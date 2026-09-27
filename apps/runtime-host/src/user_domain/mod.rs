@@ -390,6 +390,7 @@ async fn run_domain(
             Arc::downgrade(&domain),
             resources.cancellation.clone(),
         ));
+        resources.plugin_center = Some((credentials.clone(), key.clone()));
     }
     let initialized = services::initialize(
         &home,

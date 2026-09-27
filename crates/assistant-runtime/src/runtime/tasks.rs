@@ -19,7 +19,7 @@ use tokio::time::timeout;
 use tokio_util::task::TaskTracker;
 
 /// 只跟踪 Runtime 自己启动的 supervisor；Core 内部任务仍由 Core 契约所有。
-pub(super) struct RuntimeTasks {
+pub(crate) struct RuntimeTasks {
     tracker: TaskTracker,
     next_id: AtomicU64,
     aborts: Arc<Mutex<BTreeMap<u64, AbortHandle>>>,
@@ -27,7 +27,7 @@ pub(super) struct RuntimeTasks {
 }
 
 impl RuntimeTasks {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             tracker: TaskTracker::new(),
             next_id: AtomicU64::new(0),
@@ -37,7 +37,7 @@ impl RuntimeTasks {
     }
 
     /// 先登记中止句柄再启动任务，避免短任务先结束、后留下过期句柄。
-    pub(super) fn spawn(
+    pub(crate) fn spawn(
         &self,
         future: impl Future<Output = ()> + Send + 'static,
         on_panic: impl Future<Output = ()> + Send + 'static,

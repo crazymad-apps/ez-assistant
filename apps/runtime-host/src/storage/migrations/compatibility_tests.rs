@@ -238,6 +238,7 @@ fn migration_callback_cannot_create_or_change_compatibility_metadata() {
         entries.push(Migration {
             version: target,
             min_compatible_host_version: Some("0.25.2"),
+            rebuilds_referenced_tables: false,
             validate_source: v0_25_1::validate,
             apply: if existing {
                 |c| {

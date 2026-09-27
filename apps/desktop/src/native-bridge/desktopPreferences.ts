@@ -6,6 +6,7 @@ export type DesktopPreferences = {
   readonly left_sidebar_open: boolean;
   readonly right_sidebar_open: boolean;
   readonly left_sidebar_width: number;
+  /** 基准窗口剩余空间中的右栏宽度；实际像素随窗口按比例计算。 */
   readonly right_sidebar_width: number;
   readonly expanded_workspace_ids: readonly string[] | null;
   readonly close_behavior: DesktopCloseBehavior;
@@ -38,7 +39,7 @@ export async function loadDesktopPreferences(namespace?: string): Promise<Deskto
     left_sidebar_open: typeof data.left_sidebar_open === "boolean" ? data.left_sidebar_open : true,
     right_sidebar_open: typeof data.right_sidebar_open === "boolean" ? data.right_sidebar_open : true,
     left_sidebar_width: typeof data.left_sidebar_width === "number" && Number.isFinite(data.left_sidebar_width) ? Math.min(420, Math.max(220, data.left_sidebar_width)) : 286,
-    right_sidebar_width: typeof data.right_sidebar_width === "number" && Number.isFinite(data.right_sidebar_width) ? Math.max(320, data.right_sidebar_width) : 380,
+    right_sidebar_width: typeof data.right_sidebar_width === "number" && Number.isFinite(data.right_sidebar_width) ? Math.max(1, data.right_sidebar_width) : 380,
     expanded_workspace_ids: null,
     resource_workspace: null,
   };

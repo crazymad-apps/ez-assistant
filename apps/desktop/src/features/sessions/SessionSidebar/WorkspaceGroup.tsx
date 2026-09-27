@@ -23,7 +23,10 @@ export const WorkspaceGroup = observer(function WorkspaceGroup(props: Readonly<{
   const store = useRootStore();
   const [remove_open, setRemoveOpen] = useState(false);
   const is_expanded = store.navigation.expanded_workspaces.has(props.workspace.workspace_id);
-  const name = props.workspace.label;
+  const duplicated = (store.projection.application?.workspaces ?? []).filter((workspace) =>
+    workspace.lifecycle === "active" && workspace.label === props.workspace.label
+  ).length > 1;
+  const name = `${props.workspace.label}${duplicated ? ` · ${props.workspace.workspace_id.slice(0, 8)}` : ""}`;
   const retained_session_count = [
     ...(store.projection.application?.active_sessions ?? []),
     ...(store.projection.application?.archived_sessions ?? []),
@@ -42,7 +45,7 @@ export const WorkspaceGroup = observer(function WorkspaceGroup(props: Readonly<{
           className={styles.workspace_toggle}
           onClick={() => store.toggleWorkspace(props.workspace.workspace_id)}
           type="button"
-          title={`${name} · ${props.workspace.user_directory}${props.workspace.additional_directories.length ? ` · ${props.workspace.additional_directories.length} 个附加目录` : ""}`}
+          title={`${name} · ${props.workspace.user_directory ?? "仅使用私有目录"}${props.workspace.additional_directories.length ? ` · ${props.workspace.additional_directories.length} 个附加目录` : ""}`}
         >
           <Icon name="folder" size={17} />
           <span>{name}</span>
@@ -50,12 +53,12 @@ export const WorkspaceGroup = observer(function WorkspaceGroup(props: Readonly<{
         {store.navigation.list_mode === "active" && (
           <DropdownMenu className={styles.workspace_menu_root}>
             <DropdownMenuTrigger
-              aria-label={`${name} 工作空间操作`}
+              aria-label={`${name} 项目操作`}
               className={styles.workspace_action}
             >
               <Icon name="more" size={15} />
             </DropdownMenuTrigger>
-            <DropdownMenuContent aria-label={`${name} 工作空间操作`}>
+            <DropdownMenuContent aria-label={`${name} 项目操作`}>
               <DropdownMenuItem
                 disabled={
                   store.connection.state !== "connected" ||
@@ -74,7 +77,7 @@ export const WorkspaceGroup = observer(function WorkspaceGroup(props: Readonly<{
                 <Icon name="folder" size={15} />
                 <span>打开工作目录</span>
               </DropdownMenuItem>}
-              <DropdownMenuItem onSelect={() => void store.copyWorkspacePath(props.workspace.user_directory)}>
+              <DropdownMenuItem onSelect={() => void store.copyWorkspacePath(props.workspace.user_directory ?? props.workspace.agent_directory)}>
                 <Icon name="copy" size={15} />
                 <span>复制目录路径</span>
               </DropdownMenuItem>
@@ -83,7 +86,7 @@ export const WorkspaceGroup = observer(function WorkspaceGroup(props: Readonly<{
                 onSelect={() => store.openWorkspaceEditor(props.workspace.workspace_id)}
               >
                 <Icon name="edit" size={15} />
-                <span>编辑工作空间…</span>
+                <span>编辑项目…</span>
               </DropdownMenuItem>
               <DropdownMenuItem
                 className={styles.workspace_remove_action}
@@ -95,7 +98,7 @@ export const WorkspaceGroup = observer(function WorkspaceGroup(props: Readonly<{
                 onSelect={() => setRemoveOpen(true)}
               >
                 <Icon name="trash" size={15} />
-                <span>移除工作空间…</span>
+                <span>移除项目…</span>
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -116,12 +119,12 @@ export const WorkspaceGroup = observer(function WorkspaceGroup(props: Readonly<{
       <PresenceBoundary present={remove_open}>
         {remove_open && (
           <SessionActionDialog
-            confirm_label="移除工作空间"
+            confirm_label="移除项目"
             is_danger
             is_pending={store.pending_workspace_action}
             on_cancel={() => setRemoveOpen(false)}
             on_confirm={() => void removeWorkspace()}
-            title={`移除工作空间“${name}”？`}
+            title={`移除项目“${name}”？`}
           >
             <p>不会删除本地目录或历史会话。</p>
             {retained_session_count > 0 && (
@@ -144,15 +147,32 @@ export const SessionList = observer(function SessionList(props: Readonly<{
   return (
     <div className={styles.session_list} data-indent={props.indent ?? "nested"} id={props.id}>
       {props.sessions.map((session) => (
-        <button
-          aria-current={store.navigation.selected_session_id === session.session_id ? "page" : undefined}
+        <div
           className={styles.session_row}
+          data-has-actions={store.navigation.list_mode === "active"}
+          data-selected={store.navigation.selected_session_id === session.session_id}
           key={session.session_id}
-          onClick={() => void store.selectSession(session.session_id)}
-          type="button"
         >
-          <span className={`${styles.session_title} ${styles.title_refresh}`} key={session.title}>{session.title}</span>
-          {session.is_pinned && <Icon className={styles.pin_icon} name="pin" size={13} />}
+          <button
+            aria-current={store.navigation.selected_session_id === session.session_id ? "page" : undefined}
+            className={styles.session_open}
+            data-navigation-action
+            onClick={() => void store.selectSession(session.session_id)}
+            title={`${session.title} · ${session.workspace_id
+              ? store.projection.application?.workspaces.find((workspace) => workspace.workspace_id === session.workspace_id)?.label ?? "项目"
+              : "无项目"}`}
+            type="button"
+          >
+            <span className={`${styles.session_title} ${styles.title_refresh}`} key={session.title}>{session.title}</span>
+          </button>
+          {store.navigation.list_mode === "active" && <button
+            aria-label={`${session.is_pinned ? "取消置顶" : "置顶"} ${session.title}`}
+            className={styles.session_pin_action}
+            disabled={store.connection.state !== "connected" || store.pending_session_action}
+            onClick={() => void store.setSessionPinned(session.session_id, !session.is_pinned)}
+            title={session.is_pinned ? "取消置顶" : "置顶"}
+            type="button"
+          ><Icon name={session.is_pinned ? "pin" : "pin-outline"} size={14} /></button>}
           {session.active_run_id ? (
             <svg
               aria-label="正在运行"
@@ -163,10 +183,8 @@ export const SessionList = observer(function SessionList(props: Readonly<{
               <circle className={styles.loading_ring_track} cx="8" cy="8" r="6" />
               <circle className={styles.loading_ring_arc} cx="8" cy="8" r="6" />
             </svg>
-          ) : (
-            <time className={styles.session_time}>{sessionTime(session)}</time>
-          )}
-        </button>
+          ) : <time className={styles.session_time}>{sessionTime(session)}</time>}
+        </div>
       ))}
     </div>
   );

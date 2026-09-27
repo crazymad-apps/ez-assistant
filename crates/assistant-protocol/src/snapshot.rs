@@ -245,8 +245,8 @@ pub struct WorkspaceSummary {
     /// 用户可编辑的 Workspace 展示名称。
     #[serde(default)]
     pub label: String,
-    /// Host canonicalize 后保存的用户工作目录。
-    pub user_directory: String,
+    /// Host canonicalize 后保存的可选用户工作目录；`None` 表示仅使用受管私有目录。
+    pub user_directory: Option<String>,
     /// 当前 Workspace 的有序附加目录；既有 Session 仍使用自己的冻结快照。
     #[serde(default)]
     pub additional_directories: Vec<String>,
@@ -519,6 +519,9 @@ pub struct ApprovalSnapshot {
 pub struct SessionSummary {
     /// Session 的不透明标识。
     pub session_id: SessionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub custom_agent: Option<crate::CustomAgentSelection>,
     /// 创建 Session 时确定的展示标题。
     pub title: String,
     /// 显式模型二元引用；None 表示每次执行跟随当前默认模型。
@@ -630,6 +633,17 @@ pub struct TokenUsageSnapshot {
     pub cached_input_tokens: Option<u64>,
 }
 
+/// 当前主模型请求的易失进度；与 Run 的输入重试次数分开，进程重启不恢复请求。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[ts(export_to = "assistant-protocol.ts")]
+pub enum ModelRequestStatus {
+    /// 正在建立第 attempt 次请求。
+    Requesting { attempt: u32 },
+    /// 已安排下一次请求；delay_ms 是本次完整等待时长，不是客户端倒计时。
+    RetryWaiting { next_attempt: u32, delay_ms: u64 },
+}
+
 /// 一个 Runtime Run 的当前只读快照。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
@@ -666,6 +680,10 @@ pub struct RunSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub active_step: Option<u32>,
+    /// 活动主模型的建立/重试进度；建流成功、取消或终态后为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model_request: Option<ModelRequestStatus>,
     /// 截至快照时观察到的 reasoning；运行中可能因事件丢失而不完整。
     pub reasoning: String,
     /// 截至快照时观察到的正文；正常完成时由最终 AssistantMessage 校准。
@@ -796,6 +814,7 @@ mod tests {
             reasoning_effort: None,
             cancel_requested: false,
             active_step: Some(1),
+            model_request: None,
             reasoning: "checked".to_owned(),
             text: "partial".to_owned(),
             tools: vec![ToolActivitySnapshot {

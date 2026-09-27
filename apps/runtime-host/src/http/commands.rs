@@ -310,6 +310,123 @@ async fn dispatch_runtime(
 ) -> Result<(HostCommandResult, bool), RuntimeError> {
     let runtime = services.runtime.as_ref();
     let (result, shutdown) = match command {
+        RuntimeCommand::ListFeedbackRequests(request) => (
+            RuntimeCommandResult::ListFeedbackRequests(
+                runtime.list_feedback_requests(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::AnswerFeedback(request) => (
+            RuntimeCommandResult::AnswerFeedback(runtime.answer_feedback(request).await?),
+            false,
+        ),
+        RuntimeCommand::CancelFeedback(request) => (
+            RuntimeCommandResult::CancelFeedback(runtime.cancel_feedback(request).await?),
+            false,
+        ),
+        RuntimeCommand::ListCustomAgents {} => (
+            RuntimeCommandResult::ListCustomAgents(runtime.list_custom_agents().await?),
+            false,
+        ),
+        RuntimeCommand::PrepareCustomAgent(request) => (
+            RuntimeCommandResult::PrepareCustomAgent(runtime.prepare_custom_agent(request).await?),
+            false,
+        ),
+        RuntimeCommand::SavePersonalAgent(request) => (
+            RuntimeCommandResult::SavePersonalAgent(runtime.save_personal_agent(request).await?),
+            false,
+        ),
+        RuntimeCommand::DeletePersonalAgent(request) => (
+            RuntimeCommandResult::DeletePersonalAgent(
+                runtime.delete_personal_agent(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::ListPlugins {} => (
+            RuntimeCommandResult::ListPlugins(runtime.list_plugins().await?),
+            false,
+        ),
+        RuntimeCommand::MutatePluginSettings(request) => (
+            RuntimeCommandResult::MutatePluginSettings(
+                runtime.mutate_plugin_settings(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::ListPluginMarket {} => {
+            let key = permit
+                .user_key()
+                .ok_or(RuntimeError::PluginPackageUnavailable)?;
+            let (center, token) = state
+                .access
+                .credentials
+                .current_plugin_center(key)
+                .map_err(|_| RuntimeError::PluginPackageUnavailable)?;
+            let market = center
+                .list_plugins(&token)
+                .await
+                .map_err(|_| RuntimeError::PluginPackageUnavailable)?;
+            (RuntimeCommandResult::ListPluginMarket(market), false)
+        }
+        RuntimeCommand::ResolvePluginPackage(request) => {
+            let key = permit
+                .user_key()
+                .ok_or(RuntimeError::PluginPackageUnavailable)?;
+            let (center, token) = state
+                .access
+                .credentials
+                .current_plugin_center(key)
+                .map_err(|_| RuntimeError::PluginPackageUnavailable)?;
+            let selected = center
+                .resolve_plugin(
+                    &token,
+                    &key.center_id,
+                    &request.name,
+                    request.expected_active_sha256,
+                )
+                .await
+                .map_err(|_| RuntimeError::PluginPackageUnavailable)?;
+            (RuntimeCommandResult::ResolvePluginPackage(selected), false)
+        }
+        RuntimeCommand::BeginPluginInstall(request) => {
+            if request
+                .packages
+                .iter()
+                .any(|package| match &package.origin {
+                    assistant_protocol::PluginPackageOrigin::Upload => false,
+                    assistant_protocol::PluginPackageOrigin::Center { center_id } => permit
+                        .user_key()
+                        .is_none_or(|key| &key.center_id != center_id),
+                })
+            {
+                return Err(RuntimeError::InvalidRequest {
+                    reason: "plugin center does not match current user",
+                });
+            }
+            (
+                RuntimeCommandResult::BeginPluginInstall(
+                    runtime.begin_plugin_install(request).await?,
+                ),
+                false,
+            )
+        }
+        RuntimeCommand::GetPluginOperation(request) => (
+            RuntimeCommandResult::GetPluginOperation(runtime.get_plugin_operation(request).await?),
+            false,
+        ),
+        RuntimeCommand::CancelPluginOperation(request) => (
+            RuntimeCommandResult::CancelPluginOperation(
+                runtime.cancel_plugin_operation(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::RetryPluginCleanup(request) => (
+            RuntimeCommandResult::RetryPluginCleanup(runtime.retry_plugin_cleanup(request).await?),
+            false,
+        ),
+        RuntimeCommand::UninstallPlugin(request) => (
+            RuntimeCommandResult::UninstallPlugin(runtime.uninstall_plugin(request).await?),
+            false,
+        ),
         RuntimeCommand::ListProviders(_) => (
             RuntimeCommandResult::ListProviders(runtime.list_providers()?),
             false,
@@ -627,6 +744,10 @@ async fn dispatch_runtime(
                 .await;
             (RuntimeCommandResult::RemoveWorkspace(result), false)
         }
+        RuntimeCommand::RestoreWorkspace(request) => (
+            RuntimeCommandResult::RestoreWorkspace(runtime.restore_workspace(request).await?),
+            false,
+        ),
         RuntimeCommand::GetAttachment(request) => (
             RuntimeCommandResult::GetAttachment(runtime.get_attachment(request).await?),
             false,
@@ -691,6 +812,18 @@ async fn dispatch_runtime(
         ),
         RuntimeCommand::GetSession(request) => (
             RuntimeCommandResult::GetSession(runtime.get_session(request).await?),
+            false,
+        ),
+        RuntimeCommand::GetSessionMaterialization(request) => (
+            RuntimeCommandResult::GetSessionMaterialization(Box::new({
+                let mut result = runtime.get_session_materialization(request).await?;
+                if let Some(materialization) = &mut result.materialization {
+                    for attachment in &mut materialization.attachments {
+                        attachment.agent_readable_path.clear();
+                    }
+                }
+                result
+            })),
             false,
         ),
         RuntimeCommand::SubmitInput(request) => (

@@ -145,6 +145,34 @@ impl SessionLoader {
             prepared.lock_state()?.execution_prepared = true;
             prepared
         };
+        let requests = self
+            .store
+            .load_feedback(id)
+            .await
+            .map_err(|e| RuntimeError::from_store("load feedback", e))?;
+        for mut request in requests {
+            if request.status == assistant_protocol::FeedbackStatus::Pending
+                && (request.mode == assistant_protocol::FeedbackMode::Wait
+                    || session
+                        .lock_state()?
+                        .runs
+                        .get(&request.run_id)
+                        .is_none_or(|run| run.status() != assistant_protocol::RunStatus::Completed))
+            {
+                request.status = assistant_protocol::FeedbackStatus::Invalidated;
+                self.store
+                    .mutate_feedback(crate::FeedbackMutation {
+                        request: request.clone(),
+                        expected_status: Some(assistant_protocol::FeedbackStatus::Pending),
+                    })
+                    .await
+                    .map_err(|e| RuntimeError::from_store("invalidate interrupted feedback", e))?;
+            }
+            session
+                .lock_state()?
+                .feedback
+                .insert(request.request_id.clone(), request);
+        }
         self.permissions
             .register_scope(PermissionFileScope::Session(id.clone()))
             .await?;
@@ -188,6 +216,27 @@ impl SessionLoader {
         }
         let mut recovered = super::recovery::recover_session_registries(loaded)?;
         let session = recovered.sessions.remove(id).ok_or_else(unavailable)?;
+        let requests = self
+            .store
+            .load_feedback(id)
+            .await
+            .map_err(|e| RuntimeError::from_store("load feedback", e))?;
+        for mut request in requests {
+            if request.status == assistant_protocol::FeedbackStatus::Pending
+                && (request.mode == assistant_protocol::FeedbackMode::Wait
+                    || session
+                        .lock_state()?
+                        .runs
+                        .get(&request.run_id)
+                        .is_none_or(|run| run.status() != assistant_protocol::RunStatus::Completed))
+            {
+                request.status = assistant_protocol::FeedbackStatus::Invalidated;
+            }
+            session
+                .lock_state()?
+                .feedback
+                .insert(request.request_id.clone(), request);
+        }
         self.permissions
             .register_scope(PermissionFileScope::Session(id.clone()))
             .await?;

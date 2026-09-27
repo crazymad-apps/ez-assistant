@@ -150,16 +150,29 @@ export function runStatusLabel(status: LiveRunProjection["status"]): string {
   }[status];
 }
 
+/** 请求次数是当前模型调用内的次数，不是重新发送用户消息的次数。 */
+export function liveRunStatusLabel(run: LiveRunProjection): string {
+  const request = run.model_request;
+  if (run.status === "running" && request?.type === "retry_waiting") {
+    return `连接异常，等待 ${Math.ceil(request.delay_ms / 1_000)} 秒后进行第 ${request.next_attempt} 次尝试`;
+  }
+  if (run.status === "running" && request?.type === "requesting" && request.attempt > 1) {
+    return `正在重新连接模型 · 第 ${request.attempt} 次尝试`;
+  }
+  return runStatusLabel(run.status);
+}
+
 export function runFailureMessage(
   kind: ModelFailureKind | null,
   code: RuntimeErrorCode | null,
+  detail: string | null = null,
 ): string {
   const kind_message: Partial<Record<ModelFailureKind, string>> = {
     configuration: "当前模型配置无法用于此会话，请检查配置或切换模型后重试。",
     authentication: "模型认证失败，请检查 API Key 和访问权限。",
     connection: "无法连接模型服务，请检查网络和服务地址。",
     timeout: "模型响应超时，请稍后重试。",
-    stream_interrupted: "模型响应意外中断，请重试本轮。",
+    stream_interrupted: "模型响应意外中断，已停止自动重试。请检查已有结果后继续。",
     provider_rejected: "模型服务拒绝了本次请求，请检查模型能力与请求参数。",
     rate_limited: "模型服务请求过于频繁，请稍后重试。",
     service_unavailable: "模型服务暂时不可用，请稍后重试。",
@@ -168,8 +181,19 @@ export function runFailureMessage(
     tool_arguments: "模型生成的工具参数无效，请重试本轮。",
     cancelled: "本轮已取消。",
   };
-  if (kind) {
-    return kind_message[kind] ?? "本轮执行失败，请重试。";
+  // 只解释 Runtime 已持久化的固定脱敏摘要，不展示或解析 Provider 原始错误。
+  const diagnostics = code === "model_execution_failed"
+    ? /^model execution failed (before|after) stream establishment \(kind=([a-z_]+), attempts=(\d+), retries=(\d+), output_observed=(true|false)\)$/.exec(detail ?? "")
+    : null;
+  const reason = kind ?? diagnostics?.[2];
+  const message = reason ? kind_message[reason as ModelFailureKind] : null;
+  if (diagnostics?.[1] === "after") {
+    return "模型响应中断，已停止自动重试。请检查已有结果后继续。";
+  }
+  if (message) {
+    return diagnostics && Number(diagnostics[3]) > 1
+      ? `已尝试 ${diagnostics[3]} 次，未能恢复。${message}`
+      : message;
   }
   const code_message: Partial<Record<RuntimeErrorCode, string>> = {
     configuration_unavailable: "模型配置当前不可用，请检查配置后重试。",

@@ -151,14 +151,39 @@ impl HostModelImagePreprocessor {
         }
         let metadata =
             fs::symlink_metadata(candidate).map_err(|_| ImageResourceError::Unavailable)?;
+        #[cfg(unix)]
         if !metadata.file_type().is_symlink() && !metadata.file_type().is_file() {
             return Err(ImageResourceError::Boundary);
         }
-        let resolved = fs::canonicalize(candidate).map_err(|_| ImageResourceError::Unavailable)?;
-        let blobs = fs::canonicalize(self.runtime_home.join("data/blobs"))
-            .map_err(|_| ImageResourceError::Unavailable)?;
-        if !resolved.starts_with(blobs) || !resolved.is_file() {
+        #[cfg(windows)]
+        if !metadata.file_type().is_file() || platform::is_reparse_or_link(&metadata) {
             return Err(ImageResourceError::Boundary);
+        }
+        let resolved = fs::canonicalize(candidate).map_err(|_| ImageResourceError::Unavailable)?;
+        #[cfg(unix)]
+        {
+            let blobs = fs::canonicalize(self.runtime_home.join("data/blobs"))
+                .map_err(|_| ImageResourceError::Unavailable)?;
+            if !resolved.starts_with(blobs) || !resolved.is_file() {
+                return Err(ImageResourceError::Boundary);
+            }
+        }
+        #[cfg(windows)]
+        {
+            // Windows 的稳定视图是 Blob 的只读副本，不会 canonicalize 到 Blob 目录。
+            // 逐级拒绝 reparse point，并确认最终文件仍位于当前 Runtime 的 Session 根内。
+            for directory in candidate.ancestors().skip(1).take(3) {
+                let metadata =
+                    fs::symlink_metadata(directory).map_err(|_| ImageResourceError::Unavailable)?;
+                if !metadata.is_dir() || platform::is_reparse_or_link(&metadata) {
+                    return Err(ImageResourceError::Boundary);
+                }
+            }
+            let sessions =
+                fs::canonicalize(sessions).map_err(|_| ImageResourceError::Unavailable)?;
+            if !resolved.starts_with(sessions) || !resolved.is_file() {
+                return Err(ImageResourceError::Boundary);
+            }
         }
         Ok(resolved)
     }
@@ -819,6 +844,43 @@ mod tests {
                 .prepare(&outside, &CancellationToken::new())
                 .await,
             Err(ModelError::Resource(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn model_preprocessor_accepts_platform_attachment_view() {
+        let root = tempfile::tempdir().expect("runtime home");
+        let blob = root.path().join("data/blobs/image.png");
+        let view = root
+            .path()
+            .join("data/sessions/session-image/attachments/attachment-image/image.png");
+        fs::create_dir_all(blob.parent().expect("blob parent")).expect("blob directory");
+        fs::create_dir_all(view.parent().expect("view parent")).expect("view directory");
+        DynamicImage::new_rgb8(8, 8)
+            .save(&blob)
+            .expect("fixture image");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&blob, &view).expect("attachment link");
+        #[cfg(windows)]
+        fs::copy(&blob, &view).expect("attachment copy");
+
+        #[cfg(unix)]
+        let (home, model_view) = (root.path().to_path_buf(), view);
+        #[cfg(windows)]
+        let (home, model_view) = (
+            fs::canonicalize(root.path()).expect("canonical runtime home"),
+            fs::canonicalize(view).expect("canonical attachment copy"),
+        );
+        let preprocessor = HostModelImagePreprocessor::new(&home);
+        let resource = ModelImageResource::FileReference(agent_types::FileReference {
+            original_name: "image.png".to_owned(),
+            readable_path: model_view.to_string_lossy().into_owned(),
+        });
+        assert!(matches!(
+            preprocessor
+                .prepare(&resource, &CancellationToken::new())
+                .await,
+            Ok(ModelImagePreparation::Image(_))
         ));
     }
 }

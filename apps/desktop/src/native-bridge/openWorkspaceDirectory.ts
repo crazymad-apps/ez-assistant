@@ -9,7 +9,7 @@ type WorkspaceOpenFailure = {
 
 export async function openWorkspaceDirectory(workspace_id: WorkspaceId): Promise<void> {
   if (!isTauri()) {
-    throw new Error("浏览器预览无法打开本机工作空间目录。");
+    throw new Error("浏览器预览无法打开本机项目目录。");
   }
   try {
     await invoke("open_workspace_directory", { workspaceId: workspace_id });
@@ -17,7 +17,7 @@ export async function openWorkspaceDirectory(workspace_id: WorkspaceId): Promise
     if (isWorkspaceOpenFailure(error)) {
       throw new Error(error.message);
     }
-    throw new Error("无法打开工作空间目录。");
+    throw new Error("无法打开项目目录。");
   }
 }
 

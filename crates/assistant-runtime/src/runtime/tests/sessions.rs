@@ -14,6 +14,8 @@ impl SkillPackageSource for StaticSkillPackageSource {
                     name: SkillName::parse("review").expect("name"),
                     description: "Review changes".to_owned(),
                     source: SkillSource::UserAgents,
+                    plugin_name: None,
+                    plugin_sha256: None,
                     workspace_root_order: None,
                     source_path: "/fixture/review".to_owned(),
                     definition_digest: format!("sha256-v1:{}", "1".repeat(64)),
@@ -27,6 +29,62 @@ impl SkillPackageSource for StaticSkillPackageSource {
             })
         })
     }
+}
+
+#[tokio::test]
+async fn plugin_skills_are_visible_in_conversation_scope_but_not_independent_management() {
+    struct PluginSkills;
+    impl SkillPackageSource for PluginSkills {
+        fn scan(&self, request: SkillScanRequest) -> SkillScanFuture<'_> {
+            Box::pin(async move {
+                let mut result = StaticSkillPackageSource.scan(request).await?;
+                let plugin = &mut result.candidates[0];
+                plugin.source = SkillSource::Plugin;
+                plugin.plugin_name = Some("review-tools".into());
+                plugin.plugin_sha256 = Some("a".repeat(64));
+                Ok(result)
+            })
+        }
+    }
+    let mut runtime = runtime(empty_model());
+    runtime.skill_package_source = Arc::new(PluginSkills);
+    // 独立技能曾被禁用，不应覆盖插件整体启用语义。
+    runtime
+        .store
+        .set_skill_enabled(SkillNameStateChange {
+            name: SkillName::parse("review").unwrap(),
+            enabled: false,
+            updated_at_ms: 1,
+        })
+        .await
+        .unwrap();
+    let management = runtime
+        .list_skills(assistant_protocol::ListSkillsRequest::default())
+        .await
+        .unwrap();
+    assert!(management.snapshot.skills.is_empty());
+    let conversation = runtime
+        .list_skills(assistant_protocol::ListSkillsRequest {
+            include_plugins: Some(true),
+            workspace_id: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(conversation.snapshot.skills.len(), 1);
+    let skill = &conversation.snapshot.skills[0];
+    assert_eq!(skill.plugin_name.as_deref(), Some("review-tools"));
+    assert_eq!(skill.health, assistant_protocol::SkillHealthSnapshot::Ready);
+    assert!(skill.enabled && skill.user_invocable);
+    assert!(
+        runtime
+            .set_skill_enabled(assistant_protocol::SetSkillEnabledRequest {
+                workspace_id: None,
+                name: "review".into(),
+                enabled: false,
+            })
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]

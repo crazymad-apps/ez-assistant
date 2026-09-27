@@ -16,7 +16,7 @@ async function login(page: Page) {
   expect(response.status).toBe(200);
   const { token } = (await response.json()) as { token: string };
   await page.goto(`${host.base_url}/#token=${encodeURIComponent(token)}`);
-  await expect(page.locator("[data-app-title-bar]")).toBeVisible();
+  await expect(page.getByLabel("输入消息", { exact: true })).toBeVisible();
   expect(new URL(page.url()).hash).toBe("");
 }
 
@@ -34,7 +34,8 @@ test("Web selects a Host directory, uploads and downloads files, and clears reso
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await login(page);
-  await page.getByRole("button", { name: "添加工作空间", exact: true }).click();
+  await page.getByRole("button", { name: "添加项目", exact: true }).click();
+  await page.getByRole("dialog", { name: "新建项目", exact: true }).getByRole("button", { name: "添加目录", exact: true }).click();
   const picker = page.getByRole("dialog", {
     name: "选择工作目录",
     exact: true,
@@ -59,15 +60,16 @@ test("Web selects a Host directory, uploads and downloads files, and clears reso
   await page.screenshot({ path: info.outputPath("host-directory-picker.png") });
   await picker.getByRole("button", { name: "选择此目录", exact: true }).click();
   const editor = page.getByRole("dialog", {
-    name: "新建工作空间",
+    name: "新建项目",
     exact: true,
   });
   await expect(editor).toBeVisible();
+  await expect(editor.getByText(directory, { exact: true })).toBeVisible();
   await editor.getByRole("textbox").fill("M3 Web 文件");
-  await editor.getByRole("button", { name: "保存", exact: true }).click();
+  await editor.getByRole("button", { name: "创建", exact: true }).click();
   await expect(editor).toHaveCount(0);
   await page
-    .getByRole("button", { name: "M3 Web 文件 工作空间操作", exact: true })
+    .getByRole("button", { name: "M3 Web 文件 项目操作", exact: true })
     .click();
   await page.getByRole("menuitem", { name: "在此新建会话" }).click();
   await expect(
@@ -110,8 +112,8 @@ test("Web selects a Host directory, uploads and downloads files, and clears reso
   expect(await uploaded.text()).toBe("BROWSER FILE CONTENT");
   await page.getByRole("button", { name: "新建资源标签", exact: true }).click();
   await expect(page.getByRole("menuitem", { name: "浏览器" })).toHaveCount(0);
-  await page.getByRole("menuitem", { name: "工作空间", exact: true }).click();
-  const tree = page.getByRole("tree", { name: "工作空间目录" });
+  await page.getByRole("menuitem", { name: "项目", exact: true }).click();
+  const tree = page.getByRole("tree", { name: "项目目录" });
   await tree
     .getByRole("button", { name: new RegExp(basename(directory) + ".*主目录") })
     .click();
@@ -149,7 +151,7 @@ test("Web selects a Host directory, uploads and downloads files, and clears reso
   );
   await page.screenshot({ path: info.outputPath("web-host-file-preview.png") });
   await page.reload();
-  await expect(page.locator("[data-app-title-bar]")).toBeVisible();
+  await expect(page.getByLabel("输入消息", { exact: true })).toBeVisible();
   // C03 的普通 Web 只缓存匿名布局，重新核验登录后不恢复旧资源标签。
   await expect(
     page.getByText("HOST FILE CONTENT", { exact: true }),

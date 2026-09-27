@@ -224,9 +224,9 @@ Runtime Host 进程
   绑定 Workspace 的工作目录在 Run 前不可用时返回 `WorkspaceUnavailable`；其他工具构造
   失败按 Agent 构造失败处理，不向客户端泄露路径或底层 Adapter 错误。
 - Workspace 假删只阻止新 Session 绑定；已绑定 Session 的冻结路径和持久事实不改写。
-  `ApplicationSnapshot` 与 `list_workspaces` 只投影活动 Workspace，并从活动/归档 Session 列表隐藏
-  绑定已移除 Workspace 的 Session；重新登记同一 canonical path 恢复原 Workspace ID 后，
-  这些 Session 自然重新进入组合快照。
+  `ApplicationSnapshot` 与缺省 `list_workspaces` 只投影活动 Workspace；显式按 lifecycle 查询时，
+  `list_workspaces` 也可返回已移除 Workspace。活动/归档 Session 列表隐藏绑定已移除 Workspace 的
+  Session；恢复 Workspace 后，这些 Session 自然重新进入组合快照。
   附件正文不自动进入模型上下文，Agent 通过持久化 File References 和文件工具按需读取。
 
 ## v0.12.0 Agent 变体与权限边界
@@ -826,3 +826,42 @@ Host 通过 RunToolBundle 注入 PermissionRuleSource，仅提供普通规则数
 Authorizer 在每次调用和审批返回后加载，与用户规则统一匹配并按 Deny > Ask > Allow 合并。
 默认规则不写权限文件、不进入设置列表；文件 matcher 的内存例外子树不能被持久化。逻辑路径
 和物理目标都参与文件规则匹配，路径解析失败关闭授权；Host 文件 I/O 复核复用同一匹配器。
+
+## v0.28.0 C02 M0 Workspace 可空目录与恢复边界
+
+- Workspace 当前事实允许 `user_directory` 为空；此时有效工作目录统一取 Runtime 管理的
+  `agent_directory`。新增无用户目录 Workspace 每次分配新 ID，不参与 canonical 用户目录去重；
+  非空用户目录仍维持既有唯一与重新登记恢复语义。
+- Runtime Registry 同时保留 active 与 removed 事实。`ApplicationSnapshot` 仍只组合 active 项；
+  `list_workspaces` 缺省查询 active，也可显式查询 removed。恢复必须以稳定 Workspace ID 表达，
+  重复恢复保持幂等。
+- 恢复顺序固定为 Store 先提交，再重建权限作用域、Registry 与成功事件。若 Store 已提交而后续
+  内存投影失败，使用同一 ID 重试必须从 Store 的 active 事实恢复投影，不能因首次提交已完成而
+  跳过后续收敛。
+
+## v0.28.0 C02 M1 私有工作目录与会话冻结
+
+- 无用户主目录时，新 Session 的有效 cwd 是 Workspace 受管 `agent_directory`；有用户主目录时
+  使用该目录。创建与首次物化均冻结 cwd、附加根和 Workspace 私有目录，后续 Workspace 编辑
+  只影响新 Session。
+- Fork 沿用来源 Session 的冻结 Workspace 根；无 Workspace 的 Fork 则使用目标 Session 自身
+  私有目录。Clear 重建提示词与技能目录时仍使用原 Session 冻结根，不把后续目录编辑带入旧会话。
+- 现有 Session 的 Skill 文件可重新扫描，但扫描根来自冻结执行环境；Workspace 级 Skill 列表
+  则使用当前有效目录。权限根同样由冻结执行环境装配，不因目录切换扩大到当前 Workspace 根。
+
+## v0.28.0 C02 M2 物化 key 查询
+
+- Runtime 按既有首次物化 key 只读查询 Store 的 Session、首次 Input/Run 和附件事实；查询未命中
+  不代表较早的上传已确定失败。命中时按真实 Session ID 取得当前投影，不再次接纳 Input 或唤醒队列，
+  不重放历史模型和工具执行。
+
+## v0.28.1 F01 有限重试与诊断
+
+- Runtime 在缺省配置下显式装配最多五次建流前重试（含首次请求共六次尝试），等待 1/2/4/8/16 秒，Retry-After 上限 30 秒；
+  既有显式完整策略优先，enabled=false 关闭。底层 ModelRetryPolicy 仍无隐式默认。
+- RunRecord 只引用该 Run 已有 RunModelDiagnostics 供快照恢复，终态释放；父观察器不装配到
+  child 或压缩服务，避免并发调用污染父请求诊断。重试不创建新 Input/Run，不重放工具。
+
+## v0.28.1 F04 主会话问答
+
+`ask_user` 仅注册到主会话 Agent，整批解析后的授权门禁保证独占工具批次，畸形调用同样阻止相邻副作用。Session 持有反馈状态，RuntimeStore 保存问题/答案；wait 的异步等待不持锁，回答是原工具结果。end_turn 在可靠闭合工具交换后通过类型化控制正常结束，回复由既有 Input 接纳路径原子记录并创建新 Run。pending 反馈阻塞既有队列，取消不伪造答案；Goal 轮后反馈或取消等待均先暂停。

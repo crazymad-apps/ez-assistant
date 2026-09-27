@@ -21,7 +21,7 @@ function normalizeWorkspaceDirectoryFailure(error: unknown): Error {
   if (isWorkspaceDirectoryFailure(error)) {
     return new Error(error.message);
   }
-  return new Error("无法打开工作空间目录选择器。");
+  return new Error("无法打开项目目录选择器。");
 }
 
 function isWorkspaceDirectoryFailure(value: unknown): value is WorkspaceDirectoryFailure {

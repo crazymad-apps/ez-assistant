@@ -1,3 +1,4 @@
+import { revealFileLabel } from "../../platform/fileManager";
 import { useRootStore } from "../../stores/RootStoreContext";
 import type { ClientResources } from "../../runtime-client/ClientResources";
 import { hostFilePath, hostFileUri } from "../../runtime-client/hostFilePath";
@@ -217,8 +218,8 @@ export function ResourcePreview(props: Readonly<{
             on_select: () => runAction(openLocalResourceInSystem(registered.resource_key), "无法使用系统应用打开。"),
           },
           {
-            label: "在 Finder 中显示",
-            on_select: () => runAction(revealLocalResourceInDirectory(registered.resource_key), "无法在 Finder 中显示。"),
+            label: revealFileLabel(),
+            on_select: () => runAction(revealLocalResourceInDirectory(registered.resource_key), "无法在文件管理器中显示。"),
           },
         ],
       });
@@ -253,8 +254,8 @@ export function ResourcePreview(props: Readonly<{
           on_select: () => runAction(openSessionResourceInSystem(source.session_id, locator), "无法使用系统应用打开。"),
         },
         {
-          label: "在 Finder 中显示",
-          on_select: () => runAction(revealSessionResourceInDirectory(source.session_id, locator), "无法在 Finder 中显示。"),
+          label: revealFileLabel(),
+          on_select: () => runAction(revealSessionResourceInDirectory(source.session_id, locator), "无法在文件管理器中显示。"),
         }] : []),
       ],
     });
@@ -322,7 +323,7 @@ export function ResourcePreview(props: Readonly<{
           on_find={() => monaco_ref.current?.find()}
           on_open_system={() => runAction(openInSystem(), "无法使用系统应用打开。")}
           on_refresh={() => setRevision((value) => value + 1)}
-          on_reveal={() => runAction(revealInDirectory(), "无法在 Finder 中显示。")}
+          on_reveal={() => runAction(revealInDirectory(), "无法在文件管理器中显示。")}
           image_ref={image_ref}
           on_toggle_wrap={() => setWordWrap((value) => !value)}
           text_available={props.tab.type === "text" && preview?.kind === "text"}
@@ -424,7 +425,7 @@ function ResourceActionsMenu(props: Readonly<{
         <ResourceActionMenuItem icon="refresh" label="重新加载" on_select={props.on_refresh} />
         {props.on_download && <ResourceActionMenuItem icon="arrow-down" label="下载文件" on_select={props.on_download} />}
         {props.native_available && <ResourceActionMenuItem icon="external-link" label="使用系统应用打开" on_select={props.on_open_system} />}
-        {props.native_available && <ResourceActionMenuItem icon="folder" label="在 Finder 中显示" on_select={props.on_reveal} />}
+        {props.native_available && <ResourceActionMenuItem icon="folder" label={revealFileLabel()} on_select={props.on_reveal} />}
         {props.copy_available && <ResourceActionMenuItem icon="copy" label="复制完整路径" on_select={props.on_copy_path} />}
       </DropdownMenuContent>
     </DropdownMenu>
@@ -603,8 +604,8 @@ function resourceActionItems(
       on_select: () => run_action(open_in_system(), "无法使用系统应用打开。"),
     },
     {
-      label: "在 Finder 中显示",
-      on_select: () => run_action(reveal_in_directory(), "无法在 Finder 中显示。"),
+      label: revealFileLabel(),
+      on_select: () => run_action(reveal_in_directory(), "无法在文件管理器中显示。"),
     },
   ];
 }

@@ -7,9 +7,12 @@ impl VolatileRuntimeStore {
     ) -> StoreFuture<'_, StoredWorkspace> {
         Box::pin(async move {
             let mut state = self.lock()?;
-            if let Some(existing) = state.workspaces.values_mut().find(|workspace| {
-                workspace.user_directory == registration.requested_primary_directory
-            }) {
+            if let Some(requested) = registration.requested_primary_directory.as_ref()
+                && let Some(existing) = state
+                    .workspaces
+                    .values_mut()
+                    .find(|workspace| workspace.user_directory.as_ref() == Some(requested))
+            {
                 existing.lifecycle = StoredWorkspaceLifecycle::Active;
                 existing.label = registration.label;
                 existing.additional_directories = registration.requested_additional_directories;
@@ -48,11 +51,16 @@ impl VolatileRuntimeStore {
     ) -> StoreFuture<'_, StoredWorkspace> {
         Box::pin(async move {
             let mut state = self.lock()?;
-            if state.workspaces.values().any(|workspace| {
-                workspace.workspace_id != update.workspace_id
-                    && workspace.lifecycle == StoredWorkspaceLifecycle::Active
-                    && workspace.user_directory == update.requested_primary_directory
-            }) {
+            if update
+                .requested_primary_directory
+                .as_ref()
+                .is_some_and(|requested| {
+                    state.workspaces.values().any(|workspace| {
+                        workspace.workspace_id != update.workspace_id
+                            && workspace.user_directory.as_ref() == Some(requested)
+                    })
+                })
+            {
                 return Err(conflict(
                     "workspace primary directory is already registered",
                 ));
@@ -86,6 +94,25 @@ impl VolatileRuntimeStore {
                 workspace.lifecycle = StoredWorkspaceLifecycle::Removed;
                 workspace.updated_at_ms = removal.changed_at_ms;
                 workspace.removed_at_ms = Some(removal.changed_at_ms);
+            }
+            Ok(workspace.clone())
+        })
+    }
+
+    pub(super) fn restore_workspace(
+        &self,
+        restoration: WorkspaceRestoration,
+    ) -> StoreFuture<'_, StoredWorkspace> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            let workspace = state
+                .workspaces
+                .get_mut(&restoration.workspace_id)
+                .ok_or_else(|| conflict("workspace does not exist in runtime storage"))?;
+            if workspace.lifecycle == StoredWorkspaceLifecycle::Removed {
+                workspace.lifecycle = StoredWorkspaceLifecycle::Active;
+                workspace.updated_at_ms = restoration.changed_at_ms;
+                workspace.removed_at_ms = None;
             }
             Ok(workspace.clone())
         })

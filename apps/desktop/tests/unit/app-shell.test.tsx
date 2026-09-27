@@ -4,6 +4,9 @@ import type { ApplicationSnapshot, SessionSummary } from "@ez-assistant/protocol
 import { RootStore } from "../../src/stores/RootStore";
 import { RootStoreProvider } from "../../src/stores/RootStoreContext";
 import { AppShell } from "../../src/app/AppShell";
+import { AppMessageProvider } from "../../src/components/AppMessage";
+import { ApplicationConnectionContext } from "../../src/features/runtime-access/ApplicationConnectionContext";
+import type { ApplicationConnectionStore } from "../../src/features/runtime-access/ApplicationConnectionStore";
 
 afterEach(() => {
   cleanup();
@@ -11,23 +14,63 @@ afterEach(() => {
 });
 
 describe("AppShell session header", () => {
-  it("shows the milestone version next to the application title", () => {
+  it("uses local column headers instead of the old full-width title bar", () => {
     renderShell(storeWithSessions());
 
-    expect(screen.getByText(`v${__APP_VERSION__}`)).toBeVisible();
+    expect(within(screen.getByRole("complementary", { name: "会话导航" })).getByRole("navigation", { name: "会话导航操作" })).toBeVisible();
+    expect(screen.queryByText(`v${__APP_VERSION__}`)).not.toBeInTheDocument();
+    expect(screen.getByLabelText("会话标题栏")).toBeInTheDocument();
   });
 
   it("opens settings from the sidebar and restores focus after closing", async () => {
     const store = storeWithSessions();
     renderShell(store);
 
-    const opener = screen.getByRole("button", { name: "设置" });
+    const opener = screen.getByRole("button", { name: "账号与 Runtime" });
     opener.focus();
     fireEvent.click(opener);
+    fireEvent.click(screen.getByRole("menuitem", { name: "设置" }));
     await screen.findByRole("dialog", { name: "设置" });
     fireEvent.click(screen.getByRole("button", { name: "关闭设置" }));
 
     await waitFor(() => expect(opener).toHaveFocus());
+  });
+
+  it("keeps account, Host, password, Web and reconnect actions in the bottom menu", () => {
+    const store = storeWithSessions();
+    store.connection.markConnected("instance-1", {
+      mode: "personal", min_compatible_version: "0.28.0", runtime_version: "0.28.0",
+      max_command_bytes: 64 * 1024, max_attachment_bytes: null, sse: true,
+      streaming_upload: true, features: [],
+    });
+    const show_password = vi.fn();
+    const open_web = vi.fn();
+    const request_logout = vi.fn();
+    const retry = vi.spyOn(store, "retryConnection").mockImplementation(() => undefined);
+    renderShell(store, {
+      desktop: true, account_label: "测试用户", host_label: "本机 Host",
+      session: { identity: { display_name: "测试用户" } } as ApplicationConnectionStore["session"],
+      showPassword: show_password, openWeb: open_web, requestLogout: request_logout,
+    });
+
+    const account = screen.getByRole("button", { name: "账号与 Runtime" });
+    fireEvent.click(account);
+    const menu = screen.getByRole("menu", { name: "账号菜单" });
+    expect(within(menu).getByText("本机 Host")).toBeVisible();
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "修改密码" }));
+    expect(show_password).toHaveBeenCalled();
+
+    fireEvent.click(account);
+    fireEvent.click(screen.getByRole("menuitem", { name: "打开 Web 端" }));
+    expect(open_web).toHaveBeenCalled();
+
+    store.connection.markDisconnected("连接中断");
+    fireEvent.click(account);
+    fireEvent.click(within(screen.getByRole("menu", { name: "账号菜单" })).getByRole("menuitem", { name: "重新连接" }));
+    expect(retry).toHaveBeenCalled();
+    fireEvent.click(account);
+    fireEvent.click(screen.getByRole("menuitem", { name: "退出登录" }));
+    expect(request_logout).toHaveBeenCalled();
   });
 
   it("renames inline without restoring the removed idle status tag", () => {
@@ -36,7 +79,7 @@ describe("AppShell session header", () => {
     renderShell(store);
 
     expect(screen.getByLabelText("会话标题栏")).not.toHaveTextContent("空闲");
-    fireEvent.click(screen.getByRole("button", { name: "First session" }));
+    fireEvent.click(within(screen.getByLabelText("会话标题栏")).getByRole("button", { name: "First session" }));
     const input = screen.getByRole("textbox", { name: "会话标题" });
     fireEvent.change(input, { target: { value: "Renamed session" } });
     fireEvent.keyDown(input, { key: "Enter" });
@@ -89,7 +132,7 @@ describe("AppShell session header", () => {
     const rename = vi.spyOn(store, "renameSession").mockResolvedValue(true);
     renderShell(store);
 
-    fireEvent.click(screen.getByRole("button", { name: "First session" }));
+    fireEvent.click(within(screen.getByLabelText("会话标题栏")).getByRole("button", { name: "First session" }));
     const input = screen.getByRole("textbox", { name: "会话标题" });
     fireEvent.compositionStart(input);
     fireEvent.change(input, { target: { value: "New title" } });
@@ -116,7 +159,7 @@ describe("AppShell session header", () => {
     expect(select).toHaveBeenCalledWith("session-2");
 
     fireEvent.click(screen.getByRole("button", { name: "更多会话操作" }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "固定会话" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "置顶" }));
     expect(pin).toHaveBeenCalledWith("session-1", true);
 
     fireEvent.click(screen.getByRole("button", { name: "更多会话操作" }));
@@ -140,7 +183,7 @@ describe("AppShell session header", () => {
     expect(clear_action).toBeDisabled();
     export_action.focus();
     fireEvent.keyDown(export_action, { key: "ArrowDown" });
-    const next_action = within(menu).getByRole("menuitem", { name: "固定会话" });
+    const next_action = within(menu).getByRole("menuitem", { name: "置顶" });
     expect(next_action).toHaveFocus();
     fireEvent.keyDown(next_action, { key: "ArrowUp" });
     expect(export_action).toHaveFocus();
@@ -164,6 +207,23 @@ describe("AppShell session header", () => {
 
     expect(store.navigation.right_sidebar_open).toBe(false);
     expect(within(header).getByRole("button", { name: "展开资源栏" })).toBeVisible();
+  });
+
+  it("keeps the left sidebar in place in a narrow window and animates manual collapse", () => {
+    vi.spyOn(window, "innerWidth", "get").mockReturnValue(720);
+    const store = storeWithSessions();
+    store.navigation.setViewportWidth(720);
+    renderShell(store);
+
+    const sidebar = document.querySelector('aside[data-shell-sidebar="left"]');
+    expect(sidebar).toHaveAttribute("data-shell-open", "true");
+    expect(screen.getByRole("complementary", { name: "会话导航" })).toBeVisible();
+    expect(store.navigation.selected_session_id).toBe("session-1");
+    fireEvent.click(screen.getByRole("button", { name: "收起会话栏" }));
+    expect(sidebar).toHaveAttribute("data-shell-open", "false");
+    expect(sidebar).toHaveAttribute("inert");
+    expect(within(screen.getByLabelText("会话标题栏")).getByRole("button", { name: "展开会话栏" })).toBeVisible();
+    expect(store.navigation.selected_session_id).toBe("session-1");
   });
 
   it("resizes the visible sidebar with separator keyboard semantics and restores defaults", () => {
@@ -217,23 +277,24 @@ describe("AppShell session header", () => {
     vi.spyOn(window, "innerWidth", "get").mockReturnValue(1400);
     const store = storeWithSessions();
     store.navigation.setViewportWidth(1400);
-    store.resource_workspace.openTab({ type: "browser", browserId: "browser-1" });
+    store.resource_workspace.openBrowser();
     renderShell(store);
 
     const separator = screen.getByRole("separator", { name: "调整资源栏宽度" });
     fireEvent.keyDown(separator, { key: "ArrowLeft" });
-    expect(store.navigation.right_sidebar_width).toBe(388);
+    expect(store.navigation.effective_right_sidebar_width).toBe(434);
     expect(store.navigation.left_sidebar_width).toBe(286);
     fireEvent.keyDown(separator, { key: "End" });
-    expect(store.navigation.right_sidebar_width).toBe(614);
+    expect(store.navigation.effective_right_sidebar_width).toBe(614);
     expect(store.navigation.left_sidebar_width).toBe(286);
 
     fireEvent.click(screen.getByRole("button", { name: "收起资源栏" }));
     expect(screen.queryByRole("complementary", { name: "资源栏" })).not.toBeInTheDocument();
+    expect(document.querySelector('aside[data-shell-sidebar="right"]')).toHaveAttribute("data-shell-open", "false");
     expect(store.resource_workspace.active_tab_key).toBe("browser:browser-1");
 
     fireEvent.click(screen.getByRole("button", { name: "展开资源栏" }));
-    expect(screen.getByRole("tab", { name: "浏览器" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "新标签页" })).toHaveAttribute("aria-selected", "true");
   });
 
   it("previews the exact runtime impact before permanently deleting a session", async () => {
@@ -295,11 +356,17 @@ describe("AppShell session header", () => {
   });
 });
 
-function renderShell(store: RootStore) {
+function renderShell(store: RootStore, overrides: Partial<ApplicationConnectionStore> = {}) {
+  const connection = {
+    account_label: "个人用户", host_label: "本地 Host", pending: false,
+    current: store, desktop: false, session: null, web_pending: false,
+    requestLogout: vi.fn(), showPassword: vi.fn(), openWeb: vi.fn(),
+    ...overrides,
+  } as unknown as ApplicationConnectionStore;
   return render(
-    <RootStoreProvider store={store}>
-      <AppShell />
-    </RootStoreProvider>,
+    <AppMessageProvider><ApplicationConnectionContext.Provider value={connection}>
+      <RootStoreProvider store={store}><AppShell /></RootStoreProvider>
+    </ApplicationConnectionContext.Provider></AppMessageProvider>,
   );
 }
 

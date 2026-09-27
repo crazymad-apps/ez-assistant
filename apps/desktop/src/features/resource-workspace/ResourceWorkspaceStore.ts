@@ -121,7 +121,7 @@ export class ResourceWorkspaceStore {
       openAttachment: action,
       openToolResource: action,
       setWorkspaceLocation: action,
-      selectScope: action, transferDraft: action, releaseScope: action,
+      selectScope: action, transferDraft: action, moveDraft: action, releaseScope: action,
       dispose: action,
     });
     runInAction(() => this.groups.set(this.current_scope_key, new ResourceTabGroup(this.current_scope_key)));
@@ -198,7 +198,7 @@ export class ResourceWorkspaceStore {
     const identity = resourceIdentity(group, source);
     let resource_key = this.#resource_keys.get(identity);
     if (!resource_key) { resource_key = `resource-${this.#next_resource_key++}`; this.#resource_keys.set(identity, resource_key); }
-    const resource: ResourceHandle = { resource_key, display_name: path.split("/").at(-1) || path, scope_key, source };
+    const resource: ResourceHandle = { resource_key, display_name: path.split(/[/\\]/).at(-1) || path, scope_key, source };
     const type = resourceType(resource.display_name);
     this.openTab(type === "text" ? {type, resource, line: null} : {type, resource}, group);
   }
@@ -306,10 +306,31 @@ export class ResourceWorkspaceStore {
   }
 
   transferDraft(draftKey: string, sessionId: string): void {
-    const oldKey = `draft:${draftKey}`;
-    const nextKey = `session:${sessionId}`;
+    this.#transferScope(`draft:${draftKey}`, `session:${sessionId}`, false);
+  }
+
+  canMoveDraft(sourceKey: string, targetKey: string): boolean {
+    const source = this.groups.get(`draft:${sourceKey}`);
+    const target = this.groups.get(`draft:${targetKey}`);
+    return Boolean(source && !source.closing && (!target || (!target.closing && target.tabs.length === 1)));
+  }
+
+  moveDraft(sourceKey: string, targetKey: string): boolean {
+    if (!this.canMoveDraft(sourceKey, targetKey)) return false;
+    this.#transferScope(`draft:${sourceKey}`, `draft:${targetKey}`, true);
+    return true;
+  }
+
+  #transferScope(oldKey: string, nextKey: string, resetWorkspaceLocation: boolean): void {
     const group = this.groups.get(oldKey);
-    if (!group || this.groups.has(nextKey)) return;
+    if (!group) return;
+    const destination = this.groups.get(nextKey);
+    if (destination) {
+      if (destination.tabs.length !== 1 || destination.closing) return;
+      this.groups.delete(nextKey);
+      for (const tab of destination.tabs) this.view_states.delete(this.pageKey(destination, tab));
+      for (const [key, page] of this.cached_pages) if (page.group === destination) this.cached_pages.delete(key);
+    }
     this.groups.delete(oldKey);
     group.scope_key = nextKey;
     this.groups.set(nextKey, group);
@@ -322,7 +343,8 @@ export class ResourceWorkspaceStore {
     if (group.active_tab_key === oldWorkspaceKey) group.active_tab_key = `workspace:${nextKey}`;
     if (group.focused_tab_key === oldWorkspaceKey) group.focused_tab_key = `workspace:${nextKey}`;
     const location = this.workspace_locations.get(oldKey);
-    if (location) this.workspace_locations.set(nextKey, location);
+    if (!resetWorkspaceLocation && location) this.workspace_locations.set(nextKey, location);
+    else this.workspace_locations.delete(nextKey);
     this.workspace_locations.delete(oldKey);
     for (const tab of group.tabs) {
       const key = this.pageKey(group, tab);
@@ -634,7 +656,7 @@ export function isPreviewableResource(display_name: string, media_type?: string 
 export function resourceTabTitle(tab: ResourceTab): string {
   switch (tab.type) {
     case "context": return "当前上下文";
-    case "workspace": return "工作空间";
+    case "workspace": return "项目";
     case "text":
     case "markdown":
     case "image":

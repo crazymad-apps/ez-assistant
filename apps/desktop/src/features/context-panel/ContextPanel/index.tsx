@@ -1,3 +1,4 @@
+import { revealFileLabel } from "../../../platform/fileManager";
 import { SkillListStore } from "../../skills";
 import { observer } from "mobx-react-lite";
 import { useEffect, useState, type KeyboardEvent, type MouseEvent } from "react";
@@ -13,7 +14,6 @@ import { InlineIconButton } from "../../../components/InlineIconButton";
 import { PresenceBoundary } from "../../../components/Presence";
 import { Tooltip } from "../../../components/Tooltip";
 import { useRootStore } from "../../../stores/RootStoreContext";
-import { effectiveContextUsage } from "../../../stores/contextUsage";
 import {
   openAttachmentInSystem,
   revealAttachmentInDirectory,
@@ -43,8 +43,9 @@ import {
 } from "./contextDisplay";
 import styles from "./index.module.scss";
 import { SessionShellSetting } from "./SessionShellSetting";
+import { ArtifactList } from "../../resource-workspace/ArtifactList";
 
-type ContextSectionKey = "session" | "workspace" | "skills" | "attachments" | "children" | "runs";
+type ContextSectionKey = "session" | "workspace" | "skills" | "attachments" | "artifacts" | "children" | "runs";
 
 type ContextPanelProps = Readonly<{
   embedded?: boolean;
@@ -59,13 +60,8 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
     ?? application?.archived_sessions.find((item) => item.session_id === session_id);
   const workspace = application?.workspaces.find((item) => item.workspace_id === session?.workspace_id);
   const session_view = session_id ? store.projection.session_views.get(session_id) : undefined;
-  const live_run = session_id ? store.live_execution.runForSession(session_id) : null;
-  const context_usage = effectiveContextUsage(
-    session_view?.usage.context ?? null,
-    session_view?.active_run?.run_id ?? null,
-    live_run?.run_id ?? null,
-    live_run?.usage ?? null,
-  );
+  // 窗口占用由 Runtime 根据当前有效上下文计算，不能用旧 step 或累计用量取最大值。
+  const context_usage = session_view?.usage.context ?? null;
   const [skill_list] = useState(() => new SkillListStore());
   const skills = sessionSkillRows(session_view, skill_list.snapshot);
   const session_workspace = session_view?.workspace;
@@ -85,6 +81,7 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
   const [system_context_loading, setSystemContextLoading] = useState(false);
   const [locating_run_id, setLocatingRunId] = useState<string | null>(null);
   const [section_state, setSectionState] = useState<Record<string, Partial<Record<ContextSectionKey, boolean>>>>({});
+  const [artifact_refresh, setArtifactRefresh] = useState(0);
   const [all_workspace_directories_visible, setAllWorkspaceDirectoriesVisible] = useState(false);
   const model = session?.model_selection ?? application?.model_settings.default_model ?? null;
   const section_owner = session_id ?? draft_key ?? "unselected";
@@ -175,7 +172,7 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
   if (new_session_draft) {
     const draft_model = new_session_draft.model_selection ?? application?.model_settings.default_model ?? null;
     const draft_directories = draft_workspace
-      ? [draft_workspace.user_directory, ...draft_workspace.additional_directories]
+      ? [draft_workspace.user_directory ?? draft_workspace.agent_directory, ...draft_workspace.additional_directories]
       : [];
     return (
       <PanelRoot className={styles.panel} aria-label={props.embedded ? undefined : "当前上下文"} data-embedded={props.embedded || undefined}>
@@ -191,11 +188,11 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
           </ContextSection>
           <ContextSection
             action={draft_workspace ? (
-              <Tooltip content="编辑工作空间">
+              <Tooltip content="编辑项目">
                 <InlineIconButton
                   disabled={store.pending_workspace_action}
                   icon="edit"
-                  label="编辑工作空间"
+                  label="编辑项目"
                   onClick={() => store.openWorkspaceEditor(draft_workspace.workspace_id)}
                 />
               </Tooltip>
@@ -243,10 +240,22 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
         <h2>当前上下文</h2>
       </header>}
       <ContextSectionLayout>
+        {session_view && <ContextSection
+          action={session_view.artifacts?.length ? (
+            <Tooltip content="刷新产物状态">
+              <InlineIconButton icon="refresh" label="刷新产物状态" onClick={() => setArtifactRefresh((value) => value + 1)} />
+            </Tooltip>
+          ) : undefined}
+          is_open={sectionIsOpen("artifacts")}
+          on_toggle={() => toggleSection("artifacts")}
+          title="产物"
+        >
+          <ArtifactList key={session_view.session.session_id} session_id={session_view.session.session_id} artifacts={session_view.artifacts ?? []} refresh_key={artifact_refresh} />
+        </ContextSection>}
         <ContextSection is_open={sectionIsOpen("session")} on_toggle={() => toggleSection("session")} title="会话">
           {session ? (
             <dl className={styles.definition_list}>
-              <div><dt>状态</dt><dd>{sessionStatusLabel(
+              <div><dt>状态</dt><dd>{store.feedback.waiting(session.session_id) ? "等待回复" : sessionStatusLabel(
                 session.lifecycle,
                 session_view?.active_run?.status,
                 session_view?.approvals.items.length ?? 0,
@@ -293,11 +302,11 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
         </ContextSection>
         <ContextSection
           action={workspace ? (
-            <Tooltip content="编辑工作空间">
+            <Tooltip content="编辑项目">
               <InlineIconButton
                 disabled={store.pending_workspace_action}
                 icon="edit"
-                label="编辑工作空间"
+                label="编辑项目"
                 onClick={() => store.openWorkspaceEditor(workspace.workspace_id)}
               />
             </Tooltip>
@@ -345,7 +354,7 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
                 </>
               ) : (
                 <>
-                  <p className={styles.empty_row}>未绑定工作空间</p>
+                  <p className={styles.empty_row}>未绑定项目</p>
                   <WorkspaceDirectoryRow
                     label="会话私有目录"
                     on_copy={() => void store.copySessionResourcePath(session.session_id, SESSION_PRIVATE_ROOT)}
@@ -371,7 +380,7 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
                 <div className={styles.skill_list}>
                   {skills.map((skill) => (
                     <div key={skill.name}>
-                      <strong title={skill.name}>{skill.name}</strong>
+                      <strong title={skill.plugin_name ? `${skill.plugin_name} · ${skill.name}` : skill.name}>{skill.plugin_name ? `${skill.plugin_name} · ${skill.name}` : skill.name}</strong>
                       <span>{skill.status_label}</span>
                     </div>
                   ))}
@@ -483,13 +492,13 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
               ),
             },
             {
-              label: "在 Finder 中显示",
+              label: revealFileLabel(),
               on_select: () => runAttachmentAction(
                 revealAttachmentInDirectory(
                   attachment_menu.attachment.session_id,
                   attachment_menu.attachment.attachment_id,
                 ),
-                "无法在 Finder 中显示。",
+                "无法在文件管理器中显示。",
               ),
             }            ] : []),
           ]}

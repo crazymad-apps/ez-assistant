@@ -3,14 +3,16 @@
 use std::{collections::HashSet, fs, path::Path};
 
 use agent_types::UserPart;
-use assistant_protocol::{ConversationOwner, InputId, SessionTitleOrigin};
+use assistant_protocol::{
+    ConversationOwner, IdempotencyKey, InputId, SessionId, SessionTitleOrigin,
+};
 use assistant_runtime::{
     AcceptedInput, NewStoredSession, NewStoredSessionMaterialization, StoreError, StoreErrorKind,
     StoredAttachment, StoredAttachmentState, StoredConversationState, StoredInput,
     StoredInputState, StoredRun, StoredSession, StoredSessionLifecycle,
     StoredSessionMaterialization,
 };
-use rusqlite::{TransactionBehavior, params};
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
 use super::{
     StorageEngine, StorageResult, attachment_io, body_path, create_new_private_file,
@@ -523,6 +525,74 @@ impl StorageEngine {
             accepted,
         })
     }
+    /// 只读定位现有唯一 key 的可靠事实；不准备目录、更新行或重放已执行输入。
+    pub(super) fn get_session_materialization(
+        &self,
+        key: &IdempotencyKey,
+    ) -> StorageResult<Option<StoredSessionMaterialization>> {
+        let session_id = self
+            .connection
+            .query_row(
+                "SELECT session_id FROM sessions WHERE materialization_key = ?1",
+                [key.as_str()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|source| internal_error("materialization key could not be queried", source))?
+            .map(|id| {
+                SessionId::new(id).map_err(|_| invalid_data("materialized session id is invalid"))
+            })
+            .transpose()?;
+        let Some(session_id) = session_id else {
+            return Ok(None);
+        };
+        let session = self
+            .load_sessions_scoped(Some(&session_id))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| invalid_data("materialized session is missing"))?;
+        let input = self
+            .load_inputs_scoped(Some(&session_id))?
+            .into_iter()
+            .min_by_key(|input| (input.accepted_at_ms, input.queue_order))
+            .ok_or_else(|| invalid_data("materialized input is missing"))?;
+        let run = self
+            .load_runs_scoped(Some(&session_id))?
+            .into_iter()
+            .find(|run| run.input_id == input.input_id && run.attempt == 1)
+            .ok_or_else(|| invalid_data("materialized run is missing"))?;
+        let attachments = self.load_attachments_scoped(Some(&session_id))?;
+        let persisted_message = input.queued_message.clone().or_else(|| {
+            self.load_conversation(&session_id)
+                .ok()
+                .and_then(|conversation| {
+                    conversation
+                        .messages
+                        .into_iter()
+                        .find_map(|message| match message {
+                            agent_types::ConversationMessage::User(user)
+                                if user.id == input.user_message_id =>
+                            {
+                                Some(user)
+                            }
+                            _ => None,
+                        })
+                })
+        });
+        Ok(Some(StoredSessionMaterialization {
+            goal: self
+                .load_all_goals_scoped(Some(&session_id))?
+                .into_iter()
+                .next(),
+            session,
+            attachments: original_attachments(attachments, persisted_message.as_ref()),
+            accepted: AcceptedInput {
+                input,
+                run,
+                is_duplicate: true,
+            },
+        }))
+    }
 }
 
 fn validate_materialization(value: &NewStoredSessionMaterialization) -> StorageResult<()> {
@@ -673,6 +743,7 @@ fn accepted_input(input: assistant_runtime::NewStoredInput) -> AcceptedInput {
 
 fn stored_session(session: NewStoredSession) -> StoredSession {
     StoredSession {
+        custom_agent: session.custom_agent,
         agent_shell_kind: session.agent_shell_kind,
         agent_shell_environment: session.agent_shell_environment.clone(),
         session_id: session.session_id,
@@ -734,6 +805,15 @@ fn materialization_semantically_matches(
     existing_files.sort_unstable();
     candidate_files.sort_unstable();
     existing.title == candidate.session.title
+        && existing
+            .custom_agent
+            .as_ref()
+            .map(|agent| (&agent.source, &agent.config.name))
+            == candidate
+                .session
+                .custom_agent
+                .as_ref()
+                .map(|agent| (&agent.source, &agent.config.name))
         && existing.model_selection == candidate.session.model_selection
         && existing.reasoning_effort == candidate.session.reasoning_effort
         && existing.environment.workspace_id == candidate.session.environment.workspace_id
@@ -813,6 +893,32 @@ fn order_attachments(
         }
     }
     ordered.extend(attachments);
+    ordered
+}
+
+fn original_attachments(
+    mut attachments: Vec<StoredAttachment>,
+    message: Option<&agent_types::UserMessage>,
+) -> Vec<StoredAttachment> {
+    let mut ordered = Vec::new();
+    if let Some(message) = message {
+        for file in message
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                UserPart::FileReferences(files) => Some(&files.files),
+                _ => None,
+            })
+            .flatten()
+        {
+            if let Some(index) = attachments
+                .iter()
+                .position(|attachment| attachment.agent_readable_path == file.readable_path)
+            {
+                ordered.push(attachments.remove(index));
+            }
+        }
+    }
     ordered
 }
 

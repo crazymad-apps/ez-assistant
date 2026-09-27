@@ -12,6 +12,7 @@ mod runtime_bootstrap;
 mod runtime_compatibility;
 mod runtime_connection;
 mod runtime_source;
+mod system_notification;
 mod workspace_directory;
 
 use tauri::Manager as _;
@@ -50,6 +51,7 @@ pub fn run() {
         .manage(native_resources)
         .manage(browser_resource::BrowserResourceManager::default())
         .manage(desktop_lifecycle)
+        .manage(system_notification::SystemNotifications::default())
         .setup(|app| {
             let app_handle = app.handle().clone();
             let coordinator = app.state::<desktop_lifecycle::DesktopLifecycleCoordinator>();
@@ -60,6 +62,8 @@ pub fn run() {
             if view.label() == "main"
                 && matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
             {
+                view.state::<system_notification::SystemNotifications>()
+                    .cancel_all();
                 view.state::<browser_resource::BrowserResourceManager>()
                     .close_all();
             }
@@ -94,6 +98,9 @@ pub fn run() {
                 browser_resource::resource_browser_url,
                 browser_resource::close_resource_browser,
                 health,
+                system_notification::system_notification_permission,
+                system_notification::show_system_notification,
+                system_notification::close_system_notification,
                 desktop_lifecycle::desktop_platform,
                 desktop_lifecycle::is_desktop_window_maximized,
                 desktop_lifecycle::minimize_desktop_window,

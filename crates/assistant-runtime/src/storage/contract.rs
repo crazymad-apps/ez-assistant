@@ -1,5 +1,5 @@
 use agent_types::ConversationSnapshot;
-use assistant_protocol::{ChildTaskId, InputId, SessionId};
+use assistant_protocol::{ChildTaskId, IdempotencyKey, InputId, SessionId};
 
 use crate::{
     DeviceNameChange, DeviceRevocation, DeviceRevocationResult, MemoryContextSnapshot,
@@ -17,19 +17,20 @@ use super::{
     GoalStopResult, MessageFeedbackChange, ModelChange, NewAttachmentUpload, NewStoredChildTask,
     NewStoredInput, NewStoredRunAttempt, NewStoredSession, NewStoredSessionCommand,
     NewStoredSessionMaterialization, NewWorkspaceRegistration, PendingChildToolExchange,
-    PendingToolExchange, QueuePriorityChange, ReasoningEffortChange, RewriteResult,
-    SessionCommandCommit, SessionDeletion, SessionFork, SessionHistoryClear,
-    SessionHistoryClearResult, SessionHistoryCompactionFinish, SessionHistoryCompactionPreparation,
-    SessionHistoryCompactionPreparationResult, SessionPinnedChange, SessionProxyChange,
-    SessionTitleChange, SessionTitleGenerationCommit, SessionTitleGenerationCommitResult,
-    StoreFuture, StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
-    StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationWindow,
-    StoredGoal, StoredInput, StoredMcpSelection, StoredMessageFeedback, StoredRun,
-    StoredRunContinuation, StoredRunContinuationResult, StoredRunSettlement,
-    StoredRunSettlementResult, StoredSession, StoredSessionFork, StoredSessionMaterialization,
-    StoredSessionUsage, StoredTerminalRunInputReconciliation, StoredWorkPlan, StoredWorkspace,
-    ToolExecutionStart, UserMessageCommit, VariantChange, WorkPlanClear, WorkPlanMutation,
-    WorkPlanMutationResult, WorkspaceRemoval, WorkspaceUpdate,
+    PendingToolExchange, PluginOperationUpdate, PluginSettingsChange, QueuePriorityChange,
+    ReasoningEffortChange, RewriteResult, SessionCommandCommit, SessionDeletion, SessionFork,
+    SessionHistoryClear, SessionHistoryClearResult, SessionHistoryCompactionFinish,
+    SessionHistoryCompactionPreparation, SessionHistoryCompactionPreparationResult,
+    SessionPinnedChange, SessionProxyChange, SessionTitleChange, SessionTitleGenerationCommit,
+    SessionTitleGenerationCommitResult, StoreFuture, StoredAttachment, StoredChildTask,
+    StoredChildTaskSettlement, StoredConversationMessageLocation, StoredConversationRawWindow,
+    StoredConversationWindow, StoredGoal, StoredInput, StoredMcpSelection, StoredMessageFeedback,
+    StoredPlugin, StoredPluginOperation, StoredRun, StoredRunContinuation,
+    StoredRunContinuationResult, StoredRunSettlement, StoredRunSettlementResult, StoredSession,
+    StoredSessionFork, StoredSessionMaterialization, StoredSessionUsage,
+    StoredTerminalRunInputReconciliation, StoredWorkPlan, StoredWorkspace, ToolExecutionStart,
+    UserMessageCommit, VariantChange, WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult,
+    WorkspaceRemoval, WorkspaceRestoration, WorkspaceUpdate,
 };
 
 /// Runtime 启动时一次性取得的结构化恢复结果。
@@ -71,6 +72,14 @@ pub struct LoadedSession {
 ///
 /// 该端口以业务原子操作表达 Runtime 对持久化的需求，禁止退化为通用 SQL 或键值接口。
 pub trait RuntimeStore: Send + Sync {
+    /// 只读取指定会话的问答事实；不恢复或重放执行。
+    fn load_feedback(
+        &self,
+        session_id: &SessionId,
+    ) -> StoreFuture<'_, Vec<assistant_protocol::FeedbackRequestSnapshot>>;
+    /// 同一会话 gate 内提交请求的创建或终态转换；相同终态重试幂等。
+    fn mutate_feedback(&self, mutation: crate::FeedbackMutation) -> StoreFuture<'_, ()>;
+
     /// 为已从本域 Store 核实的附件提供旧定位别名。仅用于可靠历史中的结构化引用，
     /// 不能将客户端任意路径交给此接口授权；默认实现没有历史目录别名。
     fn historical_attachment_path(&self, _attachment: &StoredAttachment) -> Option<String> {
@@ -173,6 +182,29 @@ pub trait RuntimeStore: Send + Sync {
     /// 以通过格式校验的名称为唯一键原子写入一个全局 Skill 开关。
     fn set_skill_enabled(&self, change: SkillNameStateChange) -> StoreFuture<'_, SkillNameState>;
 
+    fn list_custom_agents(&self) -> StoreFuture<'_, Vec<crate::StoredCustomAgent>>;
+    /// 内容摘要 CAS：创建必须不存在，编辑/删除必须匹配读取到的完整配置。
+    fn mutate_custom_agent(
+        &self,
+        mutation: crate::CustomAgentMutation,
+    ) -> StoreFuture<'_, Option<crate::StoredCustomAgent>>;
+
+    /// 插件事实按用户域分库；独立 Skill/MCP 不属于此列表。
+    fn list_plugins(&self) -> StoreFuture<'_, Vec<StoredPlugin>>;
+    fn change_plugin_settings(&self, change: PluginSettingsChange)
+    -> StoreFuture<'_, StoredPlugin>;
+    fn list_plugin_operations(&self) -> StoreFuture<'_, Vec<StoredPluginOperation>>;
+    /// 同 key、同意图返回原记录；异意图冲突。仅接受 accepted 初始记录。
+    fn accept_plugin_operation(
+        &self,
+        operation: StoredPluginOperation,
+    ) -> StoreFuture<'_, StoredPluginOperation>;
+    /// 操作相位与插件事实在同一存储事务内推进；外部文件发布另由 Host 协调。
+    fn advance_plugin_operation(
+        &self,
+        update: PluginOperationUpdate,
+    ) -> StoreFuture<'_, StoredPluginOperation>;
+
     /// 读取一个 Session 的当前 WorkPlan；不存在时返回 `None`。
     fn load_work_plan(&self, session_id: &SessionId) -> StoreFuture<'_, Option<StoredWorkPlan>>;
 
@@ -213,6 +245,12 @@ pub trait RuntimeStore: Send + Sync {
     /// 假删 Workspace，不删除任何目录或历史绑定。
     fn remove_workspace(&self, removal: WorkspaceRemoval) -> StoreFuture<'_, StoredWorkspace>;
 
+    /// 按稳定 ID 恢复 Workspace；重复恢复活动记录幂等返回当前事实。
+    fn restore_workspace(
+        &self,
+        restoration: WorkspaceRestoration,
+    ) -> StoreFuture<'_, StoredWorkspace>;
+
     /// 完成已流式接收到 staging 的上传；同 Session、同 Blob Hash 返回首次结果。
     fn upload_attachment(&self, upload: NewAttachmentUpload) -> StoreFuture<'_, StoredAttachment>;
 
@@ -224,6 +262,12 @@ pub trait RuntimeStore: Send + Sync {
         &self,
         materialization: NewStoredSessionMaterialization,
     ) -> StoreFuture<'_, StoredSessionMaterialization>;
+
+    /// 只读查找已有首次物化事实；`None` 不排除并发上传稍后提交。
+    fn get_session_materialization(
+        &self,
+        key: &IdempotencyKey,
+    ) -> StoreFuture<'_, Option<StoredSessionMaterialization>>;
 
     /// 基于已校验的正文前缀原子创建独立 Session，并重写 Attachment 稳定视图。
     fn fork_session(&self, fork: SessionFork) -> StoreFuture<'_, StoredSessionFork>;

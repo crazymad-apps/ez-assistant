@@ -3,9 +3,11 @@ import { ModelSelection, protocols } from './models.js';
 import type { Protocol } from './models.js';
 import type { Outcome } from '../llm/entity.js';
 import type { SnapshotState } from '../llm/snapshots.js';
+import type { UsageState } from '../llm/entity.js';
 
 export const outcomes = ['in_progress', 'forwarded', 'rejected', 'upstream_error', 'interrupted', 'unknown'] as const;
 export const snapshotStates = ['disabled', 'pending', 'complete', 'partial', 'failed', 'expired', 'missing'] as const;
+export const usageStates = ['pending', 'available', 'partial', 'unavailable'] as const;
 
 export class RecordingSettings {
   @ApiProperty() enabled!: boolean;
@@ -38,6 +40,13 @@ export class CallDetails {
   @ApiProperty({ type: Number, nullable: true }) http_status!: number | null;
   @ApiProperty({ type: String, nullable: true }) reason!: string | null;
   @ApiProperty({ enum: outcomes }) outcome!: Outcome;
+  @ApiProperty({ enum: usageStates }) usage_state!: UsageState;
+  @ApiProperty({ type: String, nullable: true }) usage_reason!: string | null;
+  @ApiProperty({ type: String, nullable: true }) input_tokens!: string | null;
+  @ApiProperty({ type: String, nullable: true }) output_tokens!: string | null;
+  @ApiProperty({ type: String, nullable: true }) total_tokens!: string | null;
+  @ApiProperty({ type: String, nullable: true }) cached_input_tokens!: string | null;
+  @ApiProperty({ type: String, nullable: true }) reasoning_tokens!: string | null;
   @ApiProperty({ type: CallSnapshot }) request!: CallSnapshot;
   @ApiProperty({ type: CallSnapshot }) response!: CallSnapshot;
 }
@@ -60,6 +69,79 @@ export class CallPage {
   @ApiProperty() total!: number;
   @ApiProperty() limit!: number;
   @ApiProperty() offset!: number;
+}
+
+export class UsageQuery {
+  @ApiPropertyOptional({ format: 'date-time' }) from?: string;
+  @ApiPropertyOptional({ format: 'date-time' }) to?: string;
+  @ApiPropertyOptional({ type: Number }) user_id?: number;
+  @ApiPropertyOptional({ format: 'uuid' }) provider_instance_id?: string;
+  @ApiPropertyOptional() model_id?: string;
+  @ApiPropertyOptional({ enum: ['proxy', 'admin_test'] }) kind?: 'proxy' | 'admin_test';
+  @ApiPropertyOptional({ enum: outcomes }) outcome?: Outcome;
+  @ApiPropertyOptional({ enum: ['hour', 'day', 'month'] }) granularity?: 'hour' | 'day' | 'month';
+  @ApiPropertyOptional({ enum: ['user', 'model'] }) group_by?: 'user' | 'model';
+  @ApiPropertyOptional({ type: Number, default: 20 }) limit?: number;
+  @ApiPropertyOptional({ type: Number, default: 0 }) offset?: number;
+}
+
+export class UsageTotals {
+  @ApiProperty() calls!: string;
+  @ApiProperty() forwarded!: string;
+  @ApiProperty() rejected!: string;
+  @ApiProperty() upstream_error!: string;
+  @ApiProperty() interrupted!: string;
+  @ApiProperty() unknown!: string;
+  @ApiProperty() in_progress!: string;
+  @ApiProperty({ type: String, nullable: true }) avg_duration_ms!: string | null;
+  @ApiProperty() available!: string;
+  @ApiProperty() partial!: string;
+  @ApiProperty() unavailable!: string;
+  @ApiProperty() pending!: string;
+  @ApiProperty({ type: String, nullable: true }) input_tokens!: string | null;
+  @ApiProperty({ type: String, nullable: true }) output_tokens!: string | null;
+  @ApiProperty({ type: String, nullable: true }) total_tokens!: string | null;
+  @ApiProperty({ type: String, nullable: true }) cached_input_tokens!: string | null;
+  @ApiProperty({ type: String, nullable: true }) reasoning_tokens!: string | null;
+  @ApiProperty() input_samples!: string;
+  @ApiProperty() output_samples!: string;
+  @ApiProperty() total_samples!: string;
+  @ApiProperty() cached_samples!: string;
+  @ApiProperty() reasoning_samples!: string;
+}
+
+export class UsageBucket extends UsageTotals {
+  @ApiProperty({ format: 'date-time' }) start!: string;
+  @ApiProperty() incomplete!: boolean;
+}
+
+export class UsageGroup extends UsageTotals {
+  @ApiProperty({ type: Number, nullable: true }) user_id!: number | null;
+  @ApiProperty({ type: String, nullable: true }) username!: string | null;
+  @ApiProperty({ type: String, nullable: true }) provider_instance_id!: string | null;
+  @ApiProperty({ type: String, nullable: true }) provider_name!: string | null;
+  @ApiProperty({ type: String, nullable: true }) model_id!: string | null;
+}
+
+export class UsagePage {
+  @ApiProperty({ format: 'date-time' }) from!: string;
+  @ApiProperty({ format: 'date-time' }) to!: string;
+  @ApiProperty({ format: 'date-time' }) available_from!: string;
+  @ApiProperty() timezone!: string;
+  @ApiProperty({ enum: ['hour', 'day', 'month'] }) granularity!: 'hour' | 'day' | 'month';
+  @ApiProperty({ enum: ['user', 'model'] }) group_by!: 'user' | 'model';
+  @ApiProperty({ type: UsageTotals }) summary!: UsageTotals;
+  @ApiProperty({ type: [UsageBucket] }) buckets!: UsageBucket[];
+  @ApiProperty({ type: [UsageGroup] }) groups!: UsageGroup[];
+  @ApiProperty() group_total!: number;
+  @ApiProperty() limit!: number;
+  @ApiProperty() offset!: number;
+}
+
+export class UsageModelOption {
+  @ApiProperty({ format: 'uuid' }) provider_instance_id!: string;
+  @ApiProperty() provider_name!: string;
+  @ApiProperty() model_id!: string;
 }
 
 export class TestModel extends ModelSelection {}

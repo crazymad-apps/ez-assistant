@@ -1,0 +1,19 @@
+.content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-height: min(70vh, 640px);
+  overflow: auto;
+}
+
+.drop {
+  border: 1px dashed var(--ant-color-border);
+  border-radius: var(--ant-border-radius);
+  padding: 24px;
+  text-align: center;
+  cursor: pointer;
+}
+
+.drop:focus-visible {
+  outline: 2px solid var(--ant-color-primary);
+}

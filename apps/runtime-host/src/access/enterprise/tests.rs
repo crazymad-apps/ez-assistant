@@ -44,6 +44,13 @@ struct Mock {
     proxy_requests: Mutex<Vec<(String, Value)>>,
     proxy_control: Mutex<Option<(u16, String)>>,
     proxy_hold: Mutex<Option<Arc<Held>>>,
+    plugin: Mutex<Option<PluginFixture>>,
+}
+#[derive(Clone)]
+struct PluginFixture {
+    bytes: Vec<u8>,
+    sha256: String,
+    deprecated: bool,
 }
 #[derive(Default)]
 struct Held {
@@ -117,6 +124,55 @@ async fn mock_logout(State(mock): State<Arc<Mock>>, headers: HeaderMap) -> Statu
     StatusCode::NO_CONTENT
 }
 
+async fn mock_plugin_market(State(mock): State<Arc<Mock>>) -> Json<Value> {
+    let plugin = mock.plugin.lock().unwrap().clone();
+    Json(match plugin {
+        Some(plugin) if !plugin.deprecated => json!([{
+            "name":"warehouse-cad-guidance", "display_name":"Warehouse CAD Guidance",
+            "description":"", "versions":[{
+                "version":"0.1.0", "archive_format":"tar_gzip", "sha256":plugin.sha256,
+                "size_bytes":plugin.bytes.len(), "skills":["compact-shelving-cad"], "mcp":[]
+            }]
+        }]),
+        _ => json!([]),
+    })
+}
+async fn mock_plugin_resolve(State(mock): State<Arc<Mock>>) -> Response {
+    let plugin = mock.plugin.lock().unwrap().clone();
+    match plugin {
+        Some(plugin) if !plugin.deprecated => Json(json!({"package":{
+            "name":"warehouse-cad-guidance", "version":"0.1.0",
+            "archive_format":"tar_gzip", "sha256":plugin.sha256,
+            "size_bytes":plugin.bytes.len()
+        }}))
+        .into_response(),
+        _ => StatusCode::GONE.into_response(),
+    }
+}
+async fn mock_plugin_download(State(mock): State<Arc<Mock>>, headers: HeaderMap) -> Response {
+    let plugin = mock.plugin.lock().unwrap().clone();
+    let Some(plugin) = plugin else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if plugin.deprecated {
+        return StatusCode::GONE.into_response();
+    }
+    if headers
+        .get("if-match")
+        .and_then(|value| value.to_str().ok())
+        != Some(format!("\"{}\"", plugin.sha256).as_str())
+    {
+        return StatusCode::PRECONDITION_FAILED.into_response();
+    }
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("etag", format!("\"{}\"", plugin.sha256))
+        .header("x-plugin-sha256", plugin.sha256)
+        .header("content-length", plugin.bytes.len())
+        .body(axum::body::Body::from(plugin.bytes))
+        .unwrap()
+}
+
 struct Fixture {
     home: tempfile::TempDir,
     state: HttpState,
@@ -160,6 +216,9 @@ impl Fixture {
             .route("/api/auth/login", post(mock_login))
             .route("/api/auth/me", get(mock_me))
             .route("/api/auth/logout", post(mock_logout))
+            .route("/api/runtime/plugins", get(mock_plugin_market))
+            .route("/api/runtime/plugins/warehouse-cad-guidance/resolve", post(mock_plugin_resolve))
+            .route("/api/runtime/plugins/warehouse-cad-guidance/versions/0.1.0/package", get(mock_plugin_download))
             .route(
                 "/api/auth/password",
                 post(|| async { StatusCode::NO_CONTENT }),
@@ -280,8 +339,10 @@ impl Fixture {
         assert_eq!(response.status(), StatusCode::OK);
         let value = response.json::<Value>().await.unwrap();
         assert_eq!(value["identity"]["center_id"], CENTER_ID);
-        assert!(!value.to_string().contains("ct_"));
-        assert!(!value.to_string().contains("cl_"));
+        let mut without_host_token = value.clone();
+        without_host_token.as_object_mut().unwrap().remove("token");
+        assert!(!without_host_token.to_string().contains("ct_"));
+        assert!(!without_host_token.to_string().contains("cl_"));
         value["token"].as_str().unwrap().into()
     }
     async fn session(&self, token: &str) -> reqwest::Response {

@@ -221,7 +221,7 @@ export function SessionResourceTree(props: Readonly<{
           />
         </div>
       </div>
-      <div aria-label="工作空间目录" className={styles.tree_roots} role="tree" ref={scroll_ref}
+      <div aria-label="项目目录" className={styles.tree_roots} role="tree" ref={scroll_ref}
         onWheel={() => { restore_scroll.current = null; }}
         onPointerDown={() => { restore_scroll.current = null; }}
         onScroll={(event) => { if (props.view_state?.tree && restore_scroll.current === null) props.view_state.tree.scroll_top = event.currentTarget.scrollTop; }}>

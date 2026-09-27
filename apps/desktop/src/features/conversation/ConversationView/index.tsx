@@ -1,3 +1,4 @@
+import { revealFileLabel } from "../../../platform/fileManager";
 import { observer } from "mobx-react-lite";
 import { McpControlResult } from "../McpControlResult";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -481,6 +482,7 @@ export const ConversationView = observer(function ConversationView() {
                 ? child_task_items.filter((item) => item.task.parent_run_id === row.run_id)
                 : []}
               live_run={row.run_id === live_run?.run_id ? live_run : null}
+              awaiting_feedback={!child_task_id && !!session_id && store.feedback.waiting(session_id)?.run_id === row.run_id}
               messages={row.messages}
               on_child_open={!child_task_id && session_id
                 ? (item) => void store.openChildTask(session_id, item.task.child_task_id)
@@ -498,7 +500,7 @@ export const ConversationView = observer(function ConversationView() {
     if (store.navigation.selected_draft_key) {
       return <EmptyConversation title="开始新会话" detail="输入消息或使用 / 指令。" />;
     }
-    return <EmptyConversation title="选择一个会话" detail="从左侧工作空间中选择会话以查看消息。" />;
+    return <EmptyConversation title="选择一个会话" detail="从左侧项目中选择会话以查看消息。" />;
   }
   if (!history) {
     if (child_task_id) {
@@ -566,6 +568,7 @@ export const ConversationView = observer(function ConversationView() {
           {live_run && !conversation_rows.some((row) => row.type === "assistant_turn" && row.run_id === live_run.run_id)
             && (
               <LiveAssistantMessage
+                awaiting_feedback={!child_task_id && store.feedback.waiting(session_id)?.run_id === live_run.run_id}
                 child_tasks={!child_task_id
                   ? child_task_items.filter((item) => item.task.parent_run_id === live_run.run_id)
                   : []}
@@ -628,13 +631,13 @@ export const ConversationView = observer(function ConversationView() {
               ),
             },
             {
-              label: "在 Finder 中显示",
+              label: revealFileLabel(),
               on_select: () => runAttachmentAction(
                 revealAttachmentInDirectory(
                   attachment_menu.attachment.session_id,
                   attachment_menu.attachment.attachment_id,
                 ),
-                "无法在 Finder 中显示。",
+                "无法在文件管理器中显示。",
               ),
             }            ] : []),
           ]}

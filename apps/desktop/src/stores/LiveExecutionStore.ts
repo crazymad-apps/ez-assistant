@@ -112,6 +112,7 @@ export class LiveExecutionStore {
         this.#child_generations.delete(child_task_id);
       }
     }
+    const latest_run = view.runs?.at(-1);
     const committed_steps = new Map<string, Set<number>>();
     for (const item of view.child_tasks ?? []) {
       this.child_tasks.set(item.task.child_task_id, item.task);
@@ -130,6 +131,7 @@ export class LiveExecutionStore {
       const is_current_session = run.session_id === view.session.session_id;
       const is_authoritatively_active = view.active_run?.run_id === run.run_id;
       const retain_terminal_error = !view.active_run
+        && (!latest_run || latest_run.run_id === run.run_id)
         && run.error_message !== null
         && (run.status === "failed" || run.status === "interrupted" || run.status === "compaction_required");
       if (is_current_session && (!view.active_run || (run.status !== "accepted" && !is_authoritatively_active))
@@ -156,6 +158,9 @@ export class LiveExecutionStore {
         view.active_run,
         baseline,
       );
+    } else if (latest_run?.status === "failed" && latest_run.error) {
+      // 重连后失败事实来自既有持久 Run，不能只保留收到过终态 SSE 的页面。
+      this.#reconcileRunSnapshot(latest_run);
     }
   }
 
@@ -329,6 +334,11 @@ export class LiveExecutionStore {
         return;
       }
     }
+    // attempt 事件不带 step；终态与取消同样必须阻止迟到事件恢复重试提示。
+    if (event.type.startsWith("model_")
+      && (!isNonterminalRun(current.status) || current.status === "cancelling")) {
+      return;
+    }
     let next = current;
     switch (event.type) {
       case "run_accepted":
@@ -345,16 +355,23 @@ export class LiveExecutionStore {
         next = { ...current, status: "running" };
         break;
       case "run_cancelling":
-        next = { ...current, status: "cancelling" };
+        next = { ...current, status: "cancelling", model_request: null };
+        break;
+      case "model_attempt_started":
+        next = { ...current, model_request: { type: "requesting", attempt: event.attempt }, model_failure_kind: null };
+        break;
+      case "model_retry_scheduled":
+        next = { ...current, model_request: { type: "retry_waiting", next_attempt: event.next_attempt, delay_ms: event.delay_ms } };
         break;
       case "model_attempt_failed":
         next = {
           ...current,
+          model_request: null,
           model_failure_kind: event.will_retry ? current.model_failure_kind : event.kind,
         };
         break;
       case "model_stream_established":
-        next = { ...current, model_failure_kind: null };
+        next = { ...current, model_failure_kind: null, model_request: null };
         break;
       case "step_started":
         next = {
@@ -402,6 +419,7 @@ export class LiveExecutionStore {
         next = {
           ...current,
           status: event.status,
+          model_request: null,
           error_code: event.error?.code ?? null,
           error_message: event.error?.message ?? null,
           model_failure_kind: event.status === "failed" ? current.model_failure_kind : null,
@@ -501,6 +519,7 @@ export class LiveExecutionStore {
       this.runs.set(key, {
         ...next,
         status: snapshot.status,
+        model_request: snapshot.model_request ?? null,
         error_code: snapshot.error?.code ?? current.error_code,
         error_message: snapshot.error?.message ?? current.error_message,
         active_step,
@@ -527,12 +546,14 @@ export class LiveExecutionStore {
       .reduce<LiveRunProjection>((run, tool) => updateStep(run, tool.step!, (items) => reconcileTools(items, [tool])), {
         ...emptyRun(snapshot.session_id, snapshot.run_id, snapshot.created_at_ms ?? Date.now()),
         status: snapshot.status,
+        model_request: snapshot.model_request ?? null,
         active_step,
         steps: segments.length > 0 && active_step > 0 ? [{ step: active_step, segments }] : [],
       });
     this.runs.set(key, {
       ...extra_steps,
       status: snapshot.status,
+      model_request: snapshot.model_request ?? null,
       active_step,
       error_code: snapshot.error?.code ?? null,
       error_message: snapshot.error?.message ?? null,
@@ -547,6 +568,8 @@ function isLiveExecutionEvent(envelope: RuntimeEventEnvelope): boolean {
     "run_accepted",
     "run_started",
     "run_cancelling",
+    "model_attempt_started",
+    "model_retry_scheduled",
     "model_attempt_failed",
     "model_stream_established",
     "step_started",

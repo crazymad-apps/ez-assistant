@@ -160,11 +160,12 @@ describe("ContextPanel", () => {
 
     const columns = container.querySelectorAll<HTMLElement>("[data-context-column]");
     expect(columns).toHaveLength(2);
-    expect(within(columns[0]!).getByRole("button", { name: "会话" })).toBeVisible();
-    expect(within(columns[0]!).getByRole("button", { name: "技能" })).toBeVisible();
-    expect(within(columns[0]!).getByRole("button", { name: "运行记录 · 1" })).toBeVisible();
-    expect(within(columns[1]!).getByRole("button", { name: "工作区" })).toBeVisible();
-    expect(within(columns[1]!).getByRole("button", { name: "会话附件 · 1" })).toBeVisible();
+    expect(within(columns[0]!).getByRole("button", { name: "产物" })).toBeVisible();
+    expect(within(columns[0]!).getByRole("button", { name: "工作区" })).toBeVisible();
+    expect(within(columns[0]!).getByRole("button", { name: "会话附件 · 1" })).toBeVisible();
+    expect(within(columns[1]!).getByRole("button", { name: "会话" })).toBeVisible();
+    expect(within(columns[1]!).getByRole("button", { name: "技能" })).toBeVisible();
+    expect(within(columns[1]!).getByRole("button", { name: "运行记录 · 1" })).toBeVisible();
   });
 
   it("collapses each section and locates a selected run through the product query", async () => {
@@ -205,7 +206,7 @@ describe("ContextPanel", () => {
 
     expect(screen.queryByText("当前项目")).not.toBeInTheDocument();
     const workspace_heading = screen.getByRole("button", { name: "工作区" });
-    const workspace_edit = screen.getByRole("button", { name: "编辑工作空间" });
+    const workspace_edit = screen.getByRole("button", { name: "编辑项目" });
     const workspace_toggle = screen.getByRole("button", { name: "收起工作区" });
     expect(workspace_heading.compareDocumentPosition(workspace_edit) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(workspace_edit.compareDocumentPosition(workspace_toggle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -217,7 +218,7 @@ describe("ContextPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "浏览 /workspace/old-project" }));
     fireEvent.click(screen.getByRole("button", { name: "打开 /workspace/old-docs" }));
     fireEvent.click(screen.getByRole("button", { name: "复制 /workspace/old-project" }));
-    fireEvent.click(screen.getByRole("button", { name: "编辑工作空间" }));
+    fireEvent.click(screen.getByRole("button", { name: "编辑项目" }));
 
     expect(open).toHaveBeenCalledWith("session-1", 1);
     expect(store.resource_workspace.workspace_locations.get("session:session-1")).toEqual({

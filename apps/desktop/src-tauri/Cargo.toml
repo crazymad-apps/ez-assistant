@@ -40,6 +40,7 @@ url.workspace = true
 
 
 [target.'cfg(target_os = "macos")'.dependencies]
+mac-usernotifications = { version = "=0.3.1", default-features = false }
 # platform.rs 按该版本的 WithWebview +1 所有权接管句柄，升级必须同步移除补偿。
 tauri-runtime-wry = "=2.11.4"
 # Already present through tauri-utils; read Safari's installed version without shelling out.
@@ -56,4 +57,5 @@ objc2-web-kit = { version = "=0.3.2", default-features = false, features = ["std
 nix.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+windows = { version = "=0.61.3", features = ["Data_Xml_Dom", "UI_Notifications", "Foundation"] }
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Threading", "Win32_Security_Authorization", "Win32_Storage_FileSystem"] }

@@ -1,3 +1,4 @@
+import { revealFileLabel } from "../../platform/fileManager";
 import { useCallback, useState } from "react";
 import { MarkdownContent } from "../../components/MarkdownContent";
 import { openLocalResourceInSystem, registerLocalFileUri, revealLocalResourceInDirectory } from "../../native-bridge/nativeResource";
@@ -12,7 +13,7 @@ export function ConversationMarkdownContent(props: Readonly<{ is_streaming?: boo
   const draft = root.navigation.selected_draft_key;
   const scope = session ? `session:${session}` : draft ? `draft:${draft}` : null;
   const directory = session ? root.projection.session_views.get(session)?.workspace?.primary_directory : undefined;
-  const base = directory ? `${directory.replace(/\/$/, "")}/` : undefined;
+  const base = directory ? `${directory.replace(/[/\\]$/, "")}/` : undefined;
   const [menu, setMenu] = useState<{location: ResourceMenuLocation; path: string} | null>(null);
   const showError = useCallback((error: unknown) => root.showInteractionError(error instanceof Error ? error.message : "无法读取 Host 文件。"), [root]);
   const loadImage = useCallback(async (reference: string) => {
@@ -36,7 +37,7 @@ export function ConversationMarkdownContent(props: Readonly<{ is_streaming?: boo
       {label:"下载文件",on_select:()=>{void root.files.downloadHostFile(menu.path).catch(showError);}},
       ...(root.files.native_host ? [
         {label:"使用系统应用打开",on_select:()=>{void registerLocalFileUri(hostFileUri(menu.path)).then((r)=>openLocalResourceInSystem(r.resource_key)).catch(showError);}},
-        {label:"在 Finder 中显示",on_select:()=>{void registerLocalFileUri(hostFileUri(menu.path)).then((r)=>revealLocalResourceInDirectory(r.resource_key)).catch(showError);}},
+        {label:revealFileLabel(),on_select:()=>{void registerLocalFileUri(hostFileUri(menu.path)).then((r)=>revealLocalResourceInDirectory(r.resource_key)).catch(showError);}},
       ] : []),
     ]}/>}
   </>;

@@ -328,7 +328,7 @@ async fn reload_replaces_the_whole_session_cohort_and_publishes_one_fact() {
     let workspace = runtime
         .register_workspace(RegisterWorkspaceRequest {
             label: "permission-reload".to_owned(),
-            primary_directory: "/workspace/permission-reload".to_owned(),
+            primary_directory: Some("/workspace/permission-reload".to_owned()),
             additional_directories: Vec::new(),
         })
         .await

@@ -44,6 +44,8 @@ pub enum CompactionReason {
 pub enum ContinuationReason {
     /// Recorder 已可靠提交一项会改变下一模型请求上下文的事实。
     ContextChanged,
+    /// 工具交换已可靠闭合，交还上层并结束业务轮次，不自动续跑。
+    ReturnToHost,
 }
 
 /// 仅在当前进程内交给 Runtime 的精确下一次模型请求。
@@ -132,7 +134,7 @@ pub enum ExecutionOutcome {
         #[serde(skip)]
         handoff: Option<CompactionHandoff>,
     },
-    /// 当前执行因上下文已可靠改变而结束；Runtime 应在同一业务 Run 中续跑。
+    /// 当前执行在可靠工具边界交还宿主；由 reason 区分上下文续跑和结束当前业务轮。
     ContinuationRequired {
         /// 上层续跑原因；Core 不解释具体业务领域。
         reason: ContinuationReason,

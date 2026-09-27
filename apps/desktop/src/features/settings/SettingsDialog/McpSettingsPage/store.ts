@@ -24,7 +24,7 @@ export class McpSettingsStore {
       testing: observable, test_result: observableRef, pending_action: observable,
       error_message: observable, notice_message: observable, configuration_conflict: observable,
       load: action, mutate: action, previewImport: action, test: action,
-      cancelTest: action, deactivate: action, clearMessages: action,
+      cancelTest: action, deactivate: action, clearMessages: action, dismissNotice: action,
     });
   }
 
@@ -104,6 +104,10 @@ export class McpSettingsStore {
     this.error_message = null;
     this.notice_message = null;
     this.configuration_conflict = false;
+  }
+
+  dismissNotice(message: string): void {
+    if (this.notice_message === message) this.notice_message = null;
   }
 
   deactivate(): void {

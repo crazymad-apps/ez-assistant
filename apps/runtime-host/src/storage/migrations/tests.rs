@@ -49,6 +49,7 @@ fn first() -> Migration {
     Migration {
         version: BASELINE,
         min_compatible_host_version: None,
+        rebuilds_referenced_tables: false,
         validate_source: validate_old_source,
         apply: baseline,
         validate: validate_baseline,
@@ -60,6 +61,75 @@ fn empty(_: &Connection) -> Result<()> {
 fn next(connection: &Connection) -> Result<()> {
     connection.execute_batch("ALTER TABLE sessions ADD COLUMN extension TEXT")?;
     Ok(())
+}
+/// 带外键引用的夹具：子表行引用 sessions，后续重建父表只在 enforcement 关闭下成功。
+fn referenced(connection: &Connection) -> Result<()> {
+    connection.execute_batch(
+        "CREATE TABLE session_resources(session_id TEXT PRIMARY KEY REFERENCES sessions(session_id));
+         INSERT INTO sessions(session_id, title, body_generation, message_count) VALUES('s-1','保留',2,9);
+         INSERT INTO session_resources VALUES('s-1')",
+    )?;
+    Ok(())
+}
+fn rebuild_sessions(connection: &Connection) -> Result<()> {
+    // 版本回调无权读取或切换 foreign_keys；非白名单 PRAGMA 被 authorizer 拒绝。
+    assert!(
+        connection
+            .pragma_query_value(None, "foreign_keys", |row| row.get::<_, bool>(0))
+            .is_err()
+    );
+    connection.execute_batch(
+        "CREATE TABLE sessions_rebuilt(
+            session_id TEXT PRIMARY KEY, title TEXT NOT NULL,
+            body_generation INTEGER NOT NULL, message_count INTEGER NOT NULL,
+            model_provider_instance_id TEXT, model_id TEXT
+        );
+        INSERT INTO sessions_rebuilt
+            SELECT session_id, title, body_generation, message_count,
+                   model_provider_instance_id, model_id
+            FROM sessions;
+        DROP TABLE sessions;
+        ALTER TABLE sessions_rebuilt RENAME TO sessions",
+    )?;
+    Ok(())
+}
+fn validate_rebuild(connection: &Connection) -> Result<()> {
+    let violations: i64 =
+        connection.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })?;
+    if violations != 0 {
+        return Err(MigrationError::Integrity);
+    }
+    Ok(())
+}
+fn broken_rebuild(connection: &Connection) -> Result<()> {
+    connection.execute_batch("DROP TABLE sessions; SELECT * FROM intentional_missing")?;
+    Ok(())
+}
+fn rebuild_manifest(
+    apply: fn(&Connection) -> Result<()>,
+    validate: fn(&Connection) -> Result<()>,
+) -> [Migration; 3] {
+    [
+        first(),
+        Migration {
+            version: "0.25.2",
+            min_compatible_host_version: Some("0.25.2"),
+            rebuilds_referenced_tables: false,
+            validate_source: validate_old_source,
+            apply: referenced,
+            validate: empty,
+        },
+        Migration {
+            version: "0.25.3",
+            min_compatible_host_version: Some("0.25.2"),
+            rebuilds_referenced_tables: true,
+            validate_source: validate_old_source,
+            apply,
+            validate,
+        },
+    ]
 }
 fn ledger(connection: &Connection) -> Vec<String> {
     connection
@@ -73,6 +143,130 @@ fn ledger(connection: &Connection) -> Vec<String> {
 fn legacy(connection: &Connection) {
     connection.execute_batch("CREATE TABLE sessions(session_id TEXT PRIMARY KEY, model_key TEXT NOT NULL, title TEXT NOT NULL, body_generation INTEGER NOT NULL, message_count INTEGER NOT NULL);
         INSERT INTO sessions VALUES('one','unparseable old key','保留历史',2,9)").unwrap();
+}
+
+fn c03_isolated_home() -> tempfile::TempDir {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(".runtime-test");
+    fs::create_dir_all(&root).unwrap();
+    tempfile::Builder::new()
+        .prefix("c03-m0-upgrade-")
+        .tempdir_in(root)
+        .unwrap()
+}
+
+fn c03_manifest() -> [Migration; 6] {
+    [
+        v0_25_1::entry(),
+        v0_25_2::entry(),
+        v0_25_3::entry(),
+        v0_26_0::entry(),
+        v0_27_0::entry(),
+        v0_28_0::entry(),
+    ]
+}
+
+#[test]
+fn c03_upgrade_from_old_version_preserves_rows_and_verifies_backup() {
+    let home = c03_isolated_home();
+    let manifest = c03_manifest();
+    migrate(home.path(), "0.27.0", &manifest[..5]).unwrap();
+    let connection = db(home.path());
+    connection
+        .execute(
+            "INSERT INTO workspaces (workspace_id,label,user_directory,additional_directories_json,
+          agent_directory,lifecycle,created_at_ms,updated_at_ms)
+         VALUES('w-before','Before','/c03-before','[]','/c03-agent','active',1,1)",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let report = migrate(home.path(), "0.28.0", &manifest).unwrap();
+    assert_eq!(report.applied, ["0.28.0"]);
+    let backup = report.backup.expect("independent upgrade backup");
+    let backed = Connection::open_with_flags(
+        backup.join("runtime.sqlite3"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    assert_eq!(
+        backed
+            .query_row("SELECT COUNT(*) FROM workspaces", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(ledger(&backed).last().map(String::as_str), Some("0.27.0"));
+    let upgraded = db(home.path());
+    assert_eq!(
+        upgraded
+            .query_row("SELECT COUNT(*) FROM workspaces", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        upgraded
+            .query_row("SELECT COUNT(*) FROM plugins", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        upgraded
+            .query_row("SELECT COUNT(*) FROM plugin_operations", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(ledger(&upgraded).last().map(String::as_str), Some("0.28.0"));
+}
+
+#[test]
+fn c03_failed_upgrade_retains_previous_schema_and_verified_backup() {
+    let home = c03_isolated_home();
+    let manifest = c03_manifest();
+    migrate(home.path(), "0.27.0", &manifest[..5]).unwrap();
+    let connection = db(home.path());
+    connection
+        .execute_batch(
+            "CREATE TABLE plugins (sentinel TEXT NOT NULL); INSERT INTO plugins VALUES('kept')",
+        )
+        .unwrap();
+    drop(connection);
+    let error = migrate(home.path(), "0.28.0", &manifest).unwrap_err();
+    let MigrationError::VersionFailed {
+        version,
+        backup: Some(backup),
+        ..
+    } = error
+    else {
+        panic!("version failure with independent backup expected");
+    };
+    assert_eq!(version, "0.28.0");
+    let backed = Connection::open_with_flags(
+        backup.join("runtime.sqlite3"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    assert_eq!(
+        backed
+            .query_row("SELECT COUNT(*) FROM plugins", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    let current = db(home.path());
+    assert_eq!(
+        current
+            .query_row("SELECT sentinel FROM plugins", [], |row| row
+                .get::<_, String>(0))
+            .unwrap(),
+        "kept"
+    );
+    assert_eq!(ledger(&current).last().map(String::as_str), Some("0.27.0"));
+    assert_eq!(current.query_row("SELECT COUNT(*) FROM pragma_table_info('workspaces') WHERE name='user_directory' AND \"notnull\"=1", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
 }
 
 #[test]
@@ -206,6 +400,7 @@ fn skips_committed_prefix_and_records_explicit_empty_versions_in_semver_order() 
         Migration {
             version: "0.25.2",
             min_compatible_host_version: Some("0.25.2"),
+            rebuilds_referenced_tables: false,
             validate_source: validate_old_source,
             apply: next,
             validate: empty,
@@ -213,6 +408,7 @@ fn skips_committed_prefix_and_records_explicit_empty_versions_in_semver_order() 
         Migration {
             version: "0.25.10",
             min_compatible_host_version: Some("0.25.2"),
+            rebuilds_referenced_tables: false,
             validate_source: validate_old_source,
             apply: empty,
             validate: empty,
@@ -235,6 +431,7 @@ fn failure_rolls_back_current_sql_and_ledger_then_stops_successors() {
         Migration {
             version: "0.25.2",
             min_compatible_host_version: Some("0.25.2"),
+            rebuilds_referenced_tables: false,
             validate_source: validate_old_source,
             apply: fail,
             validate: empty,
@@ -242,6 +439,7 @@ fn failure_rolls_back_current_sql_and_ledger_then_stops_successors() {
         Migration {
             version: "0.25.3",
             min_compatible_host_version: Some("0.25.2"),
+            rebuilds_referenced_tables: false,
             validate_source: validate_old_source,
             apply: next,
             validate: empty,
@@ -279,6 +477,7 @@ fn failure_rolls_back_current_sql_and_ledger_then_stops_successors() {
             Migration {
                 version: "0.25.2",
                 min_compatible_host_version: Some("0.25.2"),
+                rebuilds_referenced_tables: false,
                 validate_source: validate_old_source,
                 apply: next,
                 validate: empty,
@@ -292,6 +491,85 @@ fn failure_rolls_back_current_sql_and_ledger_then_stops_successors() {
             .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get::<_, i64>(0))
             .unwrap(),
         0
+    );
+}
+
+/// 表重建版本由控制器临时关闭 enforcement；成功提交后控制器重新开启并回读核实。
+/// 迁移连接归 migrate 所有，重新开启通过契约证明：未恢复会以 Integrity 失败而不会返回 Ok。
+#[test]
+fn rebuild_referenced_tables_preserves_rows_and_reenables_foreign_keys() {
+    let home = tempfile::tempdir().unwrap();
+    let report = migrate(
+        home.path(),
+        "0.25.3",
+        &rebuild_manifest(rebuild_sessions, validate_rebuild),
+    )
+    .unwrap();
+    assert_eq!(report.applied, [BASELINE, "0.25.2", "0.25.3"]);
+    let connection = db(home.path());
+    assert_eq!(ledger(&connection), [BASELINE, "0.25.2", "0.25.3"]);
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT title, body_generation, message_count FROM sessions",
+                [],
+                |row| Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?
+                ))
+            )
+            .unwrap(),
+        ("保留".into(), 2, 9)
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        0
+    );
+}
+
+/// 重建版本失败同样重新开启 enforcement：恢复失败会以 Integrity 取代版本错误返回。
+#[test]
+fn failed_rebuild_rolls_back_and_reenables_foreign_keys() {
+    let home = tempfile::tempdir().unwrap();
+    let failed = migrate(
+        home.path(),
+        "0.25.3",
+        &rebuild_manifest(broken_rebuild, empty),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(failed, MigrationError::VersionFailed { ref version, .. } if version == "0.25.3")
+    );
+    let connection = db(home.path());
+    assert_eq!(ledger(&connection), [BASELINE, "0.25.2"]);
+    for table in ["sessions", "session_resources"] {
+        assert_eq!(
+            connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+    // 修复后显式再次启动只补失败版本；库不留在关死或半重建状态。
+    migrate(
+        home.path(),
+        "0.25.3",
+        &rebuild_manifest(rebuild_sessions, validate_rebuild),
+    )
+    .unwrap();
+    assert_eq!(ledger(&connection), [BASELINE, "0.25.2", "0.25.3"]);
+    assert_eq!(
+        connection
+            .query_row("SELECT title FROM sessions", [], |row| row
+                .get::<_, String>(0))
+            .unwrap(),
+        "保留"
     );
 }
 
@@ -329,6 +607,7 @@ fn validation_failure_and_illegal_transaction_controls_roll_back_initial_ledger(
                 &[Migration {
                     version: BASELINE,
                     min_compatible_host_version: None,
+                    rebuilds_referenced_tables: false,
                     validate_source: validate_old_source,
                     apply,
                     validate
@@ -373,6 +652,7 @@ fn rejects_ledger_gaps_unknown_versions_invalid_values_and_newer_database_before
                 Migration {
                     version: "0.25.2",
                     min_compatible_host_version: Some("0.25.2"),
+                    rebuilds_referenced_tables: false,
                     validate_source: validate_old_source,
                     apply: empty,
                     validate: empty,
@@ -395,6 +675,7 @@ fn invalid_manifest_is_rejected_without_creating_database() {
         vec![Migration {
             version: "0.25.2",
             min_compatible_host_version: Some("0.25.2"),
+            rebuilds_referenced_tables: false,
             validate_source: validate_old_source,
             apply: empty,
             validate: empty,
@@ -531,6 +812,7 @@ fn validation_cannot_mutate_business_rows_or_ledger() {
                 &[Migration {
                     version: BASELINE,
                     min_compatible_host_version: None,
+                    rebuilds_referenced_tables: false,
                     validate_source: validate_old_source,
                     apply: baseline,
                     validate
@@ -561,6 +843,7 @@ fn ledger_with_missing_middle_release_or_wrong_shape_is_rejected() {
         Migration {
             version: "0.25.2",
             min_compatible_host_version: Some("0.25.2"),
+            rebuilds_referenced_tables: false,
             validate_source: validate_old_source,
             apply: empty,
             validate: empty,
@@ -568,6 +851,7 @@ fn ledger_with_missing_middle_release_or_wrong_shape_is_rejected() {
         Migration {
             version: "0.25.3",
             min_compatible_host_version: Some("0.25.2"),
+            rebuilds_referenced_tables: false,
             validate_source: validate_old_source,
             apply: empty,
             validate: empty,
@@ -597,6 +881,7 @@ fn controlled_upgrade_reports_backup_and_failed_sql_without_enabling_runtime() {
     let failing = Migration {
         version: BASELINE,
         min_compatible_host_version: None,
+        rebuilds_referenced_tables: false,
         validate_source: validate_old_source,
         apply: |connection| {
             connection
@@ -757,5 +1042,84 @@ fn baseline_discards_legacy_empty_work_plan_once_and_preserves_history() {
             .unwrap()
             .applied
             .is_empty()
+    );
+}
+
+#[test]
+fn f04_upgrade_preserves_source_and_has_verified_independent_backup() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.runtime-test");
+    fs::create_dir_all(&root).unwrap();
+    let home = tempfile::Builder::new()
+        .prefix("f04-migration-")
+        .tempdir_in(&root)
+        .unwrap();
+    let mut manifest: Vec<_> = c03_manifest().into_iter().collect();
+    migrate(home.path(), "0.28.0", &manifest).unwrap();
+    db(home.path()).execute("INSERT INTO workspaces(workspace_id,label,user_directory,additional_directories_json,agent_directory,lifecycle,created_at_ms,updated_at_ms) VALUES('f04-source','F04 source','/fixture','[]','/fixture-agent','active',1,1)",[]).unwrap();
+    manifest.push(v0_28_1::entry());
+    let report = migrate(home.path(), "0.28.1", &manifest).unwrap();
+    assert_eq!(report.applied, ["0.28.1"]);
+    let backup = report.backup.unwrap();
+    let source = Connection::open_with_flags(
+        backup.join("runtime.sqlite3"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let target = db(home.path());
+    for connection in [&source, &target] {
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM workspaces", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT label FROM workspaces WHERE workspace_id='f04-source'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "F04 source"
+        );
+        assert_eq!(
+            connection
+                .query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+    }
+    assert_eq!(
+        target
+            .query_row("SELECT COUNT(*) FROM session_feedback", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        compatibility::read(&target).unwrap(),
+        Some(parse_version("0.28.1").unwrap())
+    );
+    assert_eq!(ledger(&source).last().map(String::as_str), Some("0.28.0"));
+    assert!(
+        migrate(home.path(), "0.28.1", &manifest)
+            .unwrap()
+            .applied
+            .is_empty()
+    );
+    assert!(matches!(
+        migrate(home.path(), "0.28.0", &manifest[..6]),
+        Err(MigrationError::HostTooOld | MigrationError::NewerDatabase)
+    ));
+    eprintln!(
+        "F04 migration verified: source={}, target={}, backup={}, workspaces=1, session_feedback=0",
+        backup.join("runtime.sqlite3").display(),
+        home.path()
+            .join(DATA_DIRECTORY)
+            .join(DATABASE_FILE)
+            .display(),
+        backup.display()
     );
 }

@@ -321,6 +321,10 @@ async fn shutdown_timeout_aborts_supervisor_and_force_settles_active_run() {
         RuntimeConfig::new(NonZeroUsize::new(32).expect("capacity"))
             .with_shutdown_timeout(Duration::from_millis(10)),
     );
+    // 本用例专门覆盖不响应取消的底层请求；禁用会主动响应取消的重试包装。
+    runtime.config_registry.replace_document_for_test(&format!(
+        "{TEST_CONFIG}\n[runtime.model_retry]\nenabled=false\n"
+    ));
     let session = runtime
         .create_session(CreateSessionRequest::default())
         .await
@@ -419,6 +423,10 @@ async fn force_settlement_failure_still_shuts_down_store() {
             .with_shutdown_timeout(Duration::from_millis(10)),
     )
     .await;
+    // 本用例专门覆盖不响应取消的底层请求；禁用会主动响应取消的重试包装。
+    runtime.config_registry.replace_document_for_test(&format!(
+        "{TEST_CONFIG}\n[runtime.model_retry]\nenabled=false\n"
+    ));
     let session = runtime
         .create_session(CreateSessionRequest::default())
         .await

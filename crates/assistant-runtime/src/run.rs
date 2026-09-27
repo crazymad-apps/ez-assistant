@@ -52,6 +52,8 @@ pub(crate) struct RunRecord {
     shell: Option<crate::FrozenShellEnvironment>,
     cancel_requested: bool,
     active_step: Option<u32>,
+    /// 与执行器共享同一诊断 owner；只读快照不另存一份请求状态。
+    pub(crate) model_diagnostics: Option<Arc<RunModelDiagnostics>>,
     reasoning: String,
     text: String,
     tools: Vec<ToolActivitySnapshot>,
@@ -76,6 +78,7 @@ impl RunRecord {
             shell: run.shell.clone(),
             cancel_requested: false,
             active_step: None,
+            model_diagnostics: None,
             reasoning: String::new(),
             text: String::new(),
             tools: Vec::new(),
@@ -100,6 +103,7 @@ impl RunRecord {
             shell: run.shell,
             cancel_requested: run.cancel_requested,
             active_step: None,
+            model_diagnostics: None,
             reasoning: String::new(),
             text: String::new(),
             tools: Vec::new(),
@@ -164,6 +168,11 @@ impl RunRecord {
             reasoning_effort: self.reasoning_effort,
             cancel_requested: self.cancel_requested,
             active_step: self.active_step,
+            model_request: self.model_diagnostics.as_ref().and_then(|diagnostics| {
+                (self.status == RunStatus::Running)
+                    .then(|| diagnostics.request_snapshot())
+                    .flatten()
+            }),
             reasoning: self.reasoning.clone(),
             text: self.text.clone(),
             tools: self.tools.clone(),
@@ -250,6 +259,7 @@ impl RunRecord {
     }
 
     fn settle(&mut self, settlement: RunSettlement, finished_at_ms: i64) {
+        self.model_diagnostics = None;
         self.status = settlement.status;
         if let Some(reasoning) = settlement.reasoning {
             self.reasoning = reasoning;
@@ -270,11 +280,12 @@ pub(crate) struct ActiveRun {
 }
 
 /// 从已结算快照投影 Runtime 的唯一 RunFinished 事件。
-pub(crate) fn finished_event(snapshot: RunSnapshot) -> RuntimeEvent {
+pub(crate) fn finished_event(snapshot: RunSnapshot, awaiting_feedback: bool) -> RuntimeEvent {
     RuntimeEvent::RunFinished {
         session_id: snapshot.session_id,
         run_id: snapshot.run_id,
         status: snapshot.status,
+        awaiting_feedback,
         error: snapshot.error,
     }
 }

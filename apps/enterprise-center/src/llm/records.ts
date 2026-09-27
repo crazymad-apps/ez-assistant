@@ -5,6 +5,7 @@ import type { Outcome } from './entity.js';
 import { Capture, SnapshotFiles, SnapshotMemory, noSnapshot } from './snapshots.js';
 import type { Side, SnapshotResult } from './snapshots.js';
 import { ControlError } from './errors.js';
+import { UsageObserver } from './usage.js';
 
 const sides = ['request', 'response'] as const;
 
@@ -16,6 +17,7 @@ export class CallRecording {
   readonly response?: Capture;
   private settled?: Promise<void>;
   responseUnsupported = false;
+  usage?: UsageObserver;
 
   constructor(
     readonly row: CallEntity,
@@ -36,6 +38,15 @@ export class CallRecording {
 
   private async finish(outcome: Outcome, status: number | null, reason: string | null): Promise<void> {
     try {
+      const measured = this.usage?.result(outcome) ?? {
+        state: 'unavailable' as const,
+        reason: outcome === 'rejected' ? 'not_forwarded' : 'not_reported',
+        input_tokens: null,
+        output_tokens: null,
+        total_tokens: null,
+        cached_input_tokens: null,
+        reasoning_tokens: null,
+      };
       try {
         await this.records.repository.update(this.row.id, {
           outcome,
@@ -43,6 +54,13 @@ export class CallRecording {
           reason,
           ended_at: new Date(),
           provider_name: this.row.provider_name,
+          usage_state: measured.state,
+          usage_reason: measured.reason,
+          input_tokens: measured.input_tokens,
+          output_tokens: measured.output_tokens,
+          total_tokens: measured.total_tokens,
+          cached_input_tokens: measured.cached_input_tokens,
+          reasoning_tokens: measured.reasoning_tokens,
         });
       } catch {
         diagnostic();
@@ -70,6 +88,7 @@ export class CallRecording {
     } finally {
       this.request?.release();
       this.response?.release();
+      this.usage?.release();
       this.records.active.delete(this.row.id);
     }
   }
@@ -115,6 +134,8 @@ export class CallRecords {
         reason: null,
         request_snapshot_state: settings.enabled ? 'pending' : 'disabled',
         response_snapshot_state: settings.enabled ? 'pending' : 'disabled',
+        usage_state: 'pending',
+        usage_reason: null,
       });
       await this.repository.insert(row);
       this.active.add(row.id);
@@ -145,8 +166,11 @@ export class CallRecords {
       const rows = await query.getMany();
       if (!rows.length) break;
       for (const row of rows) {
-        if (row.outcome === 'in_progress')
-          await this.repository.update(row.id, { outcome: 'unknown', reason: 'process_restarted' });
+        if (row.outcome === 'in_progress' || row.usage_state === 'pending')
+          await this.repository.update(row.id, {
+            ...(row.outcome === 'in_progress' ? { outcome: 'unknown' as const, reason: 'process_restarted' } : {}),
+            ...(row.usage_state === 'pending' ? { usage_state: 'unavailable' as const, usage_reason: 'process_restarted' } : {}),
+          });
         for (const side of sides) {
           const state = row[`${side}_snapshot_state`];
           if (!['pending', 'complete', 'partial'].includes(state)) continue;

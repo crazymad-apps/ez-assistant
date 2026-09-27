@@ -60,7 +60,10 @@ impl SessionEnvironmentFactory for HostSessionEnvironmentFactory {
         ) = match &request.workspace {
             Some(workspace) => (
                 Some(workspace.workspace_id.clone()),
-                workspace.user_directory.to_owned(),
+                workspace
+                    .user_directory
+                    .unwrap_or(workspace.agent_directory)
+                    .to_owned(),
                 workspace.additional_directories.to_vec(),
                 Some(workspace.agent_directory.to_owned()),
             ),
@@ -98,10 +101,18 @@ impl SessionEnvironmentFactory for HostSessionEnvironmentFactory {
             parts.push(snapshot.into_content());
         }
         if let Some(workspace) = &request.workspace {
-            let roots = std::iter::once(workspace.user_directory)
-                .chain(workspace.additional_directories.iter().map(String::as_str))
-                .collect::<Vec<_>>();
-            parts.push(render_workspace_context(workspace.label, &roots));
+            let roots = std::iter::once(
+                workspace
+                    .user_directory
+                    .unwrap_or(workspace.agent_directory),
+            )
+            .chain(workspace.additional_directories.iter().map(String::as_str))
+            .collect::<Vec<_>>();
+            parts.push(render_workspace_context(
+                workspace.label,
+                &roots,
+                workspace.user_directory.is_none(),
+            ));
             for (root_order, root) in roots.iter().enumerate() {
                 self.paths
                     .resolve(Path::new(root), false)
@@ -203,11 +214,15 @@ fn render_persona(content: &str) -> String {
     format!("<persona>\n{}\n</persona>", escape_xml(content))
 }
 
-fn render_workspace_context(label: &str, roots: &[&str]) -> String {
+fn render_workspace_context(label: &str, roots: &[&str], private_primary: bool) -> String {
     let mut lines = vec![
         "<workspace_context>".to_owned(),
         format!("  <label>{}</label>", escape_xml(label)),
-        "  <directory_semantics>The first root is the primary working directory used for relative file paths and Shell cwd. Additional roots must be addressed with explicit absolute paths. Registered roots are working context, not an operating-system sandbox.</directory_semantics>".to_owned(),
+        if private_primary {
+            "  <directory_semantics>The first root is this Workspace's managed private working directory, used for relative file paths and Shell cwd. It is shared by Sessions in this Workspace. Registered roots are working context, not an operating-system sandbox.</directory_semantics>".to_owned()
+        } else {
+            "  <directory_semantics>The first root is the primary working directory used for relative file paths and Shell cwd. Additional roots must be addressed with explicit absolute paths. Registered roots are working context, not an operating-system sandbox.</directory_semantics>".to_owned()
+        },
     ];
     for (index, root) in roots.iter().enumerate() {
         lines.push(format!(
@@ -386,7 +401,7 @@ mod tests {
         WorkspaceEnvironmentSource {
             workspace_id,
             label: "Example Workspace",
-            user_directory: user_directory.to_str().expect("UTF-8 workspace path"),
+            user_directory: Some(user_directory.to_str().expect("UTF-8 workspace path")),
             additional_directories: &[],
             agent_directory: agent_directory.to_str().expect("UTF-8 agent path"),
         }
@@ -452,6 +467,48 @@ mod tests {
         assert!(bound.system_prompt.parts()[1].contains("Example Workspace"));
         assert!(bound.system_prompt.parts()[1].contains("project&amp;"));
         assert!(bound.system_prompt.parts()[2].contains("workspace_private_directory"));
+    }
+
+    #[test]
+    fn private_workspace_uses_its_agent_directory_for_cwd_and_agents_instructions() {
+        let root = TempDir::new().expect("runtime home");
+        let agent_directory = root.path().join("data/workspaces/w-private/agent");
+        fs::create_dir_all(&agent_directory).expect("private workspace directory");
+        fs::write(
+            agent_directory.join(AGENTS_FILE),
+            "Follow private workspace rules.",
+        )
+        .expect("private workspace instructions");
+        let workspace_id = WorkspaceId::new("w-private").expect("workspace id");
+        let source = WorkspaceEnvironmentSource {
+            workspace_id: &workspace_id,
+            label: "Private Workspace",
+            user_directory: None,
+            additional_directories: &[],
+            agent_directory: agent_directory.to_str().expect("UTF-8 agent path"),
+        };
+        let prepared = HostSessionEnvironmentFactory::new(root.path())
+            .create_environment(SessionEnvironmentFactoryRequest {
+                session_id: &SessionId::new("s-private").expect("session id"),
+                workspace: Some(source),
+                memory_context: &MemoryContextSnapshot::default(),
+            })
+            .expect("private workspace environment");
+        assert_eq!(
+            prepared.environment.working_directory,
+            agent_directory.to_string_lossy()
+        );
+        let parts = prepared.system_prompt.parts();
+        assert!(
+            parts
+                .iter()
+                .any(|part| part.contains("managed private working directory"))
+        );
+        assert!(
+            parts
+                .iter()
+                .any(|part| part.contains("Follow private workspace rules."))
+        );
     }
 
     #[test]
@@ -551,7 +608,7 @@ mod tests {
         let source = WorkspaceEnvironmentSource {
             workspace_id: &workspace_id,
             label: "Multi Root",
-            user_directory: primary.to_str().expect("primary path"),
+            user_directory: Some(primary.to_str().expect("primary path")),
             additional_directories: &additional,
             agent_directory: agent_directory.to_str().expect("agent path"),
         };

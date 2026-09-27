@@ -21,6 +21,7 @@ import {
   uploadSelectedAttachment,
 } from "../../src/native-bridge/nativeResource";
 import { RootStore } from "../../src/stores/RootStore";
+import { RuntimeLifecycleCoordinator } from "../../src/stores/RuntimeLifecycleCoordinator";
 import { RootStoreProvider } from "../../src/stores/RootStoreContext";
 import { ComposerDock } from "../../src/features/composer/ComposerDock";
 
@@ -39,6 +40,13 @@ vi.mock("../../src/native-bridge/nativeResource", () => ({
 }));
 
 describe("ComposerDock", () => {
+  it("uses the existing borderless button type for attachments in sessions and drafts", () => {
+    const store = renderComposer();
+    expect(screen.getByRole("button", { name: "添加附件" })).toHaveAttribute("data-button-variant", "text");
+    act(() => store.openNewSessionDraft(null));
+    expect(screen.getByRole("button", { name: "添加附件" })).toHaveAttribute("data-button-variant", "text");
+  });
+
   it("shows queued and Goal MCP identities from reliable snapshots", () => {
     renderComposer({ goal: { ...goalSnapshot("paused"), mcp_server_key: "pencil" }, queue: {
       revision: 2, state: "automatic", items: [{ type: "message", payload: {
@@ -57,7 +65,7 @@ describe("ComposerDock", () => {
     const store = renderComposer();
     const list = vi.spyOn(store, "listMcpServerOptions").mockResolvedValue([
       { server_key: "github-a", display_name: "GitHub", description: "仓库一", visible_tool_count: 2 },
-      { server_key: "github-b", display_name: "GitHub", description: "仓库二", visible_tool_count: 3 },
+      { server_key: "github-b", plugin_name: "dev-tools", display_name: "GitHub", description: "仓库二", visible_tool_count: 3 },
     ]);
     const submit = vi.spyOn(store, "submitInput").mockResolvedValueOnce(false).mockResolvedValueOnce(true);
     const command = vi.spyOn(store, "submitSessionCommand");
@@ -68,8 +76,8 @@ describe("ComposerDock", () => {
     expect(search).toHaveFocus();
     expect(list).toHaveBeenCalledWith({ context: { type: "session", payload: { session_id: "session-1" } }, variant: "build" });
     expect(await screen.findByRole("option", { name: /GitHub \(github-a\)/ })).toBeVisible();
-    expect(screen.getByRole("option", { name: /GitHub \(github-b\)/ })).toBeVisible();
-    await user.type(search, "github-b");
+    expect(screen.getByRole("option", { name: /dev-tools · GitHub/ })).toBeVisible();
+    await user.type(search, "dev-tools");
     expect(screen.getAllByRole("option")).toHaveLength(1);
     await user.keyboard("{Enter}");
     await waitFor(() => expect(input).toHaveFocus());
@@ -152,6 +160,172 @@ describe("ComposerDock", () => {
     expect(store.new_session_drafts.get("unbound")).toMatchObject({
       selected_mcp: { server_key: "pencil" }, materialization_attempt: { idempotency_key: "unknown-send", mcp_server_key: "pencil" },
     });
+  });
+
+  it("moves an unbound draft and its resource group through the workspace selector", () => {
+    const store = renderComposer();
+    act(() => store.openNewSessionDraft(null));
+    const source_group = store.resource_workspace.active_group;
+    fireEvent.change(screen.getByRole("textbox", { name: "输入消息" }), { target: { value: "keep across workspace" } });
+    act(() => store.new_session_drafts.updateSelectedMcp("unbound", { server_key: "pencil", display_name: "Pencil" }));
+    fireEvent.click(screen.getByRole("button", { name: "新会话项目" }));
+    fireEvent.click(screen.getByRole("option", { name: /^project/ }));
+    expect(store.new_session_drafts.get("unbound")).toBeNull();
+    expect(store.new_session_drafts.get("workspace:workspace-1")).toMatchObject({
+      text: "keep across workspace", selected_mcp: { server_key: "pencil" }, skill_status: "idle",
+    });
+    expect(store.resource_workspace.active_group).toBe(source_group);
+    expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("keep across workspace");
+  });
+
+  it("distinguishes same-name private workspaces by identity in the selector", () => {
+    const store = renderComposer();
+    const snapshot = applicationSnapshot();
+    const original = { ...snapshot.workspaces[0]!, label: "同名", user_directory: null };
+    act(() => {
+      store.projection.applyApplicationSnapshot(observed({ ...snapshot, workspaces: [
+        original,
+        { ...original, workspace_id: "workspace-2", agent_directory: "/runtime/workspaces/2" },
+      ] }));
+      store.openNewSessionDraft(null);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "新会话项目" }));
+    expect(screen.getByRole("option", { name: /同名.*仅私有目录.*pace-1/ })).toBeVisible();
+    expect(screen.getByRole("option", { name: /同名.*仅私有目录.*pace-2/ })).toBeVisible();
+    expect(screen.queryByText("ID workspace-1")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("option", { name: /同名.*仅私有目录.*pace-2/ }));
+    expect(screen.getByRole("button", { name: "新会话项目" })).toHaveTextContent("pace-2");
+  });
+
+  it("searches by custom workspace name or final directory segment without exposing the full path", () => {
+    const store = renderComposer();
+    const snapshot = applicationSnapshot();
+    act(() => {
+      store.projection.applyApplicationSnapshot(observed({ ...snapshot, workspaces: [
+        { ...snapshot.workspaces[0]!, label: "团队知识库", user_directory: "/workspace/project" },
+      ] }));
+      store.openNewSessionDraft(null);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "新会话项目" }));
+    const dialog = screen.getByRole("dialog", { name: "选择新会话项目" });
+    expect(within(dialog).getByRole("option", { name: /团队知识库.*project/ })).toBeVisible();
+    expect(within(dialog).queryByText("/workspace/project")).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole("option", { name: "无项目" })).not.toBeInTheDocument();
+    fireEvent.change(within(dialog).getByRole("combobox", { name: "搜索项目" }), { target: { value: "project" } });
+    expect(within(dialog).getByRole("option", { name: /团队知识库.*project/ })).toBeVisible();
+    fireEvent.change(within(dialog).getByRole("combobox", { name: "搜索项目" }), { target: { value: "团队" } });
+    fireEvent.keyDown(within(dialog).getByRole("combobox", { name: "搜索项目" }), { key: "Enter" });
+    expect(store.navigation.selected_draft_key).toBe("workspace:workspace-1");
+    expect(screen.getByRole("button", { name: "清空项目选择" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "新会话项目" })).toHaveTextContent("团队知识库project");
+    fireEvent.click(screen.getByRole("button", { name: "清空项目选择" }));
+    expect(store.navigation.selected_draft_key).toBe("unbound");
+    expect(screen.getByRole("button", { name: "新会话项目" })).toHaveTextContent("选择项目");
+  });
+
+  it("keeps both drafts when clearing the workspace would collide with an unbound draft", () => {
+    const store = renderComposer();
+    act(() => {
+      store.openNewSessionDraft(null);
+      store.new_session_drafts.updateText("unbound", "未绑定草稿");
+      store.openNewSessionDraft("workspace-1");
+      store.new_session_drafts.updateText("workspace:workspace-1", "工作空间草稿");
+    });
+    fireEvent.click(screen.getByRole("button", { name: "清空项目选择" }));
+    expect(screen.getByRole("dialog", { name: "草稿目标冲突" })).toBeVisible();
+    expect(store.navigation.selected_draft_key).toBe("workspace:workspace-1");
+    expect(store.new_session_drafts.get("unbound")?.text).toBe("未绑定草稿");
+    expect(store.new_session_drafts.get("workspace:workspace-1")?.text).toBe("工作空间草稿");
+  });
+
+  it("keeps the current workspace selected when reopening the picker and pressing Enter", () => {
+    const store = renderComposer();
+    const snapshot = applicationSnapshot();
+    act(() => {
+      store.projection.applyApplicationSnapshot(observed({ ...snapshot, workspaces: [
+        snapshot.workspaces[0]!,
+        { ...snapshot.workspaces[0]!, workspace_id: "workspace-2", label: "第二个", user_directory: "/workspace/second" },
+      ] }));
+      store.openNewSessionDraft("workspace-2");
+    });
+    fireEvent.click(screen.getByRole("button", { name: "新会话项目" }));
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "搜索项目" }), { key: "Enter" });
+    expect(store.navigation.selected_draft_key).toBe("workspace:workspace-2");
+  });
+
+  it("marks a different workspace's existing draft without changing the current draft", () => {
+    const store = renderComposer();
+    act(() => {
+      store.openNewSessionDraft("workspace-1");
+      store.new_session_drafts.updateText("workspace:workspace-1", "保留的工作空间草稿");
+      store.openNewSessionDraft(null);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "新会话项目" }));
+    expect(screen.getByRole("option", { name: /project.*有草稿/ })).toBeVisible();
+    expect(store.new_session_drafts.get("unbound")?.workspace_id).toBeNull();
+  });
+
+  it("blocks first send while a selected capability is unavailable", () => {
+    const store = renderComposer();
+    act(() => {
+      store.openNewSessionDraft(null);
+      store.new_session_drafts.updateText("unbound", "执行任务");
+      store.new_session_drafts.updateSelectedMcp("unbound", { server_key: "missing", display_name: "Missing" });
+      store.new_session_drafts.setSelectedMcpAvailability("unbound", "missing", false);
+    });
+    expect(screen.getByText(/MCP · Missing.*当前项目不可用/)).toBeVisible();
+    expect(screen.getByRole("button", { name: "发送消息" })).toBeDisabled();
+  });
+
+  it("applies configured agent shortcuts without overwriting an existing draft", async () => {
+    const agents = [
+      { name: '测试绘图助手', source: { type: 'center' as const, center_id: 'center-1' } },
+      { name: '测试咨询助手', source: { type: 'center' as const, center_id: 'center-1' } },
+    ];
+    const command = vi.fn(async (request: { type: string }) => {
+      if (request.type === 'list_custom_agents') return { payload: { agents: agents.map((item) => ({
+        source: item.source, config: { name: item.name, description: '', prompt: '提示词', skills: [], mcp: [] },
+        revision: 'current', created_at_ms: null, updated_at_ms: null,
+      })), center_unavailable: false } };
+      if (request.type === 'prepare_custom_agent') return { payload: {
+        selection: agents[0], revision: 'current', dependencies: [], install_candidates: [],
+      } };
+      return { payload: {} };
+    });
+    vi.spyOn(RuntimeLifecycleCoordinator.prototype, 'client', 'get').mockReturnValue({ command } as never);
+    const store = renderComposer();
+    act(() => store.openNewSessionDraft(null));
+    const input = screen.getByRole("textbox", { name: "输入消息" });
+    expect(screen.getByRole("region", { name: "新会话项目选项" })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '整理文档' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '测试绘图入口' }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith({ type: 'list_custom_agents', payload: {} }));
+    await waitFor(() => expect(store.new_session_drafts.get('unbound')?.selected_agent?.name).toBe('测试绘图助手'));
+    expect((input as HTMLTextAreaElement).value).toContain('生成测试图纸');
+    fireEvent.change(input, { target: { value: "我的原文" } });
+    fireEvent.click(screen.getByRole('button', { name: '测试咨询入口' }));
+    const confirmation = await screen.findByRole('dialog', { name: '应用快捷入口' });
+    expect(within(confirmation).getByRole('button', { name: '取消' })).toHaveAttribute('data-button-variant', 'outlined');
+    expect(within(confirmation).getByRole('button', { name: '确认应用' })).toHaveAttribute('data-button-variant', 'primary');
+    expect(input).toHaveValue("我的原文");
+    expect(store.new_session_drafts.get('unbound')?.selected_agent?.name).toBe('测试绘图助手');
+    fireEvent.click(within(confirmation).getByRole('button', { name: '确认应用' }));
+    expect((input as HTMLTextAreaElement).value).toContain('我的原文\n\n请处理以下测试咨询');
+    expect(store.new_session_drafts.get('unbound')?.selected_agent?.name).toBe('测试咨询助手');
+    expect(store.navigation.selected_draft_key).toBe("unbound");
+  });
+
+  it("keeps configured shortcut failures from partially changing the draft", async () => {
+    const command = vi.fn(async () => ({ payload: { agents: [], center_unavailable: false } }));
+    vi.spyOn(RuntimeLifecycleCoordinator.prototype, 'client', 'get').mockReturnValue({ command } as never);
+    const store = renderComposer();
+    act(() => store.openNewSessionDraft(null));
+    const send = vi.spyOn(store, "materializeNewSessionDraft");
+    fireEvent.click(screen.getByRole('button', { name: '测试咨询入口' }));
+    await screen.findByText(/智能体「测试咨询助手」当前不可用/);
+    expect(store.new_session_drafts.get('unbound')?.selected_agent).toBeNull();
+    expect(screen.getByRole('textbox', { name: '输入消息' })).toHaveValue('');
+    expect(send).not.toHaveBeenCalled();
   });
 
   it("keeps attachments above Goal/Skill/MCP tags and blocks tagged refresh commands", async () => {
@@ -271,6 +445,94 @@ describe("ComposerDock", () => {
     cleanup();
     vi.clearAllMocks();
     vi.restoreAllMocks();
+  });
+
+  it("searches, switches and clears the agent beside the workspace while ignoring late dependency results", async () => {
+    const personal = { name: "个人助手", source: { type: "personal" as const } };
+    const center = { name: "企业助手", source: { type: "center" as const, center_id: "center-1" } };
+    let resolvePersonal!: (value: unknown) => void;
+    const command = vi.fn(async (request: { type: string; payload: { selection?: { name: string } } }) => {
+      if (request.type === "list_custom_agents") return { payload: { agents: [
+        { source: personal.source, config: { name: personal.name, description: "", prompt: "个人", skills: [], mcp: [] }, revision: "personal", created_at_ms: null, updated_at_ms: null },
+        { source: center.source, config: { name: center.name, description: "", prompt: "企业", skills: [], mcp: [] }, revision: "center", created_at_ms: null, updated_at_ms: null },
+      ], center_unavailable: false } };
+      if (request.type === "prepare_custom_agent") {
+        if (request.payload.selection?.name === personal.name) return new Promise((resolve) => { resolvePersonal = resolve; });
+        return { payload: { selection: center, revision: "center", dependencies: [], install_candidates: [] } };
+      }
+      return { payload: {} };
+    });
+    vi.spyOn(RuntimeLifecycleCoordinator.prototype, "client", "get").mockReturnValue({ command } as never);
+    const store = renderComposer();
+    act(() => store.openNewSessionDraft(null));
+    fireEvent.change(screen.getByRole("textbox", { name: "输入消息" }), { target: { value: "保留我的草稿" } });
+    const context = screen.getByRole("region", { name: "新会话项目选项" });
+    expect(within(context).getAllByRole("button").map((button) => button.getAttribute("aria-label")))
+      .toEqual(["新会话项目", "选择智能体"]);
+    fireEvent.click(screen.getByRole("button", { name: "新会话项目" }));
+    fireEvent.click(screen.getByRole("button", { name: "选择智能体" }));
+    expect(screen.queryByRole("dialog", { name: "选择新会话项目" })).not.toBeInTheDocument();
+    await screen.findByRole("option", { name: /个人助手/ });
+    const search = screen.getByRole("combobox", { name: "搜索智能体" });
+    fireEvent.change(search, { target: { value: "个人" } });
+    expect(screen.queryByRole("option", { name: /企业助手/ })).not.toBeInTheDocument();
+    fireEvent.keyDown(search, { key: "ArrowDown" });
+    fireEvent.keyDown(search, { key: "Enter" });
+    await waitFor(() => expect(resolvePersonal).toBeTypeOf("function"));
+    expect(screen.getByRole("button", { name: "选择智能体" })).toHaveTextContent("个人助手");
+    fireEvent.click(screen.getByRole("button", { name: "选择智能体" }));
+    fireEvent.click(await screen.findByRole("option", { name: /企业助手/ }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "选择智能体" })).toHaveTextContent("企业助手"));
+    await act(async () => resolvePersonal({ payload: { selection: personal, revision: "personal", dependencies: [{
+      kind: "skill", reference: { name: "obsolete" }, status: "capability_missing",
+    }], install_candidates: [] } }));
+    expect(screen.queryByText(/obsolete/)).not.toBeInTheDocument();
+    expect(store.new_session_drafts.get("unbound")?.selected_agent).toEqual(center);
+    fireEvent.click(screen.getByRole("button", { name: "选择智能体" }));
+    await waitFor(() => expect(screen.getByRole("option", { name: /企业助手/ })).toHaveAttribute("aria-selected", "true"));
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "搜索智能体" }), { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "选择智能体" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "选择智能体" })).toHaveFocus();
+    fireEvent.click(screen.getByRole("button", { name: "清空智能体选择" }));
+    expect(store.new_session_drafts.get("unbound")?.selected_agent).toBeNull();
+    expect(screen.getByRole("button", { name: "选择智能体" })).toHaveTextContent("选择智能体");
+    expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("保留我的草稿");
+  });
+
+  it.each([
+    ["software_missing", true], ["configuration_missing", true],
+    ["capability_missing", true], ["runtime_unavailable", true],
+    ["plugin_missing", false], ["plugin_disabled", false],
+    ["capability_disabled", false], ["name_conflict", false],
+  ])("treats %s as advisory only when sending is allowed (%s)", async (status, allowed) => {
+    const selection = { name: "绘图助手", source: { type: "personal" as const } };
+    const command = vi.fn(async (request: { type: string }) => {
+      if (request.type === "list_custom_agents") return { payload: { agents: [], center_unavailable: false } };
+      if (request.type === "prepare_custom_agent") return { payload: {
+        selection, revision: "current", dependencies: [{ kind: "mcp", reference: { name: "cad" }, status }], install_candidates: [],
+      } };
+      return { payload: {} };
+    });
+    vi.spyOn(RuntimeLifecycleCoordinator.prototype, "client", "get").mockReturnValue({ command } as never);
+    const store = renderComposer();
+    const materialize = vi.spyOn(store, "materializeNewSessionDraft").mockResolvedValue(false);
+    act(() => {
+      store.openNewSessionDraft(null);
+      store.new_session_drafts.updateSelectedAgent("unbound", selection);
+      store.new_session_drafts.updateText("unbound", "请检查环境并继续绘图");
+    });
+    if (allowed) {
+      await waitFor(() => expect(command).toHaveBeenCalledWith(expect.objectContaining({ type: "prepare_custom_agent" })));
+      expect(screen.queryByText(/部分能力暂不可用|智能体依赖待处理/)).not.toBeInTheDocument();
+    } else await screen.findByText(/智能体依赖待处理/);
+    fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
+    if (allowed) await waitFor(() => expect(materialize).toHaveBeenCalledWith("unbound"));
+    else {
+      await screen.findByText(/智能体依赖尚未就绪/);
+      expect(materialize).not.toHaveBeenCalled();
+    }
+    expect(store.new_session_drafts.get("unbound")?.selected_agent).toEqual(selection);
+    expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("请检查环境并继续绘图");
   });
 
   it("keeps workspace drafts isolated and allows an attachment-only first send", async () => {
@@ -588,7 +850,7 @@ describe("ComposerDock", () => {
       diagnostics: [],
       skills: [
         { name: "review", description: "检查代码", source: "workspace_ez_assistant", model_invocable: true, user_invocable: true, enabled: true, health: "ready" },
-        { name: "release", description: "准备发布", source: "workspace_agents", model_invocable: false, user_invocable: true, enabled: true, health: "ready" },
+        { name: "release", plugin_name: "release-tools", description: "准备发布", source: "plugin", model_invocable: false, user_invocable: true, enabled: true, health: "ready" },
       ],
     };
     const store = renderComposer({ skill_catalog });
@@ -602,7 +864,9 @@ describe("ComposerDock", () => {
 
     await user.type(input, "/skill");
     fireEvent.keyDown(input, { key: "Enter" });
-    await user.click(await screen.findByRole("option", { name: /release/ }));
+    await user.type(await screen.findByRole("combobox", { name: "搜索技能" }), "release-tools");
+    expect(screen.getAllByRole("option")).toHaveLength(1);
+    await user.click(screen.getByRole("option", { name: /release-tools · release/ }));
     expect(screen.queryByRole("button", { name: "移除技能 review" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "移除技能 release" })).toBeVisible();
 
@@ -662,6 +926,25 @@ describe("ComposerDock", () => {
     expect(screen.getByText("检查恢复一致性 · 由子智能体请求")).toBeVisible();
     expect(screen.getByText("允许执行命令行指令？", { exact: true })).toBeVisible();
     expect(screen.queryByRole("textbox", { name: "输入消息" })).not.toBeInTheDocument();
+  });
+
+  it("reopens the minimized workspace at the exact approval selected by a notification", async () => {
+    const user = userEvent.setup();
+    const store = renderComposer({ approvals: [approvalSnapshot(), { ...approvalSnapshot(), approval_id: "approval-2" }] });
+    const decide = vi.spyOn(store, "decideApproval").mockResolvedValue();
+    await user.click(screen.getByRole("button", { name: "最小化授权面板" }));
+    act(() => {
+      store.notifications.focus_target = {
+        scope: "fixture", owner: { type: "main_session", session_id: "session-1" },
+        run_id: "run-1", kind: "approval", approval_id: "approval-2",
+      };
+    });
+    expect(screen.getByRole("button", { name: "允许执行" })).toBeVisible();
+    expect(store.notifications.focus_target).toBeNull();
+    expect(decide).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "允许执行" }));
+    expect(decide).toHaveBeenCalledWith("session-1", "approval-2", "allow_once");
+    store.dispose();
   });
 
   it("shows every resolved path for a multi-file read approval", () => {
@@ -922,6 +1205,23 @@ describe("ComposerDock", () => {
     const tooltip = await screen.findByRole("tooltip");
     expect(tooltip).toHaveTextContent("52K / 1000K · 5.2%");
     await waitFor(() => expect(tooltip).toHaveAttribute("data-position-ready", "true"));
+  });
+
+  it("keeps the reliable smaller context after compaction instead of taking an old step maximum", () => {
+    const store = renderComposer({ context_usage: { used_tokens: 52_000, window_tokens: 1_000_000, usage_basis_points: 520 } });
+    act(() => {
+      const view = store.projection.session_views.get("session-1")!;
+      store.projection.applySessionSnapshot({ observed_sequence: 2, value: {
+        ...view,
+        active_run: { run_id: "run-1", session_id: "session-1", input_id: "input-1", attempt: 1, status: "running", variant: "build", approval_mode: "ask", created_at_ms: 1, finished_at_ms: null, cancel_requested: false, reasoning: "", text: "", tools: [], error: null },
+      } });
+      store.live_execution.buffer({ sequence: 3, emitted_at_ms: 1, event: {
+        type: "usage_updated", session_id: "session-1", run_id: "run-1", step: 1,
+        usage: { input_tokens: 170_000, output_tokens: 10_000, total_tokens: 180_000, cached_input_tokens: null },
+      } });
+      store.live_execution.flush();
+    });
+    expect(screen.getByRole("img", { name: "上下文用量：52K / 1000K · 5.2%" })).toBeVisible();
   });
 
   it("loads a missing historical model as unselected and blocks messages until reselection", async () => {
@@ -1329,6 +1629,7 @@ function sessionView(overrides: Readonly<{
     approvals: { revision: 1, items: [...(overrides.approvals ?? [])], resolving_approval_id: null },
     attachments: [],
     file_references: [],
+    artifacts: [],
     runs: [],
     usage: {
       accumulated: null,

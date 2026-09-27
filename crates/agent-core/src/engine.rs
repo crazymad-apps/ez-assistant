@@ -187,10 +187,13 @@ impl Engine {
                 BatchEnd::Settled(results) => {
                     // 整批结算完：原子完成 exchange 并追加投影，然后进入下一轮。
                     match self.complete_tool_results(&exchange, results).await {
-                        Ok(completion) if completion.continuation_required => {
-                            return self.continuation_required();
+                        Ok(crate::ExchangeCompletion::ReturnToHost) => {
+                            return self.continuation_required(ContinuationReason::ReturnToHost);
                         }
-                        Ok(_) => {}
+                        Ok(crate::ExchangeCompletion::ContextChanged) => {
+                            return self.continuation_required(ContinuationReason::ContextChanged);
+                        }
+                        Ok(crate::ExchangeCompletion::Unchanged) => {}
                         Err(error) => return self.fail(ExecutionError::Record(error)),
                     }
                 }
@@ -342,8 +345,7 @@ impl Engine {
     }
 
     /// 收敛为通用上下文改变交接终态；具体续跑编排由 Runtime 持有。
-    fn continuation_required(&self) -> ExecutionOutcome {
-        let reason = ContinuationReason::ContextChanged;
+    fn continuation_required(&self, reason: ContinuationReason) -> ExecutionOutcome {
         let consumption = self.consumption();
         self.events.send(AgentEvent::ExecutionContinuationRequired {
             reason,

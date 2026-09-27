@@ -4,7 +4,8 @@ import { expect, type Page } from "@playwright/test";
 export async function expectMcpAcceptance(page: Page): Promise<void> {
   const secret = process.env.EZ_ASSISTANT_E2E_MCP_SECRET;
   if (!secret) throw new Error("isolated MCP credential marker is missing");
-  await page.getByRole("button", { name: "设置", exact: true }).click();
+  await page.getByRole("button", { name: "账号与 Runtime" }).click();
+  await page.getByRole("menuitem", { name: "设置" }).click();
   const settings = page.getByRole("dialog", { name: "设置" });
   await settings.getByRole("button", { name: "MCP", exact: true }).click();
   await settings.getByRole("button", { name: /MCP fixture local_fixture/ }).click();
@@ -62,7 +63,7 @@ export async function expectMcpAcceptance(page: Page): Promise<void> {
   await expect(result).toContainText("已刷新 · 2 个工具");
   await expectCleanPage(page, secret);
   await page.reload();
-  await page.getByRole("button", { name: "进入工作空间" }).click();
+  await page.getByRole("button", { name: "进入项目" }).click();
   await expect(page.getByRole("article", { name: "MCP 刷新完成" })).toBeVisible();
   await expectCleanPage(page, secret);
 }

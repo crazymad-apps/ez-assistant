@@ -7,6 +7,7 @@ const outcome_labels: Record<McpServerRefreshOutcome, string> = {
   refreshed: "已刷新",
   connected_without_tools: "已连接，无工具",
   retained_after_failure: "刷新失败，保留原状态",
+  blocked_by_conflict: "名称冲突，已停用",
   removed: "已移除",
   disabled: "已停用",
   not_found: "未找到服务",

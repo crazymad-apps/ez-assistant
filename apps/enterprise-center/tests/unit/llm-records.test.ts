@@ -59,6 +59,7 @@ it('文件已发布而索引未结算时恢复为 unknown/partial；清理先文
     enabled: true,
     content_retention_days: 7,
     index_retention_days: 90,
+    usage_available_from: new Date('2020-01-01T00:00:00Z'),
   });
   const getMany = vi.fn().mockResolvedValueOnce([row]).mockResolvedValueOnce([]);
   const query = {

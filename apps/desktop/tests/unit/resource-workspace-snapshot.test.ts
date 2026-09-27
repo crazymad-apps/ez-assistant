@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ResourceWorkspaceStore, resourceTabKey } from "../../src/features/resource-workspace/ResourceWorkspaceStore";
-import { parseResourceSnapshot } from "../../src/features/resource-workspace/resourceWorkspaceSnapshot";
+import { localFileUri, parseResourceSnapshot } from "../../src/features/resource-workspace/resourceWorkspaceSnapshot";
 
 const native = vi.hoisted(() => ({ register: vi.fn(), createBrowser: vi.fn().mockResolvedValue("new-browser"), createTerminal: vi.fn() }));
 vi.mock("../../src/native-bridge/nativeResource", () => ({ registerLocalFileUri: native.register }));
@@ -96,6 +96,15 @@ describe("right workspace restart snapshot", () => {
     const late = store(); const pending = late.restoreSnapshot(snapshot); late.dispose();
     finish({ resource_key: "late", display_name: "gone", path_segments: ["/", "gone"] }); await pending;
     expect(late.groups.has("session:a")).toBe(false);
+  });
+
+  it("preserves Windows drive identity in local and Host snapshots", () => {
+    expect(localFileUri(["C:", "项目 空格", "图.png"])).toBe("file:///C:/%E9%A1%B9%E7%9B%AE%20%E7%A9%BA%E6%A0%BC/%E5%9B%BE.png");
+    const before = store();
+    before.selectScope("session:windows");
+    before.openHostFile("session:windows", "C:\\项目\\图.png");
+    before.openLocalResource("session:windows", { resource_key: "local", display_name: "图.png", path_segments: ["C:", "项目", "图.png"] });
+    expect(() => parseResourceSnapshot(before.captureSnapshot())).not.toThrow();
   });
 
   it("rejects invalid or oversized indexes before opening any native resources", () => {

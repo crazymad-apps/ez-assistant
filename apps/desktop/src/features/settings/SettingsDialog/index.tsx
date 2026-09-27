@@ -13,16 +13,22 @@ import { RuntimeSettingsPage } from "./RuntimeSettingsPage";
 import { SkillSettingsPage } from "./SkillSettingsPage";
 import { DeviceSettingsPage } from "./DeviceSettingsPage";
 import { McpSettingsPage } from "./McpSettingsPage";
+import { AgentSettingsPage } from "./AgentSettingsPage";
+import { PluginSettingsPage } from "./PluginSettingsPage";
+import { NotificationSettingsPage } from "./NotificationSettingsPage";
 import styles from "./index.module.scss";
 
 const pages: ReadonlyArray<{ id: SettingsPage; label: string; icon: IconName }> = [
+  { id: "notifications", label: "系统通知", icon: "bell" },
   { id: "runtime", label: "Runtime", icon: "terminal" },
   { id: "devices", label: "智能终端", icon: "device" },
   { id: "models", label: "模型", icon: "model" },
   { id: "memory", label: "记忆", icon: "pin" },
   { id: "permissions", label: "权限", icon: "shield" },
   { id: "skills", label: "技能", icon: "folder" },
-  { id: "mcp", label: "MCP", icon: "plugin" },
+  { id: "mcp", label: "MCP", icon: "puzzle" },
+  { id: "plugins", label: "插件", icon: "plugin" },
+  { id: "agents", label: "智能体", icon: "bot" },
 ];
 
 const runtime_pages: readonly SettingsPage[] = ["runtime", "runtime_connection", "host_access", "runtime_diagnostics", "runtime_local"];
@@ -101,6 +107,7 @@ export const SettingsDialog = observer(function SettingsDialog() {
           </nav>
           <div className={styles.content}>
             {runtime_pages.includes(settings.page) && <RuntimeSettingsPage onNavigate={selectPage} onDirtyChange={setFormDirty} />}
+            {settings.page === "notifications" && <NotificationSettingsPage />}
             {settings.page === "devices" && <DeviceSettingsPage />}
             {settings.page === "models" && (
               <ModelsSettingsPage onDirtyChange={setFormDirty} />
@@ -113,6 +120,8 @@ export const SettingsDialog = observer(function SettingsDialog() {
             )}
             {settings.page === "skills" && <SkillSettingsPage />}
             {settings.page === "mcp" && <McpSettingsPage onDirtyChange={setFormDirty} />}
+            {settings.page === "plugins" && <PluginSettingsPage onDirtyChange={setFormDirty} />}
+            {settings.page === "agents" && <AgentSettingsPage onDirtyChange={setFormDirty} />}
           </div>
         </div>
     </Dialog>

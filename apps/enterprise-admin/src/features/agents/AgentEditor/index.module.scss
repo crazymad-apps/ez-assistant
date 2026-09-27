@@ -1,0 +1,27 @@
+.page {
+  overflow: auto;
+  min-width: 0;
+}
+
+.page > * {
+  max-width: 960px;
+}
+
+.prompt {
+  resize: vertical;
+}
+
+.capabilities {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  margin-bottom: 20px;
+}
+
+.actions {
+  margin-top: 8px;
+}
+
+.full {
+  width: 100%;
+}

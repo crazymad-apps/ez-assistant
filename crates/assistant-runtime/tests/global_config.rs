@@ -16,7 +16,10 @@ fn optional_tables_keep_declared_defaults_without_a_model_catalog() {
         active.transport().request_timeout(),
         Duration::from_secs(300)
     );
-    assert!(active.retry_policy().is_none());
+    let retry = active.retry_policy().expect("product retry defaults");
+    assert_eq!(retry.delays, [1, 2, 4, 8, 16].map(Duration::from_secs));
+    assert_eq!(retry.retry_on.len(), 4);
+    assert_eq!(retry.max_retry_after, Duration::from_secs(30));
     assert_eq!(active.budget(), &ExecutionBudget::default());
     assert!(active.generation().max_output_tokens.is_none());
     assert_eq!(
@@ -191,4 +194,11 @@ fn deprecated_model_fields_are_not_part_of_the_new_configuration_shape() {
     ] {
         assert!(compile_runtime_config(document).active().is_none());
     }
+}
+
+#[test]
+fn explicit_retry_disable_keeps_single_attempt_semantics() {
+    let result = compile_runtime_config("schema_version=1\n[runtime.model_retry]\nenabled=false\n");
+    assert_eq!(result.state(), ConfigState::Ready);
+    assert!(result.active().unwrap().retry_policy().is_none());
 }

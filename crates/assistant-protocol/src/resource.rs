@@ -3,6 +3,22 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+/// 从已可靠提交的交付声明派生；定位始终相对于所属 Session 的冻结资源根。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SessionArtifact {
+    pub title: String,
+    pub locator: SessionResourceLocator,
+    pub source_run_id: crate::RunId,
+}
+
+/// 检查可读取的普通文件，不读取正文；失败通过既有资源错误返回。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SessionResourceFileInfo {
+    pub size_bytes: u64,
+}
+
 /// Session 创建时冻结的文件根身份；协议不传输根的物理路径。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]

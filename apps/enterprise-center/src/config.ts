@@ -1,4 +1,4 @@
-import { isAbsolute } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 import { isIP } from 'node:net';
 import { CenterError } from './errors.js';
 
@@ -11,6 +11,7 @@ export type CenterConfig = Readonly<{
   origin: string;
   templatesFile?: string;
   snapshotRoot?: string;
+  pluginRoot?: string;
   llmConnectTimeout?: number;
   llmIdleTimeout?: number;
 }>;
@@ -68,6 +69,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): CenterConfig {
   };
 
   if (env.CENTER_SNAPSHOT_ROOT !== undefined && !isAbsolute(env.CENTER_SNAPSHOT_ROOT)) invalid();
+  if (env.CENTER_PLUGIN_ROOT !== undefined && !isAbsolute(env.CENTER_PLUGIN_ROOT)) invalid();
   return {
     database,
     autoUpgrade: autoUpgrade === 'true',
@@ -76,6 +78,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): CenterConfig {
     origin: origin.origin,
     templatesFile: env.CENTER_MODEL_TEMPLATES_FILE,
     snapshotRoot: env.CENTER_SNAPSHOT_ROOT,
+    pluginRoot: env.CENTER_PLUGIN_ROOT ?? resolve(process.cwd(), 'data/plugins'),
     llmConnectTimeout: timeout('CENTER_LLM_CONNECT_TIMEOUT_MS', 10000, 120000),
     llmIdleTimeout: timeout('CENTER_LLM_IDLE_TIMEOUT_MS', 300000, 3600000),
   };

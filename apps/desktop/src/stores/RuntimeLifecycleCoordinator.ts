@@ -26,6 +26,7 @@ const MAX_AUTOMATIC_RECONNECTS = 3;
 
 type RuntimeLifecycleDependencies = Readonly<{
   connection: ConnectionStore;
+  on_event?: (event: RuntimeEventEnvelope) => void;
   require_selected_target?: boolean;
   live_execution: LiveExecutionStore;
   navigation: NavigationStore;
@@ -433,6 +434,7 @@ export class RuntimeLifecycleCoordinator {
       return;
     }
     this.dependencies.live_execution.buffer(envelope);
+    this.dependencies.on_event?.(envelope);
     const event = envelope.event;
     if (event.type === "session_title_generation_finished") {
       this.dependencies.on_title_generation_finished(

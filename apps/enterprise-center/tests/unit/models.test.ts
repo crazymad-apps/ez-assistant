@@ -22,6 +22,23 @@ it('共享静态模板全部可校验，重复身份和未知字段拒绝整份�
     parseTemplates([{ ...asset[0], parameters: { tool_calls: 'unsupported', tool_choice: { auto: 'supported' } } }]),
   ).toThrow();
 });
+it('GPT-6 Sol 模板只在 Responses 声明当前可用的工具调用能力', () => {
+  const template = parseTemplates(asset).find((item) => item.provider_type === 'openai' && item.model_id === 'gpt-6-sol')!;
+  expect(template.parameters.context_window_tokens).toEqual({ state: 'known', value: 1050000 });
+  expect(template.parameters.max_output_tokens).toEqual({ state: 'known', value: 128000 });
+  expect(template.parameters.default_reasoning_effort).toBe('medium');
+  expect(template.parameters.reasoning_efforts).toEqual({
+    low: 'low',
+    medium: 'medium',
+    high: 'high',
+    xhigh: 'xhigh',
+    max: 'max',
+  });
+  expect(template.protocol_parameters.open_ai_responses?.tool_calls).toBe('supported');
+  expect(template.protocol_parameters.open_ai_responses?.tool_image_projection).toBe('native_tool_result');
+  expect(template.protocol_parameters.open_ai_chat_completions?.tool_calls).toBe('unsupported');
+  expect(template.protocol_parameters.open_ai_chat_completions?.tool_image_projection).toBe('unsupported');
+});
 it('在线非法值、明确禁用思考和空档位映射不被模板掩盖', () => {
   const template = parseTemplates(asset).find((item) => item.model_id === 'gpt-6-astra')!.parameters;
   const online = emptyParameters();

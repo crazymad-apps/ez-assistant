@@ -1,4 +1,5 @@
 import { ModelProxy } from './llm/proxy.js';
+import { PluginService } from './plugins/service.js';
 import type { CenterConfig } from './config.js';
 import { createHttpApp } from './app.js';
 import { checkDatabase } from './database/check.js';
@@ -32,6 +33,7 @@ export async function startService(config: CenterConfig, adminRoot?: string) {
         closing ??= (async () => {
           try {
             await runningApp.get(ModelProxy).close();
+            await runningApp.get(PluginService).files.close();
             await runningApp.close();
           } finally {
             if (source.isInitialized) await source.destroy();
@@ -43,6 +45,7 @@ export async function startService(config: CenterConfig, adminRoot?: string) {
   } catch (error) {
     try {
       await app?.get(ModelProxy).close();
+      await app?.get(PluginService).files.close();
       await app?.close();
     } finally {
       if (source.isInitialized) await source.destroy();

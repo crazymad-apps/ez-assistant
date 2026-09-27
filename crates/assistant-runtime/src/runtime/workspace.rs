@@ -3,13 +3,14 @@
 use assistant_protocol::{
     GetWorkspaceRequest, GetWorkspaceResult, ListWorkspacesRequest, ListWorkspacesResult,
     RegisterWorkspaceRequest, RegisterWorkspaceResult, RemoveWorkspaceRequest,
-    RemoveWorkspaceResult, UpdateWorkspaceRequest, UpdateWorkspaceResult, WorkspaceId,
+    RemoveWorkspaceResult, RestoreWorkspaceRequest, RestoreWorkspaceResult, UpdateWorkspaceRequest,
+    UpdateWorkspaceResult, WorkspaceId, WorkspaceLifecycle,
 };
 
 use super::AssistantRuntime;
 use crate::{
     NewWorkspaceRegistration, RuntimeError, RuntimeResult, StoreErrorKind, StoredWorkspace,
-    StoredWorkspaceLifecycle, WorkspaceRemoval, WorkspaceUpdate, id,
+    StoredWorkspaceLifecycle, WorkspaceRemoval, WorkspaceRestoration, WorkspaceUpdate, id,
     permission::PermissionFileScope, workspace::summary,
 };
 
@@ -138,11 +139,12 @@ impl AssistantRuntime {
         })
     }
 
-    /// 按 Workspace ID 的确定性顺序列出活动 Workspace。
+    /// 按 Workspace ID 的确定性顺序列出目标生命周期，缺省为活动 Workspace。
     pub fn list_workspaces(
         &self,
-        _request: ListWorkspacesRequest,
+        request: ListWorkspacesRequest,
     ) -> RuntimeResult<ListWorkspacesResult> {
+        let lifecycle = request.lifecycle.unwrap_or(WorkspaceLifecycle::Active);
         let workspaces = self
             .workspaces
             .read()
@@ -150,7 +152,16 @@ impl AssistantRuntime {
                 component: "workspace registry",
             })?
             .values()
-            .filter(|workspace| workspace.lifecycle == StoredWorkspaceLifecycle::Active)
+            .filter(|workspace| {
+                matches!(
+                    (workspace.lifecycle, lifecycle),
+                    (StoredWorkspaceLifecycle::Active, WorkspaceLifecycle::Active)
+                        | (
+                            StoredWorkspaceLifecycle::Removed,
+                            WorkspaceLifecycle::Removed
+                        )
+                )
+            })
             .map(summary)
             .collect();
         Ok(ListWorkspacesResult { workspaces })
@@ -184,6 +195,50 @@ impl AssistantRuntime {
             workspace_id: projection.workspace_id.clone(),
         });
         Ok(RemoveWorkspaceResult {
+            workspace: projection,
+        })
+    }
+
+    /// 按稳定 ID 恢复 Workspace；可靠 Store 已提交后重复调用会重建 Registry/权限投影。
+    pub async fn restore_workspace(
+        &self,
+        request: RestoreWorkspaceRequest,
+    ) -> RuntimeResult<RestoreWorkspaceResult> {
+        let _operation = self.operation_gate.read().await;
+        self.ensure_running()?;
+        let _mutation = self.workspace_mutation_gate.lock().await;
+        let workspace_id = request.workspace_id;
+        self.workspace(&workspace_id)?;
+        let stored = self
+            .store
+            .restore_workspace(WorkspaceRestoration {
+                workspace_id: workspace_id.clone(),
+                changed_at_ms: super::now_ms()?,
+            })
+            .await
+            .map_err(|source| {
+                if source.kind() == StoreErrorKind::ResourceUnavailable {
+                    RuntimeError::WorkspaceUnavailable {
+                        workspace_id: workspace_id.clone(),
+                    }
+                } else {
+                    RuntimeError::from_store("restore workspace", source)
+                }
+            })?;
+        self.permission_coordinator
+            .register_scope(PermissionFileScope::Workspace(stored.workspace_id.clone()))
+            .await?;
+        let projection = summary(&stored);
+        self.workspaces
+            .write()
+            .map_err(|_| RuntimeError::InternalStateUnavailable {
+                component: "workspace registry",
+            })?
+            .insert(stored.workspace_id.clone(), stored);
+        self.publish(assistant_protocol::RuntimeEvent::WorkspaceChanged {
+            workspace_id: projection.workspace_id.clone(),
+        });
+        Ok(RestoreWorkspaceResult {
             workspace: projection,
         })
     }
@@ -265,22 +320,24 @@ impl AssistantRuntime {
             return Ok(None);
         };
         let current = self.workspace_for_session_context(workspace_id)?;
+        let directories_match_current = current.effective_working_directory()
+            == environment.working_directory
+            && current.additional_directories == environment.additional_workspace_directories;
         Ok(Some(assistant_protocol::SessionWorkspaceSnapshot {
             workspace_id: workspace_id.clone(),
             label: current.label,
             primary_directory: environment.working_directory.clone(),
             additional_directories: environment.additional_workspace_directories.clone(),
-            directories_match_current: current.user_directory == environment.working_directory
-                && current.additional_directories == environment.additional_workspace_directories,
+            directories_match_current,
         }))
     }
 }
 
 fn validate_workspace_form(
     label: String,
-    primary_directory: String,
+    primary_directory: Option<String>,
     additional_directories: Vec<String>,
-) -> RuntimeResult<(String, String, Vec<String>)> {
+) -> RuntimeResult<(String, Option<String>, Vec<String>)> {
     let label = label.trim().to_owned();
     if label.is_empty()
         || label.chars().count() > MAX_WORKSPACE_LABEL_CHARS
@@ -290,18 +347,29 @@ fn validate_workspace_form(
             reason: "workspace label must contain 1 to 80 non-control characters",
         });
     }
-    if primary_directory.trim().is_empty() {
+    if primary_directory
+        .as_ref()
+        .is_some_and(|directory| directory.trim().is_empty())
+    {
         return Err(RuntimeError::InvalidRequest {
-            reason: "workspace primary directory must not be empty",
+            reason: "workspace primary directory must not be empty when provided",
         });
     }
-    if additional_directories.len() >= MAX_WORKSPACE_DIRECTORIES {
+    if primary_directory.is_none() && !additional_directories.is_empty() {
+        return Err(RuntimeError::InvalidRequest {
+            reason: "workspace additional directories require a primary directory",
+        });
+    }
+    let directory_count = additional_directories.len() + usize::from(primary_directory.is_some());
+    if directory_count > MAX_WORKSPACE_DIRECTORIES {
         return Err(RuntimeError::InvalidRequest {
             reason: "workspace must contain at most 16 directories",
         });
     }
     let mut seen = std::collections::BTreeSet::new();
-    if !seen.insert(primary_directory.as_str())
+    if primary_directory
+        .as_deref()
+        .is_some_and(|directory| !seen.insert(directory))
         || additional_directories
             .iter()
             .any(|directory| directory.trim().is_empty() || !seen.insert(directory.as_str()))

@@ -2,8 +2,11 @@ import { observer } from 'mobx-react-lite';
 import { useEffect, useRef, useState } from 'react';
 import type {
   ApprovalDecision,
+  CustomAgentSelection,
+  CustomAgentSnapshot,
   GoalStateSnapshot,
   McpSelectionTagSnapshot,
+  PreparedCustomAgentSnapshot,
   QuotedTextSnapshot,
   SessionId,
   SessionViewSnapshot,
@@ -15,9 +18,10 @@ import { Icon } from '../../../components/Icon';
 import { PresenceBoundary } from '../../../components/Presence';
 import { useInputMethodGuard } from '../../../components/InputMethodGuard';
 import { Tooltip } from '../../../components/Tooltip';
-import type { NewSessionDraftKey } from '../../../stores/NewSessionDraftStore';
+import { Dialog } from '../../../components/Dialog';
+import { draftKeyForWorkspace, type NewSessionDraft, type NewSessionDraftKey } from '../../../stores/NewSessionDraftStore';
 import { useRootStore } from '../../../stores/RootStoreContext';
-import { effectiveContextUsage } from '../../../stores/contextUsage';
+import { FeedbackPanel } from '../../feedback/FeedbackPanel';
 import { ApprovalWorkspace, isAllowDecision } from './ApprovalWorkspace';
 import { ComposerNotice } from './ComposerNotice';
 import { AttachmentDetailDialog } from './AttachmentDetailDialog';
@@ -34,8 +38,12 @@ import { parseSessionCommand } from './sessionCommand';
 import { SlashCommandHelp, SlashCommandMenu } from './SlashCommandMenu';
 import { SkillPicker } from './SkillPicker';
 import { McpServerPicker } from './McpServerPicker';
+import { WorkspacePicker } from './WorkspacePicker';
+import { ContextPicker } from './ContextPicker';
+import { PluginOperationDialog } from '../../settings/SettingsDialog/PluginOperationDialog';
 import { TodoSummary } from './TodoSummary';
 import { type ComposerAttachment, useComposerAttachments } from './useComposerAttachments';
+import { QUICK_ACTIONS, resolveQuickAction, type QuickActionConfig, type ResolvedQuickAction } from './quickActions';
 import styles from './index.module.scss';
 
 export const ComposerDock = observer(function ComposerDock({
@@ -61,6 +69,7 @@ const SessionComposerDock = observer(function SessionComposerDock({
   const session_id = store.navigation.selected_session_id;
   const session_view = session_id ? store.projection.session_views.get(session_id) : undefined;
   const session = session_view?.session;
+  const feedback = session_id ? store.feedback.waiting(session_id) : undefined;
   const [draft, setDraft] = useState('');
   const [goal_armed, setGoalArmed] = useState(false);
   const [selected_skill, setSelectedSkill] = useState<SkillSummarySnapshot | null>(null);
@@ -138,7 +147,16 @@ const SessionComposerDock = observer(function SessionComposerDock({
     previous_approval_session_id.current = session_id;
   }, [session_view?.approvals.items.length, session_id]);
 
-  const approval = session_view?.approvals.items[0];
+  const notification_target = store.notifications?.focus_target;
+  const [focused_approval_id, setFocusedApprovalId] = useState<string | null>(null);
+  useEffect(() => {
+    if (notification_target?.kind !== "approval" || notification_target.owner.session_id !== session_id) return;
+    setApprovalMinimized(false);
+    setFocusedApprovalId(notification_target.approval_id);
+    store.notifications.consumeFocus(notification_target);
+  }, [notification_target, session_id, store.notifications]);
+  const approval = session_view?.approvals.items.find((item) => item.approval_id === focused_approval_id)
+    ?? session_view?.approvals.items[0];
   useEffect(() => {
     if (!approval) {
       setApprovalDecision(null);
@@ -148,15 +166,19 @@ const SessionComposerDock = observer(function SessionComposerDock({
   }, [approval?.approval_id]);
 
   useEffect(() => {
-    if (approval && !approval_minimized) {
+    if ((approval && !approval_minimized) || feedback) {
       setActiveOverlay(null);
       setShowHelp(false);
     }
-  }, [approval, approval_minimized]);
+    if (feedback) {
+      setSkillPickerOpen(false);
+      setMcpPickerOpen(false);
+    }
+  }, [approval, approval_minimized, feedback?.request_id]);
 
   useEffect(() => {
     resizeTextarea(textarea_ref.current);
-  }, [draft]);
+  }, [draft, feedback?.request_id]);
 
   if (!session || !session_view) {
     return null;
@@ -174,13 +196,8 @@ const SessionComposerDock = observer(function SessionComposerDock({
   const queue_presentation = queuePresentation(session_view.queue, session.active_run_id);
   const manual_compaction = session.active_compaction?.trigger.type === 'manual' ? session.active_compaction : null;
   const compaction_command_pending = store.pending_compaction_session_id === session.session_id;
-  const live_run = store.live_execution.runForSession(session.session_id);
-  const context_usage = effectiveContextUsage(
-    session_view.usage.context,
-    session_view.active_run?.run_id ?? null,
-    live_run?.run_id ?? null,
-    live_run?.usage ?? null,
-  );
+  // 窗口占用由 Runtime 根据当前有效上下文计算，不能用旧 step 或累计用量取最大值。
+  const context_usage = session_view?.usage.context ?? null;
 
   async function submitCompaction() {
     if (draft.trim() !== '/compact') {
@@ -207,6 +224,10 @@ const SessionComposerDock = observer(function SessionComposerDock({
   }
 
   async function submitDraft(value = draft) {
+    if (session_id && store.feedback.waiting(session_id)) {
+      store.showInteractionError('请先回复问题，或取消等待后发送新指令。');
+      return;
+    }
     const owner = input_owner.current;
     const control = parseSessionCommand(value);
     if (control.type === 'invalid') {
@@ -428,8 +449,19 @@ const SessionComposerDock = observer(function SessionComposerDock({
     });
   }
 
+  // 与审批一样占用输入区；普通草稿及附件留在当前 Composer 状态中。
+  if (!read_only && feedback) {
+    return <div className={styles.dock}>
+      <FeedbackPanel key={feedback.request_id} request={feedback} store={store.feedback} />
+    </div>;
+  }
+
   return (
     <div className={styles.dock}>
+      {!read_only && session_id && store.feedback.errors.has(session_id) && <ComposerNotice tone="error"
+        action={{ label: '重试', onClick: () => void store.feedback.refresh(session_id) }}>
+        无法读取问答状态：{store.feedback.errors.get(session_id)}
+      </ComposerNotice>}
       {!read_only && session_view.work_plan && session_view.work_plan.items.length > 0 && (
         <TodoSummary
           on_open_change={(open) => updateActiveOverlay('todo', open)}
@@ -668,7 +700,7 @@ const SessionComposerDock = observer(function SessionComposerDock({
                 }
                 iconOnly
                 onClick={() => void attachment_flow.choose()}
-                variant="outlined"
+                variant="text"
               >
                 <Icon name="plus" size={17} />
               </Button>
@@ -715,6 +747,7 @@ const SessionComposerDock = observer(function SessionComposerDock({
               className={styles.send_button}
               data-action={primary_action}
               disabled={
+                Boolean(feedback) ||
                 (store.composer_pending && !compaction_cancels_from_primary) ||
                 attachment_flow.pending ||
                 !primary_action_available ||
@@ -760,6 +793,24 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
   const draft = store.new_session_drafts.get(draft_key);
   const [skill_picker_open, setSkillPickerOpen] = useState(false);
   const [mcp_picker_open, setMcpPickerOpen] = useState(false);
+  const [workspace_picker_open, setWorkspacePickerOpen] = useState(false);
+  const [agent_picker_open, setAgentPickerOpen] = useState(false);
+  const [agent_options, setAgentOptions] = useState<readonly CustomAgentSnapshot[]>([]);
+  const [agent_loading, setAgentLoading] = useState(false);
+  const [agent_center_unavailable, setAgentCenterUnavailable] = useState(false);
+  const [agent_preparation, setAgentPreparation] = useState<PreparedCustomAgentSnapshot | null>(null);
+  const [agent_preparing, setAgentPreparing] = useState(false);
+  const [agent_install, setAgentInstall] = useState<PreparedCustomAgentSnapshot | null>(null);
+  const agent_request = useRef(0);
+  const [quick_action_loading, setQuickActionLoading] = useState(false);
+  const [quick_action_confirmation, setQuickActionConfirmation] = useState<{
+    action: QuickActionConfig;
+    resolved: ResolvedQuickAction;
+    owner: NewSessionDraft;
+    changes: string[];
+  } | null>(null);
+  const quick_action_request = useRef(0);
+  const [conflict_target, setConflictTarget] = useState<string | null>(null);
   const [active_overlay, setActiveOverlay] = useState<'execution' | 'model' | null>(null);
   const [show_help, setShowHelp] = useState(false);
   const [slash_active_index, setSlashActiveIndex] = useState(0);
@@ -768,12 +819,17 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
   const input_method = useInputMethodGuard();
   const attachment_flow = useComposerAttachments({
     attachments: draft?.attachments ?? [],
-    disabled: store.composer_pending,
+    disabled: store.composer_pending || draft?.materialization_attempt !== null,
     on_attachments_change: (attachments) => store.new_session_drafts.updateAttachments(draft_key, attachments),
     on_error: (message) => store.showInteractionError(message),
     owner_key: draft_key,
   });
   const selected_skill = draft?.selected_skill_name ? { name: draft.selected_skill_name } : null;
+  const selected_skill_unavailable = Boolean(selected_skill && draft?.skill_status === 'ready'
+    && !draft.skill_options.some((skill) => skill.name === selected_skill.name));
+  const selected_skill_pending = Boolean(selected_skill && draft?.skill_status !== 'ready');
+  const selected_mcp_unavailable = draft?.selected_mcp_availability === 'unavailable';
+  const capability_blocked = selected_skill_unavailable || selected_skill_pending || selected_mcp_unavailable;
   const slash_query = draft?.text.startsWith('/') && !draft.text.includes('\n') ? draft.text.toLocaleLowerCase() : null;
   const slash_items: readonly SlashCommandItem[] =
     slash_query === null
@@ -789,7 +845,12 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
     setSlashActiveIndex(exact_index >= 0 ? exact_index : Math.max(0, first_enabled));
   }, [slash_query]);
   useEffect(() => {
+    ++quick_action_request.current;
+    setQuickActionLoading(false);
+    setQuickActionConfirmation(null);
     setSkillPickerOpen(false);
+    setWorkspacePickerOpen(false);
+    setAgentPickerOpen(false);
     setActiveOverlay(null);
     setShowHelp(false);
   }, [draft_key]);
@@ -806,6 +867,50 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
     [draft_key, store],
   );
   useEffect(() => resizeTextarea(textarea_ref.current), [draft?.text]);
+  useEffect(() => {
+    if (!agent_picker_open || !store.runtime_client) return;
+    const client = store.runtime_client;
+    let active = true;
+    setAgentOptions([]);
+    setAgentLoading(true);
+    setAgentCenterUnavailable(false);
+    void client.command({ type: 'list_custom_agents', payload: {} }).then((result) => {
+      if (active && client === store.runtime_client) {
+        setAgentOptions(result.payload.agents);
+        setAgentCenterUnavailable(result.payload.center_unavailable);
+      }
+    }).catch((cause: unknown) => {
+      if (active) store.showInteractionError(cause instanceof Error ? cause.message : '无法读取智能体目录。');
+    }).finally(() => {
+      if (active && client === store.runtime_client) setAgentLoading(false);
+    });
+    return () => { active = false; };
+  }, [agent_picker_open, store.runtime_client]);
+  useEffect(() => {
+    const selection = draft?.selected_agent;
+    const client = store.runtime_client;
+    const request = ++agent_request.current;
+    setAgentPreparation(null);
+    setAgentPreparing(false);
+    if (!selection || !client) return;
+    setAgentPreparing(true);
+    void client.command({ type: 'prepare_custom_agent', payload: {
+      selection, ...(draft?.workspace_id ? { workspace_id: draft.workspace_id } : {}),
+    } }).then((result) => {
+      const current = store.new_session_drafts.get(draft_key);
+      if (request === agent_request.current && client === store.runtime_client && current
+        && sameAgent(current.selected_agent, selection) && current.workspace_id === draft?.workspace_id) {
+        setAgentPreparation(result.payload);
+      }
+    }).catch((cause: unknown) => {
+      if (request === agent_request.current && client === store.runtime_client)
+        store.showInteractionError(cause instanceof Error ? cause.message : '无法检查智能体依赖。');
+    }).finally(() => {
+      if (request === agent_request.current) setAgentPreparing(false);
+    });
+  }, [draft_key, draft?.selected_agent?.name, draft?.selected_agent?.source.type,
+    draft?.selected_agent?.source.type === 'center' ? draft.selected_agent.source.center_id : null,
+    draft?.workspace_id, store.runtime_client]);
 
   const draft_model = application?.model_settings.management?.read_only
     ? (application?.model_settings.default_model ?? null)
@@ -816,6 +921,74 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
   const current_draft = draft;
   const model_required = draft_model === null;
   const can_send = Boolean(draft.text.trim() || draft.attachments.length || draft.quotes.length);
+  const unresolved = draft.materialization_attempt !== null;
+  const active_workspaces = application?.workspaces.filter((workspace) => workspace.lifecycle === 'active') ?? [];
+  const quick_actions_disabled = store.composer_pending || attachment_flow.pending || unresolved || quick_action_loading;
+
+  function applyQuickAction(action: QuickActionConfig, resolved: ResolvedQuickAction, owner: NewSessionDraft) {
+    const latest = store.new_session_drafts.get(draft_key);
+    if (!latest || !sameQuickActionDraft(owner, latest) || store.navigation.selected_draft_key !== draft_key) {
+      setQuickActionConfirmation(null);
+      store.showInteractionError('草稿已变化，请重新选择快捷入口。');
+      return;
+    }
+    if (resolved.agent) store.new_session_drafts.updateSelectedAgent(draft_key, resolved.agent);
+    if (resolved.skill) {
+      store.new_session_drafts.updateSelectedSkill(draft_key, resolved.skill.name);
+      store.new_session_drafts.applySkillOptions(draft_key, [
+        ...latest.skill_options.filter((option) => option.name !== resolved.skill?.name), resolved.skill,
+      ]);
+    }
+    if (resolved.mcp) store.new_session_drafts.updateSelectedMcp(draft_key, resolved.mcp);
+    if (action.template) store.new_session_drafts.updateText(draft_key,
+      latest.text.trim() ? `${latest.text.trimEnd()}\n\n${action.template}` : action.template);
+    setQuickActionConfirmation(null);
+    setSkillPickerOpen(action.picker === 'skill');
+    setMcpPickerOpen(action.picker === 'mcp');
+    setAgentPickerOpen(action.picker === 'agent');
+    if (!action.picker) requestAnimationFrame(() => textarea_ref.current?.focus());
+  }
+
+  async function selectQuickAction(action: QuickActionConfig) {
+    const owner = store.new_session_drafts.get(draft_key);
+    const client = store.runtime_client;
+    if (!owner || !client || quick_actions_disabled) return;
+    const request = ++quick_action_request.current;
+    setQuickActionLoading(true);
+    try {
+      const resolved = await resolveQuickAction(action, {
+        agents: async () => (await client.command({ type: 'list_custom_agents', payload: {} })).payload.agents,
+        skills: async () => (await store.listSkills(owner.workspace_id)).skills,
+        mcp: () => store.listMcpServerOptions({
+          context: { type: 'new_session', payload: { workspace_id: owner.workspace_id ?? undefined } },
+          variant: owner.variant,
+        }),
+      });
+      if (request !== quick_action_request.current || client !== store.runtime_client
+        || store.navigation.selected_draft_key !== draft_key) return;
+      const latest = store.new_session_drafts.get(draft_key);
+      if (!latest || !sameQuickActionDraft(owner, latest)) {
+        store.showInteractionError('草稿已变化，请重新选择快捷入口。');
+        return;
+      }
+      const changes = [
+        action.template && latest.text.trim() ? '在现有文字后追加模板' : null,
+        resolved.agent && latest.selected_agent && !sameAgent(latest.selected_agent, resolved.agent)
+          ? `将智能体切换为「${resolved.agent.name}」` : null,
+        resolved.skill && latest.selected_skill_name && latest.selected_skill_name !== resolved.skill.name
+          ? `将技能切换为「${resolved.skill.name}」` : null,
+        resolved.mcp && latest.selected_mcp && latest.selected_mcp.server_key !== resolved.mcp.server_key
+          ? `将 MCP 服务切换为「${resolved.mcp.display_name}」` : null,
+      ].filter((item): item is string => Boolean(item));
+      if (changes.length) setQuickActionConfirmation({ action, resolved, owner: latest, changes });
+      else applyQuickAction(action, resolved, latest);
+    } catch (cause: unknown) {
+      if (request === quick_action_request.current && client === store.runtime_client)
+        store.showInteractionError(cause instanceof Error ? cause.message : '无法应用快捷入口。');
+    } finally {
+      if (request === quick_action_request.current) setQuickActionLoading(false);
+    }
+  }
 
   function updateOverlay(overlay: 'execution' | 'model', open: boolean) {
     setActiveOverlay((current) => (open ? overlay : current === overlay ? null : current));
@@ -884,7 +1057,12 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
     }
   }
 
-  function submitNewDraft() {
+  async function submitNewDraft() {
+    if (unresolved) {
+      void store.materializeNewSessionDraft(draft_key);
+      return;
+    }
+    if (capability_blocked) return;
     const command = slash_items.find((item) => item.name === current_draft.text.trim().toLocaleLowerCase());
     if (command) {
       handleSlashCommand(command);
@@ -894,16 +1072,168 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
       store.showInteractionError('发送第一条消息后，可在会话中使用刷新指令');
       return;
     }
+    const selection = current_draft.selected_agent;
+    const client = store.runtime_client;
+    if (selection && client) {
+      const request = ++agent_request.current;
+      setAgentPreparing(true);
+      try {
+        const result = await client.command({ type: 'prepare_custom_agent', payload: {
+          selection, ...(current_draft.workspace_id ? { workspace_id: current_draft.workspace_id } : {}),
+        } });
+        const latest = store.new_session_drafts.get(draft_key);
+        if (request !== agent_request.current || client !== store.runtime_client || !latest
+          || store.navigation.selected_draft_key !== draft_key || !sameAgent(latest.selected_agent, selection)
+          || latest.workspace_id !== current_draft.workspace_id || latest !== current_draft) return;
+        setAgentPreparation(result.payload);
+        if (result.payload.dependencies.some((item) => agentDependencyBlocksSession(item.status))) {
+          if (result.payload.install_candidates.length) setAgentInstall(result.payload);
+          else store.showInteractionError('智能体依赖尚未就绪。请查看缺项，完成配置或选择普通会话后重试。');
+          return;
+        }
+      } catch (cause: unknown) {
+        if (request === agent_request.current && client === store.runtime_client)
+          store.showInteractionError(cause instanceof Error ? cause.message : '无法检查智能体依赖。');
+        return;
+      } finally { if (request === agent_request.current) setAgentPreparing(false); }
+    }
     void store.materializeNewSessionDraft(draft_key);
   }
 
+  async function retryAgentInstall() {
+    setAgentInstall(null);
+    const latest = store.new_session_drafts.get(draft_key);
+    const client = store.runtime_client;
+    if (!latest?.selected_agent || !client) return;
+    const request = ++agent_request.current;
+    setAgentPreparing(true);
+    try {
+      const result = await client.command({ type: 'prepare_custom_agent', payload: {
+        selection: latest.selected_agent, ...(latest.workspace_id ? { workspace_id: latest.workspace_id } : {}),
+      } });
+      if (request !== agent_request.current || client !== store.runtime_client
+        || store.new_session_drafts.get(draft_key) !== latest) return;
+      setAgentPreparation(result.payload);
+      if (result.payload.dependencies.every((item) => item.status === 'available')) return;
+      if (result.payload.install_candidates.length) setAgentInstall(result.payload);
+      else if (result.payload.dependencies.some((item) => agentDependencyBlocksSession(item.status)))
+        store.showInteractionError('依赖仍未就绪，请查看缺项或打开插件管理。');
+    } catch (cause: unknown) {
+      if (request === agent_request.current && client === store.runtime_client)
+        store.showInteractionError(cause instanceof Error ? cause.message : '无法重新检查智能体依赖。');
+    } finally { if (request === agent_request.current) setAgentPreparing(false); }
+  }
+
   return (
-    <div className={styles.dock}>
+    <div className={`${styles.dock} ${styles.new_session_dock}`}>
       {store.interaction_error && (
         <ComposerNotice tone="error" dismiss={{ label: '关闭错误提示', onClick: () => store.clearInteractionError() }}>
           {store.interaction_error}
         </ComposerNotice>
       )}
+      {unresolved && <ComposerNotice tone="warning">首次发送结果待确认。草稿和附件已冻结；重试会先查询原请求。</ComposerNotice>}
+      <Dialog
+        aria_label="草稿目标冲突"
+        backdrop_class_name={styles.draft_conflict_backdrop}
+        dialog_class_name={styles.draft_conflict_dialog}
+        on_close={() => setConflictTarget(null)}
+        open={conflict_target !== null}
+      >
+        <h3>该项目已有草稿</h3>
+        <p>当前内容不会覆盖已有草稿。你可以取消切换，或打开目标草稿；当前草稿会保留。</p>
+        <footer>
+          <Button onClick={() => setConflictTarget(null)} variant="outlined">取消</Button>
+          <Button onClick={() => {
+            const target = conflict_target;
+            setConflictTarget(null);
+            store.openNewSessionDraft(target || null);
+          }} variant="primary">打开目标草稿</Button>
+        </footer>
+      </Dialog>
+      {store.runtime_client && agent_install && <PluginOperationDialog key={`${agent_install.revision}:${agent_request.current}`} client={store.runtime_client}
+        intent={{ type: 'install', packages: agent_install.install_candidates }} on_close={() => { setAgentInstall(null); }}
+        on_complete={() => { store.showInteractionError('插件已安装。请关闭进度窗后再次发送，系统会重新核对依赖。'); }}
+        on_retry={() => void retryAgentInstall()} />}
+      <Dialog
+        aria_label="应用快捷入口"
+        backdrop_class_name={styles.draft_conflict_backdrop}
+        dialog_class_name={styles.draft_conflict_dialog}
+        on_close={() => setQuickActionConfirmation(null)}
+        open={quick_action_confirmation !== null}
+      >
+        <h3>应用「{quick_action_confirmation?.action.label}」？</h3>
+        <p>{quick_action_confirmation?.changes.join('；')}。当前附件和已有文字会保留。</p>
+        <footer>
+          <Button onClick={() => setQuickActionConfirmation(null)} variant="outlined">取消</Button>
+          <Button onClick={() => {
+            const pending = quick_action_confirmation;
+            if (pending) applyQuickAction(pending.action, pending.resolved, pending.owner);
+          }} variant="primary">确认应用</Button>
+        </footer>
+      </Dialog>
+      <div className={styles.draft_intro}>
+        <h1>今天想完成什么？</h1>
+        <p>选择项目，或直接描述你想完成的任务。</p>
+        <div className={styles.draft_quick_actions} aria-label="新会话快捷入口">
+          {QUICK_ACTIONS.map((action) => <button disabled={quick_actions_disabled} key={action.id}
+            onClick={() => void selectQuickAction(action)} type="button">
+            <Icon name={action.icon} size={17} />{action.label}
+          </button>)}
+        </div>
+      </div>
+      {draft.selected_agent && agent_preparing && <ComposerNotice tone="neutral">正在检查智能体依赖…</ComposerNotice>}
+      {draft.selected_agent && agent_preparation && agent_preparation.dependencies.some((item) => agentDependencyBlocksSession(item.status)) &&
+        <ComposerNotice tone="warning">
+          <div className={styles.agent_dependencies}>
+            <span>智能体依赖待处理：{agent_preparation.dependencies.filter((item) => agentDependencyBlocksSession(item.status)).map((item) => `${item.kind} ${item.reference.name}（${agentDependencyLabel(item.status)}）`).join('、')}</span>
+            <div className={styles.agent_dependency_actions}>
+              {agent_preparation.install_candidates.length > 0 && <Button onClick={() => setAgentInstall(agent_preparation)} size="small" variant="text">下载缺少的插件</Button>}
+              <Button onClick={() => store.settings.open('plugins')} size="small" variant="text">管理插件</Button>
+              <Button disabled={agent_preparing} onClick={() => void retryAgentInstall()} size="small" variant="text">重新检查依赖</Button>
+            </div>
+          </div>
+        </ComposerNotice>}
+      {draft.selected_agent && !agent_preparing && !agent_preparation &&
+        <ComposerNotice tone="warning" action={{ label: '重新检查依赖', onClick: () => void retryAgentInstall() }}>暂未取得智能体依赖状态。</ComposerNotice>}
+      <section aria-label="新会话项目选项" className={`${styles.secondary_drawer} ${styles.draft_context_drawer}`}>
+        <WorkspacePicker
+            disabled={quick_actions_disabled}
+            has_draft={(workspace_id) => store.new_session_drafts.hasDraft(draftKeyForWorkspace(workspace_id))
+              && draft_key !== draftKeyForWorkspace(workspace_id)}
+            on_create={() => store.addWorkspace()}
+            on_open_change={(open) => { setWorkspacePickerOpen(open); if (open) setAgentPickerOpen(false); }}
+            on_select={(workspace_id) => {
+              if (!store.moveNewSessionDraft(draft_key, workspace_id, attachment_flow.pending))
+                setConflictTarget(workspace_id ?? '');
+            }}
+            open={workspace_picker_open}
+            selected_workspace_id={draft.workspace_id}
+            workspaces={active_workspaces}
+        />
+        <ContextPicker
+          action_icon="settings" action_label="管理智能体" dialog_label="选择智能体"
+          disabled={quick_actions_disabled} icon="bot" label="智能体"
+          empty_text={agent_loading ? '正在读取智能体…' : undefined}
+          notice={agent_center_unavailable ? '企业目录暂不可读取，当前仅显示最后一次有效结果。' : undefined}
+          on_action={() => store.settings.open('agents')}
+          on_open_change={(open) => { setAgentPickerOpen(open); if (open) setWorkspacePickerOpen(false); }}
+          on_select={(value) => {
+            const agent = agent_options.find((item) => agentOptionValue({ name: item.config.name, source: item.source }) === value);
+            if (value === null || agent) store.new_session_drafts.updateSelectedAgent(draft_key,
+              agent ? { name: agent.config.name, source: agent.source } : null);
+          }}
+          open={agent_picker_open}
+          options={agent_options.map((agent) => ({
+            value: agentOptionValue({ name: agent.config.name, source: agent.source }),
+            label: agent.config.name,
+            hints: [agent.source.type === 'center' ? '企业' : '个人'],
+            search_text: `${agent.config.name} ${agent.config.description}`,
+          }))}
+          selected={draft.selected_agent ? { value: agentOptionValue(draft.selected_agent),
+            label: draft.selected_agent.name, search_text: draft.selected_agent.name } : null}
+          trigger_label="选择智能体"
+        />
+      </section>
       <section className={styles.composer}>
         <SlashCommandMenu
           active_index={slash_active_index}
@@ -923,6 +1253,9 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
             }}
             on_select={(skill) => {
               store.new_session_drafts.updateSelectedSkill(draft_key, skill.name);
+              store.new_session_drafts.applySkillOptions(draft_key, [
+                ...draft.skill_options.filter((option) => option.name !== skill.name), skill,
+              ]);
               setSkillPickerOpen(false);
               requestAnimationFrame(() => textarea_ref.current?.focus());
             }}
@@ -960,6 +1293,7 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
                 目标
                 <button
                   aria-label="取消目标标记"
+                  disabled={unresolved}
                   onClick={() => store.new_session_drafts.updateGoalArmed(draft_key, false)}
                   type="button"
                 >
@@ -969,9 +1303,10 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
             )}
             {selected_skill && (
               <span title={selected_skill.name}>
-                {selected_skill.name}
+                {selected_skill.name}{selected_skill_unavailable ? ' · 当前项目不可用' : selected_skill_pending ? ' · 验证中' : ''}
                 <button
                   aria-label={`移除技能 ${selected_skill.name}`}
+                  disabled={unresolved}
                   onClick={() => store.new_session_drafts.updateSelectedSkill(draft_key, null)}
                   type="button"
                 >
@@ -982,8 +1317,11 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
             {draft.selected_mcp && (
               <span title={draft.selected_mcp.server_key}>
                 MCP · {draft.selected_mcp.display_name}
+                {draft.selected_mcp_availability === 'unverified' ? ' · 待验证' : ''}
+                {draft.selected_mcp_availability === 'unavailable' ? ' · 当前项目不可用' : ''}
                 <button
                   aria-label={`移除 MCP ${draft.selected_mcp.display_name}`}
+                  disabled={unresolved}
                   onClick={() => store.new_session_drafts.updateSelectedMcp(draft_key, null)}
                   type="button"
                 >
@@ -999,6 +1337,7 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
             model_required ||
             store.connection.state !== 'connected' ||
             store.composer_pending ||
+            unresolved ||
             attachment_flow.pending
           }
           onChange={(event) => store.new_session_drafts.updateText(draft_key, event.target.value)}
@@ -1023,17 +1362,17 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
           <Tooltip content="添加附件">
             <Button
               aria-label="添加附件"
-              disabled={store.composer_pending || attachment_flow.pending}
+              disabled={store.composer_pending || attachment_flow.pending || unresolved}
               iconOnly
               onClick={() => void attachment_flow.choose()}
-              variant="outlined"
+              variant="text"
             >
               <Icon name="plus" size={17} />
             </Button>
           </Tooltip>
           <ExecutionSettingsPopover
             approval_mode={draft.approval_mode}
-            disabled={store.composer_pending}
+            disabled={store.composer_pending || unresolved}
             initial_category={null}
             on_approval_change={(mode) => {
               store.setNewSessionDraftApprovalMode(draft_key, mode);
@@ -1050,7 +1389,7 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
           />
           <span className={styles.action_spacer} />
           <ModelSettingsPopover
-            disabled={store.composer_pending}
+            disabled={store.composer_pending || unresolved}
             effort={draft.reasoning_effort}
             effort_options={effort_options}
             initial_category={null}
@@ -1070,11 +1409,11 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
             trigger_class_name={styles.model_selector}
           />
           <button
-            aria-label="发送消息"
+            aria-label={unresolved ? "重试确认首次发送" : "发送消息"}
             className={styles.send_button}
             data-action="send"
-            disabled={!can_send || model_required || store.composer_pending || attachment_flow.pending}
-            onClick={submitNewDraft}
+            disabled={!can_send || (!unresolved && (model_required || capability_blocked)) || store.composer_pending || attachment_flow.pending || agent_preparing}
+            onClick={() => void submitNewDraft()}
             type="button"
           >
             <Icon name="arrow-down" size={16} />
@@ -1084,6 +1423,47 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
     </div>
   );
 });
+
+function agentOptionValue(selection: CustomAgentSelection): string {
+  return JSON.stringify([selection.source.type,
+    selection.source.type === 'center' ? selection.source.center_id : null, selection.name]);
+}
+
+function sameAgent(left: CustomAgentSelection | null, right: CustomAgentSelection | null): boolean {
+  if (!left || !right) return left === right;
+  return left.name === right.name && left.source.type === right.source.type
+    && (left.source.type !== 'center' || right.source.type === 'center' && left.source.center_id === right.source.center_id);
+}
+
+/** 目录/依赖刷新会替换草稿快照；只用会被快捷入口覆盖的用户意图判断异步结果是否过期。 */
+function sameQuickActionDraft(before: NewSessionDraft, current: NewSessionDraft): boolean {
+  return before.key === current.key && before.workspace_id === current.workspace_id
+    && before.variant === current.variant && before.text === current.text
+    && before.selected_skill_name === current.selected_skill_name
+    && before.selected_mcp?.server_key === current.selected_mcp?.server_key
+    && sameAgent(before.selected_agent, current.selected_agent)
+    && before.materialization_attempt === current.materialization_attempt;
+}
+
+// 与 Runtime 首次物化一致：环境故障只提示，安装、启用和来源冲突仍需处理。
+function agentDependencyBlocksSession(status: PreparedCustomAgentSnapshot['dependencies'][number]['status']): boolean {
+  return status === 'plugin_missing' || status === 'plugin_disabled'
+    || status === 'capability_disabled' || status === 'name_conflict';
+}
+
+function agentDependencyLabel(status: PreparedCustomAgentSnapshot['dependencies'][number]['status']): string {
+  switch (status) {
+    case 'available': return '可用';
+    case 'plugin_missing': return '缺少插件';
+    case 'plugin_disabled': return '插件未启用';
+    case 'capability_disabled': return '能力未启用';
+    case 'capability_missing': return '能力缺失';
+    case 'name_conflict': return '名称冲突';
+    case 'configuration_missing': return '缺少配置';
+    case 'software_missing': return '缺少软件';
+    case 'runtime_unavailable': return '运行环境不可用';
+  }
+}
 
 function ContextUsageRing({
   context,

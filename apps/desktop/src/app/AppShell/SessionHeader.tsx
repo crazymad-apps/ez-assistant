@@ -7,16 +7,21 @@ import {
   DropdownMenuTrigger,
 } from "../../components/DropdownMenu";
 import { Icon } from "../../components/Icon";
+import { InlineIconButton } from "../../components/InlineIconButton";
 import { PresenceBoundary } from "../../components/Presence";
 import { useInputMethodGuard } from "../../components/InputMethodGuard";
 import type { PrepareDeleteSessionResult, SessionSummary } from "@ez-assistant/protocol";
 import { SessionActionDialog } from "../../features/sessions/SessionActionDialog";
+import { SessionNavigation } from "../../features/sessions/SessionNavigation";
 import { isDraftCustomized } from "../../stores/NewSessionDraftStore";
 import { useRootStore } from "../../stores/RootStoreContext";
 import styles from "./index.module.scss";
 
-export const SessionHeader = observer(function SessionHeader({ session }: Readonly<{
+export const SessionHeader = observer(function SessionHeader({ session, sidebar_open, on_toggle_sidebar, on_search }: Readonly<{
   session?: SessionSummary;
+  sidebar_open: boolean;
+  on_toggle_sidebar: () => void;
+  on_search: () => void;
 }>) {
   const store = useRootStore();
   const [editing, setEditing] = useState(false);
@@ -26,14 +31,8 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
   const [proxy_error, setProxyError] = useState<string | null>(null);
   const cancel_blur_ref = useRef(false);
   const input_method = useInputMethodGuard();
-  const recent = [...(store.projection.application?.active_sessions ?? [])]
-    .sort((left, right) => (right.updated_at_ms ?? 0) - (left.updated_at_ms ?? 0))
-    .slice(0, 8);
   const is_archived = session?.lifecycle === "archived";
   const new_session_draft = store.new_session_drafts.get(store.navigation.selected_draft_key);
-  const draft_workspace = store.projection.application?.workspaces.find(
-    (workspace) => workspace.workspace_id === new_session_draft?.workspace_id,
-  );
   const session_view = session ? store.projection.session_views.get(session.session_id) : undefined;
   const is_controller = session?.role === "controller";
   const is_proxied = Boolean(session?.proxy);
@@ -118,45 +117,10 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
   }
 
   return (
-    <header aria-label="会话标题栏" className={styles.session_header}>
-      <div className={styles.session_navigation}>
-        <button
-          aria-label="返回上一处会话位置"
-          disabled={!store.navigation.can_go_back}
-          onClick={() => void store.navigateBack()}
-          type="button"
-        >
-          <Icon name="chevron-left" size={15} />
-        </button>
-        <button
-          aria-label="前往下一处会话位置"
-          disabled={!store.navigation.can_go_forward}
-          onClick={() => void store.navigateForward()}
-          type="button"
-        >
-          <Icon name="chevron-right" size={15} />
-        </button>
-        <DropdownMenu>
-          <DropdownMenuTrigger aria-label="选择最近会话" className={styles.session_switcher}>
-            <Icon name="chevron-down" size={16} />
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" aria-label="最近会话" className={styles.recent_menu}>
-            {recent.map((item) => (
-              <DropdownMenuItem
-                aria-current={item.session_id === session?.session_id ? "page" : undefined}
-                key={item.session_id}
-                onSelect={() => void store.selectSession(item.session_id)}
-              >
-                <span>{item.title}</span>
-                {item.session_id === session?.session_id && <Icon name="check" size={14} />}
-              </DropdownMenuItem>
-            ))}
-            {recent.length === 0 && <span className={styles.recent_empty}>暂无会话</span>}
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </div>
+    <header aria-label="会话标题栏" className={styles.session_header} data-sidebar-open={sidebar_open} data-tauri-drag-region="deep">
+      {!sidebar_open && <SessionNavigation on_search={on_search} on_toggle={on_toggle_sidebar} sidebar_open={false} />}
       <div className={styles.session_title_slot}>
-        {editing && session ? (
+        {new_session_draft ? null : editing && session ? (
           <input placeholder="请输入"
             aria-label="会话标题"
             autoFocus
@@ -198,15 +162,15 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
             type="button"
             key={session?.title ?? "new-session"}
           >
-            {session?.title ?? (new_session_draft ? "新对话" : "新会话")}
+            {session?.title ?? "新会话"}
           </button>
-        )}
-        {new_session_draft && (
-          <span className={styles.session_role_badge}>{draft_workspace?.label ?? "未绑定工作空间"}</span>
         )}
         {session && is_controller && (
           <span className={styles.session_role_badge}>主控</span>
         )}
+        {session?.custom_agent && <span className={styles.session_role_badge} title="创建会话时冻结的智能体配置">
+          {session.custom_agent.name} · {session.custom_agent.source.type === "center" ? "企业" : "个人"}
+        </span>}
         {session && !is_controller && (
           <div
             className={styles.proxy_control}
@@ -235,9 +199,7 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
       </div>
       <div className={styles.session_actions}>
         <DropdownMenu>
-          <DropdownMenuTrigger aria-label="更多会话操作">
-            <Icon name="more" size={17} />
-          </DropdownMenuTrigger>
+          <DropdownMenuTrigger aria-label="更多会话操作" className={styles.header_icon_button} inlineIcon="more" />
           <DropdownMenuContent aria-label="会话操作" className={styles.session_menu}>
             <DropdownMenuItem onSelect={() => store.resetSidebarLayout()}>
               <span>恢复默认布局</span>
@@ -279,19 +241,19 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
                 </DropdownMenuItem>
               </>
             )}
-            {!is_archived && session && (
+            {!is_archived && session && !is_controller && (
               <>
-                <DropdownMenuItem onSelect={() => void store.setSessionPinned(session.session_id, !session.is_pinned)}>
-                  <span>固定会话</span>
+                <DropdownMenuItem disabled={store.pending_session_action} onSelect={() => void store.setSessionPinned(session.session_id, !session.is_pinned)}>
+                  <span>{session.is_pinned ? "取消置顶" : "置顶"}</span>
                   {session.is_pinned && <Icon name="check" size={14} />}
                 </DropdownMenuItem>
-                {!is_controller && <DropdownMenuItem
-                  disabled={blocks_archive}
+                <DropdownMenuItem
+                  disabled={blocks_archive || store.pending_session_action}
                   onSelect={() => void store.archiveSession(session.session_id)}
                   title={blocks_archive ? "运行、队列或审批尚未结束" : undefined}
                 >
                   <span>归档会话</span>
-                </DropdownMenuItem>}
+                </DropdownMenuItem>
               </>
             )}
             {is_archived && session && (
@@ -311,14 +273,13 @@ export const SessionHeader = observer(function SessionHeader({ session }: Readon
             )}
           </DropdownMenuContent>
         </DropdownMenu>
-        <button
-          aria-label={store.navigation.effective_right_sidebar_open ? "收起资源栏" : "展开资源栏"}
+        <InlineIconButton
+          label={store.navigation.effective_right_sidebar_open ? "收起资源栏" : "展开资源栏"}
           className={styles.context_toggle}
           onClick={() => store.toggleRightSidebar()}
-          type="button"
-        >
-          <Icon name="sidebar-right" size={17} />
-        </button>
+          icon="sidebar-right"
+          size={17}
+        />
       </div>
       <PresenceBoundary present={delete_preview !== null}>
       {delete_preview && (

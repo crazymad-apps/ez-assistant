@@ -12,13 +12,15 @@ services:
       CENTER_PORT: "7320"
       CENTER_DATABASE_AUTO_UPGRADE: "false"
       CENTER_SNAPSHOT_ROOT: /data/snapshots
+      CENTER_PLUGIN_ROOT: /data/plugins
       CENTER_MODEL_TEMPLATES_FILE: /config/model-templates.json
     volumes:
       - ./data/snapshots:/data/snapshots
+      - ./data/plugins:/data/plugins
       - ./config/model-templates.json:/config/model-templates.json:ro
     networks:
       - database
-    stop_grace_period: 15s
+    stop_grace_period: 60s
 networks:
   database:
     external: true

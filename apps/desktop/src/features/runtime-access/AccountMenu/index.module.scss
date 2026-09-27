@@ -1,0 +1,72 @@
+.account_root { width: 100%; }
+
+.account_trigger {
+  display: flex;
+  width: 100%;
+  min-height: calc(var(--ez-control-height-large) + 16px);
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 0;
+  border-top: 1px solid var(--ez-border);
+  color: var(--ez-text-secondary);
+  background: var(--ez-sidebar);
+  text-align: left;
+
+  &:hover { background: var(--ez-surface-muted); }
+  > svg:last-child { flex: 0 0 auto; margin-left: auto; }
+}
+
+.avatar {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  place-items: center;
+  border: 1px solid var(--ez-border);
+  border-radius: 50%;
+  color: var(--ez-primary-text);
+  background: var(--ez-surface);
+}
+
+.account_copy {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 3px;
+
+  strong, small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  strong { color: var(--ez-text); font-size: var(--ez-font-base); font-weight: 600; }
+  small { display: flex; align-items: center; gap: 6px; font-size: var(--ez-font-small); }
+}
+
+.status_dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 50%;
+  background: var(--ez-danger);
+
+  &[data-connected="true"] { background: var(--ez-success); }
+}
+
+.account_menu {
+  width: 260px;
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
+}
+
+// 浮层定位已有 8px 视口留白，补到与侧栏右侧相同的 12px 内容间距。
+.sidebar_account_menu { margin-left: 4px; }
+
+.account_summary {
+  display: grid;
+  gap: 4px;
+  padding: 8px 9px 10px;
+  border-bottom: 1px solid var(--ez-border);
+  margin-bottom: 4px;
+
+  strong, small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  small { color: var(--ez-text-muted); font-size: var(--ez-font-small); }
+}

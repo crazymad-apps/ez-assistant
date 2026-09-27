@@ -436,6 +436,10 @@ async fn settle_run_inner(
                 Some(ExecutionOutcome::CompactionRequired { .. }) => {
                     RunSettlement::terminal(RunStatus::CompactionRequired)
                 }
+                Some(ExecutionOutcome::ContinuationRequired {
+                    reason: agent_core::ContinuationReason::ReturnToHost,
+                    ..
+                }) => RunSettlement::terminal(RunStatus::Completed),
                 Some(ExecutionOutcome::ContinuationRequired { .. }) => {
                     internal_failure("agent continuation escaped the run execution loop")
                 }
@@ -610,6 +614,15 @@ async fn settle_run_inner(
         }
         record.settle(settlement, finished_at_ms);
         let snapshot = record.snapshot();
+        for request in state.feedback.values_mut().filter(|r| {
+            r.run_id == *run_id && r.status == assistant_protocol::FeedbackStatus::Pending
+        }) {
+            if request.mode == assistant_protocol::FeedbackMode::Wait
+                || snapshot.status != RunStatus::Completed
+            {
+                request.status = assistant_protocol::FeedbackStatus::Invalidated;
+            }
+        }
         let goal = if let Some(goal) = stored_goal {
             let control = GoalControl::try_from(goal).map_err(|_| {
                 RuntimeError::InternalStateUnavailable {

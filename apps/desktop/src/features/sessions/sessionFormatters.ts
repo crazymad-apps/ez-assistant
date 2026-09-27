@@ -1,6 +1,7 @@
 import type { SessionSummary } from "@ez-assistant/protocol";
 
-export function workspaceDisplayName(path: string): string {
+export function workspaceDisplayName(path: string | null): string {
+  if (!path) return "仅使用私有目录";
   const normalized = path.replaceAll("\\", "/").replace(/\/$/, "");
   return normalized.split("/").at(-1) || path;
 }

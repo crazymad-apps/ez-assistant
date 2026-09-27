@@ -2,10 +2,11 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { readFileSync } from "node:fs";
 import { version as app_version } from "./package.json" with { type: "json" };
+import { readQuickActionsConfig } from "./scripts/quick-actions-config.mjs";
 
 const host = process.env.TAURI_DEV_HOST;
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
   plugins: [react(), {
     name: "host-web-version",
     generateBundle() {
@@ -18,6 +19,10 @@ export default defineConfig({
   }],
   define: {
     __APP_VERSION__: JSON.stringify(app_version),
+    __QUICK_ACTIONS_CONFIG__: JSON.stringify(readQuickActionsConfig(
+      command === "serve" || process.env.EZ_ASSISTANT_BUNDLE_QUICK_ACTIONS === "1"
+        || process.env.EZ_ASSISTANT_DEFAULT_HOST_MODE === "enterprise",
+    )),
   },
   clearScreen: false,
   server: {
@@ -35,4 +40,4 @@ export default defineConfig({
       ignored: ["**/src-tauri/**"],
     },
   },
-});
+}));

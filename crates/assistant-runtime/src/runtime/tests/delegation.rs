@@ -425,6 +425,15 @@ async fn one_delegate_task_runs_an_isolated_child_and_returns_only_its_final_res
     assert_eq!(released.len(), 1);
     assert!(!std::path::Path::new(&released[0]).exists());
     let observed = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+    assert_eq!(
+        observed
+            .iter()
+            .filter(|event| matches!(event, RuntimeEvent::ModelAttemptStarted { .. }))
+            .count(),
+        2,
+        "child attempts must not be attributed to the parent"
+    );
+
     assert!(observed.iter().any(|event| matches!(
         event,
         assistant_protocol::RuntimeEvent::ChildTaskEvent {

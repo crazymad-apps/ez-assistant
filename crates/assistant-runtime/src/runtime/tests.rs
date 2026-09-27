@@ -50,6 +50,7 @@ use crate::{
 const TEST_CONFIG: &str = "schema_version = 1\n";
 
 mod external_model;
+mod feedback;
 mod model_fixture;
 
 struct MissingConfigSource;
@@ -407,7 +408,10 @@ fn test_environment(
     ) = match request.workspace {
         Some(workspace) => (
             Some(workspace.workspace_id.clone()),
-            workspace.user_directory.to_owned(),
+            workspace
+                .user_directory
+                .unwrap_or(workspace.agent_directory)
+                .to_owned(),
             workspace.additional_directories.to_vec(),
             Some(workspace.agent_directory.to_owned()),
         ),
@@ -971,6 +975,7 @@ mod goal_input;
 mod input;
 mod materialization;
 mod memory;
+mod model_retry;
 mod permission;
 mod product;
 mod runs;

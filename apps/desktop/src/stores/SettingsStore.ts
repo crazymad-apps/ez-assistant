@@ -32,7 +32,7 @@ import type { RuntimeClient } from '../runtime-client/RuntimeClient';
 
 export type RuntimeSettingsPageId =
   'runtime' | 'runtime_connection' | 'host_access' | 'runtime_diagnostics' | 'runtime_local';
-export type SettingsPage = RuntimeSettingsPageId | 'models' | 'permissions' | 'memory' | 'skills' | 'devices' | 'mcp';
+export type SettingsPage = RuntimeSettingsPageId | 'models' | 'permissions' | 'memory' | 'skills' | 'devices' | 'mcp' | 'plugins' | 'agents' | 'notifications';
 
 type SettingsDependencies = Readonly<{
   get_client: () => RuntimeClient | null;
@@ -113,6 +113,7 @@ export class SettingsStore {
       setDefaultModel: action,
       setAuxiliaryVisionModel: action,
       clearMessages: action,
+      dismissNotice: action,
       showError: action,
       showNotice: action,
     });
@@ -269,6 +270,10 @@ export class SettingsStore {
     this.notice_message = null;
     this.configuration_conflict = false;
     this.permission_conflict = false;
+  }
+
+  dismissNotice(message: string): void {
+    if (this.notice_message === message) this.notice_message = null;
   }
 
   showError(message: string): void {

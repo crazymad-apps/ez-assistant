@@ -52,6 +52,26 @@ export function auditDetails(value: unknown): AuditDetails {
 
   const isModel = (v: unknown): v is string => typeof v === 'string' && v.length <= 1024 && !/[\p{Cc}]/u.test(v);
 
+  // C01 只透出名称、版本与摘要，绝不从任意 JSON 回传提示词、包正文或凭据。
+  if (typeof source.name === 'string' && [...source.name].length <= 128 && !/[\p{Cc}]/u.test(source.name))
+    result.name = source.name;
+  if (typeof source.version === 'string' && /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(source.version))
+    result.version = source.version;
+  if (Array.isArray(source.platforms) && source.platforms.length <= 6 && source.platforms.every(
+    (item: unknown) => item !== null && typeof item === 'object' &&
+      ['macos', 'windows', 'linux'].includes(Reflect.get(item, 'os')) &&
+      ['x64', 'arm64'].includes(Reflect.get(item, 'arch'))))
+    result.platforms = source.platforms.map(item => ({ os: item.os, arch: item.arch }));
+  if (source.result === 'created' || source.result === 'replaced' || source.result === 'unchanged')
+    result.result = source.result;
+  if (source.publication === 'unpublished' || source.publication === 'listed' || source.publication === 'deprecated')
+    result.publication = source.publication;
+  for (const key of ['sha256', 'previous_sha256'] as const)
+    if (typeof source[key] === 'string' && /^[0-9a-f]{64}$/.test(source[key])) result[key] = source[key];
+  for (const key of ['skill_count', 'mcp_count'] as const)
+    if (typeof source[key] === 'number' && Number.isInteger(source[key]) && source[key] >= 0 && source[key] <= 256)
+      result[key] = source[key];
+
   if (isUuid(source.call_id)) result.call_id = source.call_id;
   if (source.side === 'request' || source.side === 'response') result.side = source.side;
   if (typeof source.enabled === 'boolean') result.enabled = source.enabled;

@@ -141,6 +141,12 @@ pub enum RuntimeError {
         #[source]
         source: Option<StoreError>,
     },
+    #[error("another plugin mutation is active or cleanup is required")]
+    PluginBusy,
+    #[error("plugin operation was not found")]
+    PluginOperationNotFound,
+    #[error("plugin package files or center are unavailable")]
+    PluginPackageUnavailable,
     /// 当前配置没有可供业务使用的 active 快照。
     #[error("runtime configuration is unavailable")]
     ConfigurationUnavailable,
@@ -371,6 +377,18 @@ impl RuntimeError {
             Self::StorageUnavailable { .. } => RuntimeErrorInfo::new(
                 RuntimeErrorCode::StorageUnavailable,
                 "runtime storage is unavailable",
+            ),
+            Self::PluginBusy => RuntimeErrorInfo::new(
+                RuntimeErrorCode::PluginBusy,
+                "another plugin operation is active or needs cleanup",
+            ),
+            Self::PluginOperationNotFound => RuntimeErrorInfo::new(
+                RuntimeErrorCode::PluginOperationNotFound,
+                "plugin operation was not found",
+            ),
+            Self::PluginPackageUnavailable => RuntimeErrorInfo::new(
+                RuntimeErrorCode::PluginPackageUnavailable,
+                "plugin package is unavailable",
             ),
             Self::ConfigurationUnavailable => RuntimeErrorInfo::new(
                 RuntimeErrorCode::ConfigurationUnavailable,

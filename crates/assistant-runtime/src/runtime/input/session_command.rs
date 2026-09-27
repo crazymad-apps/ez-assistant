@@ -168,6 +168,7 @@ pub(super) async fn execute_session_command(
         SessionCommand::McpRefresh { server } => {
             let result = match super::super::mcp::refresh_mcp_registry_with(
                 context.mcp_config_store.as_ref(),
+                context.plugin.as_ref(),
                 context.mcp_registry.as_ref(),
                 context.config_registry.as_ref(),
                 context.approval_registry.as_ref(),
@@ -194,8 +195,8 @@ pub(super) async fn execute_session_command(
             let catalog = super::super::skills::prepare_current_catalog(
                 context.store.as_ref(),
                 context.skill_package_source.as_ref(),
-                &context.workspaces,
-                session.environment().workspace_id.as_ref(),
+                context.plugin.as_ref(),
+                session.environment(),
             )
             .await?;
             let success = matches!(

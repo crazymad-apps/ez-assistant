@@ -826,3 +826,46 @@ function activeSessionView(generation: number): SessionViewSnapshot {
     },
   } as unknown as SessionViewSnapshot;
 }
+
+describe("model request progress", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("recovers the latest persisted failure after reload and drops it when a newer run succeeds", () => {
+    const store = new LiveExecutionStore();
+    const view = activeSessionView(1);
+    const failed = { ...view.active_run!, status: "failed" as const, error: { code: "model_execution_failed" as const, message: "safe failure" } };
+    store.reconcileSession({ ...view, active_run: null, runs: [failed] });
+    expect(store.runForSession("session-1")?.error_message).toBe("safe failure");
+    store.reconcileSession({ ...view, active_run: null, runs: [failed, { ...failed, run_id: "run-2", status: "completed", error: null }] });
+    expect(store.runForSession("session-1")).toBeNull();
+  });
+
+  it("restores retry waits from snapshots and clears them on success, cancellation and terminal events", () => {
+    vi.stubGlobal("requestAnimationFrame", vi.fn(() => 1));
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    const store = new LiveExecutionStore();
+    const view = activeSessionView(1);
+    view.active_run!.model_request = { type: "retry_waiting", next_attempt: 2, delay_ms: 2000 };
+    store.reconcileSession(view);
+    expect(store.runForSession("session-1")?.model_request).toEqual(view.active_run!.model_request);
+    store.invalidateForGap();
+    expect(store.runForSession("session-1")).toBeNull();
+    store.reconcileSession(view);
+    const send = (event: RuntimeEvent) => { store.buffer(envelope(1, event)); store.flush(); };
+    send({ type: "model_attempt_started", session_id: "session-1", run_id: "run-1", attempt: 2 });
+    expect(store.runForSession("session-1")?.model_request).toEqual({ type: "requesting", attempt: 2 });
+    send({ type: "model_stream_established", session_id: "session-1", run_id: "run-1", attempt: 2 });
+    expect(store.runForSession("session-1")?.model_request).toBeNull();
+    const retry: RuntimeEvent = { type: "model_retry_scheduled", session_id: "session-1", run_id: "run-1", next_attempt: 2, delay_ms: 2000 };
+    send(retry);
+    send({ type: "run_cancelling", session_id: "session-1", run_id: "run-1" });
+    send(retry);
+    expect(store.runForSession("session-1")?.model_request).toBeNull();
+    send({ type: "run_finished", session_id: "session-1", run_id: "run-1", status: "cancelled", error: null });
+    send(retry);
+    expect(store.runForSession("session-1")?.model_request).toBeNull();
+    send({ ...retry, session_id: "session-2", run_id: "run-2" });
+    expect(store.runForSession("session-2")?.model_request?.type).toBe("retry_waiting");
+    store.dispose();
+  });
+});

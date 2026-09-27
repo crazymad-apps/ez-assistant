@@ -1,3 +1,4 @@
+import { revealFileLabel } from "../../../platform/fileManager";
 import { copyText } from "../../../platform/clipboard";
 import { useRootStore as useResourceRoot } from "../../../stores/RootStoreContext";
 import { useEffect, useState, type KeyboardEvent, type MouseEvent } from "react";
@@ -352,10 +353,10 @@ export function ToolDetailDialog({
               },
               {
                 disabled: file_menu.file.origin === "session_tool_image",
-                label: "在 Finder 中显示",
+                label: revealFileLabel(),
                 on_select: () => runFileAction(
                   revealToolFileInDirectory(owner, detail.message_id!, file_menu.file.resource_ref_id),
-                  "无法在 Finder 中显示。",
+                  "无法在文件管理器中显示。",
                 ),
               }              ] : []),
             ]}

@@ -7,12 +7,13 @@
         "title": "EZ Assistant",
         "width": 1000,
         "height": 700,
-        "minWidth": 720,
+        "minWidth": 920,
         "minHeight": 520,
         "center": true,
         "decorations": true,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
+        "backgroundThrottling": "disabled",
         "trafficLightPosition": {
           "x": 14,
           "y": 23

@@ -12,6 +12,10 @@ export function PageBreadcrumb() {
     if (id && heading.title !== '服务商详情')
       items.push({ title: <Link to={`/models/providers/${id}`}>服务商详情</Link> });
   }
+  if (heading?.menu === '/agents' && heading.title !== '智能体管理')
+    items.push({ title: <Link to="/agents">智能体管理</Link> });
+  if (heading?.menu === '/plugins' && heading.title !== '插件管理')
+    items.push({ title: <Link to="/plugins">插件管理</Link> });
   items.push({ title: <>{heading?.title}</> });
   return <Breadcrumb className={styles.breadcrumb} items={items} />;
 }

@@ -10,6 +10,7 @@ import { uuid } from '../models/parameters.js';
 import { RequestBodies, requestModel } from './body.js';
 import { CallRecords } from './records.js';
 import type { CallRecording } from './records.js';
+import { UsageObserver } from './usage.js';
 import { ControlError } from './errors.js';
 import { transfer, responseHeaders, TransferError } from './transport.js';
 import type { TransferSink } from './transport.js';
@@ -99,6 +100,7 @@ export class ModelProxy {
         const route = await this.models.admit(input.key, input.selection, input.protocol, input.kind === 'admin_test');
         signal.throwIfAborted();
         recording.row.provider_name = route.provider.connection.display_name;
+        recording.usage = new UsageObserver(input.protocol, route.provider.connection.provider_type);
         signal.throwIfAborted();
         upstream = true;
         const result = await transfer({
@@ -120,11 +122,13 @@ export class ModelProxy {
               status = code;
               recording.responseUnsupported =
                 !!headers['content-encoding'] && headers['content-encoding'] !== 'identity';
+              recording.usage?.headers(headers);
               input.sink.headers(code, headers);
             },
 
             chunk: async (chunk, signal) => {
               if (!recording.responseUnsupported) recording.response?.append(chunk);
+              recording.usage?.chunk(chunk);
               await input.sink.chunk(chunk, signal);
             },
           },

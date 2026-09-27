@@ -12,10 +12,18 @@ mod center_url;
 
 fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-env-changed=EZ_ASSISTANT_DEFAULT_CENTER_URL");
-    if let Some(value) = env::var_os("EZ_ASSISTANT_DEFAULT_CENTER_URL") {
+    let default_center_url = env::var_os("EZ_ASSISTANT_DEFAULT_CENTER_URL");
+    if let Some(value) = &default_center_url {
         let value = value.to_str().ok_or("default center URL must be UTF-8")?;
         center_url::validate(value).map_err(|_| "invalid default center URL")?;
         println!("cargo:rustc-env=EZ_ASSISTANT_DEFAULT_CENTER_URL={value}");
+    }
+    println!("cargo:rerun-if-env-changed=EZ_ASSISTANT_DEFAULT_HOST_MODE");
+    if let Some(mode) = env::var_os("EZ_ASSISTANT_DEFAULT_HOST_MODE") {
+        if mode != "enterprise" || default_center_url.is_none() {
+            return Err("default Host mode must be enterprise with a default center URL".into());
+        }
+        println!("cargo:rustc-env=EZ_ASSISTANT_DEFAULT_HOST_MODE=enterprise");
     }
     println!("cargo:rerun-if-env-changed=EZ_ASSISTANT_WEB_DIST");
     let output =

@@ -16,7 +16,7 @@ import { safeError } from './errors.js';
 import { IdentityController } from './identity/controller.js';
 import { IdentityService } from './identity/service.js';
 import { IdentityError } from './identity/errors.js';
-import { Access, HttpSecurity } from './security.js';
+import { Access, HttpSecurity, requestCredential } from './security.js';
 import { UsersController } from './users/controller.js';
 import { UsersService } from './users/service.js';
 import { AuditController } from './audit/controller.js';
@@ -29,6 +29,13 @@ import { CallRecords } from './llm/records.js';
 import { SnapshotFiles } from './llm/snapshots.js';
 import { CallManagement } from './llm/management.js';
 import { CallsController } from './llm/controller.js';
+import { PluginFiles } from './plugins/files.js';
+import { PluginService } from './plugins/service.js';
+import { PluginsController } from './plugins/controller.js';
+import { PluginError } from './plugins/errors.js';
+import { AgentsController } from './agents/controller.js';
+import { AgentsService } from './agents/service.js';
+import { AgentError } from './agents/errors.js';
 import type { CenterConfig } from './config.js';
 import fastifyStatic from '@fastify/static';
 
@@ -57,7 +64,8 @@ class InfoController {
       software_version: version,
       protocol_version: 1,
       min_protocol_version: 1,
-      capabilities: ['managed_models', 'llm_proxy'],
+      // M1 市场分发和 M2 完整 Agent 配置读取均已通过真实 HTTP 验证。
+      capabilities: ['managed_models', 'llm_proxy', 'plugin_market', 'managed_agents'],
     };
   }
 }
@@ -70,6 +78,8 @@ class InfoController {
     AuditController,
     ModelsController,
     CallsController,
+    PluginsController,
+    AgentsController,
   ],
 })
 class CenterModule {}
@@ -81,9 +91,11 @@ class SafeHttpErrors implements ExceptionFilter {
     const reply = http.getResponse<FastifyReply>();
     let status = 503;
     if (error instanceof IdentityError) status = error.status;
+    else if (error instanceof PluginError) status = error.status;
+    else if (error instanceof AgentError) status = error.status;
     else if (error instanceof HttpException) status = error.getStatus();
     const payload =
-      error instanceof IdentityError
+      error instanceof IdentityError || error instanceof PluginError || error instanceof AgentError
         ? { error: { code: error.code, message: error.message, request_id: request.id } }
         : httpFailure(status, request.id);
     void reply.status(status).send(payload);
@@ -94,7 +106,7 @@ class SafeHttpErrors implements ExceptionFilter {
 export async function createHttpApp(
   identity?: { source: DataSource; origin: string } & Pick<
     CenterConfig,
-    'templatesFile' | 'snapshotRoot' | 'llmConnectTimeout' | 'llmIdleTimeout'
+    'templatesFile' | 'snapshotRoot' | 'pluginRoot' | 'llmConnectTimeout' | 'llmIdleTimeout'
   >,
   adminRoot?: string,
 ): Promise<NestFastifyApplication> {
@@ -106,7 +118,7 @@ export async function createHttpApp(
     genReqId: () => randomUUID(),
 
     trustProxy: false,
-    requestTimeout: 10000,
+    requestTimeout: 30 * 60 * 1000,
     connectionTimeout: 10000,
     forceCloseConnections: true,
   });
@@ -121,6 +133,7 @@ export async function createHttpApp(
     connectTimeout: identity?.llmConnectTimeout,
     idleTimeout: identity?.llmIdleTimeout,
   });
+  const pluginFiles = new PluginFiles(identity?.pluginRoot, adminRoot);
   const app = await NestFactory.create<NestFastifyApplication>(
     {
       module: CenterModule,
@@ -134,6 +147,8 @@ export async function createHttpApp(
         { provide: IdentityService, useValue: identities },
         { provide: UsersService, useValue: new UsersService(identities, identity?.source) },
         { provide: AuditService, useValue: new AuditService(identity?.source) },
+        { provide: PluginService, useValue: new PluginService(identities, identity?.source, pluginFiles) },
+        { provide: AgentsService, useValue: new AgentsService(identities, identity?.source) },
       ],
     },
     adapter,
@@ -157,6 +172,57 @@ export async function createHttpApp(
   try {
     if (identity) await records.initialize();
     proxy.install(adapter.getInstance());
+    const fastify = adapter.getInstance();
+    // 原样交给上传 owner 逐块接收；通用 JSON bodyLimit 不适用于完整归档。
+    fastify.addContentTypeParser(['application/zip', 'application/gzip'], (_request, body, done) => {
+      done(null, body);
+    });
+    fastify.addHook('onRoute', options => {
+      const config = options.config as { pluginUpload?: boolean; agentWrite?: boolean;
+        pluginResolve?: boolean } | undefined;
+      if (config?.pluginUpload)
+        options.bodyLimit = 2 * 1024 * 1024 * 1024;
+      else if (config?.agentWrite) options.bodyLimit = 2 * 1024 * 1024;
+      else if (config?.pluginResolve) options.bodyLimit = 64 * 1024;
+    });
+    const bodyTimers = new WeakMap<FastifyRequest, NodeJS.Timeout>();
+    fastify.addHook('onRequest', async (request, reply) => {
+      const upload = (request.routeOptions.config as { pluginUpload?: boolean } | undefined)?.pluginUpload === true;
+      if (!upload) {
+        // 底层接收上限因大包提高后，普通管理 JSON 仍保持原有短超时。
+        if (['POST', 'PUT', 'PATCH'].includes(request.method)) {
+          const timer = setTimeout(() => request.raw.destroy(), 10000);
+          bodyTimers.set(request, timer);
+          request.raw.once('close', () => clearTimeout(timer));
+        }
+        if (/^(application\/zip|application\/gzip)$/i.test(request.headers['content-type'] ?? ''))
+          return reply.status(400).send(httpFailure(400, request.id));
+        return;
+      }
+      try {
+        // 在读取大包正文前先鉴权，拒绝请求不占用包暂存与扫描资源。
+        const token = requestCredential(request, identity?.origin, true);
+        if (request.headers['content-encoding'] && request.headers['content-encoding'] !== 'identity')
+          throw new IdentityError(400, 'INVALID_REQUEST');
+        const user = (await identities.me(token)).user;
+        if (!user.is_super_admin && user.role !== 'admin') throw new IdentityError(403, 'ADMIN_REQUIRED');
+        request.raw.socket.setTimeout(60000);
+      } catch (error) {
+        const failure = error instanceof IdentityError ? error : new IdentityError(503, 'SERVICE_UNAVAILABLE');
+        if (failure.status < 500) await identities.rejection('plugin_package_uploaded', request.id, failure);
+        return reply.status(failure.status).send({ error: { code: failure.code, message: failure.message, request_id: request.id } });
+      }
+    });
+    fastify.addHook('preValidation', async request => {
+      const timer = bodyTimers.get(request);
+      if (timer) clearTimeout(timer);
+    });
+    fastify.addHook('onResponse', async request => {
+      const timer = bodyTimers.get(request);
+      if (timer) clearTimeout(timer);
+      if ((request.routeOptions.config as { pluginUpload?: boolean } | undefined)?.pluginUpload)
+        request.raw.socket.setTimeout(10000);
+    });
     if (adminRoot) {
       adapter.getInstance().register(fastifyStatic, {
         root: adminRoot,
@@ -178,11 +244,13 @@ export async function createHttpApp(
       swaggerOptions: { validatorUrl: null, persistAuthorization: false },
     });
     await app.init();
+    if (identity?.pluginRoot) await pluginFiles.initialize();
     // Fastify 解析错误也由 Nest 的异常层转入全局过滤器，不重复覆盖同 scope 的 handler。
     await adapter.getInstance().ready();
     return app;
   } catch (error) {
     await proxy.close();
+    await pluginFiles.close();
     await app.close();
     throw error;
   }

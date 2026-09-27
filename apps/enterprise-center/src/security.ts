@@ -16,15 +16,17 @@ export const Access = (mode: Policy['mode'], action?: string) =>
 export type AuthenticatedRequest = FastifyRequest & { token?: string; identity?: IdentityResponse };
 
 /** Nest 管理接口和 raw 模型路由共用来源检查；凭据用途仍由各自身份入口校验。 */
-export function requestCredential(request: FastifyRequest, origin?: string): string | undefined {
+export function requestCredential(request: FastifyRequest, origin?: string, pluginUpload = false): string | undefined {
   if (
     (request.headers.origin !== undefined && request.headers.origin !== origin) ||
     request.headers['sec-fetch-site'] === 'cross-site'
   )
     throw new IdentityError(403, 'FORBIDDEN');
+  // 仅带明确上传路由标记的请求可使用归档类型，其余管理写入仍只接受 JSON。
   if (
     ['POST', 'PUT', 'PATCH'].includes(request.method) &&
-    !/^application\/json(?:\s*;|$)/i.test(request.headers['content-type'] ?? '')
+    !(pluginUpload ? /^(application\/zip|application\/gzip)$/i : /^application\/json(?:\s*;|$)/i)
+      .test(request.headers['content-type'] ?? '')
   )
     throw new IdentityError(400, 'INVALID_REQUEST');
   return /^Bearer ([^\s]+)$/i.exec(request.headers.authorization ?? '')?.[1];
@@ -44,7 +46,8 @@ export class HttpSecurity implements CanActivate {
     const request = context.switchToHttp().getRequest<AuthenticatedRequest>();
 
     const check = async () => {
-      request.token = requestCredential(request, this.origin);
+      const pluginUpload = (request.routeOptions?.config as { pluginUpload?: boolean } | undefined)?.pluginUpload === true;
+      request.token = requestCredential(request, this.origin, pluginUpload);
       if (policy?.mode === 'public' || policy?.mode === 'optional') return true;
       request.identity = await this.identity.me(request.token);
       const user = request.identity.user;

@@ -1,0 +1,16 @@
+[
+  {
+    "id": "fixture-drawing",
+    "label": "测试绘图入口",
+    "icon": "file",
+    "agent": { "name": "测试绘图助手", "source": "center" },
+    "template": "请根据输入生成测试图纸。\n\n"
+  },
+  {
+    "id": "fixture-support",
+    "label": "测试咨询入口",
+    "icon": "bot",
+    "agent": { "name": "测试咨询助手", "source": "center" },
+    "template": "请处理以下测试咨询：\n\n"
+  }
+]

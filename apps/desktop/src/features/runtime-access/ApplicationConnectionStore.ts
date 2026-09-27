@@ -283,7 +283,7 @@ export class ApplicationConnectionStore {
     this.#bootstrap = bootstrap;
     this.#auth_reaction?.();
     if (this.desktop) activateRuntimeBinding(bootstrap);
-    runInAction(() => { this.phase = this.desktop ? "entry" : "loading"; this.progress = "正在初始化用户工作空间…"; this.mode = bootstrap.capabilities.mode; });
+    runInAction(() => { this.phase = this.desktop ? "entry" : "loading"; this.progress = "正在初始化用户项目…"; this.mode = bootstrap.capabilities.mode; });
     const identity_client = new RuntimeClient(bootstrap);
     let session: HostLoginResult;
     try { session = bootstrap.session ?? await identity_client.session(); }

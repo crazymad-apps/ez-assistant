@@ -118,8 +118,9 @@ export const ResourceWorkspace = observer(function ResourceWorkspace(props: Read
 
 
   return (
-    <aside className={styles.workspace} aria-label="资源栏" hidden={props.hidden}>
-      <header className={styles.tab_bar}>
+    <aside className={styles.workspace} aria-label="资源栏" aria-hidden={props.hidden}
+      data-shell-open={!props.hidden} data-shell-sidebar="right" inert={props.hidden}>
+      <header className={styles.tab_bar} data-tauri-drag-region="deep">
         <div aria-label="资源标签" className={styles.tab_scroller} onWheel={handleTabWheel} role="tablist">
           {store.tabs.map((tab) => {
             const key = resourceTabKey(tab);
@@ -192,7 +193,7 @@ export const ResourceWorkspace = observer(function ResourceWorkspace(props: Read
             <ResourceMenuItem
               disabled={!workspace_available}
               icon="folder"
-              label="工作空间"
+              label="项目"
               on_select={() => scope_key && workspace_available && store.openWorkspace(scope_key)}
             />
             <ResourceMenuItem disabled={!terminal_available} icon="terminal" label="终端" on_select={openTerminal} />

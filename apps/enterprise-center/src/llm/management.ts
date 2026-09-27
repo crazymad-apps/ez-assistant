@@ -8,9 +8,10 @@ import { CallEntity, RecordingEntity } from './entity.js';
 import { noSnapshot } from './snapshots.js';
 import type { Side } from './snapshots.js';
 import { outcomes } from '../contracts/calls.js';
-import type { CallDetails, CallPage, RecordingSettings, SnapshotContent, ModelTestResult } from '../contracts/calls.js';
+import type { CallDetails, CallPage, RecordingSettings, SnapshotContent, ModelTestResult, UsagePage, UsageModelOption } from '../contracts/calls.js';
 import type { ModelProxy } from './proxy.js';
 import type { CallRecording } from './records.js';
+import { queryUsage, usageModels } from './usage-query.js';
 
 function snapshotView(row: CallEntity, side: Side) {
   return {
@@ -36,6 +37,13 @@ function view(row: CallEntity): CallDetails {
     http_status: row.http_status,
     reason: row.reason,
     outcome: row.outcome,
+    usage_state: row.usage_state,
+    usage_reason: row.usage_reason,
+    input_tokens: row.input_tokens,
+    output_tokens: row.output_tokens,
+    total_tokens: row.total_tokens,
+    cached_input_tokens: row.cached_input_tokens,
+    reasoning_tokens: row.reasoning_tokens,
     request: snapshotView(row, 'request'),
     response: snapshotView(row, 'response'),
   };
@@ -121,6 +129,20 @@ export class CallManagement {
     return view(await this.row(id));
   }
 
+  async usage(token: string | undefined, value: unknown): Promise<UsagePage> {
+    await this.identities.requireAdmin(this.manager, token);
+    const result = await queryUsage(this.manager, value);
+    await this.identities.requireAdmin(this.manager, token);
+    return result;
+  }
+
+  async usageModels(token: string | undefined, value: unknown): Promise<UsageModelOption[]> {
+    await this.identities.requireAdmin(this.manager, token);
+    const result = await usageModels(this.manager, value);
+    await this.identities.requireAdmin(this.manager, token);
+    return result;
+  }
+
   async settings(token?: string): Promise<RecordingSettings> {
     await this.identities.requireAdmin(this.manager, token);
     const { enabled, content_retention_days, index_retention_days } = await this.proxy.records.settings();
@@ -152,7 +174,11 @@ export class CallManagement {
     const settings = { enabled, content_retention_days, index_retention_days };
     await this.identities.write(async (manager) => {
       const user = await this.identities.requireAdmin(manager, token);
-      await manager.getRepository(RecordingEntity).update({ singleton: true }, settings);
+      const previous = await manager.getRepository(RecordingEntity).findOneByOrFail({ singleton: true });
+      const boundary = index_retention_days < previous.index_retention_days
+        ? new Date(Math.max(previous.usage_available_from.getTime(), Date.now() - index_retention_days * 86400000))
+        : previous.usage_available_from;
+      await manager.getRepository(RecordingEntity).update({ singleton: true }, { ...settings, usage_available_from: boundary });
       await this.identities.audit(
         manager,
         'llm_recording_settings_changed',

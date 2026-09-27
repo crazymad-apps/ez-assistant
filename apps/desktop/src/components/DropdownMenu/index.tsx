@@ -17,6 +17,8 @@ import {
   type ButtonVisualProps,
 } from "../Button";
 import { usePresence } from "../Presence";
+import { InlineIconButton } from "../InlineIconButton";
+import type { IconName } from "../Icon";
 import styles from "./index.module.scss";
 
 type DropdownMenuContextValue = {
@@ -32,7 +34,9 @@ type DropdownMenuProps = PropsWithChildren<{
   readonly className?: string;
 }>;
 
-type DropdownMenuTriggerProps = ButtonHTMLAttributes<HTMLButtonElement> & ButtonVisualProps;
+type DropdownMenuTriggerProps = ButtonHTMLAttributes<HTMLButtonElement> & ButtonVisualProps & {
+  readonly inlineIcon?: IconName;
+};
 
 type DropdownMenuContentProps = PropsWithChildren<
   Omit<HTMLAttributes<HTMLDivElement>, "role"> & {
@@ -108,8 +112,11 @@ export function DropdownMenu(props: DropdownMenuProps) {
 export function DropdownMenuTrigger(props: DropdownMenuTriggerProps) {
   const menu = useDropdownMenu();
   const {
+    "aria-label": aria_label,
     className,
+    children,
     iconOnly,
+    inlineIcon,
     onClick,
     onKeyDown,
     size,
@@ -120,15 +127,14 @@ export function DropdownMenuTrigger(props: DropdownMenuTriggerProps) {
     ? buttonVisualProps({ className, iconOnly, size, variant })
     : { className };
 
-  return (
-    <button
-      {...button_props}
-      {...visual_props}
-      aria-controls={menu.open ? menu.content_id : undefined}
-      aria-expanded={menu.open}
-      aria-haspopup="menu"
-      data-state={menu.open ? "open" : "closed"}
-      onClick={(event) => {
+  const trigger_props = {
+      ...button_props,
+      ...visual_props,
+      "aria-controls": menu.open ? menu.content_id : undefined,
+      "aria-expanded": menu.open,
+      "aria-haspopup": "menu" as const,
+      "data-state": menu.open ? "open" : "closed",
+      onClick: (event: React.MouseEvent<HTMLButtonElement>) => {
         onClick?.(event);
         if (!event.defaultPrevented) {
           if (!menu.open) {
@@ -136,19 +142,24 @@ export function DropdownMenuTrigger(props: DropdownMenuTriggerProps) {
           }
           menu.setOpen(!menu.open);
         }
-      }}
-      onKeyDown={(event) => {
+      },
+      onKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => {
         onKeyDown?.(event);
         if (!event.defaultPrevented && !menu.open && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
           event.preventDefault();
           menu.focus_item_on_open_ref.current = event.key === "ArrowDown" ? "first" : "last";
           menu.setOpen(true);
         }
-      }}
-      ref={menu.trigger_ref}
-      type={props.type ?? "button"}
-    />
-  );
+      },
+      ref: menu.trigger_ref,
+      type: props.type ?? "button",
+  };
+
+  if (inlineIcon) {
+    return <InlineIconButton {...trigger_props} icon={inlineIcon} label={aria_label ?? ""} />;
+  }
+
+  return <button {...trigger_props} aria-label={aria_label}>{children}</button>;
 }
 
 export function DropdownMenuContent(props: DropdownMenuContentProps) {
@@ -264,6 +275,7 @@ export function DropdownMenuItem(props: DropdownMenuItemProps) {
       {...button_props}
       className={[styles.item, className].filter(Boolean).join(" ")}
       onClick={() => {
+        menu.trigger_ref.current?.focus();
         onSelect?.();
         menu.setOpen(false);
       }}

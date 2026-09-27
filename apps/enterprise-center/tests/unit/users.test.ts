@@ -121,6 +121,23 @@ it('审计详情只投影普通字段，不回传任意 JSON 或秘密', () => {
   ).toEqual({ before: { display_name: 'Alice', role: 'user' }, after: { enabled: false } });
   expect(auditDetails(null)).toEqual({});
 });
+it('C01 审计只投影可核对的名称、版本和摘要，不回传提示词或包内容', () => {
+  const sha256 = 'a'.repeat(64);
+  expect(auditDetails({
+    name: 'warehouse-cad-guidance', version: '0.2.0',
+    platforms: [{ os: 'macos', arch: 'arm64', token: 'secret' }],
+    result: 'replaced', publication: 'listed', sha256,
+    previous_sha256: 'b'.repeat(64), skill_count: 1, mcp_count: 0,
+    prompt: 'secret', archive: 'secret', credentials: 'secret',
+  })).toEqual({
+    name: 'warehouse-cad-guidance', version: '0.2.0',
+    platforms: [{ os: 'macos', arch: 'arm64' }],
+    result: 'replaced', publication: 'listed', sha256,
+    previous_sha256: 'b'.repeat(64), skill_count: 1, mcp_count: 0,
+  });
+  expect(auditDetails({ name: 'bad\nname', version: 'latest', platforms: [{ os: 'unknown', arch: 'arm64' }],
+    sha256: 'bad', skill_count: 999, prompt: 'secret' })).toEqual({});
+});
 it('OpenAPI 描述真实管理接口、分页字段和只读超级管理员标记', async () => {
   const app = await createHttpApp();
   try {

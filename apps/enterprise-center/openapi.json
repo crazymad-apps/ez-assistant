@@ -1228,6 +1228,174 @@
         ]
       }
     },
+    "/api/llm-usage": {
+      "get": {
+        "operationId": "getLlmUsage",
+        "parameters": [
+          {
+            "required": false,
+            "name": "from",
+            "in": "query",
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "required": false,
+            "name": "to",
+            "in": "query",
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "required": false,
+            "name": "user_id",
+            "in": "query",
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "required": false,
+            "name": "provider_instance_id",
+            "in": "query",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "required": false,
+            "name": "model_id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "required": false,
+            "name": "kind",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "required": false,
+            "name": "outcome",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "required": false,
+            "name": "granularity",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "required": false,
+            "name": "group_by",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "required": false,
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "default": 20,
+              "type": "number"
+            }
+          },
+          {
+            "required": false,
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "default": 0,
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsagePage"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、参数或存储失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "llm-calls"
+        ]
+      }
+    },
+    "/api/llm-usage/models": {
+      "get": {
+        "operationId": "listLlmUsageModels",
+        "parameters": [
+          {
+            "name": "search",
+            "required": false,
+            "in": "query",
+            "schema": {}
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/UsageModelOption"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、参数或存储失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "llm-calls"
+        ]
+      }
+    },
     "/api/llm-calls": {
       "get": {
         "operationId": "listLlmCalls",
@@ -1558,6 +1726,824 @@
         "summary": "",
         "tags": [
           "llm-calls"
+        ]
+      }
+    },
+    "/api/plugins": {
+      "get": {
+        "operationId": "listPlugins",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PluginRecord"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、归档、存储或提交失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "管理员读取全部插件及当前版本",
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
+    "/api/plugins/{name}": {
+      "get": {
+        "operationId": "getPlugin",
+        "parameters": [
+          {
+            "name": "name",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "headers": {
+              "ETag": {
+                "description": "当前展示与上架事实的条件写标识",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginDetail"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、归档、存储或提交失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "管理员读取插件详情与条件写 ETag",
+        "tags": [
+          "plugins"
+        ]
+      },
+      "put": {
+        "operationId": "updatePlugin",
+        "parameters": [
+          {
+            "name": "name",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "description": "管理详情返回的当前 ETag",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PluginDescriptionInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "headers": {
+              "ETag": {
+                "description": "更新后的条件写标识",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginDetail"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、归档、存储或提交失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "以 If-Match 修改插件说明",
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
+    "/api/plugins/{name}/publication": {
+      "put": {
+        "operationId": "setPluginPublication",
+        "parameters": [
+          {
+            "name": "name",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "description": "管理详情返回的当前 ETag",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PluginPublicationInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "headers": {
+              "ETag": {
+                "description": "更新后的条件写标识",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginDetail"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、归档、存储或提交失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "以 If-Match 上架或下架插件",
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
+    "/api/plugin-packages": {
+      "post": {
+        "operationId": "uploadPluginPackage",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/zip": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "application/gzip": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PackageUploadResult"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PackageUploadResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、归档、存储或提交失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "上传或替换一个完整插件版本包",
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
+    "/api/plugin-packages/{name}/versions/{version}": {
+      "get": {
+        "operationId": "getCurrentPluginPackage",
+        "parameters": [
+          {
+            "name": "name",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PackageCurrent"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、归档、存储或提交失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "核对某版本当前完整包",
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
+    "/api/runtime/plugins": {
+      "get": {
+        "operationId": "listRuntimePlugins",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PluginRecord"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、归档、存储或提交失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "读取在架插件目录",
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
+    "/api/runtime/plugins/{name}": {
+      "get": {
+        "operationId": "getRuntimePlugin",
+        "parameters": [
+          {
+            "name": "name",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginRecord"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、归档、存储或提交失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "读取插件发布状态与在架版本",
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
+    "/api/runtime/plugins/{name}/resolve": {
+      "post": {
+        "operationId": "resolveRuntimePlugin",
+        "parameters": [
+          {
+            "name": "name",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PluginResolveInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginResolution"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、归档、存储或提交失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "按平台、Host 和能力选择当前完整包",
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
+    "/api/runtime/plugins/{name}/versions/{version}/package": {
+      "get": {
+        "operationId": "downloadRuntimePluginPackage",
+        "parameters": [
+          {
+            "name": "name",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "description": "版本当前 SHA 的带引号 ETag",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "headers": {
+              "Content-Length": {
+                "description": "原包字节数",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "ETag": {
+                "description": "当前原包 SHA 的条件标识",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Plugin-SHA256": {
+                "description": "原包 SHA-256",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "",
+            "content": {
+              "application/zip": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "application/gzip": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "身份、归档、存储或提交失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "带当前 SHA 条件下载完整原包",
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
+    "/api/agents": {
+      "get": {
+        "operationId": "listAgents",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AgentSummary"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "输入、身份、条件写或依赖失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "管理员读取 Agent 摘要与当前依赖诊断",
+        "tags": [
+          "agents"
+        ]
+      },
+      "post": {
+        "operationId": "createAgent",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentConfig"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "headers": {
+              "ETag": {
+                "description": "新配置的条件写标识",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Location": {
+                "description": "新建 Agent 的管理详情路径",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentConfig"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "输入、身份、条件写或依赖失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "创建完整企业 Agent 配置",
+        "tags": [
+          "agents"
+        ]
+      }
+    },
+    "/api/agents/{name}": {
+      "get": {
+        "operationId": "getAgent",
+        "parameters": [
+          {
+            "name": "name",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "headers": {
+              "ETag": {
+                "description": "当前完整配置的条件写标识",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDetail"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "输入、身份、条件写或依赖失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "管理员读取完整 Agent 与当前依赖诊断",
+        "tags": [
+          "agents"
+        ]
+      },
+      "put": {
+        "operationId": "updateAgent",
+        "parameters": [
+          {
+            "name": "name",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "description": "管理详情返回的当前 ETag",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentConfig"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "headers": {
+              "ETag": {
+                "description": "更新后完整配置的条件写标识",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentConfig"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "输入、身份、条件写或依赖失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "以 If-Match 修改完整 Agent 配置",
+        "tags": [
+          "agents"
+        ]
+      },
+      "delete": {
+        "operationId": "deleteAgent",
+        "parameters": [
+          {
+            "name": "name",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "description": "管理详情返回的当前 ETag",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "default": {
+            "description": "输入、身份、条件写或依赖失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "以 If-Match 删除 Agent 配置",
+        "tags": [
+          "agents"
+        ]
+      }
+    },
+    "/api/runtime/agents": {
+      "get": {
+        "operationId": "listRuntimeAgents",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AgentConfig"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "输入、身份、条件写或依赖失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "登录用户读取完整企业 Agent 配置目录",
+        "tags": [
+          "agents"
         ]
       }
     }
@@ -1931,6 +2917,30 @@
           "new_password"
         ]
       },
+      "PluginPlatform": {
+        "type": "object",
+        "properties": {
+          "os": {
+            "type": "string",
+            "enum": [
+              "macos",
+              "windows",
+              "linux"
+            ]
+          },
+          "arch": {
+            "type": "string",
+            "enum": [
+              "x64",
+              "arm64"
+            ]
+          }
+        },
+        "required": [
+          "os",
+          "arch"
+        ]
+      },
       "ModelSelection": {
         "type": "object",
         "properties": {
@@ -1968,6 +2978,52 @@
       "AuditDetails": {
         "type": "object",
         "properties": {
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "platforms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PluginPlatform"
+            }
+          },
+          "result": {
+            "type": "string",
+            "enum": [
+              "created",
+              "replaced",
+              "unchanged"
+            ]
+          },
+          "publication": {
+            "type": "string",
+            "enum": [
+              "unpublished",
+              "listed",
+              "deprecated"
+            ]
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "previous_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "skill_count": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 256
+          },
+          "mcp_count": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 256
+          },
           "call_id": {
             "type": "string",
             "format": "uuid"
@@ -2758,6 +3814,436 @@
           "center_id"
         ]
       },
+      "UsageTotals": {
+        "type": "object",
+        "properties": {
+          "calls": {
+            "type": "string"
+          },
+          "forwarded": {
+            "type": "string"
+          },
+          "rejected": {
+            "type": "string"
+          },
+          "upstream_error": {
+            "type": "string"
+          },
+          "interrupted": {
+            "type": "string"
+          },
+          "unknown": {
+            "type": "string"
+          },
+          "in_progress": {
+            "type": "string"
+          },
+          "avg_duration_ms": {
+            "type": "string",
+            "nullable": true
+          },
+          "available": {
+            "type": "string"
+          },
+          "partial": {
+            "type": "string"
+          },
+          "unavailable": {
+            "type": "string"
+          },
+          "pending": {
+            "type": "string"
+          },
+          "input_tokens": {
+            "type": "string",
+            "nullable": true
+          },
+          "output_tokens": {
+            "type": "string",
+            "nullable": true
+          },
+          "total_tokens": {
+            "type": "string",
+            "nullable": true
+          },
+          "cached_input_tokens": {
+            "type": "string",
+            "nullable": true
+          },
+          "reasoning_tokens": {
+            "type": "string",
+            "nullable": true
+          },
+          "input_samples": {
+            "type": "string"
+          },
+          "output_samples": {
+            "type": "string"
+          },
+          "total_samples": {
+            "type": "string"
+          },
+          "cached_samples": {
+            "type": "string"
+          },
+          "reasoning_samples": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "calls",
+          "forwarded",
+          "rejected",
+          "upstream_error",
+          "interrupted",
+          "unknown",
+          "in_progress",
+          "avg_duration_ms",
+          "available",
+          "partial",
+          "unavailable",
+          "pending",
+          "input_tokens",
+          "output_tokens",
+          "total_tokens",
+          "cached_input_tokens",
+          "reasoning_tokens",
+          "input_samples",
+          "output_samples",
+          "total_samples",
+          "cached_samples",
+          "reasoning_samples"
+        ]
+      },
+      "UsageBucket": {
+        "type": "object",
+        "properties": {
+          "calls": {
+            "type": "string"
+          },
+          "forwarded": {
+            "type": "string"
+          },
+          "rejected": {
+            "type": "string"
+          },
+          "upstream_error": {
+            "type": "string"
+          },
+          "interrupted": {
+            "type": "string"
+          },
+          "unknown": {
+            "type": "string"
+          },
+          "in_progress": {
+            "type": "string"
+          },
+          "avg_duration_ms": {
+            "type": "string",
+            "nullable": true
+          },
+          "available": {
+            "type": "string"
+          },
+          "partial": {
+            "type": "string"
+          },
+          "unavailable": {
+            "type": "string"
+          },
+          "pending": {
+            "type": "string"
+          },
+          "input_tokens": {
+            "type": "string",
+            "nullable": true
+          },
+          "output_tokens": {
+            "type": "string",
+            "nullable": true
+          },
+          "total_tokens": {
+            "type": "string",
+            "nullable": true
+          },
+          "cached_input_tokens": {
+            "type": "string",
+            "nullable": true
+          },
+          "reasoning_tokens": {
+            "type": "string",
+            "nullable": true
+          },
+          "input_samples": {
+            "type": "string"
+          },
+          "output_samples": {
+            "type": "string"
+          },
+          "total_samples": {
+            "type": "string"
+          },
+          "cached_samples": {
+            "type": "string"
+          },
+          "reasoning_samples": {
+            "type": "string"
+          },
+          "start": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "incomplete": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "calls",
+          "forwarded",
+          "rejected",
+          "upstream_error",
+          "interrupted",
+          "unknown",
+          "in_progress",
+          "avg_duration_ms",
+          "available",
+          "partial",
+          "unavailable",
+          "pending",
+          "input_tokens",
+          "output_tokens",
+          "total_tokens",
+          "cached_input_tokens",
+          "reasoning_tokens",
+          "input_samples",
+          "output_samples",
+          "total_samples",
+          "cached_samples",
+          "reasoning_samples",
+          "start",
+          "incomplete"
+        ]
+      },
+      "UsageGroup": {
+        "type": "object",
+        "properties": {
+          "calls": {
+            "type": "string"
+          },
+          "forwarded": {
+            "type": "string"
+          },
+          "rejected": {
+            "type": "string"
+          },
+          "upstream_error": {
+            "type": "string"
+          },
+          "interrupted": {
+            "type": "string"
+          },
+          "unknown": {
+            "type": "string"
+          },
+          "in_progress": {
+            "type": "string"
+          },
+          "avg_duration_ms": {
+            "type": "string",
+            "nullable": true
+          },
+          "available": {
+            "type": "string"
+          },
+          "partial": {
+            "type": "string"
+          },
+          "unavailable": {
+            "type": "string"
+          },
+          "pending": {
+            "type": "string"
+          },
+          "input_tokens": {
+            "type": "string",
+            "nullable": true
+          },
+          "output_tokens": {
+            "type": "string",
+            "nullable": true
+          },
+          "total_tokens": {
+            "type": "string",
+            "nullable": true
+          },
+          "cached_input_tokens": {
+            "type": "string",
+            "nullable": true
+          },
+          "reasoning_tokens": {
+            "type": "string",
+            "nullable": true
+          },
+          "input_samples": {
+            "type": "string"
+          },
+          "output_samples": {
+            "type": "string"
+          },
+          "total_samples": {
+            "type": "string"
+          },
+          "cached_samples": {
+            "type": "string"
+          },
+          "reasoning_samples": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "number",
+            "nullable": true
+          },
+          "username": {
+            "type": "string",
+            "nullable": true
+          },
+          "provider_instance_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "provider_name": {
+            "type": "string",
+            "nullable": true
+          },
+          "model_id": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "calls",
+          "forwarded",
+          "rejected",
+          "upstream_error",
+          "interrupted",
+          "unknown",
+          "in_progress",
+          "avg_duration_ms",
+          "available",
+          "partial",
+          "unavailable",
+          "pending",
+          "input_tokens",
+          "output_tokens",
+          "total_tokens",
+          "cached_input_tokens",
+          "reasoning_tokens",
+          "input_samples",
+          "output_samples",
+          "total_samples",
+          "cached_samples",
+          "reasoning_samples",
+          "user_id",
+          "username",
+          "provider_instance_id",
+          "provider_name",
+          "model_id"
+        ]
+      },
+      "UsagePage": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "available_from": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "granularity": {
+            "type": "string",
+            "enum": [
+              "hour",
+              "day",
+              "month"
+            ]
+          },
+          "group_by": {
+            "type": "string",
+            "enum": [
+              "user",
+              "model"
+            ]
+          },
+          "summary": {
+            "$ref": "#/components/schemas/UsageTotals"
+          },
+          "buckets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageBucket"
+            }
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageGroup"
+            }
+          },
+          "group_total": {
+            "type": "number"
+          },
+          "limit": {
+            "type": "number"
+          },
+          "offset": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "available_from",
+          "timezone",
+          "granularity",
+          "group_by",
+          "summary",
+          "buckets",
+          "groups",
+          "group_total",
+          "limit",
+          "offset"
+        ]
+      },
+      "UsageModelOption": {
+        "type": "object",
+        "properties": {
+          "provider_instance_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "provider_name": {
+            "type": "string"
+          },
+          "model_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider_instance_id",
+          "provider_name",
+          "model_id"
+        ]
+      },
       "CallSnapshot": {
         "type": "object",
         "properties": {
@@ -2862,6 +4348,39 @@
               "unknown"
             ]
           },
+          "usage_state": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "available",
+              "partial",
+              "unavailable"
+            ]
+          },
+          "usage_reason": {
+            "type": "string",
+            "nullable": true
+          },
+          "input_tokens": {
+            "type": "string",
+            "nullable": true
+          },
+          "output_tokens": {
+            "type": "string",
+            "nullable": true
+          },
+          "total_tokens": {
+            "type": "string",
+            "nullable": true
+          },
+          "cached_input_tokens": {
+            "type": "string",
+            "nullable": true
+          },
+          "reasoning_tokens": {
+            "type": "string",
+            "nullable": true
+          },
           "request": {
             "$ref": "#/components/schemas/CallSnapshot"
           },
@@ -2883,6 +4402,13 @@
           "http_status",
           "reason",
           "outcome",
+          "usage_state",
+          "usage_reason",
+          "input_tokens",
+          "output_tokens",
+          "total_tokens",
+          "cached_input_tokens",
+          "reasoning_tokens",
           "request",
           "response"
         ]
@@ -3016,6 +4542,641 @@
           "http_status",
           "connected",
           "reason"
+        ]
+      },
+      "PluginVersionSummary": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string"
+          },
+          "platforms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PluginPlatform"
+            }
+          },
+          "min_host_version": {
+            "type": "string"
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "mcp": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "archive_format": {
+            "type": "string",
+            "enum": [
+              "zip",
+              "tar_gzip"
+            ]
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "size_bytes": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "version",
+          "platforms",
+          "min_host_version",
+          "skills",
+          "mcp",
+          "archive_format",
+          "sha256",
+          "size_bytes"
+        ]
+      },
+      "PluginRecord": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "publication": {
+            "type": "string",
+            "enum": [
+              "unpublished",
+              "listed",
+              "deprecated"
+            ]
+          },
+          "versions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PluginVersionSummary"
+            }
+          }
+        },
+        "required": [
+          "name",
+          "display_name",
+          "description",
+          "publication",
+          "versions"
+        ]
+      },
+      "PluginConfigurationRequirement": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "secret": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "label",
+          "required",
+          "secret"
+        ]
+      },
+      "PluginExternalSoftwareRequirement": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "instructions": {
+            "type": "string"
+          },
+          "download_url": {
+            "type": "string"
+          },
+          "platforms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PluginPlatform"
+            }
+          }
+        },
+        "required": [
+          "name",
+          "display_name",
+          "instructions"
+        ]
+      },
+      "PluginVersionDetail": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string"
+          },
+          "platforms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PluginPlatform"
+            }
+          },
+          "min_host_version": {
+            "type": "string"
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "mcp": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "archive_format": {
+            "type": "string",
+            "enum": [
+              "zip",
+              "tar_gzip"
+            ]
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "size_bytes": {
+            "type": "number"
+          },
+          "updated_at": {
+            "type": "string"
+          },
+          "configuration": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PluginConfigurationRequirement"
+            }
+          },
+          "external_software": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PluginExternalSoftwareRequirement"
+            }
+          }
+        },
+        "required": [
+          "version",
+          "platforms",
+          "min_host_version",
+          "skills",
+          "mcp",
+          "archive_format",
+          "sha256",
+          "size_bytes",
+          "updated_at",
+          "configuration",
+          "external_software"
+        ]
+      },
+      "PluginDetail": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "publication": {
+            "type": "string",
+            "enum": [
+              "unpublished",
+              "listed",
+              "deprecated"
+            ]
+          },
+          "versions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PluginVersionDetail"
+            }
+          },
+          "dependent_agents": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "name",
+          "display_name",
+          "description",
+          "publication",
+          "versions",
+          "dependent_agents"
+        ]
+      },
+      "PluginDescriptionInput": {
+        "type": "object",
+        "properties": {
+          "display_name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "display_name",
+          "description"
+        ]
+      },
+      "PluginPublicationInput": {
+        "type": "object",
+        "properties": {
+          "listed": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "listed"
+        ]
+      },
+      "PackageUploadResult": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "platforms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PluginPlatform"
+            }
+          },
+          "archive_format": {
+            "type": "string",
+            "enum": [
+              "zip",
+              "tar_gzip"
+            ]
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "size_bytes": {
+            "type": "number"
+          },
+          "result": {
+            "type": "string",
+            "enum": [
+              "created",
+              "replaced",
+              "unchanged"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "version",
+          "platforms",
+          "archive_format",
+          "sha256",
+          "size_bytes",
+          "result"
+        ]
+      },
+      "PackageCurrent": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "platforms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PluginPlatform"
+            }
+          },
+          "archive_format": {
+            "type": "string",
+            "enum": [
+              "zip",
+              "tar_gzip"
+            ]
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "size_bytes": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "name",
+          "version",
+          "platforms",
+          "archive_format",
+          "sha256",
+          "size_bytes"
+        ]
+      },
+      "PluginResolveInput": {
+        "type": "object",
+        "properties": {
+          "os": {
+            "type": "string",
+            "enum": [
+              "macos",
+              "windows",
+              "linux"
+            ]
+          },
+          "arch": {
+            "type": "string",
+            "enum": [
+              "x64",
+              "arm64"
+            ]
+          },
+          "host_version": {
+            "type": "string"
+          },
+          "installed_version": {
+            "type": "string"
+          },
+          "required_skills": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "required_mcp": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "os",
+          "arch",
+          "host_version"
+        ]
+      },
+      "PluginResolvedPackage": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string"
+          },
+          "platforms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PluginPlatform"
+            }
+          },
+          "min_host_version": {
+            "type": "string"
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "mcp": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "archive_format": {
+            "type": "string",
+            "enum": [
+              "zip",
+              "tar_gzip"
+            ]
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "size_bytes": {
+            "type": "number"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "platforms",
+          "min_host_version",
+          "skills",
+          "mcp",
+          "archive_format",
+          "sha256",
+          "size_bytes",
+          "name"
+        ]
+      },
+      "PluginResolution": {
+        "type": "object",
+        "properties": {
+          "package": {
+            "$ref": "#/components/schemas/PluginResolvedPackage"
+          },
+          "update_available": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "package",
+          "update_available"
+        ]
+      },
+      "AgentDependencyDiagnostic": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "skill",
+              "mcp"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "plugin": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "available",
+              "host_check_required",
+              "plugin_missing",
+              "plugin_unpublished",
+              "plugin_deprecated",
+              "capability_missing"
+            ]
+          },
+          "platforms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PluginPlatform"
+            }
+          }
+        },
+        "required": [
+          "kind",
+          "name",
+          "status",
+          "platforms"
+        ]
+      },
+      "AgentSummary": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "skill_count": {
+            "type": "number"
+          },
+          "mcp_count": {
+            "type": "number"
+          },
+          "diagnostics": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentDependencyDiagnostic"
+            }
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "skill_count",
+          "mcp_count",
+          "diagnostics"
+        ]
+      },
+      "AgentCapabilityReference": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "plugin": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "AgentConfig": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentCapabilityReference"
+            }
+          },
+          "mcp": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentCapabilityReference"
+            }
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "prompt",
+          "skills",
+          "mcp"
+        ]
+      },
+      "AgentDetail": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentCapabilityReference"
+            }
+          },
+          "mcp": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentCapabilityReference"
+            }
+          },
+          "diagnostics": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentDependencyDiagnostic"
+            }
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "prompt",
+          "skills",
+          "mcp",
+          "diagnostics"
         ]
       }
     }

@@ -206,6 +206,13 @@ async fn provider_response(Json(body): Json<Value>) -> impl IntoResponse {
         directory_list_tool_response(current_turn_tool_result_count(&body) + 1)
     } else if case == "WRITE_CASE" && !current_turn_has_tool_result {
         file_write_tool_response(tool_exchange_number(&body))
+    } else if case == "PRIVATE_SHELL_CASE" && !current_turn_has_tool_result {
+        named_tool_response(
+            "private-shell",
+            "call-private-shell",
+            "shell",
+            json!({"command":"pwd > shell-cwd.txt"}),
+        )
     } else if case == "FILE_REFERENCE_CASE" && !current_turn_has_tool_result {
         file_read_tool_response(
             attached_file_path(&body).expect("File References request contains a readable path"),
@@ -230,7 +237,11 @@ async fn provider_response(Json(body): Json<Value>) -> impl IntoResponse {
     } else {
         let response_id = if matches!(
             case,
-            "FILE_REFERENCE_CASE" | "TOOL_CASE" | "TOOL_TWICE_CASE" | "WRITE_CASE"
+            "FILE_REFERENCE_CASE"
+                | "TOOL_CASE"
+                | "TOOL_TWICE_CASE"
+                | "WRITE_CASE"
+                | "PRIVATE_SHELL_CASE"
         ) {
             format!("text-{case}-{}", tool_exchange_number(&body))
         } else {
@@ -894,6 +905,7 @@ fn latest_case(body: &str) -> &'static str {
         "TOOL_CASE",
         "TOOL_TWICE_CASE",
         "WRITE_CASE",
+        "PRIVATE_SHELL_CASE",
         "CANCEL_CASE",
         "REPLACEMENT_CASE",
         "FILE_REFERENCE_CASE",

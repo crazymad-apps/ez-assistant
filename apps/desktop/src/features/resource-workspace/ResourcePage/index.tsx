@@ -1,3 +1,4 @@
+import { revealFileLabel } from "../../../platform/fileManager";
 import { observer } from "mobx-react-lite";
 import { useEffect, useState, type RefObject } from "react";
 import type { SessionResourceEntry } from "@ez-assistant/protocol";
@@ -29,7 +30,7 @@ export const ResourcePage = observer(function ResourcePage(props: Readonly<{
   const workspace = root_store.projection.application?.workspaces.find((item) => item.workspace_id === draft?.workspace_id);
   const view_state = store.view_states.get(key)!;
   const roots = session_view ? sessionRoots(session_view.workspace)
-    : workspace ? draftRoots(workspace.user_directory, workspace.additional_directories)
+    : workspace ? draftRoots(workspace.user_directory ?? workspace.agent_directory, workspace.additional_directories)
       : view_state.roots ?? (session_id ? sessionRoots(undefined) : []);
   useEffect(() => {
     // Host 重连会暂时清掉投影；保留根的展示信息，不把已有页面改成另一个根。
@@ -50,7 +51,7 @@ export const ResourcePage = observer(function ResourcePage(props: Readonly<{
       location,
       items: [
         {
-          label: directory ? "在工作空间中打开" : "在资源栏打开",
+          label: directory ? "在项目中打开" : "在资源栏打开",
           on_select: () => {
             if (directory) store.openWorkspace(scope_key, entry.locator);
             else store.openSessionResource(scope_key, session_id, entry.locator, entry.display_name);
@@ -66,10 +67,10 @@ export const ResourcePage = observer(function ResourcePage(props: Readonly<{
           ),
         },
         {
-          label: "在 Finder 中显示",
+          label: revealFileLabel(),
           on_select: () => runResourceAction(
             revealSessionResourceInDirectory(session_id, entry.locator),
-            "无法在 Finder 中显示。",
+            "无法在文件管理器中显示。",
           ),
         }        ] : []),
       ],

@@ -1,0 +1,36 @@
+.wrapper {
+  min-width: 0;
+  position: relative;
+}
+
+.chart {
+  width: 100%;
+  height: 340px;
+}
+
+.hint {
+  display: block;
+  margin-top: -4px;
+  color: var(--ez-text-secondary);
+  text-align: right;
+  font-size: 12px;
+}
+
+.empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--ez-text-secondary);
+  text-align: center;
+  font-size: 13px;
+
+  strong {
+    color: var(--ez-text-primary);
+    font-size: 16px;
+    font-weight: 600;
+  }
+}

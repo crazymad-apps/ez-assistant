@@ -1,32 +1,25 @@
-import { AccountMenu } from "../../features/runtime-access/AccountMenu";
 import { DesktopWindowControls } from "../../features/desktop-lifecycle/DesktopWindowControls";
 import { HostDirectoryDialog } from "../../features/workspaces/HostDirectoryDialog";
 import { observer } from "mobx-react-lite";
-import { useEffect, useRef, useState, type CSSProperties } from "react";
-import { Icon } from "../../components/Icon";
-import { Button } from "../../components/Button";
-import { useApplicationConnection } from "../../features/runtime-access/ApplicationConnectionContext";
-import { Tooltip } from "../../components/Tooltip";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { usePresence } from "../../components/Presence";
 import { ResourceWorkspace } from "../../features/resource-workspace/ResourceWorkspace";
 import { DesktopLifecycleDialog } from "../../features/desktop-lifecycle/DesktopLifecycleDialog";
 import { ComposerDock } from "../../features/composer/ComposerDock";
 import { ConversationView } from "../../features/conversation/ConversationView";
-import { RuntimeStatus } from "../../features/runtime-status/RuntimeStatus";
 import { SettingsDialog } from "../../features/settings/SettingsDialog";
 import { SessionSidebar } from "../../features/sessions/SessionSidebar";
+import { SessionSearchDialog } from "../../features/sessions/SessionSearchDialog";
 import { ConversationSearchDialog } from "../../features/sessions/ConversationSearchDialog";
 import { WorkspaceEditorDialog } from "../../features/workspaces/WorkspaceEditorDialog";
 import {
   getDesktopPlatform,
-  toggleMaximizeDesktopWindow,
   type DesktopPlatform,
 } from "../../native-bridge/desktopLifecycle";
 import { useRootStore } from "../../stores/RootStoreContext";
 import {
   LEFT_SIDEBAR_DEFAULT_WIDTH,
   LEFT_SIDEBAR_MIN_WIDTH,
-  RIGHT_SIDEBAR_DEFAULT_WIDTH,
   RIGHT_SIDEBAR_MIN_WIDTH,
 } from "../../stores/NavigationStore";
 import { ChildTaskSubheader } from "./ChildTaskSubheader";
@@ -35,8 +28,8 @@ import styles from "./index.module.scss";
 
 export const AppShell = observer(function AppShell() {
   const store = useRootStore();
-  const application_connection = useApplicationConnection();
   const [desktop_platform, setDesktopPlatform] = useState<DesktopPlatform>("unsupported");
+  const [search_dialog_open, setSearchDialogOpen] = useState(false);
   const application = store.projection.application;
   const session_id = store.navigation.selected_session_id;
   const session = application?.active_sessions.find((item) => item.session_id === session_id)
@@ -55,9 +48,9 @@ export const AppShell = observer(function AppShell() {
       setDesktopPlatform(platform);
     });
     return () => { active = false; };
-  }, []);
+  }, [navigation]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     function updateViewportWidth() {
       navigation.setViewportWidth(Math.max(document.documentElement.clientWidth, window.innerWidth));
     }
@@ -66,54 +59,29 @@ export const AppShell = observer(function AppShell() {
     return () => window.removeEventListener("resize", updateViewportWidth);
   }, [navigation]);
 
-  function handleTitleBarDoubleClick(event: React.MouseEvent<HTMLElement>) {
-    if ((desktop_platform !== "linux" && desktop_platform !== "windows") || (event.target as HTMLElement).closest("button")) return;
-    void toggleMaximizeDesktopWindow();
-  }
+  const sidebar_expanded = navigation.effective_left_sidebar_open;
 
   return (
     <main
       className={styles.app_shell}
-      data-left-sidebar={navigation.effective_left_sidebar_open}
+      data-left-sidebar={sidebar_expanded}
       data-right-sidebar={navigation.effective_right_sidebar_open}
+      data-platform={desktop_platform}
       style={{
-        "--ez-left-sidebar-width": `${navigation.effective_left_sidebar_width}px`,
+        "--ez-left-sidebar-width": `${navigation.left_sidebar_width}px`,
         "--ez-right-sidebar-width": `${navigation.effective_right_sidebar_width}px`,
       } as CSSProperties}
     >
-      <header
-        className={styles.title_bar}
-        data-app-title-bar
-        data-platform={desktop_platform}
-        data-tauri-drag-region
-        onDoubleClick={handleTitleBarDoubleClick}
-      >
-        <button
-          aria-label={navigation.effective_left_sidebar_open ? "收起会话栏" : "展开会话栏"}
-          className={styles.title_icon}
-          onClick={() => store.toggleLeftSidebar()}
-          type="button"
-        >
-          <Icon name="menu" size={17} />
-        </button>
-        <strong className={styles.app_title} data-tauri-drag-region>
-          <span data-tauri-drag-region>ez-assistant · 本地 AI 助手</span>
-          <span className={styles.app_version} data-tauri-drag-region>v{__APP_VERSION__}</span>
-        </strong>
-        {application_connection?.desktop && <Tooltip content="打开 Web 端">
-          <Button aria-label="打开 Web 端" iconOnly variant="text" disabled={application_connection.web_pending || store.connection.state !== "connected"} onClick={() => void application_connection.openWeb()}><Icon name="globe" size={17} /></Button>
-        </Tooltip>}
-        <RuntimeStatus />
-        {application_connection && <AccountMenu connection={application_connection} />}
-        <DesktopWindowControls />
-      </header>
-
       <div className={styles.app_body}>
-        {navigation.effective_left_sidebar_open && <SessionSidebar />}
-        {navigation.effective_left_sidebar_open && <SidebarResizeHandle side="left" />}
-        <section className={styles.conversation_area} data-conversation-area>
-          <div className={styles.conversation_headers}>
-            <SessionHeader session={session} />
+        <SessionSidebar
+          hidden={!sidebar_expanded}
+          on_search={() => setSearchDialogOpen(true)}
+          on_toggle={() => store.toggleLeftSidebar()}
+        />
+        {sidebar_expanded && <SidebarResizeHandle side="left" />}
+        <section className={styles.conversation_area} data-conversation-area data-new-session={store.navigation.selected_draft_key !== null}>
+          <div className={styles.conversation_headers} data-tauri-drag-region="deep">
+            <SessionHeader on_search={() => setSearchDialogOpen(true)} on_toggle_sidebar={() => store.toggleLeftSidebar()} session={session} sidebar_open={sidebar_expanded} />
             <ChildTaskSubheader />
           </div>
           {store.connection.state !== "connected" && application && (
@@ -132,7 +100,11 @@ export const AppShell = observer(function AppShell() {
         {navigation.effective_right_sidebar_open && <SidebarResizeHandle side="right" />}
         <ResourceWorkspace hidden={!navigation.effective_right_sidebar_open} overlay_root_ref={overlay_root_ref} />
       </div>
+      <div className={styles.window_controls} data-app-title-bar>
+        <DesktopWindowControls />
+      </div>
       <SettingsDialog />
+      <SessionSearchDialog on_close={() => setSearchDialogOpen(false)} open={search_dialog_open} />
       {store.directory_picker && <HostDirectoryDialog />}
       <DesktopLifecycleDialog />
       <ConversationSearchDialog />
@@ -187,7 +159,7 @@ const SidebarResizeHandle = observer(function SidebarResizeHandle(props: Readonl
     }
     const next_width = props.side === "left"
       ? navigation.left_sidebar_width
-      : navigation.right_sidebar_width;
+      : navigation.effective_right_sidebar_width;
     store.setSidebarWidth(props.side, next_width, true);
     announce(next_width);
   }
@@ -224,7 +196,7 @@ const SidebarResizeHandle = observer(function SidebarResizeHandle(props: Readonl
     if (next_width === null) return;
     event.preventDefault();
     store.setSidebarWidth(props.side, next_width, true);
-    announce(props.side === "left" ? navigation.left_sidebar_width : navigation.right_sidebar_width);
+    announce(props.side === "left" ? navigation.left_sidebar_width : navigation.effective_right_sidebar_width);
   }
 
   return (
@@ -240,7 +212,7 @@ const SidebarResizeHandle = observer(function SidebarResizeHandle(props: Readonl
         data-side={props.side}
         onDoubleClick={() => {
           store.resetSidebarWidth(props.side);
-          announce(props.side === "left" ? LEFT_SIDEBAR_DEFAULT_WIDTH : RIGHT_SIDEBAR_DEFAULT_WIDTH);
+          announce(props.side === "left" ? LEFT_SIDEBAR_DEFAULT_WIDTH : navigation.effective_right_sidebar_width);
         }}
         onKeyDown={updateFromKeyboard}
         onLostPointerCapture={finishDrag}

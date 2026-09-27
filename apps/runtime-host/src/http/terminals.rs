@@ -202,7 +202,10 @@ pub(crate) async fn directory(
                     session: None,
                     workspace: Some(workspace_id.clone()),
                 },
-                workspace.user_directory.into(),
+                workspace
+                    .user_directory
+                    .unwrap_or(workspace.agent_directory)
+                    .into(),
             )
         }
     };

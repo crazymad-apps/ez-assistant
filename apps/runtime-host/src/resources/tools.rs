@@ -264,7 +264,13 @@ impl LocalToolResources {
                 Arc::new(SessionPermissionFileMutationPolicy { sessions_root }),
             ],
         )
-        .with_default_rules(self.filesystem.paths.clone()))
+        .with_default_rules(self.filesystem.paths.clone())
+        .with_artifact_files(Arc::new(
+            crate::http::resources::artifacts::HostArtifactFiles::new(
+                request.environment.clone(),
+                self.filesystem.paths.clone(),
+            ),
+        )))
     }
 }
 

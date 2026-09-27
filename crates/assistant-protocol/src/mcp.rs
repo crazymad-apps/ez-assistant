@@ -304,6 +304,9 @@ pub struct ListMcpServerOptionsRequest {
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct McpServerOptionSnapshot {
     pub server_key: McpServerKey,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub plugin_name: Option<String>,
     pub display_name: String,
     pub description: String,
     pub visible_tool_count: u32,
@@ -425,6 +428,7 @@ pub enum McpServerRefreshOutcome {
     Refreshed,
     ConnectedWithoutTools,
     RetainedAfterFailure,
+    BlockedByConflict,
     Removed,
     Disabled,
     NotFound,

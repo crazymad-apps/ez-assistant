@@ -388,6 +388,10 @@ impl VolatileRuntimeStore {
                 .inputs
                 .retain(|_, input| !removed.contains(&input.input_id));
             state.runs.retain(|_, run| !removed.contains(&run.input_id));
+            let retained_runs = state.runs.keys().cloned().collect::<BTreeSet<_>>();
+            state
+                .feedback
+                .retain(|_, request| retained_runs.contains(&request.run_id));
             state.skill_activations.retain(|_, activation| {
                 activation.session_id != rewrite.session_id
                     || retained_message_ids.contains(&activation.message_id)

@@ -24,19 +24,19 @@ export const LEFT_SIDEBAR_MAX_WIDTH = 420;
 export const RIGHT_SIDEBAR_DEFAULT_WIDTH = 380;
 export const RIGHT_SIDEBAR_MIN_WIDTH = 320;
 export const CONVERSATION_MIN_WIDTH = 500;
+// 旧的像素偏好继续作为基准窗口下的宽度保存；实际右栏按剩余空间等比伸缩。
+const RIGHT_SIDEBAR_REFERENCE_SPACE = 1280 - LEFT_SIDEBAR_DEFAULT_WIDTH;
 
 export class NavigationStore {
   selected_session_id: SessionId | null = null;
   selected_draft_key: NewSessionDraftKey | null = null;
   selected_child_task_id: ChildTaskId | null = null;
-  search_query = "";
   list_mode: "active" | "archived" = "active";
   left_sidebar_open = true;
   right_sidebar_open = true;
   left_sidebar_width = LEFT_SIDEBAR_DEFAULT_WIDTH;
   right_sidebar_width = RIGHT_SIDEBAR_DEFAULT_WIDTH;
   viewport_width = 1280;
-  responsive_priority: "left" | "right" = "left";
   conversation_anchor_message_id: MessageId | null = null;
   readonly conversation_history = observable.array<ConversationLocation>([], { deep: false });
   conversation_history_index = -1;
@@ -48,14 +48,12 @@ export class NavigationStore {
       selected_session_id: observable,
       selected_draft_key: observable,
       selected_child_task_id: observable,
-      search_query: observable,
       list_mode: observable,
       left_sidebar_open: observable,
       right_sidebar_open: observable,
       left_sidebar_width: observable,
       right_sidebar_width: observable,
       viewport_width: observable,
-      responsive_priority: observable,
       effective_left_sidebar_open: computed,
       effective_right_sidebar_open: computed,
       effective_left_sidebar_width: computed,
@@ -73,7 +71,6 @@ export class NavigationStore {
       selectDraft: action,
       openChildTask: action,
       closeChildTask: action,
-      setSearchQuery: action,
       setListMode: action,
       toggleWorkspace: action,
       toggleLeftSidebar: action,
@@ -125,10 +122,10 @@ export class NavigationStore {
   }
 
   get left_sidebar_current_max_width(): number {
-    const other_width = this.effective_right_sidebar_open ? this.effective_right_sidebar_width : 0;
     return Math.max(
       LEFT_SIDEBAR_MIN_WIDTH,
-      Math.min(LEFT_SIDEBAR_MAX_WIDTH, this.viewport_width - other_width - CONVERSATION_MIN_WIDTH),
+      this.left_sidebar_width,
+      Math.min(LEFT_SIDEBAR_MAX_WIDTH, this.viewport_width - CONVERSATION_MIN_WIDTH),
     );
   }
 
@@ -298,10 +295,6 @@ export class NavigationStore {
     }
   }
 
-  setSearchQuery(query: string): void {
-    this.search_query = query;
-  }
-
   setListMode(mode: "active" | "archived"): void {
     this.list_mode = mode;
   }
@@ -320,21 +313,12 @@ export class NavigationStore {
   }
 
   toggleLeftSidebar(): void {
-    if (this.effective_left_sidebar_open) {
-      this.left_sidebar_open = false;
-      return;
-    }
-    this.left_sidebar_open = true;
-    this.responsive_priority = "left";
+    this.left_sidebar_open = !this.left_sidebar_open;
   }
 
   toggleRightSidebar(): void {
-    if (this.effective_right_sidebar_open) {
-      this.right_sidebar_open = false;
-      return;
-    }
-    this.right_sidebar_open = true;
-    this.responsive_priority = "right";
+    if (this.right_sidebar_open && !this.effective_right_sidebar_open) return;
+    this.right_sidebar_open = !this.right_sidebar_open;
   }
 
   setSidebarWidth(side: "left" | "right", width: number): void {
@@ -342,7 +326,9 @@ export class NavigationStore {
     if (side === "left") {
       this.left_sidebar_width = clamp(rounded_width, LEFT_SIDEBAR_MIN_WIDTH, this.left_sidebar_current_max_width);
     } else {
-      this.right_sidebar_width = clamp(rounded_width, RIGHT_SIDEBAR_MIN_WIDTH, this.right_sidebar_current_max_width);
+      const available = this.viewport_width - (this.left_sidebar_open ? this.left_sidebar_width : 0);
+      const effective_width = clamp(rounded_width, RIGHT_SIDEBAR_MIN_WIDTH, this.right_sidebar_current_max_width);
+      this.right_sidebar_width = Math.round(effective_width * RIGHT_SIDEBAR_REFERENCE_SPACE / Math.max(1, available));
     }
   }
 
@@ -359,7 +345,6 @@ export class NavigationStore {
     this.right_sidebar_open = true;
     this.left_sidebar_width = LEFT_SIDEBAR_DEFAULT_WIDTH;
     this.right_sidebar_width = RIGHT_SIDEBAR_DEFAULT_WIDTH;
-    this.responsive_priority = "left";
   }
 
   setViewportWidth(width: number): void {
@@ -392,11 +377,8 @@ export class NavigationStore {
     );
     this.right_sidebar_width = clamp(
       Number.isFinite(preferences.right_sidebar_width) ? preferences.right_sidebar_width : RIGHT_SIDEBAR_DEFAULT_WIDTH,
-      RIGHT_SIDEBAR_MIN_WIDTH,
-      Math.max(
-        RIGHT_SIDEBAR_MIN_WIDTH,
-        this.viewport_width - this.left_sidebar_width - CONVERSATION_MIN_WIDTH,
-      ),
+      1,
+      Number.MAX_SAFE_INTEGER,
     );
     this.expanded_workspaces.clear();
     this.workspace_expansion_initialized = preferences.expanded_workspace_ids !== null;
@@ -420,55 +402,22 @@ export class NavigationStore {
     right_open: boolean;
     right_width: number;
   }> {
-    const left = this.left_sidebar_open;
-    const right = this.right_sidebar_open;
-    const closed = { left_open: false, left_width: 0, right_open: false, right_width: 0 };
-    if (!left && !right) return closed;
-
-    const preferred_left_fits = this.viewport_width >= this.left_sidebar_width + CONVERSATION_MIN_WIDTH;
-    const preferred_right_fits = this.viewport_width >= this.right_sidebar_width + CONVERSATION_MIN_WIDTH;
-    if (left && right) {
-      const preferred_widths_fit = this.viewport_width
-        >= this.left_sidebar_width + this.right_sidebar_width + CONVERSATION_MIN_WIDTH;
-      if (!preferred_widths_fit) {
-        if (this.responsive_priority === "right" && preferred_right_fits) {
-          return {
-            ...closed,
-            right_open: true,
-            right_width: this.right_sidebar_width,
-          };
-        }
-        if (preferred_left_fits) {
-          return {
-            ...closed,
-            left_open: true,
-            left_width: this.left_sidebar_width,
-          };
-        }
-        return closed;
-      }
-      return {
-        left_open: true,
-        left_width: this.left_sidebar_width,
-        right_open: true,
-        right_width: this.right_sidebar_width,
-      };
-    }
-    if (left && preferred_left_fits) {
-      return {
-        ...closed,
-        left_open: true,
-        left_width: this.left_sidebar_width,
-      };
-    }
-    if (right && preferred_right_fits) {
-      return {
-        ...closed,
-        right_open: true,
-        right_width: this.right_sidebar_width,
-      };
-    }
-    return closed;
+    const left_width = this.left_sidebar_open ? this.left_sidebar_width : 0;
+    const available = this.viewport_width - left_width;
+    const right_open = this.right_sidebar_open
+      && available >= CONVERSATION_MIN_WIDTH + RIGHT_SIDEBAR_MIN_WIDTH;
+    return {
+      left_open: this.left_sidebar_open,
+      left_width,
+      right_open,
+      right_width: right_open
+        ? clamp(
+          Math.round(available * this.right_sidebar_width / RIGHT_SIDEBAR_REFERENCE_SPACE),
+          RIGHT_SIDEBAR_MIN_WIDTH,
+          available - CONVERSATION_MIN_WIDTH,
+        )
+        : 0,
+    };
   }
 }
 

@@ -279,6 +279,10 @@ async fn connection_validation_maps_structured_model_failures_without_exposing_m
             [ModelScript::FailEstablishment(error)],
         ));
         let runtime = runtime(model);
+        // 此处隔离验证单次错误映射；重试恢复另有独立用例。
+        runtime.config_registry.replace_document_for_test(&format!(
+            "{TEST_CONFIG}\n[runtime.model_retry]\nenabled=false\n"
+        ));
         let result = runtime
             .validate_model_connection(configured_validation_request())
             .await

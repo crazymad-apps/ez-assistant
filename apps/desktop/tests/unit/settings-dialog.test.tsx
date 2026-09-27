@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { runInAction } from 'mobx';
 import * as nativeCore from '@tauri-apps/api/core';
 import { SettingsDialog } from '../../src/features/settings/SettingsDialog';
+import { AppMessageProvider } from '../../src/components/AppMessage';
 import type {
   ApplicationSnapshot,
   MemoryCapabilities,
@@ -109,7 +110,7 @@ describe('SettingsDialog model management', () => {
     const enqueue = vi.spyOn(store, 'submitSessionCommand').mockResolvedValue(true);
     renderDialog(store);
     expect(screen.getByRole('heading', { name: 'MCP' })).toBeVisible();
-    expect(screen.getByRole('button', { name: /^MCP$/ }).querySelector('[data-icon="plugin"]')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^MCP$/ }).querySelector('[data-icon="puzzle"]')).toBeInTheDocument();
     expect(screen.queryByText('这里配置的服务可供所有会话使用')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '加入刷新队列' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '查看队列' })).not.toBeInTheDocument();
@@ -1078,9 +1079,9 @@ function pinnedCollection(): PinnedMemoryCollectionSnapshot {
 
 function renderDialog(store: RootStore) {
   return render(
-    <RootStoreProvider store={store}>
+    <AppMessageProvider><RootStoreProvider store={store}>
       <SettingsDialog />
-    </RootStoreProvider>,
+    </RootStoreProvider></AppMessageProvider>,
   );
 }
 

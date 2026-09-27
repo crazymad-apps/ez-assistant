@@ -7,11 +7,16 @@ use toml_edit::{DocumentMut, Item};
 pub(super) fn configurations(
     original: Option<&str>,
     paths: &Relocation,
+    fresh_home: bool,
 ) -> Result<(String, Option<String>)> {
     if let Some(original) = original {
         crate::access::validate_layout_configuration(original).map_err(|_| Error::Configuration)?;
     }
-    let mut host = crate::host_configuration::personal_document();
+    let mut host = if fresh_home {
+        crate::host_configuration::fresh_document()
+    } else {
+        crate::host_configuration::personal_document()
+    };
     let personal = original
         .map(|original| -> Result<String> {
             let mut document = original

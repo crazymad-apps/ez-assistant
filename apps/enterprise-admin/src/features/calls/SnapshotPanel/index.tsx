@@ -25,7 +25,8 @@ export const SnapshotPanel = observer(function SnapshotPanel(
     <div className={styles.panel}>
       <Space wrap>
         <Typography.Text>
-          {snapshotLabels[snapshot.state]} · {snapshot.bytes ?? 0} 字节{snapshot.reason ? ` · ${snapshot.reason}` : ''}
+          {snapshotLabels[snapshot.state]} · {snapshot.bytes === null ? '—' : `${snapshot.bytes} 字节`}
+          {snapshot.reason ? ` · ${snapshot.reason}` : ''}
         </Typography.Text>
         <Button
           disabled={!['complete', 'partial'].includes(props.snapshot.state)}

@@ -1,6 +1,16 @@
 use super::*;
 
 impl RuntimeStore for VolatileRuntimeStore {
+    fn load_feedback(
+        &self,
+        session_id: &SessionId,
+    ) -> StoreFuture<'_, Vec<assistant_protocol::FeedbackRequestSnapshot>> {
+        VolatileRuntimeStore::load_feedback(self, session_id)
+    }
+    fn mutate_feedback(&self, mutation: crate::FeedbackMutation) -> StoreFuture<'_, ()> {
+        VolatileRuntimeStore::mutate_feedback(self, mutation)
+    }
+
     fn load_default_agent_shell(&self) -> StoreFuture<'_, Option<assistant_protocol::ShellKind>> {
         VolatileRuntimeStore::load_default_agent_shell(self)
     }
@@ -143,6 +153,45 @@ impl RuntimeStore for VolatileRuntimeStore {
         VolatileRuntimeStore::set_skill_enabled(self, change)
     }
 
+    fn list_custom_agents(&self) -> StoreFuture<'_, Vec<StoredCustomAgent>> {
+        VolatileRuntimeStore::list_custom_agents(self)
+    }
+
+    fn mutate_custom_agent(
+        &self,
+        mutation: CustomAgentMutation,
+    ) -> StoreFuture<'_, Option<StoredCustomAgent>> {
+        VolatileRuntimeStore::mutate_custom_agent(self, mutation)
+    }
+
+    fn list_plugins(&self) -> StoreFuture<'_, Vec<StoredPlugin>> {
+        VolatileRuntimeStore::list_plugins(self)
+    }
+    fn change_plugin_settings(
+        &self,
+        change: PluginSettingsChange,
+    ) -> StoreFuture<'_, StoredPlugin> {
+        VolatileRuntimeStore::change_plugin_settings(self, change)
+    }
+
+    fn list_plugin_operations(&self) -> StoreFuture<'_, Vec<StoredPluginOperation>> {
+        VolatileRuntimeStore::list_plugin_operations(self)
+    }
+
+    fn accept_plugin_operation(
+        &self,
+        operation: StoredPluginOperation,
+    ) -> StoreFuture<'_, StoredPluginOperation> {
+        VolatileRuntimeStore::accept_plugin_operation(self, operation)
+    }
+
+    fn advance_plugin_operation(
+        &self,
+        update: PluginOperationUpdate,
+    ) -> StoreFuture<'_, StoredPluginOperation> {
+        VolatileRuntimeStore::advance_plugin_operation(self, update)
+    }
+
     fn load_work_plan(&self, session_id: &SessionId) -> StoreFuture<'_, Option<StoredWorkPlan>> {
         VolatileRuntimeStore::load_work_plan(self, session_id)
     }
@@ -196,6 +245,13 @@ impl RuntimeStore for VolatileRuntimeStore {
         VolatileRuntimeStore::remove_workspace(self, removal)
     }
 
+    fn restore_workspace(
+        &self,
+        restoration: WorkspaceRestoration,
+    ) -> StoreFuture<'_, StoredWorkspace> {
+        VolatileRuntimeStore::restore_workspace(self, restoration)
+    }
+
     fn upload_attachment(&self, upload: NewAttachmentUpload) -> StoreFuture<'_, StoredAttachment> {
         VolatileRuntimeStore::upload_attachment(self, upload)
     }
@@ -236,6 +292,13 @@ impl RuntimeStore for VolatileRuntimeStore {
         materialization: NewStoredSessionMaterialization,
     ) -> StoreFuture<'_, StoredSessionMaterialization> {
         VolatileRuntimeStore::materialize_session(self, materialization)
+    }
+
+    fn get_session_materialization(
+        &self,
+        key: &assistant_protocol::IdempotencyKey,
+    ) -> StoreFuture<'_, Option<StoredSessionMaterialization>> {
+        VolatileRuntimeStore::get_session_materialization(self, key)
     }
 
     fn fork_session(&self, fork: SessionFork) -> StoreFuture<'_, StoredSessionFork> {

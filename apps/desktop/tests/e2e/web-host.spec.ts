@@ -9,10 +9,9 @@ import type { ApplicationSnapshot, RunSnapshot, SystemContextSnapshot } from "@e
 type Fixture = Readonly<{ base_url: string; access_token: string }>;
 const fixture = (): Fixture => JSON.parse(process.env.EZ_ASSISTANT_E2E_BOOTSTRAP ?? "null") as Fixture;
 
-async function expectLaunch(page: Page) {
+async function expectWorkspaceReady(page: Page) {
   const transition = page.locator("[data-workspace-transition]");
   await expect(transition).toHaveAttribute("data-workspace-transition", "complete", { timeout: 8_000 });
-  expect(Number(await transition.getAttribute("data-launch-frame"))).toBeGreaterThanOrEqual(110);
   await expect(transition.locator("canvas")).toHaveCount(0);
 }
 
@@ -45,13 +44,13 @@ test("Host 内嵌 Web 支持登录、设置、改密撤销和退出", async ({ p
   await expect(page.getByLabel("Host 登录")).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("web-login.png"), animations: "disabled" });
   await page.getByLabel("访问密码", { exact: true }).fill("isolated-web-password");
-  await page.getByRole("button", { name: "进入工作空间" }).click();
-  await page.waitForFunction(() => Number(document.querySelector("[data-launch-frame]")?.getAttribute("data-launch-frame")) >= 80);
+  await page.getByRole("button", { name: "进入项目" }).click();
+  await expectWorkspaceReady(page);
   await page.screenshot({ path: testInfo.outputPath("web-workspace-reveal.png") });
-  await expectLaunch(page);
   await expect(page.locator("[data-app-title-bar]")).toBeVisible();
   await expect(page.getByText("M2 临时会话", { exact: true }).first()).toBeVisible();
-  await page.getByRole("button", { name: "设置", exact: true }).click();
+  await page.getByRole("button", { name: "账号与 Runtime" }).click();
+  await page.getByRole("menuitem", { name: "设置" }).click();
   await expect(page.getByRole("button", { name: /^本机与客户端/ })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "切换", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: /^访问设置/ }).click();
@@ -62,11 +61,11 @@ test("Host 内嵌 Web 支持登录、设置、改密撤销和退出", async ({ p
   await expect(page.getByLabel("Host 登录")).toBeVisible();
   await expect(page.locator("[data-app-title-bar]")).toHaveCount(0);
   await page.getByLabel("访问密码", { exact: true }).fill("changed-web-password");
-  await page.getByRole("button", { name: "进入工作空间" }).click();
-  await expectLaunch(page);
+  await page.getByRole("button", { name: "进入项目" }).click();
+  await expectWorkspaceReady(page);
   await expect(page.locator("[data-app-title-bar]")).toBeVisible();
   await page.reload();
-  await expectLaunch(page);
+  await expectWorkspaceReady(page);
   await expect(page.locator("[data-app-title-bar]")).toBeVisible();
   await page.getByRole("button", { name: "个人用户", exact: true }).click();
   await page.getByRole("menuitem", { name: "退出登录", exact: true }).click();
@@ -85,7 +84,7 @@ test("普通 token fragment 快速登录后立即移除，并在失效时回到�
   expect(issued.status).toBe(200);
   const { token } = await issued.json() as { token: string };
   await page.goto(`${host.base_url}/#token=${encodeURIComponent(token)}`);
-  await expectLaunch(page);
+  await expectWorkspaceReady(page);
   await expect(page.locator("[data-app-title-bar]")).toBeVisible();
   expect(new URL(page.url()).hash).toBe("");
   const current = await access({ type: "get_status" });
@@ -157,11 +156,11 @@ test("主控与普通会话都能 refresh，Skill 新目录即时更新且不创
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto(fixture().base_url);
   await page.getByLabel("访问密码", { exact: true }).fill("isolated-web-password");
-  await page.getByRole("button", { name: "进入工作空间" }).click();
+  await page.getByRole("button", { name: "进入项目" }).click();
   await expect(page.locator("[data-workspace-transition]")).toHaveAttribute("data-workspace-transition", "complete");
   const input = page.getByRole("textbox", { name: "输入消息" });
   for (const controller of [true, false]) {
-    if (controller) await page.getByRole("region", { name: "主控会话", exact: true }).getByRole("button").click();
+    if (controller) await page.getByRole("button", { name: "助理会话" }).click();
     else await page.getByText("M2 临时会话", { exact: true }).first().click();
     // 文件在会话创建后新增：无需 refresh 就能从两个角色的选择器读取。
     await input.fill("/skill");
@@ -207,6 +206,127 @@ Current fixture instructions.
   }
 });
 
+test("Web 新会话使用底部抽屉并可从私有工作空间首次发送", async ({ page }) => {
+  const host = fixture();
+  await page.goto(host.base_url);
+  await page.getByLabel("访问密码", { exact: true }).fill("isolated-web-password");
+  await page.getByRole("button", { name: "进入项目" }).click();
+  await expectWorkspaceReady(page);
+  const before = await runtimeCommand<{ snapshot: { value: ApplicationSnapshot } }>("get_application_snapshot", {});
+  await page.getByRole("button", { name: "新建会话" }).click();
+  const header = page.locator('header[aria-label="会话标题栏"]');
+  await expect(header.getByRole("button", { name: "新对话" })).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "新会话项目选项" })).toBeVisible();
+  await page.getByRole("button", { name: "添加项目" }).click();
+  const editor = page.getByRole("dialog", { name: "新建项目" });
+  await expect(editor.getByText(/仅使用私有目录/)).toBeVisible();
+  await editor.getByRole("textbox", { name: /项目名称/ }).fill("Web M4 私有工作空间");
+  await editor.getByRole("button", { name: "创建" }).click();
+  await expect(editor).toBeHidden();
+  await expect(page.getByRole("button", { name: "新会话项目" })).toContainText("Web M4 私有工作空间");
+  const after_create = await runtimeCommand<{ snapshot: { value: ApplicationSnapshot } }>("get_application_snapshot", {});
+  expect(after_create.snapshot.value.active_sessions.length).toBe(before.snapshot.value.active_sessions.length);
+  const workspace = after_create.snapshot.value.workspaces.find((item) => item.label === "Web M4 私有工作空间");
+  expect(workspace?.user_directory).toBeNull();
+  const input = page.getByRole("textbox", { name: "输入消息" });
+  await page.getByRole("button", { name: "整理文档" }).click();
+  await expect(input).toHaveValue(/请整理我提供的材料/);
+  await input.fill("PRIVATE_CASE");
+  await input.press("Enter");
+  await expect(page.getByText("离线回复：PRIVATE_CASE", { exact: true })).toBeVisible();
+  const after_send = await runtimeCommand<{ snapshot: { value: ApplicationSnapshot } }>("get_application_snapshot", {});
+  expect(after_send.snapshot.value.active_sessions.length).toBe(before.snapshot.value.active_sessions.length + 1);
+});
+
+test("C03 Web 可创建个人智能体、选择并冻结到新会话", async ({ page }) => {
+  const host = fixture();
+  await page.goto(host.base_url);
+  await page.getByLabel("访问密码", { exact: true }).fill("isolated-web-password");
+  await page.getByRole("button", { name: "进入项目" }).click();
+  await expectWorkspaceReady(page);
+  await page.getByRole("button", { name: "账号与 Runtime" }).click();
+  await page.getByRole("menuitem", { name: "设置" }).click();
+  await page.getByRole("button", { name: "智能体", exact: true }).click();
+  await page.getByRole("button", { name: "创建", exact: true }).click();
+  await page.getByRole("textbox", { name: "名称" }).fill("Web C03 助手");
+  await page.getByRole("textbox", { name: "说明" }).fill("隔离验收用个人智能体");
+  await page.getByRole("textbox", { name: "完整提示词" }).fill("请简明回答。");
+  await page.getByRole("button", { name: "保存智能体" }).click();
+  await expect(page.getByRole("button", { name: /Web C03 助手/ })).toBeVisible();
+  await page.getByRole("button", { name: "关闭设置" }).click();
+  const before = await runtimeCommand<{ snapshot: { value: ApplicationSnapshot } }>("get_application_snapshot", {});
+  await page.getByRole("button", { name: "新建会话" }).click();
+  await page.getByRole("button", { name: "选择智能体" }).click();
+  await page.getByRole("dialog", { name: "选择智能体" }).getByRole("option", { name: /Web C03 助手/ }).click();
+  await expect(page.getByRole("button", { name: "选择智能体" })).toHaveText(/Web C03 助手/);
+  const after_select = await runtimeCommand<{ snapshot: { value: ApplicationSnapshot } }>("get_application_snapshot", {});
+  expect(after_select.snapshot.value.active_sessions.length).toBe(before.snapshot.value.active_sessions.length);
+  await page.getByRole("textbox", { name: "输入消息" }).fill("FIRST_CASE");
+  await page.getByRole("button", { name: "发送消息" }).click();
+  await expect(page.getByText("离线回复：FIRST_CASE", { exact: true })).toBeVisible();
+  const after_send = await runtimeCommand<{ snapshot: { value: ApplicationSnapshot } }>("get_application_snapshot", {});
+  expect(after_send.snapshot.value.active_sessions.length).toBe(before.snapshot.value.active_sessions.length + 1);
+  expect(after_send.snapshot.value.active_sessions.some((session) => session.custom_agent?.name === "Web C03 助手" && session.custom_agent.source.type === "personal")).toBe(true);
+});
+
+test("C03 缺少插件候选时保留草稿并提供处理入口", async ({ page }) => {
+  const host = fixture();
+  await page.goto(host.base_url);
+  await page.getByLabel("访问密码", { exact: true }).fill("isolated-web-password");
+  await page.getByRole("button", { name: "进入项目" }).click();
+  await expectWorkspaceReady(page);
+  await page.getByRole("button", { name: "账号与 Runtime" }).click();
+  await page.getByRole("menuitem", { name: "设置" }).click();
+  await page.getByRole("button", { name: "智能体", exact: true }).click();
+  await page.getByRole("button", { name: "创建", exact: true }).click();
+  await page.getByRole("textbox", { name: "名称" }).fill("缺包测试智能体");
+  await page.getByRole("textbox", { name: "完整提示词" }).fill("按要求回答。");
+  await page.getByRole("button", { name: "添加默认技能" }).click();
+  await page.getByRole("textbox", { name: "默认技能名称 1" }).fill("missing-skill");
+  await page.getByRole("textbox", { name: "默认技能所属插件 1" }).fill("missing-plugin");
+  await page.getByRole("button", { name: "保存智能体" }).click();
+  await expect(page.getByRole("button", { name: /缺包测试智能体/ })).toBeVisible();
+  await page.getByRole("button", { name: "关闭设置" }).click();
+  await page.getByRole("button", { name: "新建会话" }).click();
+  await page.getByRole("button", { name: "选择智能体" }).click();
+  await page.getByRole("dialog", { name: "选择智能体" }).getByRole("option", { name: /缺包测试智能体/ }).click();
+  await expect(page.getByText(/缺少插件/)).toBeVisible();
+  await page.getByRole("textbox", { name: "输入消息" }).fill("MISSING_PLUGIN_CASE");
+  const before = await runtimeCommand<{ snapshot: { value: ApplicationSnapshot } }>("get_application_snapshot", {});
+  await page.getByRole("button", { name: "发送消息" }).click();
+  await expect(page.getByRole("button", { name: "管理插件" })).toBeVisible();
+  const after = await runtimeCommand<{ snapshot: { value: ApplicationSnapshot } }>("get_application_snapshot", {});
+  expect(after.snapshot.value.active_sessions.length).toBe(before.snapshot.value.active_sessions.length);
+  await page.getByRole("button", { name: "管理插件" }).click();
+  await expect(page.getByRole("button", { name: "上传插件" })).toBeVisible();
+  await page.getByRole("button", { name: "关闭设置" }).click();
+  await expect(page.getByRole("textbox", { name: "输入消息" })).toHaveValue("MISSING_PLUGIN_CASE");
+});
+
+test("C03 Web 上传真实插件包并显示安装终态", async ({ page }) => {
+  test.setTimeout(90_000);
+  const archive = process.env.C03_SAMPLE_ARCHIVE;
+  test.skip(!archive, "requires an explicit preserved C03 sample archive");
+  const host = fixture();
+  await page.goto(host.base_url);
+  await page.getByLabel("访问密码", { exact: true }).fill("isolated-web-password");
+  await page.getByRole("button", { name: "进入项目" }).click();
+  await expectWorkspaceReady(page);
+  await page.getByRole("button", { name: "账号与 Runtime" }).click();
+  await page.getByRole("menuitem", { name: "设置" }).click();
+  await page.getByRole("button", { name: "插件", exact: true }).click();
+  await page.getByLabel("选择插件包").setInputFiles(archive!);
+  const progress = page.getByRole("dialog", { name: "安装插件" });
+  await expect(progress.getByText("warehouse-cad-guidance", { exact: true })).toHaveCount(2);
+  await expect(progress.getByText(/0\.1\.0/)).toBeVisible();
+  await progress.getByRole("button", { name: "确认并开始安装" }).click();
+  await expect(progress.getByText("插件操作已完成")).toBeVisible({ timeout: 60_000 });
+  await progress.getByRole("button", { name: "关闭" }).click();
+  await expect(page.getByRole("button", { name: /warehouse-cad-guidance/ })).toBeVisible();
+  await page.getByRole("button", { name: /warehouse-cad-guidance/ }).click();
+  await expect(page.getByText("compact-shelving-cad")).toBeVisible();
+});
+
 test("released old Web assets cannot log in to the new Host", async ({ page, request }, info) => {
   const old = process.env.EZ_ASSISTANT_TEST_OLD_WEB_ORIGIN;
   test.skip(!old, "requires an explicitly started isolated released Host");
@@ -225,7 +345,7 @@ test("released old Web assets cannot log in to the new Host", async ({ page, req
   await expect(page.getByLabel("访问密码", { exact: true })).toBeVisible();
   await page.getByLabel("访问密码", { exact: true }).fill("isolated-web-password");
   const rejected = page.waitForResponse((response) => response.url() === `${host.base_url}/auth/login` && response.request().method() === "POST");
-  await page.getByRole("button", { name: "进入工作空间" }).click();
+  await page.getByRole("button", { name: "进入项目" }).click();
   const response = await rejected;
   expect(response.status()).toBe(409);
   expect((await response.json()).error.code).toBe("missing_declaration");

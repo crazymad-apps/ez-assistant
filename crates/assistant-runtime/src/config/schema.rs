@@ -83,6 +83,8 @@ impl Default for RawModelTransportConfig {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RawModelRetryConfig {
+    /// false 显式关闭产品默认重试；旧完整策略表缺省继续启用。
+    pub(super) enabled: Option<bool>,
     pub(super) retry_on: Option<Vec<String>>,
     pub(super) delays_ms: Option<Vec<u64>>,
     pub(super) max_retry_after_ms: Option<u64>,

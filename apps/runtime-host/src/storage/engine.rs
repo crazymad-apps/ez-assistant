@@ -285,6 +285,7 @@ super::agent_shell::encode_environment(session.agent_shell_environment.as_ref())
         let _ = self.initialize_recall_owner(&recall_owner, 1, session.created_at_ms);
 
         Ok(StoredSession {
+            custom_agent: session.custom_agent,
             agent_shell_kind: session.agent_shell_kind,
             agent_shell_environment: session.agent_shell_environment.clone(),
             session_id: session.session_id,
@@ -486,7 +487,7 @@ super::agent_shell::encode_environment(session.agent_shell_environment.as_ref())
                                   WHERE runs.session_id = sessions.session_id), created_at_ms),
                         archived_at_ms, is_pinned, title_origin,
                         sessions.pc_output_device_id, devices.display_name,
-                        sessions.materialization_key, sessions.automatic_title_pending, sessions.agent_shell_kind, sessions.agent_shell_environment_json
+                        sessions.materialization_key, sessions.automatic_title_pending, sessions.agent_shell_kind, sessions.agent_shell_environment_json, sessions.custom_agent_json
                  FROM sessions
                  LEFT JOIN devices ON devices.device_id = sessions.pc_output_device_id
                  WHERE {predicate} ORDER BY created_at_ms, session_id"))
@@ -521,6 +522,7 @@ super::agent_shell::encode_environment(session.agent_shell_environment.as_ref())
                         row.get::<_, i64>(22)?,
                         row.get::<_, Option<String>>(23)?,
                         row.get::<_, Option<String>>(24)?,
+                        row.get::<_, Option<String>>(25)?,
                     ))
                 },
             )
@@ -554,6 +556,7 @@ super::agent_shell::encode_environment(session.agent_shell_environment.as_ref())
                 automatic_title_pending,
                 agent_shell_kind,
                 agent_shell_environment,
+                custom_agent_json,
             ) = row.map_err(|source| {
                 internal_error("runtime session row could not be read", source)
             })?;
@@ -576,6 +579,12 @@ super::agent_shell::encode_environment(session.agent_shell_environment.as_ref())
                 _ => return Err(invalid_data("stored session lifecycle is invalid")),
             };
             sessions.push(StoredSession {
+                custom_agent: custom_agent_json
+                    .map(|value| serde_json::from_str(&value))
+                    .transpose()
+                    .map_err(|source| {
+                        invalid_data_with_source("stored custom agent is invalid", source)
+                    })?,
                 agent_shell_kind: super::mode::parse_shell_kind(agent_shell_kind)?,
                 agent_shell_environment: agent_shell_environment
                     .map(|value| serde_json::from_str(&value))

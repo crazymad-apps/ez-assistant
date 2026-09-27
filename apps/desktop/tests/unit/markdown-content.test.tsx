@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MarkdownContent } from "../../src/components/MarkdownContent";
 
@@ -24,6 +24,22 @@ describe("MarkdownContent local resources", () => {
       { x: 31, y: 42 },
     );
     expect(container.querySelector("[href^='file:'], [src^='file:']")).toBeNull();
+  });
+
+  it("loads Windows file images through the resource callback and exposes retry failures", async () => {
+    const load = vi.fn().mockRejectedValueOnce(new Error("路径不存在。")).mockResolvedValue("blob:windows-image");
+    const revoke = vi.fn();
+    vi.stubGlobal("URL", Object.assign(URL, { revokeObjectURL: revoke }));
+    render(<MarkdownContent text="![产物](file:///C:/project/image.png)" load_local_image={load} />);
+    await screen.findByText(/路径不存在/);
+    fireEvent.click(screen.getByRole("button", { name: "重试图片" }));
+    await waitFor(() => expect(screen.getByRole("img", { name: "产物" })).toHaveAttribute("src", "blob:windows-image"));
+    expect(load).toHaveBeenCalledWith("file:///C:/project/image.png");
+    fireEvent.error(screen.getByRole("img", { name: "产物" }));
+    expect(screen.getByText(/图片无法显示/)).toBeVisible();
+    cleanup();
+    expect(revoke).toHaveBeenCalledWith("blob:windows-image");
+    vi.unstubAllGlobals();
   });
 
   it("does not activate relative links unless the file viewer explicitly enables them", () => {

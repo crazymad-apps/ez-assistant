@@ -108,7 +108,7 @@ pub fn compile_runtime_config(document: &str) -> ConfigCompilation {
 struct CompiledGlobalConfig {
     /// Runtime 统一控制的连接、响应建立和流空闲超时。
     transport: RuntimeModelTransportConfig,
-    /// 显式配置才存在的有限建流前重试策略。
+    /// 已解析的有限建流前重试策略；显式关闭时为空。
     retry_policy: Option<ModelRetryPolicy>,
     /// Agent 请求维度的 generation 默认值。
     generation: GenerationConfig,
@@ -227,8 +227,19 @@ fn compile_global(
     };
 
     let retry_policy = match runtime.model_retry.as_ref() {
+        Some(retry) if retry.enabled == Some(false) => None,
         Some(retry) => compile_retry_policy(retry, &mut issues),
-        None => None,
+        None => Some(ModelRetryPolicy::new(
+            [
+                ModelRetryReason::Connection,
+                ModelRetryReason::Timeout,
+                ModelRetryReason::RateLimited,
+                ModelRetryReason::Unavailable,
+            ]
+            .into(),
+            [1, 2, 4, 8, 16].map(Duration::from_secs).into(),
+            Duration::from_secs(30),
+        )),
     };
     if !issues.is_empty() {
         return Err(issues);
@@ -294,7 +305,7 @@ fn compile_guardrail_check(raw: &RawGuardrailCheck) -> Option<GuardrailCheckConf
 
 /// 将用户字符串枚举编译成 provider-neutral 的有限重试策略。
 ///
-/// 整个 retry 表缺失表示不重试；表一旦出现，就必须完整声明原因、延迟序列和
+/// 整个 retry 表缺失使用产品默认策略；显式关闭外的策略表必须完整声明原因、延迟序列和
 /// Retry-After 上限，避免启用半套隐式策略。
 fn compile_retry_policy(
     raw: &RawModelRetryConfig,

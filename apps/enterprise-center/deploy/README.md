@@ -30,7 +30,9 @@ CENTER_PUBLIC_ORIGIN=http://172.16.20.4:7320
 ```
 
 将所选镜像的 `dist/resources/model-templates.json` 首次复制到 `config/model-templates.json`。
-创建 `data/snapshots`，归属容器的 UID/GID 1000:1000。升级不覆盖这些外置文件。
+创建 `data/snapshots` 和 `data/plugins`，归属容器的 UID/GID 1000:1000；`data/plugins` 权限为
+0700，不得是符号链接，也不得放在公开静态目录内。升级不覆盖这些外置文件；备份与恢复同时覆盖
+PostgreSQL 和 `data/plugins`，按当前包记录逐行核对文件长度与 SHA。
 容器加入现有 `1panel-network` 访问 PostgreSQL；其他环境设置 `CENTER_DOCKER_NETWORK`。
 
 先核对数据库目标、账号和表，并按仓库数据库规则完成批准及必要备份。新库由运维独立创建，

@@ -1,0 +1,15 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+  overflow: auto;
+}
+
+.page > * {
+  flex-shrink: 0;
+}
+
+.full {
+  width: 100%;
+}

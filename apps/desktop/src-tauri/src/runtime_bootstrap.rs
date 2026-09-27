@@ -396,7 +396,11 @@ impl RuntimeBootstrapCoordinator {
             .map_err(runtime_unavailable)?;
         match response.result {
             ResultScope::Runtime(RuntimeCommandResult::GetWorkspace(result)) => {
-                Ok(result.workspace.user_directory)
+                let workspace = result.workspace;
+                // 无用户目录的 Workspace 以受管私有目录作为实际打开位置，与 Runtime 有效工作目录口径一致。
+                Ok(workspace
+                    .user_directory
+                    .unwrap_or(workspace.agent_directory))
             }
             _ => Err(bootstrap_error(
                 RuntimeBootstrapErrorCode::ComponentMismatch,
@@ -425,7 +429,7 @@ impl RuntimeBootstrapCoordinator {
         let workspace = result.snapshot.value.workspace.ok_or_else(|| {
             bootstrap_error(
                 RuntimeBootstrapErrorCode::RuntimeUnavailable,
-                "该会话未绑定工作空间。",
+                "该会话未绑定项目。",
             )
         })?;
         if directory_index == 0 {
@@ -1246,7 +1250,7 @@ mod tests {
                 true,
             ),
             (
-                "0.27.1",
+                "0.28.1",
                 Some(assistant_protocol::MIN_COMPATIBLE_VERSION),
                 true,
             ),

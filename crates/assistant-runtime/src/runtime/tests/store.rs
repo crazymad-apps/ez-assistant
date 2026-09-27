@@ -29,7 +29,8 @@ use crate::{
     StoredPinnedMemory, StoredRun, StoredRunContinuation, StoredRunContinuationResult,
     StoredRunSettlement, StoredSession, StoredSessionFork, StoredSessionMaterialization,
     StoredSessionUsage, StoredWorkPlan, StoredWorkspace, UserMessageCommit, VariantChange,
-    WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval, WorkspaceUpdate,
+    WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval,
+    WorkspaceRestoration, WorkspaceUpdate,
     storage::{ToolExecutionStart, VolatileRuntimeStore},
 };
 
@@ -37,6 +38,7 @@ pub(super) struct FaultInjectingStore {
     inner: VolatileRuntimeStore,
     panic_next_settlement: AtomicBool,
     fail_settlement: bool,
+    pub(super) feedback_failure: AtomicUsize,
     hang_shutdown: bool,
     shutdown_called: AtomicBool,
     unavailable_session: Mutex<Option<SessionId>>,
@@ -57,6 +59,7 @@ impl FaultInjectingStore {
             inner: VolatileRuntimeStore::default(),
             panic_next_settlement: AtomicBool::new(false),
             fail_settlement: false,
+            feedback_failure: AtomicUsize::new(0),
             hang_shutdown: false,
             shutdown_called: AtomicBool::new(false),
             unavailable_session: Mutex::new(None),
@@ -77,6 +80,7 @@ impl FaultInjectingStore {
             inner: VolatileRuntimeStore::default(),
             panic_next_settlement: AtomicBool::new(true),
             fail_settlement: false,
+            feedback_failure: AtomicUsize::new(0),
             hang_shutdown: false,
             shutdown_called: AtomicBool::new(false),
             unavailable_session: Mutex::new(None),
@@ -97,6 +101,7 @@ impl FaultInjectingStore {
             inner: VolatileRuntimeStore::default(),
             panic_next_settlement: AtomicBool::new(false),
             fail_settlement: true,
+            feedback_failure: AtomicUsize::new(0),
             hang_shutdown: false,
             shutdown_called: AtomicBool::new(false),
             unavailable_session: Mutex::new(None),
@@ -117,6 +122,7 @@ impl FaultInjectingStore {
             inner: VolatileRuntimeStore::default(),
             panic_next_settlement: AtomicBool::new(false),
             fail_settlement: false,
+            feedback_failure: AtomicUsize::new(0),
             hang_shutdown: true,
             shutdown_called: AtomicBool::new(false),
             unavailable_session: Mutex::new(None),
@@ -187,6 +193,33 @@ impl FaultInjectingStore {
 }
 
 impl RuntimeStore for FaultInjectingStore {
+    fn load_feedback(
+        &self,
+        session_id: &SessionId,
+    ) -> StoreFuture<'_, Vec<assistant_protocol::FeedbackRequestSnapshot>> {
+        self.inner.load_feedback(session_id)
+    }
+    fn mutate_feedback(&self, mutation: crate::FeedbackMutation) -> StoreFuture<'_, ()> {
+        let stage = if mutation.expected_status.is_none() {
+            1
+        } else {
+            2
+        };
+        if self
+            .feedback_failure
+            .compare_exchange(stage, 0, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            return Box::pin(async {
+                Err(StoreError::new(
+                    StoreErrorKind::Unavailable,
+                    "injected feedback failure",
+                ))
+            });
+        }
+        self.inner.mutate_feedback(mutation)
+    }
+
     fn load_default_agent_shell(&self) -> StoreFuture<'_, Option<assistant_protocol::ShellKind>> {
         self.inner.load_default_agent_shell()
     }
@@ -390,6 +423,46 @@ impl RuntimeStore for FaultInjectingStore {
         self.inner.set_skill_enabled(change)
     }
 
+    fn list_custom_agents(&self) -> StoreFuture<'_, Vec<crate::StoredCustomAgent>> {
+        self.inner.list_custom_agents()
+    }
+
+    fn mutate_custom_agent(
+        &self,
+        mutation: crate::CustomAgentMutation,
+    ) -> StoreFuture<'_, Option<crate::StoredCustomAgent>> {
+        self.inner.mutate_custom_agent(mutation)
+    }
+
+    fn list_plugins(&self) -> StoreFuture<'_, Vec<crate::StoredPlugin>> {
+        self.inner.list_plugins()
+    }
+
+    fn change_plugin_settings(
+        &self,
+        change: crate::PluginSettingsChange,
+    ) -> StoreFuture<'_, crate::StoredPlugin> {
+        self.inner.change_plugin_settings(change)
+    }
+
+    fn list_plugin_operations(&self) -> StoreFuture<'_, Vec<crate::StoredPluginOperation>> {
+        self.inner.list_plugin_operations()
+    }
+
+    fn accept_plugin_operation(
+        &self,
+        operation: crate::StoredPluginOperation,
+    ) -> StoreFuture<'_, crate::StoredPluginOperation> {
+        self.inner.accept_plugin_operation(operation)
+    }
+
+    fn advance_plugin_operation(
+        &self,
+        update: crate::PluginOperationUpdate,
+    ) -> StoreFuture<'_, crate::StoredPluginOperation> {
+        self.inner.advance_plugin_operation(update)
+    }
+
     fn load_work_plan(&self, session_id: &SessionId) -> StoreFuture<'_, Option<StoredWorkPlan>> {
         self.inner.load_work_plan(session_id)
     }
@@ -439,6 +512,13 @@ impl RuntimeStore for FaultInjectingStore {
         self.inner.remove_workspace(removal)
     }
 
+    fn restore_workspace(
+        &self,
+        restoration: WorkspaceRestoration,
+    ) -> StoreFuture<'_, StoredWorkspace> {
+        self.inner.restore_workspace(restoration)
+    }
+
     fn upload_attachment(&self, upload: NewAttachmentUpload) -> StoreFuture<'_, StoredAttachment> {
         self.inner.upload_attachment(upload)
     }
@@ -452,6 +532,13 @@ impl RuntimeStore for FaultInjectingStore {
         materialization: NewStoredSessionMaterialization,
     ) -> StoreFuture<'_, StoredSessionMaterialization> {
         self.inner.materialize_session(materialization)
+    }
+
+    fn get_session_materialization(
+        &self,
+        key: &assistant_protocol::IdempotencyKey,
+    ) -> StoreFuture<'_, Option<StoredSessionMaterialization>> {
+        self.inner.get_session_materialization(key)
     }
 
     fn fork_session(&self, fork: SessionFork) -> StoreFuture<'_, StoredSessionFork> {
@@ -550,6 +637,19 @@ impl RuntimeStore for FaultInjectingStore {
     }
 
     fn accept_input(&self, input: NewStoredInput) -> StoreFuture<'_, AcceptedInput> {
+        if input.feedback_answer.is_some()
+            && self
+                .feedback_failure
+                .compare_exchange(3, 0, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        {
+            return Box::pin(async {
+                Err(StoreError::new(
+                    StoreErrorKind::Unavailable,
+                    "injected feedback acceptance failure",
+                ))
+            });
+        }
         self.inner.accept_input(input)
     }
 

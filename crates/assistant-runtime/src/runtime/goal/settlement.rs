@@ -47,7 +47,10 @@ pub(crate) fn prepare_goal_run_decision(facts: GoalRunFacts<'_>) -> RuntimeResul
         execution_steps: (execution_start_step, execution_end_step),
         finished_at_ms,
     } = facts;
-    if matches!(status, RunStatus::Cancelled | RunStatus::Interrupted) {
+    let feedback_cancelled = state.feedback.values().any(|request| {
+        request.run_id == *run_id && request.status == assistant_protocol::FeedbackStatus::Cancelled
+    });
+    if matches!(status, RunStatus::Cancelled | RunStatus::Interrupted) && !feedback_cancelled {
         return Ok(GoalRunDecision::Settle(None));
     }
     let run = state
@@ -105,6 +108,34 @@ pub(crate) fn prepare_goal_run_decision(facts: GoalRunFacts<'_>) -> RuntimeResul
         goal.consecutive_failures = 0;
     }
 
+    if feedback_cancelled {
+        return transition(
+            current,
+            goal,
+            GoalState::Paused(GoalPauseReason::UserStopped),
+            state,
+            session_id,
+            finished_at_ms,
+        )
+        .map(GoalRunDecision::Settle);
+    }
+    if state.feedback.values().any(|request| {
+        request.run_id == *run_id
+            && request.mode == assistant_protocol::FeedbackMode::EndTurn
+            && request.status == assistant_protocol::FeedbackStatus::Pending
+    }) {
+        return transition(
+            current,
+            goal,
+            GoalState::Paused(GoalPauseReason::Blocked {
+                summary: "等待用户回复".to_owned(),
+            }),
+            state,
+            session_id,
+            finished_at_ms,
+        )
+        .map(GoalRunDecision::Settle);
+    }
     if status == RunStatus::Completed
         && let Some(signal) = signal
     {

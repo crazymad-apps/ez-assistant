@@ -686,6 +686,8 @@ mod tests {
         assert!(summary["description"].as_str().expect("summary").len() < description.len());
         let server = McpCatalogServer {
             server_key: McpServerKey::new("pencil").expect("key"),
+            plugin_name: None,
+            plugin_sha256: None,
             display_name: "Pencil".to_owned(),
             description: "Design".to_owned(),
             tools: vec![tool.clone()],
@@ -712,6 +714,8 @@ mod tests {
             .collect::<Vec<_>>();
         let server = McpCatalogServer {
             server_key: McpServerKey::new("github").expect("server key"),
+            plugin_name: None,
+            plugin_sha256: None,
             display_name: "GitHub".to_owned(),
             description: "Repository operations".to_owned(),
             tools: tools.clone(),

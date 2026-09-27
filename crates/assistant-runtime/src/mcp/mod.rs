@@ -87,6 +87,8 @@ impl fmt::Debug for McpSecret {
 #[derive(Clone)]
 pub struct McpServerConfig {
     pub(crate) server_key: McpServerKey,
+    pub(crate) plugin_name: Option<String>,
+    pub(crate) plugin_sha256: Option<String>,
     pub(crate) display_name: String,
     pub(crate) description: String,
     pub(crate) enabled: bool,
@@ -97,8 +99,25 @@ pub struct McpServerConfig {
 }
 
 impl McpServerConfig {
+    /// Host 已完成包校验和路径替换后，沿用独立 MCP 的同一规范化规则。
+    pub fn from_plugin_descriptor(
+        plugin_name: String,
+        plugin_sha256: String,
+        key: McpServerKey,
+        raw: serde_json::Map<String, Value>,
+    ) -> Result<Self, assistant_protocol::McpDiagnosticSnapshot> {
+        config::plugin_server(plugin_name, plugin_sha256, key, raw)
+    }
     pub fn server_key(&self) -> &McpServerKey {
         &self.server_key
+    }
+
+    pub fn plugin_name(&self) -> Option<&str> {
+        self.plugin_name.as_deref()
+    }
+
+    pub fn plugin_sha256(&self) -> Option<&str> {
+        self.plugin_sha256.as_deref()
     }
 
     pub fn display_name(&self) -> &str {
@@ -373,10 +392,11 @@ impl McpService {
         source: Arc<dyn McpConfigSource>,
         connection_factory: Arc<dyn McpConnectionFactory>,
         image_materializer: Arc<dyn McpImageMaterializer>,
+        plugin: Arc<crate::plugin::PluginManager>,
     ) -> Self {
         Self {
             config_store: Arc::new(McpConfigStore::new(source)),
-            registry: Arc::new(McpRegistry::new(connection_factory.clone())),
+            registry: Arc::new(McpRegistry::new(connection_factory.clone()).with_plugins(plugin)),
             connection_factory,
             image_materializer,
             management_available: true,

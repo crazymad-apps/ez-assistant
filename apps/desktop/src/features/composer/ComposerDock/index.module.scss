@@ -1,10 +1,48 @@
 .dock {
+  --composer-drawer-inline-inset: 8px;
+
   position: relative;
   z-index: var(--ez-z-sticky);
   width: calc(100% - 2 * var(--conversation-horizontal-padding));
   max-width: var(--conversation-content-max-width);
   min-width: 0;
   margin: 0 auto 16px;
+}
+
+.new_session_dock {
+  max-width: 880px;
+  margin-top: auto;
+}
+
+.draft_intro { margin: 0 0 20px; text-align: center; }
+.draft_intro h1 { margin: 0; color: var(--ez-text); font-size: 24px; font-weight: 600; }
+.draft_intro p { margin: 7px 0 18px; color: var(--ez-text-muted); font-size: var(--ez-font-base); }
+.draft_quick_actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.draft_quick_actions button {
+  --ez-control-default-height: var(--ez-control-height-default);
+  display: inline-flex;
+  min-height: var(--ez-control-height);
+  align-items: center;
+  gap: 8px;
+  padding: 0 13px;
+  border: 1px solid var(--ez-border);
+  border-radius: 9px;
+  color: var(--ez-text-secondary);
+  background: var(--ez-surface);
+  font-size: var(--ez-font-base);
+  &:hover:not(:disabled) { background: var(--ez-surface-subtle); color: var(--ez-text); }
+  &:disabled { opacity: 0.48; }
+}
+
+.secondary_drawer.draft_context_drawer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  min-height: 0;
+  align-items: center;
+  // 复用抽屉向输入框下压 10px 的接缝；可见区域上下各留 8px。
+  padding: 8px 12px 18px;
+  background: var(--ez-surface-subtle);
 }
 
 .composer,
@@ -256,7 +294,7 @@
 .secondary_drawer {
   overflow: hidden;
   /* 水平内收露出输入框两侧边界；收起和展开仍向下铺入圆角区域覆盖中部接缝。 */
-  margin-inline: 8px;
+  margin-inline: var(--composer-drawer-inline-inset);
   margin-bottom: -10px;
   padding-bottom: 10px;
   border-bottom: 0;
@@ -552,6 +590,39 @@
 
     &:hover { background: var(--ez-surface-muted); }
   }
+}
+
+.agent_dependencies {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+
+  > span { min-width: 0; flex: 1 1 280px; }
+}
+
+.agent_dependency_actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+
+.draft_conflict_backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  background: rgb(0 0 0 / 35%);
+}
+
+.draft_conflict_dialog {
+  width: min(440px, calc(100vw - 32px));
+  padding: 20px;
+  border: 1px solid var(--ez-border);
+  border-radius: 12px;
+  color: var(--ez-text);
+  background: var(--ez-surface);
+
+  h3 { margin: 0 0 10px; }
+  p { margin: 0 0 18px; color: var(--ez-text-muted); }
+  footer { display: flex; justify-content: flex-end; gap: 8px; }
 }
 
 .todo_anchor {

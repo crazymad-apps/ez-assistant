@@ -114,7 +114,7 @@
   可选 cached input；`RuntimeEvent::UsageUpdated` 携带所属 Session、Run 和 step。事件允许
   丢失，客户端重建时从已持久化 Assistant Message usage 恢复最近一次模型请求用量。
 - `SessionUsageSnapshot.context` 表达 Runtime 上下文预检的同口径占用，不等同于最近请求的
-  `input_tokens`；活动 Run 的实时 usage 仍通过既有 `UsageUpdated` 合并，不新增协议字段。
+  `input_tokens`；活动 Run 的 `UsageUpdated` 触发客户端重新读取该投影，不用 live 最大值覆盖。
 - 模型调用观察新增 attempt 开始、建流前失败、重试等待和建流成功事件；失败只携带
   `ModelFailureKind`、attempt 和重试决定，不携带 Provider 原始消息。最终 Run 使用
   `ModelExecutionFailed` 稳定错误码和安全摘要，现有客户端仍可按普通 Run 失败处理。
@@ -415,3 +415,30 @@ GetProviderUsage 返回默认／辅助用途、全库显式引用会话数量、
 ## v0.27.0 C05 子任务上下文
 
 `ChildTaskUsageSnapshot.context` 为可缺失的 `ContextUsageSnapshot`，缺失表示无法可靠确定，不等价于零。`accumulated` 保留原累计口径。该变化随未发布的 v0.27.0 同版交付；历史分页的 `observed_sequence` 不授权客户端跳过实时事件。
+
+## v0.28.0 C02 M0 Workspace 可空目录与显式恢复
+
+- `WorkspaceSummary.user_directory`、`RegisterWorkspaceRequest.primary_directory` 与
+  `UpdateWorkspaceRequest.primary_directory` 均允许为空；空值表示该 Workspace 仅使用
+  `agent_directory`，不表示空字符串或未知路径。附加目录仍要求存在非空主目录。
+- `ListWorkspacesRequest.lifecycle` 为可选筛选；省略时保持只列 active 的兼容行为，显式传入 removed
+  用于恢复入口。恢复通过 `RestoreWorkspaceRequest { workspace_id }` 定位，返回恢复后的 Workspace；
+  已 active 时重复调用结果幂等。
+- 无用户目录 Workspace 不共享路径身份，每次新建分配新 ID；非空 canonical 用户目录继续复用既有
+  身份。该投影改变随 v0.28.0 提升应用协议最低兼容版本，Rust 定义与生成的 TypeScript 投影同步。
+
+## v0.28.0 C02 M2 首次物化结果查询
+
+- `GetSessionMaterializationRequest` 仅携带原 `idempotency_key`；结果可为未命中的 `null` 或既有
+  `SessionMaterializationResult`。未命中不表示原请求已确定失败，客户端仍须保留原 key 和 manifest。
+  查询沿用 Runtime Command，不增加第二种提交票据或专用 HTTP 路由。
+
+## v0.28.1 F01 请求进度
+
+- RunSnapshot 的可选 model_request 仅投影主模型正在建立或等待重试的事实；次数属于当前模型调用，
+  不等同于 Run.attempt。重连读取同一 Run 的快照，建流、取消和终态后清除，进程重启不恢复请求。
+- 既有 attempt 事件和持久 Run 错误继续复用；本次不引入请求表、模型原文或数据库迁移。
+
+## v0.28.1 F04 问答契约
+
+`FeedbackRequestSnapshot` 是主会话 `ask_user` 的权威问题和答复投影，独立于审批与消息评价。客户端通过 `ListFeedbackRequests`、`AnswerFeedback`、`CancelFeedback` 读取和提交意图；问题内容、模式与请求身份由 Runtime 冻结。`FeedbackPublished` / `FeedbackChanged` 同步状态，恢复查询不重复发通知。`RunFinished.awaiting_feedback` 为兼容缺省 false 的可选字段，避免轮后等待误报完成。本次应用最低兼容版本为 `0.28.1`。

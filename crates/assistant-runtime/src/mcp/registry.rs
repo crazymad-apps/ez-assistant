@@ -52,6 +52,8 @@ pub(crate) struct McpRegistryServerProjection {
 #[derive(Clone)]
 pub(crate) struct McpCatalogServer {
     pub(crate) server_key: McpServerKey,
+    pub(crate) plugin_name: Option<String>,
+    pub(crate) plugin_sha256: Option<String>,
     pub(crate) display_name: String,
     pub(crate) description: String,
     pub(crate) tools: Vec<McpToolDefinition>,
@@ -155,7 +157,9 @@ pub(crate) struct McpRegistry {
     refresh_gate: Mutex<()>,
     servers: RwLock<BTreeMap<McpServerKey, Arc<McpServerState>>>,
     diagnostics: RwLock<BTreeMap<McpServerKey, McpDiagnosticSnapshot>>,
+    supplemental_diagnostics: RwLock<Vec<McpDiagnosticSnapshot>>,
     connection_factory: Arc<dyn McpConnectionFactory>,
+    plugin: Option<Arc<crate::plugin::PluginManager>>,
     schema: McpSchemaEngine,
 }
 
@@ -165,9 +169,43 @@ impl McpRegistry {
             refresh_gate: Mutex::new(()),
             servers: RwLock::new(BTreeMap::new()),
             diagnostics: RwLock::new(BTreeMap::new()),
+            supplemental_diagnostics: RwLock::new(Vec::new()),
             connection_factory,
+            plugin: None,
             schema: McpSchemaEngine::new(SCHEMA_BLOCKING_CONCURRENCY),
         }
+    }
+
+    pub(crate) fn with_plugins(mut self, plugin: Arc<crate::plugin::PluginManager>) -> Self {
+        self.plugin = Some(plugin);
+        self
+    }
+
+    /// 包文件切换前关闭仍引用旧包的空闲连接；活动调用由插件使用门另行保护。
+    pub(crate) async fn retire_plugin_package(
+        &self,
+        name: &str,
+        sha256: &str,
+    ) -> RuntimeResult<(Vec<McpServerKey>, bool)> {
+        let _refresh = self.refresh_gate.lock().await;
+        let keys = self
+            .servers
+            .read()
+            .map_err(|_| registry_unavailable())?
+            .iter()
+            .filter(|(_, state)| {
+                state.plugin_name.as_deref() == Some(name)
+                    && state.plugin_sha256.as_deref() == Some(sha256)
+            })
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        let mut close_failed = false;
+        for key in &keys {
+            if let Some(state) = self.remove_current(key)? {
+                close_failed |= state.retire().await.is_err();
+            }
+        }
+        Ok((keys, close_failed))
     }
 
     pub(crate) fn projections(
@@ -203,6 +241,16 @@ impl McpRegistry {
             .read()
             .map_err(|_| registry_unavailable())
             .map(|diagnostics| diagnostics.values().cloned().collect())?;
+        for diagnostic in self
+            .supplemental_diagnostics
+            .read()
+            .map_err(|_| registry_unavailable())?
+            .iter()
+        {
+            if !diagnostics.contains(diagnostic) {
+                diagnostics.push(diagnostic.clone());
+            }
+        }
         // 错误锁已释放；警告直接来自当前可用目录，刷新替换或删除后自然消失。
         for (key, server) in self
             .servers
@@ -236,6 +284,8 @@ impl McpRegistry {
                     .values()
                     .map(|server| McpCatalogServer {
                         server_key: server.server_key.clone(),
+                        plugin_name: server.plugin_name.clone(),
+                        plugin_sha256: server.plugin_sha256.clone(),
                         display_name: server.display_name.clone(),
                         description: server.description.clone(),
                         tools: server
@@ -258,6 +308,8 @@ impl McpRegistry {
             .map(|servers| {
                 servers.get(server_key).map(|server| McpCatalogServer {
                     server_key: server.server_key.clone(),
+                    plugin_name: server.plugin_name.clone(),
+                    plugin_sha256: server.plugin_sha256.clone(),
                     display_name: server.display_name.clone(),
                     description: server.description.clone(),
                     tools: server
@@ -313,7 +365,7 @@ impl McpRegistry {
     /// 再 finish 回收旧连接；全过程不持有同步目录锁等待 I/O。旧 invocation 另按实例身份拒绝。
     pub(crate) async fn refresh(
         &self,
-        candidate: McpRegistryCandidate,
+        mut candidate: McpRegistryCandidate,
         target: Option<&McpServerKey>,
         runtime: McpRuntimeConfig,
         cancellation: CancellationToken,
@@ -321,6 +373,24 @@ impl McpRegistry {
         let _refresh = self.refresh_gate.lock().await;
         if !candidate.document_valid {
             return Err(RuntimeError::McpConfigInvalid);
+        }
+        *self
+            .supplemental_diagnostics
+            .write()
+            .map_err(|_| registry_unavailable())? = candidate.supplemental_diagnostics.clone();
+
+        if let Some(plugin) = &self.plugin {
+            let plugin_keys = candidate
+                .servers
+                .iter()
+                .filter_map(|(key, server)| Some((key.clone(), server.plugin_name()?.to_owned())))
+                .collect::<Vec<_>>();
+            for (key, name) in plugin_keys {
+                if !plugin.package_available_for_refresh(&name).await {
+                    candidate.servers.remove(&key);
+                    candidate.configured_keys.remove(&key);
+                }
+            }
         }
 
         let enabled = candidate
@@ -378,51 +448,94 @@ impl McpRegistry {
             let configured = candidate.servers.get(&key);
             let is_configured = candidate.configured_keys.contains(&key);
             let current_count = self.current_tool_count(&key)?;
-            let result = match configured {
-                Some(server) if !server.enabled() => {
-                    if let Some(old) = self.remove_current(&key)? {
-                        retired.push(old);
-                    }
-                    self.clear_diagnostic(&key)?;
-                    refresh_result(key, McpServerRefreshOutcome::Disabled, 0, None)
+            let result = if candidate.blocked_keys.contains(&key) {
+                if let Some(old) = self.remove_current(&key)? {
+                    retired.push(old);
                 }
-                Some(_) => match built.get(&key) {
-                    Some(Ok(next)) => {
-                        let tool_count = next.tools.len();
-                        if let Some(old) = self.swap_current(key.clone(), next.clone())? {
+                let diagnostic = configured_diagnostics
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        catalog_diagnostic(
+                            key.clone(),
+                            McpDiagnosticCode::InvalidConfig,
+                            "MCP server name conflicts with another source",
+                        )
+                    });
+                self.set_diagnostic(key.clone(), diagnostic.clone())?;
+                refresh_result(
+                    key,
+                    McpServerRefreshOutcome::BlockedByConflict,
+                    0,
+                    Some(diagnostic),
+                )
+            } else {
+                match configured {
+                    Some(server) if !server.enabled() => {
+                        if let Some(old) = self.remove_current(&key)? {
                             retired.push(old);
                         }
                         self.clear_diagnostic(&key)?;
-                        let warning = next
-                            .tools
-                            .values()
-                            .find_map(|tool| tool.description_warning(&key));
-                        refresh_result(
-                            key,
-                            if tool_count == 0 {
-                                McpServerRefreshOutcome::ConnectedWithoutTools
-                            } else {
-                                McpServerRefreshOutcome::Refreshed
-                            },
-                            tool_count,
-                            warning,
-                        )
+                        refresh_result(key, McpServerRefreshOutcome::Disabled, 0, None)
                     }
-                    Some(Err(diagnostic)) => {
-                        self.set_diagnostic(key.clone(), diagnostic.clone())?;
-                        refresh_result(
-                            key,
-                            McpServerRefreshOutcome::RetainedAfterFailure,
-                            current_count,
-                            Some(diagnostic.clone()),
-                        )
-                    }
-                    None => {
-                        let diagnostic = catalog_diagnostic(
-                            key.clone(),
-                            McpDiagnosticCode::CatalogFailed,
-                            "MCP candidate was not built",
-                        );
+                    Some(_) => match built.get(&key) {
+                        Some(Ok(next)) => {
+                            let tool_count = next.tools.len();
+                            if let Some(old) = self.swap_current(key.clone(), next.clone())? {
+                                retired.push(old);
+                            }
+                            self.clear_diagnostic(&key)?;
+                            let warning = next
+                                .tools
+                                .values()
+                                .find_map(|tool| tool.description_warning(&key));
+                            refresh_result(
+                                key,
+                                if tool_count == 0 {
+                                    McpServerRefreshOutcome::ConnectedWithoutTools
+                                } else {
+                                    McpServerRefreshOutcome::Refreshed
+                                },
+                                tool_count,
+                                warning,
+                            )
+                        }
+                        Some(Err(diagnostic)) => {
+                            self.set_diagnostic(key.clone(), diagnostic.clone())?;
+                            refresh_result(
+                                key,
+                                McpServerRefreshOutcome::RetainedAfterFailure,
+                                current_count,
+                                Some(diagnostic.clone()),
+                            )
+                        }
+                        None => {
+                            let diagnostic = catalog_diagnostic(
+                                key.clone(),
+                                McpDiagnosticCode::CatalogFailed,
+                                "MCP candidate was not built",
+                            );
+                            self.set_diagnostic(key.clone(), diagnostic.clone())?;
+                            refresh_result(
+                                key,
+                                McpServerRefreshOutcome::RetainedAfterFailure,
+                                current_count,
+                                Some(diagnostic),
+                            )
+                        }
+                    },
+                    None if is_configured => {
+                        let diagnostic =
+                            configured_diagnostics
+                                .get(&key)
+                                .cloned()
+                                .unwrap_or_else(|| {
+                                    catalog_diagnostic(
+                                        key.clone(),
+                                        McpDiagnosticCode::InvalidConfig,
+                                        "MCP server configuration is invalid",
+                                    )
+                                });
                         self.set_diagnostic(key.clone(), diagnostic.clone())?;
                         refresh_result(
                             key,
@@ -431,35 +544,15 @@ impl McpRegistry {
                             Some(diagnostic),
                         )
                     }
-                },
-                None if is_configured => {
-                    let diagnostic =
-                        configured_diagnostics
-                            .get(&key)
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                catalog_diagnostic(
-                                    key.clone(),
-                                    McpDiagnosticCode::InvalidConfig,
-                                    "MCP server configuration is invalid",
-                                )
-                            });
-                    self.set_diagnostic(key.clone(), diagnostic.clone())?;
-                    refresh_result(
-                        key,
-                        McpServerRefreshOutcome::RetainedAfterFailure,
-                        current_count,
-                        Some(diagnostic),
-                    )
-                }
-                None if current_keys.contains(&key) => {
-                    if let Some(old) = self.remove_current(&key)? {
-                        retired.push(old);
+                    None if current_keys.contains(&key) => {
+                        if let Some(old) = self.remove_current(&key)? {
+                            retired.push(old);
+                        }
+                        self.clear_diagnostic(&key)?;
+                        refresh_result(key, McpServerRefreshOutcome::Removed, 0, None)
                     }
-                    self.clear_diagnostic(&key)?;
-                    refresh_result(key, McpServerRefreshOutcome::Removed, 0, None)
+                    None => refresh_result(key, McpServerRefreshOutcome::NotFound, 0, None),
                 }
-                None => refresh_result(key, McpServerRefreshOutcome::NotFound, 0, None),
             };
             results.push(result);
         }
@@ -560,6 +653,19 @@ impl McpRegistry {
         // remote_may_have_executed 错误并决定下一步，不得在这里重放远端请求。
         let cancellation = cancellation.child_token();
         let state = self.invocation_state(invocation)?;
+        let _plugin_lease = if let Some(name) = state.plugin_name.as_deref() {
+            let manager = self.plugin.as_ref().ok_or_else(server_unavailable)?;
+            let lease = manager
+                .use_package(name)
+                .await
+                .map_err(|_| server_unavailable())?;
+            if Some(lease.sha256.as_str()) != state.plugin_sha256.as_deref() {
+                return Err(catalog_changed());
+            }
+            Some(lease)
+        } else {
+            None
+        };
         let tool = state
             .tools
             .get(&invocation.tool_name)
@@ -716,6 +822,8 @@ impl McpRegistry {
             server_key: server.server_key().clone(),
             display_name: server.display_name().to_owned(),
             description: server.description().to_owned(),
+            plugin_name: server.plugin_name().map(ToOwned::to_owned),
+            plugin_sha256: server.plugin_sha256().map(ToOwned::to_owned),
             transport: server.transport_kind(),
             fingerprint: server.fingerprint(),
             request_timeout: effective_tool_timeout(runtime, &server),
@@ -894,6 +1002,8 @@ struct McpServerState {
     server_key: McpServerKey,
     display_name: String,
     description: String,
+    plugin_name: Option<String>,
+    plugin_sha256: Option<String>,
     #[allow(dead_code)]
     transport: McpTransportKind,
     fingerprint: [u8; 32],
@@ -995,7 +1105,9 @@ fn overall_outcome(results: &[McpServerRefreshResultSnapshot]) -> McpRefreshOutc
         .filter(|result| {
             matches!(
                 result.outcome,
-                McpServerRefreshOutcome::RetainedAfterFailure | McpServerRefreshOutcome::NotFound
+                McpServerRefreshOutcome::RetainedAfterFailure
+                    | McpServerRefreshOutcome::BlockedByConflict
+                    | McpServerRefreshOutcome::NotFound
             )
         })
         .count();

@@ -21,6 +21,7 @@ import {
 } from "streamdown";
 import "streamdown/styles.css";
 import { openExternalHttpUrl } from "../../native-bridge/openExternalUrl";
+import { Button } from "../Button";
 import styles from "./index.module.scss";
 
 type MarkdownContentProps = Readonly<{
@@ -158,25 +159,29 @@ function LocalImage(props: Readonly<{
 }>) {
   const local = useContext(LocalResourceContext);
   const [url, setUrl] = useState<string | null>(null);
-  const [failed, setFailed] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let active = true;
     let object_url: string | null = null;
-    setFailed(false);
+    setFailure(null);
     setUrl(null);
     void props.load(props.reference).then((value) => {
       object_url = value;
       if (active) setUrl(value);
       else URL.revokeObjectURL(value);
-    }).catch(() => {
-      if (active) setFailed(true);
+    }).catch((error: unknown) => {
+      if (active) setFailure(error instanceof Error ? error.message : "图片加载失败。");
     });
     return () => {
       active = false;
       if (object_url) URL.revokeObjectURL(object_url);
     };
-  }, [props.load, props.reference]);
-  if (failed) return <span className={styles.image_unavailable}>{props.alt || "图片加载失败"}</span>;
+  }, [props.load, props.reference, attempt]);
+  if (failure) return <span className={styles.image_unavailable}>
+    {props.alt && `${props.alt}：`}{failure}
+    <Button size="small" variant="text" onClick={() => setAttempt((value) => value + 1)}>重试图片</Button>
+  </span>;
   if (!url) return <span className={styles.image_unavailable}>{props.alt || "正在加载图片…"}</span>;
   return props.onOpen ? (
     <button
@@ -186,9 +191,9 @@ function LocalImage(props: Readonly<{
       onKeyDown={(event) => openLocalMenuFromKeyboard(event, local, props.reference)}
       type="button"
     >
-      <img alt={props.alt} src={url} />
+      <img alt={props.alt} src={url} onError={() => setFailure("图片无法显示，请重试或下载查看。")} />
     </button>
-  ) : <img alt={props.alt} src={url} />;
+  ) : <img alt={props.alt} src={url} onError={() => setFailure("图片无法显示，请重试或下载查看。")} />;
 }
 
 function openLocalMenuFromPointer(

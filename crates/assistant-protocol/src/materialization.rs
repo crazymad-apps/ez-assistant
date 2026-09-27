@@ -28,6 +28,9 @@ pub struct SessionMaterializationManifest {
     pub workspace_id: Option<WorkspaceId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
+    pub custom_agent: Option<crate::CustomAgentSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub model_selection: Option<ModelSelection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]

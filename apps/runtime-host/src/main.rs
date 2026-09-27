@@ -14,6 +14,7 @@ mod mcp;
 mod mcp_startup;
 mod media_diagnostics;
 mod platform;
+mod plugins;
 mod recall_reference_key;
 mod resources;
 mod server;

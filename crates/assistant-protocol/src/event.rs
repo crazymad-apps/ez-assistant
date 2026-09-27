@@ -98,12 +98,27 @@ pub enum ChildTaskEvent {
 #[ts(export_to = "assistant-protocol.ts")]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeEvent {
+    /// 已保存且可以查询的一组反馈问题。
+    FeedbackPublished {
+        request: crate::FeedbackRequestSnapshot,
+    },
+    /// 回答、取消或失效后的权威请求。
+    FeedbackChanged {
+        request: crate::FeedbackRequestSnapshot,
+    },
     /// Runtime 已开始受控关闭。
     RuntimeShuttingDown,
     /// 应用配置投影已经变化；客户端应重新获取 ApplicationSnapshot。
     ConfigChanged,
     /// MCP 活动目录已发布；客户端应刷新服务选择与应用能力。
     McpRegistryChanged,
+    /// 插件操作相位或合并后的进度发生变化；终态仍以查询收据为准。
+    PluginOperationChanged {
+        key: crate::IdempotencyKey,
+    },
+    /// 插件包生效引用或归属变化；客户端重新获取插件列表。
+    PluginCatalogChanged,
+    CustomAgentCatalogChanged,
     /// 全局 Skill 名称状态已经变化；设置页应重新读取当前管理投影。
     SkillSettingsChanged {
         name: String,
@@ -385,6 +400,10 @@ pub enum RuntimeEvent {
         status: RunStatus,
         /// Run 失败时的脱敏错误。
         error: Option<RuntimeErrorInfo>,
+        /// 正常结束本轮但仍等待 ask_user 轮后反馈；客户端不得重复发送完成通知。
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        #[ts(as = "Option<bool>", optional)]
+        awaiting_feedback: bool,
     },
 }
 
@@ -445,6 +464,7 @@ mod tests {
 
     fn session_fixture() -> SessionSummary {
         SessionSummary {
+            custom_agent: None,
             session_id: session_id(),
             title: "Session 1".to_owned(),
             model_selection: Some(crate::ModelSelection {
@@ -538,6 +558,7 @@ mod tests {
             session_id: session_id(),
             run_id: run_id(),
             status: RunStatus::Cancelled,
+            awaiting_feedback: false,
             error: None,
         };
         let json = serde_json::to_string(&event).expect("serialize event");
@@ -834,6 +855,7 @@ mod tests {
                     session_id: session_id(),
                     run_id: run_id(),
                     status: RunStatus::Completed,
+                    awaiting_feedback: false,
                     error: None,
                 },
                 "run_finished",

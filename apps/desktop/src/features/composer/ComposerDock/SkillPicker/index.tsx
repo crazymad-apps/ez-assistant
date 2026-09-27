@@ -27,6 +27,7 @@ export const SkillPicker = observer(function SkillPicker(props: Readonly<{
     on_retry={() => void load()}
     on_select={props.on_select}
     open
+    option_label={(skill) => skill.plugin_name ? `${skill.plugin_name} · ${skill.name}` : skill.name}
     options={availableUserSkills(store.snapshot?.skills ?? [])}
   />;
 });

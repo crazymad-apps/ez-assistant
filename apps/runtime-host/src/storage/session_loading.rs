@@ -152,7 +152,8 @@ impl StorageEngine {
                     s.archived_at_ms, s.is_pinned, s.title_origin,
                     (SELECT COUNT(*) FROM inputs i WHERE i.session_id = s.session_id
                      AND i.state = 'queued' AND i.input_kind = 'message' AND i.origin = 'user' AND i.goal_id IS NULL),
-                    EXISTS(SELECT 1 FROM inputs i WHERE i.session_id = s.session_id AND i.state = 'queued' AND i.goal_id IS NULL)
+                    EXISTS(SELECT 1 FROM inputs i WHERE i.session_id = s.session_id AND i.state = 'queued' AND i.goal_id IS NULL),
+                    s.custom_agent_json
              FROM sessions s LEFT JOIN devices d ON d.device_id = s.pc_output_device_id
              LEFT JOIN session_resources r ON r.session_id = s.session_id
              WHERE (?1 IS NULL OR s.lifecycle = ?1) AND (?2 IS NULL OR s.session_id = ?2)
@@ -198,6 +199,7 @@ impl StorageEngine {
                     row.get::<_, String>(18)?,
                     row.get::<_, i64>(19)?,
                     row.get::<_, bool>(20)?,
+                    row.get::<_, Option<String>>(21)?,
                 ))
             })()
             .map_err(|e| internal_error("session summary row is invalid", e))?;
@@ -223,10 +225,21 @@ impl StorageEngine {
                 title_origin,
                 queued,
                 resume_required,
+                custom_agent_json,
             ) = result;
             let queued_input_count = non_negative_u64(queued, "invalid queued input count")?;
             summaries.push(SessionSummary {
                 session_id: SessionId::new(id).map_err(|_| invalid_data("invalid session id"))?,
+                custom_agent: custom_agent_json
+                    .map(|value| {
+                        serde_json::from_str::<assistant_protocol::CustomAgentSnapshot>(&value)
+                    })
+                    .transpose()
+                    .map_err(|_| invalid_data("invalid custom agent snapshot"))?
+                    .map(|agent| assistant_protocol::CustomAgentSelection {
+                        name: agent.config.name,
+                        source: agent.source,
+                    }),
                 title,
                 model_selection: super::model_management::read_selection_json(&model)?,
                 reasoning_effort: parse_reasoning_effort(effort)?,

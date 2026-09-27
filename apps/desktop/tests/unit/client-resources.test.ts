@@ -250,3 +250,14 @@ it("copies on ordinary HTTP without Clipboard API and cleans the temporary selec
     "手动选择复制：/host/path",
   );
 });
+
+
+it("downloads Windows Host files with a basename while preserving the request path", async () => {
+  const client = runtime();
+  const resources = new ClientResources(() => client, false);
+  const download = vi.spyOn(resources, "download").mockResolvedValue();
+  await resources.downloadHostFile("C:\\项目\\图 片.png");
+  expect(download).toHaveBeenCalledWith("/host-files/download", "图 片.png", { path: "C:\\项目\\图 片.png" });
+  resources.dispose();
+  client.dispose();
+});

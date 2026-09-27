@@ -224,6 +224,16 @@ impl VolatileRuntimeStore {
             run.cancel_requested = settlement.cancel_requested;
             run.error = settlement.error;
             run.finished_at_ms = Some(settlement.finished_at_ms);
+            for request in state.feedback.values_mut().filter(|r| {
+                r.run_id == settlement.run_id
+                    && r.status == assistant_protocol::FeedbackStatus::Pending
+            }) {
+                if request.mode == assistant_protocol::FeedbackMode::Wait
+                    || settlement.status != RunStatus::Completed
+                {
+                    request.status = assistant_protocol::FeedbackStatus::Invalidated;
+                }
+            }
             let session = state
                 .sessions
                 .get_mut(&settlement.session_id)

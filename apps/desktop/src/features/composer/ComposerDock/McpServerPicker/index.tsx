@@ -31,7 +31,9 @@ export const McpServerPicker = observer(function McpServerPicker(props: Readonly
     on_retry={() => void load()}
     on_select={(server) => props.on_select({ server_key: server.server_key, display_name: server.display_name })}
     open
-    option_label={(server) => `${server.display_name} (${server.server_key})`}
+    option_label={(server) => server.plugin_name
+      ? `${server.plugin_name} · ${server.display_name}`
+      : `${server.display_name} (${server.server_key})`}
     options={store.servers.map((server) => ({ ...server, name: server.server_key }))}
   />;
 });

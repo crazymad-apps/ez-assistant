@@ -1,5 +1,6 @@
 import type {
   ModelFailureKind,
+  ModelRequestStatus,
   McpToolIdentity,
   RuntimeErrorCode,
   RunStatus,
@@ -58,6 +59,7 @@ export type LiveRunProjection = Readonly<{
   error_code: RuntimeErrorCode | null;
   error_message: string | null;
   model_failure_kind: ModelFailureKind | null;
+  model_request: ModelRequestStatus | null;
 }>;
 
 export function emptyRun(
@@ -76,6 +78,7 @@ export function emptyRun(
     error_code: null,
     error_message: null,
     model_failure_kind: null,
+    model_request: null,
   };
 }
 

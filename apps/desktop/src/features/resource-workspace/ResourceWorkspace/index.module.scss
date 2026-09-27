@@ -1,5 +1,4 @@
 .workspace {
-  &[hidden] { display: none; }
   display: grid;
   overflow: hidden;
 
@@ -11,7 +10,7 @@
   border-left: 1px solid var(--ez-border);
   background: var(--ez-sidebar);
 
-  grid-template-rows: 56px minmax(0, 1fr);
+  grid-template-rows: 42px minmax(0, 1fr);
 }
 
 .tab_bar {

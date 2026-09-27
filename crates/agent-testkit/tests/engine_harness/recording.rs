@@ -456,4 +456,53 @@ async fn recorder_context_change_ends_the_execution_with_reliable_consumption() 
     assert_eq!(recorder.deltas().len(), 2);
 }
 
+#[tokio::test]
+async fn recorder_host_handoff_closes_exchange_without_another_model_request() {
+    let log = OrderLog::new();
+    let turn = calls_message("message_1", vec![call("call_1", "load_context", json!({}))]);
+    let model = Arc::new(ScriptedModelService::new(
+        capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
+        [ModelScript::Events(message_events(&turn))],
+    ));
+    let recorder = Arc::new(InMemoryRecorder::new(log.clone()).with_return_to_host());
+    let execution = AgentExecution::start(
+        make_spec(
+            model.clone(),
+            snapshot_of(vec![ScriptedTool::succeed(
+                "load_context",
+                json!({"status": "staged"}),
+                log.clone(),
+            )]),
+            ExecutionBudget::default(),
+        ),
+        make_input(vec![]).0,
+        make_context(
+            recorder.clone(),
+            Arc::new(ScriptedAuthorizer::allow_all(log)),
+        ),
+    );
+
+    let (outcome, events) = finish(execution).await;
+    assert_eq!(
+        outcome,
+        ExecutionOutcome::ContinuationRequired {
+            reason: agent_core::ContinuationReason::ReturnToHost,
+            consumption: ExecutionConsumption {
+                steps: 1,
+                tool_calls: 1,
+            },
+        }
+    );
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::ExecutionContinuationRequired {
+            reason: agent_core::ContinuationReason::ReturnToHost,
+            ..
+        })
+    ));
+    assert_eq!(recorder.deltas().len(), 2);
+    assert_eq!(model.take_requests().len(), 1);
+}
+
 // ---------- 预算边界（0 / 刚好等于上限 / 同批跨越 / None 见多轮测试） ----------

@@ -201,6 +201,13 @@ Provider/model/协议，不自动重试或跟随跳转。中心自产错误有 `
 保留期；默认关闭，正文 7 天、索引 90 天。关闭不删除已有文件。模型参数页只能测试已保存且未修改的
 固定配置，使用短非流式请求、30 秒期限与 1 MiB 响应限制；不会修改企业默认，也不证明全部能力可用。
 
+`GET /api/llm-usage` 为管理员提供按用户、时间（小时/天/月）及“服务商 / 模型”联合键的用量聚合；
+`GET /api/llm-usage/models` 查询历史联合键选项。中心从上游 Chat Completions 或 Responses 的
+流式/非流式响应提取 usage，每次代理尝试独立结算；输入、输出、总量及可获得的缓存/推理明细写入
+调用索引，不依赖正文采集开关。未收到 usage、解析失败、超限和旧调用分别标为不可用或部分可用，
+聚合只报告已知值及覆盖数，不推算缺失数据。统计使用 Asia/Shanghai 时间桶，默认查询最近 7 天的
+业务调用；索引保留期决定可查范围，延长保留期不能恢复已删除记录。后台可从统计页下钻到调用列表。
+
 启用正文采集前设置 `CENTER_SNAPSHOT_ROOT`，预先创建独立、绝对、非公开的持久目录。目录权限
 0700、文件 0600；禁止符号链接。文件按 UTC 开始日期及调用 UUID 存放，各侧上限 8 MiB，采集与待写
 缓冲共 64 MiB；超限保留 UTF-8 前缀并标记部分。压缩响应仍原样转发，但不作为文本快照保存。
@@ -212,9 +219,40 @@ rename 覆盖已存在终态文件；快照根所在文件系统须支持同目�
 不符会单独标记，不改写可靠的转发结果。恢复异常停止启动；每小时最多清理 100 条，先删文件再改
 状态/删索引。清理出错停止调度，排查后重启；未知文件和符号链接不会被递归删除。
 
-部署与备份需同时包含 PostgreSQL、独立模板、快照根；只恢复其中一项不能保证正文完整性。共享开发库
+部署与备份需同时包含 PostgreSQL、独立模板、快照根及插件包根；只恢复其中一项不能保证正文或插件包完整性。共享开发库
 仍保持自动升级关闭。C04 M1 集成验证使用明确核对的新隔离库，按根规则完成备份恢复后定向运行
 `tests/integration/calls.test.ts`，不直接运行会连接其他循环库的整组集成测试。
+
+C01 M0 的 `POST /api/plugin-packages` 仅允许管理员上传 ZIP/TAR.GZ 完整包；首包建立未上架插件，
+同名同版本同 SHA 返回 unchanged，异 SHA 校验通过后替换当前包引用。`GET
+/api/plugin-packages/:name/versions/:version` 可在回包丢失后核对当前 SHA。上传暂存、内容寻址包与数据库
+记录分属文件系统和 PostgreSQL，备份与恢复须覆盖两者。`CENTER_PLUGIN_ROOT` 默认为当前工作目录的
+`data/plugins`，正式部署必须指向独立、绝对、非公开且仅中心进程可写的持久目录；中心不提供静态包路由。
+启动会检查根、`staging`、`packages`，清理仅属于中心的遗留 `.part`，不自动删除无引用完整包。
+
+C01 M1 在同一身份体系下开放管理员 `GET /api/plugins`、`GET/PUT /api/plugins/:name` 和
+`PUT /api/plugins/:name/publication`。详情返回 ETag；说明和发布状态写入必须携带当前 `If-Match`，
+过期条件返回 412。首次上架必须已有可用完整包，下架后状态为 deprecated，可重新上架。
+普通已登录用户通过 `GET /api/runtime/plugins` 发现仅在架插件，通过详情查询已废弃/未上架状态，
+再用 `POST /api/runtime/plugins/:name/resolve` 按平台、Host 版本和所需 Skill/MCP 名称选包。
+`GET /api/runtime/plugins/:name/versions/:version/package` 必须带 Bearer 和当前 SHA 的
+`If-Match`；同版本当前包已替换时返回 412 `PACKAGE_CHANGED`，下架后返回 410，且不提供
+公开下载地址或 Range。下载以已打开的旧 SHA 文件句柄完成；下架提交后取消未完成的同名下载。
+中心现声明 `plugin_market`，但不代表客户端安装、自动更新或 Host 侧 Agent 接入已经完成。
+
+C01 M2 复用迁移 `003-agents-and-plugins.sql` 的 `custom_agents` 表，不新增 Agent 专用发布流程。
+管理员通过 `GET/POST /api/agents` 和 `GET/PUT/DELETE /api/agents/:name` 读取摘要、创建、读取完整配置、
+修改与删除；修改和删除必须携带详情返回的 `ETag` 作为 `If-Match`，缺失返回 428，旧条件返回 412。
+创建后名称不可原位修改。已登录企业用户通过 `GET /api/runtime/agents` 读取完整配置数组；空数组是有效结果，
+未授权与读取失败不解释为空目录。中心已声明 `managed_agents`，但不代表 Host 已安装依赖或能执行 Agent。
+
+Agent 名称支持 NFC 中文，限制 1—64 个 Unicode 字符且不能有首尾空白或控制字符；描述最多 4096 字符，
+完整提示词非全空、最多 256 KiB UTF-8 字节，保存时不裁剪换行或空格。Skill/MCP 引用各最多 256 项，
+按同类名称去重；可不引用任何能力。引用带 `plugin` 时，新增引用必须被该插件至少一个当前包声明；
+不带 `plugin` 表示由 Host 自行核对，不推断为中心插件。插件后来下架、替换或丢失能力不会删除已存引用，
+管理员详情与列表会按当前包重新给出状态及支持平台，不能把中心诊断当作目标 Host 就绪结论。
+管理列表不返回完整提示词，审计也不保存提示词或凭据。Agent JSON 写入上限 2 MiB；其余普通管理请求维持
+原有上限。正式 Admin 的 Agent 编辑与依赖选择页面属于 C01 M3，目前尚未接入。
 
 ## Docker 交付
 

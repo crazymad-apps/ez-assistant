@@ -1,5 +1,5 @@
 import * as sdk from './openapi/sdk.gen';
-import type { ListLlmCallsData, RecordingSettings, ModelSelection } from './openapi';
+import type { ListLlmCallsData, GetLlmUsageData, RecordingSettings, ModelSelection } from './openapi';
 
 const options = (token: string, signal?: AbortSignal) => ({
   headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -8,6 +8,11 @@ const options = (token: string, signal?: AbortSignal) => ({
 });
 
 export const callApi = {
+  usage: async (token: string, query: GetLlmUsageData['query'], signal?: AbortSignal) =>
+    (await sdk.getLlmUsage({ ...options(token, signal), query })).data,
+
+  usageModels: async (token: string, search: string, signal?: AbortSignal) =>
+    (await sdk.listLlmUsageModels({ ...options(token, signal), query: { search } })).data,
   list: async (token: string, query: ListLlmCallsData['query'], signal?: AbortSignal) =>
     (await sdk.listLlmCalls({ ...options(token, signal), query })).data,
 

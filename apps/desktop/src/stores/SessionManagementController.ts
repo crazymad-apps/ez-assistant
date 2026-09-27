@@ -319,7 +319,7 @@ export class SessionManagementController {
 
   async registerWorkspace(input: Readonly<{
     label: string;
-    primary_directory: string;
+    primary_directory: string | null;
     additional_directories: string[];
   }>): Promise<boolean> {
     const { connection, navigation, runtime, state } = this.dependencies;
@@ -399,6 +399,41 @@ export class SessionManagementController {
       runInAction(() => {
         state.pending_workspace_action = false;
       });
+    }
+  }
+
+  async listRemovedWorkspaces(): Promise<WorkspaceSummary[] | null> {
+    const { connection, runtime, state } = this.dependencies;
+    if (!runtime.client || connection.state !== "connected") return null;
+    runInAction(() => { state.interaction_error = null; });
+    try {
+      const result = await runtime.client.command({ type: "list_workspaces", payload: { lifecycle: "removed" } });
+      return result.payload.workspaces;
+    } catch (error: unknown) {
+      runInAction(() => { state.interaction_error = displayError(error); });
+      return null;
+    }
+  }
+
+  async restoreWorkspace(workspace_id: WorkspaceId): Promise<boolean> {
+    const { connection, navigation, runtime, state } = this.dependencies;
+    if (!runtime.client || connection.state !== "connected" || state.pending_workspace_action || state.pending_session_action) return false;
+    runInAction(() => {
+      state.pending_workspace_action = true;
+      state.interaction_error = null;
+    });
+    try {
+      await runtime.client.command({ type: "restore_workspace", payload: { workspace_id } });
+      await runtime.loadApplication();
+      navigation.ensureWorkspaceExpanded(workspace_id);
+      this.dependencies.save_preferences();
+      this.dependencies.select_draft(workspace_id);
+      return true;
+    } catch (error: unknown) {
+      runInAction(() => { state.interaction_error = displayError(error); });
+      return false;
+    } finally {
+      runInAction(() => { state.pending_workspace_action = false; });
     }
   }
 

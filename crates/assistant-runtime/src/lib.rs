@@ -4,15 +4,20 @@
 //! Runtime Host 进程装配本 crate；本 crate 不依赖 Tauri 或具体进程通信方式。
 
 mod agent_variant;
+mod artifact;
+pub use artifact::ArtifactFiles;
 mod channel;
 pub mod config;
 mod context_compaction;
 mod conversation_recall;
+mod custom_agent;
 mod delegation;
 mod device;
 mod environment;
 mod error;
 mod factory;
+mod feedback;
+pub use feedback::FeedbackMutation;
 mod goal;
 mod id;
 mod internal_boundary;
@@ -21,6 +26,7 @@ mod mcp;
 mod memory;
 mod observation;
 mod permission;
+mod plugin;
 mod run;
 mod runtime;
 mod session;
@@ -46,6 +52,7 @@ pub use config::{
     RuntimeModelTransportConfig, compile_runtime_config,
 };
 pub use conversation_recall::HmacRecallReferenceCodec;
+pub use custom_agent::{CenterCustomAgentDirectory, CustomAgentDirectorySource};
 pub use delegation::DELEGATE_TASK_TOOL_NAME;
 pub use device::{
     DeviceLifecycle, DeviceNameChange, DevicePublicKey, DeviceRevocation, DeviceRevocationResult,
@@ -57,6 +64,10 @@ pub use environment::{
     WorkspaceEnvironmentSource,
 };
 pub use error::{RuntimeError, RuntimeResult};
+pub use plugin::{
+    CommittedPluginChange, PluginAudit, PluginConfigLease, PluginFileError, PluginFilePort,
+    PluginMcpDiscovery, PluginUseLease, PreparedPluginPackage,
+};
 mod shell;
 pub use shell::FrozenShellEnvironment;
 
@@ -95,12 +106,12 @@ pub use runtime::{
     StagedSessionAttachment,
 };
 pub use skill::{
-    MAX_CATALOG_SKILLS, SkillActivationOwner, SkillActivationResolveError, SkillActivationTrigger,
-    SkillCandidate, SkillCatalog, SkillCatalogStatus, SkillDefinition, SkillDiagnostic,
-    SkillDiagnosticCode, SkillDiagnosticSeverity, SkillDiscovery, SkillDiscoveryStatus,
-    SkillMetadata, SkillName, SkillNameError, SkillNameState, SkillNameStateChange,
-    SkillPackageSource, SkillPackageSourceError, SkillScanFuture, SkillScanRequest,
-    SkillScanResult, SkillSource, StoredSkillActivation, compile_skill_discovery,
+    MAX_CATALOG_SKILLS, PluginSkillPackage, SkillActivationOwner, SkillActivationResolveError,
+    SkillActivationTrigger, SkillCandidate, SkillCatalog, SkillCatalogStatus, SkillDefinition,
+    SkillDiagnostic, SkillDiagnosticCode, SkillDiagnosticSeverity, SkillDiscovery,
+    SkillDiscoveryStatus, SkillMetadata, SkillName, SkillNameError, SkillNameState,
+    SkillNameStateChange, SkillPackageSource, SkillPackageSourceError, SkillScanFuture,
+    SkillScanRequest, SkillScanResult, SkillSource, StoredSkillActivation, compile_skill_discovery,
     explicit_skill_states, sort_diagnostics,
 };
 pub use storage::{
@@ -110,33 +121,35 @@ pub use storage::{
     ConversationRawWindowRequest, ConversationRewrite, ConversationSearchHit,
     ConversationSearchPage, ConversationSearchRequest, ConversationSearchScope,
     ConversationWindowRequest, CrossSessionInputBinding, CrossSessionInputEnvelope,
-    ForkedAttachmentReference, ForkedSessionCommand, GoalClear, GoalHeldInputResume,
-    GoalHeldInputResumeResult, GoalInputBinding, GoalStop, GoalStopResult,
+    CustomAgentMutation, ForkedAttachmentReference, ForkedSessionCommand, GoalClear,
+    GoalHeldInputResume, GoalHeldInputResumeResult, GoalInputBinding, GoalStop, GoalStopResult,
     InputMessageValidationError, InputOrigin, LoadedSession, MessageFeedbackChange, ModelChange,
     NewAttachmentUpload, NewStoredChildTask, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
     NewStoredSessionCommand, NewStoredSessionMaterialization, NewWorkspaceRegistration,
-    PendingChildToolExchange, PendingToolExchange, ProviderModelCatalogReplacement,
-    QueuePriorityChange, ReasoningEffortChange, RecoveredRuntime, RewriteGoalEffect, RewriteResult,
-    RuntimeStore, SessionCommandCommit, SessionDeletion, SessionFork, SessionHistoryClear,
-    SessionHistoryClearResult, SessionHistoryCompactionFinish, SessionHistoryCompactionFinishKind,
-    SessionHistoryCompactionPreparation, SessionHistoryCompactionPreparationResult,
-    SessionPinnedChange, SessionProxyChange, SessionProxyState, SessionRole, SessionSummaryQuery,
-    SessionTitleChange, SessionTitleGenerationCommit, SessionTitleGenerationCommitResult,
-    StoreError, StoreErrorKind, StoreFuture, StoredAttachment, StoredAttachmentState,
-    StoredChildTask, StoredChildTaskSettlement, StoredConversationMessageLocation,
-    StoredConversationRawWindow, StoredConversationState, StoredConversationWindow, StoredGoal,
+    PendingChildToolExchange, PendingToolExchange, PluginOperationKind, PluginOperationPhase,
+    PluginOperationUpdate, PluginRecordChange, PluginSettingsChange, PluginSource,
+    ProviderModelCatalogReplacement, QueuePriorityChange, ReasoningEffortChange, RecoveredRuntime,
+    RewriteGoalEffect, RewriteResult, RuntimeStore, SessionCommandCommit, SessionDeletion,
+    SessionFork, SessionHistoryClear, SessionHistoryClearResult, SessionHistoryCompactionFinish,
+    SessionHistoryCompactionFinishKind, SessionHistoryCompactionPreparation,
+    SessionHistoryCompactionPreparationResult, SessionPinnedChange, SessionProxyChange,
+    SessionProxyState, SessionRole, SessionSummaryQuery, SessionTitleChange,
+    SessionTitleGenerationCommit, SessionTitleGenerationCommitResult, StoreError, StoreErrorKind,
+    StoreFuture, StoredAttachment, StoredAttachmentState, StoredChildTask,
+    StoredChildTaskSettlement, StoredConversationMessageLocation, StoredConversationRawWindow,
+    StoredConversationState, StoredConversationWindow, StoredCustomAgent, StoredGoal,
     StoredGoalBudget, StoredGoalObjective, StoredGoalObjectivePart, StoredGoalPauseReason,
     StoredGoalSettlementEffect, StoredGoalState, StoredInput, StoredInputState, StoredMcpSelection,
-    StoredMessageFeedback, StoredModelCatalog, StoredProvider, StoredQueueItem, StoredRun,
-    StoredRunContinuation, StoredRunContinuationResult, StoredRunSettlement,
-    StoredRunSettlementResult, StoredSession, StoredSessionCommand, StoredSessionCommandResult,
-    StoredSessionCommandState, StoredSessionFork, StoredSessionLifecycle,
-    StoredSessionMaterialization, StoredSessionUsage, StoredTerminalRunInputReconciliation,
-    StoredTodoItemStatus, StoredWorkPlan, StoredWorkPlanItem, StoredWorkspace,
-    StoredWorkspaceLifecycle, ToolExecutionStart, UserMessageCommit, VariantChange, WorkPlanClear,
-    WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval, WorkspaceUpdate,
-    attachment_stable_view_path, execution_context_from_product_history,
-    merge_context_replacement_with_product_history, normalize_context_usage_adjustments,
-    stored_model_catalog_is_valid, validate_input_message,
-    validate_input_message_with_channel_source,
+    StoredMessageFeedback, StoredModelCatalog, StoredPlugin, StoredPluginOperation, StoredProvider,
+    StoredQueueItem, StoredRun, StoredRunContinuation, StoredRunContinuationResult,
+    StoredRunSettlement, StoredRunSettlementResult, StoredSession, StoredSessionCommand,
+    StoredSessionCommandResult, StoredSessionCommandState, StoredSessionFork,
+    StoredSessionLifecycle, StoredSessionMaterialization, StoredSessionUsage,
+    StoredTerminalRunInputReconciliation, StoredTodoItemStatus, StoredWorkPlan, StoredWorkPlanItem,
+    StoredWorkspace, StoredWorkspaceLifecycle, ToolExecutionStart, UserMessageCommit,
+    VariantChange, WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval,
+    WorkspaceRestoration, WorkspaceUpdate, attachment_stable_view_path, custom_agent_revision,
+    execution_context_from_product_history, merge_context_replacement_with_product_history,
+    normalize_context_usage_adjustments, stored_model_catalog_is_valid, valid_custom_agent_config,
+    valid_custom_agent_name, validate_input_message, validate_input_message_with_channel_source,
 };

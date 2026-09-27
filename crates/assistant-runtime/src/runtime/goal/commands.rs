@@ -329,6 +329,7 @@ impl AssistantRuntime {
         let accepted = self
             .store
             .accept_input(NewStoredInput {
+                feedback_answer: None,
                 agent_shell_target: None,
                 input_id,
                 run_id,

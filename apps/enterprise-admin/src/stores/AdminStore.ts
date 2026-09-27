@@ -53,6 +53,7 @@ export class AdminStore {
       resetModel: action.bound,
       setDefaultModel: action.bound,
       reloadModelTemplates: action.bound,
+      manage: action.bound,
     });
   }
 
@@ -174,7 +175,11 @@ export class AdminStore {
   }
 
   /** 写入不自动重试；成功与后续读取失败分开呈现，不让保存按钮重新发起已完成的操作。 */
-  private async write(work: (token: string) => Promise<unknown>, selfInvalidates = false): Promise<string | undefined> {
+  private async write(
+    work: (token: string) => Promise<unknown>,
+    selfInvalidates = false,
+    onFailure?: (code: unknown) => void,
+  ): Promise<string | undefined> {
     if (this.busy) return '操作正在提交，请稍候。';
     const token = this.token;
     if (!token || !this.valid(token)) return '登录已失效，请重新登录。';
@@ -189,12 +194,26 @@ export class AdminStore {
       }
       // 列表投影在页面本地；写入成功由调用方回调页面刷新，Store 不感知列表。
     } catch (error) {
-      return failure(error, true).text;
+      const problem = failure(error, true);
+      onFailure?.(problem.code);
+      return problem.text;
     } finally {
       runInAction(() => {
         this.busy = false;
       });
     }
+  }
+
+  /** 新管理页面共用身份快照与单次写入门；页面仍持有自己的草稿和结果。 */
+  manage<T>(work: (token: string) => Promise<T>, completed: (result: T) => void, failed?: (code: unknown) => void) {
+    return this.write(
+      async (token) => {
+        const result = await work(token);
+        if (this.valid(token)) completed(result);
+      },
+      false,
+      failed,
+    );
   }
 
   saveRecordingSettings(settings: RecordingSettings) {

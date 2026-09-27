@@ -44,6 +44,25 @@ impl UserPaths {
         let secrets = self.protected_files.read().map_err(|_| denied())?.clone();
         let host = assistant_runtime::resolve_permission_path(&self.host_root)?;
         let user = assistant_runtime::resolve_permission_path(&self.user_root)?;
+        let plugin_root = self.user_root.join("plugins");
+        // 普通文件能力只能读取包内容；配置、数据与过程目录必须走插件专用入口。
+        // 枚举从当前用户域的受管目录取得，不接受客户端传入的插件名。
+        let readable_packages = match std::fs::read_dir(&plugin_root) {
+            Ok(entries) => entries
+                .collect::<io::Result<Vec<_>>>()?
+                .into_iter()
+                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(crate::plugins::plugin_name)
+                })
+                .map(|entry| entry.path().join("packages"))
+                .collect::<Vec<_>>(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error),
+        };
         for (host, user) in [(&self.host_root, &self.user_root), (&host, &user)] {
             for operation in [
                 Op::Read,
@@ -77,6 +96,49 @@ impl UserPaths {
                         )?;
                     }
                 }
+            }
+        }
+        // 删除用户根会间接删除其受管插件和 Runtime 数据，不能凭父目录权限绕过子树拒绝。
+        for path in [&self.user_root, &user] {
+            push_rule(
+                &mut document,
+                Op::Delete,
+                path,
+                PathMatch::Exact,
+                Vec::new(),
+            )?;
+        }
+        for (root, packages) in [
+            (plugin_root.clone(), readable_packages.clone()),
+            (
+                assistant_runtime::resolve_permission_path(&plugin_root)?,
+                readable_packages
+                    .iter()
+                    .map(|path| assistant_runtime::resolve_permission_path(path))
+                    .collect::<io::Result<Vec<_>>>()?,
+            ),
+        ] {
+            for operation in [
+                Op::Read,
+                Op::List,
+                Op::Find,
+                Op::Search,
+                Op::Write,
+                Op::Edit,
+                Op::Delete,
+            ] {
+                let exclusions = if matches!(operation, Op::Write | Op::Edit | Op::Delete) {
+                    Vec::new()
+                } else {
+                    packages.clone()
+                };
+                push_rule(
+                    &mut document,
+                    operation,
+                    &root,
+                    PathMatch::Recursive,
+                    exclusions,
+                )?;
             }
         }
         for secret in secrets {

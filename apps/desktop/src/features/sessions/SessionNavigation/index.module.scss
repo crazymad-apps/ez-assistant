@@ -1,0 +1,28 @@
+.navigation {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+}
+
+.icon_button {
+  width: var(--ez-control-height-small);
+  height: var(--ez-control-height-small);
+  flex: 0 0 var(--ez-control-height-small);
+}
+
+.recent_menu {
+  width: min(310px, calc(100vw - 16px));
+
+  button {
+    justify-content: space-between;
+    span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  }
+}
+
+.recent_empty {
+  display: block;
+  padding: 10px;
+  color: var(--ez-text-muted);
+  font-size: var(--ez-font-small);
+}

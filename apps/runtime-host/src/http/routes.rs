@@ -9,12 +9,13 @@ use axum::{
     Router,
     extract::DefaultBodyLimit,
     middleware::{from_fn, from_fn_with_state},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 
 use super::{
     HttpState, MAX_COMMAND_BYTES, attachments, auth, capabilities, commands, compatibility,
-    ensure_ready, events, health, login, materializations, resources, terminals, web,
+    ensure_ready, events, health, login, materializations, plugin_config, plugin_upload, resources,
+    terminals, web,
 };
 
 pub(crate) fn router(state: HttpState) -> Router {
@@ -80,12 +81,32 @@ pub(crate) fn router(state: HttpState) -> Router {
             post(resources::preview_session_resource_file),
         )
         .route(
+            "/sessions/{session_id}/resource-files/stat",
+            post(resources::stat_session_resource_file),
+        )
+        .route(
             "/session-materializations",
             post(materializations::materialize_session).layer(DefaultBodyLimit::disable()),
         )
         .route(
             "/sessions/{session_id}/attachments",
             post(attachments::upload_attachment).layer(DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/plugins/inspect",
+            post(plugin_upload::inspect_plugin_package).layer(DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/plugins/operations/{key}/package",
+            post(plugin_upload::upload_plugin_package).layer(DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/plugins/{name}/config-files",
+            get(plugin_config::list_files),
+        )
+        .route(
+            "/plugins/{name}/config-files/{*relative}",
+            put(plugin_config::upload_file).layer(DefaultBodyLimit::disable()),
         )
         .route_layer((version.clone(), resource_body));
     let resources = files

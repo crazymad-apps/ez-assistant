@@ -919,3 +919,35 @@ M3 已通过 macOS 四组真实 Host 隔离验收（后台与信号、双启动�
 ## v0.27.0 C05 子任务窗口存储
 
 现有 v0.27.0 迁移在 `child_tasks` 增加可空、非零正整数 `context_window_tokens`；新任务写入实际装配窗口，旧行保留 NULL。不得以当前模型配置回填，不持久化已用 token 或百分比。升级沿用现有独立备份与事务校验流程；未发布版本的中间数据库不建立兼容迁移。
+
+## v0.28.0 C02 M0 Workspace 存储迁移与 Runtime Home 重定位
+
+- v0.28.0 迁移将 `workspaces.user_directory` 改为 nullable，并保留非空目录的唯一约束；SQLite
+  表重建必须保留 Workspace ID、lifecycle、时间与 Session 外键关系，沿用独立备份、事务校验和
+  重复启动幂等门禁。数据库最低 Host 版本同步提升到 0.28.0。
+- Store 只对非空用户目录做 canonicalize 与身份复用；无用户目录登记每次写入新 Workspace ID。
+  removed 列表与按 ID 恢复属于正式 Store 契约，恢复 active 记录必须幂等。
+- Runtime Home 整体移动时，Host 仅重定位可严格验证为旧固定布局的 `agent_directory`。同一事务内，
+  只把相同 Workspace ID 且 `working_directory` 精确等于旧 `agent_directory` 的 Session 改为新私有
+  目录，再更新 Workspace；外部用户目录及其他冻结路径不改写。任一校验或写入异常必须整体停止，
+  不得留下 Workspace `agent_directory` 与作为 cwd 的 Session 路径指向不同 Runtime Home 的半完成状态。
+
+## v0.28.0 C02 M1 冻结资源与正式 Host 消费者
+
+- Workspace 当前有效目录为 `user_directory.unwrap_or(agent_directory)`；文件、Shell、Workspace
+  终端和 Skill/AGENTS 发现共享该语义。Session 终端、文件和 Shell 使用持久化冻结根，不读取
+  Workspace 后续编辑的主目录。
+- 新 Session 写入前须匹配 Workspace 当前有效目录；Fork 写入前须与来源 Session 冻结根一致，
+  不能用当前 Workspace 目录校验旧会话。无 Workspace 的 Fork cwd 改为目标 Session 私有目录。
+- 恢复仅私有目录 Workspace 时，先在原固定布局准备并验证 `agent_directory`，失败不更新
+  lifecycle；Runtime Home 重定位仅修复可证明的受管路径，不替换外部冻结 cwd。
+
+## v0.28.0 C02 M2 物化结果只读恢复
+
+- Store 依据 `sessions.materialization_key` 唯一索引定位已提交 Session、首次 Input/Run、附件与 Goal；
+  查询不写入数据库或重新执行副作用。HTTP Command 复用当前用户域身份，返回附件摘要前清空 Host
+  物理路径，与正常首次物化响应保持相同脱敏边界。
+
+## v0.28.1 F04 问答持久化
+
+Host 只转发问答命令，权威状态仍归 Runtime。每个用户域的既有 SQLite 增加 `session_feedback`，Session/Run 外键管理清理，pending 状态比较更新；轮后回答与 Input 接纳共用事务。迁移版本和数据库最低 Host 版本为 `0.28.1`，使用既有迁移框架的独立备份与验证。

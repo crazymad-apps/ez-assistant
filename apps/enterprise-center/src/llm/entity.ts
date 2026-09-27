@@ -3,6 +3,7 @@ import type { Protocol } from '../contracts/models.js';
 import type { SnapshotState } from './snapshots.js';
 
 export type Outcome = 'in_progress' | 'forwarded' | 'rejected' | 'upstream_error' | 'interrupted' | 'unknown';
+export type UsageState = 'pending' | 'available' | 'partial' | 'unavailable';
 
 @Entity({ schema: 'public', name: 'llm_recording_settings', synchronize: false })
 export class RecordingEntity {
@@ -10,6 +11,7 @@ export class RecordingEntity {
   @Column('boolean') enabled!: boolean;
   @Column('integer') content_retention_days!: number;
   @Column('integer') index_retention_days!: number;
+  @Column('timestamptz') usage_available_from!: Date;
 }
 
 @Entity({ schema: 'public', name: 'llm_calls', synchronize: false })
@@ -27,6 +29,13 @@ export class CallEntity {
   @Column({ type: 'integer', nullable: true }) http_status!: number | null;
   @Column({ type: 'text', nullable: true }) reason!: string | null;
   @Column('text') outcome!: Outcome;
+  @Column({ type: 'bigint', nullable: true }) input_tokens!: string | null;
+  @Column({ type: 'bigint', nullable: true }) output_tokens!: string | null;
+  @Column({ type: 'bigint', nullable: true }) total_tokens!: string | null;
+  @Column({ type: 'bigint', nullable: true }) cached_input_tokens!: string | null;
+  @Column({ type: 'bigint', nullable: true }) reasoning_tokens!: string | null;
+  @Column('text') usage_state!: UsageState;
+  @Column({ type: 'text', nullable: true }) usage_reason!: string | null;
   @Column('text') request_snapshot_state!: SnapshotState;
   @Column({ type: 'text', nullable: true }) request_path!: string | null;
   @Column({ type: 'bigint', nullable: true }) request_bytes!: string | null;

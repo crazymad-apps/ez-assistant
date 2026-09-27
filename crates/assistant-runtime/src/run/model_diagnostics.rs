@@ -4,7 +4,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use crate::observation::ObservationCoordinator;
 use agent_model::{ModelAttemptEvent, ModelAttemptObserver, ModelError, ModelTransportErrorKind};
-use assistant_protocol::{ModelFailureKind, RunId, RuntimeEvent, SessionId};
+use assistant_protocol::{ModelFailureKind, ModelRequestStatus, RunId, RuntimeEvent, SessionId};
 
 /// 最终结算使用的安全模型失败事实；不保存 Provider 展示文本。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -18,6 +18,7 @@ pub(crate) struct ModelFailureDiagnostics {
 
 #[derive(Default)]
 struct ModelAttemptState {
+    request: Option<ModelRequestStatus>,
     attempt: u32,
     retries: u32,
     stream_established: bool,
@@ -33,6 +34,11 @@ pub(crate) struct RunModelDiagnostics {
 }
 
 impl RunModelDiagnostics {
+    /// 读取同一观察状态供 Run 快照恢复；不创建持久请求或额外重试循环。
+    pub(crate) fn request_snapshot(&self) -> Option<ModelRequestStatus> {
+        self.lock_state().request.clone()
+    }
+
     pub(crate) fn new(
         session_id: SessionId,
         run_id: RunId,
@@ -88,6 +94,8 @@ impl ModelAttemptObserver for RunModelDiagnostics {
                         *state = ModelAttemptState::default();
                     }
                     state.attempt = attempt;
+                    state.retries = attempt.saturating_sub(1);
+                    state.request = Some(ModelRequestStatus::Requesting { attempt });
                 }
                 self.publish(RuntimeEvent::ModelAttemptStarted {
                     session_id: self.session_id.clone(),
@@ -101,7 +109,11 @@ impl ModelAttemptObserver for RunModelDiagnostics {
                 will_retry,
                 ..
             } => {
-                self.lock_state().attempt = attempt;
+                {
+                    let mut state = self.lock_state();
+                    state.attempt = attempt;
+                    state.request = None;
+                }
                 self.publish(RuntimeEvent::ModelAttemptFailed {
                     session_id: self.session_id.clone(),
                     run_id: self.run_id.clone(),
@@ -115,7 +127,10 @@ impl ModelAttemptObserver for RunModelDiagnostics {
                 delay_ms,
                 ..
             } => {
-                self.lock_state().retries = next_attempt.saturating_sub(1);
+                self.lock_state().request = Some(ModelRequestStatus::RetryWaiting {
+                    next_attempt,
+                    delay_ms,
+                });
                 self.publish(RuntimeEvent::ModelRetryScheduled {
                     session_id: self.session_id.clone(),
                     run_id: self.run_id.clone(),
@@ -128,6 +143,7 @@ impl ModelAttemptObserver for RunModelDiagnostics {
                     let mut state = self.lock_state();
                     state.attempt = attempt;
                     state.stream_established = true;
+                    state.request = None;
                 }
                 self.publish(RuntimeEvent::ModelStreamEstablished {
                     session_id: self.session_id.clone(),

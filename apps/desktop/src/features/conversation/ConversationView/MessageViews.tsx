@@ -26,6 +26,7 @@ import {
   formatDateTime,
   formatTime,
   runStatusLabel,
+  liveRunStatusLabel,
   runFailureMessage,
   segmentStateKey,
 } from "./conversationRows";
@@ -285,6 +286,7 @@ export function AssistantTurn(props: Readonly<{
   child_tasks: readonly ChildTaskTreeItemSnapshot[];
   messages: readonly AssistantMessageSnapshot[];
   live_run: LiveRunProjection | null;
+  awaiting_feedback?: boolean;
   on_child_open?: (item: ChildTaskTreeItemSnapshot) => void;
   onFork: (message_id: MessageId) => void;
   show_fork: boolean;
@@ -344,7 +346,7 @@ export function AssistantTurn(props: Readonly<{
         </div>
       )}
       {props.live_run?.status === "failed" ? null : props.live_run ? (
-        <div className={styles.live_status}><span className={styles.live_dot} />{runStatusLabel(props.live_run.status)}</div>
+        <div className={styles.live_status} role="status"><span className={styles.live_dot} />{props.awaiting_feedback ? "等待回复" : liveRunStatusLabel(props.live_run)}</div>
       ) : (
         <MessageActions
           can_fork={last_message.can_fork}
@@ -365,6 +367,7 @@ export function LiveAssistantMessage(props: Readonly<{
   on_child_open?: (item: ChildTaskTreeItemSnapshot) => void;
   onToolClick: (tool: LiveToolSnapshot) => void;
   run: LiveRunProjection;
+  awaiting_feedback?: boolean;
 }>) {
   return (
     <article className={`${styles.assistant_message} ${styles.live_message}`}>
@@ -372,7 +375,7 @@ export function LiveAssistantMessage(props: Readonly<{
         <LiveSteps child_tasks={props.child_tasks ?? []} on_child_open={props.on_child_open} onToolClick={props.onToolClick} run={props.run} />
         {props.run.status === "failed" && <RunFailure run={props.run} />}
       </div>
-      {props.run.status !== "failed" && <div className={styles.live_status}><span className={styles.live_dot} />{runStatusLabel(props.run.status)}</div>}
+      {props.run.status !== "failed" && <div className={styles.live_status} role="status"><span className={styles.live_dot} />{props.awaiting_feedback ? "等待回复" : liveRunStatusLabel(props.run)}</div>}
     </article>
   );
 }
@@ -381,7 +384,7 @@ function RunFailure(props: Readonly<{ run: LiveRunProjection }>) {
   return (
     <p className={styles.run_error} role="alert">
       <span aria-hidden="true" />
-      {runFailureMessage(props.run.model_failure_kind, props.run.error_code)}
+      {runFailureMessage(props.run.model_failure_kind, props.run.error_code, props.run.error_message)}
     </p>
   );
 }

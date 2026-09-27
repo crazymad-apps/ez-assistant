@@ -1,3 +1,4 @@
+import { hostFileUri, isAbsoluteHostPath } from "../../runtime-client/hostFilePath";
 import type { ResourceHandle, ResourceTab } from "./ResourceWorkspaceStore";
 import type { ResourceViewState } from "./resourceViewState";
 import type { TerminalSource } from "../../runtime-client/TerminalSocket";
@@ -23,7 +24,8 @@ export type ResourceWorkspaceSnapshot = Readonly<{
 }>;
 
 export function localFileUri(segments: readonly string[]): string {
-  return `file:///${segments.filter((part) => part !== "/").map(encodeURIComponent).join("/")}`;
+  const path = segments.filter((part) => part !== "/").join("/");
+  return hostFileUri(segments[0] === "/" ? `/${path}` : path);
 }
 
 export function resourceIdentity(group: { id: string; scope_key: string }, source: ResourceHandle["source"]): string {
@@ -78,9 +80,10 @@ function locator(value: unknown): boolean {
 function source(value: unknown): boolean {
   if (!record(value)) return false;
   if (value.type === "session_file") return text(value.session_id) && locator(value.locator);
-  if (value.type === "host_file") return text(value.path) && value.path.startsWith("/") && !value.path.includes("\0");
+  if (value.type === "host_file") return text(value.path) && isAbsoluteHostPath(value.path) && !value.path.includes("\0");
   if (value.type === "local_file") return Array.isArray(value.path_segments) && value.path_segments.length > 1
-    && value.path_segments[0] === "/" && value.path_segments.slice(1).every((part: unknown) => text(part) && part !== ".." && !part.includes("/"));
+    && (value.path_segments[0] === "/" || /^[a-z]:$/i.test(String(value.path_segments[0])))
+    && value.path_segments.slice(1).every((part: unknown) => text(part) && part !== ".." && part !== "." && !/[/\\\0]/.test(part));
   if (value.type === "attachment") return text(value.session_id) && text(value.attachment_id) && Array.isArray(value.siblings)
     && value.siblings.every((item: unknown) => record(item) && text(item.attachment_id) && text(item.original_name));
   if (value.type === "tool_file") return record(value.owner) && text(value.owner.session_id)

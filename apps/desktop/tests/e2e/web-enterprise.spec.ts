@@ -121,7 +121,7 @@ async function login(page: Page, username: string) {
   await page.goto(address);
   await page.getByLabel('企业账号', { exact: true }).fill(username);
   await page.getByLabel('账号密码', { exact: true }).fill('fixture-password');
-  await page.getByRole('button', { name: '进入工作空间' }).click();
+  await page.getByRole('button', { name: '进入项目' }).click();
   await expect(page.locator('[data-app-title-bar]')).toBeVisible();
 }
 async function logout(page: Page, user: string, cancel = false) {
@@ -137,7 +137,7 @@ test('登录表单在常用矮窗口完整显示，Desktop 本机和远端字段
   await expect(page.getByLabel('企业账号', { exact: true })).toBeVisible();
   const expectCompactEntry = async () => {
     await expect(page.getByRole('button', { name: '管理本机 Host' })).toHaveCount(0);
-    await expect(page.getByRole('heading', { name: '连接你的工作空间' })).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: '连接你的项目' })).toHaveCount(0);
     expect(await page.evaluate(() => document.documentElement.scrollHeight <= window.innerHeight)).toBe(true);
   };
   await expectCompactEntry();
@@ -206,7 +206,7 @@ test('企业登录、阻塞重试、改密、退出取消与多浏览器隔离',
   await page.goto(address);
   await page.getByLabel('企业账号', { exact: true }).fill('alice');
   await page.getByLabel('账号密码', { exact: true }).fill('fixture-password');
-  await page.getByRole('button', { name: '进入工作空间' }).click();
+  await page.getByRole('button', { name: '进入项目' }).click();
   await expect(page.getByRole('button', { name: '重试初始化' })).toBeVisible();
   expect(readiness).toBe(1);
   await page.getByRole('button', { name: '重试初始化' }).click();

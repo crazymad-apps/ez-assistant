@@ -37,7 +37,9 @@ export const SkillSettingsPage = observer(function SkillSettingsPage() {
     { value: "", label: "仅用户根目录" },
     ...workspaces.map((workspace) => ({
       value: workspace.workspace_id,
-      label: workspace.user_directory.split("/").filter(Boolean).at(-1) ?? workspace.user_directory,
+      label: workspace.user_directory
+        ? workspace.user_directory.split("/").filter(Boolean).at(-1) ?? workspace.user_directory
+        : `${workspace.label}（仅私有目录）`,
     })),
   ];
   const directory_sources: ReadonlyArray<{ source: SkillSourceSnapshot; label: string; workspace: boolean }> = [
@@ -222,6 +224,7 @@ function sourceLabel(source: SkillSourceSnapshot): string {
     legacy_user_ez_assistant: "旧个人目录 .ez-assistant",
     host_supplement: "Host 公共补充",
     user_agents: "用户目录 .agents",
+    plugin: "插件 Skill",
   }[source];
 }
 

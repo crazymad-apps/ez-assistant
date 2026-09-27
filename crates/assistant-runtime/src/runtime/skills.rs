@@ -7,9 +7,9 @@ use assistant_protocol::{
 
 use super::{AssistantRuntime, now_ms, product::project_skill_management};
 use crate::{
-    RuntimeError, RuntimeResult, SkillDiagnostic, SkillDiagnosticCode, SkillDiscovery,
-    SkillDiscoveryStatus, SkillName, SkillNameState, SkillNameStateChange, SkillScanRequest,
-    StoredWorkspace, compile_skill_discovery,
+    RuntimeError, RuntimeResult, SessionExecutionEnvironment, SkillDiagnostic, SkillDiagnosticCode,
+    SkillDiscovery, SkillDiscoveryStatus, SkillName, SkillNameState, SkillNameStateChange,
+    SkillScanRequest, StoredWorkspace, compile_skill_discovery,
 };
 
 impl AssistantRuntime {
@@ -21,7 +21,11 @@ impl AssistantRuntime {
         let workspace = self.skill_workspace(request.workspace_id.as_ref())?;
         let (discovery, states) = self.discover_skills(workspace.as_ref()).await?;
         Ok(ListSkillsResult {
-            snapshot: project_skill_management(&discovery, &states),
+            snapshot: project_skill_management(
+                &discovery,
+                &states,
+                request.include_plugins.unwrap_or(false),
+            ),
         })
     }
 
@@ -36,7 +40,7 @@ impl AssistantRuntime {
         let workspace = self.skill_workspace(request.workspace_id.as_ref())?;
         let name = SkillName::parse(request.name).map_err(|_| RuntimeError::SkillNameInvalid)?;
         let (discovery, states) = self.discover_skills(workspace.as_ref()).await?;
-        let management = project_skill_management(&discovery, &states);
+        let management = project_skill_management(&discovery, &states, false);
         let detail = management
             .skills
             .iter()
@@ -65,6 +69,16 @@ impl AssistantRuntime {
         let _mutation = self.workspace_mutation_gate.lock().await;
         let workspace = self.skill_workspace(request.workspace_id.as_ref())?;
         let name = SkillName::parse(request.name).map_err(|_| RuntimeError::SkillNameInvalid)?;
+        let (before, _) = self.discover_skills(workspace.as_ref()).await?;
+        if before.candidates.iter().any(|candidate| {
+            candidate.name == name && candidate.source == crate::SkillSource::Plugin
+        }) && !before.candidates.iter().any(|candidate| {
+            candidate.name == name && candidate.source != crate::SkillSource::Plugin
+        }) {
+            return Err(RuntimeError::InvalidRequest {
+                reason: "plugin skill cannot be changed through independent skill settings",
+            });
+        }
         let changed_at_ms =
             u64::try_from(now_ms()?).map_err(|_| RuntimeError::InternalStateUnavailable {
                 component: "system clock range",
@@ -83,11 +97,11 @@ impl AssistantRuntime {
             enabled: request.enabled,
         });
         Ok(SetSkillEnabledResult {
-            snapshot: project_skill_management(&discovery, &states),
+            snapshot: project_skill_management(&discovery, &states, false),
         })
     }
 
-    /// 新激活和执行装配使用当前共享目录，不在 Session 中保存目录副本。
+    /// 新激活和执行装配使用 Session 冻结根；Skill 文件本身每次重新扫描。
     pub(super) async fn current_skill_catalog(
         &self,
         session: &crate::session::SessionController,
@@ -95,8 +109,8 @@ impl AssistantRuntime {
         prepare_current_catalog(
             self.store.as_ref(),
             self.skill_package_source.as_ref(),
-            &self.workspaces,
-            session.environment().workspace_id.as_ref(),
+            self.plugin.as_ref(),
+            session.environment(),
         )
         .await
     }
@@ -110,7 +124,7 @@ impl AssistantRuntime {
             .transpose()
     }
 
-    async fn discover_skills(
+    pub(super) async fn discover_skills(
         &self,
         workspace: Option<&StoredWorkspace>,
     ) -> RuntimeResult<(SkillDiscovery, Vec<SkillNameState>)> {
@@ -124,11 +138,12 @@ impl AssistantRuntime {
             .scan(SkillScanRequest {
                 workspace_directories: workspace
                     .map(|workspace| {
-                        std::iter::once(workspace.user_directory.clone())
+                        std::iter::once(workspace.effective_working_directory().to_owned())
                             .chain(workspace.additional_directories.iter().cloned())
                             .collect()
                     })
                     .unwrap_or_default(),
+                plugin_packages: self.plugin.active_skill_packages().await?,
             })
             .await
         {
@@ -168,6 +183,7 @@ fn current_skill_body(discovery: &SkillDiscovery, name: &SkillName) -> Option<St
 pub(super) async fn prepare_catalog(
     store: &dyn crate::RuntimeStore,
     source: &dyn crate::SkillPackageSource,
+    plugin: &crate::plugin::PluginManager,
     workspace_directories: Vec<String>,
 ) -> RuntimeResult<crate::SkillCatalog> {
     let states = store
@@ -177,6 +193,7 @@ pub(super) async fn prepare_catalog(
     let scan = match source
         .scan(crate::SkillScanRequest {
             workspace_directories,
+            plugin_packages: plugin.active_skill_packages().await?,
         })
         .await
     {
@@ -201,29 +218,57 @@ pub(super) async fn prepare_catalog(
     })
 }
 
-/// 当前工作区根只在扫描开始时取值，不复制到 Session 技能状态。
+/// 已有 Session 只从冻结根重新扫描 Skill，不随 Workspace 后续目录编辑换根。
 pub(super) async fn prepare_current_catalog(
     store: &dyn crate::RuntimeStore,
     source: &dyn crate::SkillPackageSource,
-    workspaces: &std::sync::RwLock<
-        std::collections::BTreeMap<assistant_protocol::WorkspaceId, StoredWorkspace>,
-    >,
-    workspace_id: Option<&assistant_protocol::WorkspaceId>,
+    plugin: &crate::plugin::PluginManager,
+    environment: &SessionExecutionEnvironment,
 ) -> RuntimeResult<crate::SkillCatalog> {
-    let directories = if let Some(id) = workspace_id {
-        let workspaces = workspaces
-            .read()
-            .map_err(|_| RuntimeError::InternalStateUnavailable {
-                component: "workspace registry",
-            })?;
-        let workspace = workspaces
-            .get(id)
-            .ok_or_else(|| RuntimeError::WorkspaceNotFound {
-                workspace_id: id.clone(),
-            })?;
-        super::workspace_directories(workspace)
+    let directories = if environment.workspace_id.is_some() {
+        std::iter::once(environment.working_directory.clone())
+            .chain(environment.additional_workspace_directories.iter().cloned())
+            .collect()
     } else {
         Vec::new()
     };
-    prepare_catalog(store, source, directories).await
+    prepare_catalog(store, source, plugin, directories).await
+}
+
+/// Run 持有其 Skill Catalog 实际引用的包，扫描与取得租约之间的变更会重试。
+pub(super) async fn prepare_run_catalog(
+    store: &dyn crate::RuntimeStore,
+    source: &dyn crate::SkillPackageSource,
+    plugin: &crate::plugin::PluginManager,
+    environment: &SessionExecutionEnvironment,
+) -> RuntimeResult<(crate::SkillCatalog, Vec<crate::PluginUseLease>)> {
+    for _ in 0..3 {
+        let catalog = prepare_current_catalog(store, source, plugin, environment).await?;
+        let packages = catalog
+            .definitions
+            .iter()
+            .filter_map(|definition| {
+                Some((
+                    definition.plugin_name.as_ref()?,
+                    definition.plugin_sha256.as_ref()?,
+                ))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut leases = Vec::with_capacity(packages.len());
+        let mut stale = false;
+        for (name, sha256) in packages {
+            match plugin.use_package(name).await {
+                Ok(lease) if &lease.sha256 == sha256 => leases.push(lease),
+                Ok(_) | Err(RuntimeError::PluginBusy | RuntimeError::PluginPackageUnavailable) => {
+                    stale = true;
+                    break;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if !stale {
+            return Ok((catalog, leases));
+        }
+    }
+    Err(RuntimeError::PluginBusy)
 }

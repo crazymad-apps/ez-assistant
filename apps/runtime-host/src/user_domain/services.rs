@@ -4,6 +4,7 @@ use crate::{
     device::{DeviceChannelOutputDispatcher, DeviceGatewayService},
     http::{ReadyServices, StartupStateHandle},
     mcp::{HostMcpConnectionFactory, HostMcpImageMaterializer, LocalMcpConfigSource},
+    plugins::HostPluginFiles,
     recall_reference_key,
     resources::HostResources,
     speech::SpeechService,
@@ -26,6 +27,10 @@ pub(super) struct UserResources {
     runtime: Option<Arc<AssistantRuntime>>,
     mcp: Option<Arc<HostMcpConnectionFactory>>,
     pub(super) models: Option<Arc<crate::resources::model::CenterModelLoader>>,
+    pub(super) plugin_center: Option<(
+        Arc<crate::access::Credentials>,
+        crate::access::enterprise::UserKey,
+    )>,
     model_task: Option<tokio::task::JoinHandle<()>>,
 }
 impl UserResources {
@@ -42,6 +47,7 @@ impl UserResources {
             runtime: None,
             mcp: None,
             models: None,
+            plugin_center: None,
             model_task: None,
         }
     }
@@ -158,6 +164,16 @@ pub(super) async fn initialize(
     let mcp_source = Arc::new(LocalMcpConfigSource::new(user_home.to_path_buf()));
     let mcp_factory = Arc::new(HostMcpConnectionFactory::new(user_home.to_path_buf()));
     owner.mcp = Some(mcp_factory.clone());
+    let mut plugin_files = HostPluginFiles::new(user_home.to_path_buf());
+    let agent_source = owner.plugin_center.as_ref().map(|(credentials, key)| {
+        Arc::new(crate::access::enterprise::HostAgentDirectorySource::new(
+            credentials.clone(),
+            key.clone(),
+        )) as Arc<dyn assistant_runtime::CustomAgentDirectorySource>
+    });
+    if let Some((credentials, key)) = &owner.plugin_center {
+        plugin_files = plugin_files.with_center(credentials.clone(), key.clone());
+    }
     let runtime = match AssistantRuntime::open_with_recall_key(
         RuntimeConfig::new(event_capacity),
         source.clone(),
@@ -172,22 +188,33 @@ pub(super) async fn initialize(
     )
     .await
     {
-        Ok(runtime) => Arc::new(
-            runtime
-                .with_cancellation(owner.cancellation.clone())
-                .with_mcp_services(
-                    mcp_source,
-                    mcp_factory.clone(),
-                    Arc::new(HostMcpImageMaterializer),
-                )
-                .with_channel_output_dispatcher(dispatcher.clone()),
-        ),
+        Ok(runtime) => {
+            let runtime = if let Some(source) = agent_source {
+                runtime.with_custom_agent_source(source)
+            } else {
+                runtime
+            };
+            Arc::new(
+                runtime
+                    .with_cancellation(owner.cancellation.clone())
+                    .with_plugin_files(Arc::new(plugin_files))
+                    .with_mcp_services(
+                        mcp_source,
+                        mcp_factory.clone(),
+                        Arc::new(HostMcpImageMaterializer),
+                    )
+                    .with_channel_output_dispatcher(dispatcher.clone()),
+            )
+        }
         Err(_) => {
             return Err(ConfigurationInvalid);
         }
     };
     owner.runtime = Some(runtime.clone());
     startup.stage(RuntimeHostStartupStage::Configuration);
+    if runtime.recover_plugin_operations().await.is_err() {
+        return Err(ConfigurationInvalid);
+    }
     if runtime
         .reload_config(ReloadConfigRequest::default())
         .await

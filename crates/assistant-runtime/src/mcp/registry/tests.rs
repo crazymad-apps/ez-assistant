@@ -142,6 +142,8 @@ fn tool(schema: Value) -> McpToolDefinition {
 
 fn server(fingerprint: u8) -> McpServerConfig {
     McpServerConfig {
+        plugin_name: None,
+        plugin_sha256: None,
         server_key: McpServerKey::new("github").expect("key"),
         display_name: "GitHub".to_owned(),
         description: "Issues".to_owned(),
@@ -161,11 +163,139 @@ fn server(fingerprint: u8) -> McpServerConfig {
 fn candidate(server: McpServerConfig) -> McpRegistryCandidate {
     let key = server.server_key.clone();
     McpRegistryCandidate {
+        blocked_keys: BTreeSet::new(),
+        supplemental_diagnostics: Vec::new(),
         document_valid: true,
         configured_keys: BTreeSet::from([key.clone()]),
         servers: BTreeMap::from([(key, server)]),
         diagnostics: Vec::new(),
     }
+}
+
+#[tokio::test]
+async fn conflicting_sources_retire_existing_connection_and_publish_diagnostic() {
+    let old = FixtureConnection::new(vec![tool(json!({"type":"object"}))]);
+    let registry = McpRegistry::new(FixtureFactory::new(vec![old.clone()]));
+    let key = McpServerKey::new("github").expect("key");
+    registry
+        .refresh(
+            candidate(server(1)),
+            None,
+            McpRuntimeConfig::test_default(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("initial")
+        .finish()
+        .await;
+
+    let mut conflicted = candidate(server(2));
+    conflicted.servers.clear();
+    conflicted.blocked_keys.insert(key.clone());
+    conflicted.diagnostics.push(McpDiagnosticSnapshot {
+        server_key: Some(key.clone()),
+        code: McpDiagnosticCode::InvalidConfig,
+        field_path: None,
+        message: "plugin MCP server name conflicts with another source".to_owned(),
+    });
+    let result = registry
+        .refresh(
+            conflicted,
+            None,
+            McpRuntimeConfig::test_default(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("conflict")
+        .finish()
+        .await;
+    assert_eq!(result.outcome, McpRefreshOutcome::Failure);
+    assert_eq!(
+        result.servers[0].outcome,
+        McpServerRefreshOutcome::BlockedByConflict
+    );
+    assert!(registry.current(&key).expect("registry").is_none());
+    assert_eq!(old.closed.load(Ordering::SeqCst), 1);
+    assert_eq!(registry.diagnostics().expect("diagnostics").len(), 1);
+}
+
+#[tokio::test]
+async fn independent_server_remains_available_when_plugin_name_conflicts() {
+    let independent = FixtureConnection::new(vec![tool(json!({"type":"object"}))]);
+    let registry = McpRegistry::new(FixtureFactory::new(vec![independent.clone()]));
+    let mut configured = candidate(server(1));
+    let key = McpServerKey::new("github").expect("key");
+    configured
+        .supplemental_diagnostics
+        .push(McpDiagnosticSnapshot {
+            server_key: Some(key.clone()),
+            code: McpDiagnosticCode::InvalidConfig,
+            field_path: None,
+            message: "plugin MCP server name conflicts with an independent server".to_owned(),
+        });
+    let result = registry
+        .refresh(
+            configured,
+            None,
+            McpRuntimeConfig::test_default(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("refresh")
+        .finish()
+        .await;
+    assert_eq!(result.outcome, McpRefreshOutcome::Success);
+    assert_eq!(
+        result.servers[0].outcome,
+        McpServerRefreshOutcome::Refreshed
+    );
+    assert!(registry.current(&key).expect("registry").is_some());
+    assert!(registry.diagnostics().unwrap().iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("plugin MCP server name conflicts")
+    }));
+    registry.shutdown().await.expect("shutdown");
+    assert_eq!(independent.closed.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn retiring_plugin_package_closes_idle_connection_before_file_change() {
+    let old = FixtureConnection::new(vec![tool(json!({"type":"object"}))]);
+    let registry = McpRegistry::new(FixtureFactory::new(vec![old.clone()]));
+    let mut configured = server(1);
+    configured.plugin_name = Some("example-tools".into());
+    configured.plugin_sha256 = Some("a".repeat(64));
+    let key = configured.server_key.clone();
+    registry
+        .refresh(
+            candidate(configured),
+            None,
+            McpRuntimeConfig::test_default(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("initial")
+        .finish()
+        .await;
+    assert!(
+        registry
+            .retire_plugin_package("example-tools", &"b".repeat(64))
+            .await
+            .unwrap()
+            .0
+            .is_empty()
+    );
+    assert_eq!(old.closed.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        registry
+            .retire_plugin_package("example-tools", &"a".repeat(64))
+            .await
+            .unwrap(),
+        (vec![key.clone()], false)
+    );
+    assert!(registry.current(&key).expect("registry").is_none());
+    assert_eq!(old.closed.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

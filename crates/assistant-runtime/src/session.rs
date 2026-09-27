@@ -32,6 +32,8 @@ use crate::{
 /// 可靠事实必须先由 Store 提交，不能仅修改这里的状态。
 pub(crate) struct SessionController {
     id: SessionId,
+    pub(crate) feedback_changed: tokio::sync::Notify,
+    custom_agent: Option<assistant_protocol::CustomAgentSnapshot>,
     created_at_ms: i64,
     system_prompt: SystemPromptSnapshot,
     environment: SessionExecutionEnvironment,
@@ -43,6 +45,7 @@ pub(crate) struct SessionController {
 ///
 /// 字段同时包含可恢复业务事实和明确标注的进程内状态，恢复时由 Store 重新构建而非序列化本结构。
 pub(crate) struct SessionState {
+    pub(crate) feedback: BTreeMap<String, assistant_protocol::FeedbackRequestSnapshot>,
     pub(crate) agent_shell_kind: Option<assistant_protocol::ShellKind>,
     pub(crate) agent_shell_environment: Option<crate::FrozenShellEnvironment>,
     pub(crate) execution_prepared: bool,
@@ -128,6 +131,13 @@ pub(crate) struct InputRecord {
 impl SessionState {
     /// 按 Goal 状态选择唯一可自动领取的输入；Goal 存在时不会回退消费用户队列。
     pub(crate) fn next_runnable_input(&self) -> Option<InputId> {
+        if self
+            .feedback
+            .values()
+            .any(|request| request.status == assistant_protocol::FeedbackStatus::Pending)
+        {
+            return None;
+        }
         match self.goal.as_ref() {
             None => {
                 if self.queue_paused_by_user || self.resume_required {
@@ -190,11 +200,14 @@ impl SessionController {
     pub(crate) fn new(stored: StoredSession) -> Self {
         Self {
             id: stored.session_id,
+            feedback_changed: tokio::sync::Notify::new(),
+            custom_agent: stored.custom_agent,
             created_at_ms: stored.created_at_ms,
             system_prompt: stored.system_prompt,
             environment: stored.environment,
             mutation_gate: AsyncMutex::new(()),
             state: Mutex::new(SessionState {
+                feedback: BTreeMap::new(),
                 agent_shell_kind: stored.agent_shell_kind,
                 agent_shell_environment: stored.agent_shell_environment,
                 execution_prepared: true,
@@ -323,11 +336,14 @@ impl SessionController {
         let resume_required = !queue_item_ids.is_empty();
         Self {
             id: stored.session_id,
+            feedback_changed: tokio::sync::Notify::new(),
+            custom_agent: stored.custom_agent,
             created_at_ms: stored.created_at_ms,
             system_prompt: stored.system_prompt,
             environment: stored.environment,
             mutation_gate: AsyncMutex::new(()),
             state: Mutex::new(SessionState {
+                feedback: BTreeMap::new(),
                 agent_shell_kind: stored.agent_shell_kind,
                 agent_shell_environment: stored.agent_shell_environment,
                 execution_prepared: false,
@@ -399,6 +415,12 @@ impl SessionController {
         let state = self.lock_state()?;
         Ok(SessionSummary {
             session_id: self.id.clone(),
+            custom_agent: self.custom_agent.as_ref().map(|agent| {
+                assistant_protocol::CustomAgentSelection {
+                    name: agent.config.name.clone(),
+                    source: agent.source.clone(),
+                }
+            }),
             title: state.title.clone(),
             model_selection: state.model_selection.clone(),
             reasoning_effort: state.reasoning_effort,
@@ -538,7 +560,11 @@ impl SessionController {
             });
         }
         let has_nonterminal_run = state.runs.values().any(|run| !run.status().is_terminal());
-        if state.active_run.is_some()
+        if state
+            .feedback
+            .values()
+            .any(|request| request.status == assistant_protocol::FeedbackStatus::Pending)
+            || state.active_run.is_some()
             || !state.queue_item_ids.is_empty()
             || !state.goal_inputs.is_empty()
             || state.executing_command.is_some()
@@ -614,6 +640,10 @@ impl SessionController {
 
     pub(crate) fn current_system_prompt(&self) -> RuntimeResult<SystemPromptSnapshot> {
         Ok(self.system_prompt.clone())
+    }
+
+    pub(crate) fn custom_agent(&self) -> Option<&assistant_protocol::CustomAgentSnapshot> {
+        self.custom_agent.as_ref()
     }
 
     pub(crate) fn environment(&self) -> &SessionExecutionEnvironment {

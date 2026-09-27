@@ -59,6 +59,23 @@ pub(crate) fn personal_document() -> DocumentMut {
     doc
 }
 
+/// 构建默认值只在全新 Home 首次创建 host.toml 时使用，不改变已有配置或旧布局迁移。
+pub(crate) fn fresh_document() -> DocumentMut {
+    fresh_document_with_default(
+        option_env!("EZ_ASSISTANT_DEFAULT_HOST_MODE"),
+        option_env!("EZ_ASSISTANT_DEFAULT_CENTER_URL"),
+    )
+}
+
+fn fresh_document_with_default(mode: Option<&str>, center_url: Option<&str>) -> DocumentMut {
+    let mut document = personal_document();
+    if mode == Some("enterprise") {
+        set_mode_with_default(&mut document, HostMode::Enterprise, None, center_url)
+            .expect("build.rs validates the enterprise default center URL");
+    }
+    document
+}
+
 /// 创建企业配置时才取构建默认值。已有企业配置始终先严格校验，换包不能自动改连中心。
 pub(crate) fn set_mode(
     document: &mut DocumentMut,
@@ -110,6 +127,23 @@ fn set_mode_with_default(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fresh_home_uses_only_the_explicit_build_default() {
+        let default =
+            fresh_document_with_default(Some("enterprise"), Some("http://172.16.20.4:7320"));
+        let parsed = parse(&default.to_string()).unwrap();
+        assert_eq!(parsed.mode, HostMode::Enterprise);
+        let enterprise = parsed.enterprise.unwrap();
+        assert_eq!(enterprise.center_url, "http://172.16.20.4:7320");
+        assert!(enterprise.center_id.is_none());
+        assert_eq!(
+            parse(&fresh_document_with_default(None, Some("http://172.16.20.4:7320")).to_string())
+                .unwrap()
+                .mode,
+            HostMode::Personal
+        );
+    }
 
     #[test]
     fn default_is_only_used_when_creating_enterprise_configuration() {

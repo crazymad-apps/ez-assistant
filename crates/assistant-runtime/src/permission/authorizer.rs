@@ -201,6 +201,19 @@ impl RuntimeToolAuthorizer {
         invocation: &ResolvedToolInvocation,
         batch: &ResolvedToolBatch,
     ) -> ToolAuthorization {
+        // 整批检查必须先于任何权限或工具执行，畸形 ask_user 同样构成隔离屏障。
+        let feedback_calls = batch
+            .iter()
+            .filter(|item| match item {
+                ResolvedBatchItemRef::Valid(candidate) => candidate
+                    .facts::<crate::feedback::FeedbackAuthorizationFacts>()
+                    .is_some(),
+                ResolvedBatchItemRef::Invalid { tool_name, .. } => tool_name.as_str() == "ask_user",
+            })
+            .count();
+        if feedback_calls > 0 && (batch.len() != 1 || feedback_calls != 1) {
+            return deny("ask_user must be the only tool call; retry it in a separate response");
+        }
         let goal_signal_calls = batch
             .iter()
             .filter(|item| match item {
@@ -240,9 +253,22 @@ impl RuntimeToolAuthorizer {
         {
             return deny("no further tools are allowed after a Goal terminal signal");
         }
+        if invocation
+            .facts::<crate::feedback::FeedbackAuthorizationFacts>()
+            .is_some()
+        {
+            return ToolAuthorization::Allow;
+        }
         // WorkPlan 是 Session 内部结构化状态，不触及 OS、网络或 Host 基础设施；只有
         // Runtime 私有工具能构造该 facts，因此不进入用户审批和通用权限匹配。
         if invocation.facts::<WorkPlanAuthorizationFacts>().is_some() {
+            return ToolAuthorization::Allow;
+        }
+        // 交付身份只写当前工具结果；Host 仍强制核验 Session 根和可读普通文件。
+        if invocation
+            .facts::<crate::artifact::ArtifactAuthorizationFacts>()
+            .is_some()
+        {
             return ToolAuthorization::Allow;
         }
         // Skill 启用只改变模型指令上下文，不授予任何底层能力；真正的文件、Shell 等
@@ -781,6 +807,7 @@ mod tests {
         RuntimeToolAuthorizer::new(
             RunAuthorizationScope { variant },
             Arc::new(SessionController::new(crate::StoredSession {
+                custom_agent: None,
                 agent_shell_environment: None,
                 agent_shell_kind: None,
                 session_id: SessionId::new("s-test").expect("session id"),

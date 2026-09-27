@@ -11,6 +11,7 @@ impl VolatileRuntimeStore {
                 return Err(conflict("session already exists in runtime storage"));
             }
             let stored = StoredSession {
+                custom_agent: session.custom_agent,
                 session_id: session.session_id.clone(),
                 agent_shell_kind: session.agent_shell_kind,
                 agent_shell_environment: session.agent_shell_environment.clone(),
@@ -301,6 +302,90 @@ impl VolatileRuntimeStore {
         })
     }
 
+    pub(super) fn get_session_materialization(
+        &self,
+        key: &assistant_protocol::IdempotencyKey,
+    ) -> StoreFuture<'_, Option<StoredSessionMaterialization>> {
+        let key = key.clone();
+        Box::pin(async move {
+            let state = self.lock()?;
+            let Some(session) = state
+                .sessions
+                .values()
+                .find(|session| session.materialization_key.as_ref() == Some(&key))
+                .cloned()
+            else {
+                return Ok(None);
+            };
+            let input = state
+                .inputs
+                .values()
+                .filter(|input| input.session_id == session.session_id)
+                .min_by_key(|input| (input.accepted_at_ms, input.queue_order))
+                .cloned()
+                .ok_or_else(|| conflict("materialized input is missing"))?;
+            let run = state
+                .runs
+                .values()
+                .find(|run| run.input_id == input.input_id && run.attempt == 1)
+                .cloned()
+                .ok_or_else(|| conflict("materialized run is missing"))?;
+            let mut available = state
+                .attachments
+                .values()
+                .filter(|attachment| attachment.session_id == session.session_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            let persisted_message = input.queued_message.as_ref().or_else(|| {
+                state
+                    .conversations
+                    .get(&session.session_id)
+                    .and_then(|conversation| {
+                        conversation
+                            .messages
+                            .iter()
+                            .find_map(|message| match message {
+                                ConversationMessage::User(user)
+                                    if user.id == input.user_message_id =>
+                                {
+                                    Some(user)
+                                }
+                                _ => None,
+                            })
+                    })
+            });
+            let mut attachments = Vec::new();
+            if let Some(message) = persisted_message {
+                for file in message
+                    .parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        UserPart::FileReferences(files) => Some(&files.files),
+                        _ => None,
+                    })
+                    .flatten()
+                {
+                    if let Some(index) = available
+                        .iter()
+                        .position(|attachment| attachment.agent_readable_path == file.readable_path)
+                    {
+                        attachments.push(available.remove(index));
+                    }
+                }
+            }
+            Ok(Some(StoredSessionMaterialization {
+                goal: state.goals.get(&session.session_id).cloned(),
+                session,
+                attachments,
+                accepted: AcceptedInput {
+                    input,
+                    run,
+                    is_duplicate: true,
+                },
+            }))
+        })
+    }
+
     pub(super) fn fork_session(&self, fork: SessionFork) -> StoreFuture<'_, StoredSessionFork> {
         Box::pin(async move {
             fork.conversation
@@ -462,6 +547,7 @@ impl VolatileRuntimeStore {
             let message_count = u64::try_from(conversation.messages.len())
                 .map_err(|_| conflict("fork conversation is too large"))?;
             let stored = StoredSession {
+                custom_agent: fork.session.custom_agent,
                 session_id: fork.session.session_id.clone(),
                 agent_shell_kind: fork.session.agent_shell_kind,
                 agent_shell_environment: fork.session.agent_shell_environment.clone(),
@@ -645,6 +731,9 @@ impl VolatileRuntimeStore {
                 .filter(|task| task.session_id == deletion.session_id)
                 .map(|task| task.child_task_id.clone())
                 .collect::<BTreeSet<_>>();
+            state
+                .feedback
+                .retain(|_, request| request.session_id != deletion.session_id);
             state.sessions.remove(&deletion.session_id);
             state.conversations.remove(&deletion.session_id);
             state.session_usage.remove(&deletion.session_id);

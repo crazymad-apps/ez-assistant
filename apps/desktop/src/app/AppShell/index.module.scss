@@ -2,67 +2,31 @@
   display: grid;
   width: 100vw;
   height: 100vh;
-  min-height: min(650px, 100vh);
-  grid-template-rows: 42px minmax(0, 1fr);
+  min-height: 0;
+  grid-template-rows: minmax(0, 1fr);
   overflow: hidden;
   background: var(--ez-surface);
 }
 
-.title_bar {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 9px;
-  padding: 0 16px;
-  border-bottom: 1px solid var(--ez-border);
-  background: var(--ez-surface-subtle);
+.window_controls {
+  position: absolute;
+  z-index: 12;
+  top: 0;
+  right: 0;
+  height: 42px;
+  pointer-events: none;
 
-  strong {
-    overflow: hidden;
-    pointer-events: none;
-    font-size: var(--ez-font-base);
-    font-weight: 650;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  &[data-platform="linux"], &[data-platform="windows"] { padding-right: 0; }
+  button { pointer-events: auto; }
 }
 
-.app_title {
-  display: flex;
-  min-width: 0;
-  flex: 1 1 auto;
-  align-items: baseline;
-  gap: 7px;
-
-  > span:first-child {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
+.app_shell[data-platform="windows"][data-right-sidebar="false"] .conversation_headers,
+.app_shell[data-platform="linux"][data-right-sidebar="false"] .conversation_headers {
+  padding-right: 126px;
 }
 
-.app_version {
-  flex: 0 0 auto;
-  color: var(--ez-text-muted);
-  font-size: var(--ez-font-small);
-  font-weight: 500;
-}
-
-.title_icon {
-  --ez-control-default-height: var(--ez-control-height-small);
-  display: grid;
-  width: var(--ez-control-height);
-  height: var(--ez-control-height);
-  place-items: center;
-  border: 0;
-  border-radius: var(--ez-radius-small);
-  color: var(--ez-text-muted);
-  background: transparent;
-
-  &:hover { background: var(--ez-surface-muted); }
+.app_shell[data-platform="windows"] .app_body > aside:last-child > header:first-child,
+.app_shell[data-platform="linux"] .app_body > aside:last-child > header:first-child {
+  padding-right: 126px;
 }
 
 .app_body {
@@ -78,15 +42,27 @@
 
 .app_body > aside {
   flex: 0 0 auto;
-  transition: width var(--ez-motion-sidebar-enter) var(--ez-ease-standard);
+  overflow: hidden;
+  min-width: 0;
+  transition:
+    width var(--ez-motion-sidebar-enter) var(--ez-ease-standard),
+    opacity var(--ez-motion-sidebar-enter) var(--ez-ease-standard);
 }
 
-.app_shell[data-left-sidebar="true"] .app_body > aside:first-child {
+.app_body > aside[data-shell-sidebar="left"] {
   width: var(--ez-left-sidebar-width);
 }
 
-.app_shell[data-right-sidebar="true"] .app_body > aside:last-child {
+.app_body > aside[data-shell-sidebar="right"] {
   width: var(--ez-right-sidebar-width);
+}
+
+.app_body > aside[data-shell-open="false"] {
+  width: 0;
+  border-inline-width: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition-duration: var(--ez-motion-sidebar-exit);
 }
 
 :global(html[data-sidebar-resizing]) .app_body > aside {
@@ -146,7 +122,8 @@
   width: 0;
   flex: 1 1 auto;
   height: 100%;
-  min-width: 500px;
+  // 窗口窄于左栏与中栏最小宽度之和时，保留左栏并让中栏占满余下空间。
+  min-width: min(500px, calc(100vw - var(--ez-left-sidebar-width)));
   min-height: 0;
   max-height: 100%;
   overflow: hidden;
@@ -164,13 +141,21 @@
 .session_header {
   display: grid;
   min-width: 0;
-  min-height: 56px;
+  min-height: 42px;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 9px;
-  padding: 0 18px 0 26px;
+  gap: 8px;
+  padding: 0 12px 0 16px;
   border-bottom: 1px solid var(--ez-border);
+}
 
+.session_header[data-sidebar-open="true"] {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.app_shell[data-platform="macos"][data-left-sidebar="false"] .session_header {
+  // 左栏消失后，原生交通灯覆盖中栏左侧；按钮命中区与交通灯之间再留出间距。
+  padding-left: 96px;
 }
 
 .child_task_header {
@@ -295,8 +280,8 @@
   color: var(--ez-text);
   background: transparent;
   font: inherit;
-  font-size: var(--ez-font-large);
-  font-weight: 650;
+  font-size: var(--ez-font-base);
+  font-weight: 500;
   text-align: left;
 }
 
@@ -393,6 +378,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .title_refresh { animation: none; }
+  .app_body > aside { transition: none; }
 }
 
 .session_title_input {
@@ -403,58 +389,16 @@
   }
 }
 
-.session_switcher,
-.session_navigation > button,
-.session_actions button {
-  display: grid;
-  width: var(--ez-control-height);
-  height: var(--ez-control-height);
-  place-items: center;
-  border: 0;
-  border-radius: var(--ez-radius-small);
-  color: var(--ez-text-muted);
-  background: var(--ez-surface-subtle);
-
-  &:hover:not(:disabled) {
-    color: var(--ez-text-secondary);
-    background: var(--ez-surface-muted);
-  }
-}
-
-.session_navigation {
-  display: flex;
-  align-items: center;
-  gap: 3px;
-
-  > button:disabled { opacity: 0.35; }
+.header_icon_button,
+.context_toggle {
+  width: var(--ez-control-height-small);
+  height: var(--ez-control-height-small);
 }
 
 .session_actions {
   display: flex;
   align-items: center;
   gap: 3px;
-}
-
-.recent_menu {
-  width: min(310px, calc(100vw - 16px));
-
-  button {
-    justify-content: space-between;
-
-    span {
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-  }
-}
-
-.recent_empty {
-  display: block;
-  padding: 10px;
-  color: var(--ez-text-muted);
-  font-size: var(--ez-font-small);
 }
 
 .session_menu {
@@ -503,6 +447,15 @@
   grid-row: 4;
   min-width: 0;
   min-height: 0;
+}
+
+.conversation_area[data-new-session="true"] .conversation_content { display: none; }
+
+.conversation_area[data-new-session="true"] .composer_slot {
+  display: flex;
+  grid-row: 3 / 5;
+  align-items: flex-start;
+  overflow-y: auto;
 }
 
 @media (max-width: 600px) {

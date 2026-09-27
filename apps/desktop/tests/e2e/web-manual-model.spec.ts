@@ -33,7 +33,8 @@ test("manual model origin survives online changes and controls deletion and tags
     const { token } = await issued.json() as { token: string };
     await page.emulateMedia({ reducedMotion: "reduce" });
     await page.goto(`${fixture.base_url}/#token=${encodeURIComponent(token)}`);
-    await page.getByRole("button", { name: "设置", exact: true }).click();
+    await page.getByRole("button", { name: "账号与 Runtime" }).click();
+    await page.getByRole("menuitem", { name: "设置" }).click();
     const dialog = page.getByRole("dialog", { name: "设置", exact: true });
     await dialog.getByRole("button", { name: "模型", exact: true }).click();
     await dialog.getByRole("button", { name: "添加服务商", exact: true }).click();

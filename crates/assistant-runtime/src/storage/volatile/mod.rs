@@ -22,29 +22,31 @@ use super::{
     ContextReplacementResult, ContextReplacementTarget, ConversationMessageLocationRequest,
     ConversationRawWindowRequest, ConversationRewrite, ConversationSearchHit,
     ConversationSearchPage, ConversationSearchRequest, ConversationSearchScope,
-    ConversationWindowRequest, CrossSessionInputBinding, GoalClear, GoalHeldInputResume,
-    GoalHeldInputResumeResult, GoalStop, GoalStopResult, InputOrigin, MessageFeedbackChange,
-    ModelChange, NewAttachmentUpload, NewStoredChildTask, NewStoredInput, NewStoredRunAttempt,
-    NewStoredSession, NewStoredSessionCommand, NewStoredSessionMaterialization,
-    NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange, QueuePriorityChange,
-    ReasoningEffortChange, RecoveredRuntime, RewriteResult, RuntimeStore, SessionCommandCommit,
-    SessionDeletion, SessionFork, SessionHistoryClear, SessionHistoryClearResult,
-    SessionHistoryCompactionFinish, SessionHistoryCompactionFinishKind,
-    SessionHistoryCompactionPreparation, SessionHistoryCompactionPreparationResult,
-    SessionPinnedChange, SessionProxyChange, SessionProxyState, SessionRole, SessionTitleChange,
-    SessionTitleGenerationCommit, SessionTitleGenerationCommitResult, StoreError, StoreErrorKind,
-    StoreFuture, StoredAttachment, StoredAttachmentState, StoredChildTask,
-    StoredChildTaskSettlement, StoredConversationMessageLocation, StoredConversationRawWindow,
-    StoredConversationState, StoredConversationWindow, StoredGoal, StoredGoalPauseReason,
+    ConversationWindowRequest, CrossSessionInputBinding, CustomAgentMutation, GoalClear,
+    GoalHeldInputResume, GoalHeldInputResumeResult, GoalStop, GoalStopResult, InputOrigin,
+    MessageFeedbackChange, ModelChange, NewAttachmentUpload, NewStoredChildTask, NewStoredInput,
+    NewStoredRunAttempt, NewStoredSession, NewStoredSessionCommand,
+    NewStoredSessionMaterialization, NewWorkspaceRegistration, PendingChildToolExchange,
+    PendingToolExchange, PluginOperationPhase, PluginOperationUpdate, PluginRecordChange,
+    PluginSettingsChange, QueuePriorityChange, ReasoningEffortChange, RecoveredRuntime,
+    RewriteResult, RuntimeStore, SessionCommandCommit, SessionDeletion, SessionFork,
+    SessionHistoryClear, SessionHistoryClearResult, SessionHistoryCompactionFinish,
+    SessionHistoryCompactionFinishKind, SessionHistoryCompactionPreparation,
+    SessionHistoryCompactionPreparationResult, SessionPinnedChange, SessionProxyChange,
+    SessionProxyState, SessionRole, SessionTitleChange, SessionTitleGenerationCommit,
+    SessionTitleGenerationCommitResult, StoreError, StoreErrorKind, StoreFuture, StoredAttachment,
+    StoredAttachmentState, StoredChildTask, StoredChildTaskSettlement,
+    StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationState,
+    StoredConversationWindow, StoredCustomAgent, StoredGoal, StoredGoalPauseReason,
     StoredGoalSettlementEffect, StoredGoalState, StoredInput, StoredInputState,
-    StoredMessageFeedback, StoredRun, StoredRunContinuation, StoredRunContinuationResult,
-    StoredRunSettlement, StoredRunSettlementResult, StoredSession, StoredSessionCommand,
-    StoredSessionCommandState, StoredSessionFork, StoredSessionLifecycle,
+    StoredMessageFeedback, StoredPlugin, StoredPluginOperation, StoredRun, StoredRunContinuation,
+    StoredRunContinuationResult, StoredRunSettlement, StoredRunSettlementResult, StoredSession,
+    StoredSessionCommand, StoredSessionCommandState, StoredSessionFork, StoredSessionLifecycle,
     StoredSessionMaterialization, StoredSessionUsage, StoredTerminalRunInputReconciliation,
     StoredTodoItemStatus, StoredWorkPlan, StoredWorkspace, StoredWorkspaceLifecycle,
     ToolExecutionStart, UserMessageCommit, VariantChange, WorkPlanClear, WorkPlanMutation,
-    WorkPlanMutationResult, WorkspaceRemoval, WorkspaceUpdate, validate_input_message,
-    validate_input_message_with_channel_source,
+    WorkPlanMutationResult, WorkspaceRemoval, WorkspaceRestoration, WorkspaceUpdate,
+    validate_input_message, validate_input_message_with_channel_source,
 };
 use crate::{
     AcceptedStoredSessionCommand, DeviceLifecycle, DeviceNameChange, DeviceRevocation,
@@ -59,11 +61,14 @@ mod adapter;
 mod child_task;
 mod context;
 mod conversation;
+mod custom_agent;
+mod feedback;
 mod global_state;
 mod goal;
 mod input;
 mod lifecycle;
 mod model_management;
+mod plugin;
 mod run;
 mod session;
 mod session_history;
@@ -102,6 +107,7 @@ struct VolatileCompactionReceipt {
 
 #[derive(Default)]
 struct State {
+    feedback: BTreeMap<String, assistant_protocol::FeedbackRequestSnapshot>,
     default_agent_shell: Option<assistant_protocol::ShellKind>,
     providers: BTreeMap<assistant_protocol::ProviderInstanceId, crate::StoredProvider>,
     model_settings: assistant_protocol::ModelSettings,
@@ -112,6 +118,9 @@ struct State {
     pinned_collection_revision: u64,
     pinned_memories: BTreeMap<String, StoredPinnedMemory>,
     skill_name_states: BTreeMap<SkillName, SkillNameState>,
+    custom_agents: BTreeMap<String, StoredCustomAgent>,
+    plugins: BTreeMap<String, StoredPlugin>,
+    plugin_operations: BTreeMap<IdempotencyKey, StoredPluginOperation>,
     workspaces: BTreeMap<WorkspaceId, StoredWorkspace>,
     attachments: BTreeMap<AttachmentId, StoredAttachment>,
     sessions: BTreeMap<SessionId, StoredSession>,
@@ -838,6 +847,7 @@ fn validate_volatile_input_activation(
 
 fn stored_session(session: NewStoredSession) -> StoredSession {
     StoredSession {
+        custom_agent: session.custom_agent,
         agent_shell_kind: session.agent_shell_kind,
         agent_shell_environment: session.agent_shell_environment.clone(),
         session_id: session.session_id,
@@ -899,6 +909,15 @@ fn materialization_semantically_matches(
     existing_files.sort_unstable();
     candidate_files.sort_unstable();
     existing.title == candidate.session.title
+        && existing
+            .custom_agent
+            .as_ref()
+            .map(|agent| (&agent.source, &agent.config.name))
+            == candidate
+                .session
+                .custom_agent
+                .as_ref()
+                .map(|agent| (&agent.source, &agent.config.name))
         && existing.model_selection == candidate.session.model_selection
         && existing.reasoning_effort == candidate.session.reasoning_effort
         && existing.environment.workspace_id == candidate.session.environment.workspace_id

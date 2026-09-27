@@ -109,7 +109,7 @@ fn database_upgrade_preserves_external_paths_and_verified_backup() {
                 |r| r.get::<_, String>(0)
             )
             .unwrap(),
-        "0.27.0"
+        "0.28.1"
     );
     assert_eq!(
         fs::read_to_string(target.join("data/workspaces/w/agent/notes.txt")).unwrap(),
@@ -197,7 +197,11 @@ fn empty_home_commits_version_without_creating_a_database() {
     let contents = fs::read_to_string(home.path().join("host.toml")).unwrap();
     assert_eq!(
         host_configuration::parse(&contents).unwrap().mode,
-        host_configuration::HostMode::Personal
+        if option_env!("EZ_ASSISTANT_DEFAULT_HOST_MODE") == Some("enterprise") {
+            host_configuration::HostMode::Enterprise
+        } else {
+            host_configuration::HostMode::Personal
+        }
     );
     upgrade(home.path()).unwrap();
     assert_eq!(

@@ -8,8 +8,13 @@ import { LoginRoute, RequireIdentity } from './IdentityRoutes';
 import { ModelsRoute, ProviderRoute, ProviderEditor, ModelEditor } from '../features/models';
 import { UsersRoute } from '../features/users/UsersRoute';
 import { CallsRoute, CallDetailRoute } from '../features/calls';
+import { UsageRoute } from '../features/usage/UsageRoute';
 import { AuditRoute } from '../features/audit/AuditRoute';
 import { AuditDetailRoute } from '../features/audit/AuditDetailRoute';
+import { AgentsRoute } from '../features/agents/AgentsRoute';
+import { AgentEditor } from '../features/agents/AgentEditor';
+import { PluginsRoute } from '../features/plugins/PluginsRoute';
+import { PluginDetailRoute } from '../features/plugins/PluginDetailRoute';
 
 export type RouteHeading = Readonly<{ title: string; menu: string }>;
 
@@ -54,6 +59,21 @@ export function adminRoutes(): RouteObject[] {
                   ...route,
                   handle: { title, menu: '/models' } satisfies RouteHeading,
                 })),
+                ...[
+                  { path: '/agents', element: <AgentsRoute />, title: '智能体管理' },
+                  { path: '/agents/new', element: <AgentEditor />, title: '新建智能体' },
+                  { path: '/agents/edit', element: <AgentEditor />, title: '编辑智能体' },
+                ].map(({ title, ...route }) => ({
+                  ...route,
+                  handle: { title, menu: '/agents' } satisfies RouteHeading,
+                })),
+                ...[
+                  { path: '/plugins', element: <PluginsRoute />, title: '插件管理' },
+                  { path: '/plugins/detail', element: <PluginDetailRoute />, title: '插件详情' },
+                ].map(({ title, ...route }) => ({
+                  ...route,
+                  handle: { title, menu: '/plugins' } satisfies RouteHeading,
+                })),
                 {
                   path: '/calls',
                   element: <CallsRoute />,
@@ -63,6 +83,11 @@ export function adminRoutes(): RouteObject[] {
                   path: '/calls/:id',
                   element: <CallDetailRoute />,
                   handle: { title: '调用详情', menu: '/calls' } satisfies RouteHeading,
+                },
+                {
+                  path: '/usage',
+                  element: <UsageRoute />,
+                  handle: { title: '用量统计', menu: '/usage' } satisfies RouteHeading,
                 },
                 {
                   path: '/audit',

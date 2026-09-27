@@ -257,6 +257,21 @@ impl StorageEngine {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|source| internal_error("input acceptance could not begin", source))?;
+        if let Some(request) = &input.feedback_answer {
+            if request.session_id != input.session_id
+                || request.mode != assistant_protocol::FeedbackMode::EndTurn
+                || request.status != assistant_protocol::FeedbackStatus::Answered
+            {
+                return Err(conflict("feedback input ownership mismatch"));
+            }
+            super::feedback::apply_feedback_mutation(
+                &transaction,
+                &assistant_runtime::FeedbackMutation {
+                    request: request.clone(),
+                    expected_status: Some(assistant_protocol::FeedbackStatus::Pending),
+                },
+            )?;
+        }
         match input
             .cross_session
             .as_ref()
@@ -396,10 +411,11 @@ impl StorageEngine {
             None => {}
         }
         // 无 Goal、跨会话和渠道来源的 Runtime Input 当前用于轮内播报提醒，需要优先执行。
-        let priority_order = if input.origin == InputOrigin::Runtime
-            && input.goal_binding.is_none()
-            && input.cross_session.is_none()
-            && input.channel_source.is_none()
+        let priority_order = if input.feedback_answer.is_some()
+            || (input.origin == InputOrigin::Runtime
+                && input.goal_binding.is_none()
+                && input.cross_session.is_none()
+                && input.channel_source.is_none())
         {
             transaction
                 .execute(

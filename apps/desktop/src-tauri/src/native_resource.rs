@@ -504,7 +504,7 @@ pub(crate) async fn reveal_local_resource_in_directory(
     app.opener().reveal_item_in_dir(canonical).map_err(|_| {
         error(
             NativeResourceErrorCode::SystemOpenFailed,
-            "无法在 Finder 中显示该资源。",
+            "无法在文件管理器中显示该资源。",
         )
     })
 }
@@ -648,7 +648,7 @@ pub(crate) async fn reveal_session_resource_in_directory(
     app.opener().reveal_item_in_dir(path).map_err(|_| {
         error(
             NativeResourceErrorCode::SystemOpenFailed,
-            "无法在 Finder 中显示该资源。",
+            "无法在文件管理器中显示该资源。",
         )
     })
 }
@@ -1459,7 +1459,15 @@ fn display_path_segments(path: &Path) -> Result<Vec<String>, NativeResourceError
     let mut segments = Vec::new();
     for component in path.components() {
         let text = match component {
-            std::path::Component::RootDir => "/".to_owned(),
+            // Windows canonicalize 返回 VerbatimDisk；显示与恢复必须保留盘符，不能降为 /path。
+            #[cfg(windows)]
+            std::path::Component::Prefix(prefix) => match prefix.kind() {
+                std::path::Prefix::Disk(drive) | std::path::Prefix::VerbatimDisk(drive) => {
+                    format!("{}:", char::from(drive))
+                }
+                _ => return Err(invalid_local_resource()),
+            },
+            std::path::Component::RootDir if segments.is_empty() => "/".to_owned(),
             std::path::Component::Normal(value) => value
                 .to_str()
                 .map(str::to_owned)
@@ -2408,6 +2416,22 @@ mod tests {
         let parent = Path::new("/tmp/export-target");
         let path = temporary_export_path(parent, "export-1");
         assert_eq!(path.parent(), Some(parent));
+    }
+
+    #[test]
+    fn resource_path_segments_preserve_platform_root() {
+        #[cfg(windows)]
+        for path in [r"C:\项目 空格\图.png", r"\\?\C:\项目 空格\图.png"] {
+            assert_eq!(
+                display_path_segments(Path::new(path)).unwrap(),
+                ["C:", "项目 空格", "图.png"]
+            );
+        }
+        #[cfg(unix)]
+        assert_eq!(
+            display_path_segments(Path::new("/项目 空格/图.png")).unwrap(),
+            ["/", "项目 空格", "图.png"]
+        );
     }
 
     #[test]

@@ -12,6 +12,233 @@ use assistant_runtime::{
 };
 use std::time::Duration;
 
+#[tokio::test]
+#[ignore = "set C03_SAMPLE_ARCHIVE to the preserved valid TAR.GZ fixture"]
+async fn center_package_download_installs_for_one_user_and_rejects_deprecated_selection() {
+    use sha2::{Digest, Sha256};
+    let source =
+        std::path::PathBuf::from(std::env::var_os("C03_SAMPLE_ARCHIVE").expect("sample archive"));
+    let bytes = std::fs::read(source).unwrap();
+    let sha256 = format!("{:x}", Sha256::digest(&bytes));
+    let mut f = Fixture::with_domains(true, None).await;
+    *f.mock.plugin.lock().unwrap() = Some(PluginFixture {
+        bytes,
+        sha256: sha256.clone(),
+        deprecated: false,
+    });
+    let alice = f.login("alice").await;
+    let bob = f.login("bob").await;
+    assert_eq!(f.ready(&alice).await.status(), StatusCode::NO_CONTENT);
+    assert_eq!(f.ready(&bob).await.status(), StatusCode::NO_CONTENT);
+    for user in [1, 2] {
+        let database = f
+            .home
+            .path()
+            .join(format!("users/{CENTER_ID}_{user}/data/runtime.sqlite3"));
+        let db = rusqlite::Connection::open_with_flags(
+            database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        for table in ["plugins", "plugin_operations"] {
+            let count: i64 = db
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "fresh user {user} table {table}");
+        }
+    }
+    let market = f.command(&alice, RuntimeCommand::ListPluginMarket {}).await;
+    assert_eq!(market.status(), StatusCode::OK);
+    let market: Value = market.json().await.unwrap();
+    assert_eq!(
+        market["result"]["payload"]["payload"]["plugins"][0]["name"],
+        "warehouse-cad-guidance"
+    );
+    let resolved = f
+        .command(
+            &alice,
+            RuntimeCommand::ResolvePluginPackage(ResolvePluginPackageRequest {
+                name: "warehouse-cad-guidance".into(),
+                expected_active_sha256: None,
+            }),
+        )
+        .await;
+    assert_eq!(resolved.status(), StatusCode::OK);
+    let resolved: Value = resolved.json().await.unwrap();
+    let selection: PluginPackageSelection =
+        serde_json::from_value(resolved["result"]["payload"]["payload"].clone()).unwrap();
+    assert_eq!(selection.sha256, sha256);
+    assert_eq!(
+        selection.origin,
+        PluginPackageOrigin::Center {
+            center_id: CENTER_ID.into()
+        }
+    );
+    let mut wrong_center = selection.clone();
+    wrong_center.origin = PluginPackageOrigin::Center {
+        center_id: "11234567-89ab-4cde-8f01-23456789abcd".into(),
+    };
+    assert_ne!(
+        f.command(
+            &alice,
+            RuntimeCommand::BeginPluginInstall(BeginPluginInstallRequest {
+                key: IdempotencyKey::new("wrong-center").unwrap(),
+                packages: vec![wrong_center],
+            })
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let key = IdempotencyKey::new("alice-center-package").unwrap();
+    assert_eq!(
+        f.command(
+            &alice,
+            RuntimeCommand::BeginPluginInstall(BeginPluginInstallRequest {
+                key: key.clone(),
+                packages: vec![selection.clone()],
+            })
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        f.command(
+            &bob,
+            RuntimeCommand::GetPluginOperation(PluginOperationRequest { key: key.clone() })
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    let alice_services = f.services(&alice).await;
+    let installed = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let operation = alice_services
+                .runtime
+                .get_plugin_operation(PluginOperationRequest { key: key.clone() })
+                .await
+                .unwrap();
+            if matches!(
+                operation.phase,
+                PluginOperationStatus::Succeeded | PluginOperationStatus::Failed
+            ) {
+                break operation;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(installed.phase, PluginOperationStatus::Succeeded);
+    assert_eq!(
+        alice_services.runtime.list_plugins().await.unwrap().plugins[0]
+            .sha256
+            .as_deref(),
+        Some(sha256.as_str())
+    );
+    assert!(
+        f.services(&bob)
+            .await
+            .runtime
+            .list_plugins()
+            .await
+            .unwrap()
+            .plugins
+            .is_empty()
+    );
+    f.mock.plugin.lock().unwrap().as_mut().unwrap().deprecated = true;
+    assert_eq!(
+        f.command(
+            &bob,
+            RuntimeCommand::ResolvePluginPackage(ResolvePluginPackageRequest {
+                name: "warehouse-cad-guidance".into(),
+                expected_active_sha256: None,
+            })
+        )
+        .await
+        .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    let bob_key = IdempotencyKey::new("bob-deprecated-package").unwrap();
+    assert_eq!(
+        f.command(
+            &bob,
+            RuntimeCommand::BeginPluginInstall(BeginPluginInstallRequest {
+                key: bob_key.clone(),
+                packages: vec![selection],
+            })
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let bob_services = f.services(&bob).await;
+    let failed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let operation = bob_services
+                .runtime
+                .get_plugin_operation(PluginOperationRequest {
+                    key: bob_key.clone(),
+                })
+                .await
+                .unwrap();
+            if operation.phase == PluginOperationStatus::Failed {
+                break operation;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(failed.error_code.as_deref(), Some("package_unavailable"));
+    assert!(
+        bob_services
+            .runtime
+            .list_plugins()
+            .await
+            .unwrap()
+            .plugins
+            .is_empty()
+    );
+    for (user, expected_plugins, expected_operations) in [(1, 1, 1), (2, 0, 1)] {
+        let database = f
+            .home
+            .path()
+            .join(format!("users/{CENTER_ID}_{user}/data/runtime.sqlite3"));
+        let db = rusqlite::Connection::open_with_flags(
+            database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        for (table, expected) in [
+            ("plugins", expected_plugins),
+            ("plugin_operations", expected_operations),
+        ] {
+            let count: i64 = db
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, expected, "user {user} table {table}");
+        }
+        if user == 1 {
+            let active: String = db
+                .query_row(
+                    "SELECT active_sha256 FROM plugins WHERE name='warehouse-cad-guidance'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(active, sha256);
+        }
+    }
+    f.stop().await;
+}
+
 impl Fixture {
     async fn ready(&self, token: &str) -> reqwest::Response {
         self.request(reqwest::Method::POST, "/runtime/ensure-ready", Some(token))

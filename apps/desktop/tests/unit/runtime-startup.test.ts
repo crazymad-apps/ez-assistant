@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { MIN_COMPATIBLE_VERSION, SOFTWARE_VERSION } from "@ez-assistant/protocol";
 import { RuntimeClient } from "../../src/runtime-client/RuntimeClient";
 import type { RuntimeBootstrap } from "../../src/native-bridge/runtimeBootstrap";
 import { startupMessage } from "../../src/runtime-client/startupStatus";
 const bootstrap: RuntimeBootstrap = {
   base_url: "http://127.0.0.1:9000", access_token: "fixture", instance_id: "one", started_runtime: false,
-  capabilities: { mode: "personal", min_compatible_version: "0.27.0", runtime_version: "0.27.0", max_command_bytes: 1000, max_attachment_bytes: null, sse: true, streaming_upload: true, features: ["startup_diagnostics"] },
+  capabilities: { mode: "personal", min_compatible_version: MIN_COMPATIBLE_VERSION, runtime_version: SOFTWARE_VERSION, max_command_bytes: 1000, max_attachment_bytes: null, sse: true, streaming_upload: true, features: ["startup_diagnostics"] },
 };
 const health = (status: string, error: string | null = null) => new Response(JSON.stringify({ status, stage: "database_migration", error, database_version: null, target_version: "0.25.1" }));
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
@@ -79,7 +80,7 @@ describe("event connection compatibility", () => {
     await (await client.connectEvents(listener, new AbortController().signal)).closed;
     await expect(client.connectEvents(listener, new AbortController().signal)).rejects.toMatchObject({ code: "client_too_old" });
     expect(fetcher.mock.calls.map(([url]) => new URL(url).pathname)).toEqual(["/capabilities", "/events", "/capabilities"]);
-    expect(fetcher.mock.calls.every(([, init]) => init.headers.get("x-ez-client-version") === "0.27.0" && init.headers.get("x-ez-min-compatible-version") === "0.27.0")).toBe(true);
+    expect(fetcher.mock.calls.every(([, init]) => init.headers.get("x-ez-client-version") === SOFTWARE_VERSION && init.headers.get("x-ez-min-compatible-version") === MIN_COMPATIBLE_VERSION)).toBe(true);
     client.dispose();
   });
   it("preserves a compatibility failure between capabilities and SSE admission", async () => {

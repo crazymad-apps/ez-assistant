@@ -5,9 +5,11 @@
 mod command;
 mod compatibility;
 mod config;
+mod custom_agent;
 mod device_gateway;
 mod error;
 mod event;
+mod feedback;
 mod host;
 mod host_access;
 mod id;
@@ -16,6 +18,7 @@ mod mcp;
 mod memory;
 mod model_management;
 mod permission;
+mod plugin;
 mod product;
 mod resource;
 mod skill;
@@ -54,9 +57,10 @@ pub use command::{
     GetChildTaskResult, GetConfigStatusRequest, GetConfigStatusResult,
     GetMemoryCapabilitiesRequest, GetMemoryCapabilitiesResult, GetPermissionDocumentRequest,
     GetPermissionDocumentResult, GetPersonaRequest, GetPersonaResult, GetRunRequest, GetRunResult,
-    GetSessionRequest, GetSessionResult, GetSkillDetailRequest, GetSkillDetailResult,
-    GetSystemContextRequest, GetSystemContextResult, GetWorkspaceRequest, GetWorkspaceResult,
-    ListAttachmentsRequest, ListAttachmentsResult, ListChildTasksRequest, ListChildTasksResult,
+    GetSessionMaterializationRequest, GetSessionMaterializationResult, GetSessionRequest,
+    GetSessionResult, GetSkillDetailRequest, GetSkillDetailResult, GetSystemContextRequest,
+    GetSystemContextResult, GetWorkspaceRequest, GetWorkspaceResult, ListAttachmentsRequest,
+    ListAttachmentsResult, ListChildTasksRequest, ListChildTasksResult,
     ListPendingApprovalsRequest, ListPendingApprovalsResult, ListPinnedMemoriesRequest,
     ListPinnedMemoriesResult, ListRunsRequest, ListRunsResult, ListSessionsRequest,
     ListSessionsResult, ListSkillsRequest, ListSkillsResult, ListWorkspacesRequest,
@@ -66,22 +70,28 @@ pub use command::{
     ReloadPermissionsRequest, ReloadPermissionsResult, RemoveWorkspaceRequest,
     RemoveWorkspaceResult, RenameSessionRequest, RenameSessionResult,
     ReplacePermissionDocumentRequest, ReplacePermissionDocumentResult, RestoreSessionRequest,
-    RestoreSessionResult, ResumeGoalRequest, ResumeGoalResult, ResumeSessionRequest,
-    ResumeSessionResult, RetryRunRequest, RetryRunResult, RuntimeCommand, RuntimeCommandResult,
-    SecretValue, SessionHistoryCleanupStatus, SetAuxiliaryVisionModelRequest,
-    SetCurrentControllerOutputHostingRequest, SetCurrentControllerOutputHostingResult,
-    SetDefaultModelRequest, SetMessageFeedbackRequest, SetMessageFeedbackResult, SetPersonaRequest,
-    SetPersonaResult, SetSessionApprovalModeRequest, SetSessionApprovalModeResult,
-    SetSessionModelRequest, SetSessionModelResult, SetSessionPinnedRequest, SetSessionPinnedResult,
-    SetSessionProxyRequest, SetSessionProxyResult, SetSessionReasoningEffortRequest,
-    SetSessionReasoningEffortResult, SetSessionVariantRequest, SetSessionVariantResult,
-    SetSkillEnabledRequest, SetSkillEnabledResult, ShutdownRuntimeRequest, ShutdownRuntimeResult,
-    StopGoalRequest, StopGoalResult, SubmitInputMode, SubmitInputRequest, SubmitInputResult,
-    UpdatePinnedMemoryRequest, UpdateWorkspaceRequest, UpdateWorkspaceResult,
+    RestoreSessionResult, RestoreWorkspaceRequest, RestoreWorkspaceResult, ResumeGoalRequest,
+    ResumeGoalResult, ResumeSessionRequest, ResumeSessionResult, RetryRunRequest, RetryRunResult,
+    RuntimeCommand, RuntimeCommandResult, SecretValue, SessionHistoryCleanupStatus,
+    SetAuxiliaryVisionModelRequest, SetCurrentControllerOutputHostingRequest,
+    SetCurrentControllerOutputHostingResult, SetDefaultModelRequest, SetMessageFeedbackRequest,
+    SetMessageFeedbackResult, SetPersonaRequest, SetPersonaResult, SetSessionApprovalModeRequest,
+    SetSessionApprovalModeResult, SetSessionModelRequest, SetSessionModelResult,
+    SetSessionPinnedRequest, SetSessionPinnedResult, SetSessionProxyRequest, SetSessionProxyResult,
+    SetSessionReasoningEffortRequest, SetSessionReasoningEffortResult, SetSessionVariantRequest,
+    SetSessionVariantResult, SetSkillEnabledRequest, SetSkillEnabledResult, ShutdownRuntimeRequest,
+    ShutdownRuntimeResult, StopGoalRequest, StopGoalResult, SubmitInputMode, SubmitInputRequest,
+    SubmitInputResult, UpdatePinnedMemoryRequest, UpdateWorkspaceRequest, UpdateWorkspaceResult,
     UploadAttachmentResult, ValidateModelConnectionRequest, ValidateModelConnectionResult,
 };
 pub use config::{
     ConfigurationIssue, ConfigurationIssueCode, ConfigurationState, ConfigurationStatus,
+};
+pub use custom_agent::{
+    AgentCapabilityReference, AgentDependencySnapshot, AgentDependencyStatus, CustomAgentConfig,
+    CustomAgentListSnapshot, CustomAgentSelection, CustomAgentSnapshot, CustomAgentSource,
+    DeletePersonalAgentRequest, DeletedPersonalAgentResult, PrepareCustomAgentRequest,
+    PreparedCustomAgentSnapshot, SavePersonalAgentRequest,
 };
 pub use device_gateway::{
     CloseDevicePairingWindowRequest, ConfirmDevicePairingRequest, DeviceCapabilitiesSnapshot,
@@ -136,6 +146,15 @@ pub use permission::{
     PermissionProcessModeDefinition, PermissionRuleDefinition, PermissionRuleEffect,
     PermissionRuleMatcher, PermissionShellMatcher,
 };
+pub use plugin::{
+    BeginPluginInstallRequest, InstalledPluginSnapshot, MutatePluginSettingsRequest,
+    MutatePluginSettingsResult, PluginArchiveFormat, PluginConfigFileSnapshot,
+    PluginConfigFilesSnapshot, PluginConfigurationFieldSnapshot, PluginListSnapshot,
+    PluginMarketEntry, PluginMarketSnapshot, PluginMarketVersion, PluginOperationKind,
+    PluginOperationRequest, PluginOperationSnapshot, PluginOperationStatus, PluginPackageOrigin,
+    PluginPackageSelection, PluginPackageState, PluginSettingsMutation,
+    PluginSoftwareFieldSnapshot, ResolvePluginPackageRequest, UninstallPluginRequest,
+};
 pub use product::{
     ApplicationCapabilities, ApplicationSnapshot, ApprovalQueueSnapshot, AssistantMessageSnapshot,
     AssistantSegment, AuxiliaryUsageSnapshot, ChildTaskTreeItemSnapshot, ChildTaskUsageSnapshot,
@@ -165,9 +184,10 @@ pub use product::{
 pub use resource::{
     HostFileEntry, HostFileRequest, ListHostFilesRequest, ListHostFilesResult,
     ListSessionResourceFilesRequest, ListSessionResourceFilesResult,
-    PreviewSessionResourceFileRequest, PreviewSessionResourceFileResult, SessionResourceEntry,
-    SessionResourceEntryKind, SessionResourceEntryState, SessionResourceLocator,
-    SessionResourcePreviewKind, SessionResourceRoot,
+    PreviewSessionResourceFileRequest, PreviewSessionResourceFileResult, SessionArtifact,
+    SessionResourceEntry, SessionResourceEntryKind, SessionResourceEntryState,
+    SessionResourceFileInfo, SessionResourceLocator, SessionResourcePreviewKind,
+    SessionResourceRoot,
 };
 pub use skill::{
     ActiveSkillSnapshot, SkillActivationTagSnapshot, SkillActivationTriggerSnapshot,
@@ -177,14 +197,15 @@ pub use skill::{
 pub use snapshot::{
     AgentVariant, ApprovalDecision, ApprovalMode, ApprovalSnapshot, ApprovalStatus,
     AttachmentState, AttachmentSummary, ChildTaskSnapshot, ChildTaskStatus,
-    ControllerAvailabilitySnapshot, GuardrailKind, GuardrailMode, PcOutputHostingSnapshot,
-    PermissionDiagnostic, PermissionDiagnosticCode, PermissionFileStatus, PermissionFileSummary,
-    PermissionScope, ReasoningEffortKey, RunSnapshot, RunStatus, RuntimeLifecycle,
-    SessionCompactionReasonSnapshot, SessionCompactionSnapshot, SessionCompactionTriggerSnapshot,
-    SessionLifecycle, SessionListFilter, SessionProxySnapshot, SessionRoleSnapshot, SessionSummary,
-    SessionTitleGenerationSnapshot, SessionTitleGenerationTriggerSnapshot, SessionTitleOrigin,
-    TokenUsageSnapshot, ToolActivitySnapshot, ToolActivityStatus, ToolApprovalSubject,
-    ToolOutputChannel, WorkspaceLifecycle, WorkspaceSummary,
+    ControllerAvailabilitySnapshot, GuardrailKind, GuardrailMode, ModelRequestStatus,
+    PcOutputHostingSnapshot, PermissionDiagnostic, PermissionDiagnosticCode, PermissionFileStatus,
+    PermissionFileSummary, PermissionScope, ReasoningEffortKey, RunSnapshot, RunStatus,
+    RuntimeLifecycle, SessionCompactionReasonSnapshot, SessionCompactionSnapshot,
+    SessionCompactionTriggerSnapshot, SessionLifecycle, SessionListFilter, SessionProxySnapshot,
+    SessionRoleSnapshot, SessionSummary, SessionTitleGenerationSnapshot,
+    SessionTitleGenerationTriggerSnapshot, SessionTitleOrigin, TokenUsageSnapshot,
+    ToolActivitySnapshot, ToolActivityStatus, ToolApprovalSubject, ToolOutputChannel,
+    WorkspaceLifecycle, WorkspaceSummary,
 };
 
 mod user_terminal;
@@ -203,4 +224,9 @@ pub use model_management::{
     ProviderCredentialChange, ProviderModelCatalogSnapshot, ProviderProtocolPreference,
     ProviderRequest, ProviderSessionUsage, ProviderSummary, ProviderType, ProviderUsage,
     SaveModelFixedConfigRequest, UpdateProviderRequest,
+};
+
+pub use feedback::{
+    AnswerFeedbackRequest, CancelFeedbackRequest, FeedbackAnswer, FeedbackMode, FeedbackOption,
+    FeedbackQuestion, FeedbackRequestSnapshot, FeedbackStatus, ListFeedbackRequestsRequest,
 };

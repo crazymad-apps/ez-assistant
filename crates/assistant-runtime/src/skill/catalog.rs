@@ -25,6 +25,10 @@ pub struct SkillDefinition {
     pub name: SkillName,
     pub description: String,
     pub source: SkillSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_sha256: Option<String>,
     /// 共享 Root 中的源目录；只供 Runtime/工具按需读取，不进入模型目录或 revision。
     pub source_path: String,
     pub definition_digest: String,
@@ -72,6 +76,8 @@ impl SkillCatalog {
                 name: winner.name,
                 description: winner.description,
                 source: winner.source,
+                plugin_name: winner.plugin_name,
+                plugin_sha256: winner.plugin_sha256,
                 source_path: winner.source_path,
                 definition_digest: winner.definition_digest,
                 body: winner.body,
@@ -192,6 +198,10 @@ impl SkillCatalog {
                 definition.description.trim().is_empty()
                     || definition.source_path.is_empty()
                     || !is_sha256_v1(&definition.definition_digest)
+                    || (definition.source == SkillSource::Plugin)
+                        != definition.plugin_name.is_some()
+                    || (definition.source == SkillSource::Plugin)
+                        != definition.plugin_sha256.is_some()
             })
         {
             return Err(SkillPackageSourceError::new(
@@ -240,6 +250,10 @@ struct CatalogRevisionEntry<'a> {
     name: &'a SkillName,
     description: &'a str,
     source: SkillSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plugin_name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plugin_sha256: Option<&'a str>,
     definition_digest: &'a str,
     model_invocable: bool,
     user_invocable: bool,
@@ -252,6 +266,8 @@ fn catalog_revision(definitions: &[SkillDefinition]) -> Result<String, SkillPack
             name: &definition.name,
             description: &definition.description,
             source: definition.source,
+            plugin_name: definition.plugin_name.as_deref(),
+            plugin_sha256: definition.plugin_sha256.as_deref(),
             definition_digest: &definition.definition_digest,
             model_invocable: definition.model_invocable,
             user_invocable: definition.user_invocable,

@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent-context"
-version = "0.27.0"
+version = "0.28.1"
 dependencies = [
  "agent-model",
  "agent-types",
@@ -24,7 +24,7 @@ dependencies = [
 
 [[package]]
 name = "agent-core"
-version = "0.27.0"
+version = "0.28.1"
 dependencies = [
  "agent-context",
  "agent-model",
@@ -41,7 +41,7 @@ dependencies = [
 
 [[package]]
 name = "agent-memory"
-version = "0.27.0"
+version = "0.28.1"
 dependencies = [
  "agent-types",
  "futures-util",
@@ -56,7 +56,7 @@ dependencies = [
 
 [[package]]
 name = "agent-model"
-version = "0.27.0"
+version = "0.28.1"
 dependencies = [
  "agent-types",
  "futures-core",
@@ -70,7 +70,7 @@ dependencies = [
 
 [[package]]
 name = "agent-openai-compatible"
-version = "0.27.0"
+version = "0.28.1"
 dependencies = [
  "agent-model",
  "agent-testkit",
@@ -92,7 +92,7 @@ dependencies = [
 
 [[package]]
 name = "agent-sdk"
-version = "0.27.0"
+version = "0.28.1"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -109,7 +109,7 @@ dependencies = [
 
 [[package]]
 name = "agent-testkit"
-version = "0.27.0"
+version = "0.28.1"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -125,7 +125,7 @@ dependencies = [
 
 [[package]]
 name = "agent-tools"
-version = "0.27.0"
+version = "0.28.1"
 dependencies = [
  "agent-memory",
  "agent-types",
@@ -139,7 +139,7 @@ dependencies = [
 
 [[package]]
 name = "agent-tools-local"
-version = "0.27.0"
+version = "0.28.1"
 dependencies = [
  "agent-tools",
  "process-wrap",
@@ -152,7 +152,7 @@ dependencies = [
 
 [[package]]
 name = "agent-types"
-version = "0.27.0"
+version = "0.28.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -347,7 +347,7 @@ dependencies = [
 
 [[package]]
 name = "assistant-protocol"
-version = "0.27.0"
+version = "0.28.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -358,7 +358,7 @@ dependencies = [
 
 [[package]]
 name = "assistant-runtime"
-version = "0.27.0"
+version = "0.28.1"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -384,12 +384,13 @@ dependencies = [
  "tokio-util",
  "toml 0.9.12+spec-1.1.0",
  "toml_edit 0.25.12+spec-1.1.0",
+ "unicode-normalization",
  "url",
 ]
 
 [[package]]
 name = "assistant-runtime-host"
-version = "0.27.0"
+version = "0.28.1"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -409,8 +410,10 @@ dependencies = [
  "axum-server",
  "base64 0.22.1",
  "clap",
+ "crc32fast",
  "dirs",
  "ed25519-dalek",
+ "flate2",
  "futures-core",
  "futures-util",
  "getrandom 0.4.3",
@@ -439,6 +442,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sse-stream",
+ "tar",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -446,8 +450,10 @@ dependencies = [
  "toml 0.9.12+spec-1.1.0",
  "toml_edit 0.25.12+spec-1.1.0",
  "tungstenite",
+ "unicode-normalization",
  "url",
  "windows-sys 0.61.2",
+ "zip",
 ]
 
 [[package]]
@@ -1177,7 +1183,7 @@ dependencies = [
 
 [[package]]
 name = "core-demo"
-version = "0.27.0"
+version = "0.28.1"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -1437,7 +1443,7 @@ dependencies = [
 
 [[package]]
 name = "debug-viewer"
-version = "0.27.0"
+version = "0.28.1"
 dependencies = [
  "agent-core",
  "agent-model",
@@ -1841,7 +1847,7 @@ dependencies = [
 
 [[package]]
 name = "ez-assistant-desktop"
-version = "0.27.0"
+version = "0.28.1"
 dependencies = [
  "assistant-protocol",
  "base64 0.22.1",
@@ -1851,6 +1857,7 @@ dependencies = [
  "image",
  "infer",
  "libc",
+ "mac-usernotifications",
  "nix 0.28.0",
  "objc2",
  "objc2-app-kit",
@@ -1873,6 +1880,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "url",
+ "windows 0.61.3",
  "windows-sys 0.61.2",
 ]
 
@@ -1952,6 +1960,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "filetime"
+version = "0.2.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
+dependencies = [
+ "cfg-if",
+ "libc",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1965,6 +1983,7 @@ checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
+ "zlib-rs",
 ]
 
 [[package]]
@@ -2146,6 +2165,12 @@ name = "futures-task"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "037711b3d59c33004d3856fbdc83b99d4ff37a24768fa1be9ce3538a1cde4393"
+
+[[package]]
+name = "futures-timer"
+version = "3.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af43fadb8a98512d547e37b4e92e0ced13e205c061b87b4623eff01d918d6968"
 
 [[package]]
 name = "futures-util"
@@ -3264,6 +3289,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
+name = "mac-usernotifications"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08adbb1b9e11709f9ce628dd7471208e5dd3ad35a245dbc81e59a36dce3f3780"
+dependencies = [
+ "block2",
+ "futures-channel",
+ "futures-lite",
+ "futures-timer",
+ "log",
+ "objc2",
+ "objc2-core-foundation",
+ "objc2-foundation",
+ "objc2-user-notifications",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "markup5ever"
 version = "0.38.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3311,7 +3354,7 @@ dependencies = [
 
 [[package]]
 name = "memory-demo"
-version = "0.27.0"
+version = "0.28.1"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -3650,7 +3693,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a180dd8642fa45cdb7dd721cd4c11b1cadd4929ce112ebd8b9f5803cc79d536"
 dependencies = [
  "bitflags 2.13.0",
+ "block2",
  "dispatch2",
+ "libc",
  "objc2",
 ]
 
@@ -3777,7 +3822,10 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9df9128cbbfef73cda168416ccf7f837b62737d748333bfe9ab71c245d76613e"
 dependencies = [
+ "bitflags 2.13.0",
+ "block2",
  "objc2",
+ "objc2-core-location",
  "objc2-foundation",
 ]
 
@@ -4537,7 +4585,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "reliability-demo"
-version = "0.27.0"
+version = "0.28.1"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -4663,7 +4711,7 @@ dependencies = [
 
 [[package]]
 name = "runtime-harness"
-version = "0.27.0"
+version = "0.28.1"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -4824,7 +4872,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "safety-demo"
-version = "0.27.0"
+version = "0.28.1"
 dependencies = [
  "agent-context",
  "agent-core",
@@ -5598,6 +5646,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.118",
+]
+
+[[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
 ]
 
 [[package]]
@@ -6390,6 +6448,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "typed-path"
+version = "0.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e28f89b80c87b8fb0cf04ab448d5dd0dd0ade2f8891bae878de66a75a28600e"
+
+[[package]]
 name = "typeid"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6470,6 +6534,15 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "unicode-normalization"
+version = "0.1.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
+dependencies = [
+ "tinyvec",
+]
 
 [[package]]
 name = "unicode-segmentation"
@@ -7640,6 +7713,25 @@ dependencies = [
  "quote",
  "syn 2.0.118",
 ]
+
+[[package]]
+name = "zip"
+version = "8.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
+dependencies = [
+ "crc32fast",
+ "flate2",
+ "indexmap 2.14.0",
+ "memchr",
+ "typed-path",
+]
+
+[[package]]
+name = "zlib-rs"
+version = "0.6.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
 
 [[package]]
 name = "zmij"

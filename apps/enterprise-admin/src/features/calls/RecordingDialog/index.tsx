@@ -77,7 +77,10 @@ export const RecordingDialog = observer(function RecordingDialog(
           />
         </Form.Item>
       </Form>
-      <Alert type="info" title="每侧最多保存 8 MiB，中心采集缓冲共 64 MiB。关闭采集保留已有文件；调用索引持续记录。" />
+      <Alert
+        type="info"
+        title="此开关只影响新调用的正文保存；Token 用量始终独立统计。每侧最多保存 8 MiB，中心采集缓冲共 64 MiB。"
+      />
     </Modal>
   );
 });

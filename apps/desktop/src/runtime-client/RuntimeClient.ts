@@ -15,6 +15,11 @@ import type {
   RuntimeEventEnvelope,
   RuntimeHostCapabilities,
   RuntimeHostHealth,
+  PluginArchiveFormat,
+  PluginPackageSelection,
+  PluginOperationSnapshot,
+  PluginConfigFileSnapshot,
+  PluginConfigFilesSnapshot,
 } from "@ez-assistant/protocol";
 import type { RuntimeBootstrap } from "../native-bridge/runtimeBootstrap";
 
@@ -99,6 +104,32 @@ export class RuntimeClient {
 
   logout(): Promise<HostLogoutResult | null> {
     return this.resource("/auth/logout", { method: "POST" }, (response) => response.status === 204 ? Promise.resolve(null) : response.json());
+  }
+
+  inspectPluginPackage(file: File, format: PluginArchiveFormat, signal?: AbortSignal): Promise<PluginPackageSelection> {
+    return this.resource("/plugins/inspect", {
+      method: "POST", body: file, signal,
+      headers: { "x-ez-plugin-format": format },
+    }, (response) => response.json() as Promise<PluginPackageSelection>);
+  }
+
+  uploadPluginPackage(key: string, file: File, signal?: AbortSignal): Promise<PluginOperationSnapshot> {
+    return this.resource(`/plugins/operations/${encodeURIComponent(key)}/package`, {
+      method: "POST", body: file, signal,
+    }, (response) => response.json() as Promise<PluginOperationSnapshot>);
+  }
+
+  listPluginConfigFiles(name: string, sha256: string): Promise<PluginConfigFilesSnapshot> {
+    return this.resource(`/plugins/${encodeURIComponent(name)}/config-files?sha256=${encodeURIComponent(sha256)}`,
+      { method: "GET" }, (response) => response.json() as Promise<PluginConfigFilesSnapshot>);
+  }
+
+  uploadPluginConfigFile(name: string, sha256: string, relative: string, revision: string, file: File): Promise<PluginConfigFileSnapshot> {
+    const path = relative.split("/").map(encodeURIComponent).join("/");
+    return this.resource(`/plugins/${encodeURIComponent(name)}/config-files/${path}`, {
+      method: "PUT", body: file,
+      headers: { "x-ez-plugin-sha256": sha256, "x-ez-expected-revision": revision },
+    }, (response) => response.json() as Promise<PluginConfigFileSnapshot>);
   }
 
   openUserTerminal(source: TerminalSource, size: TerminalSize, receive: (event: TerminalEvent) => void, shell: ShellKind | null = null): TerminalSocket {

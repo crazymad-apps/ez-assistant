@@ -137,6 +137,32 @@ pub(crate) fn sync_file_at(path: &Path) -> io::Result<()> {
         .sync_all()
 }
 
+#[cfg(test)]
+mod sync_tests {
+    use super::*;
+
+    #[test]
+    fn sync_existing_marker_file() {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(".runtime-test");
+        fs::create_dir_all(&base).unwrap();
+        let directory = tempfile::Builder::new()
+            .prefix("windows-sync-")
+            .tempdir_in(base)
+            .unwrap();
+        let marker = directory.path().join("operation-owner");
+        fs::write(&marker, b"owner").unwrap();
+
+        sync_file_at(&marker).unwrap();
+        sync_directory(directory.path()).unwrap();
+        assert_eq!(fs::read(marker).unwrap(), b"owner");
+    }
+}
+
 /// rename 后重读目标文件并比对字节，替代 Unix 的目录 fsync；不一致视为替换失败。
 pub(crate) fn verify_replacement_contents(path: &Path, expected: &[u8]) -> io::Result<()> {
     let actual = fs::read(path)?;

@@ -177,7 +177,8 @@ impl StorageEngine {
             .map_err(|source| {
                 internal_error("fork work plan items could not be encoded", source)
             })?;
-        let paths = self.prepare_new_session_directories(&fork.session)?;
+        let paths =
+            self.prepare_fork_session_directories(&fork.source_session_id, &fork.session)?;
         let prepared = (|| -> StorageResult<_> {
             let source_attachments = self
                 .load_attachments()?
@@ -441,6 +442,7 @@ super::agent_shell::encode_environment(fork.session.agent_shell_environment.as_r
         }
         let stored = StoredSessionFork {
             session: StoredSession {
+                custom_agent: fork.session.custom_agent,
                 agent_shell_kind: fork.session.agent_shell_kind,
                 agent_shell_environment: fork.session.agent_shell_environment.clone(),
                 session_id: fork.session.session_id,

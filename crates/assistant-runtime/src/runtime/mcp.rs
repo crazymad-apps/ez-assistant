@@ -54,6 +54,7 @@ impl AssistantRuntime {
             if visible_tool_count > 0 {
                 servers.push(McpServerOptionSnapshot {
                     server_key: server.server_key,
+                    plugin_name: server.plugin_name,
                     display_name: server.display_name,
                     description: server.description,
                     visible_tool_count,
@@ -88,10 +89,18 @@ impl AssistantRuntime {
     ) -> RuntimeResult<PreviewMcpImportResult> {
         self.ensure_running()?;
         self.mcp_service.ensure_available()?;
-        self.mcp_service
+        let mut result = self
+            .mcp_service
             .config_store
             .preview_import(&request.document)
-            .await
+            .await?;
+        let plugin_keys = self.plugin.declared_mcp_keys().await?;
+        for entry in &mut result.entries {
+            if plugin_keys.contains(&entry.server_key) {
+                entry.conflicts_with_existing = true;
+            }
+        }
+        Ok(result)
     }
 
     pub async fn mutate_mcp_configuration(
@@ -101,6 +110,32 @@ impl AssistantRuntime {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
         self.mcp_service.ensure_available()?;
+        let plugin_keys = self.plugin.declared_mcp_keys().await?;
+        let touches_plugin = match &request.mutation {
+            assistant_protocol::McpConfigurationMutation::Upsert { server } => {
+                plugin_keys.contains(&server.server_key)
+            }
+            assistant_protocol::McpConfigurationMutation::SetEnabled { server_key, .. }
+            | assistant_protocol::McpConfigurationMutation::Remove { server_key } => {
+                plugin_keys.contains(server_key)
+            }
+            assistant_protocol::McpConfigurationMutation::Import { document, .. } => {
+                serde_json::from_str::<serde_json::Value>(document)
+                    .ok()
+                    .and_then(|value| value.get("mcpServers")?.as_object().cloned())
+                    .is_some_and(|servers| {
+                        servers.keys().any(|name| {
+                            assistant_protocol::McpServerKey::new(name.clone())
+                                .is_ok_and(|key| plugin_keys.contains(&key))
+                        })
+                    })
+            }
+        };
+        if touches_plugin {
+            return Err(RuntimeError::InvalidRequest {
+                reason: "plugin MCP server cannot be changed through independent MCP settings",
+            });
+        }
         let runtime = self.mcp_service.registry.projections()?;
         let mut snapshot = self
             .mcp_service
@@ -127,6 +162,7 @@ impl AssistantRuntime {
         self.mcp_service.ensure_available()?;
         refresh_mcp_registry_with(
             self.mcp_service.config_store.as_ref(),
+            self.plugin.as_ref(),
             self.mcp_service.registry.as_ref(),
             self.config_registry.as_ref(),
             self.approval_registry.as_ref(),
@@ -335,8 +371,13 @@ fn cancelled_test(started: Instant) -> TestMcpServerResult {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "shared refresh needs the existing Runtime owners without duplicating state"
+)]
 pub(super) async fn refresh_mcp_registry_with(
     config_store: &crate::mcp::McpConfigStore,
+    plugin: &crate::plugin::PluginManager,
     registry: &crate::mcp::McpRegistry,
     config_registry: &crate::config::ConfigRegistry,
     approval_registry: &crate::permission::ApprovalRegistry,
@@ -344,7 +385,48 @@ pub(super) async fn refresh_mcp_registry_with(
     root_cancellation: &tokio_util::sync::CancellationToken,
     target: Option<&assistant_protocol::McpServerKey>,
 ) -> RuntimeResult<McpRefreshControlResultSnapshot> {
-    let candidate = config_store.registry_candidate().await?;
+    let mut candidate = config_store.registry_candidate().await?;
+    let plugin_candidates = plugin.mcp_candidates().await?;
+    candidate
+        .supplemental_diagnostics
+        .extend(plugin_candidates.diagnostics);
+    let mut by_key = std::collections::BTreeMap::<_, Vec<_>>::new();
+    for server in plugin_candidates.servers {
+        by_key
+            .entry(server.server_key().clone())
+            .or_default()
+            .push(server);
+    }
+    for (key, servers) in by_key {
+        if candidate.configured_keys.contains(&key) {
+            candidate
+                .supplemental_diagnostics
+                .push(McpDiagnosticSnapshot {
+                    server_key: Some(key),
+                    code: McpDiagnosticCode::InvalidConfig,
+                    field_path: None,
+                    message: "plugin MCP server name conflicts with an independent server"
+                        .to_owned(),
+                });
+            continue;
+        }
+        if servers.len() > 1 {
+            candidate.servers.remove(&key);
+            candidate.blocked_keys.insert(key.clone());
+            candidate.diagnostics.push(McpDiagnosticSnapshot {
+                server_key: Some(key.clone()),
+                code: McpDiagnosticCode::InvalidConfig,
+                field_path: None,
+                message: "plugin MCP server name conflicts with another source".to_owned(),
+            });
+            candidate.configured_keys.insert(key);
+            continue;
+        }
+        candidate.configured_keys.insert(key.clone());
+        candidate
+            .servers
+            .insert(key, servers.into_iter().next().expect("nonempty group"));
+    }
     let snapshot = config_registry.snapshot()?;
     let runtime_config = snapshot
         .active()
@@ -366,6 +448,7 @@ pub(super) async fn refresh_mcp_registry_with(
                 | assistant_protocol::McpServerRefreshOutcome::ConnectedWithoutTools
                 | assistant_protocol::McpServerRefreshOutcome::Removed
                 | assistant_protocol::McpServerRefreshOutcome::Disabled
+                | assistant_protocol::McpServerRefreshOutcome::BlockedByConflict
         ) {
             let approvals =
                 match approval_registry.invalidate_pending_mcp_server(&server.server_key) {

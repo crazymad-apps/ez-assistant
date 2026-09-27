@@ -83,6 +83,9 @@ impl VolatileRuntimeStore {
             state
                 .pending_child_tool_exchanges
                 .retain(|_, exchange| exchange.session_id != clear.session_id);
+            state
+                .feedback
+                .retain(|_, request| request.session_id != clear.session_id);
             state.work_plans.remove(&clear.session_id);
             state
                 .work_plan_completion_receipts

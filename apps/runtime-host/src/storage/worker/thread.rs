@@ -27,6 +27,33 @@ pub(super) fn run_worker(
 
     while let Some(command) = receiver.blocking_recv() {
         match command {
+            Command::LoadFeedback { session_id, reply } => {
+                let _ = reply.send(engine.load_feedback(&session_id));
+            }
+            Command::MutateFeedback { mutation, reply } => {
+                let _ = reply.send(engine.mutate_feedback(mutation));
+            }
+            Command::ListCustomAgents { reply } => {
+                let _ = reply.send(engine.list_custom_agents());
+            }
+            Command::MutateCustomAgent { mutation, reply } => {
+                let _ = reply.send(engine.mutate_custom_agent(mutation));
+            }
+            Command::ListPlugins { reply } => {
+                let _ = reply.send(engine.list_plugins());
+            }
+            Command::ChangePluginSettings { change, reply } => {
+                let _ = reply.send(engine.change_plugin_settings(change));
+            }
+            Command::ListPluginOperations { reply } => {
+                let _ = reply.send(engine.list_plugin_operations());
+            }
+            Command::AcceptPluginOperation { operation, reply } => {
+                let _ = reply.send(engine.accept_plugin_operation(operation));
+            }
+            Command::AdvancePluginOperation { update, reply } => {
+                let _ = reply.send(engine.advance_plugin_operation(update));
+            }
             Command::LoadDefaultAgentShell { reply } => {
                 let _ = reply.send(engine.load_default_agent_shell());
             }
@@ -152,17 +179,23 @@ pub(super) fn run_worker(
             Command::RemoveWorkspace { removal, reply } => {
                 let _ = reply.send(engine.remove_workspace(removal));
             }
+            Command::RestoreWorkspace { restoration, reply } => {
+                let _ = reply.send(engine.restore_workspace(restoration));
+            }
             Command::UploadAttachment { upload, reply } => {
                 let _ = reply.send(engine.upload_attachment(upload));
             }
             Command::CreateSession { session, reply } => {
-                let _ = reply.send(engine.create_session(session));
+                let _ = reply.send(engine.create_session(*session));
             }
             Command::MaterializeSession {
                 materialization,
                 reply,
             } => {
                 let _ = reply.send(engine.materialize_session(*materialization));
+            }
+            Command::GetSessionMaterialization { key, reply } => {
+                let _ = reply.send(engine.get_session_materialization(&key));
             }
             Command::ForkSession { fork, reply } => {
                 let _ = reply.send(engine.fork_session(*fork));

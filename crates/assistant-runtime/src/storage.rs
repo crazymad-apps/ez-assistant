@@ -6,10 +6,12 @@
 mod child_task;
 mod contract;
 mod conversation;
+mod custom_agent;
 mod error;
 mod execution;
 mod goal;
 mod model_management;
+mod plugin;
 mod session;
 mod volatile;
 mod work_plan;
@@ -29,6 +31,10 @@ pub use conversation::{
     execution_context_from_product_history, merge_context_replacement_with_product_history,
     normalize_context_usage_adjustments,
 };
+pub use custom_agent::{
+    CustomAgentMutation, StoredCustomAgent, custom_agent_revision, valid_custom_agent_config,
+    valid_name as valid_custom_agent_name,
+};
 pub use error::{StoreError, StoreErrorKind, StoreFuture};
 pub use execution::{
     AcceptedInput, AcceptedStoredSessionCommand, CompletedToolExchange, CrossSessionInputBinding,
@@ -45,6 +51,10 @@ pub use goal::{
     GoalClear, GoalHeldInputResume, GoalHeldInputResumeResult, GoalStop, GoalStopResult,
     StoredGoal, StoredGoalBudget, StoredGoalObjective, StoredGoalObjectivePart,
     StoredGoalPauseReason, StoredGoalState,
+};
+pub use plugin::{
+    PluginOperationKind, PluginOperationPhase, PluginOperationUpdate, PluginRecordChange,
+    PluginSettingsChange, PluginSource, StoredPlugin, StoredPluginOperation,
 };
 pub use session::{
     ApprovalModeChange, ArchiveChange, ForkedAttachmentReference, ForkedSessionCommand,
@@ -64,7 +74,8 @@ pub use work_plan::{
 pub use workspace::{
     NewAttachmentUpload, NewStoredSessionMaterialization, NewWorkspaceRegistration,
     StoredAttachment, StoredAttachmentState, StoredSessionMaterialization, StoredWorkspace,
-    StoredWorkspaceLifecycle, WorkspaceRemoval, WorkspaceUpdate, attachment_stable_view_path,
+    StoredWorkspaceLifecycle, WorkspaceRemoval, WorkspaceRestoration, WorkspaceUpdate,
+    attachment_stable_view_path,
 };
 
 pub use model_management::{

@@ -44,6 +44,7 @@ impl Default for ScanLimits {
 /// 正式 Host 的本地 Skill 包扫描适配器。
 pub(super) struct HostSkillPackageSource {
     roots: Vec<(SkillSource, Option<usize>, PathBuf)>,
+    user_root: PathBuf,
     paths: std::sync::Arc<crate::user_paths::UserPaths>,
 }
 
@@ -54,6 +55,7 @@ impl HostSkillPackageSource {
     ) -> Self {
         Self {
             roots: skill_roots(None, Some(user_root), &[]),
+            user_root: user_root.to_owned(),
             paths,
         }
     }
@@ -63,6 +65,7 @@ impl HostSkillPackageSource {
     ) -> Self {
         Self {
             roots: skill_roots(dirs::home_dir().as_deref(), Some(user_root), &[]),
+            user_root: user_root.to_owned(),
             paths,
         }
     }
@@ -72,9 +75,60 @@ impl SkillPackageSource for HostSkillPackageSource {
         let mut roots = skill_roots(None, None, &request.workspace_directories);
         roots.extend(self.roots.clone());
         let paths = self.paths.clone();
+        let user_root = self.user_root.clone();
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
-                scan_roots(roots, ScanLimits::default(), Some(&paths))
+                let mut result = scan_roots(roots, ScanLimits::default(), Some(&paths));
+                if !result.complete {
+                    return result;
+                }
+                for package in request.plugin_packages {
+                    if !crate::plugins::plugin_name(&package.name)
+                        || package.name.len() > 64
+                        || package.sha256.len() != 64
+                        || !package
+                            .sha256
+                            .bytes()
+                            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+                    {
+                        result.complete = false;
+                        result.diagnostics.push(SkillDiagnostic::error(
+                            SkillDiagnosticCode::RootUnreadable,
+                            "plugin package reference is invalid",
+                        ));
+                        break;
+                    }
+                    let root = user_root
+                        .join("plugins")
+                        .join(&package.name)
+                        .join("packages")
+                        .join(&package.sha256)
+                        .join("skills");
+                    let mut plugin = scan_roots(
+                        vec![(SkillSource::Plugin, None, root)],
+                        ScanLimits::default(),
+                        Some(&paths),
+                    );
+                    for candidate in &mut plugin.candidates {
+                        candidate.plugin_name = Some(package.name.clone());
+                        candidate.plugin_sha256 = Some(package.sha256.clone());
+                    }
+                    result.candidates.append(&mut plugin.candidates);
+                    result.diagnostics.append(&mut plugin.diagnostics);
+                    result.complete &= plugin.complete;
+                    if result.candidates.len() > MAX_CANDIDATES {
+                        result.complete = false;
+                        result.diagnostics.push(SkillDiagnostic::error(
+                            SkillDiagnosticCode::CandidateLimitExceeded,
+                            "combined skill candidate limit was exceeded",
+                        ));
+                    }
+                    if !result.complete {
+                        break;
+                    }
+                }
+                sort_diagnostics(&mut result.diagnostics);
+                result
             })
             .await
             .map_err(|source| {
@@ -440,6 +494,8 @@ fn scan_candidate(
         name: parsed.name,
         description: parsed.description,
         source,
+        plugin_name: None,
+        plugin_sha256: None,
         workspace_root_order,
         source_path,
         definition_digest: format!("sha256-v1:{:x}", hasher.finalize()),
@@ -1066,6 +1122,47 @@ mod tests {
                 .unwrap()
                 .source,
             SkillSource::LegacyUserEzAssistant
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_plugin_skill_scan_uses_only_explicit_package_reference() {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(".runtime-test");
+        fs::create_dir_all(&base).unwrap();
+        let home = tempfile::Builder::new()
+            .prefix("c03-m2-skill-")
+            .tempdir_in(base)
+            .unwrap();
+        let sha = "a".repeat(64);
+        let root = home
+            .path()
+            .join("plugins/example-tools/packages")
+            .join(&sha);
+        write_skill(&root.join("skills"), "review", "review", "");
+        let source = HostSkillPackageSource::user(
+            home.path(),
+            std::sync::Arc::new(crate::user_paths::UserPaths::new(home.path(), Vec::new())),
+        );
+        let empty = source.scan(SkillScanRequest::default()).await.unwrap();
+        assert!(empty.candidates.is_empty());
+        let scanned = source
+            .scan(SkillScanRequest {
+                workspace_directories: Vec::new(),
+                plugin_packages: vec![assistant_runtime::PluginSkillPackage {
+                    name: "example-tools".into(),
+                    sha256: sha,
+                }],
+            })
+            .await
+            .unwrap();
+        assert!(scanned.complete, "{:?}", scanned.diagnostics);
+        assert_eq!(scanned.candidates.len(), 1);
+        assert_eq!(scanned.candidates[0].source, SkillSource::Plugin);
+        assert_eq!(
+            scanned.candidates[0].plugin_name.as_deref(),
+            Some("example-tools")
         );
     }
 }

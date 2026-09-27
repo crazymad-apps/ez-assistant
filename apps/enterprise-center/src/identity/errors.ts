@@ -2,6 +2,7 @@ import { CenterError } from '../errors.js';
 
 const messages = {
   CALL_NOT_FOUND: '调用记录不存在。',
+  PACKAGE_NOT_FOUND: '插件版本不存在。',
   SNAPSHOT_ROOT_UNAVAILABLE: '快照目录未配置或不可用。',
   MODEL_NOT_FOUND: '模型或服务商不存在，请刷新目录或保存固定配置。',
   MODEL_CONFIGURATION_CHANGED: '服务商连接已变化，请重新刷新。',

@@ -385,6 +385,7 @@ impl AssistantRuntime {
                             approvals,
                             attachments,
                             file_references,
+                            artifacts: crate::artifact::project_artifacts(&conversation_snapshot),
                             runs,
                             usage,
                             child_tasks: child_task_items,
@@ -1517,6 +1518,7 @@ fn protocol_effort_key(value: crate::ReasoningEffortKey) -> ReasoningEffortKey {
 pub(super) fn project_skill_management(
     discovery: &crate::SkillDiscovery,
     states: &[crate::SkillNameState],
+    include_plugins: bool,
 ) -> SkillManagementSnapshot {
     let enabled_by_name = states
         .iter()
@@ -1535,12 +1537,22 @@ pub(super) fn project_skill_management(
         .collect::<std::collections::BTreeSet<_>>();
     let mut by_name = std::collections::BTreeMap::new();
     for candidate in &discovery.candidates {
+        if candidate.source == crate::SkillSource::Plugin {
+            continue;
+        }
         by_name.entry(candidate.name.clone()).or_insert(candidate);
+    }
+    if include_plugins {
+        for candidate in &discovery.candidates {
+            by_name.entry(candidate.name.clone()).or_insert(candidate);
+        }
     }
     let skills = by_name
         .into_iter()
         .map(|(name, candidate)| {
-            let enabled = enabled_by_name.get(&name).copied().unwrap_or(true);
+            // 插件整体启用由扫描入口决定，不继承同名独立技能的历史开关。
+            let enabled = candidate.source == crate::SkillSource::Plugin
+                || enabled_by_name.get(&name).copied().unwrap_or(true);
             let health = if !enabled {
                 SkillHealthSnapshot::Disabled
             } else if discovery.status == crate::SkillDiscoveryStatus::Unavailable {
@@ -1554,6 +1566,7 @@ pub(super) fn project_skill_management(
             };
             SkillSummarySnapshot {
                 name: name.as_str().to_owned(),
+                plugin_name: candidate.plugin_name.clone(),
                 description: candidate.description.clone(),
                 source: project_skill_source(candidate.source),
                 model_invocable: candidate.model_invocable,
@@ -1569,6 +1582,9 @@ pub(super) fn project_skill_management(
         diagnostics: discovery
             .diagnostics
             .iter()
+            .filter(|diagnostic| {
+                include_plugins || diagnostic.source != Some(crate::SkillSource::Plugin)
+            })
             .map(project_skill_diagnostic)
             .collect(),
     }
@@ -1622,6 +1638,7 @@ fn project_skill_source(source: crate::SkillSource) -> SkillSourceSnapshot {
         crate::SkillSource::LegacyUserEzAssistant => SkillSourceSnapshot::LegacyUserEzAssistant,
         crate::SkillSource::HostSupplement => SkillSourceSnapshot::HostSupplement,
         crate::SkillSource::UserAgents => SkillSourceSnapshot::UserAgents,
+        crate::SkillSource::Plugin => SkillSourceSnapshot::Plugin,
     }
 }
 
@@ -1659,6 +1676,7 @@ fn skill_diagnostic_code(code: crate::SkillDiagnosticCode) -> &'static str {
         crate::SkillDiagnosticCode::SameSourceConflict => "same_source_conflict",
         crate::SkillDiagnosticCode::DisabledByName => "disabled_by_name",
         crate::SkillDiagnosticCode::Shadowed => "shadowed",
+        crate::SkillDiagnosticCode::PluginConflict => "plugin_conflict",
         crate::SkillDiagnosticCode::NotInvocable => "not_invocable",
         crate::SkillDiagnosticCode::CatalogLimitExceeded => "catalog_limit_exceeded",
         crate::SkillDiagnosticCode::LegacyCatalogUnavailable => "legacy_catalog_unavailable",

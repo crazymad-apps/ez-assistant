@@ -42,6 +42,12 @@ export const actionLabels: Record<string, string> = {
   model_configuration_reset: '重置模型固定配置',
   model_default_changed: '更改企业默认模型',
   model_templates_reloaded: '重新加载模型模板',
+  agent_created: '创建智能体',
+  agent_updated: '修改智能体',
+  agent_deleted: '删除智能体',
+  plugin_updated: '修改插件说明',
+  plugin_publication_changed: '更改插件上架状态',
+  plugin_package_uploaded: '上传插件包',
 };
 
 export function userView(user: IdentityUser | UserRecord): UserView {
@@ -80,6 +86,21 @@ export function auditView(record: AuditRecord): AuditView {
         ? `默认模型：${details.default_model.model_id}（${details.default_model.provider_instance_id}）`
         : '已清除默认模型',
     );
+  // 只拼接中心审计白名单中的 C01 摘要，不展示完整提示词或任意 JSON 字段。
+  if (details.name) changes.push(`${record.action.startsWith('agent_') ? '智能体' : '插件'}：${details.name}`);
+  if (details.version) changes.push(`版本：${details.version}`);
+  if (details.platforms?.length)
+    changes.push(`平台：${details.platforms.map((item) => `${item.os}-${item.arch}`).join('、')}`);
+  if (details.result)
+    changes.push(
+      `上传结果：${{ created: '新建版本', replaced: '替换当前包', unchanged: '内容未变化' }[details.result]}`,
+    );
+  if (details.publication)
+    changes.push(`上架状态：${{ unpublished: '未上架', listed: '在架', deprecated: '已下架' }[details.publication]}`);
+  if (details.sha256) changes.push(`SHA-256：${details.sha256}`);
+  if (details.previous_sha256) changes.push(`原 SHA-256：${details.previous_sha256}`);
+  if (details.skill_count !== undefined || details.mcp_count !== undefined)
+    changes.push(`默认能力：Skill ${details.skill_count ?? 0} · MCP ${details.mcp_count ?? 0}`);
   return {
     id: record.id,
     time: new Date(record.occurred_at).toLocaleString(),

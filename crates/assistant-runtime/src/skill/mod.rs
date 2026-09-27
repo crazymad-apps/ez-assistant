@@ -16,7 +16,7 @@ pub(crate) use catalog::ModelSkillResolveError;
 pub use catalog::{SkillActivationResolveError, SkillCatalog, SkillCatalogStatus, SkillDefinition};
 pub(crate) use discovery::EmptySkillPackageSource;
 pub use discovery::{
-    MAX_CATALOG_SKILLS, SkillCandidate, SkillDiagnostic, SkillDiagnosticCode,
+    MAX_CATALOG_SKILLS, PluginSkillPackage, SkillCandidate, SkillDiagnostic, SkillDiagnosticCode,
     SkillDiagnosticSeverity, SkillDiscovery, SkillDiscoveryStatus, SkillNameState,
     SkillNameStateChange, SkillPackageSource, SkillPackageSourceError, SkillScanFuture,
     SkillScanRequest, SkillScanResult, compile_skill_discovery, explicit_skill_states,

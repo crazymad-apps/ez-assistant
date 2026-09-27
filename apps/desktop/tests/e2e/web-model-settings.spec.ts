@@ -54,7 +54,8 @@ test("model settings apply provider rules, field templates and wire effort mappi
     const { token } = await issued.json() as { token: string };
     await page.emulateMedia({ reducedMotion: "reduce" });
     await page.goto(`${fixture.base_url}/#token=${encodeURIComponent(token)}`);
-    await page.getByRole("button", { name: "设置", exact: true }).click();
+    await page.getByRole("button", { name: "账号与 Runtime" }).click();
+    await page.getByRole("menuitem", { name: "设置" }).click();
     const dialog = page.getByRole("dialog", { name: "设置", exact: true });
     await dialog.getByRole("button", { name: "模型", exact: true }).click();
     async function select(label: string | RegExp, option: string) {
@@ -282,7 +283,7 @@ test("model settings apply provider rules, field templates and wire effort mappi
       await expect(dialog.getByRole("button", { name: purpose, exact: true })).toContainText(model);
     }
     await dialog.getByRole("button", { name: "关闭设置", exact: true }).click();
-    await page.getByRole("region", { name: "主控会话", exact: true }).getByRole("button").click();
+    await page.getByRole("button", { name: "助理会话" }).click();
     await page.getByRole("button", { name: "模型设置", exact: true }).click();
     const default_option = page.getByRole("menuitemradio", { name: "默认模型", exact: true });
     await expect(default_option).toBeFocused();
@@ -338,7 +339,8 @@ test("model settings apply provider rules, field templates and wire effort mappi
     await page.keyboard.press("Escape");
     expect(direct_commands).not.toContain("get_model_configuration");
     expect(direct_commands).not.toContain("save_model_fixed_config");
-    await page.getByRole("button", { name: "设置", exact: true }).click();
+    await page.getByRole("button", { name: "账号与 Runtime" }).click();
+    await page.getByRole("menuitem", { name: "设置" }).click();
     await dialog.getByRole("button", { name: "模型", exact: true }).click();
     const clear_default = dialog.getByRole("button", { name: "清除默认模型", exact: true });
     await expect(clear_default).toHaveText("");

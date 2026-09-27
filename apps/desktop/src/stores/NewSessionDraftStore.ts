@@ -2,6 +2,7 @@ import { action, makeObservable, observable } from "mobx";
 import type {
   AgentVariant,
   ApprovalMode,
+  CustomAgentSelection,
   AttachmentId,
   ModelSelection,
   McpSelectionTagSnapshot,
@@ -38,7 +39,9 @@ export type NewSessionDraft = Readonly<{
   approval_mode: ApprovalMode;
   goal_armed: boolean;
   selected_skill_name: string | null;
+  selected_agent: CustomAgentSelection | null;
   selected_mcp: McpSelectionTagSnapshot | null;
+  selected_mcp_availability: "unverified" | "available" | "unavailable";
   skill_options: readonly SkillSummarySnapshot[];
   skill_status: "idle" | "loading" | "ready" | "failed";
   materialization_attempt: SessionMaterializationManifest | null;
@@ -77,12 +80,15 @@ export class NewSessionDraftStore {
       updateApprovalMode: action,
       updateGoalArmed: action,
       updateSelectedSkill: action,
+      updateSelectedAgent: action,
       updateSelectedMcp: action,
+      setSelectedMcpAvailability: action,
       beginSkillLoad: action,
       applySkillOptions: action,
       failSkillLoad: action,
       beginMaterialization: action,
       clearMaterializationAttempt: action,
+      move: action,
       setAttachmentTransferState: action,
       remove: action,
       clear: action,
@@ -120,7 +126,21 @@ export class NewSessionDraftStore {
 
   hasDraft(key: NewSessionDraftKey): boolean {
     const draft = this.drafts.get(key);
-    return draft ? isDraftMeaningful(draft) : false;
+    return draft ? isDraftMeaningful(draft) || draft.materialization_attempt !== null : false;
+  }
+
+  move(source: NewSessionDraftKey, target: NewSessionDraftKey): boolean {
+    if (source === target) return true;
+    const draft = this.drafts.get(source);
+    const destination = this.drafts.get(target);
+    if (!draft || draft.materialization_attempt || destination?.materialization_attempt
+      || (destination && isDraftCustomized(destination, this.default_approval_mode, this.default_model_selection))) return false;
+    this.drafts.delete(source);
+    this.drafts.set(target, {
+      ...draft, key: target, workspace_id: workspaceForDraftKey(target),
+      skill_options: [], skill_status: "idle", selected_mcp_availability: "unverified",
+    });
+    return true;
   }
 
   updateText(key: NewSessionDraftKey, text: string): void {
@@ -156,8 +176,18 @@ export class NewSessionDraftStore {
     this.#patch(key, { selected_skill_name });
   }
 
+  updateSelectedAgent(key: NewSessionDraftKey, selected_agent: CustomAgentSelection | null): void {
+    this.#patch(key, { selected_agent });
+  }
+
   updateSelectedMcp(key: NewSessionDraftKey, selected_mcp: McpSelectionTagSnapshot | null): void {
-    this.#patch(key, { selected_mcp });
+    this.#patch(key, { selected_mcp, selected_mcp_availability: "available" });
+  }
+
+  setSelectedMcpAvailability(key: NewSessionDraftKey, server_key: string, available: boolean): void {
+    const draft = this.drafts.get(key);
+    if (!draft || draft.materialization_attempt || draft.selected_mcp?.server_key !== server_key) return;
+    this.drafts.set(key, { ...draft, selected_mcp_availability: available ? "available" : "unavailable" });
   }
 
   beginSkillLoad(key: NewSessionDraftKey): boolean {
@@ -170,10 +200,7 @@ export class NewSessionDraftStore {
   applySkillOptions(key: NewSessionDraftKey, skill_options: readonly SkillSummarySnapshot[]): void {
     const draft = this.drafts.get(key);
     if (!draft) return;
-    const selected_skill_name = skill_options.some((skill) => skill.name === draft.selected_skill_name)
-      ? draft.selected_skill_name
-      : null;
-    this.drafts.set(key, { ...draft, skill_options, skill_status: "ready", selected_skill_name });
+    this.drafts.set(key, { ...draft, skill_options, skill_status: "ready" });
   }
 
   failSkillLoad(key: NewSessionDraftKey): void {
@@ -226,8 +253,8 @@ export class NewSessionDraftStore {
 
   #patch(key: NewSessionDraftKey, patch: Partial<NewSessionDraft>): void {
     const draft = this.drafts.get(key);
-    if (!draft) return;
-    this.drafts.set(key, { ...draft, ...patch, materialization_attempt: null });
+    if (!draft || draft.materialization_attempt) return;
+    this.drafts.set(key, { ...draft, ...patch });
   }
 }
 
@@ -238,6 +265,7 @@ export function isDraftMeaningful(draft: NewSessionDraft): boolean {
     || draft.quotes.length
     || draft.goal_armed
     || draft.selected_skill_name
+    || draft.selected_agent
     || draft.selected_mcp,
   );
 }
@@ -248,6 +276,7 @@ export function isDraftCustomized(
   default_model_selection: ModelSelection | null = null,
 ): boolean {
   return isDraftMeaningful(draft)
+    || draft.materialization_attempt !== null
     || !sameModelSelection(draft.model_selection, default_model_selection)
     || draft.reasoning_effort !== null
     || draft.variant !== "build"
@@ -271,7 +300,9 @@ function createDraft(
     approval_mode,
     goal_armed: false,
     selected_skill_name: null,
+    selected_agent: null,
     selected_mcp: null,
+    selected_mcp_availability: "available",
     skill_options: [],
     skill_status: "idle",
     materialization_attempt: null,

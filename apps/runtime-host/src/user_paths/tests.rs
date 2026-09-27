@@ -36,12 +36,17 @@ fn own_data_and_shared_skills_have_distinct_access_from_host_private_files() {
         }
     }
     assert!(p.resolve(&p.host_root, true).is_err());
+    let user_root = agent_tools::AbsolutePath::new(p.user_root.clone()).unwrap();
+    assert!(p.permission_document().unwrap().rules.iter().any(|rule| {
+        matches!(&rule.matcher, assistant_runtime::PermissionMatcher::File(matcher)
+            if assistant_runtime::file_matcher_matches(matcher, agent_tools::FileOperation::Delete, &user_root))
+    }));
     assert!(p.resolve(dir.path(), true).is_err());
     assert!(p.resolve(&dir.path().join("public/file"), true).is_ok());
     assert!(p.resolve(&dir.path().join("tls.key"), false).is_err());
     let root = std::fs::canonicalize(dir.path()).unwrap();
     let excludes = p.search_exclusions(&root).unwrap();
-    assert_eq!(excludes.len(), 2);
+    assert_eq!(excludes.len(), 3);
 }
 
 #[cfg(unix)]
@@ -83,4 +88,35 @@ fn pending_tls_key_changes_apply_to_an_existing_user_policy() {
         .push(pending.clone());
     assert!(policy.resolve(&pending, false).is_err());
     assert!(policy.resolve(&dir.path().join("tls.key"), false).is_err());
+}
+
+#[test]
+fn plugin_packages_are_read_only_and_private_files_are_hidden() {
+    let (_dir, paths) = fixture();
+    let plugin = paths.user_root.join("plugins/example");
+    for child in ["packages/abc", "config", "data"] {
+        std::fs::create_dir_all(plugin.join(child)).unwrap();
+    }
+    let package_file = plugin.join("packages/abc/SKILL.md");
+    let config_file = plugin.join("config/secret.yaml");
+    assert!(paths.resolve(&package_file, false).is_ok());
+    assert!(paths.resolve(&package_file, true).is_err());
+    for path in [
+        paths
+            .user_root
+            .join("plugins/.staging/operation/archive.zip"),
+        paths.user_root.join("plugins/.trash/operation/old"),
+        config_file,
+        plugin.join("data/cache.db"),
+        paths.user_root.join("plugins/unknown/config/file"),
+    ] {
+        assert!(paths.resolve(&path, false).is_err(), "{path:?}");
+        assert!(paths.resolve(&path, true).is_err(), "{path:?}");
+    }
+    let exclusions = paths
+        .search_exclusions(&std::fs::canonicalize(&paths.user_root).unwrap())
+        .unwrap();
+    assert!(exclusions.contains(
+        &assistant_runtime::resolve_permission_path(&paths.user_root.join("plugins")).unwrap()
+    ));
 }

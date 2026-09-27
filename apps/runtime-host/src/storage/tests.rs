@@ -1,4 +1,3 @@
-#[cfg(unix)]
 use assistant_runtime::{StoredWorkspaceLifecycle, WorkspaceRemoval};
 use std::{
     collections::BTreeMap,
@@ -62,6 +61,100 @@ use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
+#[tokio::test]
+async fn personal_agent_cas_survives_restart_and_delete_has_verified_backup() {
+    use assistant_protocol::{AgentCapabilityReference, CustomAgentConfig};
+    use assistant_runtime::{CustomAgentMutation, StoredCustomAgent, custom_agent_revision};
+
+    let base = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(".runtime-test");
+    fs::create_dir_all(&base).unwrap();
+    let home = tempfile::Builder::new()
+        .prefix("c03-m3-agent-store-")
+        .tempdir_in(&base)
+        .unwrap();
+    let store = LocalRuntimeStore::open(home.path(), 4).await.unwrap();
+    let first = StoredCustomAgent {
+        config: CustomAgentConfig {
+            name: "库房 CAD 绘图助手".into(),
+            description: "仓储平面图".into(),
+            prompt: "先读取规则和原图。".into(),
+            skills: vec![AgentCapabilityReference {
+                name: "compact-shelving-cad".into(),
+                plugin: Some("warehouse-cad-guidance".into()),
+            }],
+            mcp: vec![AgentCapabilityReference {
+                name: "autocad-ai".into(),
+                plugin: None,
+            }],
+        },
+        created_at_ms: 1,
+        updated_at_ms: 1,
+    };
+    assert_eq!(
+        store
+            .mutate_custom_agent(CustomAgentMutation::Save {
+                expected_revision: None,
+                next: first.clone(),
+            })
+            .await
+            .unwrap(),
+        Some(first.clone())
+    );
+    let revision = custom_agent_revision(&first.config);
+    let stale = store
+        .mutate_custom_agent(CustomAgentMutation::Save {
+            expected_revision: None,
+            next: first.clone(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(stale.kind(), StoreErrorKind::Conflict);
+    store.shutdown().await.unwrap();
+
+    let database = home.path().join(DATA_DIRECTORY).join(DATABASE_FILE);
+    let backup = home.path().join("before-agent-delete.sqlite3");
+    fs::copy(&database, &backup).unwrap();
+    let backup_db = Connection::open(&backup).unwrap();
+    let backup_count: i64 = backup_db
+        .query_row("SELECT COUNT(*) FROM custom_agents", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(backup_count, 1);
+    drop(backup_db);
+
+    let reopened = LocalRuntimeStore::open(home.path(), 4).await.unwrap();
+    assert_eq!(
+        reopened.list_custom_agents().await.unwrap(),
+        vec![first.clone()]
+    );
+    let stale_delete = reopened
+        .mutate_custom_agent(CustomAgentMutation::Delete {
+            name: first.config.name.clone(),
+            expected_revision: "stale".into(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(stale_delete.kind(), StoreErrorKind::Conflict);
+    assert!(
+        reopened
+            .mutate_custom_agent(CustomAgentMutation::Delete {
+                name: first.config.name.clone(),
+                expected_revision: revision,
+            })
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(reopened.list_custom_agents().await.unwrap().is_empty());
+    reopened.shutdown().await.unwrap();
+    let final_db = Connection::open(database).unwrap();
+    let final_count: i64 = final_db
+        .query_row("SELECT COUNT(*) FROM custom_agents", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(final_count, 0);
+}
+
 fn desktop_channel_source() -> assistant_runtime::InputChannelSource {
     assistant_runtime::InputChannelSource::Desktop(DesktopInputSource {
         modality: assistant_runtime::InputModality::Text,
@@ -103,6 +196,7 @@ fn new_session(value: &str, sessions_directory: &Path) -> NewStoredSession {
     let session_directory = sessions_directory.join(value);
     let private_directory = session_directory.join("private");
     NewStoredSession {
+        custom_agent: None,
         agent_shell_kind: None,
         agent_shell_environment: None,
         session_id: session_id(value),
@@ -134,6 +228,46 @@ fn new_session(value: &str, sessions_directory: &Path) -> NewStoredSession {
         role: assistant_runtime::SessionRole::Standard,
         created_at_ms: 1_000,
     }
+}
+
+#[tokio::test]
+async fn frozen_agent_snapshot_is_saved_in_session_and_restored() {
+    use assistant_protocol::{CustomAgentConfig, CustomAgentSnapshot, CustomAgentSource};
+    let base = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(".runtime-test");
+    fs::create_dir_all(&base).unwrap();
+    let home = tempfile::Builder::new()
+        .prefix("c03-m3-agent-session-")
+        .tempdir_in(&base)
+        .unwrap();
+    let mut engine = open_engine(&home);
+    let mut created = new_session("frozen-agent-session", &engine.sessions_directory);
+    let agent = CustomAgentSnapshot {
+        source: CustomAgentSource::Personal,
+        config: CustomAgentConfig {
+            name: "审阅助手".into(),
+            description: "审阅".into(),
+            prompt: "保留原始规则".into(),
+            skills: Vec::new(),
+            mcp: Vec::new(),
+        },
+        revision: "sha256:fixture".into(),
+        created_at_ms: Some(1),
+        updated_at_ms: Some(1),
+    };
+    created.custom_agent = Some(agent.clone());
+    created.system_prompt = SystemPromptSnapshot::new(vec![agent.config.prompt.clone()]);
+    assert_eq!(
+        engine.create_session(created).unwrap().custom_agent,
+        Some(agent.clone())
+    );
+    drop(engine);
+    let reopened = open_engine(&home);
+    let restored = reopened.load_sessions().unwrap();
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].custom_agent, Some(agent.clone()));
+    assert_eq!(restored[0].system_prompt.parts(), &[agent.config.prompt]);
 }
 
 #[test]
@@ -475,6 +609,7 @@ fn controller_delivery_binding_persists_and_user_takeover_is_atomic() {
     let controller_message = raw_user_message("m-delivery-controller", "controller request");
     engine
         .accept_input(NewStoredInput {
+            feedback_answer: None,
             agent_shell_target: None,
             input_id: controller_input_id.clone(),
             run_id: controller_run_id.clone(),
@@ -538,6 +673,7 @@ fn controller_delivery_binding_persists_and_user_takeover_is_atomic() {
     };
     let accepted = engine
         .accept_input(NewStoredInput {
+            feedback_answer: None,
             agent_shell_target: None,
             input_id: InputId::new("i-delivery-target").expect("input id"),
             run_id: run_id("r-delivery-target"),
@@ -570,6 +706,7 @@ fn controller_delivery_binding_persists_and_user_takeover_is_atomic() {
 
     engine
         .accept_input(NewStoredInput {
+            feedback_answer: None,
             agent_shell_target: None,
             input_id: InputId::new("i-user-takeover").expect("input id"),
             run_id: run_id("r-user-takeover"),
@@ -638,6 +775,7 @@ fn controller_delivery_can_atomically_start_a_goal_with_its_reply_route() {
     let controller_message = raw_user_message("m-goal-delivery-controller", "delegate task");
     engine
         .accept_input(NewStoredInput {
+            feedback_answer: None,
             agent_shell_target: None,
             input_id: controller_input_id.clone(),
             run_id: controller_run_id.clone(),
@@ -750,6 +888,7 @@ fn controller_delivery_can_atomically_start_a_goal_with_its_reply_route() {
     };
     let accepted = engine
         .accept_input(NewStoredInput {
+            feedback_answer: None,
             agent_shell_target: None,
             input_id: InputId::new("i-goal-delivery-target").expect("input id"),
             run_id: run_id("r-goal-delivery-target"),
@@ -820,6 +959,7 @@ fn proxy_report_is_accepted_atomically_with_source_run_settlement() {
     let source_message = raw_user_message("m-report-source", "managed work");
     engine
         .accept_input(NewStoredInput {
+            feedback_answer: None,
             agent_shell_target: None,
             input_id: source_input_id.clone(),
             run_id: source_run_id.clone(),
@@ -873,6 +1013,7 @@ fn proxy_report_is_accepted_atomically_with_source_run_settlement() {
         .expect("report source"),
     ));
     let report_input = NewStoredInput {
+        feedback_answer: None,
         agent_shell_target: None,
         input_id: InputId::new("i-proxy-report").expect("input id"),
         run_id: run_id("r-proxy-report"),
@@ -1011,6 +1152,8 @@ fn session_persists_only_frozen_prompt_not_skill_catalog() {
             name: SkillName::parse("review").expect("name"),
             description: "Review changes".to_owned(),
             source: SkillSource::WorkspaceAgents,
+            plugin_name: None,
+            plugin_sha256: None,
             workspace_root_order: Some(0),
             source_path: shared_skill.to_string_lossy().into_owned(),
             definition_digest: format!("sha256-v1:{}", "1".repeat(64)),
@@ -1100,6 +1243,8 @@ fn user_skill_activation_is_atomic_recoverable_and_forked_as_ledger_fact() {
             name: SkillName::parse("review").expect("name"),
             description: "Review changes".to_owned(),
             source: SkillSource::WorkspaceAgents,
+            plugin_name: None,
+            plugin_sha256: None,
             workspace_root_order: Some(0),
             source_path: "/fixture/review".to_owned(),
             definition_digest: format!("sha256-v1:{}", "2".repeat(64)),
@@ -1142,6 +1287,7 @@ fn user_skill_activation_is_atomic_recoverable_and_forked_as_ledger_fact() {
     };
     engine
         .accept_input(NewStoredInput {
+            feedback_answer: None,
             agent_shell_target: None,
             input_id: input_id.clone(),
             run_id: run_id.clone(),
@@ -1862,20 +2008,66 @@ fn copied_runtime_home_rebases_workspace_private_resources_only() {
         .register_workspace(NewWorkspaceRegistration {
             workspace_id: workspace_id.clone(),
             label: "runtime-migrated".to_owned(),
-            requested_primary_directory: user_workspace.path().to_string_lossy().into_owned(),
+            requested_primary_directory: Some(user_workspace.path().to_string_lossy().into_owned()),
             requested_additional_directories: Vec::new(),
             changed_at_ms: 1_000,
         })
         .expect("register source workspace");
-    let expected_user_workspace = workspace.user_directory.clone();
+    let expected_user_workspace = workspace.effective_working_directory().to_owned();
     let session_id = session_id("s-workspace-migrated");
     let mut session = new_session(session_id.as_str(), &source.sessions_directory);
     session.environment.workspace_id = Some(workspace_id.clone());
-    session.environment.working_directory = workspace.user_directory.clone();
+    session.environment.working_directory = workspace.effective_working_directory().to_owned();
     session.environment.workspace_private_directory = Some(workspace.agent_directory);
     source
         .create_session(session)
         .expect("create workspace-bound session");
+    source
+        .update_workspace(WorkspaceUpdate {
+            workspace_id: workspace_id.clone(),
+            label: "runtime-migrated-now-private".to_owned(),
+            requested_primary_directory: None,
+            requested_additional_directories: Vec::new(),
+            changed_at_ms: 1_050,
+        })
+        .expect("external session keeps its frozen cwd after workspace changes to private");
+
+    let private_workspace_id =
+        WorkspaceId::new("w-runtime-private-migrated").expect("private workspace id");
+    let private_workspace = source
+        .register_workspace(NewWorkspaceRegistration {
+            workspace_id: private_workspace_id.clone(),
+            label: "runtime-private-migrated".to_owned(),
+            requested_primary_directory: None,
+            requested_additional_directories: Vec::new(),
+            changed_at_ms: 1_100,
+        })
+        .expect("register source private workspace");
+    let old_private_agent_directory = private_workspace.agent_directory.clone();
+    let private_session_id =
+        SessionId::new("s-workspace-private-migrated").expect("private session id");
+    let mut private_session = new_session(private_session_id.as_str(), &source.sessions_directory);
+    private_session.environment.workspace_id = Some(private_workspace_id.clone());
+    private_session.environment.working_directory = private_workspace.agent_directory.clone();
+    private_session.environment.workspace_private_directory =
+        Some(private_workspace.agent_directory);
+    source
+        .create_session(private_session)
+        .expect("create private workspace-bound session");
+    fs::write(
+        Path::new(&old_private_agent_directory).join("private-workspace-marker.txt"),
+        "private data survives Runtime Home move",
+    )
+    .expect("write private workspace marker");
+    source
+        .update_workspace(WorkspaceUpdate {
+            workspace_id: private_workspace_id.clone(),
+            label: "runtime-private-now-external".to_owned(),
+            requested_primary_directory: Some(expected_user_workspace.clone()),
+            requested_additional_directories: Vec::new(),
+            changed_at_ms: 1_150,
+        })
+        .expect("private session keeps its frozen cwd after workspace changes to external");
     drop(source);
 
     let target_root = TempDir::new().expect("target Runtime Home");
@@ -1899,7 +2091,7 @@ fn copied_runtime_home_rebases_workspace_private_resources_only() {
         migrated_workspace.agent_directory,
         expected_agent.to_string_lossy()
     );
-    assert_eq!(migrated_workspace.user_directory, expected_user_workspace);
+    assert_eq!(migrated_workspace.user_directory, None);
     assert!(
         !expected_agent.join("permissions.json").exists(),
         "moving Runtime Home does not materialize implicit Workspace defaults"
@@ -1927,6 +2119,51 @@ fn copied_runtime_home_rebases_workspace_private_resources_only() {
             .session_private_directory
             .starts_with(target_root.path().to_string_lossy().as_ref())
     );
+
+    let migrated_private_workspace = recovered
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.workspace_id == private_workspace_id)
+        .expect("migrated private workspace");
+    let expected_private_agent = target_root
+        .path()
+        .join("data")
+        .join("workspaces")
+        .join(private_workspace_id.as_str())
+        .join("agent");
+    assert_eq!(
+        migrated_private_workspace.user_directory.as_deref(),
+        Some(expected_user_workspace.as_str())
+    );
+    assert_eq!(
+        migrated_private_workspace.agent_directory,
+        expected_private_agent.to_string_lossy()
+    );
+    let migrated_private_session = recovered
+        .sessions
+        .iter()
+        .find(|session| session.session_id == private_session_id)
+        .expect("migrated private workspace session");
+    assert_ne!(
+        migrated_private_session.environment.working_directory,
+        old_private_agent_directory
+    );
+    assert_eq!(
+        migrated_private_session.environment.working_directory,
+        expected_private_agent.to_string_lossy()
+    );
+    assert_eq!(
+        migrated_private_session
+            .environment
+            .workspace_private_directory
+            .as_deref(),
+        expected_private_agent.to_str()
+    );
+    assert_eq!(
+        fs::read_to_string(expected_private_agent.join("private-workspace-marker.txt"))
+            .expect("migrated private workspace marker"),
+        "private data survives Runtime Home move"
+    );
 }
 
 fn copy_runtime_database_and_sessions(source: &Path, target: &Path) {
@@ -1941,6 +2178,10 @@ fn copy_runtime_database_and_sessions(source: &Path, target: &Path) {
         &source.join(DATA_DIRECTORY).join(SESSIONS_DIRECTORY),
         &target_data.join(SESSIONS_DIRECTORY),
     );
+    let source_workspaces = source.join(DATA_DIRECTORY).join("workspaces");
+    if source_workspaces.is_dir() {
+        copy_directory(&source_workspaces, &target_data.join("workspaces"));
+    }
 }
 
 fn copy_directory(source: &Path, target: &Path) {
@@ -1967,6 +2208,7 @@ fn session_navigation_metadata_and_feedback_survive_reopen() {
         .expect("create session");
     engine
         .accept_input(NewStoredInput {
+            feedback_answer: None,
             agent_shell_target: None,
             input_id: InputId::new("input-navigation-persistence").expect("input id"),
             run_id: run_id("run-navigation-persistence"),
@@ -2474,6 +2716,7 @@ fn commit_completed_turn(
     let message = raw_user_message(&format!("user-{suffix}"), suffix);
     engine
         .accept_input(NewStoredInput {
+            feedback_answer: None,
             agent_shell_target: None,
             agent_variant: assistant_protocol::AgentVariant::Build,
             origin: assistant_runtime::InputOrigin::User,
@@ -2822,6 +3065,7 @@ fn queued_shell_intent_survives_reopen_without_changing_session_binding() {
     engine.create_session(session).unwrap();
     let accepted = engine
         .accept_input(NewStoredInput {
+            feedback_answer: None,
             agent_shell_target: Some(assistant_protocol::ShellKind::Powershell7),
             agent_variant: assistant_protocol::AgentVariant::Build,
             origin: assistant_runtime::InputOrigin::User,
@@ -3105,6 +3349,7 @@ fn paired_device_and_controller_hosting_survive_restart_and_revoke_atomically() 
     );
     engine
         .accept_input(NewStoredInput {
+            feedback_answer: None,
             agent_shell_target: None,
             input_id: InputId::new("input-device-durable").expect("input id"),
             run_id: run_id("run-device-durable"),
@@ -3222,6 +3467,7 @@ fn paired_device_input_can_target_an_active_standard_session() {
 
     let accepted = engine
         .accept_input(NewStoredInput {
+            feedback_answer: None,
             agent_shell_target: None,
             input_id: InputId::new("input-device-standard").expect("input id"),
             run_id: run_id("run-device-standard"),
@@ -3548,6 +3794,7 @@ fn first_goal_input_goal_and_run_are_atomic_and_idempotent() {
         completed_at_ms: None,
     };
     let input = NewStoredInput {
+        feedback_answer: None,
         agent_shell_target: None,
         input_id: InputId::new("input-goal-first").expect("input id"),
         run_id: RunId::new("run-goal-first").expect("run id"),
@@ -3578,6 +3825,7 @@ fn first_goal_input_goal_and_run_are_atomic_and_idempotent() {
     assert!(!accepted.is_duplicate);
     let duplicate = engine
         .accept_input(NewStoredInput {
+            feedback_answer: None,
             agent_shell_target: None,
             input_id: InputId::new("input-goal-duplicate").expect("input id"),
             run_id: RunId::new("run-goal-duplicate").expect("run id"),
@@ -3589,6 +3837,7 @@ fn first_goal_input_goal_and_run_are_atomic_and_idempotent() {
     assert_eq!(duplicate.run.run_id, accepted.run.run_id);
 
     let rejected = engine.accept_input(NewStoredInput {
+        feedback_answer: None,
         agent_shell_target: None,
         input_id: InputId::new("input-second-goal").expect("input id"),
         run_id: RunId::new("run-second-goal").expect("run id"),
@@ -3669,6 +3918,7 @@ fn goal_run_continuation_updates_budget_without_creating_input_or_run() {
     };
     let first = engine
         .accept_input(NewStoredInput {
+            feedback_answer: None,
             agent_shell_target: None,
             input_id: InputId::new("input-goal-settlement").expect("input id"),
             run_id: RunId::new("run-goal-settlement").expect("run id"),
@@ -3791,6 +4041,7 @@ fn goal_run_continuation_updates_budget_without_creating_input_or_run() {
     let held_message = raw_user_message("goal-resume-user", "use stable channel");
     let held = engine
         .accept_input(NewStoredInput {
+            feedback_answer: None,
             agent_shell_target: None,
             input_id: InputId::new("input-goal-resume").expect("input id"),
             run_id: RunId::new("run-goal-resume").expect("run id"),
@@ -3955,6 +4206,7 @@ fn running_goal_is_durably_paused_once_during_recovery() {
         .expect("seed running goal");
     engine
         .accept_input(NewStoredInput {
+            feedback_answer: None,
             agent_shell_target: None,
             input_id: InputId::new("input-recovery-continuation").expect("input id"),
             run_id: RunId::new("run-recovery-continuation").expect("run id"),
@@ -4239,15 +4491,20 @@ fn known_unversioned_storage_migrates_without_losing_existing_business_data() {
         .connection
         .execute_batch(
             "BEGIN IMMEDIATE;
+             DROP TABLE session_feedback;
              DROP TABLE model_fixed_configs;
              DROP TABLE model_settings;
              DROP TABLE providers;
              DROP TABLE schema_migrations;
              DROP TABLE database_compatibility;
+             DROP TABLE plugin_operations;
+             DROP TABLE plugins;
+             DROP TABLE custom_agents;
              DROP TABLE agent_shell_settings;
              ALTER TABLE child_tasks DROP COLUMN context_window_tokens;
              ALTER TABLE sessions DROP COLUMN agent_shell_kind;
              ALTER TABLE sessions DROP COLUMN agent_shell_environment_json;
+             ALTER TABLE sessions DROP COLUMN custom_agent_json;
              ALTER TABLE inputs DROP COLUMN agent_shell_target;
              ALTER TABLE runs DROP COLUMN shell_snapshot_json;
              ALTER TABLE sessions DROP COLUMN model_id;
@@ -4641,6 +4898,104 @@ fn startup_repairs_started_child_tool_exchange_inside_the_child_body_only() {
     );
 }
 
+#[test]
+fn workspaces_without_user_directories_are_distinct_and_restore_by_id() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    let first = engine
+        .register_workspace(NewWorkspaceRegistration {
+            workspace_id: workspace_id("w-private-first"),
+            label: "private".to_owned(),
+            requested_primary_directory: None,
+            requested_additional_directories: Vec::new(),
+            changed_at_ms: 100,
+        })
+        .expect("register first private workspace");
+    let second = engine
+        .register_workspace(NewWorkspaceRegistration {
+            workspace_id: workspace_id("w-private-second"),
+            label: "private".to_owned(),
+            requested_primary_directory: None,
+            requested_additional_directories: Vec::new(),
+            changed_at_ms: 101,
+        })
+        .expect("register second private workspace");
+    assert_ne!(first.workspace_id, second.workspace_id);
+    assert_eq!(first.user_directory, None);
+    assert_eq!(second.user_directory, None);
+    assert!(Path::new(&first.agent_directory).is_dir());
+    assert!(Path::new(&second.agent_directory).is_dir());
+
+    let removed = engine
+        .remove_workspace(WorkspaceRemoval {
+            workspace_id: first.workspace_id.clone(),
+            changed_at_ms: 200,
+        })
+        .expect("remove private workspace");
+    assert_eq!(removed.lifecycle, StoredWorkspaceLifecycle::Removed);
+    let restored = engine
+        .restore_workspace(assistant_runtime::WorkspaceRestoration {
+            workspace_id: first.workspace_id.clone(),
+            changed_at_ms: 300,
+        })
+        .expect("restore private workspace by id");
+    assert_eq!(restored.lifecycle, StoredWorkspaceLifecycle::Active);
+    assert_eq!(restored.updated_at_ms, 300);
+    assert_eq!(restored.removed_at_ms, None);
+    assert_eq!(
+        engine
+            .restore_workspace(assistant_runtime::WorkspaceRestoration {
+                workspace_id: first.workspace_id,
+                changed_at_ms: 400,
+            })
+            .expect("repeat restore")
+            .updated_at_ms,
+        300,
+        "idempotent restore keeps the first reliable changed time"
+    );
+}
+
+#[test]
+fn private_workspace_restore_rejects_unusable_original_directory_without_reactivating() {
+    let root = TempDir::new().expect("runtime home");
+    let mut engine = open_engine(&root);
+    let workspace_id = workspace_id("w-private-restore-failure");
+    let workspace = engine
+        .register_workspace(NewWorkspaceRegistration {
+            workspace_id: workspace_id.clone(),
+            label: "private".to_owned(),
+            requested_primary_directory: None,
+            requested_additional_directories: Vec::new(),
+            changed_at_ms: 100,
+        })
+        .expect("register private workspace");
+    engine
+        .remove_workspace(WorkspaceRemoval {
+            workspace_id: workspace_id.clone(),
+            changed_at_ms: 200,
+        })
+        .expect("remove private workspace");
+    fs::remove_dir(&workspace.agent_directory).expect("remove empty test agent directory");
+    fs::write(&workspace.agent_directory, b"blocked")
+        .expect("replace test agent directory with a file");
+
+    assert!(
+        engine
+            .restore_workspace(assistant_runtime::WorkspaceRestoration {
+                workspace_id: workspace_id.clone(),
+                changed_at_ms: 300,
+            })
+            .is_err(),
+        "restore must not choose a different directory or silently reactivate"
+    );
+    let stored = engine
+        .get_workspace(&workspace_id)
+        .expect("read stored workspace");
+    assert_eq!(stored.lifecycle, StoredWorkspaceLifecycle::Removed);
+    assert_eq!(stored.removed_at_ms, Some(200));
+    assert_eq!(fs::read(&workspace.agent_directory).unwrap(), b"blocked");
+}
+
 #[cfg(unix)]
 #[test]
 fn workspace_registration_canonicalizes_soft_deletes_and_restores_the_original_id() {
@@ -4654,16 +5009,16 @@ fn workspace_registration_canonicalizes_soft_deletes_and_restores_the_original_i
         .register_workspace(NewWorkspaceRegistration {
             workspace_id: workspace_id("w-first"),
             label: "first".to_owned(),
-            requested_primary_directory: alias.to_string_lossy().into_owned(),
+            requested_primary_directory: Some(alias.to_string_lossy().into_owned()),
             requested_additional_directories: Vec::new(),
             changed_at_ms: 100,
         })
         .expect("register workspace");
     assert_eq!(
-        first.user_directory,
+        first.user_directory.as_deref(),
         fs::canonicalize(user_directory.path())
             .expect("canonical workspace")
-            .to_string_lossy()
+            .to_str()
     );
     assert!(Path::new(&first.agent_directory).is_dir());
     assert!(
@@ -4677,7 +5032,7 @@ fn workspace_registration_canonicalizes_soft_deletes_and_restores_the_original_i
         .register_workspace(NewWorkspaceRegistration {
             workspace_id: workspace_id("w-unused"),
             label: "duplicate".to_owned(),
-            requested_primary_directory: user_directory.path().to_string_lossy().into_owned(),
+            requested_primary_directory: Some(user_directory.path().to_string_lossy().into_owned()),
             requested_additional_directories: Vec::new(),
             changed_at_ms: 200,
         })
@@ -4707,7 +5062,7 @@ fn workspace_registration_canonicalizes_soft_deletes_and_restores_the_original_i
         .register_workspace(NewWorkspaceRegistration {
             workspace_id: workspace_id("w-other-unused"),
             label: "restored".to_owned(),
-            requested_primary_directory: alias.to_string_lossy().into_owned(),
+            requested_primary_directory: Some(alias.to_string_lossy().into_owned()),
             requested_additional_directories: Vec::new(),
             changed_at_ms: 400,
         })
@@ -4731,7 +5086,7 @@ fn workspace_update_canonicalizes_the_full_form_and_cannot_take_another_workspac
         .register_workspace(NewWorkspaceRegistration {
             workspace_id: workspace_id("w-update-first"),
             label: "first".to_owned(),
-            requested_primary_directory: first_primary.path().to_string_lossy().into_owned(),
+            requested_primary_directory: Some(first_primary.path().to_string_lossy().into_owned()),
             requested_additional_directories: Vec::new(),
             changed_at_ms: 100,
         })
@@ -4740,7 +5095,7 @@ fn workspace_update_canonicalizes_the_full_form_and_cannot_take_another_workspac
         .register_workspace(NewWorkspaceRegistration {
             workspace_id: workspace_id("w-update-second"),
             label: "second".to_owned(),
-            requested_primary_directory: second_primary.path().to_string_lossy().into_owned(),
+            requested_primary_directory: Some(second_primary.path().to_string_lossy().into_owned()),
             requested_additional_directories: Vec::new(),
             changed_at_ms: 100,
         })
@@ -4750,7 +5105,7 @@ fn workspace_update_canonicalizes_the_full_form_and_cannot_take_another_workspac
         .update_workspace(WorkspaceUpdate {
             workspace_id: first.workspace_id.clone(),
             label: "renamed".to_owned(),
-            requested_primary_directory: replacement_alias.to_string_lossy().into_owned(),
+            requested_primary_directory: Some(replacement_alias.to_string_lossy().into_owned()),
             requested_additional_directories: vec![
                 additional.path().to_string_lossy().into_owned(),
             ],
@@ -4759,10 +5114,10 @@ fn workspace_update_canonicalizes_the_full_form_and_cannot_take_another_workspac
         .expect("update first workspace");
     assert_eq!(updated.label, "renamed");
     assert_eq!(
-        updated.user_directory,
+        updated.user_directory.as_deref(),
         fs::canonicalize(replacement_primary.path())
             .expect("canonical replacement")
-            .to_string_lossy()
+            .to_str()
     );
     assert_eq!(
         updated.additional_directories,
@@ -4795,7 +5150,7 @@ fn workspace_registration_preserves_an_existing_permission_file() {
         .register_workspace(NewWorkspaceRegistration {
             workspace_id: workspace_id("w-custom-permissions"),
             label: "custom-permissions".to_owned(),
-            requested_primary_directory: user_directory.path().to_string_lossy().into_owned(),
+            requested_primary_directory: Some(user_directory.path().to_string_lossy().into_owned()),
             requested_additional_directories: Vec::new(),
             changed_at_ms: 100,
         })
@@ -4809,7 +5164,7 @@ fn workspace_registration_preserves_an_existing_permission_file() {
         .register_workspace(NewWorkspaceRegistration {
             workspace_id: workspace_id("w-unused-custom"),
             label: "restored-custom".to_owned(),
-            requested_primary_directory: user_directory.path().to_string_lossy().into_owned(),
+            requested_primary_directory: Some(user_directory.path().to_string_lossy().into_owned()),
             requested_additional_directories: Vec::new(),
             changed_at_ms: 200,
         })
@@ -4833,7 +5188,9 @@ fn runtime_recovery_removes_only_the_exact_legacy_workspace_rule_set() {
         .register_workspace(NewWorkspaceRegistration {
             workspace_id: workspace_id("w-backfill-default"),
             label: "backfill-default".to_owned(),
-            requested_primary_directory: first_directory.path().to_string_lossy().into_owned(),
+            requested_primary_directory: Some(
+                first_directory.path().to_string_lossy().into_owned(),
+            ),
             requested_additional_directories: Vec::new(),
             changed_at_ms: 100,
         })
@@ -4842,7 +5199,9 @@ fn runtime_recovery_removes_only_the_exact_legacy_workspace_rule_set() {
         .register_workspace(NewWorkspaceRegistration {
             workspace_id: workspace_id("w-backfill-custom"),
             label: "backfill-custom".to_owned(),
-            requested_primary_directory: second_directory.path().to_string_lossy().into_owned(),
+            requested_primary_directory: Some(
+                second_directory.path().to_string_lossy().into_owned(),
+            ),
             requested_additional_directories: Vec::new(),
             changed_at_ms: 100,
         })
@@ -4851,7 +5210,9 @@ fn runtime_recovery_removes_only_the_exact_legacy_workspace_rule_set() {
         .register_workspace(NewWorkspaceRegistration {
             workspace_id: workspace_id("w-missing-permissions"),
             label: "missing-permissions".to_owned(),
-            requested_primary_directory: third_directory.path().to_string_lossy().into_owned(),
+            requested_primary_directory: Some(
+                third_directory.path().to_string_lossy().into_owned(),
+            ),
             requested_additional_directories: Vec::new(),
             changed_at_ms: 100,
         })
@@ -4994,7 +5355,7 @@ fn session_workspace_binding_and_legacy_unbound_repair_are_persisted_without_pro
         .register_workspace(NewWorkspaceRegistration {
             workspace_id: workspace_id("w-bound"),
             label: "bound".to_owned(),
-            requested_primary_directory: user_directory.path().to_string_lossy().into_owned(),
+            requested_primary_directory: Some(user_directory.path().to_string_lossy().into_owned()),
             requested_additional_directories: vec![
                 user_additional.path().to_string_lossy().into_owned(),
             ],
@@ -5004,7 +5365,7 @@ fn session_workspace_binding_and_legacy_unbound_repair_are_persisted_without_pro
 
     let mut bound = new_session("s-bound", &engine.sessions_directory);
     bound.environment.workspace_id = Some(workspace.workspace_id.clone());
-    bound.environment.working_directory = workspace.user_directory.clone();
+    bound.environment.working_directory = workspace.effective_working_directory().to_owned();
     bound.environment.additional_workspace_directories = workspace.additional_directories.clone();
     bound.environment.workspace_private_directory = Some(workspace.agent_directory.clone());
     let created = engine.create_session(bound).expect("create bound session");
@@ -5018,7 +5379,7 @@ fn session_workspace_binding_and_legacy_unbound_repair_are_persisted_without_pro
 
     let mut second_bound = new_session("s-bound-two", &engine.sessions_directory);
     second_bound.environment.workspace_id = Some(workspace.workspace_id.clone());
-    second_bound.environment.working_directory = workspace.user_directory.clone();
+    second_bound.environment.working_directory = workspace.effective_working_directory().to_owned();
     second_bound.environment.additional_workspace_directories =
         workspace.additional_directories.clone();
     second_bound.environment.workspace_private_directory = Some(workspace.agent_directory.clone());
@@ -5061,7 +5422,9 @@ fn session_workspace_binding_and_legacy_unbound_repair_are_persisted_without_pro
         .update_workspace(WorkspaceUpdate {
             workspace_id: workspace.workspace_id.clone(),
             label: "renamed bound".to_owned(),
-            requested_primary_directory: updated_directory.path().to_string_lossy().into_owned(),
+            requested_primary_directory: Some(
+                updated_directory.path().to_string_lossy().into_owned(),
+            ),
             requested_additional_directories: vec![
                 updated_additional.path().to_string_lossy().into_owned(),
             ],
@@ -5069,8 +5432,8 @@ fn session_workspace_binding_and_legacy_unbound_repair_are_persisted_without_pro
         })
         .expect("update workspace");
     assert_ne!(
-        updated.user_directory,
-        created.environment.working_directory
+        updated.user_directory.as_deref(),
+        Some(created.environment.working_directory.as_str())
     );
     drop(engine);
 
@@ -5171,6 +5534,7 @@ fn queued_input_priority_is_non_negative_and_survives_reopen() {
     for (suffix, at) in [("one", 1_001), ("two", 1_002), ("three", 1_003)] {
         engine
             .accept_input(NewStoredInput {
+                feedback_answer: None,
                 agent_shell_target: None,
                 agent_variant: assistant_protocol::AgentVariant::Build,
                 origin: assistant_runtime::InputOrigin::User,
@@ -5332,7 +5696,7 @@ async fn permission_files_use_fixed_scopes_and_cas_does_not_overwrite_external_e
         .register_workspace(NewWorkspaceRegistration {
             workspace_id: workspace_id("w-permission"),
             label: "permission".to_owned(),
-            requested_primary_directory: user_directory.to_string_lossy().into_owned(),
+            requested_primary_directory: Some(user_directory.to_string_lossy().into_owned()),
             requested_additional_directories: Vec::new(),
             changed_at_ms: 1,
         })
@@ -5341,7 +5705,7 @@ async fn permission_files_use_fixed_scopes_and_cas_does_not_overwrite_external_e
     let sessions_directory = root.path().join(DATA_DIRECTORY).join(SESSIONS_DIRECTORY);
     let mut session = new_session("s-permission", &sessions_directory);
     session.environment.workspace_id = Some(workspace.workspace_id.clone());
-    session.environment.working_directory = workspace.user_directory.clone();
+    session.environment.working_directory = workspace.effective_working_directory().to_owned();
     session.environment.workspace_private_directory = Some(workspace.agent_directory.clone());
     let session = store
         .create_session(session)
@@ -5484,6 +5848,7 @@ fn file_references_survive_queued_json_and_conversation_restart_round_trip() {
     };
     engine
         .accept_input(NewStoredInput {
+            feedback_answer: None,
             agent_shell_target: None,
             agent_variant: assistant_protocol::AgentVariant::Build,
             origin: assistant_runtime::InputOrigin::User,
@@ -6530,6 +6895,7 @@ fn terminal_run_reconciliation_is_exact_idempotent_and_leaves_unrelated_queue_un
     let unrelated = raw_user_message("user-unrelated", "leave me queued");
     engine
         .accept_input(NewStoredInput {
+            feedback_answer: None,
             agent_shell_target: None,
             input_id: unrelated_input_id.clone(),
             run_id: unrelated_run_id,
@@ -7570,6 +7936,7 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
         let user_message = raw_user_message(user, user);
         engine
             .accept_input(NewStoredInput {
+                feedback_answer: None,
                 agent_shell_target: None,
                 agent_variant: assistant_protocol::AgentVariant::Build,
                 origin: assistant_runtime::InputOrigin::User,
@@ -7652,6 +8019,7 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
                 replacement_user.clone(),
             )]),
             input: NewStoredInput {
+                feedback_answer: None,
                 agent_shell_target: None,
                 agent_variant: assistant_protocol::AgentVariant::Build,
                 origin: assistant_runtime::InputOrigin::User,
@@ -7746,6 +8114,7 @@ fn archive_and_model_changes_are_persisted_and_recheck_idle_state() {
     let queued_message = raw_user_message("queued-user", "queued");
     engine
         .accept_input(NewStoredInput {
+            feedback_answer: None,
             agent_shell_target: None,
             agent_variant: assistant_protocol::AgentVariant::Build,
             origin: assistant_runtime::InputOrigin::User,
@@ -8057,6 +8426,7 @@ fn session_materialization_is_atomic_and_response_loss_retry_is_idempotent() {
                 created_at_ms: 2_000,
             }],
             input: NewStoredInput {
+                feedback_answer: None,
                 agent_shell_target: None,
                 input_id: InputId::new(input_name).expect("input id"),
                 run_id: run_id(run_name),
@@ -8456,7 +8826,9 @@ fn recall_index_applies_session_workspace_and_global_scopes_to_main_and_child_co
         .register_workspace(NewWorkspaceRegistration {
             workspace_id: workspace_id("w-recall-scope"),
             label: "recall-scope".to_owned(),
-            requested_primary_directory: workspace_directory.path().to_string_lossy().into_owned(),
+            requested_primary_directory: Some(
+                workspace_directory.path().to_string_lossy().into_owned(),
+            ),
             requested_additional_directories: Vec::new(),
             changed_at_ms: 100,
         })
@@ -8466,7 +8838,8 @@ fn recall_index_applies_session_workspace_and_global_scopes_to_main_and_child_co
         let mut session = new_session(session_value, &engine.sessions_directory);
         if in_workspace {
             session.environment.workspace_id = Some(workspace.workspace_id.clone());
-            session.environment.working_directory = workspace.user_directory.clone();
+            session.environment.working_directory =
+                workspace.effective_working_directory().to_owned();
             session.environment.workspace_private_directory =
                 Some(workspace.agent_directory.clone());
         }
@@ -9215,6 +9588,7 @@ fn clear_session_atomically_replaces_history_and_preserves_stable_resources() {
     let source_message = raw_user_message("user-clear-target", "clear target");
     engine
         .accept_input(NewStoredInput {
+            feedback_answer: None,
             agent_shell_target: None,
             input_id: source_input_id.clone(),
             run_id: source_run_id.clone(),
@@ -9277,6 +9651,7 @@ fn clear_session_atomically_replaces_history_and_preserves_stable_resources() {
         reply_route: assistant_runtime::ReplyRoute::SessionDefault,
     };
     let report_input = NewStoredInput {
+        feedback_answer: None,
         agent_shell_target: None,
         input_id: report_input_id.clone(),
         run_id: run_id("r-clear-cross-session-report"),
@@ -9421,6 +9796,7 @@ fn clear_session_keeps_user_title_and_rejects_a_busy_snapshot() {
     let queued_input_id = InputId::new("i-clear-busy").expect("input id");
     engine
         .accept_input(NewStoredInput {
+            feedback_answer: None,
             agent_shell_target: None,
             input_id: queued_input_id.clone(),
             run_id: run_id("r-clear-busy"),

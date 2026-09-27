@@ -34,14 +34,20 @@
     "node-pg-migrate": "9.0.0",
     "pg": "8.23.0",
     "reflect-metadata": "0.2.2",
+    "rxjs": "7.8.2",
+    "tar": "7.5.22",
     "typeorm": "1.1.1",
-    "rxjs": "7.8.2"
+    "yaml": "2.9.1",
+    "yauzl": "3.4.0"
   },
   "devDependencies": {
     "@types/node": "24.0.0",
     "@types/pg": "8.15.5",
+    "@types/yauzl": "3.4.0",
+    "@types/yazl": "3.3.0",
     "oxlint": "1.78.0",
     "typescript": "7.0.2",
-    "vitest": "5.0.1"
+    "vitest": "5.0.1",
+    "yazl": "3.3.1"
   }
 }

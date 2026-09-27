@@ -109,6 +109,8 @@ pub enum SkillSource {
     HostSupplement,
     /// 用户 Home 下的 `.agents/skills`。
     UserAgents,
+    /// 已生效的受管插件包内 Skill。
+    Plugin,
 }
 
 /// 从通用 frontmatter 保留的兼容元数据；不参与权限决策。

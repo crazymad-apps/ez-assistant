@@ -22,7 +22,7 @@ pub struct InMemoryRecorder {
     /// 第 N 次 Recorder 调用（begin/complete 合计，从 1 开始）注入失败。
     fail_at: Option<u64>,
     fail_start: bool,
-    continuation_required: bool,
+    completion: ExchangeCompletion,
     log: OrderLog,
 }
 
@@ -49,7 +49,7 @@ impl InMemoryRecorder {
             state: Mutex::new(RecorderState::default()),
             fail_at: None,
             fail_start: false,
-            continuation_required: false,
+            completion: ExchangeCompletion::Unchanged,
             log,
         }
     }
@@ -74,7 +74,13 @@ impl InMemoryRecorder {
     /// 让每次成功 complete 都要求上层以新的 AgentExecution 续跑。
     #[must_use]
     pub fn with_continuation_required(mut self) -> Self {
-        self.continuation_required = true;
+        self.completion = ExchangeCompletion::ContextChanged;
+        self
+    }
+
+    /// 可靠闭合工具交换后结束当前执行，不再发起下一次模型请求。
+    pub fn with_return_to_host(mut self) -> Self {
+        self.completion = ExchangeCompletion::ReturnToHost;
         self
     }
 
@@ -200,9 +206,7 @@ impl ExecutionRecorder for InMemoryRecorder {
             completed.push(ConversationDelta::Assistant(pending.assistant));
             completed.extend(results.into_iter().map(ConversationDelta::Tool));
             state.deltas.extend(completed);
-            Ok(ExchangeCompletion {
-                continuation_required: self.continuation_required,
-            })
+            Ok(self.completion)
         })
     }
 }

@@ -760,6 +760,9 @@ pub struct SessionViewSnapshot {
     pub attachments: Vec<AttachmentSummary>,
     #[serde(default)]
     pub file_references: Vec<ConversationFileReference>,
+    /// 只包含明确声明且尚未撤销的交付项；文件可用性由 Host 读取时校验。
+    #[serde(default)]
+    pub artifacts: Vec<crate::SessionArtifact>,
     pub runs: Vec<RunSnapshot>,
     pub usage: SessionUsageSnapshot,
     pub child_tasks: Vec<ChildTaskTreeItemSnapshot>,

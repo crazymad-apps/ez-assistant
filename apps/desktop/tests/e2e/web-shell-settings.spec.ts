@@ -24,7 +24,8 @@ test("Windows Shell settings, session switch and terminal types use the real Hos
   const document = await page.goto(`${host.base_url}/#token=${encodeURIComponent(token)}`);
   expect(document?.status()).toBe(200);
   await expect(page.locator("[data-app-title-bar]")).toBeVisible();
-  await page.getByRole("button", { name: "设置", exact: true }).click();
+  await page.getByRole("button", { name: "账号与 Runtime" }).click();
+  await page.getByRole("menuitem", { name: "设置" }).click();
   await page.getByRole("button", { name: /^状态与诊断/ }).click();
   await expect(page.getByText("Windows · x64", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "平台依赖", exact: true })).toBeVisible();

@@ -10,6 +10,7 @@ pub(super) fn entry() -> Migration {
     Migration {
         version: "0.27.0",
         min_compatible_host_version: Some("0.27.0"),
+        rebuilds_referenced_tables: false,
         validate_source: v0_26_0::validate,
         apply,
         validate,
@@ -23,7 +24,7 @@ fn apply(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn validate(connection: &Connection) -> Result<()> {
+pub(super) fn validate(connection: &Connection) -> Result<()> {
     v0_26_0::validate(connection)?;
     let invalid: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM child_tasks WHERE context_window_tokens IS NOT NULL AND (typeof(context_window_tokens)!='integer' OR context_window_tokens<=0))",

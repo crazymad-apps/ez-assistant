@@ -1,6 +1,8 @@
 //! 受控附件预览与 Session Markdown 导出资源路由。
 
+pub(crate) mod artifacts;
 mod files;
+pub(super) use artifacts::stat_session_resource_file;
 mod host;
 pub(super) use host::{
     download_attachment, download_child_tool_file, download_host_file, download_session_file,

@@ -4,13 +4,15 @@ use std::{collections::BTreeSet, path::Path, sync::Arc};
 
 use agent_types::FileReference;
 use assistant_protocol::{
-    SessionMaterializationManifest, SessionMaterializationResult, SessionTitleOrigin,
-    SubmitInputMode,
+    GetRunRequest, GetSessionMaterializationRequest, GetSessionMaterializationResult,
+    GetSessionRequest, SessionMaterializationManifest, SessionMaterializationResult,
+    SessionTitleOrigin, SubmitInputMode,
 };
 
 use super::{
     AssistantRuntime, StagedSessionAttachment,
     attachment::summary as attachment_summary,
+    custom_agents::dependency_blocks_session,
     goal::GoalSubmissionPersistence,
     input::{automatic_session_title, projection::project_accepted_input},
     quote::{deactivate_quote_sources, insert_quotes, validate_quotes},
@@ -33,6 +35,50 @@ use crate::{
 const MAX_MATERIALIZATION_ATTACHMENTS: usize = 32;
 
 impl AssistantRuntime {
+    /// 按原 key 只读查询已提交事实；未命中不取消可能仍在进行的首次上传。
+    ///
+    /// Store 查询先于按 Session ID 的惰性投影加载，绝不重新接纳 Input 或唤醒队列；
+    /// 与物化共享 Workspace mutation gate，避免同进程的提交与查询交错。
+    pub async fn get_session_materialization(
+        &self,
+        request: GetSessionMaterializationRequest,
+    ) -> RuntimeResult<GetSessionMaterializationResult> {
+        let _operation = self.operation_gate.read().await;
+        self.ensure_running()?;
+        let _workspace_mutation = self.workspace_mutation_gate.lock().await;
+        let Some(stored) = self
+            .store
+            .get_session_materialization(&request.idempotency_key)
+            .await
+            .map_err(|source| RuntimeError::from_store("get session materialization", source))?
+        else {
+            return Ok(GetSessionMaterializationResult {
+                materialization: None,
+            });
+        };
+        let session_id = stored.session.session_id;
+        let run_id = stored.accepted.run.run_id;
+        let run = self
+            .get_run(GetRunRequest {
+                session_id: session_id.clone(),
+                run_id,
+            })
+            .await?
+            .run;
+        let session = self
+            .get_session(GetSessionRequest { session_id })
+            .await?
+            .session;
+        Ok(GetSessionMaterializationResult {
+            materialization: Some(SessionMaterializationResult {
+                session,
+                input_id: stored.accepted.input.input_id,
+                run,
+                attachments: stored.attachments.iter().map(attachment_summary).collect(),
+            }),
+        })
+    }
+
     /// 将草稿首次发送一次性落实为正式 Session、附件、Input 和首次 Run。
     pub async fn materialize_session(
         &self,
@@ -41,8 +87,53 @@ impl AssistantRuntime {
     ) -> RuntimeResult<SessionMaterializationResult> {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
-        let _workspace_mutation = self.workspace_mutation_gate.lock().await;
         validate_manifest(&manifest, &staged_attachments)?;
+        let existing = self
+            .store
+            .get_session_materialization(&manifest.idempotency_key)
+            .await
+            .map_err(|source| RuntimeError::from_store("get session materialization", source))?;
+        let selected_agent = match (&manifest.custom_agent, existing.as_ref()) {
+            (None, None) => None,
+            (Some(selection), None) => {
+                let mut current = self.resolve_custom_agent(selection).await?;
+                let mut stable = false;
+                for _ in 0..2 {
+                    let prepared = self
+                        .prepare_resolved_custom_agent(&current, manifest.workspace_id.as_ref())
+                        .await?;
+                    if prepared
+                        .dependencies
+                        .iter()
+                        .any(|item| dependency_blocks_session(item.status))
+                    {
+                        return Err(RuntimeError::ConfigurationUnavailable);
+                    }
+                    let latest = self.resolve_custom_agent(selection).await?;
+                    if latest.revision == current.revision {
+                        stable = true;
+                        break;
+                    }
+                    current = latest;
+                }
+                if !stable {
+                    return Err(RuntimeError::ConfigurationUnavailable);
+                }
+                Some(current)
+            }
+            (selection, Some(existing)) => {
+                let frozen = existing.session.custom_agent.clone();
+                if selection.as_ref().map(|item| (&item.source, &item.name))
+                    != frozen
+                        .as_ref()
+                        .map(|item| (&item.source, &item.config.name))
+                {
+                    return Err(RuntimeError::SnapshotStale);
+                }
+                frozen
+            }
+        };
+        let _workspace_mutation = self.workspace_mutation_gate.lock().await;
 
         let configuration = self.config_registry.snapshot()?;
         let model_selection = manifest.model_selection.clone();
@@ -126,7 +217,7 @@ impl AssistantRuntime {
                     .map(|workspace| WorkspaceEnvironmentSource {
                         workspace_id: &workspace.workspace_id,
                         label: &workspace.label,
-                        user_directory: &workspace.user_directory,
+                        user_directory: workspace.user_directory.as_deref(),
                         additional_directories: &workspace.additional_directories,
                         agent_directory: &workspace.agent_directory,
                     }),
@@ -136,10 +227,15 @@ impl AssistantRuntime {
         let skill_catalog = self
             .prepare_session_skill_catalog(workspace.as_ref().map(super::workspace_directories))
             .await?;
-        let system_prompt = skill_catalog.augment_system_prompt(prepared_environment.system_prompt);
+        let system_prompt =
+            skill_catalog.augment_system_prompt(super::custom_agents::with_agent_prompt(
+                prepared_environment.system_prompt,
+                selected_agent.as_ref(),
+            ));
         let created_at_ms = super::now_ms()?;
         let (agent_shell_kind, agent_shell_environment) = self.initial_agent_shell().await?;
         let new_session = NewStoredSession {
+            custom_agent: selected_agent,
             agent_shell_kind,
             agent_shell_environment,
             session_id: session_id.clone(),
@@ -283,6 +379,7 @@ impl AssistantRuntime {
             .filter(|goal| matches!(goal.persistence, GoalSubmissionPersistence::Start))
             .map(|goal| goal.control.to_stored(session_id.clone()));
         let input = NewStoredInput {
+            feedback_answer: None,
             agent_shell_target: None,
             input_id,
             run_id,
@@ -451,6 +548,7 @@ fn validate_manifest(
 
 fn stored_session_preview(session: &NewStoredSession) -> crate::StoredSession {
     crate::StoredSession {
+        custom_agent: session.custom_agent.clone(),
         agent_shell_kind: session.agent_shell_kind,
         agent_shell_environment: session.agent_shell_environment.clone(),
         session_id: session.session_id.clone(),

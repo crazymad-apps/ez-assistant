@@ -380,6 +380,12 @@ pub(super) fn apply_run_settlement(
         session_id,
         queued_user_message.as_ref(),
     )?;
+    transaction.execute(
+        "UPDATE session_feedback SET snapshot_json=json_set(snapshot_json,'$.status','invalidated')
+         WHERE run_id=?1 AND session_id=?2 AND json_extract(snapshot_json,'$.status')='pending'
+         AND (json_extract(snapshot_json,'$.mode')='wait' OR ?3 != 'completed')",
+        params![run_id.as_str(), session_id.as_str(), run_status_value(*status)],
+    ).map_err(|source| internal_error("feedback settlement failed", source))?;
     let updated = transaction
         .execute(
             "UPDATE runs

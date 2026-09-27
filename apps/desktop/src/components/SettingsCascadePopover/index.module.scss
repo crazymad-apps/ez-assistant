@@ -42,10 +42,10 @@
 .selected_icon { color: var(--ez-primary); }
 
 .settings_category {
-  --ez-control-default-height: var(--ez-control-height-large); height: auto;
+  height: auto;
   display: grid;
   width: 100%;
-  min-height: var(--ez-control-height);
+  min-height: var(--ez-control-height-default);
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;

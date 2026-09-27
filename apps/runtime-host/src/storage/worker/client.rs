@@ -33,7 +33,7 @@ use assistant_runtime::{
     StoredSessionCommand, StoredSessionFork, StoredSessionMaterialization, StoredSessionUsage,
     StoredTerminalRunInputReconciliation, StoredWorkPlan, StoredWorkspace, ToolExecutionStart,
     UserMessageCommit, VariantChange, WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult,
-    WorkspaceRemoval, WorkspaceUpdate,
+    WorkspaceRemoval, WorkspaceRestoration, WorkspaceUpdate,
 };
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 
@@ -196,6 +196,85 @@ impl LocalRuntimeStore {
 }
 
 impl RuntimeStore for LocalRuntimeStore {
+    fn load_feedback(
+        &self,
+        session_id: &SessionId,
+    ) -> StoreFuture<'_, Vec<assistant_protocol::FeedbackRequestSnapshot>> {
+        let session_id = session_id.clone();
+        Box::pin(async move {
+            self.request(|reply| Command::LoadFeedback { session_id, reply })
+                .await
+        })
+    }
+    fn mutate_feedback(
+        &self,
+        mutation: assistant_runtime::FeedbackMutation,
+    ) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            self.request(|reply| Command::MutateFeedback { mutation, reply })
+                .await
+        })
+    }
+
+    fn list_custom_agents(&self) -> StoreFuture<'_, Vec<assistant_runtime::StoredCustomAgent>> {
+        Box::pin(async move {
+            self.request(|reply| Command::ListCustomAgents { reply })
+                .await
+        })
+    }
+
+    fn mutate_custom_agent(
+        &self,
+        mutation: assistant_runtime::CustomAgentMutation,
+    ) -> StoreFuture<'_, Option<assistant_runtime::StoredCustomAgent>> {
+        Box::pin(async move {
+            self.request(|reply| Command::MutateCustomAgent { mutation, reply })
+                .await
+        })
+    }
+
+    fn list_plugins(&self) -> StoreFuture<'_, Vec<assistant_runtime::StoredPlugin>> {
+        Box::pin(async move { self.request(|reply| Command::ListPlugins { reply }).await })
+    }
+
+    fn change_plugin_settings(
+        &self,
+        change: assistant_runtime::PluginSettingsChange,
+    ) -> StoreFuture<'_, assistant_runtime::StoredPlugin> {
+        Box::pin(async move {
+            self.request(|reply| Command::ChangePluginSettings { change, reply })
+                .await
+        })
+    }
+
+    fn list_plugin_operations(
+        &self,
+    ) -> StoreFuture<'_, Vec<assistant_runtime::StoredPluginOperation>> {
+        Box::pin(async move {
+            self.request(|reply| Command::ListPluginOperations { reply })
+                .await
+        })
+    }
+
+    fn accept_plugin_operation(
+        &self,
+        operation: assistant_runtime::StoredPluginOperation,
+    ) -> StoreFuture<'_, assistant_runtime::StoredPluginOperation> {
+        Box::pin(async move {
+            self.request(|reply| Command::AcceptPluginOperation { operation, reply })
+                .await
+        })
+    }
+
+    fn advance_plugin_operation(
+        &self,
+        update: assistant_runtime::PluginOperationUpdate,
+    ) -> StoreFuture<'_, assistant_runtime::StoredPluginOperation> {
+        Box::pin(async move {
+            self.request(|reply| Command::AdvancePluginOperation { update, reply })
+                .await
+        })
+    }
     fn current_recorded_resource_path(
         &self,
         path: &str,
@@ -506,6 +585,16 @@ impl RuntimeStore for LocalRuntimeStore {
         })
     }
 
+    fn restore_workspace(
+        &self,
+        restoration: WorkspaceRestoration,
+    ) -> StoreFuture<'_, StoredWorkspace> {
+        Box::pin(async move {
+            self.request(|reply| Command::RestoreWorkspace { restoration, reply })
+                .await
+        })
+    }
+
     fn upload_attachment(&self, upload: NewAttachmentUpload) -> StoreFuture<'_, StoredAttachment> {
         Box::pin(async move {
             self.request(|reply| Command::UploadAttachment { upload, reply })
@@ -515,8 +604,11 @@ impl RuntimeStore for LocalRuntimeStore {
 
     fn create_session(&self, session: NewStoredSession) -> StoreFuture<'_, StoredSession> {
         Box::pin(async move {
-            self.request(|reply| Command::CreateSession { session, reply })
-                .await
+            self.request(|reply| Command::CreateSession {
+                session: Box::new(session),
+                reply,
+            })
+            .await
         })
     }
 
@@ -530,6 +622,17 @@ impl RuntimeStore for LocalRuntimeStore {
                 reply,
             })
             .await
+        })
+    }
+
+    fn get_session_materialization(
+        &self,
+        key: &assistant_protocol::IdempotencyKey,
+    ) -> StoreFuture<'_, Option<StoredSessionMaterialization>> {
+        let key = key.clone();
+        Box::pin(async move {
+            self.request(|reply| Command::GetSessionMaterialization { key, reply })
+                .await
         })
     }
 

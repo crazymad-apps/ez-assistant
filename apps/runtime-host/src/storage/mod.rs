@@ -16,6 +16,7 @@ mod context_replacement;
 mod conversation;
 mod device;
 mod engine;
+mod feedback;
 mod filesystem;
 mod goal;
 mod history_titles;
@@ -26,8 +27,10 @@ mod mode;
 mod model_management;
 mod resource_reference;
 
+mod custom_agent;
 pub(crate) mod migrations;
 mod permission;
+mod plugin;
 mod recall_index;
 mod recovery;
 mod run_projection;

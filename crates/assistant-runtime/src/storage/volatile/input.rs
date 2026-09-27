@@ -33,6 +33,21 @@ impl VolatileRuntimeStore {
                     is_duplicate: true,
                 });
             }
+            if let Some(request) = &input.feedback_answer {
+                if request.session_id != input.session_id
+                    || request.mode != assistant_protocol::FeedbackMode::EndTurn
+                    || request.status != assistant_protocol::FeedbackStatus::Answered
+                {
+                    return Err(conflict("feedback input ownership mismatch"));
+                }
+                super::feedback::validate_feedback_mutation(
+                    &state.feedback,
+                    &crate::FeedbackMutation {
+                        request: request.clone(),
+                        expected_status: Some(assistant_protocol::FeedbackStatus::Pending),
+                    },
+                )?;
+            }
             validate_input_message_with_channel_source(
                 input.origin,
                 input.goal_binding.as_ref(),
@@ -229,10 +244,11 @@ impl VolatileRuntimeStore {
                 }
                 None => {}
             }
-            let queue_order = if input.origin == InputOrigin::Runtime
-                && input.goal_binding.is_none()
-                && input.cross_session.is_none()
-                && input.channel_source.is_none()
+            let queue_order = if input.feedback_answer.is_some()
+                || (input.origin == InputOrigin::Runtime
+                    && input.goal_binding.is_none()
+                    && input.cross_session.is_none()
+                    && input.channel_source.is_none())
             {
                 for queued in state.inputs.values_mut().filter(|candidate| {
                     candidate.session_id == input.session_id
@@ -298,6 +314,11 @@ impl VolatileRuntimeStore {
             }
             if let Some(goal) = input.resumed_goal {
                 state.goals.insert(goal.session_id.clone(), goal);
+            }
+            if let Some(request) = &input.feedback_answer {
+                state
+                    .feedback
+                    .insert(request.request_id.clone(), request.clone());
             }
             state.inputs.insert(input.input_id, stored.clone());
             state.runs.insert(run.run_id.clone(), run.clone());

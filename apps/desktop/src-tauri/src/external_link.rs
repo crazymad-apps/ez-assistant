@@ -45,14 +45,14 @@ pub(crate) async fn open_workspace_directory(
     })?;
     let workspace_id = WorkspaceId::new(workspace_id).map_err(|_| ExternalLinkFailure {
         code: "invalid_workspace",
-        message: "工作空间标识无效。",
+        message: "项目标识无效。",
     })?;
     let path = coordinator
         .workspace_directory(workspace_id)
         .await
         .map_err(|_| ExternalLinkFailure {
             code: "workspace_unavailable",
-            message: "无法从 Runtime 获取工作空间目录。",
+            message: "无法从 Runtime 获取项目目录。",
         })?;
     target.ensure_local().map_err(|_| ExternalLinkFailure {
         code: "local_operation_unavailable",
@@ -62,7 +62,7 @@ pub(crate) async fn open_workspace_directory(
         .open_path(path, None::<&str>)
         .map_err(|_| ExternalLinkFailure {
             code: "workspace_open_failed",
-            message: "无法使用系统文件管理器打开工作空间。",
+            message: "无法使用系统文件管理器打开项目。",
         })
 }
 

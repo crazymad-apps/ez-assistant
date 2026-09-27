@@ -46,6 +46,8 @@ use crate::{
 /// timeout 和 retry 产生不同解释；两者的请求内容仍分别构造。
 pub(super) struct CompiledModelService {
     pub(super) model: Arc<dyn ModelService>,
+    /// 子任务与压缩共享无父 Run 观察器的服务，避免并发 attempt 污染父诊断。
+    background_model: Arc<dyn ModelService>,
     pub(super) provider: agent_types::ProviderId,
     pub(super) protocol: ModelProtocol,
     pub(super) capabilities: ResolvedModelCapabilities,
@@ -686,6 +688,7 @@ pub(super) async fn compile_run_agent(
             RuntimeError::RunToolsBuildFailed { source }
         })?;
     let default_rules = bundle.default_rules();
+    let artifact_files = bundle.artifact_files();
     let (base_tools, infrastructure_policies) = bundle.into_parts();
     let active_skill_names = {
         let state = session.lock_state()?;
@@ -717,7 +720,7 @@ pub(super) async fn compile_run_agent(
     };
     let skill_activation_latch = Arc::new(SkillActivationLatch::new(active_skill_names));
     let parent_compactor = Arc::new(RuntimeContextCompactor::for_parent(
-        compiled.model.clone(),
+        compiled.background_model.clone(),
         session.current_system_prompt()?,
     ));
     let goal_signal_latch = if let Some(binding) = authorization.goal_binding.as_ref() {
@@ -841,6 +844,28 @@ pub(super) async fn compile_run_agent(
     tool_assembly.contribute(RunToolContribution::frozen(base_tools.clone()));
     let mut child_base_tools = base_tools.clone();
     if compiled.model.capabilities().tool_calls {
+        tool_assembly.contribute(
+            RunToolContribution::tool(crate::feedback::AskUserTool::new(
+                session.clone(),
+                authorization.run_id.clone(),
+                resources.store.clone(),
+                authorization.events.clone(),
+            ))
+            .map_err(|_| RuntimeError::InternalStateUnavailable {
+                component: "feedback tool definition",
+            })?,
+        );
+        if let Some(files) = artifact_files {
+            tool_assembly.contribute(
+                RunToolContribution::tool(crate::artifact::DeclareArtifactTool::new(
+                    files,
+                    authorization.run_id.clone(),
+                ))
+                .map_err(|_| RuntimeError::InternalStateUnavailable {
+                    component: "artifact tool definition",
+                })?,
+            );
+        }
         if !mcp_scope.is_empty() {
             let image_directory = (compiled.capabilities.tool_image_projection
                 != agent_model::ToolImageProjection::Unsupported)
@@ -965,11 +990,11 @@ pub(super) async fn compile_run_agent(
         child_prompt_parts.push(crate::delegation::CHILD_AGENT_INSTRUCTION_V1.to_owned());
         let child_prompt = SystemPromptSnapshot::new(child_prompt_parts);
         let child_compactor = Arc::new(RuntimeContextCompactor::for_child(
-            compiled.model.clone(),
+            compiled.background_model.clone(),
             child_prompt.clone(),
         ));
         let mut child_builder = AgentBuilder::new(
-            compiled.model.clone(),
+            compiled.background_model.clone(),
             child_prompt,
             resources.context_window.clone(),
         )
@@ -1099,6 +1124,13 @@ pub(super) fn compile_resolved_model_service(
         .map_err(|source| RuntimeError::ModelBuildFailed { source })?;
     let base_model = bundle.model;
     let image_preprocessor = bundle.image_preprocessor;
+    let background_model: Arc<dyn ModelService> = match active.retry_policy() {
+        Some(policy) => Arc::new(RetryingModelService::new(
+            base_model.clone(),
+            policy.clone(),
+        )),
+        None => base_model.clone(),
+    };
     let model = match (active.retry_policy(), model_attempt_observer) {
         (Some(policy), Some(observer)) => Arc::new(RetryingModelService::with_observer(
             base_model,
@@ -1116,6 +1148,7 @@ pub(super) fn compile_resolved_model_service(
     };
     Ok(CompiledModelService {
         model,
+        background_model,
         provider: model_config.provider().clone(),
         protocol: model_config.protocol(),
         capabilities: model_config.capabilities().clone(),
@@ -1137,6 +1170,11 @@ fn bind_image_preparation(
     }
     compiled.model = Arc::new(ImagePreparingModelService {
         inner: compiled.model.clone(),
+        preprocessor: preprocessor.clone(),
+        tool_image_directory: environment.session_tool_image_directory.clone(),
+    });
+    compiled.background_model = Arc::new(ImagePreparingModelService {
+        inner: compiled.background_model.clone(),
         preprocessor,
         tool_image_directory: environment.session_tool_image_directory.clone(),
     });

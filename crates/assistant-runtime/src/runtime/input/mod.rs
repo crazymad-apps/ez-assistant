@@ -55,6 +55,7 @@ struct QueueDriverContext {
     context_window: Arc<ContextWindowEvaluator>,
     store: Arc<dyn RuntimeStore>,
     skill_package_source: Arc<dyn crate::SkillPackageSource>,
+    plugin: Arc<crate::plugin::PluginManager>,
     output_dispatcher: Arc<dyn crate::ChannelOutputDispatcher>,
     recall_reference_codec: Arc<crate::HmacRecallReferenceCodec>,
     mcp_registry: Arc<crate::mcp::McpRegistry>,
@@ -113,6 +114,7 @@ impl AssistantRuntime {
             context_window: self.context_window.clone(),
             store: self.store.clone(),
             skill_package_source: self.skill_package_source.clone(),
+            plugin: self.plugin.clone(),
             output_dispatcher: self.output_dispatcher.clone(),
             recall_reference_codec: self.recall_reference_codec.clone(),
             mcp_registry: self.mcp_service.registry.clone(),
@@ -339,13 +341,13 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     })?
                     .map_err(|source| RuntimeError::RunToolsBuildFailed { source })?
             };
-            let skill_catalog = super::skills::prepare_current_catalog(
+            let (skill_catalog, plugin_leases) = super::skills::prepare_run_catalog(
                 context.store.as_ref(),
                 context.skill_package_source.as_ref(),
-                &context.workspaces,
-                session.environment().workspace_id.as_ref(),
+                context.plugin.as_ref(),
+                session.environment(),
             )
-            .await;
+            .await?;
             let config = context.config_registry.snapshot()?;
             let controller_tools = controller_tool_coordinator_from(&context);
             compile_run_agent(
@@ -355,7 +357,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                 RunCompilationResources {
                     attachments: context.attachments.clone(),
                     shell,
-                    skill_catalog: skill_catalog?,
+                    skill_catalog,
                     model_factory: context.model_factory.as_ref(),
                     context_window: context.context_window.clone(),
                     run_tool_factory: context.run_tool_factory.as_ref(),
@@ -388,6 +390,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                 Some(model_diagnostics.clone()),
             )
             .await
+            .map(|compiled| (compiled, plugin_leases))
         };
         // 这里尚未领取 Input 或写入正文；丢弃目录读取 future 不丢失持久化进度。
         let prepared = {
@@ -447,12 +450,12 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
             // 取消、暂停或置顶使本次准备失效，不得为旧 Run 写入失败或用户正文。
             continue;
         }
-        let prepared = prepared.and_then(|compiled| {
+        let prepared = prepared.and_then(|(compiled, leases)| {
             compiled.ensure_models_current(&context.config_registry)?;
-            Ok(compiled)
+            Ok((compiled, leases))
         });
         let start_error = match prepared {
-            Ok(compiled) => {
+            Ok((compiled, _plugin_leases)) => {
                 let super::model::CompiledRunParts {
                     shell,
                     model_binding,
@@ -632,11 +635,9 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                         cancellation: cancellation.clone(),
                         goal_signal_latch,
                     });
-                    state
-                        .runs
-                        .get_mut(&next.2.run_id)
-                        .expect("run exists")
-                        .freeze_execution(reasoning_effort, shell);
+                    let record = state.runs.get_mut(&next.2.run_id).expect("run exists");
+                    record.freeze_execution(reasoning_effort, shell);
+                    record.model_diagnostics = Some(model_diagnostics.clone());
                     let conversation = state
                         .journal
                         .as_ref()
@@ -737,6 +738,20 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                                 .clone()
                                 .map(agent_core::CompactionHandoff::into_request),
                         ),
+                        Some(agent_core::ExecutionOutcome::Cancelled { consumption })
+                        | Some(agent_core::ExecutionOutcome::ContinuationRequired {
+                            reason: agent_core::ContinuationReason::ReturnToHost,
+                            consumption,
+                        }) => {
+                            final_execution_steps = Some((
+                                next_step.get(),
+                                next_step
+                                    .get()
+                                    .saturating_add(consumption.steps)
+                                    .saturating_sub(1),
+                            ));
+                            break (observed.outcome, None);
+                        }
                         Some(agent_core::ExecutionOutcome::ContinuationRequired {
                             consumption,
                             ..
@@ -1009,6 +1024,16 @@ fn publish_settlement_events(
     session: &Arc<SessionController>,
     settlement: crate::run::RunSettlementResult,
 ) {
+    if let Ok(state) = session.lock_state() {
+        for request in state.feedback.values().filter(|r| {
+            r.run_id == settlement.run.run_id
+                && r.status == assistant_protocol::FeedbackStatus::Invalidated
+        }) {
+            let _ = context.events.send(RuntimeEvent::FeedbackChanged {
+                request: request.clone(),
+            });
+        }
+    }
     let should_generate_title = settlement.run.status == RunStatus::Completed
         && settlement.final_message_step.is_some()
         && session.lock_state().is_ok_and(|state| {
@@ -1039,9 +1064,16 @@ fn publish_settlement_events(
             });
         }
     }
-    let _ = context
-        .events
-        .send(crate::run::finished_event(settlement.run));
+    let _ = context.events.send(crate::run::finished_event(
+        settlement.run.clone(),
+        session.lock_state().is_ok_and(|state| {
+            state.feedback.values().any(|request| {
+                request.run_id == settlement.run.run_id
+                    && request.mode == assistant_protocol::FeedbackMode::EndTurn
+                    && request.status == assistant_protocol::FeedbackStatus::Pending
+            })
+        }),
+    ));
     if let Some(goal) = settlement.goal {
         let _ = context.events.send(RuntimeEvent::GoalChanged {
             session_id: session.id().clone(),
@@ -1240,6 +1272,15 @@ async fn fail_before_start(
             state.persisted_message_count += 1;
             state.message_count += 1;
         }
+        for request in state.feedback.values_mut().filter(|request| {
+            request.run_id == *run_id
+                && request.status == assistant_protocol::FeedbackStatus::Pending
+        }) {
+            request.status = assistant_protocol::FeedbackStatus::Invalidated;
+            let _ = context.events.send(RuntimeEvent::FeedbackChanged {
+                request: request.clone(),
+            });
+        }
         let failed_input_id = state.runs.get(run_id).map(|run| run.input_id().clone());
         if let Some(input_id) = failed_input_id.as_ref()
             && let Some(input) = state.inputs.get_mut(input_id)
@@ -1291,6 +1332,7 @@ async fn fail_before_start(
             session_id: session.id().clone(),
             run_id: run_id.clone(),
             status: RunStatus::Failed,
+            awaiting_feedback: false,
             error: Some(error),
         });
     // 源 Run 的 Store 和内存终态均已完成，且未持有源状态锁；此后才进入主控 Session 投影。

@@ -29,7 +29,7 @@ export const RuntimeConnectionForm = observer(function RuntimeConnectionForm({ c
   const missing_credentials = connection.mode === "enterprise" && (!username.trim() || !password);
   const submit_disabled = connection.pending || (connection.target === "local" && connection.local_state === "starting")
     || (!local_upgrade && (already_connected || missing_credentials || (connection.target === "remote" && (!origin.trim() || !password))));
-  let submit_label = connection.target === "local" ? "进入工作空间" : "连接 Runtime";
+  let submit_label = connection.target === "local" ? "进入项目" : "连接 Runtime";
   if (settings) submit_label = connection.mode === "enterprise" ? "确认切换" : "切换 Runtime";
   if (already_connected) submit_label = "当前连接";
   if (local_upgrade) submit_label = "更新并重启";

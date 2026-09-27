@@ -26,7 +26,7 @@ use assistant_runtime::{
     StoredSessionCommand, StoredSessionFork, StoredSessionMaterialization, StoredSessionUsage,
     StoredTerminalRunInputReconciliation, StoredWorkPlan, StoredWorkspace, ToolExecutionStart,
     UserMessageCommit, VariantChange, WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult,
-    WorkspaceRemoval, WorkspaceUpdate,
+    WorkspaceRemoval, WorkspaceRestoration, WorkspaceUpdate,
 };
 use tokio::sync::oneshot;
 
@@ -35,6 +35,40 @@ use tokio::sync::oneshot;
 /// 每个变体只携带业务参数和一次性回复通道；命令按 mpsc 接收顺序在同一线程执行，
 /// 因此不得在调用方假设并行数据库事务或另存一份存储状态。
 pub(super) enum Command {
+    LoadFeedback {
+        session_id: SessionId,
+        reply:
+            oneshot::Sender<Result<Vec<assistant_protocol::FeedbackRequestSnapshot>, StoreError>>,
+    },
+    MutateFeedback {
+        mutation: assistant_runtime::FeedbackMutation,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    ListCustomAgents {
+        reply: oneshot::Sender<Result<Vec<assistant_runtime::StoredCustomAgent>, StoreError>>,
+    },
+    MutateCustomAgent {
+        mutation: assistant_runtime::CustomAgentMutation,
+        reply: oneshot::Sender<Result<Option<assistant_runtime::StoredCustomAgent>, StoreError>>,
+    },
+    ListPlugins {
+        reply: oneshot::Sender<Result<Vec<assistant_runtime::StoredPlugin>, StoreError>>,
+    },
+    ChangePluginSettings {
+        change: assistant_runtime::PluginSettingsChange,
+        reply: oneshot::Sender<Result<assistant_runtime::StoredPlugin, StoreError>>,
+    },
+    ListPluginOperations {
+        reply: oneshot::Sender<Result<Vec<assistant_runtime::StoredPluginOperation>, StoreError>>,
+    },
+    AcceptPluginOperation {
+        operation: assistant_runtime::StoredPluginOperation,
+        reply: oneshot::Sender<Result<assistant_runtime::StoredPluginOperation, StoreError>>,
+    },
+    AdvancePluginOperation {
+        update: assistant_runtime::PluginOperationUpdate,
+        reply: oneshot::Sender<Result<assistant_runtime::StoredPluginOperation, StoreError>>,
+    },
     LoadDefaultAgentShell {
         reply: oneshot::Sender<Result<Option<assistant_protocol::ShellKind>, StoreError>>,
     },
@@ -181,17 +215,25 @@ pub(super) enum Command {
         removal: WorkspaceRemoval,
         reply: oneshot::Sender<Result<StoredWorkspace, StoreError>>,
     },
+    RestoreWorkspace {
+        restoration: WorkspaceRestoration,
+        reply: oneshot::Sender<Result<StoredWorkspace, StoreError>>,
+    },
     UploadAttachment {
         upload: NewAttachmentUpload,
         reply: oneshot::Sender<Result<StoredAttachment, StoreError>>,
     },
     CreateSession {
-        session: NewStoredSession,
+        session: Box<NewStoredSession>,
         reply: oneshot::Sender<Result<StoredSession, StoreError>>,
     },
     MaterializeSession {
         materialization: Box<NewStoredSessionMaterialization>,
         reply: oneshot::Sender<Result<StoredSessionMaterialization, StoreError>>,
+    },
+    GetSessionMaterialization {
+        key: assistant_protocol::IdempotencyKey,
+        reply: oneshot::Sender<Result<Option<StoredSessionMaterialization>, StoreError>>,
     },
     ForkSession {
         fork: Box<SessionFork>,

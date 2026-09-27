@@ -9,6 +9,7 @@ pub(super) fn entry() -> Migration {
         version: "0.25.3",
         // 老 Host 不认识绑定，会用不同解释器执行命令，不能继续写入此库。
         min_compatible_host_version: Some("0.25.3"),
+        rebuilds_referenced_tables: false,
         validate_source: v0_25_1::validate,
         apply,
         validate,

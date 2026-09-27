@@ -10,7 +10,7 @@ export async function createResourceMenu(on_workspace: () => void, on_browser: (
   const items: IconMenuItem[] = [];
   let menu: Menu | undefined;
   try {
-    items.push(await IconMenuItem.new({ text: "工作空间", icon: NativeIcon.Folder, action: on_workspace }));
+    items.push(await IconMenuItem.new({ text: "项目", icon: NativeIcon.Folder, action: on_workspace }));
     items.push(await IconMenuItem.new({ text: "浏览器", icon: NativeIcon.Network, action: on_browser }));
     items.push(await IconMenuItem.new({ text: "终端", icon: NativeIcon.Computer, enabled: false, action: on_terminal }));
     menu = await Menu.new({ items });

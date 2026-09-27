@@ -163,6 +163,7 @@ pub trait ModelServiceFactory: Send + Sync {
 /// Bundle 不进入 Protocol 或 Conversation；不同 Run 必须分别由
 /// [`RunToolFactory`] 编译，不得修改共享的可变路径解析器。
 pub struct RunToolBundle {
+    artifact_files: Option<Arc<dyn crate::ArtifactFiles>>,
     tools: ToolSetSnapshot,
     infrastructure_policies: Vec<Arc<dyn ToolPolicy>>,
     default_rules: Option<Arc<dyn crate::PermissionRuleSource>>,
@@ -187,9 +188,20 @@ impl RunToolBundle {
     pub fn new(tools: ToolSetSnapshot, infrastructure_policies: Vec<Arc<dyn ToolPolicy>>) -> Self {
         Self {
             tools,
+            artifact_files: None,
             infrastructure_policies,
             default_rules: None,
         }
+    }
+
+    /// 注入当前 Session 冻结根的交付文件检查能力，供父 Agent 声明工具使用。
+    pub fn with_artifact_files(mut self, files: Arc<dyn crate::ArtifactFiles>) -> Self {
+        self.artifact_files = Some(files);
+        self
+    }
+
+    pub fn artifact_files(&self) -> Option<Arc<dyn crate::ArtifactFiles>> {
+        self.artifact_files.clone()
     }
 
     /// 注入宿主默认权限规则；不落入用户可编辑的权限文件。

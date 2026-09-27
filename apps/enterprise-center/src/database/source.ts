@@ -6,6 +6,8 @@ import { UserEntity } from '../users/entity.js';
 import { CenterIdentityEntity } from '../identity/entity.js';
 import { CallEntity, RecordingEntity } from '../llm/entity.js';
 import { AuditEntity } from '../audit/entity.js';
+import { CustomAgentEntity } from '../agents/entity.js';
+import { PluginEntity, PluginPackageEntity } from '../plugins/entity.js';
 
 /** 唯一业务连接池；仅在 SQL 升级/准入完成后初始化，不运行任何 Schema 同步。 */
 export function createDataSource(config: DatabaseConfig): DataSource {
@@ -22,6 +24,9 @@ export function createDataSource(config: DatabaseConfig): DataSource {
       ProviderEntity,
       FixedConfigEntity,
       ModelSettingsEntity,
+      CustomAgentEntity,
+      PluginEntity,
+      PluginPackageEntity,
     ],
     synchronize: false,
     dropSchema: false,

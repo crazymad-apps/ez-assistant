@@ -7,6 +7,7 @@ pub(super) fn entry() -> Migration {
     Migration {
         version: "0.25.2",
         min_compatible_host_version: Some("0.25.2"),
+        rebuilds_referenced_tables: false,
         validate_source: v0_25_1::validate,
         apply: |_: &Connection| -> Result<()> { Ok(()) },
         validate: v0_25_1::validate,

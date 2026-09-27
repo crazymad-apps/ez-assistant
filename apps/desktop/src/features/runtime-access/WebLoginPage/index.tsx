@@ -58,7 +58,7 @@ export const WebLoginPage = observer(function WebLoginPage({
               type="submit"
               variant="primary"
             >
-              {connection.pending ? "连接中…" : "进入工作空间"}
+              {connection.pending ? "连接中…" : "进入项目"}
               <span aria-hidden="true">→</span>
             </Button>
             <div className={styles.feedback} aria-live="polite">

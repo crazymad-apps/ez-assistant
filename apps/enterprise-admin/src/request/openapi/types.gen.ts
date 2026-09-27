@@ -125,6 +125,11 @@ export type ResetPasswordRequest = {
     new_password: string;
 };
 
+export type PluginPlatform = {
+    os: 'macos' | 'windows' | 'linux';
+    arch: 'x64' | 'arm64';
+};
+
 export type ModelSelection = {
     provider_instance_id: string;
     model_id: string;
@@ -137,6 +142,15 @@ export type AuditUserFields = {
 };
 
 export type AuditDetails = {
+    name?: string;
+    version?: string;
+    platforms?: Array<PluginPlatform>;
+    result?: 'created' | 'replaced' | 'unchanged';
+    publication?: 'unpublished' | 'listed' | 'deprecated';
+    sha256?: string;
+    previous_sha256?: string;
+    skill_count?: number;
+    mcp_count?: number;
     call_id?: string;
     side?: 'request' | 'response';
     enabled?: boolean;
@@ -322,6 +336,109 @@ export type RuntimeModelConfiguration = {
     parameters?: ModelParameters;
 };
 
+export type UsageTotals = {
+    calls: string;
+    forwarded: string;
+    rejected: string;
+    upstream_error: string;
+    interrupted: string;
+    unknown: string;
+    in_progress: string;
+    avg_duration_ms: string | null;
+    available: string;
+    partial: string;
+    unavailable: string;
+    pending: string;
+    input_tokens: string | null;
+    output_tokens: string | null;
+    total_tokens: string | null;
+    cached_input_tokens: string | null;
+    reasoning_tokens: string | null;
+    input_samples: string;
+    output_samples: string;
+    total_samples: string;
+    cached_samples: string;
+    reasoning_samples: string;
+};
+
+export type UsageBucket = {
+    calls: string;
+    forwarded: string;
+    rejected: string;
+    upstream_error: string;
+    interrupted: string;
+    unknown: string;
+    in_progress: string;
+    avg_duration_ms: string | null;
+    available: string;
+    partial: string;
+    unavailable: string;
+    pending: string;
+    input_tokens: string | null;
+    output_tokens: string | null;
+    total_tokens: string | null;
+    cached_input_tokens: string | null;
+    reasoning_tokens: string | null;
+    input_samples: string;
+    output_samples: string;
+    total_samples: string;
+    cached_samples: string;
+    reasoning_samples: string;
+    start: string;
+    incomplete: boolean;
+};
+
+export type UsageGroup = {
+    calls: string;
+    forwarded: string;
+    rejected: string;
+    upstream_error: string;
+    interrupted: string;
+    unknown: string;
+    in_progress: string;
+    avg_duration_ms: string | null;
+    available: string;
+    partial: string;
+    unavailable: string;
+    pending: string;
+    input_tokens: string | null;
+    output_tokens: string | null;
+    total_tokens: string | null;
+    cached_input_tokens: string | null;
+    reasoning_tokens: string | null;
+    input_samples: string;
+    output_samples: string;
+    total_samples: string;
+    cached_samples: string;
+    reasoning_samples: string;
+    user_id: number | null;
+    username: string | null;
+    provider_instance_id: string | null;
+    provider_name: string | null;
+    model_id: string | null;
+};
+
+export type UsagePage = {
+    from: string;
+    to: string;
+    available_from: string;
+    timezone: string;
+    granularity: 'hour' | 'day' | 'month';
+    group_by: 'user' | 'model';
+    summary: UsageTotals;
+    buckets: Array<UsageBucket>;
+    groups: Array<UsageGroup>;
+    group_total: number;
+    limit: number;
+    offset: number;
+};
+
+export type UsageModelOption = {
+    provider_instance_id: string;
+    provider_name: string;
+    model_id: string;
+};
+
 export type CallSnapshot = {
     state: 'disabled' | 'pending' | 'complete' | 'partial' | 'failed' | 'expired' | 'missing';
     bytes: number | null;
@@ -343,6 +460,13 @@ export type CallDetails = {
     http_status: number | null;
     reason: string | null;
     outcome: 'in_progress' | 'forwarded' | 'rejected' | 'upstream_error' | 'interrupted' | 'unknown';
+    usage_state: 'pending' | 'available' | 'partial' | 'unavailable';
+    usage_reason: string | null;
+    input_tokens: string | null;
+    output_tokens: string | null;
+    total_tokens: string | null;
+    cached_input_tokens: string | null;
+    reasoning_tokens: string | null;
     request: CallSnapshot;
     response: CallSnapshot;
 };
@@ -378,6 +502,155 @@ export type ModelTestResult = {
     http_status: number | null;
     connected: boolean;
     reason: string | null;
+};
+
+export type PluginVersionSummary = {
+    version: string;
+    platforms: Array<PluginPlatform>;
+    min_host_version: string;
+    skills: Array<string>;
+    mcp: Array<string>;
+    archive_format: 'zip' | 'tar_gzip';
+    sha256: string;
+    size_bytes: number;
+};
+
+export type PluginRecord = {
+    name: string;
+    display_name: string;
+    description: string;
+    publication: 'unpublished' | 'listed' | 'deprecated';
+    versions: Array<PluginVersionSummary>;
+};
+
+export type PluginConfigurationRequirement = {
+    name: string;
+    label: string;
+    required: boolean;
+    secret: boolean;
+};
+
+export type PluginExternalSoftwareRequirement = {
+    name: string;
+    display_name: string;
+    instructions: string;
+    download_url?: string;
+    platforms?: Array<PluginPlatform>;
+};
+
+export type PluginVersionDetail = {
+    version: string;
+    platforms: Array<PluginPlatform>;
+    min_host_version: string;
+    skills: Array<string>;
+    mcp: Array<string>;
+    archive_format: 'zip' | 'tar_gzip';
+    sha256: string;
+    size_bytes: number;
+    updated_at: string;
+    configuration: Array<PluginConfigurationRequirement>;
+    external_software: Array<PluginExternalSoftwareRequirement>;
+};
+
+export type PluginDetail = {
+    name: string;
+    display_name: string;
+    description: string;
+    publication: 'unpublished' | 'listed' | 'deprecated';
+    versions: Array<PluginVersionDetail>;
+    dependent_agents: Array<string>;
+};
+
+export type PluginDescriptionInput = {
+    display_name: string;
+    description: string;
+};
+
+export type PluginPublicationInput = {
+    listed: boolean;
+};
+
+export type PackageUploadResult = {
+    name: string;
+    version: string;
+    platforms: Array<PluginPlatform>;
+    archive_format: 'zip' | 'tar_gzip';
+    sha256: string;
+    size_bytes: number;
+    result: 'created' | 'replaced' | 'unchanged';
+};
+
+export type PackageCurrent = {
+    name: string;
+    version: string;
+    platforms: Array<PluginPlatform>;
+    archive_format: 'zip' | 'tar_gzip';
+    sha256: string;
+    size_bytes: number;
+};
+
+export type PluginResolveInput = {
+    os: 'macos' | 'windows' | 'linux';
+    arch: 'x64' | 'arm64';
+    host_version: string;
+    installed_version?: string;
+    required_skills?: Array<string>;
+    required_mcp?: Array<string>;
+};
+
+export type PluginResolvedPackage = {
+    version: string;
+    platforms: Array<PluginPlatform>;
+    min_host_version: string;
+    skills: Array<string>;
+    mcp: Array<string>;
+    archive_format: 'zip' | 'tar_gzip';
+    sha256: string;
+    size_bytes: number;
+    name: string;
+};
+
+export type PluginResolution = {
+    package: PluginResolvedPackage;
+    update_available: boolean;
+};
+
+export type AgentDependencyDiagnostic = {
+    kind: 'skill' | 'mcp';
+    name: string;
+    plugin?: string;
+    status: 'available' | 'host_check_required' | 'plugin_missing' | 'plugin_unpublished' | 'plugin_deprecated' | 'capability_missing';
+    platforms: Array<PluginPlatform>;
+};
+
+export type AgentSummary = {
+    name: string;
+    description: string;
+    skill_count: number;
+    mcp_count: number;
+    diagnostics: Array<AgentDependencyDiagnostic>;
+};
+
+export type AgentCapabilityReference = {
+    name: string;
+    plugin?: string;
+};
+
+export type AgentConfig = {
+    name: string;
+    description: string;
+    prompt: string;
+    skills: Array<AgentCapabilityReference>;
+    mcp: Array<AgentCapabilityReference>;
+};
+
+export type AgentDetail = {
+    name: string;
+    description: string;
+    prompt: string;
+    skills: Array<AgentCapabilityReference>;
+    mcp: Array<AgentCapabilityReference>;
+    diagnostics: Array<AgentDependencyDiagnostic>;
 };
 
 export type LoginRequestWritable = {
@@ -1060,6 +1333,64 @@ export type GetRuntimeModelConfigurationResponses = {
 
 export type GetRuntimeModelConfigurationResponse = GetRuntimeModelConfigurationResponses[keyof GetRuntimeModelConfigurationResponses];
 
+export type GetLlmUsageData = {
+    body?: never;
+    path?: never;
+    query?: {
+        from?: string;
+        to?: string;
+        user_id?: number;
+        provider_instance_id?: string;
+        model_id?: string;
+        kind?: string;
+        outcome?: string;
+        granularity?: string;
+        group_by?: string;
+        limit?: number;
+        offset?: number;
+    };
+    url: '/api/llm-usage';
+};
+
+export type GetLlmUsageErrors = {
+    /**
+     * 身份、参数或存储失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type GetLlmUsageError = GetLlmUsageErrors[keyof GetLlmUsageErrors];
+
+export type GetLlmUsageResponses = {
+    200: UsagePage;
+};
+
+export type GetLlmUsageResponse = GetLlmUsageResponses[keyof GetLlmUsageResponses];
+
+export type ListLlmUsageModelsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        search?: unknown;
+    };
+    url: '/api/llm-usage/models';
+};
+
+export type ListLlmUsageModelsErrors = {
+    /**
+     * 身份、参数或存储失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type ListLlmUsageModelsError = ListLlmUsageModelsErrors[keyof ListLlmUsageModelsErrors];
+
+export type ListLlmUsageModelsResponses = {
+    200: Array<UsageModelOption>;
+};
+
+export type ListLlmUsageModelsResponse = ListLlmUsageModelsResponses[keyof ListLlmUsageModelsResponses];
+
 export type ListLlmCallsData = {
     body?: never;
     path?: never;
@@ -1208,3 +1539,408 @@ export type TestModelConfigurationResponses = {
 };
 
 export type TestModelConfigurationResponse = TestModelConfigurationResponses[keyof TestModelConfigurationResponses];
+
+export type ListPluginsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/plugins';
+};
+
+export type ListPluginsErrors = {
+    /**
+     * 身份、归档、存储或提交失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type ListPluginsError = ListPluginsErrors[keyof ListPluginsErrors];
+
+export type ListPluginsResponses = {
+    200: Array<PluginRecord>;
+};
+
+export type ListPluginsResponse = ListPluginsResponses[keyof ListPluginsResponses];
+
+export type GetPluginData = {
+    body?: never;
+    path: {
+        name: string;
+    };
+    query?: never;
+    url: '/api/plugins/{name}';
+};
+
+export type GetPluginErrors = {
+    /**
+     * 身份、归档、存储或提交失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type GetPluginError = GetPluginErrors[keyof GetPluginErrors];
+
+export type GetPluginResponses = {
+    200: PluginDetail;
+};
+
+export type GetPluginResponse = GetPluginResponses[keyof GetPluginResponses];
+
+export type UpdatePluginData = {
+    body: PluginDescriptionInput;
+    headers: {
+        /**
+         * 管理详情返回的当前 ETag
+         */
+        'If-Match': string;
+    };
+    path: {
+        name: string;
+    };
+    query?: never;
+    url: '/api/plugins/{name}';
+};
+
+export type UpdatePluginErrors = {
+    /**
+     * 身份、归档、存储或提交失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type UpdatePluginError = UpdatePluginErrors[keyof UpdatePluginErrors];
+
+export type UpdatePluginResponses = {
+    200: PluginDetail;
+};
+
+export type UpdatePluginResponse = UpdatePluginResponses[keyof UpdatePluginResponses];
+
+export type SetPluginPublicationData = {
+    body: PluginPublicationInput;
+    headers: {
+        /**
+         * 管理详情返回的当前 ETag
+         */
+        'If-Match': string;
+    };
+    path: {
+        name: string;
+    };
+    query?: never;
+    url: '/api/plugins/{name}/publication';
+};
+
+export type SetPluginPublicationErrors = {
+    /**
+     * 身份、归档、存储或提交失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type SetPluginPublicationError = SetPluginPublicationErrors[keyof SetPluginPublicationErrors];
+
+export type SetPluginPublicationResponses = {
+    200: PluginDetail;
+};
+
+export type SetPluginPublicationResponse = SetPluginPublicationResponses[keyof SetPluginPublicationResponses];
+
+export type UploadPluginPackageData = {
+    body: Blob | File;
+    path?: never;
+    query?: never;
+    url: '/api/plugin-packages';
+};
+
+export type UploadPluginPackageErrors = {
+    /**
+     * 身份、归档、存储或提交失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type UploadPluginPackageError = UploadPluginPackageErrors[keyof UploadPluginPackageErrors];
+
+export type UploadPluginPackageResponses = {
+    200: PackageUploadResult;
+    201: PackageUploadResult;
+};
+
+export type UploadPluginPackageResponse = UploadPluginPackageResponses[keyof UploadPluginPackageResponses];
+
+export type GetCurrentPluginPackageData = {
+    body?: never;
+    path: {
+        name: string;
+        version: string;
+    };
+    query?: never;
+    url: '/api/plugin-packages/{name}/versions/{version}';
+};
+
+export type GetCurrentPluginPackageErrors = {
+    /**
+     * 身份、归档、存储或提交失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type GetCurrentPluginPackageError = GetCurrentPluginPackageErrors[keyof GetCurrentPluginPackageErrors];
+
+export type GetCurrentPluginPackageResponses = {
+    200: PackageCurrent;
+};
+
+export type GetCurrentPluginPackageResponse = GetCurrentPluginPackageResponses[keyof GetCurrentPluginPackageResponses];
+
+export type ListRuntimePluginsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/runtime/plugins';
+};
+
+export type ListRuntimePluginsErrors = {
+    /**
+     * 身份、归档、存储或提交失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type ListRuntimePluginsError = ListRuntimePluginsErrors[keyof ListRuntimePluginsErrors];
+
+export type ListRuntimePluginsResponses = {
+    200: Array<PluginRecord>;
+};
+
+export type ListRuntimePluginsResponse = ListRuntimePluginsResponses[keyof ListRuntimePluginsResponses];
+
+export type GetRuntimePluginData = {
+    body?: never;
+    path: {
+        name: string;
+    };
+    query?: never;
+    url: '/api/runtime/plugins/{name}';
+};
+
+export type GetRuntimePluginErrors = {
+    /**
+     * 身份、归档、存储或提交失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type GetRuntimePluginError = GetRuntimePluginErrors[keyof GetRuntimePluginErrors];
+
+export type GetRuntimePluginResponses = {
+    200: PluginRecord;
+};
+
+export type GetRuntimePluginResponse = GetRuntimePluginResponses[keyof GetRuntimePluginResponses];
+
+export type ResolveRuntimePluginData = {
+    body: PluginResolveInput;
+    path: {
+        name: string;
+    };
+    query?: never;
+    url: '/api/runtime/plugins/{name}/resolve';
+};
+
+export type ResolveRuntimePluginErrors = {
+    /**
+     * 身份、归档、存储或提交失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type ResolveRuntimePluginError = ResolveRuntimePluginErrors[keyof ResolveRuntimePluginErrors];
+
+export type ResolveRuntimePluginResponses = {
+    200: PluginResolution;
+};
+
+export type ResolveRuntimePluginResponse = ResolveRuntimePluginResponses[keyof ResolveRuntimePluginResponses];
+
+export type DownloadRuntimePluginPackageData = {
+    body?: never;
+    headers: {
+        /**
+         * 版本当前 SHA 的带引号 ETag
+         */
+        'If-Match': string;
+    };
+    path: {
+        name: string;
+        version: string;
+    };
+    query?: never;
+    url: '/api/runtime/plugins/{name}/versions/{version}/package';
+};
+
+export type DownloadRuntimePluginPackageErrors = {
+    /**
+     * 身份、归档、存储或提交失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type DownloadRuntimePluginPackageError = DownloadRuntimePluginPackageErrors[keyof DownloadRuntimePluginPackageErrors];
+
+export type DownloadRuntimePluginPackageResponses = {
+    200: Blob | File;
+};
+
+export type DownloadRuntimePluginPackageResponse = DownloadRuntimePluginPackageResponses[keyof DownloadRuntimePluginPackageResponses];
+
+export type ListAgentsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/agents';
+};
+
+export type ListAgentsErrors = {
+    /**
+     * 输入、身份、条件写或依赖失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type ListAgentsError = ListAgentsErrors[keyof ListAgentsErrors];
+
+export type ListAgentsResponses = {
+    200: Array<AgentSummary>;
+};
+
+export type ListAgentsResponse = ListAgentsResponses[keyof ListAgentsResponses];
+
+export type CreateAgentData = {
+    body: AgentConfig;
+    path?: never;
+    query?: never;
+    url: '/api/agents';
+};
+
+export type CreateAgentErrors = {
+    /**
+     * 输入、身份、条件写或依赖失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type CreateAgentError = CreateAgentErrors[keyof CreateAgentErrors];
+
+export type CreateAgentResponses = {
+    201: AgentConfig;
+};
+
+export type CreateAgentResponse = CreateAgentResponses[keyof CreateAgentResponses];
+
+export type DeleteAgentData = {
+    body?: never;
+    headers: {
+        /**
+         * 管理详情返回的当前 ETag
+         */
+        'If-Match': string;
+    };
+    path: {
+        name: string;
+    };
+    query?: never;
+    url: '/api/agents/{name}';
+};
+
+export type DeleteAgentErrors = {
+    /**
+     * 输入、身份、条件写或依赖失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type DeleteAgentError = DeleteAgentErrors[keyof DeleteAgentErrors];
+
+export type DeleteAgentResponses = {
+    204: void;
+};
+
+export type DeleteAgentResponse = DeleteAgentResponses[keyof DeleteAgentResponses];
+
+export type GetAgentData = {
+    body?: never;
+    path: {
+        name: string;
+    };
+    query?: never;
+    url: '/api/agents/{name}';
+};
+
+export type GetAgentErrors = {
+    /**
+     * 输入、身份、条件写或依赖失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type GetAgentError = GetAgentErrors[keyof GetAgentErrors];
+
+export type GetAgentResponses = {
+    200: AgentDetail;
+};
+
+export type GetAgentResponse = GetAgentResponses[keyof GetAgentResponses];
+
+export type UpdateAgentData = {
+    body: AgentConfig;
+    headers: {
+        /**
+         * 管理详情返回的当前 ETag
+         */
+        'If-Match': string;
+    };
+    path: {
+        name: string;
+    };
+    query?: never;
+    url: '/api/agents/{name}';
+};
+
+export type UpdateAgentErrors = {
+    /**
+     * 输入、身份、条件写或依赖失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type UpdateAgentError = UpdateAgentErrors[keyof UpdateAgentErrors];
+
+export type UpdateAgentResponses = {
+    200: AgentConfig;
+};
+
+export type UpdateAgentResponse = UpdateAgentResponses[keyof UpdateAgentResponses];
+
+export type ListRuntimeAgentsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/runtime/agents';
+};
+
+export type ListRuntimeAgentsErrors = {
+    /**
+     * 输入、身份、条件写或依赖失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type ListRuntimeAgentsError = ListRuntimeAgentsErrors[keyof ListRuntimeAgentsErrors];
+
+export type ListRuntimeAgentsResponses = {
+    200: Array<AgentConfig>;
+};
+
+export type ListRuntimeAgentsResponse = ListRuntimeAgentsResponses[keyof ListRuntimeAgentsResponses];

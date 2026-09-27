@@ -16,13 +16,23 @@ pub enum StoredWorkspaceLifecycle {
 pub struct StoredWorkspace {
     pub workspace_id: WorkspaceId,
     pub label: String,
-    pub user_directory: String,
+    /// Host canonicalize 后保存的可选用户目录；`None` 时实际工作位置是 `agent_directory`。
+    pub user_directory: Option<String>,
     pub additional_directories: Vec<String>,
     pub agent_directory: String,
     pub lifecycle: StoredWorkspaceLifecycle,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
     pub removed_at_ms: Option<i64>,
+}
+
+impl StoredWorkspace {
+    /// 返回新 Session 和目录消费者应使用的非空实际工作位置。
+    pub fn effective_working_directory(&self) -> &str {
+        self.user_directory
+            .as_deref()
+            .unwrap_or(self.agent_directory.as_str())
+    }
 }
 
 /// Attachment 的正文及 Session 稳定视图是否可供 Agent 读取。
@@ -117,7 +127,7 @@ fn safe_attachment_display_name(name: &str) -> String {
 pub struct NewWorkspaceRegistration {
     pub workspace_id: WorkspaceId,
     pub label: String,
-    pub requested_primary_directory: String,
+    pub requested_primary_directory: Option<String>,
     pub requested_additional_directories: Vec<String>,
     pub changed_at_ms: i64,
 }
@@ -127,7 +137,7 @@ pub struct NewWorkspaceRegistration {
 pub struct WorkspaceUpdate {
     pub workspace_id: WorkspaceId,
     pub label: String,
-    pub requested_primary_directory: String,
+    pub requested_primary_directory: Option<String>,
     pub requested_additional_directories: Vec<String>,
     pub changed_at_ms: i64,
 }
@@ -135,6 +145,13 @@ pub struct WorkspaceUpdate {
 /// Runtime 请求 Store 假删 Workspace。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceRemoval {
+    pub workspace_id: WorkspaceId,
+    pub changed_at_ms: i64,
+}
+
+/// Runtime 请求 Store 按稳定 ID 恢复 Workspace。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceRestoration {
     pub workspace_id: WorkspaceId,
     pub changed_at_ms: i64,
 }

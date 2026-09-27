@@ -1,6 +1,8 @@
 //! Center 私有协议适配；限制时间、响应体与重定向，不向应用协议暴露后端秘密。
 
+mod agents;
 mod models;
+pub(crate) mod plugins;
 pub(crate) use models::ModelConfiguration;
 
 use super::CenterError;

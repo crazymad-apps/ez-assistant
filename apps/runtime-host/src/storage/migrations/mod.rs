@@ -15,6 +15,8 @@ mod v0_25_2;
 mod v0_25_3;
 mod v0_26_0;
 mod v0_27_0;
+mod v0_28_0;
+mod v0_28_1;
 
 #[cfg(test)]
 use std::fs;
@@ -92,6 +94,8 @@ struct Migration {
     version: &'static str,
     /// None 仅用于引入兼容表之前的历史基线；后续版本显式声明且不得下降。
     min_compatible_host_version: Option<&'static str>,
+    /// 仅用于必须重建被外键引用表的已核实版本；控制器负责临时切换 enforcement。
+    rebuilds_referenced_tables: bool,
     /// 无账本的既有文件必须先识别已知旧结构；新建空库不走此入口。
     validate_source: fn(&Connection) -> Result<()>,
     apply: fn(&Connection) -> Result<()>,
@@ -120,6 +124,8 @@ pub(super) fn align(
             v0_25_3::entry(),
             v0_26_0::entry(),
             v0_27_0::entry(),
+            v0_28_0::entry(),
+            v0_28_1::entry(),
         ],
         progress,
     )
@@ -399,54 +405,75 @@ fn apply_version(
     expected: usize,
     relocation: Option<&crate::host_layout::paths::Relocation>,
 ) -> Result<()> {
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if completed_prefix(&transaction, versions)? != expected {
-        return Err(MigrationError::InvalidLedger);
-    }
-    let minimum = compatibility::read(&transaction)?;
-    compatibility::admit(
-        minimum.as_ref(),
-        versions.last().ok_or(MigrationError::InvalidManifest)?,
-    )?;
-    compatibility::validate_committed(minimum.as_ref(), manifest, expected)?;
-    transaction.execute_batch(LEDGER)?;
-    transaction.authorizer(Some(migration_authorizer))?;
-    let outcome = (migration.apply)(&transaction).and_then(|()| {
-        if migration.version == "0.27.0"
-            && let Some(paths) = relocation
-        {
-            v0_27_0::relocate(&transaction, paths)?;
+    if migration.rebuilds_referenced_tables {
+        connection.pragma_update(None, "foreign_keys", false)?;
+        let enabled: bool =
+            connection.pragma_query_value(None, "foreign_keys", |row| row.get(0))?;
+        if enabled {
+            return Err(MigrationError::Integrity);
         }
+    }
+
+    let outcome = (|| -> Result<()> {
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if completed_prefix(&transaction, versions)? != expected {
+            return Err(MigrationError::InvalidLedger);
+        }
+        let minimum = compatibility::read(&transaction)?;
+        compatibility::admit(
+            minimum.as_ref(),
+            versions.last().ok_or(MigrationError::InvalidManifest)?,
+        )?;
+        compatibility::validate_committed(minimum.as_ref(), manifest, expected)?;
+        transaction.execute_batch(LEDGER)?;
+        transaction.authorizer(Some(migration_authorizer))?;
+        let outcome = (migration.apply)(&transaction).and_then(|()| {
+            if migration.version == "0.27.0"
+                && let Some(paths) = relocation
+            {
+                v0_27_0::relocate(&transaction, paths)?;
+            }
+            Ok(())
+        });
+        transaction.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+        // 显式回滚当前版本，避免把失败版本当作成功；后继入口不会得到执行机会。
+        if let Err(error) = outcome {
+            transaction.rollback()?;
+            return Err(error);
+        }
+        validate_read_only(&transaction, migration.validate)?;
+        compatibility::record(&transaction, migration.min_compatible_host_version)?;
+        backup::check_integrity(&transaction)?;
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|d| i64::try_from(d.as_millis()).ok())
+            .ok_or(MigrationError::InvalidLedger)?;
+        transaction.execute(
+            "INSERT INTO schema_migrations(version, applied_at_ms) VALUES (?1, ?2)",
+            rusqlite::params![migration.version, timestamp],
+        )?;
+        if completed_prefix(&transaction, versions)? != expected + 1 {
+            return Err(MigrationError::InvalidLedger);
+        }
+        compatibility::validate_committed(
+            compatibility::read(&transaction)?.as_ref(),
+            manifest,
+            expected + 1,
+        )?;
+        transaction.commit()?;
         Ok(())
-    });
-    transaction.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
-    // 显式回滚当前版本，避免把失败版本当作成功；后继入口不会得到执行机会。
-    if let Err(error) = outcome {
-        transaction.rollback()?;
-        return Err(error);
+    })();
+
+    if migration.rebuilds_referenced_tables {
+        connection.pragma_update(None, "foreign_keys", true)?;
+        let enabled: bool =
+            connection.pragma_query_value(None, "foreign_keys", |row| row.get(0))?;
+        if !enabled {
+            return Err(MigrationError::Integrity);
+        }
     }
-    validate_read_only(&transaction, migration.validate)?;
-    compatibility::record(&transaction, migration.min_compatible_host_version)?;
-    backup::check_integrity(&transaction)?;
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|d| i64::try_from(d.as_millis()).ok())
-        .ok_or(MigrationError::InvalidLedger)?;
-    transaction.execute(
-        "INSERT INTO schema_migrations(version, applied_at_ms) VALUES (?1, ?2)",
-        rusqlite::params![migration.version, timestamp],
-    )?;
-    if completed_prefix(&transaction, versions)? != expected + 1 {
-        return Err(MigrationError::InvalidLedger);
-    }
-    compatibility::validate_committed(
-        compatibility::read(&transaction)?.as_ref(),
-        manifest,
-        expected + 1,
-    )?;
-    transaction.commit()?;
-    Ok(())
+    outcome
 }
 
 fn migration_authorizer(context: AuthContext<'_>) -> Authorization {

@@ -18,6 +18,7 @@ pub enum SkillSourceSnapshot {
     /// Host 根的公共补充，低于个人 Skill。
     HostSupplement,
     UserAgents,
+    Plugin,
 }
 
 /// 当前管理投影中一个名称的可用状态。
@@ -36,6 +37,9 @@ pub enum SkillHealthSnapshot {
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct SkillSummarySnapshot {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub plugin_name: Option<String>,
     pub description: String,
     pub source: SkillSourceSnapshot,
     pub model_invocable: bool,

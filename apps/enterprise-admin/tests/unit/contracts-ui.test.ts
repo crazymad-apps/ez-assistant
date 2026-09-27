@@ -35,6 +35,33 @@ describe('正式契约', () => {
     expect(view.actor).toBe('未认证');
     expect(JSON.stringify(view)).not.toContain('secret');
   });
+  it('C01 审计以中文显示操作与可核对的插件包摘要', () => {
+    const sha256 = 'a'.repeat(64);
+    const view = auditView({
+      id: 3,
+      occurred_at: '2026-09-23T00:00:00Z',
+      actor_user_id: 1,
+      target_user_id: null,
+      actor_username: 'admin',
+      target_username: null,
+      action: 'plugin_package_uploaded',
+      success: true,
+      reason_code: null,
+      request_id: 'request',
+      details: {
+        name: 'warehouse-cad-guidance',
+        version: '0.2.0',
+        platforms: [{ os: 'macos', arch: 'arm64' }],
+        result: 'created',
+        sha256,
+      },
+    });
+    expect(view.action).toBe('上传插件包');
+    expect(view.detail).toContain('插件：warehouse-cad-guidance');
+    expect(view.detail).toContain('版本：0.2.0');
+    expect(view.detail).toContain(`SHA-256：${sha256}`);
+    expect(view.detail).not.toContain('undefined');
+  });
   it('审计优先显示关联用户名，无关联时不猜测失败登录账号', () => {
     const record = {
       id: 2,

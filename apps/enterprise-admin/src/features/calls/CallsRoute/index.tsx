@@ -1,5 +1,6 @@
 import { useCallback, useState } from 'react';
-import { useNavigate } from 'react-router';
+import { useNavigate, useSearchParams } from 'react-router';
+import dayjs from 'dayjs';
 import { Alert, Button, Card, DatePicker, Form, Input, InputNumber, Pagination, Select, Space, Table } from 'antd';
 import type { TableProps } from 'antd';
 import { observer } from 'mobx-react-lite';
@@ -8,13 +9,23 @@ import { callApi } from '../../../request/calls';
 import { useResourceQuery } from '../../../request/useResourceQuery';
 import { useElementHeight } from '../../../components/useElementHeight';
 import { RecordingDialog } from '../RecordingDialog';
-import { outcomeLabels, snapshotLabels } from '../model';
+import { outcomeLabels, snapshotLabels, usageLabels } from '../model';
 import styles from './index.module.scss';
 
 type Query = NonNullable<ListLlmCallsData['query']>;
 
 export const CallsRoute = observer(function CallsRoute() {
-  const [draft, setDraft] = useState<Query>({ limit: 50, offset: 0 });
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [draft, setDraft] = useState<Query>(() => {
+    const initial: Query = { limit: 50, offset: 0 };
+    for (const name of ['id', 'provider_instance_id', 'model_id', 'kind', 'outcome', 'from', 'to'] as const) {
+      const value = searchParams.get(name);
+      if (value) Object.assign(initial, { [name]: value });
+    }
+    const user = searchParams.get('user_id');
+    if (user && /^[1-9][0-9]*$/.test(user)) initial.user_id = Number(user);
+    return initial;
+  });
   const [query, setQuery] = useState<Query>(draft);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const navigate = useNavigate();
@@ -62,6 +73,12 @@ export const CallsRoute = observer(function CallsRoute() {
     },
     { title: 'HTTP', dataIndex: 'http_status', width: 80 },
     {
+      title: '总 Token',
+      key: 'usage',
+      width: 130,
+      render: (_: unknown, row: CallDetails) => `${row.total_tokens ?? '—'} · ${usageLabels[row.usage_state]}`,
+    },
+    {
       title: '请求 / 响应快照',
       key: 'snapshot',
       width: 180,
@@ -77,7 +94,7 @@ export const CallsRoute = observer(function CallsRoute() {
       align: 'center',
 
       render: (_: unknown, row: CallDetails) => (
-        <Button type="link" size="small" onClick={() => navigate(`/calls/${row.id}`)}>
+        <Button type="link" size="small" onClick={() => navigate(`/calls/${row.id}?${searchParams.toString()}`)}>
           详情
         </Button>
       ),
@@ -95,11 +112,27 @@ export const CallsRoute = observer(function CallsRoute() {
           </Button>
         }
       >
+        {settings.value && (
+          <Alert
+            type="info"
+            title={
+              settings.value.enabled
+                ? '当前已开启请求和响应正文采集；每条调用以开始时的策略为准。'
+                : '当前未开启请求和响应正文采集；调用索引和 Token 用量仍会记录。'
+            }
+            action={!settings.value.enabled && <Button onClick={() => setSettingsOpen(true)}>设置采集</Button>}
+          />
+        )}
         <Form
           layout="inline"
           className={styles.filters}
           onFinish={() => {
-            setQuery({ ...draft, offset: 0 });
+            const next = { ...draft, offset: 0 };
+            setQuery(next);
+            const params = new URLSearchParams();
+            for (const [key, value] of Object.entries(next))
+              if (value !== undefined && value !== '') params.set(key, String(value));
+            setSearchParams(params, { replace: true });
             records.reload();
           }}
         >
@@ -170,6 +203,7 @@ export const CallsRoute = observer(function CallsRoute() {
               className={styles.time_range}
               id="call-filter-6"
               showTime
+              value={draft.from && draft.to ? [dayjs(draft.from), dayjs(draft.to)] : undefined}
               placeholder={['开始时间（含）', '结束时间（不含）']}
               onChange={(values) =>
                 setDraft({ ...draft, from: values?.[0]?.toISOString(), to: values?.[1]?.toISOString() })
@@ -192,7 +226,7 @@ export const CallsRoute = observer(function CallsRoute() {
             columns={columns}
             dataSource={records.value?.items ?? []}
             loading={records.loading}
-            scroll={{ x: 1290, y: Math.max(120, height - 120) }}
+            scroll={{ x: 1420, y: Math.max(120, height - 120) }}
             pagination={false}
             footer={() => (
               <div className={styles.pagination}>

@@ -18,6 +18,8 @@ fn candidate(name: &str, source: SkillSource, path: &str) -> SkillCandidate {
         name: SkillName::parse(name).expect("valid name"),
         description: format!("{name} description"),
         source,
+        plugin_name: None,
+        plugin_sha256: None,
         workspace_root_order: matches!(
             source,
             SkillSource::WorkspaceEzAssistant | SkillSource::WorkspaceAgents
@@ -82,6 +84,50 @@ fn source_priority_and_disabled_name_are_deterministic_without_fallback() {
             .diagnostics
             .iter()
             .any(|diagnostic| { diagnostic.code == SkillDiagnosticCode::DisabledByName })
+    );
+}
+
+#[test]
+fn plugin_skills_do_not_inherit_independent_name_switches_or_win_name_conflicts() {
+    let mut plugin = candidate("review", SkillSource::Plugin, "/plugin/review");
+    plugin.plugin_name = Some("review-tools".to_owned());
+    plugin.plugin_sha256 = Some("a".repeat(64));
+    let disabled = [SkillNameState {
+        name: SkillName::parse("review").expect("name"),
+        enabled: false,
+        updated_at_ms: 1,
+    }];
+    let plugin_only = compile_skill_discovery(
+        SkillScanResult {
+            candidates: vec![plugin.clone()],
+            diagnostics: Vec::new(),
+            complete: true,
+        },
+        &disabled,
+    );
+    assert_eq!(plugin_only.winners.len(), 1);
+    assert_eq!(
+        plugin_only.winners[0].plugin_name.as_deref(),
+        Some("review-tools")
+    );
+
+    let with_independent = compile_skill_discovery(
+        SkillScanResult {
+            candidates: vec![
+                plugin,
+                candidate("review", SkillSource::UserAgents, "/user/review"),
+            ],
+            diagnostics: Vec::new(),
+            complete: true,
+        },
+        &disabled,
+    );
+    assert!(with_independent.winners.is_empty());
+    assert!(
+        with_independent
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == SkillDiagnosticCode::PluginConflict)
     );
 }
 

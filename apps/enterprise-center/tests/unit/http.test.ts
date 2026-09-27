@@ -18,7 +18,7 @@ it('GET /api/info 只暴露软件与协议兼容事实', async () => {
     software_version: '0.1.0',
     protocol_version: 1,
     min_protocol_version: 1,
-    capabilities: ['managed_models', 'llm_proxy'],
+    capabilities: ['managed_models', 'llm_proxy', 'plugin_market', 'managed_agents'],
   });
   expect(response.headers['cache-control']).toBe('no-store');
 });

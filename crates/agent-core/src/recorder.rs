@@ -60,9 +60,14 @@ impl ExchangeReceipt {
 
 /// Recorder 完整提交一个 Tool Exchange 后交回 Core 的通用控制结果。
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ExchangeCompletion {
-    /// 可靠提交同时改变了后续模型上下文，当前执行应结束并交由上层续跑。
-    pub continuation_required: bool,
+pub enum ExchangeCompletion {
+    /// 沿当前模型循环继续执行。
+    #[default]
+    Unchanged,
+    /// 可靠事实改变了请求上下文，交回宿主重建执行。
+    ContextChanged,
+    /// 已可靠闭合工具交换，结束当前轮次并交还宿主。
+    ReturnToHost,
 }
 
 /// 规范对话的两阶段落账 SPI；实现归 Runtime（持久化会话/日志等）。

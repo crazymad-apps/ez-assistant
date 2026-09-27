@@ -256,8 +256,9 @@ pub struct ValidateModelConnectionResult {
 pub struct RegisterWorkspaceRequest {
     /// 用户可编辑的展示名称；允许重名。
     pub label: String,
-    /// 用户选择的本机绝对 UTF-8 主目录。
-    pub primary_directory: String,
+    /// 用户选择的本机绝对 UTF-8 主目录；`None` 表示只使用 Host 管理的 Workspace 私有目录。
+    #[serde(default)]
+    pub primary_directory: Option<String>,
     /// 按用户顺序登记的附加目录。
     pub additional_directories: Vec<String>,
 }
@@ -277,7 +278,9 @@ pub struct RegisterWorkspaceResult {
 pub struct UpdateWorkspaceRequest {
     pub workspace_id: WorkspaceId,
     pub label: String,
-    pub primary_directory: String,
+    /// `None` 表示更新为只使用 Host 管理的 Workspace 私有目录。
+    #[serde(default)]
+    pub primary_directory: Option<String>,
     pub additional_directories: Vec<String>,
 }
 
@@ -300,10 +303,14 @@ pub struct GetWorkspaceResult {
     pub workspace: WorkspaceSummary,
 }
 
-/// 按确定性顺序列出当前活动 Workspace。
+/// 按确定性顺序列出指定生命周期的 Workspace；缺省只列活动项。
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
-pub struct ListWorkspacesRequest {}
+pub struct ListWorkspacesRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub lifecycle: Option<crate::WorkspaceLifecycle>,
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
@@ -321,6 +328,19 @@ pub struct RemoveWorkspaceRequest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct RemoveWorkspaceResult {
+    pub workspace: WorkspaceSummary,
+}
+
+/// 按稳定 Workspace ID 恢复已移除记录；不修改名称、目录或历史绑定。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct RestoreWorkspaceRequest {
+    pub workspace_id: WorkspaceId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct RestoreWorkspaceResult {
     pub workspace: WorkspaceSummary,
 }
 
@@ -551,6 +571,20 @@ pub struct GetSessionResult {
     pub session: SessionSummary,
 }
 
+/// 按首次发送的原幂等键读取已经可靠提交的定位结果，不创建新会话。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct GetSessionMaterializationRequest {
+    pub idempotency_key: IdempotencyKey,
+}
+
+/// `None` 仅表示查询时未发现提交，不保证原上传稍后不会完成。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct GetSessionMaterializationResult {
+    pub materialization: Option<crate::SessionMaterializationResult>,
+}
+
 /// 可靠提交一条用户输入；同 Session 内可按 key 幂等重试。
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
@@ -607,6 +641,10 @@ pub struct SubmitInputRequest {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ListSkillsRequest {
+    /// 会话能力入口包含插件技能；独立技能管理默认不包含。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub include_plugins: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub workspace_id: Option<WorkspaceId>,
@@ -1138,6 +1176,22 @@ pub struct GetSystemContextResult {
 #[ts(export_to = "assistant-protocol.ts")]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum RuntimeCommand {
+    ListFeedbackRequests(crate::ListFeedbackRequestsRequest),
+    AnswerFeedback(crate::AnswerFeedbackRequest),
+    CancelFeedback(crate::CancelFeedbackRequest),
+    ListCustomAgents {},
+    PrepareCustomAgent(crate::PrepareCustomAgentRequest),
+    SavePersonalAgent(crate::SavePersonalAgentRequest),
+    DeletePersonalAgent(crate::DeletePersonalAgentRequest),
+    ListPlugins {},
+    MutatePluginSettings(crate::MutatePluginSettingsRequest),
+    ListPluginMarket {},
+    ResolvePluginPackage(crate::ResolvePluginPackageRequest),
+    BeginPluginInstall(crate::BeginPluginInstallRequest),
+    GetPluginOperation(crate::PluginOperationRequest),
+    CancelPluginOperation(crate::PluginOperationRequest),
+    RetryPluginCleanup(crate::PluginOperationRequest),
+    UninstallPlugin(crate::UninstallPluginRequest),
     ListProviders(crate::ListProvidersRequest),
     CreateProvider(crate::CreateProviderRequest),
     UpdateProvider(crate::UpdateProviderRequest),
@@ -1237,6 +1291,8 @@ pub enum RuntimeCommand {
     ListWorkspaces(ListWorkspacesRequest),
     /// 假删 Workspace。
     RemoveWorkspace(RemoveWorkspaceRequest),
+    /// 按稳定 ID 恢复已移除 Workspace。
+    RestoreWorkspace(RestoreWorkspaceRequest),
     /// 查询 Attachment。
     GetAttachment(GetAttachmentRequest),
     /// 列出 Session Attachment。
@@ -1265,6 +1321,8 @@ pub enum RuntimeCommand {
     SetSkillEnabled(SetSkillEnabledRequest),
     /// 查询 Session。
     GetSession(GetSessionRequest),
+    /// 按原 key 只读查询新会话首次发送的可靠结果。
+    GetSessionMaterialization(GetSessionMaterializationRequest),
     /// 提交持久化输入。
     SubmitInput(SubmitInputRequest),
     /// 清除 Session 工作计划。
@@ -1324,6 +1382,22 @@ pub enum RuntimeCommand {
 #[ts(export_to = "assistant-protocol.ts")]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum RuntimeCommandResult {
+    ListFeedbackRequests(Vec<crate::FeedbackRequestSnapshot>),
+    AnswerFeedback(crate::FeedbackRequestSnapshot),
+    CancelFeedback(crate::FeedbackRequestSnapshot),
+    ListCustomAgents(crate::CustomAgentListSnapshot),
+    PrepareCustomAgent(crate::PreparedCustomAgentSnapshot),
+    SavePersonalAgent(crate::CustomAgentSnapshot),
+    DeletePersonalAgent(crate::DeletedPersonalAgentResult),
+    ListPlugins(crate::PluginListSnapshot),
+    MutatePluginSettings(crate::MutatePluginSettingsResult),
+    ListPluginMarket(crate::PluginMarketSnapshot),
+    ResolvePluginPackage(crate::PluginPackageSelection),
+    BeginPluginInstall(crate::PluginOperationSnapshot),
+    GetPluginOperation(crate::PluginOperationSnapshot),
+    CancelPluginOperation(crate::PluginOperationSnapshot),
+    RetryPluginCleanup(crate::PluginOperationSnapshot),
+    UninstallPlugin(crate::PluginOperationSnapshot),
     ListProviders(Vec<crate::ProviderSummary>),
     CreateProvider(crate::ProviderSummary),
     UpdateProvider(crate::ProviderSummary),
@@ -1394,6 +1468,8 @@ pub enum RuntimeCommandResult {
     ListWorkspaces(ListWorkspacesResult),
     /// Workspace 已假删。
     RemoveWorkspace(RemoveWorkspaceResult),
+    /// Workspace 已按稳定 ID 恢复。
+    RestoreWorkspace(RestoreWorkspaceResult),
     /// Attachment 查询已返回。
     GetAttachment(GetAttachmentResult),
     /// Attachment 列表已返回。
@@ -1417,6 +1493,8 @@ pub enum RuntimeCommandResult {
     SetSkillEnabled(SetSkillEnabledResult),
     /// Session 查询已返回。
     GetSession(GetSessionResult),
+    /// 首次发送的可靠结果查询已返回。
+    GetSessionMaterialization(Box<GetSessionMaterializationResult>),
     /// 输入已接受。
     SubmitInput(SubmitInputResult),
     ClearWorkPlan(ClearWorkPlanResult),
@@ -1474,6 +1552,7 @@ mod tests {
 
     fn session_summary() -> SessionSummary {
         SessionSummary {
+            custom_agent: None,
             session_id: SessionId::new("session-1").expect("session id"),
             title: "Session 1".to_owned(),
             model_selection: Some(model_selection()),
@@ -1515,6 +1594,7 @@ mod tests {
             reasoning_effort: None,
             cancel_requested: false,
             active_step: None,
+            model_request: None,
             reasoning: String::new(),
             text: String::new(),
             tools: Vec::new(),
@@ -1570,7 +1650,7 @@ mod tests {
         WorkspaceSummary {
             workspace_id: WorkspaceId::new("workspace-1").expect("workspace id"),
             label: "Workspace".to_owned(),
-            user_directory: "/workspace".to_owned(),
+            user_directory: Some("/workspace".to_owned()),
             additional_directories: Vec::new(),
             agent_directory: "/runtime/workspaces/workspace-1/agent".to_owned(),
             lifecycle: crate::WorkspaceLifecycle::Active,
@@ -1712,6 +1792,54 @@ mod tests {
     }
 
     #[test]
+    fn workspace_requests_round_trip_with_absent_primary_directory() {
+        let register = RegisterWorkspaceRequest {
+            label: "private".to_owned(),
+            primary_directory: None,
+            additional_directories: Vec::new(),
+        };
+        let value = serde_json::to_value(&register).expect("serialize register request");
+        assert_eq!(value["primary_directory"], json!(null));
+        assert_eq!(
+            serde_json::from_value::<RegisterWorkspaceRequest>(value)
+                .expect("deserialize register request"),
+            register
+        );
+        // 缺失字段同样反序列化为 None，不补默认值。
+        assert_eq!(
+            serde_json::from_value::<RegisterWorkspaceRequest>(json!({
+                "label": "private",
+                "additional_directories": []
+            }))
+            .expect("register request without primary directory field"),
+            register
+        );
+
+        let update = UpdateWorkspaceRequest {
+            workspace_id: WorkspaceId::new("workspace-1").expect("workspace id"),
+            label: "renamed".to_owned(),
+            primary_directory: None,
+            additional_directories: Vec::new(),
+        };
+        let value = serde_json::to_value(&update).expect("serialize update request");
+        assert_eq!(value["primary_directory"], json!(null));
+        assert_eq!(
+            serde_json::from_value::<UpdateWorkspaceRequest>(value)
+                .expect("deserialize update request"),
+            update
+        );
+        assert_eq!(
+            serde_json::from_value::<UpdateWorkspaceRequest>(json!({
+                "workspace_id": "workspace-1",
+                "label": "renamed",
+                "additional_directories": []
+            }))
+            .expect("update request without primary directory field"),
+            update
+        );
+    }
+
+    #[test]
     fn command_result_uses_matching_explicit_tag() {
         let result = RuntimeCommandResult::ShutdownRuntime(ShutdownRuntimeResult {
             lifecycle: RuntimeLifecycle::ShuttingDown,
@@ -1783,7 +1911,7 @@ mod tests {
             (
                 RuntimeCommand::RegisterWorkspace(RegisterWorkspaceRequest {
                     label: "workspace".to_owned(),
-                    primary_directory: "/workspace".to_owned(),
+                    primary_directory: Some("/workspace".to_owned()),
                     additional_directories: vec!["/docs".to_owned()],
                 }),
                 "register_workspace",
@@ -1792,7 +1920,7 @@ mod tests {
                 RuntimeCommand::UpdateWorkspace(UpdateWorkspaceRequest {
                     workspace_id: WorkspaceId::new("workspace-1").expect("workspace id"),
                     label: "renamed".to_owned(),
-                    primary_directory: "/workspace".to_owned(),
+                    primary_directory: Some("/workspace".to_owned()),
                     additional_directories: vec!["/docs".to_owned()],
                 }),
                 "update_workspace",
@@ -1804,7 +1932,9 @@ mod tests {
                 "get_workspace",
             ),
             (
-                RuntimeCommand::ListWorkspaces(ListWorkspacesRequest::default()),
+                RuntimeCommand::ListWorkspaces(ListWorkspacesRequest {
+                    lifecycle: Some(crate::WorkspaceLifecycle::Removed),
+                }),
                 "list_workspaces",
             ),
             (
@@ -1812,6 +1942,12 @@ mod tests {
                     workspace_id: WorkspaceId::new("workspace-1").expect("workspace id"),
                 }),
                 "remove_workspace",
+            ),
+            (
+                RuntimeCommand::RestoreWorkspace(RestoreWorkspaceRequest {
+                    workspace_id: WorkspaceId::new("workspace-1").expect("workspace id"),
+                }),
+                "restore_workspace",
             ),
             (
                 RuntimeCommand::GetAttachment(GetAttachmentRequest {
@@ -2142,6 +2278,12 @@ mod tests {
                     workspace: workspace_summary(),
                 }),
                 "remove_workspace",
+            ),
+            (
+                RuntimeCommandResult::RestoreWorkspace(RestoreWorkspaceResult {
+                    workspace: workspace_summary(),
+                }),
+                "restore_workspace",
             ),
             (
                 RuntimeCommandResult::GetAttachment(GetAttachmentResult {

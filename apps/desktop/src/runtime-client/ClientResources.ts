@@ -110,6 +110,10 @@ export class ClientResources {
           `/sessions/${encodeURIComponent(id)}/resource-files/preview`,
           request,
         );
+  statSessionResourceFile = (id: string, locator: SessionResourceLocator, signal?: AbortSignal) =>
+    this.json<import("@ez-assistant/protocol").SessionResourceFileInfo>(
+      `/sessions/${encodeURIComponent(id)}/resource-files/stat`, { locator }, signal,
+    );
   chooseAttachmentFiles = async (): Promise<
     readonly native.AttachmentSelection[]
   > => {
@@ -311,7 +315,7 @@ export class ClientResources {
   downloadHostFile = (path: string) =>
     this.download(
       "/host-files/download",
-      path.split("/").at(-1) || "download",
+      path.split(/[/\\]/).at(-1) || "download",
       { path },
     );
   downloadSessionFile = (

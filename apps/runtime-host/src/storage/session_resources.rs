@@ -193,6 +193,57 @@ impl StorageEngine {
         session: &NewStoredSession,
     ) -> StorageResult<PreparedSessionDirectories> {
         self.validate_new_session_environment(session)?;
+        self.prepare_validated_session_directories(session)
+    }
+
+    pub(super) fn prepare_fork_session_directories(
+        &self,
+        source_session_id: &SessionId,
+        session: &NewStoredSession,
+    ) -> StorageResult<PreparedSessionDirectories> {
+        self.validate_stored_session_environment(&session.session_id, &session.environment)?;
+        let source = self.load_session_environment(source_session_id)?;
+        let expected_working_directory = if source.workspace_id.is_some() {
+            source.working_directory.as_str()
+        } else {
+            session.environment.session_private_directory.as_str()
+        };
+        if session.environment.workspace_id != source.workspace_id
+            || session.environment.working_directory != expected_working_directory
+            || session.environment.additional_workspace_directories
+                != source.additional_workspace_directories
+            || session.environment.workspace_private_directory != source.workspace_private_directory
+        {
+            return Err(StoreError::new(
+                StoreErrorKind::InvalidInput,
+                "fork environment does not match source session",
+            ));
+        }
+        if let Some(workspace_id) = source.workspace_id.as_ref()
+            && self.get_workspace(workspace_id)?.lifecycle != StoredWorkspaceLifecycle::Active
+        {
+            return Err(StoreError::new(
+                StoreErrorKind::Conflict,
+                "workspace cannot accept forked sessions",
+            ));
+        }
+        if source.workspace_id.is_some()
+            && !fs::metadata(&session.environment.working_directory)
+                .map(|metadata| metadata.is_dir())
+                .unwrap_or(false)
+        {
+            return Err(StoreError::new(
+                StoreErrorKind::ResourceUnavailable,
+                "fork working directory is unavailable",
+            ));
+        }
+        self.prepare_validated_session_directories(session)
+    }
+
+    fn prepare_validated_session_directories(
+        &self,
+        session: &NewStoredSession,
+    ) -> StorageResult<PreparedSessionDirectories> {
         let mut paths = self.prepare_session_directories(&session.session_id)?;
         match self.ensure_session_permission_file(&session.environment) {
             Ok(created) => {
@@ -210,6 +261,19 @@ impl StorageEngine {
         transaction: &Transaction<'_>,
         session: &NewStoredSession,
     ) -> StorageResult<()> {
+        if let Some(agent) = &session.custom_agent {
+            let encoded = serde_json::to_string(agent).map_err(|source| {
+                super::internal_error("session custom agent could not be encoded", source)
+            })?;
+            transaction
+                .execute(
+                    "UPDATE sessions SET custom_agent_json=?2 WHERE session_id=?1",
+                    params![session.session_id.as_str(), encoded],
+                )
+                .map_err(|source| {
+                    super::database_write_error("session custom agent could not be saved", source)
+                })?;
+        }
         transaction
             .execute(
                 "INSERT INTO session_resources (
@@ -282,7 +346,7 @@ impl StorageEngine {
             Some(_) => {
                 // Workspace 当前目录可以在 Session 创建后编辑；恢复只要求绑定仍存在且
                 // Workspace 私有目录可解析，不能拿当前目录覆盖或拒绝冻结目录。
-                if row.3.is_none() || row.4.is_none() {
+                if row.4.is_none() {
                     return Err(invalid_data("stored session workspace is invalid"));
                 }
                 row.4
@@ -325,7 +389,8 @@ impl StorageEngine {
                         "workspace cannot accept new sessions",
                     ));
                 }
-                if session.environment.working_directory != workspace.user_directory
+                let effective_working_directory = workspace.effective_working_directory();
+                if session.environment.working_directory != effective_working_directory
                     || session.environment.additional_workspace_directories
                         != workspace.additional_directories
                     || session.environment.workspace_private_directory.as_deref()
@@ -336,7 +401,7 @@ impl StorageEngine {
                         "session workspace environment does not match storage",
                     ));
                 }
-                if !fs::metadata(&workspace.user_directory)
+                if !fs::metadata(effective_working_directory)
                     .map(|metadata| metadata.is_dir())
                     .unwrap_or(false)
                 {

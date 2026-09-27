@@ -10,7 +10,7 @@ export function sessionSkillRows(view: SessionViewSnapshot | undefined, catalog:
       let status_label = "可用";
       if (trigger === "user") status_label = "用户激活";
       if (trigger === "model") status_label = "智能体激活";
-      return { name: skill.name, status_label };
+      return { name: skill.name, plugin_name: skill.plugin_name, status_label };
     });
 }
 

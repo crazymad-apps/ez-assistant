@@ -104,6 +104,7 @@ pub(super) fn runtime_status(code: RuntimeErrorCode) -> StatusCode {
         | RuntimeErrorCode::WorkspaceNotFound
         | RuntimeErrorCode::AttachmentNotFound
         | RuntimeErrorCode::SkillNotFound => StatusCode::NOT_FOUND,
+        RuntimeErrorCode::PluginOperationNotFound => StatusCode::NOT_FOUND,
         RuntimeErrorCode::GoalNotFound => StatusCode::NOT_FOUND,
         RuntimeErrorCode::ApprovalNotFound => StatusCode::NOT_FOUND,
         RuntimeErrorCode::SessionBusy
@@ -134,6 +135,7 @@ pub(super) fn runtime_status(code: RuntimeErrorCode) -> StatusCode {
         | RuntimeErrorCode::SessionCompactionInProgress
         | RuntimeErrorCode::SessionCompactionNotFound
         | RuntimeErrorCode::OperationNotAllowed => StatusCode::CONFLICT,
+        RuntimeErrorCode::PluginBusy => StatusCode::CONFLICT,
         RuntimeErrorCode::SkillNotUserInvocable => StatusCode::UNPROCESSABLE_ENTITY,
         RuntimeErrorCode::GoalUnsupportedByModel => StatusCode::UNPROCESSABLE_ENTITY,
         RuntimeErrorCode::AttachmentTooLarge | RuntimeErrorCode::ResourceTooLarge => {
@@ -150,6 +152,7 @@ pub(super) fn runtime_status(code: RuntimeErrorCode) -> StatusCode {
         | RuntimeErrorCode::SkillCatalogUnavailable
         | RuntimeErrorCode::SnapshotBusy
         | RuntimeErrorCode::SessionHistoryCleanupPending => StatusCode::SERVICE_UNAVAILABLE,
+        RuntimeErrorCode::PluginPackageUnavailable => StatusCode::SERVICE_UNAVAILABLE,
         RuntimeErrorCode::PermissionFileInvalid | RuntimeErrorCode::ResourceNotPreviewable => {
             StatusCode::UNPROCESSABLE_ENTITY
         }

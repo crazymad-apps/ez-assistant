@@ -16,12 +16,12 @@ describe("ResourceWorkspace", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "新建资源标签" }));
     const menu = screen.getByRole("menu", { name: "新建资源标签" });
-    const workspace = within(menu).getByRole("menuitem", { name: /工作空间/ });
+    const workspace = within(menu).getByRole("menuitem", { name: /项目/ });
     expect(within(menu).queryByRole("menuitem", { name: /浏览器/ })).not.toBeInTheDocument();
     const terminal = within(menu).getByRole("menuitem", { name: /终端/ });
     expect(workspace).toBeDisabled();
     expect(terminal).toBeDisabled();
-    expect(workspace).toHaveTextContent("工作空间");
+    expect(workspace).toHaveTextContent("项目");
     expect(workspace).not.toHaveTextContent("将在文件浏览里程碑启用");
   });
 
@@ -35,14 +35,14 @@ describe("ResourceWorkspace", () => {
     const browser = screen.getByRole("tab", { name: "浏览器" });
     browser.focus();
     fireEvent.keyDown(browser, { key: "ArrowLeft" });
-    const workspace = screen.getByRole("tab", { name: "工作空间" });
+    const workspace = screen.getByRole("tab", { name: "项目" });
     expect(workspace).toHaveFocus();
     expect(workspace).toHaveAttribute("aria-selected", "false");
 
     fireEvent.keyDown(workspace, { key: "Enter" });
     expect(workspace).toHaveAttribute("aria-selected", "true");
     fireEvent.keyDown(workspace, { key: "Delete" });
-    expect(screen.queryByRole("tab", { name: "工作空间" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "项目" })).not.toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "当前上下文" })).toHaveAttribute("aria-selected", "true");
   });
 
@@ -53,11 +53,11 @@ describe("ResourceWorkspace", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "新建资源标签" }));
     const workspace = within(screen.getByRole("menu", { name: "新建资源标签" }))
-      .getByRole("menuitem", { name: "工作空间" });
+      .getByRole("menuitem", { name: "项目" });
     expect(workspace).toBeEnabled();
     fireEvent.click(workspace);
 
-    expect(screen.getByRole("tab", { name: "工作空间" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "项目" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByText("会话私有目录")).toBeVisible();
   });
 
@@ -66,14 +66,14 @@ describe("ResourceWorkspace", () => {
     store.navigation.selectSession("session-1");
     store.resource_workspace.openWorkspace("session:session-1");
     const view = renderWorkspace(store);
-    const tree = view.container.querySelector('[aria-label="工作空间目录"]');
+    const tree = view.container.querySelector('[aria-label="项目目录"]');
     expect(tree).not.toBeNull();
 
     fireEvent.click(screen.getByRole("tab", { name: "当前上下文" }));
     expect(tree?.closest('[role="tabpanel"]')).toHaveAttribute("hidden");
 
-    fireEvent.click(screen.getByRole("tab", { name: "工作空间" }));
-    expect(view.container.querySelector('[aria-label="工作空间目录"]')).toBe(tree);
+    fireEvent.click(screen.getByRole("tab", { name: "项目" }));
+    expect(view.container.querySelector('[aria-label="项目目录"]')).toBe(tree);
   });
 });
 

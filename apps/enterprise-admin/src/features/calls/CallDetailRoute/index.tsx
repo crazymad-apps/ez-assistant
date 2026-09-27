@@ -1,16 +1,17 @@
 import { useCallback } from 'react';
-import { useNavigate, useParams } from 'react-router';
+import { useNavigate, useParams, useSearchParams } from 'react-router';
 import { Alert, Button, Card, Descriptions, Tabs, Space } from 'antd';
 import { observer } from 'mobx-react-lite';
 import { callApi } from '../../../request/calls';
 import { useResourceQuery } from '../../../request/useResourceQuery';
 import { SnapshotPanel } from '../SnapshotPanel';
-import { outcomeLabels } from '../model';
+import { outcomeLabels, usageLabels, usageReasonLabels } from '../model';
 import styles from './index.module.scss';
 
 export const CallDetailRoute = observer(function CallDetailRoute() {
   const id = useParams().id!;
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const read = useCallback((token: string, signal: AbortSignal) => callApi.get(token, id, signal), [id]);
   const query = useResourceQuery(read);
   const row = query.value;
@@ -22,7 +23,7 @@ export const CallDetailRoute = observer(function CallDetailRoute() {
         extra={
           <Space>
             <Button onClick={query.reload}>刷新</Button>
-            <Button onClick={() => navigate('/calls')}>返回列表</Button>
+            <Button onClick={() => navigate(`/calls?${searchParams.toString()}`)}>返回列表</Button>
           </Space>
         }
       >
@@ -52,6 +53,18 @@ export const CallDetailRoute = observer(function CallDetailRoute() {
                 children: `${outcomeLabels[row.outcome]} / ${row.http_status ?? '—'}`,
               },
               { key: 'reason', label: '原因', children: row.reason ?? '—' },
+              {
+                key: 'usage',
+                label: 'Token 用量',
+                children: `${row.input_tokens ?? '—'} 输入 / ${row.output_tokens ?? '—'} 输出 / ${row.total_tokens ?? '—'} 总量`,
+              },
+              {
+                key: 'usage-state',
+                label: '用量状态',
+                children: `${usageLabels[row.usage_state]}${row.usage_reason ? ` · ${usageReasonLabels[row.usage_reason] ?? row.usage_reason}` : ''}`,
+              },
+              { key: 'cache', label: '缓存命中输入', children: row.cached_input_tokens ?? '—' },
+              { key: 'reasoning', label: '推理输出', children: row.reasoning_tokens ?? '—' },
             ]}
           />
         )}

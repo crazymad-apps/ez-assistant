@@ -73,9 +73,9 @@ describe("NavigationStore", () => {
     expect(store.selected_draft_key).toBeNull();
   });
 
-  it("keeps preferred sidebar state separate from narrow-window effective visibility", () => {
+  it("keeps the left sidebar visible and restores the proportional right sidebar after widening", () => {
     const store = new NavigationStore();
-    store.setViewportWidth(900);
+    store.setViewportWidth(950);
 
     expect(store.left_sidebar_open).toBe(true);
     expect(store.right_sidebar_open).toBe(true);
@@ -85,12 +85,19 @@ describe("NavigationStore", () => {
     store.toggleRightSidebar();
     expect(store.left_sidebar_open).toBe(true);
     expect(store.right_sidebar_open).toBe(true);
-    expect(store.effective_left_sidebar_open).toBe(false);
-    expect(store.effective_right_sidebar_open).toBe(true);
+    expect(store.effective_left_sidebar_open).toBe(true);
+    expect(store.effective_right_sidebar_open).toBe(false);
 
     store.setViewportWidth(1400);
     expect(store.effective_left_sidebar_open).toBe(true);
     expect(store.effective_right_sidebar_open).toBe(true);
+    expect(store.effective_right_sidebar_width).toBe(426);
+    store.setViewportWidth(1600);
+    expect(store.effective_left_sidebar_width).toBe(286);
+    expect(store.effective_right_sidebar_width).toBe(502);
+    store.setViewportWidth(1200);
+    expect(store.effective_right_sidebar_open).toBe(true);
+    expect(store.effective_right_sidebar_width).toBe(349);
   });
 
   it("clamps resized widths without treating a closed sidebar as zero preference", () => {
@@ -99,7 +106,8 @@ describe("NavigationStore", () => {
     store.setSidebarWidth("left", 999);
     store.setSidebarWidth("right", 999);
     expect(store.left_sidebar_width).toBe(420);
-    expect(store.right_sidebar_width).toBe(999);
+    expect(store.effective_right_sidebar_width).toBeGreaterThanOrEqual(998);
+    expect(store.effective_right_sidebar_width).toBeLessThanOrEqual(999);
 
     store.toggleLeftSidebar();
     expect(store.left_sidebar_width).toBe(420);
@@ -111,7 +119,7 @@ describe("NavigationStore", () => {
     expect(store.right_sidebar_width).toBe(380);
   });
 
-  it("keeps preferred sidebar widths fixed and hides the lower-priority sidebar when they no longer fit", () => {
+  it("keeps the right sidebar ratio while hiding it only below the combined minimum", () => {
     const store = new NavigationStore();
     store.setViewportWidth(2000);
     store.setSidebarWidth("right", 760);
@@ -122,27 +130,53 @@ describe("NavigationStore", () => {
     expect(store.effective_right_sidebar_open).toBe(false);
     expect(store.effective_left_sidebar_width).toBe(286);
     expect(store.effective_right_sidebar_width).toBe(0);
-    expect(store.right_sidebar_width).toBe(760);
+    expect(store.right_sidebar_width).toBeGreaterThan(0);
 
     store.setViewportWidth(2000);
     expect(store.effective_left_sidebar_width).toBe(286);
     expect(store.effective_right_sidebar_width).toBe(760);
   });
 
-  it("hides the right sidebar first and then the left at fixed-width thresholds", () => {
+  it("keeps the left sidebar at its preferred width after the right sidebar reaches its minimum", () => {
     const store = new NavigationStore();
 
-    store.setViewportWidth(1_166);
+    store.setViewportWidth(1_106);
     expect(store.effective_left_sidebar_open).toBe(true);
     expect(store.effective_right_sidebar_open).toBe(true);
+    expect(store.effective_right_sidebar_width).toBe(320);
 
-    store.setViewportWidth(1_165);
+    store.setViewportWidth(1_105);
     expect(store.effective_left_sidebar_open).toBe(true);
     expect(store.effective_right_sidebar_open).toBe(false);
 
     store.setViewportWidth(785);
-    expect(store.effective_left_sidebar_open).toBe(false);
+    expect(store.effective_left_sidebar_open).toBe(true);
     expect(store.effective_right_sidebar_open).toBe(false);
+    expect(store.effective_left_sidebar_width).toBe(286);
+  });
+
+  it("lets a manually widened left sidebar keep its width while the right sidebar yields", () => {
+    const store = new NavigationStore();
+    store.setViewportWidth(1_280);
+    store.setSidebarWidth("left", 420);
+    expect(store.effective_left_sidebar_width).toBe(420);
+    expect(store.effective_right_sidebar_open).toBe(true);
+
+    store.setViewportWidth(920);
+    expect(store.effective_left_sidebar_width).toBe(420);
+    expect(store.effective_right_sidebar_open).toBe(false);
+  });
+
+  it("does not trade the left sidebar away when the user requests the right sidebar in a narrow window", () => {
+    const store = new NavigationStore();
+    store.setViewportWidth(1_105);
+    store.toggleRightSidebar();
+    expect(store.effective_right_sidebar_open).toBe(false);
+    expect(store.effective_left_sidebar_width).toBe(286);
+    store.setViewportWidth(1_106);
+    expect(store.effective_right_sidebar_open).toBe(true);
+    expect(store.effective_left_sidebar_open).toBe(true);
+    expect(store.effective_left_sidebar_width).toBe(286);
   });
 
   it("uses the remaining viewport as the right sidebar maximum without a fixed cap", () => {
@@ -151,11 +185,12 @@ describe("NavigationStore", () => {
 
     expect(store.right_sidebar_current_max_width).toBe(1_614);
     store.setSidebarWidth("right", 1_500);
-    expect(store.right_sidebar_width).toBe(1_500);
+    expect(store.effective_right_sidebar_width).toBeGreaterThanOrEqual(1_499);
+    expect(store.effective_right_sidebar_width).toBeLessThanOrEqual(1_500);
     expect(store.left_sidebar_width).toBe(286);
 
     store.setSidebarWidth("right", 2_000);
-    expect(store.right_sidebar_width).toBe(1_614);
+    expect(store.effective_right_sidebar_width).toBe(1_614);
     expect(store.left_sidebar_width).toBe(286);
   });
 
@@ -171,7 +206,27 @@ describe("NavigationStore", () => {
     });
 
     expect(store.left_sidebar_width).toBe(300);
-    expect(store.right_sidebar_width).toBe(600);
+    expect(store.right_sidebar_width).toBe(9_999);
+    expect(store.effective_right_sidebar_width).toBe(600);
+  });
+
+  it("restores a minimum-width resource rail from its proportional preference", () => {
+    const store = new NavigationStore();
+    store.setViewportWidth(2_400);
+    store.setSidebarWidth("right", 320);
+    const preference = store.right_sidebar_width;
+    expect(preference).toBeLessThan(320);
+
+    const restored = new NavigationStore();
+    restored.setViewportWidth(2_400);
+    restored.applyPreferences({
+      left_sidebar_open: true,
+      right_sidebar_open: true,
+      left_sidebar_width: 286,
+      right_sidebar_width: preference,
+      expanded_workspace_ids: null,
+    });
+    expect(restored.effective_right_sidebar_width).toBe(320);
   });
 });
 

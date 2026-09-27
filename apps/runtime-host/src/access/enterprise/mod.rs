@@ -1,6 +1,7 @@
 //! 每用户一份当前中心凭据；与客户端登录共享同一提交锁，不把凭据绑定到任务。
 
-mod client;
+mod agents;
+pub(crate) mod client;
 mod models;
 #[cfg(test)]
 mod tests;
@@ -9,6 +10,7 @@ use super::{
     AccessError, AccessPermit, Credentials,
     credentials::{LoginSession, issue},
 };
+pub(crate) use agents::HostAgentDirectorySource;
 use assistant_protocol::{HostPasswordRequest, HostUserIdentity, SecretValue};
 pub(crate) use client::{CenterClient, ModelConfiguration};
 use futures_util::{
@@ -113,6 +115,39 @@ pub(super) struct UserState {
 }
 
 impl Credentials {
+    pub(crate) fn current_agent_center(
+        &self,
+        key: &UserKey,
+    ) -> Result<(CenterClient, SecretValue, String), AccessError> {
+        let state = self.state.lock().expect("credential state poisoned");
+        let user = state
+            .users
+            .get(key)
+            .ok_or(CenterError::InvalidCredentials)?;
+        if user.connections.is_cancelled() {
+            return Err(CenterError::Unavailable.into());
+        }
+        Ok((
+            user.login.client.clone(),
+            user.login.token.clone(),
+            user.identity.center_id.clone(),
+        ))
+    }
+
+    pub(crate) fn current_plugin_center(
+        &self,
+        key: &UserKey,
+    ) -> Result<(CenterClient, SecretValue), AccessError> {
+        let state = self.state.lock().expect("credential state poisoned");
+        let user = state
+            .users
+            .get(key)
+            .ok_or(CenterError::InvalidCredentials)?;
+        if user.connections.is_cancelled() {
+            return Err(CenterError::Unavailable.into());
+        }
+        Ok((user.login.client.clone(), user.login.token.clone()))
+    }
     /// 用户域只捕获访问取消和活动观察句柄，绝不捕获逐登录的 Center 凭据。
     pub(crate) fn domain_access(
         &self,

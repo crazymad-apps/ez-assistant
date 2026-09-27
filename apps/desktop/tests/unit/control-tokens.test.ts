@@ -2,9 +2,10 @@ import { compile, Logger } from "sass";
 import { describe, expect, it } from "vitest";
 
 describe("Desktop control height contract", () => {
-  it("disables native macOS and Windows boundary elasticity without changing Web or Linux", () => {
+  it("limits native overscroll suppression to the macOS and Windows viewport", () => {
     const platform = compile("src/styles/platform.scss", { logger: Logger.silent }).css;
-    expect(platform).toMatch(/:root\[data-platform=macos\] body \*[^}]*:root\[data-platform=windows\][^}]*:root\[data-platform=windows\] body \*\s*\{\s*overscroll-behavior: none/s);
+    expect(platform).toMatch(/:root\[data-platform=macos\],\s*:root\[data-platform=macos\] body,\s*:root\[data-platform=windows\],\s*:root\[data-platform=windows\] body\s*\{\s*overscroll-behavior: none;/s);
+    expect(platform).not.toMatch(/:root\[data-platform=(?:macos|windows)\] body \*/);
     expect(platform).not.toMatch(/:root\[data-platform=(?:other|linux)\].*overscroll-behavior/s);
   });
 
@@ -20,20 +21,26 @@ describe("Desktop control height contract", () => {
     expect(composer).not.toMatch(/\.send_button:hover[^{}]*\{[^}]*background: var\(--ez-surface-muted\)/s);
   });
 
-  it("keeps input focus free of page-specific shadow rings", () => {
+  it("keeps text fields and composite focus regions free of extra rings", () => {
     const paths = Object.keys(import.meta.glob("../../src/**/*.module.scss"));
     const violations: string[] = [];
     for (const path of paths) {
       const css = compile(path.replace("../../", ""), { logger: Logger.silent }).css;
       for (const [, selector, body] of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
         if (!selector.includes(":focus")) continue;
-        const is_field = /\b(input|textarea)\b/.test(selector)
+        // 普通按钮和原生开关保留键盘外圈；复合搜索框/选择框由外框统一承接焦点。
+        const is_native_toggle = /\b(checkbox|radio|range|color|file)\b|\.switch\b/.test(selector);
+        const is_field = (/\b(input|textarea|select)\b/.test(selector) && !is_native_toggle)
+          || selector.includes(":focus-within")
           || (path.includes("SelectionPopover/") && selector.includes(".trigger"));
         const shadow = body.match(/box-shadow:\s*([^;]+)/)?.[1].trim();
-        if (is_field && shadow && shadow !== "none") violations.push(`${path}: ${selector.trim()}`);
+        const outline = body.match(/(?:^|;)\s*outline(?:-width)?:\s*([^;]+)/)?.[1].trim();
+        const has_shadow = shadow && shadow !== "none";
+        const has_outline = outline && !/^(?:none|0(?:px)?)(?:\s|$)/.test(outline);
+        if (is_field && (has_shadow || has_outline)) violations.push(`${path}: ${selector.trim()}`);
       }
     }
-    expect(violations, "字段焦点共用 fields.focus-border，不得重新叠加阴影光圈").toEqual([]);
+    expect(violations, "字段焦点共用 fields.focus-border，不得叠加 outline 或阴影光圈").toEqual([]);
   });
 
   it("keeps the three border-box heights in the shared token source", () => {

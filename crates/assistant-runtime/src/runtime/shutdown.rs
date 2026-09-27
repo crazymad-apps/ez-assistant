@@ -224,7 +224,7 @@ impl AssistantRuntime {
                         generation: goal.generation,
                     });
                 }
-                self.publish(finished_event(settlement.run));
+                self.publish(finished_event(settlement.run, false));
                 let generation = session.lock_state()?.body_generation;
                 self.publish(assistant_protocol::RuntimeEvent::ConversationCommitted {
                     owner: assistant_protocol::ConversationOwner::MainSession {

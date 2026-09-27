@@ -121,6 +121,11 @@ export class IdentityService {
     return publicUser(user);
   }
 
+  /** 下载准入也须在短串行段内复查 Token 与用户启停状态。 */
+  async requireUser(client: EntityManager, token?: string): Promise<IdentityUser> {
+    return publicUser(await this.userForToken(client, token));
+  }
+
   /** 仅在身份事务成功提交后调用；角色和启停变化撤销；改密与重置保留已有凭据。 */
   revokeUser(id: number): void {
     for (const [token, userId] of this.tokens) if (userId === id) this.revoke(token);

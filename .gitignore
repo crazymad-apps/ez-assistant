@@ -16,3 +16,9 @@ tmp
 
 # 项目内独立 Runtime 测试数据（包含本地凭据）
 /.runtime-test/
+
+# 本机快捷入口模板；企业版构建或显式启用打包时嵌入客户端。
+/apps/desktop/src/features/composer/ComposerDock/quick-actions.json
+
+# 项目内业务插件源码与打包素材由本地按需维护。
+/plugins/

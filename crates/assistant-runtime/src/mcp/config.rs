@@ -68,6 +68,8 @@ impl McpConfigStore {
         let loaded = self.load().await?;
         Ok(McpRegistryCandidate {
             document_valid: loaded.mutable,
+            blocked_keys: BTreeSet::new(),
+            supplemental_diagnostics: Vec::new(),
             configured_keys: loaded
                 .raw_servers
                 .keys()
@@ -253,6 +255,10 @@ impl McpConfigStore {
 
 pub(crate) struct McpRegistryCandidate {
     pub(crate) document_valid: bool,
+    /// 多个插件声明同名服务时，冲突候选都不得继续运行。
+    pub(crate) blocked_keys: BTreeSet<McpServerKey>,
+    /// 候选虽可运行，但另一管理来源存在独立故障。
+    pub(crate) supplemental_diagnostics: Vec<McpDiagnosticSnapshot>,
     pub(crate) configured_keys: BTreeSet<McpServerKey>,
     pub(crate) servers: BTreeMap<McpServerKey, McpServerConfig>,
     pub(crate) diagnostics: Vec<McpDiagnosticSnapshot>,
@@ -615,6 +621,8 @@ fn normalize_server(
         raw,
         config: McpServerConfig {
             server_key: key.clone(),
+            plugin_name: None,
+            plugin_sha256: None,
             display_name,
             description,
             enabled,
@@ -625,6 +633,18 @@ fn normalize_server(
         },
         warnings,
     })
+}
+
+pub(super) fn plugin_server(
+    plugin_name: String,
+    plugin_sha256: String,
+    key: McpServerKey,
+    raw: Map<String, Value>,
+) -> Result<McpServerConfig, McpDiagnosticSnapshot> {
+    let mut config = normalize_server(&key, raw)?.config;
+    config.plugin_name = Some(plugin_name);
+    config.plugin_sha256 = Some(plugin_sha256);
+    Ok(config)
 }
 
 fn draft_to_raw(

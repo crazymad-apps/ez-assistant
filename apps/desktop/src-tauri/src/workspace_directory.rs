@@ -12,7 +12,7 @@ impl WorkspaceDirectoryFailure {
     fn unavailable() -> Self {
         Self {
             code: "workspace_directory_unavailable",
-            message: "无法读取所选工作空间目录。",
+            message: "无法读取所选项目目录。",
         }
     }
 }
@@ -28,7 +28,7 @@ pub(crate) async fn choose_workspace_directory(
     let (sender, receiver) = tokio::sync::oneshot::channel();
     app.dialog()
         .file()
-        .set_title("选择工作空间目录")
+        .set_title("选择项目目录")
         .pick_folder(move |selection| {
             let _ = sender.send(selection);
         });

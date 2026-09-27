@@ -1,0 +1,18 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: auto;
+}
+
+.card {
+  min-width: 0;
+}
+
+.filters {
+  margin-bottom: 16px;
+}
+
+.state {
+  min-width: 120px;
+}

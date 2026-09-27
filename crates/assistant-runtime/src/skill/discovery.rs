@@ -24,6 +24,10 @@ pub struct SkillCandidate {
     pub description: String,
     /// 候选项所属固定扫描层级。
     pub source: SkillSource,
+    /// 受管插件的明确归属；独立 Skill 为 `None`。
+    pub plugin_name: Option<String>,
+    /// 与包租约匹配的精确生效摘要；独立 Skill 为 `None`。
+    pub plugin_sha256: Option<String>,
     /// Workspace 候选所属根目录顺序；用户级候选为 `None`。
     pub workspace_root_order: Option<usize>,
     /// 供本机诊断和激活后按需访问共享资源使用的候选目录。
@@ -86,6 +90,8 @@ pub enum SkillDiagnosticCode {
     DisabledByName,
     /// 候选项被更高优先级的同名来源覆盖。
     Shadowed,
+    /// 插件能力名称与独立来源或另一插件冲突。
+    PluginConflict,
     /// 用户和模型调用资格均被关闭。
     NotInvocable,
     /// 有效 Winner 超过单 Catalog 上限。
@@ -151,8 +157,16 @@ pub struct SkillScanResult {
 /// Runtime 发给 Host 扫描适配器的文件实现无关请求。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SkillScanRequest {
-    /// 当前 Workspace 的规范绝对目录，主目录固定为第 0 项。
+    /// 本次扫描的规范绝对根；已有 Session 使用冻结目录，新 Workspace 查询使用当前目录。
     pub workspace_directories: Vec<String>,
+    /// Runtime 已确认生效且启用的包；Host 根据归属与摘要构造固定根。
+    pub plugin_packages: Vec<PluginSkillPackage>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PluginSkillPackage {
+    pub name: String,
+    pub sha256: String,
 }
 
 /// Skill 包扫描的异步返回类型。
@@ -300,6 +314,50 @@ pub fn compile_skill_discovery(
 
     let mut winners = Vec::new();
     for (name, candidates) in by_name {
+        let independent = candidates
+            .iter()
+            .filter(|candidate| candidate.source != SkillSource::Plugin)
+            .collect::<Vec<_>>();
+        let plugins = candidates
+            .iter()
+            .filter(|candidate| candidate.source == SkillSource::Plugin)
+            .collect::<Vec<_>>();
+        if !independent.is_empty() && !plugins.is_empty() {
+            let mut diagnostic = name_diagnostic(
+                SkillDiagnosticSeverity::Error,
+                SkillDiagnosticCode::PluginConflict,
+                &name,
+                "plugin skill name conflicts with an independent skill",
+            );
+            diagnostic.source = Some(SkillSource::Plugin);
+            scan.diagnostics.push(diagnostic);
+        }
+        if independent.is_empty() {
+            if plugins.len() > 1 {
+                let mut diagnostic = name_diagnostic(
+                    SkillDiagnosticSeverity::Error,
+                    SkillDiagnosticCode::PluginConflict,
+                    &name,
+                    "multiple enabled plugins declare this skill name",
+                );
+                diagnostic.source = Some(SkillSource::Plugin);
+                scan.diagnostics.push(diagnostic);
+                continue;
+            }
+            if let Some(plugin) = plugins.first() {
+                if plugin.model_invocable || plugin.user_invocable {
+                    winners.push((*plugin).clone());
+                } else {
+                    scan.diagnostics.push(name_diagnostic(
+                        SkillDiagnosticSeverity::Warning,
+                        SkillDiagnosticCode::NotInvocable,
+                        &name,
+                        "plugin skill is unavailable to both user and model invocation",
+                    ));
+                }
+            }
+            continue;
+        }
         // 开关绑定逻辑名称而非当前 Winner；禁用后绝不选择低优先级候补。
         if enabled.get(&name) == Some(&false) {
             scan.diagnostics.push(name_diagnostic(
@@ -311,11 +369,11 @@ pub fn compile_skill_discovery(
             continue;
         }
 
-        let best_priority = candidates
+        let best_priority = independent
             .first()
-            .map(candidate_priority)
+            .map(|candidate| candidate_priority(candidate))
             .expect("grouped candidates are non-empty");
-        let same_priority = candidates
+        let same_priority = independent
             .iter()
             .filter(|candidate| candidate_priority(candidate) == best_priority)
             .collect::<Vec<_>>();
@@ -340,7 +398,7 @@ pub fn compile_skill_discovery(
             ));
             continue;
         }
-        for shadowed in candidates
+        for shadowed in independent
             .iter()
             .filter(|candidate| candidate_priority(candidate) != best_priority)
         {
@@ -354,7 +412,7 @@ pub fn compile_skill_discovery(
             diagnostic.source_path = Some(shadowed.source_path.clone());
             scan.diagnostics.push(diagnostic);
         }
-        winners.push(winner.clone());
+        winners.push((*winner).clone());
     }
 
     winners.sort_by(|left, right| left.name.cmp(&right.name));
@@ -398,6 +456,7 @@ fn candidate_priority(candidate: &SkillCandidate) -> (u8, usize, SkillSource) {
         | SkillSource::LegacyUserEzAssistant
         | SkillSource::HostSupplement
         | SkillSource::UserAgents => (1, 0, candidate.source),
+        SkillSource::Plugin => (2, 0, candidate.source),
     }
 }
 

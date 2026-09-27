@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { ModelSelection } from './models.js';
+import { PluginPlatform } from './plugins.js';
 import { PageQuery } from './users.js';
 
 export class AuditQuery extends PageQuery {
@@ -26,6 +27,16 @@ export class AuditUserFields {
   @ApiPropertyOptional({ type: Boolean }) readonly enabled?: boolean;
 }
 export class AuditDetails {
+  @ApiPropertyOptional({ type: String }) name?: string;
+  @ApiPropertyOptional({ type: String }) version?: string;
+  @ApiPropertyOptional({ type: [PluginPlatform] }) platforms?: PluginPlatform[];
+  @ApiPropertyOptional({ enum: ['created', 'replaced', 'unchanged'] }) result?: 'created' | 'replaced' | 'unchanged';
+  @ApiPropertyOptional({ enum: ['unpublished', 'listed', 'deprecated'] })
+  publication?: 'unpublished' | 'listed' | 'deprecated';
+  @ApiPropertyOptional({ type: String, pattern: '^[0-9a-f]{64}$' }) sha256?: string;
+  @ApiPropertyOptional({ type: String, pattern: '^[0-9a-f]{64}$' }) previous_sha256?: string;
+  @ApiPropertyOptional({ type: Number, minimum: 0, maximum: 256 }) skill_count?: number;
+  @ApiPropertyOptional({ type: Number, minimum: 0, maximum: 256 }) mcp_count?: number;
   @ApiPropertyOptional({ type: String, format: 'uuid' }) call_id?: string;
   @ApiPropertyOptional({ enum: ['request', 'response'] }) side?: 'request' | 'response';
   @ApiPropertyOptional({ type: Boolean }) enabled?: boolean;

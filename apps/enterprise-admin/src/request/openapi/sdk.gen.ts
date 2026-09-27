@@ -2,7 +2,7 @@
 
 import type { Client, ClientMeta, Options as Options2, RequestResult, TDataShape } from './client';
 import { client } from './client.gen';
-import type { ChangeOwnPasswordData, ChangeOwnPasswordErrors, ChangeOwnPasswordResponses, CreateModelProviderData, CreateModelProviderErrors, CreateModelProviderResponses, CreateUserData, CreateUserErrors, CreateUserResponses, DeleteModelProviderData, DeleteModelProviderErrors, DeleteModelProviderResponses, GetCenterInfoData, GetCenterInfoErrors, GetCenterInfoResponses, GetCurrentIdentityData, GetCurrentIdentityErrors, GetCurrentIdentityResponses, GetLlmCallData, GetLlmCallErrors, GetLlmCallResponses, GetLlmRecordingSettingsData, GetLlmRecordingSettingsErrors, GetLlmRecordingSettingsResponses, GetLlmSnapshotData, GetLlmSnapshotErrors, GetLlmSnapshotResponses, GetModelCatalogData, GetModelCatalogErrors, GetModelCatalogResponses, GetModelProviderData, GetModelProviderErrors, GetModelProviderResponses, GetModelProviderUsageData, GetModelProviderUsageErrors, GetModelProviderUsageResponses, GetModelSettingsData, GetModelSettingsErrors, GetModelSettingsResponses, GetModelTemplateStatusData, GetModelTemplateStatusErrors, GetModelTemplateStatusResponses, GetRuntimeModelConfigurationData, GetRuntimeModelConfigurationErrors, GetRuntimeModelConfigurationResponses, ListFixedModelConfigurationsData, ListFixedModelConfigurationsErrors, ListFixedModelConfigurationsResponses, ListLlmCallsData, ListLlmCallsErrors, ListLlmCallsResponses, ListManagementAuditData, ListManagementAuditErrors, ListManagementAuditResponses, ListModelProvidersData, ListModelProvidersErrors, ListModelProvidersResponses, ListUsersData, ListUsersErrors, ListUsersResponses, LoginData, LoginErrors, LoginResponses, LogoutData, LogoutErrors, LogoutResponses, QueryModelConfigurationData, QueryModelConfigurationErrors, QueryModelConfigurationResponses, RefreshModelCatalogData, RefreshModelCatalogErrors, RefreshModelCatalogResponses, ReloadModelTemplatesData, ReloadModelTemplatesErrors, ReloadModelTemplatesResponses, ResetModelConfigurationData, ResetModelConfigurationErrors, ResetModelConfigurationResponses, ResetUserPasswordData, ResetUserPasswordErrors, ResetUserPasswordResponses, SaveLlmRecordingSettingsData, SaveLlmRecordingSettingsErrors, SaveLlmRecordingSettingsResponses, SaveModelConfigurationData, SaveModelConfigurationErrors, SaveModelConfigurationResponses, SaveModelSettingsData, SaveModelSettingsErrors, SaveModelSettingsResponses, TestModelConfigurationData, TestModelConfigurationErrors, TestModelConfigurationResponses, UpdateModelProviderData, UpdateModelProviderErrors, UpdateModelProviderResponses, UpdateUserData, UpdateUserErrors, UpdateUserResponses } from './types.gen';
+import type { ChangeOwnPasswordData, ChangeOwnPasswordErrors, ChangeOwnPasswordResponses, CreateAgentData, CreateAgentErrors, CreateAgentResponses, CreateModelProviderData, CreateModelProviderErrors, CreateModelProviderResponses, CreateUserData, CreateUserErrors, CreateUserResponses, DeleteAgentData, DeleteAgentErrors, DeleteAgentResponses, DeleteModelProviderData, DeleteModelProviderErrors, DeleteModelProviderResponses, DownloadRuntimePluginPackageData, DownloadRuntimePluginPackageErrors, DownloadRuntimePluginPackageResponses, GetAgentData, GetAgentErrors, GetAgentResponses, GetCenterInfoData, GetCenterInfoErrors, GetCenterInfoResponses, GetCurrentIdentityData, GetCurrentIdentityErrors, GetCurrentIdentityResponses, GetCurrentPluginPackageData, GetCurrentPluginPackageErrors, GetCurrentPluginPackageResponses, GetLlmCallData, GetLlmCallErrors, GetLlmCallResponses, GetLlmRecordingSettingsData, GetLlmRecordingSettingsErrors, GetLlmRecordingSettingsResponses, GetLlmSnapshotData, GetLlmSnapshotErrors, GetLlmSnapshotResponses, GetLlmUsageData, GetLlmUsageErrors, GetLlmUsageResponses, GetModelCatalogData, GetModelCatalogErrors, GetModelCatalogResponses, GetModelProviderData, GetModelProviderErrors, GetModelProviderResponses, GetModelProviderUsageData, GetModelProviderUsageErrors, GetModelProviderUsageResponses, GetModelSettingsData, GetModelSettingsErrors, GetModelSettingsResponses, GetModelTemplateStatusData, GetModelTemplateStatusErrors, GetModelTemplateStatusResponses, GetPluginData, GetPluginErrors, GetPluginResponses, GetRuntimeModelConfigurationData, GetRuntimeModelConfigurationErrors, GetRuntimeModelConfigurationResponses, GetRuntimePluginData, GetRuntimePluginErrors, GetRuntimePluginResponses, ListAgentsData, ListAgentsErrors, ListAgentsResponses, ListFixedModelConfigurationsData, ListFixedModelConfigurationsErrors, ListFixedModelConfigurationsResponses, ListLlmCallsData, ListLlmCallsErrors, ListLlmCallsResponses, ListLlmUsageModelsData, ListLlmUsageModelsErrors, ListLlmUsageModelsResponses, ListManagementAuditData, ListManagementAuditErrors, ListManagementAuditResponses, ListModelProvidersData, ListModelProvidersErrors, ListModelProvidersResponses, ListPluginsData, ListPluginsErrors, ListPluginsResponses, ListRuntimeAgentsData, ListRuntimeAgentsErrors, ListRuntimeAgentsResponses, ListRuntimePluginsData, ListRuntimePluginsErrors, ListRuntimePluginsResponses, ListUsersData, ListUsersErrors, ListUsersResponses, LoginData, LoginErrors, LoginResponses, LogoutData, LogoutErrors, LogoutResponses, QueryModelConfigurationData, QueryModelConfigurationErrors, QueryModelConfigurationResponses, RefreshModelCatalogData, RefreshModelCatalogErrors, RefreshModelCatalogResponses, ReloadModelTemplatesData, ReloadModelTemplatesErrors, ReloadModelTemplatesResponses, ResetModelConfigurationData, ResetModelConfigurationErrors, ResetModelConfigurationResponses, ResetUserPasswordData, ResetUserPasswordErrors, ResetUserPasswordResponses, ResolveRuntimePluginData, ResolveRuntimePluginErrors, ResolveRuntimePluginResponses, SaveLlmRecordingSettingsData, SaveLlmRecordingSettingsErrors, SaveLlmRecordingSettingsResponses, SaveModelConfigurationData, SaveModelConfigurationErrors, SaveModelConfigurationResponses, SaveModelSettingsData, SaveModelSettingsErrors, SaveModelSettingsResponses, SetPluginPublicationData, SetPluginPublicationErrors, SetPluginPublicationResponses, TestModelConfigurationData, TestModelConfigurationErrors, TestModelConfigurationResponses, UpdateAgentData, UpdateAgentErrors, UpdateAgentResponses, UpdateModelProviderData, UpdateModelProviderErrors, UpdateModelProviderResponses, UpdatePluginData, UpdatePluginErrors, UpdatePluginResponses, UpdateUserData, UpdateUserErrors, UpdateUserResponses, UploadPluginPackageData, UploadPluginPackageErrors, UploadPluginPackageResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -289,6 +289,20 @@ export const getRuntimeModelConfiguration = <ThrowOnError extends boolean = fals
     ...options
 });
 
+export const getLlmUsage = <ThrowOnError extends boolean = false>(options?: Options<GetLlmUsageData, ThrowOnError>): RequestResult<GetLlmUsageResponses, GetLlmUsageErrors, ThrowOnError> => (options?.client ?? client).get<GetLlmUsageResponses, GetLlmUsageErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/llm-usage',
+    ...options
+});
+
+export const listLlmUsageModels = <ThrowOnError extends boolean = false>(options?: Options<ListLlmUsageModelsData, ThrowOnError>): RequestResult<ListLlmUsageModelsResponses, ListLlmUsageModelsErrors, ThrowOnError> => (options?.client ?? client).get<ListLlmUsageModelsResponses, ListLlmUsageModelsErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/llm-usage/models',
+    ...options
+});
+
 export const listLlmCalls = <ThrowOnError extends boolean = false>(options?: Options<ListLlmCallsData, ThrowOnError>): RequestResult<ListLlmCallsResponses, ListLlmCallsErrors, ThrowOnError> => (options?.client ?? client).get<ListLlmCallsResponses, ListLlmCallsErrors, ThrowOnError>({
     responseType: 'json',
     security: [{ scheme: 'bearer', type: 'http' }],
@@ -337,4 +351,188 @@ export const testModelConfiguration = <ThrowOnError extends boolean = false>(opt
         'Content-Type': 'application/json',
         ...options.headers
     }
+});
+
+/**
+ * 管理员读取全部插件及当前版本
+ */
+export const listPlugins = <ThrowOnError extends boolean = false>(options?: Options<ListPluginsData, ThrowOnError>): RequestResult<ListPluginsResponses, ListPluginsErrors, ThrowOnError> => (options?.client ?? client).get<ListPluginsResponses, ListPluginsErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/plugins',
+    ...options
+});
+
+/**
+ * 管理员读取插件详情与条件写 ETag
+ */
+export const getPlugin = <ThrowOnError extends boolean = false>(options: Options<GetPluginData, ThrowOnError>): RequestResult<GetPluginResponses, GetPluginErrors, ThrowOnError> => (options.client ?? client).get<GetPluginResponses, GetPluginErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/plugins/{name}',
+    ...options
+});
+
+/**
+ * 以 If-Match 修改插件说明
+ */
+export const updatePlugin = <ThrowOnError extends boolean = false>(options: Options<UpdatePluginData, ThrowOnError>): RequestResult<UpdatePluginResponses, UpdatePluginErrors, ThrowOnError> => (options.client ?? client).put<UpdatePluginResponses, UpdatePluginErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/plugins/{name}',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * 以 If-Match 上架或下架插件
+ */
+export const setPluginPublication = <ThrowOnError extends boolean = false>(options: Options<SetPluginPublicationData, ThrowOnError>): RequestResult<SetPluginPublicationResponses, SetPluginPublicationErrors, ThrowOnError> => (options.client ?? client).put<SetPluginPublicationResponses, SetPluginPublicationErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/plugins/{name}/publication',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * 上传或替换一个完整插件版本包
+ */
+export const uploadPluginPackage = <ThrowOnError extends boolean = false>(options: Options<UploadPluginPackageData, ThrowOnError>): RequestResult<UploadPluginPackageResponses, UploadPluginPackageErrors, ThrowOnError> => (options.client ?? client).post<UploadPluginPackageResponses, UploadPluginPackageErrors, ThrowOnError>({
+    bodySerializer: null,
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/plugin-packages',
+    ...options,
+    headers: {
+        'Content-Type': 'application/zip',
+        ...options.headers
+    }
+});
+
+/**
+ * 核对某版本当前完整包
+ */
+export const getCurrentPluginPackage = <ThrowOnError extends boolean = false>(options: Options<GetCurrentPluginPackageData, ThrowOnError>): RequestResult<GetCurrentPluginPackageResponses, GetCurrentPluginPackageErrors, ThrowOnError> => (options.client ?? client).get<GetCurrentPluginPackageResponses, GetCurrentPluginPackageErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/plugin-packages/{name}/versions/{version}',
+    ...options
+});
+
+/**
+ * 读取在架插件目录
+ */
+export const listRuntimePlugins = <ThrowOnError extends boolean = false>(options?: Options<ListRuntimePluginsData, ThrowOnError>): RequestResult<ListRuntimePluginsResponses, ListRuntimePluginsErrors, ThrowOnError> => (options?.client ?? client).get<ListRuntimePluginsResponses, ListRuntimePluginsErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/runtime/plugins',
+    ...options
+});
+
+/**
+ * 读取插件发布状态与在架版本
+ */
+export const getRuntimePlugin = <ThrowOnError extends boolean = false>(options: Options<GetRuntimePluginData, ThrowOnError>): RequestResult<GetRuntimePluginResponses, GetRuntimePluginErrors, ThrowOnError> => (options.client ?? client).get<GetRuntimePluginResponses, GetRuntimePluginErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/runtime/plugins/{name}',
+    ...options
+});
+
+/**
+ * 按平台、Host 和能力选择当前完整包
+ */
+export const resolveRuntimePlugin = <ThrowOnError extends boolean = false>(options: Options<ResolveRuntimePluginData, ThrowOnError>): RequestResult<ResolveRuntimePluginResponses, ResolveRuntimePluginErrors, ThrowOnError> => (options.client ?? client).post<ResolveRuntimePluginResponses, ResolveRuntimePluginErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/runtime/plugins/{name}/resolve',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * 带当前 SHA 条件下载完整原包
+ */
+export const downloadRuntimePluginPackage = <ThrowOnError extends boolean = false>(options: Options<DownloadRuntimePluginPackageData, ThrowOnError>): RequestResult<DownloadRuntimePluginPackageResponses, DownloadRuntimePluginPackageErrors, ThrowOnError> => (options.client ?? client).get<DownloadRuntimePluginPackageResponses, DownloadRuntimePluginPackageErrors, ThrowOnError>({
+    responseType: 'blob',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/runtime/plugins/{name}/versions/{version}/package',
+    ...options
+});
+
+/**
+ * 管理员读取 Agent 摘要与当前依赖诊断
+ */
+export const listAgents = <ThrowOnError extends boolean = false>(options?: Options<ListAgentsData, ThrowOnError>): RequestResult<ListAgentsResponses, ListAgentsErrors, ThrowOnError> => (options?.client ?? client).get<ListAgentsResponses, ListAgentsErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/agents',
+    ...options
+});
+
+/**
+ * 创建完整企业 Agent 配置
+ */
+export const createAgent = <ThrowOnError extends boolean = false>(options: Options<CreateAgentData, ThrowOnError>): RequestResult<CreateAgentResponses, CreateAgentErrors, ThrowOnError> => (options.client ?? client).post<CreateAgentResponses, CreateAgentErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/agents',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * 以 If-Match 删除 Agent 配置
+ */
+export const deleteAgent = <ThrowOnError extends boolean = false>(options: Options<DeleteAgentData, ThrowOnError>): RequestResult<DeleteAgentResponses, DeleteAgentErrors, ThrowOnError> => (options.client ?? client).delete<DeleteAgentResponses, DeleteAgentErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/agents/{name}',
+    ...options
+});
+
+/**
+ * 管理员读取完整 Agent 与当前依赖诊断
+ */
+export const getAgent = <ThrowOnError extends boolean = false>(options: Options<GetAgentData, ThrowOnError>): RequestResult<GetAgentResponses, GetAgentErrors, ThrowOnError> => (options.client ?? client).get<GetAgentResponses, GetAgentErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/agents/{name}',
+    ...options
+});
+
+/**
+ * 以 If-Match 修改完整 Agent 配置
+ */
+export const updateAgent = <ThrowOnError extends boolean = false>(options: Options<UpdateAgentData, ThrowOnError>): RequestResult<UpdateAgentResponses, UpdateAgentErrors, ThrowOnError> => (options.client ?? client).put<UpdateAgentResponses, UpdateAgentErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/agents/{name}',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * 登录用户读取完整企业 Agent 配置目录
+ */
+export const listRuntimeAgents = <ThrowOnError extends boolean = false>(options?: Options<ListRuntimeAgentsData, ThrowOnError>): RequestResult<ListRuntimeAgentsResponses, ListRuntimeAgentsErrors, ThrowOnError> => (options?.client ?? client).get<ListRuntimeAgentsResponses, ListRuntimeAgentsErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/runtime/agents',
+    ...options
 });

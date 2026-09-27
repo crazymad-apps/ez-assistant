@@ -22,6 +22,7 @@ getrandom.workspace = true
 hmac.workspace = true
 jsonschema.workspace = true
 sha2 = "0.10.9"
+unicode-normalization = "0.1.24"
 serde.workspace = true
 serde_json.workspace = true
 schemars.workspace = true

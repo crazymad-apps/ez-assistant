@@ -11,7 +11,7 @@ use thiserror::Error;
 pub struct SessionExecutionEnvironment {
     /// 创建时冻结的可选 Workspace 绑定。
     pub workspace_id: Option<WorkspaceId>,
-    /// Agent 默认工作的用户目录；未绑定 Workspace 时指向 Session 私有目录。
+    /// Agent 冻结的实际 cwd：用户目录、Workspace 私有目录或未绑定 Session 私有目录。
     pub working_directory: String,
     /// 创建 Session 时冻结的有序 Workspace 附加目录；后续 Workspace 编辑不会改写。
     pub additional_workspace_directories: Vec<String>,
@@ -29,7 +29,8 @@ pub struct SessionExecutionEnvironment {
 pub struct WorkspaceEnvironmentSource<'a> {
     pub workspace_id: &'a WorkspaceId,
     pub label: &'a str,
-    pub user_directory: &'a str,
+    /// 用户显式选择的工作目录；`None` 时 Host 使用 `agent_directory` 作为实际 cwd。
+    pub user_directory: Option<&'a str>,
     pub additional_directories: &'a [String],
     pub agent_directory: &'a str,
 }

@@ -60,7 +60,7 @@ impl AssistantRuntime {
             }
             input.idempotency_key = Some(device_input_idempotency_key(source)?);
         }
-        self.accept_session_input(input, request.source, None)
+        self.accept_session_input(input, request.source, None, None)
             .await
             .map(|(result, _)| result)
     }
@@ -89,6 +89,7 @@ impl AssistantRuntime {
         mut request: SubmitInputRequest,
         channel_source: InputChannelSource,
         agent_shell_target: Option<assistant_protocol::ShellKind>,
+        feedback_reply: Option<assistant_protocol::AnswerFeedbackRequest>,
     ) -> RuntimeResult<(SubmitInputResult, bool)> {
         let _operation = self.operation_gate.read().await;
         let _binding = self.model_binding_gate.read().await;
@@ -104,6 +105,43 @@ impl AssistantRuntime {
         let session = self.session_loader.prepare(&request.session_id).await?;
         let _mutation = session.mutation().await;
         session.ensure_active()?;
+        let feedback_answer = if let Some(reply) = feedback_reply.as_ref() {
+            let mut feedback = session
+                .lock_state()?
+                .feedback
+                .get(&reply.request_id)
+                .cloned()
+                .ok_or_else(|| crate::feedback::invalid("问题已失效"))?;
+            crate::feedback::validate_answers(&feedback, &reply.answers)?;
+            if feedback.mode != assistant_protocol::FeedbackMode::EndTurn
+                || session.lock_state()?.active_run.is_some()
+            {
+                return Err(crate::feedback::invalid("问题暂时不能回复，请稍后重试"));
+            }
+            if feedback.status != assistant_protocol::FeedbackStatus::Pending
+                && !(feedback.status == assistant_protocol::FeedbackStatus::Answered
+                    && feedback.answers.as_ref() == Some(&reply.answers))
+            {
+                return Err(crate::feedback::invalid("问题已处理或失效"));
+            }
+            request.message = crate::feedback::answer_message(&feedback, &reply.answers);
+            feedback.status = assistant_protocol::FeedbackStatus::Answered;
+            feedback.answers = Some(reply.answers.clone());
+            Some(feedback)
+        } else {
+            if session
+                .lock_state()?
+                .feedback
+                .values()
+                .any(|r| r.status == assistant_protocol::FeedbackStatus::Pending)
+            {
+                return Err(crate::feedback::invalid(
+                    "请回复当前问题，或取消等待后发送新指令",
+                ));
+            }
+            None
+        };
+
         if let Some(key) = request.idempotency_key.as_ref()
             && session
                 .lock_state()?
@@ -284,6 +322,7 @@ impl AssistantRuntime {
         let accepted = self
             .store
             .accept_input(NewStoredInput {
+                feedback_answer: feedback_answer.clone(),
                 agent_shell_target,
                 input_id: input_id.clone(),
                 run_id: run_id.clone(),
@@ -322,6 +361,14 @@ impl AssistantRuntime {
                 },
                 true,
             ));
+        }
+        if let Some(feedback) = feedback_answer {
+            let mut state = session.lock_state()?;
+            state
+                .feedback
+                .insert(feedback.request_id.clone(), feedback.clone());
+            state.resume_required = false;
+            self.publish(assistant_protocol::RuntimeEvent::FeedbackChanged { request: feedback });
         }
         let goal_snapshot = prepared_goal
             .as_ref()
@@ -370,6 +417,10 @@ impl AssistantRuntime {
                 }
                 state.queue_paused_by_user = false;
                 let projection = project_accepted_input(&mut state, accepted, mcp_selection);
+                if feedback_reply.is_some() && changes_session_queue {
+                    state.queue_item_ids.retain(|id| id != &projection.input_id);
+                    state.queue_item_ids.push_front(projection.input_id.clone());
+                }
                 if !changes_session_queue && !removed_deliveries.is_empty() {
                     state.queue_revision = state.queue_revision.saturating_add(1);
                 }

@@ -58,6 +58,9 @@ pub enum RuntimeErrorCode {
     WorkPlanRevisionConflict,
     /// Runtime 的权威存储当前不可用或拒绝了业务提交。
     StorageUnavailable,
+    PluginBusy,
+    PluginOperationNotFound,
+    PluginPackageUnavailable,
     /// Runtime 已开始关闭，不再接受新的变更操作。
     RuntimeShuttingDown,
     /// 为一次 Run 构造 Agent 失败。

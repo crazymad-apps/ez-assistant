@@ -14,7 +14,7 @@ type Discovery = {
 const STARTUP_TIMEOUT_MS = 10_000;
 
 export default async function setupRuntimeHost(_config: FullConfig): Promise<() => Promise<void>> {
-  const test_root = resolve(process.env.EZ_ASSISTANT_E2E_TEST_ROOT ?? "../../.runtime-test/c03-m4");
+  const test_root = resolve(process.env.EZ_ASSISTANT_E2E_TEST_ROOT ?? "../../.runtime-test/c02-m4");
   await mkdir(test_root, { recursive: true });
   const runtime_home = await mkdtemp(join(test_root, "ez-assistant-e2e-runtime-"));
   const workspace = await mkdtemp(join(test_root, "ez-assistant-e2e-workspace-"));
@@ -41,7 +41,7 @@ server_names = []
 `,
   );
 
-  const executable = resolve(process.cwd(), `../../target/debug/ez-assistant-runtime${process.platform === "win32" ? ".exe" : ""}`);
+  const executable = process.env.EZ_ASSISTANT_E2E_HOST_BINARY ?? resolve(process.cwd(), `../../target/debug/ez-assistant-runtime${process.platform === "win32" ? ".exe" : ""}`);
   // 只在隔离 Runtime Home 中启用安全 stdio fixture，不读取或变更用户 MCP 配置。
   await writeFile(join(runtime_home, "mcp.json"), JSON.stringify({ mcpServers: {
     local_fixture: {
@@ -113,7 +113,12 @@ server_names = []
   } catch (error) {
     child.kill("SIGTERM");
     await provider.close();
-    await removeTemporaryDirectories(runtime_home, workspace, additional_workspace, user_directory);
+    if (process.env.C03_E2E_RETAIN_HOME === "1") {
+      // C03 实包联调保留新建的隔离库，供停机后的精确核验；默认 E2E 行为不变。
+      process.stdout.write(`retained C03 E2E Runtime Home: ${runtime_home}\n`);
+    } else {
+      await removeTemporaryDirectories(runtime_home, workspace, additional_workspace, user_directory);
+    }
     throw error;
   }
 
@@ -132,7 +137,11 @@ server_names = []
     }
     await waitForExit(child);
     await provider.close();
-    await removeTemporaryDirectories(runtime_home, workspace, additional_workspace, user_directory);
+    if (process.env.C03_E2E_RETAIN_HOME === "1") {
+      process.stdout.write(`retained C03 E2E Runtime Home: ${runtime_home}\n`);
+    } else {
+      await removeTemporaryDirectories(runtime_home, workspace, additional_workspace, user_directory);
+    }
     delete process.env.EZ_ASSISTANT_E2E_BOOTSTRAP;
     delete process.env.EZ_ASSISTANT_E2E_NEW_WORKSPACE;
     delete process.env.EZ_ASSISTANT_E2E_RUNTIME_HOME;
@@ -176,7 +185,27 @@ async function startFakeProvider(): Promise<FakeProvider> {
       "cache-control": "no-cache",
     });
     let frames: readonly object[];
-    if (marker === "C05_STREAM") {
+    const feedback_index = body.messages?.findLastIndex((message) => message.role === "user" && JSON.stringify(message.content).includes("F04_")) ?? -1;
+    const feedback_completed = body.messages?.slice(feedback_index + 1).some((message) => message.role === "tool");
+    const resource_text = body.messages?.filter((message) => message.role === "user").map((message) => {
+      if (typeof message.content === "string") return message.content;
+      if (!Array.isArray(message.content)) return "";
+      return message.content.map((part: { text?: string }) => part.text ?? "").join("\n");
+    }).findLast((text) => text.startsWith("F05_RESOURCES\n"));
+    if (resource_text) {
+      frames = textFrames(response_id, resource_text.slice("F05_RESOURCES\n".length));
+    } else if (feedback_index >= 0 && !feedback_completed) {
+      const mode = JSON.stringify(body.messages?.[feedback_index]).includes("F04_END") ? "end_turn" : "wait";
+      const arguments_text = JSON.stringify({ mode, questions: [
+        { question: "最终使用什么格式？", header: "格式", options: [{ label: "PDF", description: "便于阅读" }, { label: "文档" }] },
+        { question: "交付包含哪些部分？", header: "内容", multiple: true, options: [{ label: "说明" }, { label: "清单" }] },
+        { question: "还有什么补充？", header: "补充" },
+      ] });
+      frames = [
+        { id: response_id, model: "offline-model", choices: [{ index: 0, delta: { role: "assistant", tool_calls: [{ index: 0, id: `feedback-${response_id}`, type: "function", function: { name: "ask_user", arguments: arguments_text } }] }, finish_reason: null }] },
+        { id: response_id, model: "offline-model", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] },
+      ];
+    } else if (marker === "C05_STREAM") {
       frames = [
         ...Array.from({ length: 180 }, (_, i) => ({ id: response_id, model: "offline-model", choices: [{ index: 0, delta: { reasoning_content: `推理 ${i}\n`.repeat(6) }, finish_reason: null }] })),
         ...Array.from({ length: 180 }, (_, i) => ({ id: response_id, model: "offline-model", choices: [{ index: 0, delta: { content: `正文 ${i}\n\n`.repeat(3) }, finish_reason: null }] })),
@@ -230,7 +259,7 @@ type ProviderMessage = Readonly<{ role?: string; content?: unknown }>;
 type ProviderRequest = Readonly<{ messages?: readonly ProviderMessage[] }>;
 
 function latestMarker(body: string): string {
-  const markers = ["FIRST_CASE", "BLOCK_FOR_QUEUE", "QUEUED_CASE", "TOOL_CASE", "DELEGATE_CASE", "MCP_CASE", "C05_STREAM"];
+  const markers = ["FIRST_CASE", "BLOCK_FOR_QUEUE", "QUEUED_CASE", "TOOL_CASE", "DELEGATE_CASE", "MCP_CASE", "PRIVATE_CASE", "C05_STREAM"];
   return markers
     .flatMap((marker) => {
       const position = body.lastIndexOf(marker);

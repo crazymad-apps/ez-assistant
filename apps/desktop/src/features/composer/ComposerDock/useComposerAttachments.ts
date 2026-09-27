@@ -138,6 +138,7 @@ export function useComposerAttachments(options: Readonly<{
   }
 
   function remove(attachment: ComposerAttachment) {
+    if (options.disabled || pending) return;
     if (attachment.state === "uploading") {
       if (attachment.operation_id) {
         void files.cancelResourceOperation(attachment.operation_id).catch(() => undefined);

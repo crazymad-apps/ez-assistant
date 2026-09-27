@@ -27,6 +27,7 @@ import type {
   RecallNavigationTarget,
   RunId,
   SessionMaterializationManifest,
+  SessionMaterializationResult,
   SessionId,
   SessionResourceLocator,
   SessionCommand,
@@ -35,6 +36,7 @@ import type {
   SystemContextSnapshot,
   SubmitInputMode,
   WorkspaceId,
+  WorkspaceSummary,
 } from "@ez-assistant/protocol";
 import { viewingSnapshot, loadDesktopPreferences, saveDesktopPreferences } from "../native-bridge/desktopPreferences";
 import {
@@ -66,7 +68,15 @@ import { SettingsStore } from "./SettingsStore";
 import { TransientFocusStore } from "./TransientFocusStore";
 import { ResourceWorkspaceStore } from "../features/resource-workspace/ResourceWorkspaceStore";
 
+import { FeedbackStore } from "../features/feedback/FeedbackStore";
+import { NotificationStore, type NotificationTarget } from "../features/notifications";
+
 export class RootStore {
+  readonly notifications = new NotificationStore({
+    scope: () => this.notificationScope(),
+    navigate: (target) => this.openNotificationTarget(target),
+  });
+  readonly feedback = new FeedbackStore({ client: () => this.#runtime.client, scope: () => this.notificationScope() });
   readonly connection = new ConnectionStore();
   readonly composer_quotes = new ComposerQuoteStore();
   readonly transient_focus = new TransientFocusStore();
@@ -85,7 +95,7 @@ export class RootStore {
   pending_session_action = false;
   pending_workspace_action = false;
   workspace_editor: Readonly<
-    | { mode: "create"; primary_directory: string }
+    | { mode: "create"; primary_directory: string | null }
     | { mode: "edit"; workspace_id: WorkspaceId }
   > | null = null;
   composer_pending = false;
@@ -106,6 +116,8 @@ export class RootStore {
   readonly #run_interaction: RunInteractionController;
   readonly #session_management: SessionManagementController;
   #disposed = false;
+  readonly #draft_skill_requests = new Map<NewSessionDraftKey, object>();
+  readonly #draft_mcp_requests = new Map<NewSessionDraftKey, object>();
   #preferences_save_timer: number | null = null;
   #preferences_initialization: Promise<void> | null = null;
   #initial_connection: Promise<void> | null = null;
@@ -122,9 +134,16 @@ export class RootStore {
   #runtime_state_disposer: IReactionDisposer;
   #resource_scope_disposer: IReactionDisposer;
   #provider_defaults_disposer: IReactionDisposer;
+  #feedback_disposer: IReactionDisposer;
+  #feedback_navigator_disposer: () => void;
 
   constructor(private readonly target_options: Readonly<{ target_kind?: "local" | "remote"; target_address?: string; restore_resources?: boolean }> = {}) {
     this.#runtime = new RuntimeLifecycleCoordinator({
+      on_event: (event) => {
+        this.feedback.setScope(this.notificationScope());
+        this.feedback.ingest(event);
+        this.notifications.ingest(event);
+      },
       require_selected_target: this.target_options.target_kind !== undefined,
       connection: this.connection,
       live_execution: this.live_execution,
@@ -163,6 +182,26 @@ export class RootStore {
           }, 1600);
         }
       },
+    });
+    this.#feedback_disposer = reaction(
+      () => {
+        const session_id = this.navigation.selected_session_id;
+        return { state: this.connection.state, scope: this.notificationScope(), session_id,
+          view: session_id ? this.projection.session_views.get(session_id) : undefined };
+      },
+      ({ state, scope, session_id }) => {
+        this.feedback.setScope(scope);
+        if (state === "connected" && session_id) void this.feedback.refresh(session_id);
+      },
+      { fireImmediately: true },
+    );
+    this.#feedback_navigator_disposer = this.notifications.registerFeedbackNavigator(async (target) => {
+      if (!(await this.openNotificationTarget(target))) return;
+      await this.feedback.refresh(target.owner.session_id);
+      if (target.scope !== this.notificationScope() || this.navigation.selected_session_id !== target.owner.session_id) return;
+      const request = this.feedback.requests.get(target.request_id);
+      if (request?.status === "pending") this.feedback.open(request);
+      else this.showInteractionError("这个问题已处理或已失效，当前显示会话最新状态。");
     });
     this.files = new ClientResources(() => this.#runtime.client, this.target_options.target_kind !== "remote");
     this.device_gateway = new DeviceGatewayStore({
@@ -272,6 +311,7 @@ export class RootStore {
       locateTextQuoteSource: action,
       cancelChildTask: action,
       openNewSessionDraft: action,
+      moveNewSessionDraft: action,
       clearNewSessionDraft: action,
       materializeNewSessionDraft: action,
       forkSession: action,
@@ -428,6 +468,42 @@ export class RootStore {
   resetSidebarLayout(): void {
     this.navigation.resetSidebarLayout();
     this.#schedulePreferencesSave();
+  }
+
+  #notification_navigation = 0;
+
+  notificationScope(): string | null {
+    const client = this.#runtime?.client;
+    return client ? JSON.stringify([client.address, client.instance_id, client.login_context]) : null;
+  }
+
+  async openNotificationTarget(target: NotificationTarget): Promise<boolean> {
+    const client = this.#runtime.client;
+    if (!client || this.#disposed || target.scope !== this.notificationScope()) return false;
+    const generation = ++this.#notification_navigation;
+    const selection = () => JSON.stringify([this.navigation.selected_session_id, this.navigation.selected_draft_key, this.navigation.selected_child_task_id]);
+    const previous_selection = selection();
+    const result = await client.command({ type: "get_session_view", payload: { session_id: target.owner.session_id } });
+    if (this.#disposed || client !== this.#runtime.client || target.scope !== this.notificationScope()
+      || generation !== this.#notification_navigation || selection() !== previous_selection) return false;
+    const view = result.payload.snapshot.value;
+    if (view.session.session_id !== target.owner.session_id) throw new Error("通知来源会话不匹配。");
+    runInAction(() => {
+      this.projection.applySessionSnapshot(result.payload.snapshot);
+      this.transient_focus.clear();
+      this.interaction_error = null;
+      this.navigation.setListMode(view.session.lifecycle === "archived" ? "archived" : "active");
+      this.navigation.selectSession(target.owner.session_id);
+      this.settings.close();
+      if (target.kind === "approval" && !view.approvals.items.some((item) => item.approval_id === target.approval_id)) {
+        this.interaction_error = "这项审批已处理或已失效，当前显示会话最新状态。";
+      }
+    });
+    // 子任务审批仍位于父会话唯一的审批区，不能创建第二份等待列表。
+    if (target.kind !== "approval" && target.owner.type === "child_task") {
+      await this.openChildTask(target.owner.session_id, target.owner.child_task_id);
+    }
+    return true;
   }
 
   async selectSession(session_id: SessionId): Promise<void> {
@@ -604,7 +680,7 @@ export class RootStore {
         item.workspace_id === workspace_id && item.lifecycle === "active"
       ));
       if (!workspace) {
-        this.interaction_error = "工作空间当前不可用，请选择其他工作空间。";
+        this.interaction_error = "项目当前不可用，请选择其他项目。";
         return;
       }
     }
@@ -616,11 +692,42 @@ export class RootStore {
   }
 
   async clearNewSessionDraft(key: NewSessionDraftKey): Promise<void> {
+    if (this.composer_pending || this.new_session_drafts.get(key)?.materialization_attempt) {
+      this.interaction_error = "首次发送结果待确认，暂不能清空草稿。";
+      return;
+    }
+    this.#draft_skill_requests.delete(key);
+    this.#draft_mcp_requests.delete(key);
     const removed = this.new_session_drafts.remove(key);
     if (removed) await releaseDraftSelections(removed, this.files);
     if (this.navigation.selected_draft_key === key) {
       this.new_session_drafts.open(key);
     }
+  }
+
+  moveNewSessionDraft(source: NewSessionDraftKey, workspace_id: WorkspaceId | null, picker_pending = false): boolean {
+    const target = draftKeyForWorkspace(workspace_id);
+    if (source === target) return true;
+    if (workspace_id && !this.projection.application?.workspaces.some((workspace) =>
+      workspace.workspace_id === workspace_id && workspace.lifecycle === "active")) {
+      this.interaction_error = "目标项目当前不可用。";
+      return false;
+    }
+    if (this.navigation.selected_draft_key !== source || this.composer_pending || picker_pending
+      || this.new_session_drafts.get(source)?.attachments.some((item) => item.state === "uploading")
+      || !this.resource_workspace.canMoveDraft(source, target)
+      || !this.new_session_drafts.move(source, target)) {
+      this.interaction_error = "无法移动草稿：目标已有内容或资源，或当前有选择、上传、发送操作。可取消移动并打开目标草稿。";
+      return false;
+    }
+    this.#draft_skill_requests.delete(source);
+    this.#draft_mcp_requests.delete(source);
+    this.resource_workspace.moveDraft(source, target);
+    this.navigation.selectDraft(target);
+    this.interaction_error = null;
+    void this.#loadNewSessionDraftSkills(target);
+    void this.#verifyNewSessionDraftMcp(target);
+    return true;
   }
 
   async materializeNewSessionDraft(key: NewSessionDraftKey): Promise<boolean> {
@@ -641,36 +748,77 @@ export class RootStore {
     if (!draft.text.trim() && draft.attachments.length === 0 && draft.quotes.length === 0) {
       return false;
     }
-    const manifest = draft.materialization_attempt ?? materializationManifest(draft);
-    if (!draft.materialization_attempt) {
-      this.new_session_drafts.beginMaterialization(key, manifest);
-    }
+    const previous_attempt = draft.materialization_attempt;
+    let active_attempt = previous_attempt;
+    const client = this.#runtime.client;
+    const instance_id = this.connection.instance_id;
+    if (!client || !instance_id) return false;
+    const sameOwner = () => client === this.#runtime.client && instance_id === this.connection.instance_id
+      && !this.#disposed;
     this.composer_pending = true;
     this.interaction_error = null;
-    this.new_session_drafts.setAttachmentTransferState(key, "uploading");
     try {
-      const result = await this.files.materializeNewSession(manifest, createOperationId("materialize"));
+      let result: SessionMaterializationResult | null = null;
+      if (previous_attempt) {
+        const recovered = await client.command({
+          type: "get_session_materialization",
+          payload: { idempotency_key: previous_attempt.idempotency_key },
+        });
+        if (!sameOwner() || this.new_session_drafts.get(key)?.materialization_attempt !== previous_attempt) return false;
+        result = recovered.payload.materialization;
+      }
+      if (!result) {
+        if (!previous_attempt) {
+          if (draft.selected_skill_name && (draft.skill_status !== "ready"
+            || !draft.skill_options.some((skill) => skill.name === draft.selected_skill_name))) {
+            throw new Error("所选技能在当前项目不可用，请移除或重新选择。");
+          }
+          if (draft.selected_mcp) {
+            const available = await this.listMcpServerOptions({
+              context: { type: "new_session", payload: { workspace_id: draft.workspace_id ?? undefined } },
+              variant: draft.variant,
+            });
+            const current_draft = this.new_session_drafts.get(key);
+            if (!sameOwner() || !current_draft || current_draft.workspace_id !== draft.workspace_id
+              || current_draft.selected_mcp?.server_key !== draft.selected_mcp.server_key
+              || current_draft.text !== draft.text || current_draft.variant !== draft.variant) return false;
+            const mcp_available = available.some((server) => server.server_key === draft.selected_mcp?.server_key);
+            this.new_session_drafts.setSelectedMcpAvailability(key, draft.selected_mcp.server_key, mcp_available);
+            if (!mcp_available) {
+              throw new Error("所选 MCP 服务在当前项目不可用，请移除或重新选择。");
+            }
+          }
+        }
+        const manifest = previous_attempt ?? materializationManifest(draft);
+        active_attempt = manifest;
+        if (!previous_attempt) this.new_session_drafts.beginMaterialization(key, manifest);
+        if (!sameOwner() || this.new_session_drafts.get(key)?.materialization_attempt !== manifest) return false;
+        this.new_session_drafts.setAttachmentTransferState(key, "uploading");
+        result = await this.files.materializeNewSession(manifest, createOperationId("materialize"));
+      }
+      if (!sameOwner() || this.new_session_drafts.get(key)?.materialization_attempt !== active_attempt) return false;
       runInAction(() => {
         // 物化已可靠成功，先转移标签 owner 再改导航；活跃 PTY/浏览器不重新创建。
         this.resource_workspace.transferDraft(key, result.session.session_id);
         this.new_session_drafts.remove(key);
-        this.navigation.selectSession(result.session.session_id, false);
+        if (this.navigation.selected_draft_key === key) this.navigation.selectSession(result.session.session_id, false);
         if (result.session.workspace_id) {
           this.navigation.ensureWorkspaceExpanded(result.session.workspace_id);
         }
       });
       try {
-        await this.#runtime.loadApplication();
-        await this.#runtime.loadSession(result.session.session_id);
+        if (sameOwner()) await this.#runtime.loadApplication();
+        if (sameOwner()) await this.#runtime.loadSession(result.session.session_id);
       } catch (error: unknown) {
-        runInAction(() => this.connection.markDisconnected(displayError(error)));
+        if (sameOwner()) runInAction(() => this.connection.markDisconnected(displayError(error)));
       }
       this.#schedulePreferencesSave();
       return true;
     } catch (error: unknown) {
       const message = displayError(error);
       runInAction(() => {
-        if (!(error instanceof NativeResourceFailure && error.code === "materialization_response_unknown")) {
+        if (!sameOwner()) return;
+        if (!previous_attempt && !(error instanceof NativeResourceFailure && error.code === "materialization_response_unknown")) {
           this.new_session_drafts.clearMaterializationAttempt(key);
         }
         this.new_session_drafts.setAttachmentTransferState(key, "failed", message);
@@ -726,14 +874,9 @@ export class RootStore {
     }
   }
 
-  async addWorkspace(): Promise<void> {
+  addWorkspace(): void {
     if (this.pending_workspace_action || this.pending_session_action) return;
-    const primary_directory = await this.chooseWorkspaceDirectory();
-    if (primary_directory && !this.#disposed) {
-      runInAction(() => {
-        this.workspace_editor = { mode: "create", primary_directory };
-      });
-    }
+    this.workspace_editor = { mode: "create", primary_directory: null };
   }
 
   openWorkspaceEditor(workspace_id: WorkspaceId): void {
@@ -757,7 +900,7 @@ export class RootStore {
 
   async saveWorkspaceEditor(input: Readonly<{
     label: string;
-    primary_directory: string;
+    primary_directory: string | null;
     additional_directories: string[];
   }>): Promise<boolean> {
     const editor = this.workspace_editor;
@@ -774,12 +917,26 @@ export class RootStore {
   }
 
   async removeWorkspace(workspace_id: WorkspaceId): Promise<boolean> {
+    const key = draftKeyForWorkspace(workspace_id);
+    if (this.composer_pending || this.new_session_drafts.get(key)?.materialization_attempt) {
+      this.interaction_error = "该项目仍有待确认的首次发送，暂不能移除。";
+      return false;
+    }
     const removed = await this.#session_management.removeWorkspace(workspace_id);
     if (removed) {
-      const draft = this.new_session_drafts.remove(draftKeyForWorkspace(workspace_id));
+      const draft = this.new_session_drafts.get(key)?.materialization_attempt
+        ? null : this.new_session_drafts.remove(key);
       if (draft) await releaseDraftSelections(draft, this.files);
     }
     return removed;
+  }
+
+  listRemovedWorkspaces(): Promise<WorkspaceSummary[] | null> {
+    return this.#session_management.listRemovedWorkspaces();
+  }
+
+  restoreWorkspace(workspace_id: WorkspaceId): Promise<boolean> {
+    return this.#session_management.restoreWorkspace(workspace_id);
   }
 
   async openWorkspace(workspace_id: WorkspaceId): Promise<void> {
@@ -878,7 +1035,7 @@ export class RootStore {
   async listSkills(workspace_id?: WorkspaceId | null): Promise<SkillManagementSnapshot> {
     const client = this.#runtime.client;
     if (!client || this.connection.state !== "connected") throw new Error("Runtime 未连接");
-    const result = await client.command({ type: "list_skills", payload: workspace_id ? { workspace_id } : {} });
+    const result = await client.command({ type: "list_skills", payload: { include_plugins: true, ...(workspace_id ? { workspace_id } : {}) } });
     if (client !== this.#runtime.client || this.connection.state !== "connected") throw new Error("Runtime 连接已变化，请重试");
     return result.payload.snapshot;
   }
@@ -1275,6 +1432,10 @@ export class RootStore {
     if (this.#disposed) return;
     this.#flush_view_state();
     this.#disposed = true;
+    this.#feedback_disposer();
+    this.#feedback_navigator_disposer();
+    this.feedback.dispose();
+    this.notifications.dispose();
     this.#resource_snapshot_disposer();
     window.removeEventListener("scroll", this.#save_view_state, true);
     window.removeEventListener("pointerup", this.#save_view_state);
@@ -1371,18 +1532,56 @@ export class RootStore {
 
   async #loadNewSessionDraftSkills(key: NewSessionDraftKey): Promise<void> {
     const client = this.#runtime.client;
+    const instance_id = this.connection.instance_id;
     const draft = this.new_session_drafts.get(key);
     if (!client || !draft || !this.new_session_drafts.beginSkillLoad(key)) return;
+    const request = {};
+    this.#draft_skill_requests.set(key, request);
     try {
       const result = await client.command({
         type: "list_skills",
-        payload: draft.workspace_id ? { workspace_id: draft.workspace_id } : {},
+        payload: { include_plugins: true, ...(draft.workspace_id ? { workspace_id: draft.workspace_id } : {}) },
       });
       runInAction(() => {
-        this.new_session_drafts.applySkillOptions(key, result.payload.snapshot.skills);
+        if (client === this.#runtime.client && instance_id === this.connection.instance_id
+          && this.#draft_skill_requests.get(key) === request
+          && this.new_session_drafts.get(key)?.workspace_id === draft.workspace_id)
+          this.new_session_drafts.applySkillOptions(key, result.payload.snapshot.skills);
       });
     } catch {
-      runInAction(() => this.new_session_drafts.failSkillLoad(key));
+      runInAction(() => {
+        if (client === this.#runtime.client && instance_id === this.connection.instance_id
+          && this.#draft_skill_requests.get(key) === request
+          && this.new_session_drafts.get(key)?.workspace_id === draft.workspace_id)
+          this.new_session_drafts.failSkillLoad(key);
+      });
+    }
+  }
+
+  async #verifyNewSessionDraftMcp(key: NewSessionDraftKey): Promise<void> {
+    const client = this.#runtime.client;
+    const instance_id = this.connection.instance_id;
+    const draft = this.new_session_drafts.get(key);
+    if (!client || !draft?.selected_mcp) return;
+    const request = {};
+    const server_key = draft.selected_mcp.server_key;
+    this.#draft_mcp_requests.set(key, request);
+    try {
+      const available = await this.listMcpServerOptions({
+        context: { type: "new_session", payload: { workspace_id: draft.workspace_id ?? undefined } },
+        variant: draft.variant,
+      });
+      runInAction(() => {
+        if (client === this.#runtime.client && instance_id === this.connection.instance_id
+          && this.#draft_mcp_requests.get(key) === request
+          && this.new_session_drafts.get(key)?.workspace_id === draft.workspace_id) {
+          this.new_session_drafts.setSelectedMcpAvailability(
+            key, server_key, available.some((server) => server.server_key === server_key),
+          );
+        }
+      });
+    } catch {
+      // 查询失败保留未验证标签；发送前仍重新校验，不能信任旧工作空间缓存。
     }
   }
 }
@@ -1404,6 +1603,7 @@ function materializationManifest(draft: NewSessionDraft): SessionMaterialization
     })),
     quotes: [...draft.quotes],
     ...(draft.selected_skill_name ? { skill_name: draft.selected_skill_name } : {}),
+    ...(draft.selected_agent ? { custom_agent: draft.selected_agent } : {}),
     ...(draft.selected_mcp ? { mcp_server_key: draft.selected_mcp.server_key } : {}),
   };
 }

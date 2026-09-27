@@ -10,6 +10,9 @@ export const TABLES = [
   'model_settings',
   'llm_recording_settings',
   'llm_calls',
+  'custom_agents',
+  'plugins',
+  'plugin_packages',
 ] as const;
 
 /** 只用于显式维护命令/验收的行数报告；普通启动不扫描业务数据。 */

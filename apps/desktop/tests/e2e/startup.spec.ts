@@ -39,7 +39,7 @@ for (const desktop of [true, false]) {
         } });
       }, fixture);
       await page.goto("/");
-      await page.getByRole("button", { name: "进入工作空间" }).click();
+      await page.getByRole("button", { name: "进入项目" }).click();
     } else {
       const issued = await fetch(`${fixture.base_url}/auth/login`, { method: "POST", headers: { ...compatibilityHeaders(), Authorization: `Bearer ${fixture.access_token}`, "Content-Type": "application/json" }, body: JSON.stringify({ method: "desktop" }) });
       expect(issued.ok).toBe(true);

@@ -10,6 +10,7 @@ import {
   NewSessionDraftStore,
 } from "../../src/stores/NewSessionDraftStore";
 import { RootStore } from "../../src/stores/RootStore";
+import { RuntimeLifecycleCoordinator } from "../../src/stores/RuntimeLifecycleCoordinator";
 
 describe("NewSessionDraftStore", () => {
   it("keeps following-default intent and treats explicit choices as customized", () => {
@@ -53,6 +54,11 @@ describe("NewSessionDraftStore", () => {
     expect(drafts.get("workspace:workspace-2")?.model_selection).toEqual(remembered);
   });
   it("passes a stable MCP key in first materialization and preserves it on rejection", async () => {
+    const client = { command: vi.fn(async (request: { type: string }) => request.type === "list_skills"
+      ? { payload: { snapshot: { skills: [{ name: "review" }] } } }
+      : { payload: { servers: [{ server_key: "github", display_name: "GitHub" }] } }) };
+    const clientSpy = vi.spyOn(RuntimeLifecycleCoordinator.prototype, "client", "get")
+      .mockReturnValue(client as never);
     const store = new RootStore();
     store.connection.markConnected("instance-1", {
       mode: "personal", min_compatible_version: "0.25.2", runtime_version: "0.25.2", max_command_bytes: 65536,
@@ -63,6 +69,7 @@ describe("NewSessionDraftStore", () => {
     store.new_session_drafts.updateGoalArmed("unbound", true);
     store.new_session_drafts.updateSelectedSkill("unbound", "review");
     store.new_session_drafts.updateSelectedMcp("unbound", { server_key: "github", display_name: "旧展示名" });
+    await vi.waitFor(() => expect(store.new_session_drafts.get("unbound")?.skill_status).toBe("ready"));
     vi.mocked(materializeNewSession).mockRejectedValueOnce(new Error("MCP 服务已不可用，请重新选择"));
     expect(await store.materializeNewSessionDraft("unbound")).toBe(false);
     expect(materializeNewSession).toHaveBeenCalledWith(expect.objectContaining({ mcp_server_key: "github", skill_name: "review", mode: "start_goal", message: "创建 issue" }), expect.any(String));
@@ -71,6 +78,7 @@ describe("NewSessionDraftStore", () => {
     store.new_session_drafts.updateVariant("unbound", "plan");
     expect(store.new_session_drafts.get("unbound")).toMatchObject({ selected_mcp: null, selected_skill_name: "review", goal_armed: true });
     store.dispose();
+    clientSpy.mockRestore();
   });
 
   it("keeps one isolated in-memory draft per workspace and no Session identity", () => {
@@ -96,7 +104,7 @@ describe("NewSessionDraftStore", () => {
     expect(drafts.get(first)).not.toHaveProperty("session_id");
   });
 
-  it("retains one materialization manifest until the draft changes or the attempt is cleared", () => {
+  it("keeps a materialization manifest frozen until explicitly cleared", () => {
     const drafts = new NewSessionDraftStore();
     drafts.open("unbound");
     const manifest = {
@@ -115,11 +123,42 @@ describe("NewSessionDraftStore", () => {
     expect(drafts.get("unbound")?.materialization_attempt).toEqual(manifest);
 
     drafts.updateText("unbound", "用户已修改");
-    expect(drafts.get("unbound")?.materialization_attempt).toBeNull();
+    expect(drafts.get("unbound")?.text).toBe("");
+    expect(drafts.get("unbound")?.materialization_attempt).toEqual(manifest);
 
-    drafts.beginMaterialization("unbound", manifest);
     drafts.clearMaterializationAttempt("unbound");
     expect(drafts.get("unbound")?.materialization_attempt).toBeNull();
+    drafts.updateText("unbound", "用户已修改");
+    expect(drafts.get("unbound")?.text).toBe("用户已修改");
+  });
+
+  it("keeps an agent selection with a moved draft and freezes its source on first send", async () => {
+    const drafts = new NewSessionDraftStore();
+    drafts.open("unbound");
+    const selected = { name: "Warehouse", source: { type: "center" as const, center_id: "enterprise-1" } };
+    drafts.updateText("unbound", "画仓库模型");
+    drafts.updateSelectedAgent("unbound", selected);
+    expect(isDraftCustomized(drafts.get("unbound")!)).toBe(true);
+    expect(drafts.move("unbound", "workspace:workspace-1")).toBe(true);
+    expect(drafts.get("workspace:workspace-1")?.selected_agent).toEqual(selected);
+
+    const clientSpy = vi.spyOn(RuntimeLifecycleCoordinator.prototype, "client", "get")
+      .mockReturnValue({ command: vi.fn() } as never);
+    const store = new RootStore();
+    store.connection.markConnected("instance-1", {
+      mode: "personal", min_compatible_version: "0.28.0", runtime_version: "0.28.0",
+      max_command_bytes: 65536, max_attachment_bytes: null, sse: true, streaming_upload: true,
+      features: ["session_materialization"],
+    });
+    store.openNewSessionDraft(null);
+    store.new_session_drafts.updateText("unbound", "画仓库模型");
+    store.new_session_drafts.updateSelectedAgent("unbound", selected);
+    const upload = vi.spyOn(store.files, "materializeNewSession").mockRejectedValueOnce(new Error("test rejected"));
+    expect(await store.materializeNewSessionDraft("unbound")).toBe(false);
+    expect(upload.mock.calls[0][0].custom_agent).toEqual(selected);
+    expect(store.new_session_drafts.get("unbound")?.selected_agent).toEqual(selected);
+    store.dispose();
+    clientSpy.mockRestore();
   });
 
   it("does not fall back to creating an empty Session when the Host lacks materialization", async () => {

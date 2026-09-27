@@ -283,6 +283,9 @@ impl StoredSessionCommandResult {
 /// 原子接受 Input 及其首次 Run 所需的完整事实。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct NewStoredInput {
+    /// 轮后答案与新 Input/Run 同事务提交；普通输入为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_answer: Option<assistant_protocol::FeedbackRequestSnapshot>,
     pub agent_shell_target: Option<assistant_protocol::ShellKind>,
     pub input_id: InputId,
     pub run_id: RunId,

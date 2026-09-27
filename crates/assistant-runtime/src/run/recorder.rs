@@ -150,6 +150,23 @@ impl ExecutionRecorder for RuntimeRecorder {
     ) -> RecordFuture<'a, ExchangeCompletion> {
         Box::pin(async move {
             let _mutation = self.target.mutation().await;
+            let return_to_host = match &self.target {
+                RecorderTarget::Parent { session, run_id } => session
+                    .lock_state()
+                    .map_err(|_| record_error("feedback state unavailable"))?
+                    .feedback
+                    .values()
+                    .any(|request| {
+                        request.run_id == *run_id
+                            && request.mode == assistant_protocol::FeedbackMode::EndTurn
+                            && results.iter().any(|result| {
+                                result.result.call_id.as_str() == request.tool_call_id.as_str()
+                                    && result.result.status
+                                        == agent_types::ToolResultStatus::Success
+                            })
+                    }),
+                RecorderTarget::Child { .. } => false,
+            };
             let completed_at_ms = crate::runtime::now_ms()
                 .map_err(|_| record_error("tool exchange time could not be recorded"))?;
             let staged = self
@@ -223,8 +240,12 @@ impl ExecutionRecorder for RuntimeRecorder {
                 .lock()
                 .map_err(|_| record_error("tool exchange step registry is unavailable"))?
                 .remove(receipt.as_str());
-            Ok(ExchangeCompletion {
-                continuation_required: !prepared.call_ids.is_empty(),
+            Ok(if return_to_host {
+                ExchangeCompletion::ReturnToHost
+            } else if prepared.call_ids.is_empty() {
+                ExchangeCompletion::Unchanged
+            } else {
+                ExchangeCompletion::ContextChanged
             })
         })
     }
@@ -316,6 +337,7 @@ mod tests {
         let run_id = RunId::new("r-recorder-child").expect("run id");
         store
             .create_session(NewStoredSession {
+                custom_agent: None,
                 agent_shell_kind: None,
                 agent_shell_environment: None,
                 session_id: session_id.clone(),
@@ -345,6 +367,7 @@ mod tests {
             .expect("create session");
         store
             .accept_input(NewStoredInput {
+                feedback_answer: None,
                 agent_shell_target: None,
                 input_id: InputId::new("input-recorder-child").expect("input id"),
                 run_id: run_id.clone(),

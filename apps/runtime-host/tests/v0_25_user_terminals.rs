@@ -149,6 +149,90 @@ fn gone(pid: i32) -> bool {
 }
 
 #[test]
+fn private_workspace_and_frozen_session_terminals_use_their_respective_roots() {
+    let runtime_test_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.runtime-test");
+    fs::create_dir_all(&runtime_test_root).expect("prepare isolated Runtime test root");
+    let home = tempfile::tempdir_in(runtime_test_root).expect("isolated Runtime Home");
+    let external = support::test_directory();
+    let host = HostProcess::start(home.path());
+    let mut api = host.connect();
+    let workspace = api.runtime(
+        "register_workspace",
+        json!({"label":"private terminal", "primary_directory":null, "additional_directories":[]}),
+    )["workspace"]
+        .clone();
+    let workspace_id = workspace["workspace_id"].clone();
+    let agent_directory = Path::new(workspace["agent_directory"].as_str().unwrap());
+    let session_id = api.runtime(
+        "create_session",
+        json!({"workspace_id":workspace_id,"title":"frozen terminal","model_selection":null}),
+    )["session"]["session_id"]
+        .clone();
+
+    let workspace_source = json!({"type":"workspace","workspace_id":workspace_id});
+    let mut private_terminal = socket(&host, None);
+    assert_eq!(
+        open(
+            &mut private_terminal,
+            Some(host.access_token()),
+            &workspace_source
+        )["type"],
+        "created"
+    );
+    input(&mut private_terminal, "pwd > private-terminal-cwd.txt\n");
+    let private_marker = agent_directory.join("private-terminal-cwd.txt");
+    wait_for(|| private_marker.exists());
+    assert_eq!(
+        fs::read_to_string(&private_marker).unwrap().trim(),
+        agent_directory.to_str().unwrap()
+    );
+    close(&mut private_terminal);
+
+    api.runtime(
+        "update_workspace",
+        json!({"workspace_id":workspace_id,"label":"external terminal","primary_directory":external.path(),"additional_directories":[]}),
+    );
+    let session_source = json!({"type":"session","session_id":session_id,"locator":{"root":{"type":"workspace_primary"},"relative_path":""}});
+    let mut frozen_terminal = socket(&host, None);
+    assert_eq!(
+        open(
+            &mut frozen_terminal,
+            Some(host.access_token()),
+            &session_source
+        )["type"],
+        "created"
+    );
+    input(&mut frozen_terminal, "pwd > frozen-terminal-cwd.txt\n");
+    let frozen_marker = agent_directory.join("frozen-terminal-cwd.txt");
+    wait_for(|| frozen_marker.exists());
+    assert_eq!(
+        fs::read_to_string(&frozen_marker).unwrap().trim(),
+        agent_directory.to_str().unwrap()
+    );
+    close(&mut frozen_terminal);
+
+    let mut external_terminal = socket(&host, None);
+    assert_eq!(
+        open(
+            &mut external_terminal,
+            Some(host.access_token()),
+            &workspace_source
+        )["type"],
+        "created"
+    );
+    input(&mut external_terminal, "pwd > external-terminal-cwd.txt\n");
+    let external_marker = external.path().join("external-terminal-cwd.txt");
+    wait_for(|| external_marker.exists());
+    assert_eq!(
+        fs::read_to_string(&external_marker).unwrap().trim(),
+        external.path().canonicalize().unwrap().to_str().unwrap()
+    );
+    close(&mut external_terminal);
+    api.runtime("shutdown_runtime", json!({}));
+    assert!(host.wait().status.success());
+}
+
+#[test]
 fn terminal_bytes_resize_disconnect_and_source_removal_are_connection_owned() {
     let home = support::test_directory();
     let workspace = support::test_directory();

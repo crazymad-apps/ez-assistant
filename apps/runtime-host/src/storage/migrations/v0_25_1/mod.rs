@@ -42,6 +42,7 @@ pub(super) fn entry() -> Migration {
     Migration {
         version: "0.25.1",
         min_compatible_host_version: None,
+        rebuilds_referenced_tables: false,
         validate_source: validate_legacy,
         apply,
         validate,

@@ -329,7 +329,7 @@ impl ResolvedConfig {
         &self.generation
     }
 
-    /// 显式有限重试策略；None 表示不启用隐藏重试。
+    /// 产品有限重试策略；None 表示配置已显式关闭重试。
     pub fn retry_policy(&self) -> Option<&ModelRetryPolicy> {
         self.retry_policy.as_ref()
     }

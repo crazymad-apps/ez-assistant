@@ -7,7 +7,7 @@ import { useRootStore } from "../../../stores/RootStoreContext";
 import { MarkdownContent } from "../../../components/MarkdownContent";
 import styles from "./index.module.scss";
 
-/** 历史命中的只读上下文预览；预览本身不会写入当前 Agent 上下文。 */
+/** 历史命中的只读上下文预览；预览本身不会写入当前智能体上下文。 */
 export const ConversationSearchDialog = observer(function ConversationSearchDialog() {
   const store = useRootStore();
   const hit = store.conversation_search.selected_hit;
@@ -51,7 +51,7 @@ export const ConversationSearchDialog = observer(function ConversationSearchDial
         ))}
       </div>
       <footer>
-        <span>只读预览，不会加入当前 Agent 上下文</span>
+        <span>只读预览，不会加入当前智能体上下文</span>
         <div>
           <button onClick={() => store.conversation_search.closeRecall()} type="button">关闭</button>
           <button

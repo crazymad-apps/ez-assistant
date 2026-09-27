@@ -125,9 +125,9 @@
   只与输入区互斥；Approval Restore 和 Queue 可以同时出现，不能为了压缩高度互相替换。
 - 底栏常驻视觉项固定为添加、执行设置、上下文用量、模型设置、发送/停止。执行 variant 与 approval、
   model 与 reasoning effort 各自独立，只能以分类级联组织，不得在客户端构造排列组合状态。
-- 上下文用量以 SessionView 的 Runtime 预检投影为基线；仅当 live Run 与当前权威 active run 身份一致时，
-  用最近已完成模型 step 的 Provider `total_tokens` 推进旧占用，但不得回退快照已包含的 Tool Result
-  增量。终态残留或其他 Run 不得污染当前环形图。
+- 上下文用量统一读取 SessionView 的 Runtime 预检投影；UsageUpdated、ConversationCommitted 和压缩事件
+  触发权威刷新。v0.28.1 F01 移除 live 最大值合并，避免旧 step 用量遮住压缩后或新请求的较小占用；
+  累计消耗仍独立展示，不与窗口占用合并。
 - 自动压缩状态必须区分“达到本地阈值”和“Provider 报告上下文不足”；该原因复用既有 trigger，
   Desktop 不自行推断，也不为展示新增业务状态。
 - Runtime Goal 的 Running/Paused、budget、pause reason 和 held Queue 都以 SessionView 为准；Goal
@@ -432,7 +432,8 @@ M3 已通过 macOS 四组真实 Host 隔离验收（后台与信号、双启动�
 ## v0.26.0 M6 候选补充收口
 
 - 根级 `overscroll-behavior: none` 同时适用于原生 macOS 与 Windows Desktop，阻止 WKWebView 和
-  WebView2 的边界回弹/越界弹动；普通 Web 与 Linux 不匹配该规则，业务滚动容器不得用 wheel
+  WebView2 的边界回弹/越界弹动；不可扩展到所有后代，否则横向滚动的代码块、表格及工具卡片
+  会阻断纵向滚轮传至消息列表。普通 Web 与 Linux 不匹配该规则，业务滚动容器不得用 wheel
   `preventDefault` 代替。
 - 手动标题完成事件可以携带可选安全错误。Desktop 只按稳定错误码区分超时、模型失败和其他失败，
   不显示 Provider 原文；成功仍短暂提示，失败仍保留重试动作。
@@ -472,3 +473,37 @@ M3 已通过 macOS 四组真实 Host 隔离验收（后台与信号、双启动�
 - 仅升级关闭命令使用固定 0.26.0 最低兼容声明，软件版本仍为真实构建版本；普通业务请求不降级，不取 Host 声明冒充客户端。Desktop 不访问数据库，备份与迁移由新版 Host 完成。
 - 原生生命周期意图共享串行 gate；升级前后核对候选摘要/版本对，固定原实例凭据，等待 PID 退出与锁释放，不强杀或关闭后继实例。重复升级请求在新版已可连接时直接复用。
 - 启动等待满 60 秒后，只有安全实例锁仍被占用才延长，最多 15 分钟，适配大量历史文件备份核验。超时保留后台初始化，允许用户稍后重试；UI 等待期间禁用重复启动。
+
+## v0.28.0 C02 M0 Workspace 可空目录消费边界
+
+- Desktop 必须把 nullable `user_directory` 作为正式业务状态：为空时展示“仅使用私有目录”，需要
+  有效目录的已有只读入口使用投影中的 `agent_directory`，不得显示空字符串或自行猜测用户目录。
+- active Workspace 继续来自 `ApplicationSnapshot`；removed 查询与按 ID 恢复使用独立命令，不得把
+  已移除项重新混入会话边栏或新会话候选。完整的新建/编辑/恢复交互仍由 C02 后续 Desktop 里程碑
+  实现，M0 只要求现有消费者安全读取新投影。
+
+## v0.28.0 C02 M1 目录打开边界
+
+- 原生打开当前 Workspace 目录时，Host 投影为空用户目录则使用其 `agent_directory`；
+  Session 资源入口仍使用 Session 冻结根。远端连接不得把 Host 路径当作客户端本地路径打开。
+
+## v0.28.0 C02 M2 草稿移动与未知结果确认
+
+- 新会话草稿在现有 map 内同步迁移；目标已有自定义草稿、未解决物化或非默认资源标签时拒绝，
+  选择/上传/首次发送进行中也拒绝。移动保留附件 selection、引用及设置，不释放资源；资源组身份、
+  文件来源、页面状态和终端创建 cwd 不变，Workspace 位置缓存按目标失效。
+- 目标 Workspace 的 Skill 选项重新查询，原 Skill/MCP 标签暂留；当前能力不可用时阻止新发送。
+  异步 Skill 回调核对连接和请求身份，不回填已移动或销毁的草稿。
+- 首次发送结果未知后锁定原 manifest 和 selection，普通编辑与清空不能换 key；重试先查询原 key，
+  命中则采用已提交结果，未命中仍用原 key 提交。用户已离开草稿时成功结果不抢占当前导航。
+
+## v0.28.1 F04 问答面板
+
+`features/feedback` 管理 Runtime 问题投影和客户端短期答案草稿；不持有执行权威状态。问答面板与审批组件一样抢占 Composer，等待期间隐藏普通输入且不可收起，只有一组可编辑问题，历史问答只读；多题统一提交，选择可附加文本，无预选或自动回答。通知点击先复核并切换来源会话，再重读问题并聚焦面板；恢复快照不重新提醒。取消等待与普通发送为明确的两步意图，保留普通草稿和附件。提交/取消命令尚未确认时保持输入区占用，即使终态 SSE 先到也不提前释放。
+
+
+## v0.28.1 F05 跨平台资源引用
+
+- Host 路径解析依据路径语法，不依据客户端系统；Windows 盘符、反斜杠和本机 VerbatimDisk 前缀转换为合法 file URI，传给 Host 的盘符路径不带 URI 的首个 `/`。UNC、远端 file authority、query/fragment 与编码分隔符不转成普通本机文件。
+- 原生本地资源的 `path_segments` 保留 Windows 盘符，恢复索引和 URI 重建消费同一身份；Host 文件的显示/下载名同时处理两种目录分隔符。会话文件仍优先使用 root + relative locator，授权由现有 Host 入口执行。
+- 文件管理器文案使用执行原生动作的客户端平台；远端 Host 和普通 Web 不开放本机定位动作。Markdown 图片失败显示原因并可显式重试，Object URL 随引用切换和卸载释放。

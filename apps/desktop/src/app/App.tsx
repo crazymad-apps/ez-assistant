@@ -3,6 +3,7 @@ import { AccountDialog } from "../features/runtime-access/AccountDialog";
 import { useEffect, useState } from "react";
 import { observer } from "mobx-react-lite";
 import { AppErrorBoundary } from "./AppErrorBoundary";
+import { AppMessageProvider } from "../components/AppMessage";
 import { AppShell } from "./AppShell";
 import type { RootStore } from "../stores/RootStore";
 import { RootStoreProvider } from "../stores/RootStoreContext";
@@ -42,10 +43,7 @@ export const App = observer(function App(props: AppProps) {
   }, [connection]);
 
   let entry = <WebLoginPage connection={connection} />;
-  // Web 退出或失效时释放本次转场，下一次成功登录重新播放；Desktop 设置切换保持原实例。
-  let transition_key = connection.current ? "web-session" : "web-entry";
   if (connection.desktop) {
-    transition_key = "desktop";
     entry = <>
       <DesktopEntryPage connection={connection} />
       {connection.phase !== "workspace" && connection.current && <RootStoreProvider store={connection.current}><DesktopLifecycleDialog /><SettingsDialog /></RootStoreProvider>}
@@ -53,18 +51,18 @@ export const App = observer(function App(props: AppProps) {
   }
 
   return (
-    <AppErrorBoundary>
-      <ApplicationConnectionContext.Provider value={connection}>
-        <AccountDialog connection={connection} />
-        <WorkspaceTransition
-          key={transition_key}
-          ready={connection.phase === "workspace"}
-          connected={connection.current?.connection.state === "connected"}
-          entry={entry}
-        >
-          {connection.phase === "workspace" && connection.current && <RootStoreProvider store={connection.current}><AppShell /></RootStoreProvider>}
-        </WorkspaceTransition>
-      </ApplicationConnectionContext.Provider>
-    </AppErrorBoundary>
+    <AppMessageProvider>
+      <AppErrorBoundary>
+        <ApplicationConnectionContext.Provider value={connection}>
+          <AccountDialog connection={connection} />
+          <WorkspaceTransition
+            ready={connection.phase === "workspace"}
+            entry={entry}
+          >
+            {connection.phase === "workspace" && connection.current && <RootStoreProvider store={connection.current}><AppShell /></RootStoreProvider>}
+          </WorkspaceTransition>
+        </ApplicationConnectionContext.Provider>
+      </AppErrorBoundary>
+    </AppMessageProvider>
   );
 });

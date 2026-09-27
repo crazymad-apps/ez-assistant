@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SettingsDialog } from '../../src/features/settings/SettingsDialog';
+import { AppMessageProvider } from '../../src/components/AppMessage';
 import { RootStore } from '../../src/stores/RootStore';
 import { RootStoreProvider } from '../../src/stores/RootStoreContext';
 import { discoveredModel, modelParameters, modelProvider, modelSelection } from '../support/modelManagement';
@@ -40,9 +41,9 @@ function modelStore() {
 }
 function show(store: RootStore) {
   render(
-    <RootStoreProvider store={store}>
+    <AppMessageProvider><RootStoreProvider store={store}>
       <SettingsDialog />
-    </RootStoreProvider>,
+    </RootStoreProvider></AppMessageProvider>,
   );
 }
 function detail(source: 'fixed' | 'online' = 'fixed'): ModelConfigurationDetail {

@@ -12,6 +12,9 @@ import {
   SnapshotContent,
   TestModel,
   ModelTestResult,
+  UsagePage,
+  UsageQuery,
+  UsageModelOption,
 } from '../contracts/calls.js';
 import { enumeration } from '../models/parameters.js';
 import { queryFields } from '../validation.js';
@@ -23,6 +26,22 @@ import { CallManagement } from './management.js';
 @ApiDefaultResponse({ type: CenterErrorResponse, description: '身份、参数或存储失败' })
 export class CallsController {
   constructor(@Inject(CallManagement) private readonly calls: CallManagement) {}
+
+  @Get('llm-usage')
+  @ApiOperation({ operationId: 'getLlmUsage' })
+  @ApiQuery({ type: UsageQuery })
+  @ApiOkResponse({ type: UsagePage })
+  usage(@Query() query: unknown, @Req() request: AuthenticatedRequest) {
+    return this.calls.usage(request.token, query);
+  }
+
+  @Get('llm-usage/models')
+  @ApiOperation({ operationId: 'listLlmUsageModels' })
+  @ApiQuery({ name: 'search', required: false })
+  @ApiOkResponse({ type: [UsageModelOption] })
+  usageModels(@Query() query: unknown, @Req() request: AuthenticatedRequest) {
+    return this.calls.usageModels(request.token, query);
+  }
 
   @Get('llm-calls')
   @ApiOperation({ operationId: 'listLlmCalls' })

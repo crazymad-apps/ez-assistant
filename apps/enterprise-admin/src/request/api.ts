@@ -64,6 +64,23 @@ const errors: Record<string, string> = {
   RATE_LIMITED: '操作过于频繁，请稍后重试。',
   AUTH_STATE_CHANGED: '账号信息已变更，请重新核对。',
   FORBIDDEN: '请求来源不被允许，请检查访问地址。',
+  AGENT_NOT_FOUND: '智能体不存在，请返回列表核对。',
+  AGENT_EXISTS: '智能体名称已存在，请更换名称。',
+  AGENT_DEPENDENCY_INVALID: '新增能力未被所选插件的当前包声明，请重新选择。',
+  PLUGIN_NOT_FOUND: '插件不存在，请返回列表核对。',
+  PLUGIN_UNPUBLISHED: '插件尚未上架，无法下载。',
+  PLUGIN_DEPRECATED: '插件已下架，无法下载。',
+  PACKAGE_UNAVAILABLE: '当前插件包文件不可用，请联系中心管理员核对存储。',
+  PACKAGE_CHANGED: '包内容已变化，请刷新后重新下载。',
+  PACKAGE_INVALID: '整个插件包未接纳；请核对清单、声明平台入口和归档结构，原版本保持不变。',
+  PACKAGE_TOO_LARGE: '插件包超过中心大小或条目限制，原版本保持不变。',
+  PACKAGE_BUSY: '中心同时处理的包过多，请稍后显式重试。',
+  PACKAGE_STORAGE_UNAVAILABLE: '插件包存储不可用，原版本保持不变，请联系管理员核对。',
+  PACKAGE_RESULT_UNKNOWN: '上传结果未确认，请先按名称、版本和当前 SHA 核对。',
+  PACKAGE_TIMEOUT: '上传或校验超时，请先核对中心当前包，勿自动重传。',
+  PACKAGE_CANCELLED: '上传已中断，请核对中心结果。',
+  PRECONDITION_REQUIRED: '请重新读取最新内容后再操作。',
+  CONFIG_CHANGED: '内容已变化，请重新读取并对照当前草稿。',
 };
 
 export function failure(error: unknown, write = false) {

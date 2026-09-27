@@ -6,8 +6,10 @@ mod channel;
 mod compaction;
 mod connection_validation;
 pub(crate) mod controller;
+mod custom_agents;
 mod delegation;
 mod device;
+mod feedback;
 pub(crate) mod goal;
 mod input;
 mod materialization;
@@ -27,7 +29,7 @@ mod session_management;
 mod shell;
 mod shutdown;
 mod skills;
-mod tasks;
+pub(crate) mod tasks;
 mod title;
 mod tool_assembly;
 pub(crate) mod tool_input_projection;
@@ -126,6 +128,9 @@ pub struct AssistantRuntime {
     event_sender: ObservationCoordinator,
     root_cancellation: CancellationToken,
     tasks: Arc<RuntimeTasks>,
+    plugin: Arc<crate::plugin::PluginManager>,
+    custom_agent_source: Option<Arc<dyn crate::CustomAgentDirectorySource>>,
+    custom_agent_directory: AsyncMutex<custom_agents::DirectoryState>,
 }
 
 #[derive(Clone)]
@@ -270,6 +275,14 @@ impl AssistantRuntime {
             store.clone(),
             permission_coordinator.clone(),
         ));
+        let tasks = Arc::new(RuntimeTasks::new());
+        let root_cancellation = CancellationToken::new();
+        let plugin = Arc::new(crate::plugin::PluginManager::new(
+            store.clone(),
+            tasks.clone(),
+            root_cancellation.clone(),
+            event_sender.clone(),
+        ));
         Ok(Self {
             config,
             lifecycle: RwLock::new(RuntimeLifecycle::Running),
@@ -304,8 +317,11 @@ impl AssistantRuntime {
             ),
             mcp_service: crate::mcp::McpService::unavailable(),
             event_sender,
-            root_cancellation: CancellationToken::new(),
-            tasks: Arc::new(RuntimeTasks::new()),
+            root_cancellation,
+            tasks,
+            plugin,
+            custom_agent_source: None,
+            custom_agent_directory: AsyncMutex::new(custom_agents::DirectoryState::default()),
         })
     }
 
@@ -316,8 +332,137 @@ impl AssistantRuntime {
 
     /// 宿主开放入口前绑定整个 Runtime 的生命周期；与任何客户端连接/登录 Token 的期限无关。
     pub fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
+        self.plugin = Arc::new(crate::plugin::PluginManager::new(
+            self.store.clone(),
+            self.tasks.clone(),
+            cancellation.clone(),
+            self.event_sender.clone(),
+        ));
         self.root_cancellation = cancellation;
         self
+    }
+
+    /// Host 在开放入口前注入本用户的包文件端口；业务事实仍由 Runtime Store 决定。
+    pub fn with_plugin_files(mut self, files: Arc<dyn crate::PluginFilePort>) -> Self {
+        self.plugin = Arc::new(
+            crate::plugin::PluginManager::new(
+                self.store.clone(),
+                self.tasks.clone(),
+                self.root_cancellation.clone(),
+                self.event_sender.clone(),
+            )
+            .with_files(files),
+        );
+        self
+    }
+
+    pub fn with_custom_agent_source(
+        mut self,
+        source: Arc<dyn crate::CustomAgentDirectorySource>,
+    ) -> Self {
+        self.custom_agent_source = Some(source);
+        self
+    }
+
+    pub async fn recover_plugin_operations(&self) -> RuntimeResult<()> {
+        self.plugin.recover().await
+    }
+
+    pub async fn list_plugins(&self) -> RuntimeResult<assistant_protocol::PluginListSnapshot> {
+        self.plugin.list().await
+    }
+
+    pub async fn mutate_plugin_settings(
+        &self,
+        request: assistant_protocol::MutatePluginSettingsRequest,
+    ) -> RuntimeResult<assistant_protocol::MutatePluginSettingsResult> {
+        let _operation = self.operation_gate.read().await;
+        self.ensure_running()?;
+        let result = self.plugin.mutate_settings(request).await?;
+        let _ = self.refresh_mcp_registry(None).await;
+        Ok(result)
+    }
+
+    pub async fn begin_plugin_install(
+        &self,
+        request: assistant_protocol::BeginPluginInstallRequest,
+    ) -> RuntimeResult<assistant_protocol::PluginOperationSnapshot> {
+        self.plugin.begin_install(request).await
+    }
+
+    pub async fn plugin_upload_received(
+        &self,
+        key: &assistant_protocol::IdempotencyKey,
+    ) -> RuntimeResult<assistant_protocol::PluginOperationSnapshot> {
+        self.plugin.uploaded(key).await
+    }
+
+    pub async fn plugin_upload_selection(
+        &self,
+        key: &assistant_protocol::IdempotencyKey,
+    ) -> RuntimeResult<assistant_protocol::PluginPackageSelection> {
+        self.plugin.upload_selection(key).await
+    }
+
+    pub async fn plugin_upload_failed(
+        &self,
+        key: &assistant_protocol::IdempotencyKey,
+        cancelled: bool,
+    ) -> RuntimeResult<()> {
+        self.plugin.upload_failed(key, cancelled).await
+    }
+
+    pub async fn use_plugin_package(&self, name: &str) -> RuntimeResult<crate::PluginUseLease> {
+        self.plugin.use_package(name).await
+    }
+
+    pub async fn plugin_config_lease(
+        &self,
+        name: &str,
+        expected_sha256: &str,
+    ) -> RuntimeResult<crate::PluginConfigLease> {
+        self.plugin.config_lease(name, expected_sha256).await
+    }
+
+    pub fn notify_plugin_config_changed(&self) {
+        let _ = self.event_sender.send(RuntimeEvent::PluginCatalogChanged);
+    }
+
+    pub fn report_plugin_upload_progress(
+        &self,
+        key: &assistant_protocol::IdempotencyKey,
+        received: u64,
+        total: u64,
+    ) {
+        self.plugin.report_progress(key, received, total);
+    }
+
+    pub async fn get_plugin_operation(
+        &self,
+        request: assistant_protocol::PluginOperationRequest,
+    ) -> RuntimeResult<assistant_protocol::PluginOperationSnapshot> {
+        self.plugin.get(&request.key).await
+    }
+
+    pub async fn cancel_plugin_operation(
+        &self,
+        request: assistant_protocol::PluginOperationRequest,
+    ) -> RuntimeResult<assistant_protocol::PluginOperationSnapshot> {
+        self.plugin.cancel(request).await
+    }
+
+    pub async fn retry_plugin_cleanup(
+        &self,
+        request: assistant_protocol::PluginOperationRequest,
+    ) -> RuntimeResult<assistant_protocol::PluginOperationSnapshot> {
+        self.plugin.retry_cleanup(request).await
+    }
+
+    pub async fn uninstall_plugin(
+        &self,
+        request: assistant_protocol::UninstallPluginRequest,
+    ) -> RuntimeResult<assistant_protocol::PluginOperationSnapshot> {
+        self.plugin.begin_uninstall(request).await
     }
 
     /// 在 Host 开放入口前替换附加 Channel 输出端口。
@@ -336,8 +481,14 @@ impl AssistantRuntime {
         connection_factory: Arc<dyn crate::McpConnectionFactory>,
         image_materializer: Arc<dyn crate::McpImageMaterializer>,
     ) -> Self {
-        self.mcp_service =
-            crate::mcp::McpService::available(source, connection_factory, image_materializer);
+        self.mcp_service = crate::mcp::McpService::available(
+            source,
+            connection_factory,
+            image_materializer,
+            self.plugin.clone(),
+        );
+        self.plugin
+            .bind_mcp_retirement(&self.mcp_service.registry, self.approval_registry.clone());
         self
     }
 
@@ -456,7 +607,7 @@ impl AssistantRuntime {
                     .map(|workspace| WorkspaceEnvironmentSource {
                         workspace_id: &workspace.workspace_id,
                         label: &workspace.label,
-                        user_directory: &workspace.user_directory,
+                        user_directory: workspace.user_directory.as_deref(),
                         additional_directories: &workspace.additional_directories,
                         agent_directory: &workspace.agent_directory,
                     }),
@@ -475,6 +626,7 @@ impl AssistantRuntime {
         let stored = self
             .store
             .create_session(NewStoredSession {
+                custom_agent: None,
                 agent_shell_kind,
                 agent_shell_environment,
                 session_id: session_id.clone(),
@@ -587,6 +739,7 @@ impl AssistantRuntime {
         skills::prepare_catalog(
             self.store.as_ref(),
             self.skill_package_source.as_ref(),
+            self.plugin.as_ref(),
             workspace_directories.unwrap_or_default(),
         )
         .await
@@ -851,7 +1004,7 @@ impl AssistantRuntime {
 }
 
 fn workspace_directories(workspace: &StoredWorkspace) -> Vec<String> {
-    std::iter::once(workspace.user_directory.clone())
+    std::iter::once(workspace.effective_working_directory().to_owned())
         .chain(workspace.additional_directories.iter().cloned())
         .collect()
 }

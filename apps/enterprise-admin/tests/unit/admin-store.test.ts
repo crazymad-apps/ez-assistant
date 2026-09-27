@@ -87,6 +87,21 @@ describe('身份与凭证隔离', () => {
 });
 
 describe('写入闭环', () => {
+  it('C01 管理写入共用身份快照与写入门，旧身份完成不会提交页面结果', async () => {
+    const store = await signedIn();
+    const request = deferred<string>();
+    const completed = vi.fn();
+    const pending = store.manage((token) => {
+      expect(token).toBe('token-a');
+      return request.promise;
+    }, completed);
+    expect(await store.manage(async () => 'duplicate', completed)).toContain('正在提交');
+    store.invalidateIdentity('token-a', '身份已失效');
+    request.resolve('saved');
+    await pending;
+    expect(completed).not.toHaveBeenCalled();
+    expect(store.busy).toBe(false);
+  });
   it('成功写入不重复发请求；失败写入返回结果不明且不遗留写入锁', async () => {
     const store = await signedIn();
     expect(await store.saveUser(draft)).toBeUndefined();

@@ -341,6 +341,7 @@ impl AssistantRuntime {
                 source_session_id: request.session_id,
                 source_generation,
                 session: NewStoredSession {
+                    custom_agent: source.custom_agent().cloned(),
                     agent_shell_kind,
                     agent_shell_environment,
                     session_id: session_id.clone(),
@@ -584,7 +585,13 @@ impl AssistantRuntime {
             .transpose()?;
         if let Some(workspace) = workspace.as_mut() {
             // Clear 会重建上下文，但不能把 Workspace 后续编辑的目录热更新进既有 Session。
-            workspace.user_directory = current_environment.working_directory.clone();
+            workspace.user_directory = if current_environment.workspace_private_directory.as_deref()
+                == Some(current_environment.working_directory.as_str())
+            {
+                None
+            } else {
+                Some(current_environment.working_directory.clone())
+            };
             workspace.additional_directories =
                 current_environment.additional_workspace_directories.clone();
         }
@@ -601,7 +608,7 @@ impl AssistantRuntime {
                     .map(|workspace| WorkspaceEnvironmentSource {
                         workspace_id: &workspace.workspace_id,
                         label: &workspace.label,
-                        user_directory: &workspace.user_directory,
+                        user_directory: workspace.user_directory.as_deref(),
                         additional_directories: &workspace.additional_directories,
                         agent_directory: &workspace.agent_directory,
                     }),
@@ -615,12 +622,14 @@ impl AssistantRuntime {
         }
         let skill_catalog = self
             .prepare_session_skill_catalog(workspace.as_ref().map(|workspace| {
-                std::iter::once(workspace.user_directory.clone())
+                std::iter::once(workspace.effective_working_directory().to_owned())
                     .chain(workspace.additional_directories.iter().cloned())
                     .collect()
             }))
             .await?;
-        let system_prompt = skill_catalog.augment_system_prompt(prepared.system_prompt);
+        let system_prompt = skill_catalog.augment_system_prompt(
+            super::custom_agents::with_agent_prompt(prepared.system_prompt, session.custom_agent()),
+        );
         session.cancel_title_generation()?;
         let cleared = self
             .store
@@ -1291,6 +1300,7 @@ impl AssistantRuntime {
                 target_user_message_id: target_message_id,
                 conversation: replacement.clone(),
                 input: NewStoredInput {
+                    feedback_answer: None,
                     agent_shell_target: None,
                     input_id: input_id.clone(),
                     run_id: run_id.clone(),
@@ -1335,6 +1345,14 @@ impl AssistantRuntime {
             state
                 .commands
                 .retain(|_, command| !removed_user_ids.contains(&command.user_message_id));
+            let retained_runs = state
+                .runs
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>();
+            state
+                .feedback
+                .retain(|_, request| retained_runs.contains(&request.run_id));
             state.queue_item_ids.clear();
             state.goal_inputs.clear();
             state.goal = rewritten_goal.map(|(goal, _)| goal);

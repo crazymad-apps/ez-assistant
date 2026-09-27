@@ -17,7 +17,8 @@ const LEFT_SIDEBAR_DEFAULT_WIDTH: i32 = 286;
 const LEFT_SIDEBAR_MIN_WIDTH: i32 = 220;
 const LEFT_SIDEBAR_MAX_WIDTH: i32 = 420;
 const RIGHT_SIDEBAR_DEFAULT_WIDTH: i32 = 380;
-const RIGHT_SIDEBAR_MIN_WIDTH: i32 = 320;
+// 保存的是基准窗口下的宽度；大窗口中合法的 320px 右栏可能对应更小的偏好值。
+const RIGHT_SIDEBAR_MIN_PREFERENCE: i32 = 1;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct DesktopPreferences {
@@ -25,6 +26,7 @@ pub(crate) struct DesktopPreferences {
     right_sidebar_open: bool,
     #[serde(default = "default_left_sidebar_width")]
     left_sidebar_width: i32,
+    /// 基准窗口剩余空间中的宽度；WebView 按当前窗口空间换算实际右栏宽度。
     #[serde(default = "default_right_sidebar_width")]
     right_sidebar_width: i32,
     #[serde(default)]
@@ -245,7 +247,9 @@ fn validate(
     preferences.left_sidebar_width = preferences
         .left_sidebar_width
         .clamp(LEFT_SIDEBAR_MIN_WIDTH, LEFT_SIDEBAR_MAX_WIDTH);
-    preferences.right_sidebar_width = preferences.right_sidebar_width.max(RIGHT_SIDEBAR_MIN_WIDTH);
+    preferences.right_sidebar_width = preferences
+        .right_sidebar_width
+        .max(RIGHT_SIDEBAR_MIN_PREFERENCE);
     if let Some(expanded_workspace_ids) = &mut preferences.expanded_workspace_ids {
         if expanded_workspace_ids.len() > MAX_EXPANDED_WORKSPACES
             || expanded_workspace_ids
@@ -433,6 +437,13 @@ mod tests {
         .expect("clamped preferences");
         assert_eq!(clamped.left_sidebar_width, LEFT_SIDEBAR_MIN_WIDTH);
         assert_eq!(clamped.right_sidebar_width, 9_999);
+
+        let proportional = validate(DesktopPreferences {
+            right_sidebar_width: 150,
+            ..DesktopPreferences::default()
+        })
+        .expect("proportional preference");
+        assert_eq!(proportional.right_sidebar_width, 150);
     }
 
     #[test]

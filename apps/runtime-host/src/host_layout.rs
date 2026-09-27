@@ -271,7 +271,9 @@ fn finish_at_boundaries(
     } else {
         None
     };
-    let (host, personal) = transform::configurations(original.as_deref(), &manifest.paths)?;
+    let fresh_home = manifest.entries.is_empty() && manifest.database_projection.is_none();
+    let (host, personal) =
+        transform::configurations(original.as_deref(), &manifest.paths, fresh_home)?;
     // 所有转换先计算并核对；遇到损坏/冲突不能边发现边搬下一项。
     let mut changed = BTreeMap::new();
     for (relative, entry) in &manifest.entries {
