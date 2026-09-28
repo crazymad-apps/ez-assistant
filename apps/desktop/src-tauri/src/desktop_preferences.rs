@@ -34,7 +34,7 @@ pub(crate) struct DesktopPreferences {
     #[serde(default)]
     close_behavior: DesktopCloseBehavior,
     /// 仅作为这个 Desktop/目标的新草稿默认，不是 Runtime 当前 Session 状态。
-    #[serde(default)]
+    #[serde(default = "default_approval_mode")]
     default_approval_mode: ApprovalMode,
     /// 最近一次明确选择的二元模型身份；None 表示继续跟随 Runtime 全局默认。
     #[serde(default)]
@@ -69,11 +69,15 @@ impl Default for DesktopPreferences {
             right_sidebar_width: RIGHT_SIDEBAR_DEFAULT_WIDTH,
             expanded_workspace_ids: None,
             close_behavior: DesktopCloseBehavior::HideToTray,
-            default_approval_mode: ApprovalMode::Ask,
+            default_approval_mode: default_approval_mode(),
             last_model_selection: None,
             resource_workspace: None,
         }
     }
+}
+
+fn default_approval_mode() -> ApprovalMode {
+    ApprovalMode::Auto
 }
 
 pub(crate) fn load_close_behavior<R: tauri::Runtime>(app: &AppHandle<R>) -> DesktopCloseBehavior {
@@ -426,8 +430,13 @@ mod tests {
                 .expect("legacy preferences");
         assert_eq!(legacy.left_sidebar_width, LEFT_SIDEBAR_DEFAULT_WIDTH);
         assert_eq!(legacy.right_sidebar_width, RIGHT_SIDEBAR_DEFAULT_WIDTH);
-        assert_eq!(legacy.default_approval_mode, ApprovalMode::Ask);
+        assert_eq!(legacy.default_approval_mode, ApprovalMode::Auto);
         assert!(legacy.last_model_selection.is_none());
+        let explicit: DesktopPreferences = serde_json::from_str(
+            r#"{"left_sidebar_open":true,"right_sidebar_open":false,"default_approval_mode":"ask"}"#,
+        )
+        .expect("explicit approval preference");
+        assert_eq!(explicit.default_approval_mode, ApprovalMode::Ask);
 
         let clamped = validate(DesktopPreferences {
             left_sidebar_width: -10,

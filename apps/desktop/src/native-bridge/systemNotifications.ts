@@ -14,13 +14,22 @@ export function createNotificationPlatform(): NotificationPlatform {
       return Notification.permission;
     },
 
+    async isFocused() {
+      if (desktop) return invoke<boolean>('system_notification_focused');
+      return document.visibilityState === 'visible' && document.hasFocus();
+    },
+
     async show(id, title, body, click, fail) {
       if (desktop) {
         return new Promise<() => void>((resolve, reject) => {
           let submitted = false;
-          const events = new Channel<'submitted' | 'clicked'>();
+          const events = new Channel<'submitted' | 'clicked' | 'skipped'>();
           events.onmessage = (event) => {
             if (event === 'clicked') click();
+            if (event === 'skipped') {
+              submitted = true;
+              resolve(() => undefined);
+            }
             if (event === 'submitted') {
               submitted = true;
               resolve(() => {

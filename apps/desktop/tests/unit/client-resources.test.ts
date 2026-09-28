@@ -212,7 +212,7 @@ it("persists only anonymous Web layout without user resource descriptions", asyn
     ],
   };
   const preferences = await loadDesktopPreferences();
-  expect(preferences.default_approval_mode).toBe("ask");
+  expect(preferences.default_approval_mode).toBe("auto");
   expect(preferences.last_model_selection).toBeNull();
   await saveDesktopPreferences({
     ...preferences,

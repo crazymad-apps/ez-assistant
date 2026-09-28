@@ -73,13 +73,14 @@ it("starts a discovered update without asking for another confirmation", async (
   await waitFor(() => expect(command).toHaveBeenCalledWith(expect.objectContaining({ type: "begin_plugin_install" })));
 });
 
-it("explains that a full transfer bar still leaves package preparation running", () => {
+it("shows an indeterminate preparation stage after transfer completes", () => {
   const preparing: PluginOperationSnapshot = { key: "plugin-preparing", kind: "update", phase: "preparing",
     committed_names: [], cancel_requested: false, error_code: null, cleanup_required: false,
     received_bytes: 62_036_210, total_bytes: 62_036_210 };
   render(<PluginOperationDialog client={{ command: vi.fn(async () => ({ payload: preparing })) } as never}
     intent={null} initial_snapshot={preparing} on_close={vi.fn()} on_complete={vi.fn()} />);
   expect(screen.getByText("文件已接收，正在校验并解包")).toBeVisible();
-  expect(screen.getByText("文件传输：59.2 MiB / 59.2 MiB · 100%")).toBeVisible();
+  expect(screen.getByText("文件传输完成：59.2 MiB；正在处理插件包")).toBeVisible();
+  expect(screen.getByRole("progressbar", { name: "正在校验并解包插件" })).not.toHaveAttribute("value");
   expect(screen.getByRole("button", { name: "取消操作" })).toBeVisible();
 });

@@ -10,6 +10,8 @@ mod platform;
 use std::{collections::HashMap, sync::Mutex};
 
 use serde::Serialize;
+#[cfg(not(any(target_os = "macos", windows)))]
+use tauri::Manager as _;
 use tauri::{AppHandle, State, ipc::Channel};
 use tokio_util::sync::CancellationToken;
 
@@ -37,9 +39,27 @@ pub(crate) enum Permission {
 #[serde(rename_all = "snake_case")]
 pub(super) enum NotificationEvent {
     #[cfg(any(target_os = "macos", windows))]
+    Skipped,
+    #[cfg(any(target_os = "macos", windows))]
     Submitted,
     #[cfg(any(target_os = "macos", windows))]
     Clicked,
+}
+
+#[tauri::command]
+pub(crate) async fn system_notification_focused(app: AppHandle) -> Result<bool, NotificationError> {
+    #[cfg(target_os = "macos")]
+    return platform::is_focused(&app).await;
+    #[cfg(windows)]
+    {
+        let _ = app;
+        platform::is_focused()
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    app.get_window("main")
+        .ok_or(NotificationError::Unavailable)?
+        .is_focused()
+        .map_err(|_| NotificationError::Unavailable)
 }
 
 #[derive(Debug, thiserror::Error, Serialize)]

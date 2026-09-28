@@ -88,6 +88,66 @@ async fn plugin_skills_are_visible_in_conversation_scope_but_not_independent_man
 }
 
 #[tokio::test]
+async fn plugin_skill_wins_over_same_named_independent_skill_in_catalog_and_management() {
+    struct ShadowedPluginSkills;
+    impl SkillPackageSource for ShadowedPluginSkills {
+        fn scan(&self, request: SkillScanRequest) -> SkillScanFuture<'_> {
+            Box::pin(async move {
+                let mut result = StaticSkillPackageSource.scan(request).await?;
+                let independent = result.candidates[0].clone();
+                let plugin = &mut result.candidates[0];
+                plugin.source = SkillSource::Plugin;
+                plugin.plugin_name = Some("review-tools".into());
+                plugin.plugin_sha256 = Some("a".repeat(64));
+                plugin.source_path = "/plugin/review".into();
+                plugin.body = "Plugin review instructions.".into();
+                result.candidates.push(independent);
+                Ok(result)
+            })
+        }
+    }
+    let mut runtime = runtime(empty_model());
+    runtime.skill_package_source = Arc::new(ShadowedPluginSkills);
+    let management = runtime
+        .list_skills(assistant_protocol::ListSkillsRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(management.snapshot.skills.len(), 1);
+    assert_eq!(
+        management.snapshot.skills[0].source,
+        assistant_protocol::SkillSourceSnapshot::UserAgents
+    );
+    assert_eq!(
+        management.snapshot.skills[0].health,
+        assistant_protocol::SkillHealthSnapshot::Unavailable
+    );
+    let detail = runtime
+        .get_skill_detail(assistant_protocol::GetSkillDetailRequest {
+            workspace_id: None,
+            name: "review".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(detail.detail.unwrap().body, None);
+    let conversation = runtime
+        .list_skills(assistant_protocol::ListSkillsRequest {
+            include_plugins: Some(true),
+            workspace_id: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(conversation.snapshot.skills.len(), 1);
+    assert_eq!(
+        conversation.snapshot.skills[0].plugin_name.as_deref(),
+        Some("review-tools")
+    );
+    assert_eq!(
+        conversation.snapshot.skills[0].health,
+        assistant_protocol::SkillHealthSnapshot::Ready
+    );
+}
+
+#[tokio::test]
 async fn config_reload_ensures_one_controller_and_role_restricts_lifecycle_operations() {
     let source = Arc::new(MutableConfigSource::new(TEST_CONFIG.to_owned()));
     let runtime = AssistantRuntime::new(

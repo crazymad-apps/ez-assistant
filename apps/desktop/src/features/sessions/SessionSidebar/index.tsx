@@ -110,6 +110,28 @@ export const SessionSidebar = observer(function SessionSidebar({ hidden = false,
             type="button"
           ><Icon name="bot" size={17} /><span>助理会话</span></button>
         </Tooltip>
+        <Tooltip content="智能体管理">
+          <button
+            aria-current={store.settings.is_open && store.settings.page === "agents" ? "page" : undefined}
+            className={styles.quick_action}
+            data-navigation-action
+            onClick={() => store.settings.open("agents")}
+            type="button"
+          >
+            <Icon name="bot" size={17} /><span>智能体管理</span>
+          </button>
+        </Tooltip>
+        <Tooltip content="插件管理">
+          <button
+            aria-current={store.settings.is_open && store.settings.page === "plugins" ? "page" : undefined}
+            className={styles.quick_action}
+            data-navigation-action
+            onClick={() => store.settings.open("plugins")}
+            type="button"
+          >
+            <Icon name="plugin" size={17} /><span>插件管理</span>
+          </button>
+        </Tooltip>
       </div>
 
       <div className={styles.session_scroll}>

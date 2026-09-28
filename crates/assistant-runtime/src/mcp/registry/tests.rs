@@ -16,7 +16,7 @@ use agent_types::{ToolCall, ToolCallId, ToolName, ToolResultStatus};
 
 struct FixtureConnection {
     pages: StdMutex<VecDeque<Vec<McpToolDefinition>>>,
-    calls: StdMutex<VecDeque<McpRawCallResult>>,
+    calls: StdMutex<VecDeque<Result<McpRawCallResult, McpConnectionError>>>,
     closed: AtomicUsize,
     close_failed: AtomicBool,
 }
@@ -32,7 +32,14 @@ impl FixtureConnection {
     }
 
     fn with_call(self: &Arc<Self>, call: McpRawCallResult) {
-        self.calls.lock().expect("calls").push_back(call);
+        self.calls.lock().expect("calls").push_back(Ok(call));
+    }
+
+    fn with_failure(self: &Arc<Self>, kind: McpConnectionFailureKind) {
+        self.calls
+            .lock()
+            .expect("calls")
+            .push_back(Err(McpConnectionError::new(kind, "fixture request failed")));
     }
 }
 
@@ -67,11 +74,11 @@ impl McpConnection for FixtureConnection {
                 .lock()
                 .expect("calls")
                 .pop_front()
-                .ok_or_else(|| {
-                    McpConnectionError::new(
+                .unwrap_or_else(|| {
+                    Err(McpConnectionError::new(
                         McpConnectionFailureKind::ToolCall,
                         "fixture call is unavailable",
-                    )
+                    ))
                 })
         })
     }
@@ -169,6 +176,127 @@ fn candidate(server: McpServerConfig) -> McpRegistryCandidate {
         configured_keys: BTreeSet::from([key.clone()]),
         servers: BTreeMap::from([(key, server)]),
         diagnostics: Vec::new(),
+    }
+}
+
+#[tokio::test]
+async fn single_request_failures_keep_connection_for_next_explicit_call() {
+    for kind in [
+        McpConnectionFailureKind::ToolCall,
+        McpConnectionFailureKind::Cancelled,
+        McpConnectionFailureKind::UnsupportedExtension,
+    ] {
+        let connection = FixtureConnection::new(vec![tool(json!({"type":"object"}))]);
+        connection.with_failure(kind);
+        connection.with_call(McpRawCallResult {
+            content: vec![McpRawContent::Text {
+                text: "created".into(),
+            }],
+            structured_content: Some(json!({"id": 1})),
+            is_error: false,
+        });
+        let registry = McpRegistry::new(FixtureFactory::new(vec![connection.clone()]));
+        registry
+            .refresh(
+                candidate(server(1)),
+                None,
+                McpRuntimeConfig::test_default(),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("refresh")
+            .finish()
+            .await;
+        let key = McpServerKey::new("github").expect("key");
+        let invocation = registry
+            .resolve(&key, "create_issue", json!({}))
+            .await
+            .expect("resolve");
+        let failure = registry
+            .execute(
+                &invocation,
+                None,
+                &UnavailableMcpImageMaterializer,
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("first request must fail");
+        assert!(failure.remote_may_have_executed);
+        assert!(!invocation.is_retired());
+        assert_eq!(connection.closed.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            connection.calls.lock().expect("calls").len(),
+            1,
+            "failed request must not replay"
+        );
+        assert!(registry.diagnostics().expect("diagnostics").is_empty());
+        let next = registry
+            .resolve(&key, "create_issue", json!({}))
+            .await
+            .expect("still discoverable");
+        let result = registry
+            .execute(
+                &next,
+                None,
+                &UnavailableMcpImageMaterializer,
+                CancellationToken::new(),
+            )
+            .await
+            .expect("next explicit request succeeds");
+        assert!(!result.is_error);
+        registry.shutdown().await.expect("shutdown");
+        assert_eq!(connection.closed.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn broken_connections_are_retired_without_replaying_request() {
+    for kind in [
+        McpConnectionFailureKind::Connect,
+        McpConnectionFailureKind::Protocol,
+    ] {
+        let connection = FixtureConnection::new(vec![tool(json!({"type":"object"}))]);
+        connection.with_failure(kind);
+        let registry = McpRegistry::new(FixtureFactory::new(vec![connection.clone()]));
+        registry
+            .refresh(
+                candidate(server(1)),
+                None,
+                McpRuntimeConfig::test_default(),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("refresh")
+            .finish()
+            .await;
+        let key = McpServerKey::new("github").expect("key");
+        let invocation = registry
+            .resolve(&key, "create_issue", json!({}))
+            .await
+            .expect("resolve");
+        let failure = registry
+            .execute(
+                &invocation,
+                None,
+                &UnavailableMcpImageMaterializer,
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("broken connection");
+        assert_eq!(failure.kind, McpCallFailureKind::RequestFailed);
+        assert!(failure.remote_may_have_executed);
+        assert!(invocation.is_retired());
+        assert_eq!(connection.closed.load(Ordering::SeqCst), 1);
+        assert_eq!(registry.diagnostics().expect("diagnostics").len(), 1);
+        assert_eq!(
+            registry
+                .resolve(&key, "create_issue", json!({}))
+                .await
+                .expect_err("unavailable")
+                .kind,
+            McpCallFailureKind::ServerUnavailable
+        );
+        registry.shutdown().await.expect("shutdown");
     }
 }
 

@@ -41,6 +41,9 @@
   2026-09-13 用户在 M4 明确批准 Desktop discovery／锁文件 owner SID 核验的局部 FFI：
   `runtime_bootstrap/windows.rs::owned_by_current_user`。只借用文件句柄，Token 由 OwnedHandle
   回收，安全描述符在 SID 比较结束后释放；不增加线程或 DACL 改写。
+  2026-09-28 用户批准 Desktop 通知模块的只读前台查询局部 FFI：
+  `system_notification/windows.rs::is_focused`。只同步读取前台窗口和所属 PID，
+  不保存或关闭借用 HWND、不创建线程、不修改窗口或系统设置；不扩展到其他函数。
   其他代码不得借此增加 unsafe，其他 workspace 成员仍继承 `forbid`。
 
 ## 三、Workspace、package 与依赖

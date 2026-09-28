@@ -90,7 +90,7 @@ pub enum SkillDiagnosticCode {
     DisabledByName,
     /// 候选项被更高优先级的同名来源覆盖。
     Shadowed,
-    /// 插件能力名称与独立来源或另一插件冲突。
+    /// 多个启用插件声明同一技能名称。
     PluginConflict,
     /// 用户和模型调用资格均被关闭。
     NotInvocable,
@@ -322,17 +322,7 @@ pub fn compile_skill_discovery(
             .iter()
             .filter(|candidate| candidate.source == SkillSource::Plugin)
             .collect::<Vec<_>>();
-        if !independent.is_empty() && !plugins.is_empty() {
-            let mut diagnostic = name_diagnostic(
-                SkillDiagnosticSeverity::Error,
-                SkillDiagnosticCode::PluginConflict,
-                &name,
-                "plugin skill name conflicts with an independent skill",
-            );
-            diagnostic.source = Some(SkillSource::Plugin);
-            scan.diagnostics.push(diagnostic);
-        }
-        if independent.is_empty() {
+        if !plugins.is_empty() {
             if plugins.len() > 1 {
                 let mut diagnostic = name_diagnostic(
                     SkillDiagnosticSeverity::Error,
@@ -343,6 +333,17 @@ pub fn compile_skill_discovery(
                 diagnostic.source = Some(SkillSource::Plugin);
                 scan.diagnostics.push(diagnostic);
                 continue;
+            }
+            for shadowed in &independent {
+                let mut diagnostic = name_diagnostic(
+                    SkillDiagnosticSeverity::Warning,
+                    SkillDiagnosticCode::Shadowed,
+                    &name,
+                    "independent skill is shadowed by an enabled plugin",
+                );
+                diagnostic.source = Some(shadowed.source);
+                diagnostic.source_path = Some(shadowed.source_path.clone());
+                scan.diagnostics.push(diagnostic);
             }
             if let Some(plugin) = plugins.first() {
                 if plugin.model_invocable || plugin.user_invocable {
@@ -447,16 +448,16 @@ fn candidate_order(left: &SkillCandidate, right: &SkillCandidate) -> std::cmp::O
 
 fn candidate_priority(candidate: &SkillCandidate) -> (u8, usize, SkillSource) {
     match candidate.source {
+        SkillSource::Plugin => (0, 0, candidate.source),
         SkillSource::WorkspaceEzAssistant | SkillSource::WorkspaceAgents => (
-            0,
+            1,
             candidate.workspace_root_order.unwrap_or(usize::MAX),
             candidate.source,
         ),
         SkillSource::UserEzAssistant
         | SkillSource::LegacyUserEzAssistant
         | SkillSource::HostSupplement
-        | SkillSource::UserAgents => (1, 0, candidate.source),
-        SkillSource::Plugin => (2, 0, candidate.source),
+        | SkillSource::UserAgents => (2, 0, candidate.source),
     }
 }
 

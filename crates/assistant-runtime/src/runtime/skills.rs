@@ -172,10 +172,9 @@ fn current_skill_body(discovery: &SkillDiscovery, name: &SkillName) -> Option<St
     if discovery.status != SkillDiscoveryStatus::Available {
         return None;
     }
-    let winner = discovery
-        .winners
-        .iter()
-        .find(|candidate| &candidate.name == name)?;
+    let winner = discovery.winners.iter().find(|candidate| {
+        &candidate.name == name && candidate.source != crate::SkillSource::Plugin
+    })?;
     Some(winner.body.clone())
 }
 

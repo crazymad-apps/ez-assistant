@@ -735,6 +735,8 @@ MCP 连接与工具发现不再阻塞监听发布。Host Supervisor 管理可降
 初始化结束后等待 Host 关闭，初始化中收到关闭则取消，连接资源仍由既有 factory 统一回收。
 基本配置／Store 故障仍阻止启动；不得把它们随 MCP 一起后台化或忽略。启动分段日志不含凭据。
 
+MCP Adapter 必须区分单次 JSON-RPC 请求拒绝、取消、超时与 Transport 断开或协议故障；只向 Runtime 返回静态脱敏分类，不转发底层错误正文。单次请求失败不能被投影为整条连接失效。
+
 ## v0.25.1 M0 在线模型发现（部分实现）
 
 - Host 在既有 ModelServiceFactory 中实现单次在线发现；网络与原始 JSON 解析位于

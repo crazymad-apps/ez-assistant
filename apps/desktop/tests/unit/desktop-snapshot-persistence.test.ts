@@ -103,7 +103,7 @@ it("clears a remembered model when its provider disappears without rewriting mea
   expect(store.new_session_drafts.get("workspace:workspace-2")?.model_selection).toEqual(remembered);
   expect(store.interaction_error).toContain("服务商已删除");
 });
-it("loads once before connecting and never saves the empty startup projection over the existing snapshot", async () => {
+it("starts in a new draft while retaining saved sessions' resource tabs", async () => {
   let load!: (value: DesktopPreferences) => void;
   bridge.load.mockImplementationOnce(() => new Promise((resolve) => { load = resolve; }));
   const store = create();
@@ -116,11 +116,22 @@ it("loads once before connecting and never saves the empty startup projection ov
   await Promise.all([initialized, connected, repeated]);
   expect(bridge.load).toHaveBeenCalledOnce();
   expect(RuntimeLifecycleCoordinator.prototype.connect).toHaveBeenCalledOnce();
-  expect(store.navigation.selected_session_id).toBe("saved");
-  expect(store.resource_workspace.active_tab.type).toBe("workspace");
+  expect(store.navigation.selected_session_id).toBeNull();
+  expect(store.navigation.selected_draft_key).toBe("unbound");
+  expect(store.resource_workspace.active_tab.type).toBe("context");
+  expect(store.resource_workspace.groups.get("session:saved")?.tabs.map((tab) => tab.type)).toEqual(["context", "workspace"]);
   await store.flushPreferences();
-  expect(bridge.save.mock.calls[0]?.[0].resource_workspace.current_scope_key).toBe("session:saved");
+  expect(bridge.save.mock.calls[0]?.[0].resource_workspace.current_scope_key).toBe("draft:unbound");
 });
+it("starts with automatic approval when preferences cannot be loaded and retains the error", async () => {
+  bridge.load.mockRejectedValueOnce(new Error("invalid preferences"));
+  const store = create();
+  await store.connect();
+  expect(store.navigation.selected_draft_key).toBe("unbound");
+  expect(store.new_session_drafts.get("unbound")?.approval_mode).toBe("auto");
+  expect(store.interaction_error).toContain("桌面状态读取失败");
+});
+
 it("serializes disk writes and freezes the final snapshot before terminal shutdown removes its tab", async () => {
   const store = create(); await store.connect();
   store.navigation.selectSession("a");

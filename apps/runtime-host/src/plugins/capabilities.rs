@@ -259,7 +259,7 @@ fn expand(
     parameters: &BTreeMap<String, String>,
     software: &BTreeMap<String, String>,
 ) -> Option<String> {
-    let root = root.to_str()?;
+    let root_text = root.to_str()?;
     let mut remaining = input;
     let mut output = String::new();
     while let Some(start) = remaining.find("${") {
@@ -268,7 +268,7 @@ fn expand(
         let end = tail.find('}')?;
         let key = &tail[..end];
         let value = if key == "plugin_root" {
-            root
+            root_text
         } else if let Some(name) = key.strip_prefix("config.") {
             parameters.get(name)?.as_str()
         } else {
@@ -282,7 +282,16 @@ fn expand(
         }
     }
     output.push_str(remaining);
-    (output.len() <= 32 * 1024).then_some(output)
+    if output.len() > 32 * 1024 {
+        return None;
+    }
+    // 包内路径以 / 分隔，Windows canonical 根可能是 \\?\C:\...；字符串拼接会
+    // 留下 verbatim 路径不接受的 /。通过原生 join 组合路径，保留长路径前缀及真实根。
+    if input.starts_with("${plugin_root}/") {
+        let relative = output.strip_prefix(root_text)?.strip_prefix('/')?;
+        return root.join(relative).into_os_string().into_string().ok();
+    }
+    Some(output)
 }
 
 fn diagnostic(server_key: Option<McpServerKey>, message: &str) -> McpDiagnosticSnapshot {
@@ -298,6 +307,45 @@ fn diagnostic(server_key: Option<McpServerKey>, message: &str) -> McpDiagnosticS
 mod tests {
     use super::*;
     use assistant_runtime::{McpConnectionFactory, McpConnectionOptions, PluginSource};
+
+    #[test]
+    fn bundled_mcp_paths_resolve_under_canonical_plugin_root() {
+        let home = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(home.path())
+            .unwrap()
+            .join("插件 中文 空格");
+        let executables = [
+            "runtimes/windows-x64/gorag-mcp.exe",
+            "runtimes/windows-x64/python/python.exe",
+        ];
+        for relative in executables {
+            let executable = root.join(relative);
+            fs::create_dir_all(executable.parent().unwrap()).unwrap();
+            fs::write(&executable, b"fixture").unwrap();
+            let mut raw = serde_json::json!({
+                "command": format!("${{plugin_root}}/{relative}"),
+                "args": ["${plugin_root}/mcp/entry.py"],
+                "cwd": "${plugin_root}/mcp",
+            })
+            .as_object()
+            .unwrap()
+            .clone();
+            assert!(expand_server(
+                &mut raw,
+                &root,
+                &BTreeMap::new(),
+                &BTreeMap::new()
+            ));
+            let command = Path::new(raw["command"].as_str().unwrap());
+            assert_eq!(command, executable);
+            assert!(command.is_file());
+            assert_eq!(
+                Path::new(raw["args"][0].as_str().unwrap()),
+                root.join("mcp/entry.py")
+            );
+            assert_eq!(Path::new(raw["cwd"].as_str().unwrap()), root.join("mcp"));
+        }
+    }
 
     #[tokio::test]
     async fn managed_plugin_remote_descriptor_connects_to_controlled_server() {

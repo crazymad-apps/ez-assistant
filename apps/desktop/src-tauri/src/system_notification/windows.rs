@@ -16,6 +16,25 @@ use windows::{
 
 use super::{NotificationError, NotificationEvent, Permission};
 
+#[allow(unsafe_code)]
+pub(super) fn is_focused() -> Result<bool, NotificationError> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowThreadProcessId,
+    };
+    // SAFETY: 只读系统当前前台 HWND 和所属 PID，不解引用、保存或关闭借用句柄。
+    // 输出指针指向栈上 u32；两个同步调用无需 UI 线程，不产生线程或修改系统状态。
+    let foreground = unsafe { GetForegroundWindow() };
+    if foreground.is_null() {
+        return Ok(false);
+    }
+    let mut process_id = 0;
+    if unsafe { GetWindowThreadProcessId(foreground, &mut process_id) } == 0 {
+        return Err(NotificationError::Unavailable);
+    }
+    // 判断整个客户端是否前台，包含 WebView、资源网页和原生对话框，不要求输入框有焦点。
+    Ok(process_id == std::process::id())
+}
+
 pub(super) async fn permission(app: &AppHandle, _: bool) -> Result<Permission, NotificationError> {
     let setting = settings::read(&app.config().identifier).map_err(|error| {
         eprintln!("Windows notification settings failed: {:?}", error.code());
@@ -71,10 +90,10 @@ pub(super) async fn show(
                       args: windows::core::Ref<
                     windows::UI::Notifications::ToastDismissedEventArgs,
                 >| {
-                    if let Some(args) = args.as_ref() {
-                        if args.Reason()? != ToastDismissalReason::TimedOut {
-                            let _ = sender.try_send(Ok(false));
-                        }
+                    if let Some(args) = args.as_ref()
+                        && args.Reason()? != ToastDismissalReason::TimedOut
+                    {
+                        let _ = sender.try_send(Ok(false));
                     }
                     Ok(())
                 },
@@ -86,8 +105,15 @@ pub(super) async fn show(
             Ok(())
         }))
         .map_err(|_| NotificationError::Unavailable)?;
+    let mut shown = false;
     let result = async {
+        // JS 的预检查不能覆盖切回窗口的竞态；紧邻 OS Show 再读当前前台进程。
+        if is_focused()? {
+            events.send(NotificationEvent::Skipped).map_err(|_| NotificationError::Unavailable)?;
+            return Ok(());
+        }
         notifier.Show(&toast).map_err(|_| NotificationError::Unavailable)?;
+        shown = true;
         events.send(NotificationEvent::Submitted).map_err(|_| NotificationError::Unavailable)?;
         tokio::select! {
             _ = cancel.cancelled() => {},
@@ -104,9 +130,11 @@ pub(super) async fn show(
     let _ = toast.RemoveActivated(activated);
     let _ = toast.RemoveDismissed(dismissed);
     let _ = toast.RemoveFailed(failed);
-    notifier
-        .Hide(&toast)
-        .map_err(|_| NotificationError::Unavailable)?;
+    if shown {
+        notifier
+            .Hide(&toast)
+            .map_err(|_| NotificationError::Unavailable)?;
+    }
     result
 }
 

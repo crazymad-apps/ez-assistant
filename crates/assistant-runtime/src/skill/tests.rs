@@ -88,7 +88,7 @@ fn source_priority_and_disabled_name_are_deterministic_without_fallback() {
 }
 
 #[test]
-fn plugin_skills_do_not_inherit_independent_name_switches_or_win_name_conflicts() {
+fn enabled_plugin_shadows_independent_skill_without_inheriting_its_name_switch() {
     let mut plugin = candidate("review", SkillSource::Plugin, "/plugin/review");
     plugin.plugin_name = Some("review-tools".to_owned());
     plugin.plugin_sha256 = Some("a".repeat(64));
@@ -122,9 +122,46 @@ fn plugin_skills_do_not_inherit_independent_name_switches_or_win_name_conflicts(
         },
         &disabled,
     );
-    assert!(with_independent.winners.is_empty());
+    assert_eq!(with_independent.winners.len(), 1);
+    assert_eq!(with_independent.winners[0].source, SkillSource::Plugin);
+    assert_eq!(
+        with_independent.winners[0].plugin_name.as_deref(),
+        Some("review-tools")
+    );
     assert!(
         with_independent
+            .diagnostics
+            .iter()
+            .any(
+                |diagnostic| diagnostic.code == SkillDiagnosticCode::Shadowed
+                    && diagnostic.source == Some(SkillSource::UserAgents)
+            )
+    );
+}
+
+#[test]
+fn two_enabled_plugins_with_the_same_skill_name_have_no_winner() {
+    let mut first = candidate("review", SkillSource::Plugin, "/plugin/first/review");
+    first.plugin_name = Some("first".to_owned());
+    first.plugin_sha256 = Some("a".repeat(64));
+    let mut second = candidate("review", SkillSource::Plugin, "/plugin/second/review");
+    second.plugin_name = Some("second".to_owned());
+    second.plugin_sha256 = Some("b".repeat(64));
+    let discovery = compile_skill_discovery(
+        SkillScanResult {
+            candidates: vec![
+                candidate("review", SkillSource::HostSupplement, "/shared/review"),
+                first,
+                second,
+            ],
+            diagnostics: Vec::new(),
+            complete: true,
+        },
+        &[],
+    );
+    assert!(discovery.winners.is_empty());
+    assert!(
+        discovery
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.code == SkillDiagnosticCode::PluginConflict)

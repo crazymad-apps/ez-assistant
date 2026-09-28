@@ -665,6 +665,7 @@ fake authorizer 和确定性时钟，不依赖真实 Provider 的偶然输出。
   Runtime 领域决定；Host 不持有第二份 Catalog 状态机。
 - 四个 Root 的优先级固定为工作区 `.ez-assistant`、工作区 `.agents`、用户 `.ez-assistant`、
   用户 `.agents`。目录枚举和诊断排序必须确定，扫描不完整不得以部分结果继续构造 Catalog。
+- v0.28.1 发版前修正：启用的插件 Skill 与独立 Skill 同名时优先使用插件，独立候选仅显示为被覆盖；独立来源之间仍沿用原有顺序，独立名称开关不影响插件。两个启用插件同名时不猜测胜者，保持冲突并阻止该技能进入 Catalog。此规则取代 v0.28.0 中插件与独立 Skill 同名即阻止插件生效的约定。
 - SQLite 开关只以格式有效的 Skill `name` 为键，不区分来源或层级；禁用不会回退同名低优先级包。
 - Skill 是指令来源而不是权限来源；启用本身无需额外权限，包内文件、Shell 等能力仍由现有工具
   Authorizer 决定，`allowed-tools` 不转换为放行规则。

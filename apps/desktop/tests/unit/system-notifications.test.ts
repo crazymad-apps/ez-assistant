@@ -20,6 +20,7 @@ function fixture() {
   const platform: NotificationPlatform = {
     desktop: true,
     permission: vi.fn(async () => 'granted' as const),
+    isFocused: vi.fn(async () => false),
     show: vi.fn(async () => close),
     focus: vi.fn(async () => {}),
   };
@@ -60,6 +61,46 @@ afterEach(() => {
 });
 
 describe('系统通知投递与业务隔离', () => {
+  it.each(['turn', 'approval', 'feedback'] as const)('窗口聚焦时不发送 %s 通知，失焦后不补发旧事项', async (kind) => {
+    const { store, platform } = fixture();
+    vi.mocked(platform.isFocused).mockResolvedValue(true);
+    let focused_target: NotificationTarget = target;
+    if (kind === 'approval') focused_target = { ...target, kind, approval_id: 'approval-1' };
+    if (kind === 'feedback') focused_target = { ...target, kind, request_id: 'question-1' };
+    await store.publish({ ...notification, target: focused_target });
+    expect(platform.show).not.toHaveBeenCalled();
+    vi.mocked(platform.isFocused).mockResolvedValue(false);
+    await store.publish({ ...notification, target: focused_target });
+    expect(platform.show).not.toHaveBeenCalled();
+    await store.publish({ ...notification, target: { ...target, run_id: 'new-run' } });
+    expect(platform.show).toHaveBeenCalledOnce();
+  });
+
+  it('权限等待期间重新聚焦窗口时不显示迟到通知', async () => {
+    const { store, platform } = fixture();
+    let grant!: (value: 'granted') => void;
+    vi.mocked(platform.permission).mockReturnValueOnce(new Promise((resolve) => { grant = resolve; }));
+    const pending = store.publish(notification);
+    vi.mocked(platform.isFocused).mockResolvedValue(true);
+    grant('granted');
+    await pending;
+    expect(platform.show).not.toHaveBeenCalled();
+  });
+
+  it('前台测试只显示页面提示，延迟测试失焦后才发送', async () => {
+    vi.useFakeTimers();
+    const { store, platform } = fixture();
+    vi.mocked(platform.isFocused).mockResolvedValue(true);
+    await store.test();
+    expect(platform.show).not.toHaveBeenCalled();
+    expect(store.notice_message).toContain('处于前台');
+    const delayed = store.test(true);
+    vi.mocked(platform.isFocused).mockResolvedValue(false);
+    await vi.advanceTimersByTimeAsync(10000);
+    await delayed;
+    expect(platform.show).toHaveBeenCalledOnce();
+  });
+
   it('全局消费完成事件一次，不依赖远端时钟，关闭期间的事件不补发', async () => {
     const { store, platform } = fixture();
     store.ingest({ ...finished(), emitted_at_ms: Date.now() - 60_000 });

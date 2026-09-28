@@ -9,6 +9,21 @@ use tokio_util::sync::CancellationToken;
 
 use super::{NotificationError, NotificationEvent, Permission};
 
+pub(super) async fn is_focused(app: &AppHandle) -> Result<bool, NotificationError> {
+    let (send, receive) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || {
+        // 应用是否前台与输入控件焦点无关；AppKit 对象只在主线程读取，不跨线程持有。
+        let active = objc2::MainThreadMarker::new()
+            .map(|main| objc2_app_kit::NSApplication::sharedApplication(main).isActive());
+        let _ = send.send(active);
+    })
+    .map_err(|_| NotificationError::Unavailable)?;
+    receive
+        .await
+        .map_err(|_| NotificationError::Unavailable)?
+        .ok_or(NotificationError::Unavailable)
+}
+
 pub(super) async fn permission(
     _: &AppHandle,
     request: bool,
@@ -50,6 +65,13 @@ pub(super) async fn show(
         return Err(NotificationError::PermissionDenied);
     }
     if cancel.is_cancelled() {
+        return Ok(());
+    }
+    // JS 查询与系统投递之间可能切回前台；最后提交边界重新核对并正常消费该事项。
+    if is_focused(app).await? {
+        events
+            .send(NotificationEvent::Skipped)
+            .map_err(|_| NotificationError::Unavailable)?;
         return Ok(());
     }
     let handle = Notification::new()

@@ -61,7 +61,7 @@ export function workspaceForDraftKey(key: NewSessionDraftKey): WorkspaceId | nul
  */
 export class NewSessionDraftStore {
   readonly drafts = observable.map<NewSessionDraftKey, NewSessionDraft>(undefined, { deep: false });
-  default_approval_mode: ApprovalMode = "ask";
+  default_approval_mode: ApprovalMode = "auto";
   default_model_selection: ModelSelection | null = null;
 
   constructor() {
@@ -272,7 +272,7 @@ export function isDraftMeaningful(draft: NewSessionDraft): boolean {
 
 export function isDraftCustomized(
   draft: NewSessionDraft,
-  default_approval_mode: ApprovalMode = "ask",
+  default_approval_mode: ApprovalMode = "auto",
   default_model_selection: ModelSelection | null = null,
 ): boolean {
   return isDraftMeaningful(draft)

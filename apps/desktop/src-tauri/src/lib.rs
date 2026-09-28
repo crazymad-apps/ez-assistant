@@ -99,6 +99,7 @@ pub fn run() {
                 browser_resource::close_resource_browser,
                 health,
                 system_notification::system_notification_permission,
+                system_notification::system_notification_focused,
                 system_notification::show_system_notification,
                 system_notification::close_system_notification,
                 desktop_lifecycle::desktop_platform,

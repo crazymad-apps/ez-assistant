@@ -16,6 +16,7 @@ describe("NewSessionDraftStore", () => {
   it("keeps following-default intent and treats explicit choices as customized", () => {
     const drafts = new NewSessionDraftStore();
     const draft = drafts.open("unbound");
+    expect(draft.approval_mode).toBe("auto");
     expect(draft.model_selection).toBeNull();
     expect(isDraftCustomized(draft)).toBe(false);
     drafts.updateModel("unbound", { provider_instance_id: "provider-1", model_id: "vendor/model.v1" });

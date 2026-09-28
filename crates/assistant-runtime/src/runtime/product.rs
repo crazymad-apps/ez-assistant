@@ -1524,15 +1524,21 @@ pub(super) fn project_skill_management(
         .iter()
         .map(|state| (state.name.clone(), state.enabled))
         .collect::<std::collections::BTreeMap<_, _>>();
-    let winner_names = discovery
+    let winners_by_name = discovery
         .winners
         .iter()
-        .map(|candidate| candidate.name.clone())
-        .collect::<std::collections::BTreeSet<_>>();
+        .map(|candidate| (candidate.name.clone(), candidate))
+        .collect::<std::collections::BTreeMap<_, _>>();
     let conflict_names = discovery
         .diagnostics
         .iter()
-        .filter(|diagnostic| diagnostic.code == crate::SkillDiagnosticCode::SameSourceConflict)
+        .filter(|diagnostic| {
+            matches!(
+                diagnostic.code,
+                crate::SkillDiagnosticCode::SameSourceConflict
+                    | crate::SkillDiagnosticCode::PluginConflict
+            )
+        })
         .filter_map(|diagnostic| diagnostic.skill_name.clone())
         .collect::<std::collections::BTreeSet<_>>();
     let mut by_name = std::collections::BTreeMap::new();
@@ -1545,6 +1551,11 @@ pub(super) fn project_skill_management(
     if include_plugins {
         for candidate in &discovery.candidates {
             by_name.entry(candidate.name.clone()).or_insert(candidate);
+        }
+        for winner in &discovery.winners {
+            if winner.source == crate::SkillSource::Plugin {
+                by_name.insert(winner.name.clone(), winner);
+            }
         }
     }
     let skills = by_name
@@ -1559,7 +1570,10 @@ pub(super) fn project_skill_management(
                 SkillHealthSnapshot::Unavailable
             } else if conflict_names.contains(&name) {
                 SkillHealthSnapshot::Conflict
-            } else if winner_names.contains(&name) {
+            } else if winners_by_name
+                .get(&name)
+                .is_some_and(|winner| *winner == candidate)
+            {
                 SkillHealthSnapshot::Ready
             } else {
                 SkillHealthSnapshot::Unavailable

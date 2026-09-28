@@ -117,11 +117,6 @@
 
 .navigation { display: flex; align-items: center; gap: 6px; }
 .error { margin: 12px 0 0; color: var(--ez-danger); overflow-wrap: anywhere; }
-.record {
-  display: grid; gap: 6px; min-width: 0; padding: 8px; border-left: 2px solid var(--ez-border);
-  p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-  > button { justify-self: start; }
-}
 
 @media (max-width: 480px) {
   .header { padding-inline: 10px; }

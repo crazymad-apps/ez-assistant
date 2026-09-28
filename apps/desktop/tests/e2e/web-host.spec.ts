@@ -75,6 +75,33 @@ test("Host 内嵌 Web 支持登录、设置、改密撤销和退出", async ({ p
   expect(errors).toEqual([]);
 });
 
+test("启动默认进入新建会话并使用自动审批", async ({ page }) => {
+  await page.goto(fixture().base_url);
+  await page.getByLabel("访问密码", { exact: true }).fill("isolated-web-password");
+  await page.getByRole("button", { name: "进入项目" }).click();
+  await expectWorkspaceReady(page);
+  await expect(page.getByRole("heading", { name: "今天想完成什么？", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "执行设置", exact: true })).toHaveText("构建 · 自动");
+  await expect(page.getByText("M2 临时会话", { exact: true }).first()).toBeVisible();
+});
+
+test("侧栏快捷入口直达智能体和插件管理", async ({ page }, testInfo) => {
+  await page.goto(fixture().base_url);
+  await page.getByLabel("访问密码", { exact: true }).fill("isolated-web-password");
+  await page.getByRole("button", { name: "进入项目" }).click();
+  await expectWorkspaceReady(page);
+
+  await page.screenshot({ path: testInfo.outputPath("sidebar-shortcuts.png"), animations: "disabled" });
+  await page.getByRole("button", { name: "智能体管理" }).click();
+  await expect(page.getByRole("dialog", { name: "设置" })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "设置页面" }).getByRole("button", { name: "智能体" })).toHaveAttribute("aria-current", "page");
+  await page.getByRole("button", { name: "关闭设置" }).click();
+
+  await page.getByRole("button", { name: "插件管理" }).click();
+  await expect(page.getByRole("navigation", { name: "设置页面" }).getByRole("button", { name: "插件" })).toHaveAttribute("aria-current", "page");
+  await page.getByRole("button", { name: "关闭设置" }).click();
+});
+
 test("普通 token fragment 快速登录后立即移除，并在失效时回到密码页", async ({ page }) => {
   const host = fixture();
   const issued = await fetch(`${host.base_url}/auth/login`, {

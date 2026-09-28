@@ -1,10 +1,9 @@
-import { useEffect, useId, useRef, type ReactNode } from 'react';
+import { useEffect, useId, useRef } from 'react';
 import { observer } from 'mobx-react-lite';
 import type { FeedbackRequestSnapshot } from '@ez-assistant/protocol';
 import { Icon } from '../../../components/Icon';
 import { Button } from '../../../components/Button';
 import { useInputMethodGuard } from '../../../components/InputMethodGuard';
-import { useRootStore } from '../../../stores/RootStoreContext';
 import { answerComplete, type FeedbackStore } from '../FeedbackStore';
 import styles from './index.module.scss';
 
@@ -145,20 +144,4 @@ export const FeedbackPanel = observer(function FeedbackPanel(props: FeedbackPane
       </footer>
     </section>
   );
-});
-
-/** 历史和实时记录引用同一权威请求；旧问题始终只读。 */
-export const FeedbackRecord = observer(function FeedbackRecord(props: Readonly<{ call_id: string; fallback: ReactNode }>) {
-  const root = useRootStore();
-  const session_id = root.navigation.selected_session_id;
-  const request = session_id ? root.feedback.forSession(session_id).find((item) => item.tool_call_id === props.call_id) : undefined;
-  if (!request) return props.fallback;
-  return <div className={styles.record}>
-    <strong>{request.status === 'pending' ? '等待你的回复' : request.status === 'answered' ? '已回答' : request.status === 'cancelled' ? '已取消' : '等待已失效'}</strong>
-    {request.questions.map((question, index) => <div key={index}>
-      <p>{question.question}</p>
-      {request.answers?.[index] && <p>{request.answers[index].selected_options.map((option) => question.options[option].label).join('、')}{request.answers[index].text ? ` ${request.answers[index].text}` : ''}</p>}
-    </div>)}
-    {request.status === 'pending' && <Button onClick={() => root.feedback.open(request)} size="small" variant="text">回答问题</Button>}
-  </div>;
 });

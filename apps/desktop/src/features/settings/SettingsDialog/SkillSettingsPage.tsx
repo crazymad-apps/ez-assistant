@@ -255,6 +255,7 @@ function diagnosticMessage(code: string): string {
     same_source_conflict: "相同来源层级存在多个同名技能，无法确定生效项。",
     disabled_by_name: "该名称已禁用，所有同名来源均被屏蔽。",
     shadowed: "该候选项已被更高优先级的同名来源覆盖。",
+    plugin_conflict: "多个已启用插件提供同名技能，无法确定生效项。",
     not_invocable: "该技能未向用户或智能体开放调用。",
     catalog_limit_exceeded: "该技能超出单个会话技能数量上限。",
     legacy_catalog_unavailable: "历史会话没有可恢复的技能信息。",

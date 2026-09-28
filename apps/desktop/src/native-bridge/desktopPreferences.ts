@@ -17,7 +17,7 @@ export type DesktopPreferences = {
 
 export type DesktopCloseBehavior = "hide_to_tray" | "quit_desktop";
 
-const defaults: DesktopPreferences = { left_sidebar_open: true, right_sidebar_open: true, left_sidebar_width: 286, right_sidebar_width: 380, expanded_workspace_ids: null, close_behavior: "hide_to_tray", default_approval_mode: "ask", last_model_selection: null };
+const defaults: DesktopPreferences = { left_sidebar_open: true, right_sidebar_open: true, left_sidebar_width: 286, right_sidebar_width: 380, expanded_workspace_ids: null, close_behavior: "hide_to_tray", default_approval_mode: "auto", last_model_selection: null };
 const WEB_KEY = "ez-assistant:view";
 
 export function viewingSnapshot(value: ResourceWorkspaceSnapshot | null | undefined, native: boolean, local = native): ResourceWorkspaceSnapshot | null {
@@ -47,7 +47,7 @@ export async function loadDesktopPreferences(namespace?: string): Promise<Deskto
 export async function saveDesktopPreferences(preferences: DesktopPreferences, namespace?: string): Promise<void> {
   if (isTauri()) { await invoke("save_desktop_preferences", {preferences, namespace: namespace ?? null}); return; }
   // 同源账号共享 Cookie，只持久化无用户数据的布局；资源、会话 ID 不写浏览器缓存。
-  // 普通 Web 不消费或保存 Desktop 设备默认，继续固定 Ask 并跟随 Runtime 全局模型默认。
+  // 普通 Web 不消费或保存 Desktop 设备默认，使用 Auto 并跟随 Runtime 全局模型默认。
   const text = JSON.stringify({
     left_sidebar_open: preferences.left_sidebar_open,
     right_sidebar_open: preferences.right_sidebar_open,

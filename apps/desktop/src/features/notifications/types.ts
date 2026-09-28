@@ -23,6 +23,7 @@ export type NotificationPermission = 'default' | 'granted' | 'denied' | 'unsuppo
 export interface NotificationPlatform {
   readonly desktop: boolean;
   permission(request: boolean): Promise<NotificationPermission>;
+  isFocused(): Promise<boolean>;
   show(id: string, title: string, body: string, click: () => void, fail: () => void): Promise<() => void>;
   focus(): Promise<void>;
 }

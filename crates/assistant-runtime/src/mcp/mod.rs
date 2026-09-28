@@ -200,6 +200,7 @@ pub enum McpConnectionFailureKind {
     Connect,
     Protocol,
     Catalog,
+    /// 单次请求失败；不表示底层连接已断开。
     ToolCall,
     UnsupportedExtension,
     Cancelled,

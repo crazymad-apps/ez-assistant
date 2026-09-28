@@ -9,6 +9,8 @@ while startup_gate and not os.path.exists(startup_gate):
     time.sleep(0.02)
 
 legacy = len(sys.argv) > 1 and sys.argv[1] == "legacy"
+if len(sys.argv) > 1 and sys.argv[1] in ("reject-once", "disconnect"):
+    os.environ["MCP_FIXTURE_CALL_MODE"] = sys.argv[1]
 
 # 仅由隔离验收配置显式开启：验证 stderr 被持续排空且不会转发 credential。
 if os.environ.get("MCP_FIXTURE_STDERR_FLOOD"):
@@ -106,6 +108,14 @@ for line in sys.stdin:
             sys.exit(0)
         if mode == "hang":
             time.sleep(60)
+            continue
+        if mode == "reject-once":
+            os.environ.pop("MCP_FIXTURE_CALL_MODE", None)
+            sys.stdout.write(json.dumps({
+                "jsonrpc": "2.0", "id": request["id"],
+                "error": {"code": -32603, "message": "sensitive fixture error"},
+            }) + "\n")
+            sys.stdout.flush()
             continue
         response(
             request["id"],

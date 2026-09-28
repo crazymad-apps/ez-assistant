@@ -38,7 +38,7 @@ use rmcp::{
         CallToolRequestParams, CallToolResponse, ContentBlock, PaginatedRequestParams,
         ProtocolVersion, ResourceContents,
     },
-    service::{RunningService, RxJsonRpcMessage, TxJsonRpcMessage},
+    service::{RunningService, RxJsonRpcMessage, ServiceError, TxJsonRpcMessage},
     transport::{
         Transport,
         async_rw::AsyncRwTransport,
@@ -194,7 +194,7 @@ impl McpConnection for HostMcpConnection {
             let service = self.service.read().await;
             let Some(service) = service.as_ref() else {
                 return Err(connection_error(
-                    McpConnectionFailureKind::ToolCall,
+                    McpConnectionFailureKind::Connect,
                     "MCP connection is closed",
                 ));
             };
@@ -203,12 +203,7 @@ impl McpConnection for HostMcpConnection {
                 () = cancellation.cancelled() => return Err(cancelled_error()),
                 response = service.call_tool_once(request) => response,
             }
-            .map_err(|_| {
-                connection_error(
-                    McpConnectionFailureKind::ToolCall,
-                    "MCP tool request failed",
-                )
-            })?;
+            .map_err(tool_request_error)?;
             let result = match response {
                 CallToolResponse::Complete(result) => result,
                 CallToolResponse::InputRequired(_) | CallToolResponse::Task(_) => {
@@ -547,7 +542,13 @@ fn spawn_managed(command: Command) -> io::Result<Box<dyn ChildWrapper>> {
     command.wrap(ProcessGroup::leader());
     #[cfg(windows)]
     command.wrap(JobObject);
-    command.spawn()
+    command.spawn_with(|command| {
+        // JobObject 会重设创建标志；在最终启动边界隐藏 MCP 控制台，
+        // 并保留先加入 Job 再恢复线程所需的挂起位，与本地 Shell 启动一致。
+        #[cfg(windows)]
+        command.creation_flags(0x0800_0000 | 0x0000_0004); // CREATE_NO_WINDOW | CREATE_SUSPENDED
+        command.spawn()
+    })
 }
 
 struct ManagedStdioTransport {
@@ -695,6 +696,37 @@ impl<R: AsyncRead + Unpin> AsyncRead for BoundedLineReader<R> {
     }
 }
 
+fn tool_request_error(error: ServiceError) -> McpConnectionError {
+    // SDK 错误正文可能包含凭据或远端数据；只投影静态分类。
+    match error {
+        ServiceError::McpError(_) => connection_error(
+            McpConnectionFailureKind::ToolCall,
+            "MCP server rejected the tool request",
+        ),
+        ServiceError::Cancelled { .. } => cancelled_error(),
+        ServiceError::Timeout { .. } => connection_error(
+            McpConnectionFailureKind::ToolCall,
+            "MCP tool request timed out",
+        ),
+        ServiceError::SubscriptionLagged { .. } => connection_error(
+            McpConnectionFailureKind::ToolCall,
+            "MCP tool response buffer was exceeded",
+        ),
+        ServiceError::TransportSend(_) | ServiceError::TransportClosed => connection_error(
+            McpConnectionFailureKind::Connect,
+            "MCP tool connection was lost",
+        ),
+        ServiceError::InputRequiredRoundsExceeded { .. } => connection_error(
+            McpConnectionFailureKind::UnsupportedExtension,
+            "MCP tool requested an unsupported continuation",
+        ),
+        _ => connection_error(
+            McpConnectionFailureKind::Protocol,
+            "MCP tool response protocol is invalid",
+        ),
+    }
+}
+
 fn connection_error(kind: McpConnectionFailureKind, message: &'static str) -> McpConnectionError {
     McpConnectionError::new(kind, message)
 }
@@ -786,6 +818,66 @@ mod tests {
             .close(CancellationToken::new())
             .await
             .expect("close fixture");
+    }
+
+    #[tokio::test]
+    async fn stdio_tool_rejection_keeps_transport_but_disconnect_is_classified() {
+        for (mode, kind) in [
+            ("reject-once", McpConnectionFailureKind::ToolCall),
+            ("disconnect", McpConnectionFailureKind::Connect),
+        ] {
+            let connection = HostMcpConnection {
+                service: RwLock::new(Some(start_stdio_fixture(Some(mode)).await)),
+            };
+            let error = connection
+                .call_tool_once(
+                    "first_tool".into(),
+                    serde_json::Map::new(),
+                    CancellationToken::new(),
+                )
+                .await
+                .err()
+                .expect("first call fails");
+            assert_eq!(error.kind(), kind);
+            assert!(!error.message().contains("sensitive fixture error"));
+            if mode == "reject-once" {
+                let result = connection
+                    .call_tool_once(
+                        "first_tool".into(),
+                        serde_json::Map::new(),
+                        CancellationToken::new(),
+                    )
+                    .await
+                    .expect("second explicit call succeeds on same transport");
+                assert!(!result.is_error);
+            }
+            connection
+                .close(CancellationToken::new())
+                .await
+                .expect("close fixture");
+        }
+    }
+
+    #[test]
+    fn tool_request_cancellation_and_timeout_preserve_connection_classification() {
+        assert_eq!(
+            tool_request_error(ServiceError::Cancelled {
+                reason: Some("secret".into())
+            })
+            .kind(),
+            McpConnectionFailureKind::Cancelled
+        );
+        assert_eq!(
+            tool_request_error(ServiceError::Timeout {
+                timeout: std::time::Duration::from_secs(1)
+            })
+            .kind(),
+            McpConnectionFailureKind::ToolCall
+        );
+        assert_eq!(
+            tool_request_error(ServiceError::UnexpectedResponse).kind(),
+            McpConnectionFailureKind::Protocol
+        );
     }
 
     async fn start_stdio_fixture(mode: Option<&str>) -> ClientService {

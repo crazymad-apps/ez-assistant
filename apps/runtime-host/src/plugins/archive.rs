@@ -135,6 +135,10 @@ pub(crate) fn prepare_archive_with_cancel(
             return Err(PackageError::Invalid);
         }
         create_links(root, &index)?;
+        // Staging is not published until every extracted file and directory has been
+        // synced. Syncing each file while writing it serializes every directory
+        // update with disk flushes and makes large packages take minutes.
+        sync_staging(root, cancellation)?;
         Ok(manifest)
     })();
     match checked {
@@ -447,17 +451,42 @@ fn write_entry(
     mode: u32,
     cancellation: &CancellationToken,
 ) -> Result<()> {
+    #[cfg(not(unix))]
+    let _ = mode;
     fs::create_dir_all(target.parent().ok_or(PackageError::Invalid)?)?;
     let mut output = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(target)?;
     copy_bounded(input, &mut output, size, total, crc, cancellation)?;
-    output.sync_all()?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(target, fs::Permissions::from_mode(mode & 0o777))?;
+    }
+    Ok(())
+}
+
+fn sync_staging(root: &Path, cancellation: &CancellationToken) -> Result<()> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut directories = Vec::new();
+    while let Some(directory) = pending.pop() {
+        check_cancel(cancellation)?;
+        directories.push(directory.clone());
+        for entry in fs::read_dir(&directory)? {
+            check_cancel(cancellation)?;
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                pending.push(entry.path());
+            } else if kind.is_file() {
+                crate::platform::sync_file_at(&entry.path())?;
+            }
+        }
+    }
+    for directory in directories.into_iter().rev() {
+        check_cancel(cancellation)?;
+        crate::platform::sync_directory(&directory)?;
     }
     Ok(())
 }

@@ -195,7 +195,8 @@ export class NotificationStore {
       });
       if (permission !== 'granted') return;
       const send = async () => {
-        if (!active()) return;
+        // 发送前读取真实窗口焦点；前台收到的事项已消费，失焦后不补发。
+        if (!active() || await this.platform.isFocused() || !active()) return;
         const close = await this.platform.show(
           crypto.randomUUID(),
           notification.title,
@@ -248,6 +249,14 @@ export class NotificationStore {
         this.permission = permission;
       });
       if (permission !== 'granted') return;
+      const focused = await this.platform.isFocused();
+      if (this.#disposed || generation !== this.#generation) return;
+      if (focused) {
+        runInAction(() => {
+          this.notice_message = '当前窗口处于前台，未发送系统通知。可切换窗口后测试延迟通知。';
+        });
+        return;
+      }
       const close = await this.platform.show(
         crypto.randomUUID(),
         'EZ Assistant 测试通知',

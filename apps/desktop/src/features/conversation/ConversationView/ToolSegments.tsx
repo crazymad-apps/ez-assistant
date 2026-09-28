@@ -1,5 +1,4 @@
-import { FeedbackRecord } from "../../feedback/FeedbackPanel";
-import { Fragment, useId, useRef, useState, type ReactNode } from "react";
+import { Fragment, useId, useRef, useState } from "react";
 import type {
   AssistantSegment,
   ChildTaskTreeItemSnapshot,
@@ -172,7 +171,7 @@ function ToolGroup(props: Readonly<{
     const tool_child_tasks = props.child_tasks.filter((item) => item.task.parent_tool_call_id === tool.call_id);
     return (
       <Fragment key={tool.call_id}>
-        <FeedbackRecordOrTool tool_name={tool.tool_name} call_id={tool.call_id} row={<ToolRow identity={tool.mcp_identity} input={tool.input} name={tool.tool_name} on_click={() => props.on_tool_click(tool.call_id)} status={tool.status} summary={tool.summary} />} />
+        <ToolRow identity={tool.mcp_identity} input={tool.input} name={tool.tool_name} on_click={() => props.on_tool_click(tool.call_id)} status={tool.status} summary={tool.summary} />
         {props.on_child_open && <ChildTaskTree embedded items={tool_child_tasks} on_open={props.on_child_open} />}
       </Fragment>
     );
@@ -189,15 +188,11 @@ function LiveToolGroup(props: Readonly<{
     const tool_child_tasks = props.child_tasks.filter((item) => item.task.parent_tool_call_id === tool.call_id);
     return (
       <Fragment key={tool.call_id}>
-        <FeedbackRecordOrTool tool_name={tool.tool_name} call_id={tool.call_id} row={<ToolRow identity={tool.mcp_identity} input={tool.input} name={tool.tool_name} on_click={() => props.on_tool_click(tool)} status={tool.status} summary={toolSummary(tool)} />} />
+        <ToolRow identity={tool.mcp_identity} input={tool.input} name={tool.tool_name} on_click={() => props.on_tool_click(tool)} status={tool.status} summary={toolSummary(tool)} />
         {props.on_child_open && <ChildTaskTree embedded items={tool_child_tasks} on_open={props.on_child_open} />}
       </Fragment>
     );
   })}</div>;
-}
-
-function FeedbackRecordOrTool(props: Readonly<{ tool_name: string; call_id: string; row: ReactNode }>) {
-  return props.tool_name === "ask_user" ? <FeedbackRecord call_id={props.call_id} fallback={props.row} /> : props.row;
 }
 
 function ToolRow(props: Readonly<{

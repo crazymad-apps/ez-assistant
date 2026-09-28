@@ -384,8 +384,14 @@ export class RootStore {
     this.#disposed = false;
     await this.initializePreferences();
     if (this.#disposed) return;
+    if (!this.navigation.selected_session_id && !this.navigation.selected_draft_key) {
+      this.new_session_drafts.open("unbound");
+      this.navigation.selectDraft("unbound");
+    }
     await this.#runtime.connect(bootstrap);
     if (this.#disposed || this.connection.state !== "connected") return;
+    const draft_key = this.navigation.selected_draft_key;
+    if (draft_key) void this.#loadNewSessionDraftSkills(draft_key);
     await this.#restoreResourceSnapshot();
   }
 
@@ -406,18 +412,11 @@ export class RootStore {
         this.navigation.applyPreferences(preferences);
         this.desktop_lifecycle.applyPreferences(preferences);
         this.new_session_drafts.applyDefaults(
-          this.files.desktop ? preferences.default_approval_mode : "ask",
+          this.files.desktop ? preferences.default_approval_mode : "auto",
           this.files.desktop ? preferences.last_model_selection : null,
         );
       });
       this.#pending_snapshot = this.target_options.restore_resources === false ? null : viewingSnapshot(preferences.resource_workspace, this.files.desktop, this.files.native_host);
-      const scope = this.navigation.selected_session_id || this.navigation.selected_draft_key
-        ? null : this.#pending_snapshot?.current_scope_key;
-      if (scope?.startsWith("session:")) this.navigation.selectSession(scope.slice(8), false);
-      else if (scope?.startsWith("draft:")) {
-        const workspace = scope.startsWith("draft:workspace:") ? scope.slice(16) : null;
-        this.openNewSessionDraft(workspace);
-      }
     } catch (failure) {
       runInAction(() => { this.interaction_error = `桌面状态读取失败：${displayError(failure)}`; });
     }
@@ -1491,7 +1490,7 @@ export class RootStore {
         close_behavior: this.desktop_lifecycle.close_behavior,
         default_approval_mode: this.files.desktop
           ? this.new_session_drafts.default_approval_mode
-          : "ask" as const,
+          : "auto" as const,
         last_model_selection: this.files.desktop
           ? this.new_session_drafts.default_model_selection
           : null,

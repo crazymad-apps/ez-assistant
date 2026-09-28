@@ -695,6 +695,16 @@ impl McpRegistry {
             Ok(Ok(raw)) => raw,
             Ok(Err(error)) => {
                 let failure = call_failure(&error);
+                // 工具拒绝、取消和不支持的单次响应不能使仍可用的连接退役。
+                // 保留目录供后续显式调用使用；本次请求仍返回失败，绝不重放。
+                if matches!(
+                    error.kind(),
+                    McpConnectionFailureKind::ToolCall
+                        | McpConnectionFailureKind::Cancelled
+                        | McpConnectionFailureKind::UnsupportedExtension
+                ) {
+                    return Err(failure);
+                }
                 self.mark_unavailable_if_current(&state, &error)
                     .map_err(|_| server_unavailable())?;
                 drop(permit);

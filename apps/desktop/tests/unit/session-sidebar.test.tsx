@@ -24,6 +24,20 @@ afterEach(() => {
 });
 
 describe("SessionSidebar grouping", () => {
+  it("opens agent and plugin management from separate sidebar shortcuts", () => {
+    const store = connectedStore();
+    render(<RootStoreProvider store={store}><SessionSidebar /></RootStoreProvider>);
+
+    fireEvent.click(screen.getByRole("button", { name: "智能体管理" }));
+    expect(store.settings.is_open).toBe(true);
+    expect(store.settings.page).toBe("agents");
+
+    store.settings.close();
+    fireEvent.click(screen.getByRole("button", { name: "插件管理" }));
+    expect(store.settings.is_open).toBe(true);
+    expect(store.settings.page).toBe("plugins");
+  });
+
   it("loads another summary page only when requested and keeps existing rows", async () => {
     const store = connectedStore();
     const snapshot = applicationSnapshot();

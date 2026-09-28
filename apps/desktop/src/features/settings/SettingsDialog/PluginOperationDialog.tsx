@@ -132,7 +132,12 @@ export function PluginOperationDialog(props: Readonly<{
     {!snapshot && props.intent?.type === "uninstall" && <p>{props.intent.clear_data ? "同时清除该插件的用户配置与运行数据。" : "保留该插件的用户配置与运行数据。"}项目产物不受影响。</p>}
     {snapshot && <div className={styles.progress} role="status">
       <strong>{snapshot.cleanup_required ? "插件目录清理受阻" : phaseLabel(snapshot.phase, download_complete)}</strong>
-      {snapshot.received_bytes != null && <><progress max={snapshot.total_bytes || 1} value={snapshot.received_bytes} /><span>文件传输：{formatBytes(snapshot.received_bytes)} / {snapshot.total_bytes ? formatBytes(snapshot.total_bytes) : "总量未知"}{percent !== null ? ` · ${percent}%` : ""}</span></>}
+      {snapshot.received_bytes != null && <>
+        {download_complete ? <progress aria-label="正在校验并解包插件" />
+          : <progress aria-label="正在传输插件包" max={snapshot.total_bytes || 1} value={snapshot.received_bytes} />}
+        <span>{download_complete ? `文件传输完成：${formatBytes(snapshot.received_bytes)}；正在处理插件包`
+          : `文件传输：${formatBytes(snapshot.received_bytes)} / ${snapshot.total_bytes ? formatBytes(snapshot.total_bytes) : "总量未知"}${percent !== null ? ` · ${percent}%` : ""}`}</span>
+      </>}
       {snapshot.committed_names.length > 0 && <span>已完成：{snapshot.committed_names.join("、")}</span>}
       {snapshot.error_code && <span className={styles.error}>原因：{snapshot.error_code}</span>}
       {snapshot.cleanup_required && <span className={styles.error}>{snapshot.phase === "failed" ? "此失败记录不影响其他插件操作。" : "应用会自动重试清理，其他插件操作可继续。"}</span>}
