@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ApplicationSnapshot, SessionSummary } from "@ez-assistant/protocol";
+import type { ApprovalSnapshot, ApplicationSnapshot, SessionSummary } from "@ez-assistant/protocol";
 import { RootStore } from "../../src/stores/RootStore";
 import { RootStoreProvider } from "../../src/stores/RootStoreContext";
 import { AppShell } from "../../src/app/AppShell";
@@ -14,6 +14,22 @@ afterEach(() => {
 });
 
 describe("AppShell session header", () => {
+  it("keeps global pending work reachable when the entire left sidebar is collapsed", () => {
+    const store = storeWithSessions();
+    store.pending_notifications.setConnection("fixture", true);
+    store.pending_notifications.ingest({ sequence: 1, emitted_at_ms: 1, event: {
+      type: "approval_requested",
+      approval: { approval_id: "a", session_id: "other", run_id: "run", subject: { type: "shell", tool_name: "shell" } } as ApprovalSnapshot,
+    } });
+    store.pending_notifications.dismissHint();
+    renderShell(store);
+    fireEvent.click(screen.getByRole("button", { name: "收起会话栏" }));
+    expect(within(screen.getByLabelText("会话标题栏")).getByRole("button", { name: "待处理 1" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "待处理 1" }));
+    expect(screen.getByRole("menuitem", { name: "需要审批：shell" })).toBeVisible();
+    store.dispose();
+  });
+
   it("uses local column headers instead of the old full-width title bar", () => {
     renderShell(storeWithSessions());
 
@@ -360,6 +376,7 @@ function renderShell(store: RootStore, overrides: Partial<ApplicationConnectionS
   const connection = {
     account_label: "个人用户", host_label: "本地 Host", pending: false,
     current: store, desktop: false, session: null, web_pending: false,
+    updates: { visible: false },
     requestLogout: vi.fn(), showPassword: vi.fn(), openWeb: vi.fn(),
     ...overrides,
   } as unknown as ApplicationConnectionStore;

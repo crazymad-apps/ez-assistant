@@ -18,7 +18,10 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) use config::{McpConfigStore, McpRegistryCandidate};
-pub(crate) use discovery::{DiscoverMcpTools, McpDiscoveryAuthorizationFacts, McpRunDisclosure};
+pub(crate) use discovery::{
+    DiscoverMcpTools, McpDiscoveryAuthorizationFacts, McpRunDisclosure, needs_initial_disclosure,
+    refresh_directory,
+};
 #[cfg(test)]
 pub(crate) use registry::ResolvedMcpInvocation;
 pub(crate) use registry::{McpCatalogServer, McpRegistry, McpRegistryServerProjection};

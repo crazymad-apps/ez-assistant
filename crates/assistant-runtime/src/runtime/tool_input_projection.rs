@@ -62,6 +62,17 @@ pub(crate) fn project_tool_input(
                 .unwrap_or_default(),
             process_mode: string_field(arguments, "process_mode", &mut flags),
         }
+    } else if name == "edit_file" && arguments.get("files").and_then(Value::as_array).is_some() {
+        let paths = arguments["files"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|file| file.get("path").cloned())
+            .collect::<Vec<_>>();
+        ToolInputSnapshot::Files {
+            operation: bounded_string(name, &mut flags),
+            paths: string_array(Some(&Value::Array(paths)), &mut flags),
+        }
     } else if arguments.get("paths").and_then(Value::as_array).is_some() {
         ToolInputSnapshot::Files {
             operation: bounded_string(name, &mut flags),
@@ -273,6 +284,34 @@ mod tests {
                 .len()
                 <= 16 * 1024
         );
+    }
+
+    #[test]
+    fn batch_edit_keeps_all_sixteen_paths_without_replacement_text() {
+        let paths = (0..16)
+            .map(|index| format!("/workspace/{index}.txt"))
+            .collect::<Vec<_>>();
+        let files = paths.iter().map(|path| json!({"path":path,"edits":[{"old_string":"secret old text","new_string":"secret new text"}]})).collect::<Vec<_>>();
+        let projection = project_tool_input("edit_file", &json!({"files":files}), None);
+        assert!(!projection.truncated);
+        assert_eq!(
+            projection.value,
+            ToolInputSnapshot::Files {
+                operation: "edit_file".into(),
+                paths
+            }
+        );
+        assert!(
+            !serde_json::to_string(&projection)
+                .unwrap()
+                .contains("secret")
+        );
+        let legacy = project_tool_input(
+            "edit_file",
+            &json!({"path":"old.txt","old_string":"x","new_string":"y"}),
+            None,
+        );
+        assert!(matches!(legacy.value,ToolInputSnapshot::File {path,..} if path == "old.txt"));
     }
 
     #[test]

@@ -8,7 +8,7 @@ license.workspace = true
 name = "ez_assistant_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
-# 经用户确认，浏览器、Windows 进程/文件归属及通知前台查询 FFI 可局部允许 unsafe。
+# 经用户确认，浏览器、Windows 进程/文件归属、通知前台查询及更新启动锁 FFI 可局部允许 unsafe。
 # 其他桌面代码仍默认拒绝，workspace 其他成员继续继承 forbid。
 [lints.rust]
 unsafe_code = "deny"
@@ -28,15 +28,20 @@ base64.workspace = true
 reqwest = { workspace = true, features = ["multipart"] }
 serde.workspace = true
 serde_json.workspace = true
-tauri = { version = "=2.11.5", features = ["image-png", "tray-icon", "unstable"] }
+tauri = { version = "=2.11.5", features = ["macos-private-api", "image-png", "tray-icon", "unstable"] }
 tauri-plugin-dialog = "2.7.2"
 tauri-plugin-opener = "2.5.4"
 tauri-plugin-window-state = "2"
+tauri-plugin-updater = "=2.12.0"
+minisign-verify = "=0.2.4"
 tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "process"] }
 tokio-util = { workspace = true, features = ["io"] }
 url.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -57,5 +62,6 @@ objc2-web-kit = { version = "=0.3.2", default-features = false, features = ["std
 nix.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+tauri-plugin-single-instance = "=2.4.5"
 windows = { version = "=0.61.3", features = ["Data_Xml_Dom", "UI_Notifications", "Foundation"] }
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Threading", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_UI_WindowsAndMessaging"] }

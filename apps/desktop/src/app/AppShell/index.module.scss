@@ -8,6 +8,25 @@
   background: var(--ez-surface);
 }
 
+.app_shell[data-platform="macos"] {
+  // 中栏和右栏自行绘制实色，只有左栏透出窗口底层的原生 Sidebar 材质。
+  // 冷色从顶部轻轻淡出，保留系统材质的通透感和正文对比度。
+  --ez-left-sidebar-background: linear-gradient(
+    180deg,
+    rgb(143 163 226 / 10%) 0%,
+    rgb(179 189 225 / 4%) 48%,
+    rgb(247 248 250 / 0%) 100%
+  ), rgb(247 248 250 / 18%);
+  --ez-left-account-background: transparent;
+  background: transparent;
+
+  @media (prefers-reduced-transparency: reduce) {
+    --ez-left-sidebar-background: var(--ez-sidebar);
+    --ez-left-account-background: var(--ez-sidebar);
+    background: var(--ez-surface);
+  }
+}
+
 .window_controls {
   position: absolute;
   z-index: 12;

@@ -4,7 +4,9 @@
 mod software_version;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
+    // 构建脚本可能由共享缓存复用，路径必须取本次 Cargo 执行环境。
+    let manifest =
+        std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?).join("../../Cargo.toml");
     println!("cargo:rerun-if-changed={}", manifest.display());
     println!("cargo:rerun-if-changed=src/software_version.rs");
     let document: toml::Value = toml::from_str(&std::fs::read_to_string(manifest)?)
@@ -25,7 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         software_version::parse_software_version(version).ok_or("invalid software version")?;
     let lower = software_version::parse_software_version(minimum)
         .ok_or("invalid minimum compatible version")?;
-    if lower > parsed || version != env!("CARGO_PKG_VERSION") {
+    if lower > parsed || version != std::env::var("CARGO_PKG_VERSION")? {
         return Err("inconsistent software release declaration".into());
     }
     println!("cargo:rustc-env=EZ_ASSISTANT_MIN_COMPATIBLE_VERSION={minimum}");

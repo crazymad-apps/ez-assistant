@@ -56,6 +56,10 @@ pub enum ChildTaskEvent {
         delta: String,
     },
     ReasoningDelta {
+        /// 缺失时按普通 reasoning 解释，不从 part ID 猜测。
+        #[serde(default, skip_serializing_if = "crate::ReasoningSource::is_raw")]
+        #[ts(as = "Option<crate::ReasoningSource>", optional)]
+        source: crate::ReasoningSource,
         step: u32,
         part_id: PartId,
         delta: String,
@@ -86,6 +90,10 @@ pub enum ChildTaskEvent {
         status: ToolActivityStatus,
     },
     Finished {
+        /// 来自已可靠结算 child 的终结时间。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        finished_at_ms: Option<i64>,
         status: ChildTaskStatus,
         error: Option<RuntimeErrorInfo>,
     },
@@ -234,6 +242,10 @@ pub enum RuntimeEvent {
     },
     /// 一个 Run 已被 Runtime 原子登记。
     RunAccepted {
+        /// 来自已接受 Run 的可靠时间，不是事件发送时间。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        created_at_ms: Option<i64>,
         /// Run 所属 Session。
         session_id: SessionId,
         /// 已接受的 Run。
@@ -303,6 +315,10 @@ pub enum RuntimeEvent {
     },
     /// Run 产生 reasoning 文本增量。
     ReasoningDelta {
+        /// 缺失时按普通 reasoning 解释，不从 part ID 猜测。
+        #[serde(default, skip_serializing_if = "crate::ReasoningSource::is_raw")]
+        #[ts(as = "Option<crate::ReasoningSource>", optional)]
+        source: crate::ReasoningSource,
         /// Run 所属 Session。
         session_id: SessionId,
         /// 产生增量的 Run。
@@ -392,6 +408,10 @@ pub enum RuntimeEvent {
     },
     /// Run 已由 completion 唯一结算为终态。
     RunFinished {
+        /// 来自已可靠结算 Run 的终结时间。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        finished_at_ms: Option<i64>,
         /// Run 所属 Session。
         session_id: SessionId,
         /// 已结算的 Run。
@@ -555,6 +575,7 @@ mod tests {
     #[test]
     fn run_finished_round_trips_as_a_single_terminal_fact() {
         let event = RuntimeEvent::RunFinished {
+            finished_at_ms: None,
             session_id: session_id(),
             run_id: run_id(),
             status: RunStatus::Cancelled,
@@ -694,6 +715,7 @@ mod tests {
             ),
             (
                 RuntimeEvent::RunAccepted {
+                    created_at_ms: None,
                     session_id: session_id(),
                     run_id: run_id(),
                 },
@@ -768,6 +790,7 @@ mod tests {
             ),
             (
                 RuntimeEvent::ReasoningDelta {
+                    source: Default::default(),
                     session_id: session_id(),
                     run_id: run_id(),
                     step: 1,
@@ -852,6 +875,7 @@ mod tests {
             ),
             (
                 RuntimeEvent::RunFinished {
+                    finished_at_ms: None,
                     session_id: session_id(),
                     run_id: run_id(),
                     status: RunStatus::Completed,

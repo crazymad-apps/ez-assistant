@@ -309,7 +309,32 @@ async fn dispatch_runtime(
     permit: &AccessPermit,
 ) -> Result<(HostCommandResult, bool), RuntimeError> {
     let runtime = services.runtime.as_ref();
+    let feedback = crate::access::enterprise::feedback::FeedbackAccess::for_permit(
+        state.access.credentials.clone(),
+        permit.clone(),
+    );
     let (result, shutdown) = match command {
+        RuntimeCommand::GetFeedbackSupport {} => (
+            RuntimeCommandResult::GetFeedbackSupport(feedback.support().await.into()),
+            false,
+        ),
+        RuntimeCommand::SubmitFeedback(request) => (
+            RuntimeCommandResult::SubmitFeedback(
+                feedback
+                    .submit(request, assistant_protocol::FeedbackSource::Manual)
+                    .await
+                    .into(),
+            ),
+            false,
+        ),
+        RuntimeCommand::ListSubmittedFeedback(request) => (
+            RuntimeCommandResult::ListSubmittedFeedback(feedback.list(request).await.into()),
+            false,
+        ),
+        RuntimeCommand::GetSubmittedFeedback(request) => (
+            RuntimeCommandResult::GetSubmittedFeedback(feedback.detail(&request.id).await.into()),
+            false,
+        ),
         RuntimeCommand::ListFeedbackRequests(request) => (
             RuntimeCommandResult::ListFeedbackRequests(
                 runtime.list_feedback_requests(request).await?,

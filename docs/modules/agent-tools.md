@@ -136,3 +136,16 @@ pub trait FileSystemTool: Send + Sync {
 cargo test -p agent-tools
 cargo clippy -p agent-tools --all-targets --all-features -- -D warnings
 ```
+
+## v0.29.0 F07 M1 批量 edit 契约
+
+`edit_file` 的批量 files/edits 与旧平面输入互斥，resolve 统一为 `EditFileRequest.files`，
+逐组公开 replace_all=false，冻结全部 `FileBatchAuthorizationFacts(Edit)`；数量、路径、正文和
+结果预算按 F07 技术方案。原始紧凑 JSON 在反序列化核对 256 KiB；能力入口复核数量、路径及
+编码正文预算，不将默认值补齐和绝对路径展开误算为原始输入。
+结果保持全部输入位置的 success/failed/unknown/not_executed，只有全 success 才返回工具成功。
+业务失败及正常取消保留完整结构化结果；无效契约可返回外层错误。能力层不执行权限规则。
+
+单路径 `FileToolPolicyAdapter` 只匹配 `FileAuthorizationFacts`；接入批量文件工具的上层策略必须
+处理 `FileBatchAuthorizationFacts`，逐条判断且整批获准后才委托。正式 Host 与两个文件安全验证
+宿主均已接入，不在 Core 通用适配器中推断业务聚合规则。

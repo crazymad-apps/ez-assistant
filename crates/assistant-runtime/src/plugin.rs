@@ -1072,18 +1072,19 @@ impl PluginManager {
                     )
                     .await;
             }
+            // 写门阻止刷新重新启动旧包；实际调用由 Registry 取消并等待关闭。
             let _use_guard = if old
                 .as_ref()
                 .is_some_and(|plugin| plugin.active_sha256.is_some())
             {
-                match self.use_gate(&selection.name).await.try_write_owned() {
-                    Ok(guard) => Some(guard),
-                    Err(_) => {
-                        return self
-                            .stop_before_commit_with_code(key, Some(selection), false, "busy")
-                            .await;
+                let gate = self.use_gate(&selection.name).await;
+                let guard = tokio::select! {
+                    guard = gate.write_owned() => guard,
+                    () = token.cancelled() => {
+                        return self.stop_before_commit(key, Some(selection), true).await;
                     }
-                }
+                };
+                Some(guard)
             } else {
                 None
             };
@@ -1096,7 +1097,7 @@ impl PluginManager {
                     .is_err()
             {
                 return self
-                    .stop_before_commit_with_code(key, Some(selection), false, "busy")
+                    .stop_before_commit_with_code(key, Some(selection), false, "mcp_close_failed")
                     .await;
             }
             if let Err(error) = files.publish(key.clone(), selection.clone()).await {
@@ -2245,5 +2246,49 @@ mod tests {
             Some("a".repeat(64))
         );
         drop(lease);
+    }
+    #[tokio::test]
+    async fn update_waits_for_short_package_lease_instead_of_failing_busy() {
+        let manager = manager(Arc::new(FakeFiles::default()));
+        let first = IdempotencyKey::new("update-lease-first").unwrap();
+        manager
+            .begin_install(BeginPluginInstallRequest {
+                key: first.clone(),
+                packages: vec![choice("document-tools", 'a', None)],
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            settled(&manager, &first).await.phase,
+            PluginOperationStatus::Succeeded
+        );
+        let lease = manager.use_package("document-tools").await.unwrap();
+        let update = IdempotencyKey::new("update-lease-next").unwrap();
+        manager
+            .begin_install(BeginPluginInstallRequest {
+                key: update.clone(),
+                packages: vec![choice("document-tools", 'b', Some("a".repeat(64)))],
+            })
+            .await
+            .unwrap();
+        // Tokio 写门排队后会阻止新读者；不靠 sleep 猜测更新是否到达写门。
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while manager
+                .package_available_for_refresh("document-tools")
+                .await
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(lease);
+        let result = settled(&manager, &update).await;
+        assert_eq!(result.phase, PluginOperationStatus::Succeeded);
+        assert_eq!(result.error_code, None);
+        assert_eq!(
+            manager.list().await.unwrap().plugins[0].sha256,
+            Some("b".repeat(64))
+        );
     }
 }

@@ -23,7 +23,7 @@ use crate::{
     ToolCompletionStatus, guardrail::GuardrailTrigger,
 };
 
-/// 取消收敛时为未结算调用补记的模型可读错误文本。
+/// 取消收敛时为尚无结果的调用补记的模型可读错误文本。
 const INTERRUPTED_TEXT: &str = "interrupted: execution cancelled";
 
 /// 一个 Tool Call 批次的结局。
@@ -202,9 +202,12 @@ impl Engine {
             Err(error) => error_result(&call.id, error.to_string()),
         };
         if self.cancellation.is_cancelled() {
+            // dispatch 已返回的结果是工具报告的实际事实，取消不能用 interrupted 覆盖。
+            // 直接收敛而不经过结果型 Guardrail；取消不计作连续失败，也不执行后续调用。
+            results.push(result);
             let settled = std::mem::take(results);
             return Some(
-                self.converge_cancelled(exchange, &calls[index..], settled)
+                self.converge_cancelled(exchange, &calls[index + 1..], settled)
                     .await,
             );
         }
@@ -329,15 +332,6 @@ impl Engine {
             group_results[offset] = Some(result);
         }
 
-        // 所有 Tool SPI 已完成取消清理后，整组才统一结算为 interrupted。
-        if self.cancellation.is_cancelled() {
-            let settled = std::mem::take(results);
-            return Some(
-                self.converge_cancelled(exchange, &calls[start..], settled)
-                    .await,
-            );
-        }
-
         let mut ordered = Vec::with_capacity(group_results.len());
         for (offset, result) in group_results.into_iter().enumerate() {
             let call = &calls[start + offset];
@@ -350,6 +344,16 @@ impl Engine {
             ordered.push(result);
         }
         results.extend(ordered.iter().cloned());
+
+        // 所有 Tool SPI 完成清理后，保留组内已返回结果（包括授权/预算错误）并按原序落账。
+        // 取消优先于预算和结果型 Guardrail，只为组外尚未执行的调用补 interrupted。
+        if self.cancellation.is_cancelled() {
+            let settled = std::mem::take(results);
+            return Some(
+                self.converge_cancelled(exchange, &calls[end..], settled)
+                    .await,
+            );
+        }
 
         // 预算终态优先：只观察首次预算超限前已经发生的结果。
         let guardrail_result_count = budget_exceeded
@@ -458,7 +462,7 @@ impl Engine {
         })
     }
 
-    /// 为未结算调用补记 interrupted，完成 pending exchange 后归为取消终态。
+    /// 保留已有结果，为尚无结果的调用补记 interrupted；可靠完成 exchange 后归为取消终态。
     async fn converge_cancelled(
         &mut self,
         exchange: &ExchangeReceipt,

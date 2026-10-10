@@ -847,6 +847,7 @@ fn validate_volatile_input_activation(
 
 fn stored_session(session: NewStoredSession) -> StoredSession {
     StoredSession {
+        server_history_key: None,
         custom_agent: session.custom_agent,
         agent_shell_kind: session.agent_shell_kind,
         agent_shell_environment: session.agent_shell_environment.clone(),

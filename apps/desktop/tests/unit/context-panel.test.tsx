@@ -33,6 +33,31 @@ describe("ContextPanel", () => {
     expect(screen.queryByText(/当前绑定不可用/)).not.toBeInTheDocument();
   });
 
+  it("lets an unbound Unix session select bash/zsh through the existing command queue", async () => {
+    const store = contextStore();
+    const view = store.projection.session_views.get("session-1")!;
+    store.projection.applySessionSnapshot({ observed_sequence: 2, value: { ...view, agent_shell_kind: undefined } });
+    vi.mocked(store.getAgentShellSettings).mockResolvedValue({ default_agent_shell: null, catalog: [
+      { kind: "posix_sh", available: true, reason: null },
+      { kind: "bash", available: true, reason: null },
+      { kind: "zsh", available: true, reason: null },
+      { kind: "cmd", available: false, reason: "不适用" },
+    ] });
+    const submit = vi.spyOn(store, "submitSessionCommand").mockResolvedValue(true);
+    renderPanel(store);
+    const trigger = screen.getByRole("button", { name: "切换会话 Agent Shell" });
+    await waitFor(() => expect(trigger).toHaveTextContent("/bin/sh"));
+    expect(trigger).toBeEnabled();
+    for (const [kind, label] of [["bash", "Bash"], ["zsh", "zsh"]]) {
+      fireEvent.click(trigger);
+      expect(await screen.findByRole("option", { name: "/bin/sh" })).toBeVisible();
+      expect(screen.queryByRole("option", { name: /CMD/ })).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("option", { name: label }));
+      await waitFor(() => expect(submit).toHaveBeenCalledWith("session-1", { type: "agent_shell_switch", payload: { shell: kind } }));
+      expect(trigger).toHaveTextContent("/bin/sh");
+    }
+  });
+
   it.each([false, true])("keeps an unavailable binding visible and clears its warning after catalog recovery (missing=%s)", async (missing) => {
     const store = contextStore();
     vi.mocked(store.getAgentShellSettings).mockResolvedValue({

@@ -4,6 +4,7 @@ import type { RuntimeEvent } from "@ez-assistant/protocol";
 import { RootStore } from "../../src/stores/RootStore";
 import { RootStoreProvider } from "../../src/stores/RootStoreContext";
 import { ConversationView } from "../../src/features/conversation/ConversationView";
+import { ChildTaskSubheader } from "../../src/app/AppShell/ChildTaskSubheader";
 import { UserMessage } from "../../src/features/conversation/ConversationView/MessageViews";
 import { thumbnailAttachment } from "../../src/native-bridge/nativeResource";
 
@@ -416,11 +417,13 @@ describe("ConversationView scroll anchoring", () => {
     expect(screen.queryByRole("button", { name: "赞同" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "不赞同" })).not.toBeInTheDocument();
 
-    const collapse = screen.getByRole("button", { name: "收起消息" });
-    expect(collapse.querySelector("svg")).toHaveAttribute("data-icon", "chevron-up");
-    fireEvent.click(collapse);
-    const expand = screen.getByRole("button", { name: "展开消息" });
-    expect(expand.querySelector("svg")).toHaveAttribute("data-icon", "chevron-down");
+    const process = screen.getByRole("button", { name: "处理过程" });
+    expect(process).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(process);
+    expect(process).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(process);
+    expect(screen.getByText("完成内容")).toBeVisible();
+
   });
 
   it("previews and confirms a fork at the selected reliable assistant message", async () => {
@@ -626,6 +629,7 @@ describe("ConversationView scroll anchoring", () => {
 
     render(<RootStoreProvider store={store}><ConversationView /></RootStoreProvider>);
 
+    for (const group of screen.getAllByRole("button", { name: /工具调用：/ })) fireEvent.click(group);
     expect(screen.getByRole("button", { name: /read file完成/ })).toBeInTheDocument();
     expect(screen.getByText("继续分析")).toBeInTheDocument();
     expect(screen.getByText("正在生成")).toBeInTheDocument();
@@ -672,7 +676,7 @@ describe("ConversationView scroll anchoring", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("当前模型配置无法用于此会话，请检查配置或切换模型后重试。");
     expect(screen.queryByText("正在准备…")).not.toBeInTheDocument();
     expect(screen.queryByText(/model execution failed before stream establishment/)).not.toBeInTheDocument();
-    expect(screen.queryByText("执行失败")).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("执行失败");
   });
 
   it("opens a formal child task branch from the parent turn", () => {
@@ -715,6 +719,8 @@ describe("ConversationView scroll anchoring", () => {
     } as unknown as Parameters<RootStore["projection"]["applySessionSnapshot"]>[0]);
     render(<RootStoreProvider store={store}><ConversationView /></RootStoreProvider>);
 
+    fireEvent.click(screen.getByRole("button", { name: "处理过程" }));
+    fireEvent.click(screen.getByRole("button", { name: /工具调用：/ }));
     const tool = screen.getByRole("button", { name: /delegate task完成/ });
     const child_task = screen.getByRole("button", { name: "查看子任务：检查恢复一致性" });
     const actions = screen.getByRole("button", { name: "复制助手正文" });
@@ -807,7 +813,7 @@ describe("ConversationView scroll anchoring", () => {
     store.projection.applyChildTaskSnapshot({
       observed_sequence: 5,
       value: {
-        task: childTaskItem(),
+        task: { ...childTaskItem(), task: { ...childTaskItem().task, status: "completed", finished_at_ms: 6 } },
         approval_ids: [],
         conversation: {
           owner: { type: "child_task", session_id: "session-1", child_task_id: "child-1" },
@@ -868,12 +874,14 @@ describe("ConversationView scroll anchoring", () => {
 
     render(<RootStoreProvider store={store}><ConversationView /></RootStoreProvider>);
 
+    fireEvent.click(screen.getByRole("button", { name: "处理过程" }));
     fireEvent.click(screen.getByRole("button", { name: "思考过程" }));
     expect(screen.getByText("先检查恢复路径")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /工具调用：/ }));
     expect(screen.getByRole("button", { name: /shell完成/ })).toBeInTheDocument();
     expect(screen.getByText("恢复检查完成")).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "复制助手正文" })).toHaveLength(1);
-    expect(screen.getAllByRole("button", { name: "收起消息" })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "处理过程" })).toHaveLength(1);
   });
 
   it("shows and opens a live child task from its live parent tool call", () => {
@@ -884,6 +892,20 @@ describe("ConversationView scroll anchoring", () => {
     });
     vi.stubGlobal("cancelAnimationFrame", vi.fn());
     const store = conversationStore();
+
+    const child = childTaskItem();
+    const reliable_child = {
+      ...child,
+      task: { ...child.task, child_task_id: "child-live", parent_run_id: "run-live-parent", title: "实时检查两个项目" },
+      usage: {
+        accumulated: { input_tokens: 217_000, output_tokens: 2000, total_tokens: 219_000, cached_input_tokens: null },
+        context: { used_tokens: 120_000, window_tokens: 258_000, usage_basis_points: 4651 },
+      },
+    };
+    store.projection.applySessionSnapshot({
+      observed_sequence: 0,
+      value: { ...store.projection.session_views.get("session-1")!, child_tasks: [reliable_child] },
+    });
 
     emitLive(store, [{
       type: "run_started",
@@ -920,13 +942,26 @@ describe("ConversationView scroll anchoring", () => {
           finished_at_ms: null,
         },
       },
+    }, {
+      type: "child_task_event",
+      session_id: "session-1",
+      parent_run_id: "run-live-parent",
+      child_task_id: "child-live",
+      event: {
+        type: "usage_updated",
+        step: 2,
+        usage: { input_tokens: 118_000, output_tokens: 1000, total_tokens: 119_000, cached_input_tokens: null },
+      },
     }], () => frame);
 
-    render(<RootStoreProvider store={store}><ConversationView /></RootStoreProvider>);
+    render(<RootStoreProvider store={store}><ChildTaskSubheader /><ConversationView /></RootStoreProvider>);
 
+    fireEvent.click(screen.getByRole("button", { name: /工具调用：/ }));
     const entry = screen.getByRole("button", { name: "查看子任务：实时检查两个项目" });
+    expect(entry).toHaveTextContent("累计 219K Token");
     fireEvent.click(entry);
     expect(store.navigation.selected_child_task_id).toBe("child-live");
+    expect(screen.getByRole("region", { name: "子任务标题栏" })).toHaveTextContent("累计 219K Token");
   });
 
   it("keeps the empty child conversation content visible before messages arrive", () => {

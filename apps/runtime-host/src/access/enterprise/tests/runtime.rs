@@ -493,6 +493,8 @@ async fn start_work(runtime: &AssistantRuntime) -> SessionId {
                 protocol_preference: ProviderProtocolPreference::ChatCompletions,
                 models_path: "/v1/models".into(),
                 discovery_format: ModelDiscoveryFormat::OpenAi,
+                server_history_enabled: false,
+                server_history_support_override: None,
             },
             credential: ProviderCredentialChange::Clear,
         })

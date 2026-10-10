@@ -131,14 +131,14 @@ mod tests {
     #[test]
     fn fresh_home_uses_only_the_explicit_build_default() {
         let default =
-            fresh_document_with_default(Some("enterprise"), Some("http://172.16.20.4:7320"));
+            fresh_document_with_default(Some("enterprise"), Some("http://192.0.2.10:7320"));
         let parsed = parse(&default.to_string()).unwrap();
         assert_eq!(parsed.mode, HostMode::Enterprise);
         let enterprise = parsed.enterprise.unwrap();
-        assert_eq!(enterprise.center_url, "http://172.16.20.4:7320");
+        assert_eq!(enterprise.center_url, "http://192.0.2.10:7320");
         assert!(enterprise.center_id.is_none());
         assert_eq!(
-            parse(&fresh_document_with_default(None, Some("http://172.16.20.4:7320")).to_string())
+            parse(&fresh_document_with_default(None, Some("http://192.0.2.10:7320")).to_string())
                 .unwrap()
                 .mode,
             HostMode::Personal

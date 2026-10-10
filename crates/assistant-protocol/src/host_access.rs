@@ -178,3 +178,11 @@ pub struct HostLogoutResult {
     pub local_ended: bool,
     pub center_revocation_confirmed: bool,
 }
+
+/// 登录前读取的当前进程更新来源；不包含凭据、Runtime Home 或待重启配置。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct DesktopUpdateContext {
+    pub center_url: Option<String>,
+    pub enterprise_protocols: Vec<u32>,
+}

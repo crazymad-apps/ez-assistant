@@ -570,6 +570,10 @@ export class SettingsStore {
         ? await client.command({ type: 'update_provider', payload: { provider_instance_id, connection, credential } })
         : await client.command({ type: 'create_provider', payload: { connection, credential } });
       if (client !== this.dependencies.get_client()) throw new Error('运行时连接已切换，请重新读取设置。');
+      if (result.payload.connection.server_history_enabled !== connection.server_history_enabled
+        || result.payload.connection.server_history_support_override !== connection.server_history_support_override) {
+        throw new Error('服务商续接设置未被正确保存，请检查 Host 版本后重试。');
+      }
       saved = result.payload;
       this.invalidateModelRead();
       runInAction(() => {

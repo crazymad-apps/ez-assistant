@@ -1,10 +1,9 @@
-//! Provider-neutral 的模型建流前有限重试。
-//!
-//! 本模块只包装 [`ModelService::stream`] 直接返回的错误。一旦下层返回事件流，
-//! 包装器立即交还原流，之后的任何 `TurnFailed` 都不会触发透明重试。
+//! Provider-neutral 的有限模型重试。建流与流中失败共用预算；
+//! 重试从原请求恢复，TurnRestarted 明确废弃尚未提交的响应。
 
 use std::{collections::BTreeSet, num::NonZeroU32, sync::Arc, time::Duration};
 
+use futures_util::StreamExt as _;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -14,9 +13,9 @@ use crate::{
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-/// 上层策略可以显式允许的建流前瞬态错误原因。
+/// 上层策略可以显式允许的瞬态错误原因。
 pub enum ModelRetryReason {
-    /// 响应建立前连接失败。
+    /// 连接建立失败或响应流中断。
     Connection,
     /// 连接或整体请求超时。
     Timeout,
@@ -78,6 +77,19 @@ pub enum ModelAttemptEvent {
         /// 当前策略与取消状态是否允许安排下一 attempt。
         will_retry: bool,
     },
+    /// 下层事件流以受控失败结束。
+    StreamFailed {
+        /// 当前调用关联信息；存在时已写入当前 attempt。
+        trace: Option<TraceContext>,
+        /// 当前 1-based attempt。
+        attempt: u32,
+        /// 原始规范模型错误。
+        error: ModelError,
+        /// 从结构化错误得到的可选瞬态原因。
+        retry_reason: Option<ModelRetryReason>,
+        /// 当前策略与取消状态是否允许安排下一 attempt。
+        will_retry: bool,
+    },
     /// 已确定下一 attempt 及实际等待时间。
     RetryScheduled {
         /// 下一 attempt 的关联信息。
@@ -87,7 +99,7 @@ pub enum ModelAttemptEvent {
         /// 策略等待与 `Retry-After` 合并后的实际毫秒数。
         delay_ms: u64,
     },
-    /// 下层已成功返回事件流，透明重试边界到此结束。
+    /// 下层已成功返回事件流，随后仍监视受控流中失败。
     StreamEstablished {
         /// 当前调用关联信息；存在时已写入当前 attempt。
         trace: Option<TraceContext>,
@@ -105,7 +117,8 @@ pub trait ModelAttemptObserver: Send + Sync {
     fn observe(&self, event: ModelAttemptEvent);
 }
 
-/// 只重试建流前瞬态错误的 [`ModelService`] 装饰器。
+/// 重试建流与流中瞬态错误的 [`ModelService`] 装饰器。
+#[derive(Clone)]
 pub struct RetryingModelService {
     inner: Arc<dyn ModelService>,
     policy: ModelRetryPolicy,
@@ -156,94 +169,162 @@ impl ModelService for RetryingModelService {
     }
 
     fn stream(&self, request: ModelRequest, context: ModelCallContext) -> ModelStreamFuture<'_> {
+        let service = self.clone();
         Box::pin(async move {
-            let cancellation = context.cancellation.clone();
-            let base_trace = context.trace;
-            let mut attempt = 1_u32;
-            let mut delay_index = 0_usize;
+            let mut state = RetryStream {
+                service,
+                request,
+                context,
+                attempt: 1,
+                stream: None,
+                done: false,
+            };
+            state.establish().await?;
+            Ok(Box::pin(futures_util::stream::unfold(
+                state,
+                |mut state| async move {
+                    let event = state.next_event().await?;
+                    Some((event, state))
+                },
+            )) as crate::ModelEventStream)
+        })
+    }
+}
 
-            loop {
-                if cancellation.is_cancelled() {
-                    return Err(ModelError::Cancelled);
-                }
+/// 一个逻辑调用对建流与流中失败共用有限预算。
+struct RetryStream {
+    service: RetryingModelService,
+    request: ModelRequest,
+    context: ModelCallContext,
+    attempt: u32,
+    stream: Option<crate::ModelEventStream>,
+    done: bool,
+}
 
-                let trace = trace_for_attempt(base_trace.as_ref(), attempt);
-                self.observe(ModelAttemptEvent::Started {
-                    trace: trace.clone(),
-                    attempt,
-                });
-                let attempt_context = ModelCallContext {
-                    cancellation: cancellation.clone(),
-                    trace: trace.clone(),
-                    prepared_images: context.prepared_images.clone(),
-                };
-                let result = tokio::select! {
-                    biased;
-                    () = cancellation.cancelled() => Err(ModelError::Cancelled),
-                    result = self.inner.stream(request.clone(), attempt_context) => result,
-                };
-
-                match result {
-                    Ok(stream) => {
-                        self.observe(ModelAttemptEvent::StreamEstablished { trace, attempt });
-                        return Ok(stream);
-                    }
-                    Err(error) => {
-                        let retry_reason = retry_reason(&error);
-                        let configured_delay = self.policy.delays.get(delay_index).copied();
-                        let retry_after = retry_after(&error);
-                        let next_attempt = attempt.checked_add(1);
-                        let cancelled = cancellation.is_cancelled();
-                        let retry_after_accepted =
-                            retry_after.is_none_or(|delay| delay <= self.policy.max_retry_after);
-                        let will_retry = !cancelled
-                            && next_attempt.is_some()
-                            && configured_delay.is_some()
-                            && retry_reason
-                                .is_some_and(|reason| self.policy.retry_on.contains(&reason))
-                            && retry_after_accepted;
-
-                        self.observe(ModelAttemptEvent::EstablishmentFailed {
-                            trace,
-                            attempt,
-                            error: error.clone(),
-                            retry_reason,
-                            will_retry,
-                        });
-
-                        if cancelled {
-                            return Err(ModelError::Cancelled);
-                        }
-                        if !will_retry {
-                            return Err(error);
-                        }
-
-                        let next_attempt = next_attempt.expect("will_retry requires next attempt");
-                        let configured_delay =
-                            configured_delay.expect("will_retry requires configured delay");
-                        let effective_delay = retry_after
-                            .map_or(configured_delay, |delay| configured_delay.max(delay));
-                        self.observe(ModelAttemptEvent::RetryScheduled {
-                            trace: trace_for_attempt(base_trace.as_ref(), next_attempt),
-                            next_attempt,
-                            delay_ms: duration_millis(effective_delay),
-                        });
-
-                        tokio::select! {
-                            biased;
-                            () = cancellation.cancelled() => return Err(ModelError::Cancelled),
-                            () = tokio::time::sleep(effective_delay) => {}
-                        }
-                        if cancellation.is_cancelled() {
-                            return Err(ModelError::Cancelled);
-                        }
-
-                        attempt = next_attempt;
-                        delay_index += 1;
-                    }
+impl RetryStream {
+    async fn next_event(&mut self) -> Option<crate::ModelEvent> {
+        if self.done {
+            return None;
+        }
+        let event = tokio::select! {
+            biased;
+            () = self.context.cancellation.cancelled() => crate::ModelEvent::TurnFailed { error: ModelError::Cancelled },
+            event = self.stream.as_mut().expect("established stream").next() => {
+                event.expect("validator supplies a terminal event")
+            }
+        };
+        if let crate::ModelEvent::TurnFailed { error } = event {
+            // 等待重连前先释放失败流；原请求只包含已经可靠提交的上下文。
+            self.stream = None;
+            match self.retry(&error).await {
+                Ok(()) => return Some(crate::ModelEvent::TurnRestarted),
+                Err(error) => {
+                    self.done = true;
+                    return Some(crate::ModelEvent::TurnFailed { error });
                 }
             }
-        })
+        }
+        if event.is_terminal() {
+            self.done = true;
+        }
+        Some(event)
+    }
+
+    async fn establish(&mut self) -> Result<(), ModelError> {
+        loop {
+            if self.context.cancellation.is_cancelled() {
+                return Err(ModelError::Cancelled);
+            }
+            let trace = trace_for_attempt(self.context.trace.as_ref(), self.attempt);
+            self.service.observe(ModelAttemptEvent::Started {
+                trace: trace.clone(),
+                attempt: self.attempt,
+            });
+            let mut context = self.context.clone();
+            context.trace = trace.clone();
+            let result = tokio::select! {
+                biased;
+                () = self.context.cancellation.cancelled() => Err(ModelError::Cancelled),
+                result = self.service.inner.stream(self.request.clone(), context) => result,
+            };
+            match result {
+                Ok(stream) => {
+                    self.service.observe(ModelAttemptEvent::StreamEstablished {
+                        trace,
+                        attempt: self.attempt,
+                    });
+                    self.stream = Some(Box::pin(crate::LifecycleValidator::new(stream)));
+                    return Ok(());
+                }
+                Err(error) => self.schedule_retry(&error, false).await?,
+            }
+        }
+    }
+
+    async fn retry(&mut self, error: &ModelError) -> Result<(), ModelError> {
+        self.schedule_retry(error, true).await?;
+        self.establish().await
+    }
+
+    async fn schedule_retry(
+        &mut self,
+        error: &ModelError,
+        in_stream: bool,
+    ) -> Result<(), ModelError> {
+        let reason = retry_reason(error);
+        let delay = self
+            .service
+            .policy
+            .delays
+            .get(self.attempt as usize - 1)
+            .copied();
+        let suggested = retry_after(error);
+        let next_attempt = self.attempt.checked_add(1);
+        let will_retry = !self.context.cancellation.is_cancelled()
+            && next_attempt.is_some()
+            && delay.is_some()
+            && reason.is_some_and(|reason| self.service.policy.retry_on.contains(&reason))
+            && suggested.is_none_or(|delay| delay <= self.service.policy.max_retry_after);
+        let trace = trace_for_attempt(self.context.trace.as_ref(), self.attempt);
+        let event = if in_stream {
+            ModelAttemptEvent::StreamFailed {
+                trace,
+                attempt: self.attempt,
+                error: error.clone(),
+                retry_reason: reason,
+                will_retry,
+            }
+        } else {
+            ModelAttemptEvent::EstablishmentFailed {
+                trace,
+                attempt: self.attempt,
+                error: error.clone(),
+                retry_reason: reason,
+                will_retry,
+            }
+        };
+        self.service.observe(event);
+        if self.context.cancellation.is_cancelled() {
+            return Err(ModelError::Cancelled);
+        }
+        if !will_retry {
+            return Err(error.clone());
+        }
+        let next_attempt = next_attempt.expect("retry requires next attempt");
+        let configured = delay.expect("retry requires configured delay");
+        let effective = suggested.map_or(configured, |delay| configured.max(delay));
+        self.service.observe(ModelAttemptEvent::RetryScheduled {
+            trace: trace_for_attempt(self.context.trace.as_ref(), next_attempt),
+            next_attempt,
+            delay_ms: duration_millis(effective),
+        });
+        tokio::select! {
+            biased;
+            () = self.context.cancellation.cancelled() => return Err(ModelError::Cancelled),
+            () = tokio::time::sleep(effective) => {}
+        }
+        self.attempt = next_attempt;
+        Ok(())
     }
 }
 
@@ -257,7 +338,7 @@ fn trace_for_attempt(trace: Option<&TraceContext>, attempt: u32) -> Option<Trace
 fn retry_reason(error: &ModelError) -> Option<ModelRetryReason> {
     match error {
         ModelError::Transport {
-            kind: ModelTransportErrorKind::Connection,
+            kind: ModelTransportErrorKind::Connection | ModelTransportErrorKind::Interrupted,
             ..
         } => Some(ModelRetryReason::Connection),
         ModelError::Transport {

@@ -6,9 +6,11 @@ use tokio_util::sync::CancellationToken;
 #[derive(Clone, Debug, Default)]
 /// 单次模型调用的控制面上下文。
 ///
-/// 只承载取消与可选的追踪关联信息。它不是业务 `RunId`（Core 不知道 Runtime 的
+/// 承载取消、追踪及宿主显式的一次历史重建指令。它不是业务 `RunId`（Core 不知道 Runtime 的
 /// Run 概念），也不携带 credential；credential 在 Adapter 构造时注入。
 pub struct ModelCallContext {
+    /// 宿主已核实旧 ID 失效后，要求本次从完整本地输入建立新链；不改变本地消息。
+    pub rebuild_server_history: bool,
     /// 取消令牌。取消发生后，调用必须产生唯一受控结果：
     /// 建立前以 `Err(ModelError::Cancelled)` 返回，建立后以
     /// `ModelEvent::TurnFailed` 终态结束。
@@ -23,6 +25,7 @@ impl ModelCallContext {
     /// 创建只携带取消令牌的调用上下文。
     pub fn new(cancellation: CancellationToken) -> Self {
         Self {
+            rebuild_server_history: false,
             cancellation,
             trace: None,
             prepared_images: crate::PreparedModelImages::default(),

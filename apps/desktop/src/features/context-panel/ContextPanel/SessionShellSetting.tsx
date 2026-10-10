@@ -38,17 +38,17 @@ export const SessionShellSetting = observer(function SessionShellSetting(props: 
       aria_label="切换会话 Agent Shell"
       trigger_variant="compact"
       trigger_content={label}
-      selected={pending.length > 0 ? "" : selected ?? ""}
+      selected={pending.length > 0 ? "" : selected ?? (unix ? "posix_sh" : "")}
       open={open}
       on_open_change={setOpen}
-      disabled={Boolean(unix) || root.pending_session_action || props.view.session.lifecycle === "archived"}
-      options={(catalog?.catalog ?? []).filter((entry) => entry.kind !== "posix_sh").map((entry) => ({
+      disabled={root.pending_session_action || props.view.session.lifecycle === "archived"}
+      options={(catalog?.catalog ?? []).filter((entry) => entry.available).map((entry) => ({
         value: entry.kind, label: `${shellLabels[entry.kind]}${entry.available ? "" : "（未安装）"}`,
         disabled: !entry.available, description: entry.available ? undefined : entry.reason ?? "当前不可用",
       }))}
       on_select={(shell) => { if (shell) void root.submitSessionCommand(session_id, { type: "agent_shell_switch", payload: { shell } }); }}
     />
-    {selected && !unix && <Button size="small" variant="text" aria-label="刷新 Shell 环境"
+    {selected && <Button size="small" variant="text" aria-label="刷新 Shell 环境"
       disabled={root.pending_session_action || pending.length > 0 || props.view.session.lifecycle === "archived"}
       onClick={() => { void root.submitSessionCommand(session_id, { type: "agent_shell_switch", payload: { shell: selected } }); }}
     >刷新</Button>}

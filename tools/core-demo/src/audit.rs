@@ -6,8 +6,8 @@ use std::{
 };
 
 use agent_tools::{
-    FileAuthorizationFacts, GeneralAuthorizationFacts, ResolvedToolInvocation,
-    ShellAuthorizationFacts, ShellProcessMode,
+    FileAuthorizationFacts, FileBatchAuthorizationFacts, GeneralAuthorizationFacts,
+    ResolvedToolInvocation, ShellAuthorizationFacts, ShellProcessMode,
 };
 use agent_types::{ToolCallId, ToolResult, ToolResultStatus};
 use serde::{Deserialize, Serialize};
@@ -23,6 +23,10 @@ pub(crate) enum AuditFacts {
         operation: String,
         path: String,
     },
+    Files {
+        operation: String,
+        paths: Vec<String>,
+    },
     Shell {
         command: String,
         workdir: String,
@@ -37,6 +41,12 @@ impl AuditFacts {
             return Self::File {
                 operation: format!("{:?}", facts.operation).to_ascii_lowercase(),
                 path: facts.path.to_string(),
+            };
+        }
+        if let Some(facts) = invocation.facts::<FileBatchAuthorizationFacts>() {
+            return Self::Files {
+                operation: format!("{:?}", facts.operation).to_ascii_lowercase(),
+                paths: facts.paths.iter().map(ToString::to_string).collect(),
             };
         }
         if let Some(facts) = invocation.facts::<ShellAuthorizationFacts>() {

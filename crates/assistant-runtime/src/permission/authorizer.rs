@@ -152,22 +152,49 @@ impl RuntimeToolAuthorizer {
         self
     }
 
-    async fn current_rules(&self) -> Result<Vec<super::PermissionRule>, ()> {
-        let loads = self
+    async fn current_rules(&self) -> Result<Vec<Vec<super::PermissionRule>>, ()> {
+        let mut loads = self
             .permission_coordinator
             .snapshot(&self.permission_scopes)
             .map_err(|_| ())?;
+        loads.sort_by(|a, b| b.scope.cmp(&a.scope));
         let mut rules = Vec::new();
         for load in loads {
             let document = load.document.as_ref().ok_or(())?;
-            rules.extend(document.rules.iter().cloned());
+            rules.push(document.rules.clone());
         }
         if let Some(source) = &self.default_rules {
             let document = source.load().await.map_err(|_| ())?;
             document.validate().map_err(|_| ())?;
-            rules.extend(document.rules);
+            rules.push(document.rules);
         }
         Ok(rules)
+    }
+
+    /// 会话、工作区、全局、内置依次兜底；同层冲突保持 Deny > Ask > Allow。
+    /// 审批后的复核也必须使用同一层级，避免低层默认拒绝覆盖用户已配置的许可。
+    fn first_layer_effect(
+        &self,
+        layers: &[Vec<super::PermissionRule>],
+        matches: impl Fn(&super::PermissionRule) -> bool,
+    ) -> Option<(bool, bool, bool)> {
+        for layer in layers {
+            let mut effect = (false, false, false);
+            for rule in layer {
+                if !rule.variants.contains(&self.variant) || !matches(rule) {
+                    continue;
+                }
+                match rule.effect {
+                    super::PermissionEffect::Deny => effect.0 = true,
+                    super::PermissionEffect::Ask => effect.1 = true,
+                    super::PermissionEffect::Allow => effect.2 = true,
+                }
+            }
+            if effect.0 || effect.1 || effect.2 {
+                return Some(effect);
+            }
+        }
+        None
     }
 
     pub(crate) fn with_goal_signal_latch(mut self, latch: Option<Arc<GoalRunSignalLatch>>) -> Self {
@@ -306,11 +333,7 @@ impl RuntimeToolAuthorizer {
         }
 
         // Plan 的私有目录限制属于不可被规则放宽的产品硬边界，必须先于用户规则判断。
-        if self.variant == AgentVariant::Plan
-            && let Some(facts) = invocation.facts::<FileAuthorizationFacts>()
-            && is_mutation(facts.operation)
-            && !self.plan_mutation_is_safe(facts.path.clone()).await
-        {
+        if self.variant == AgentVariant::Plan && !self.plan_mutations_are_safe(invocation).await {
             return deny(
                 "Plan only permits structured file mutations inside Agent private directories",
             );
@@ -346,27 +369,15 @@ impl RuntimeToolAuthorizer {
                     )
                 })
                 .collect::<Vec<_>>();
-            for rule in &rules {
-                if !rule.variants.contains(&self.variant) {
-                    continue;
-                }
-                let super::PermissionMatcher::File(matcher) = &rule.matcher else {
-                    continue;
-                };
-                for (index, path) in facts.paths.iter().enumerate() {
-                    if !file_matcher_matches_with_paths(
-                        matcher,
-                        facts.operation,
-                        path,
-                        Some(&paths),
-                    ) {
-                        continue;
-                    }
-                    match rule.effect {
-                        super::PermissionEffect::Deny => path_effects[index].0 = true,
-                        super::PermissionEffect::Ask => path_effects[index].1 = true,
-                        super::PermissionEffect::Allow => path_effects[index].2 = true,
-                    }
+            // 每条路径独立选择首个匹配层，不能用一条路径的 Allow 放行整批。
+            for (index, path) in facts.paths.iter().enumerate() {
+                if let Some(effect) = self.first_layer_effect(&rules, |rule| {
+                    let super::PermissionMatcher::File(matcher) = &rule.matcher else {
+                        return false;
+                    };
+                    file_matcher_matches_with_paths(matcher, facts.operation, path, Some(&paths))
+                }) {
+                    path_effects[index] = effect;
                 }
             }
 
@@ -389,23 +400,19 @@ impl RuntimeToolAuthorizer {
             };
         }
 
-        // 三层规则不是“最近一层覆盖上一层”：任意 Deny 胜出，其次 Ask，最后才是 Allow。
-        // 这样局部 Allow 无法绕过更高层显式 Deny，规则合并结果也与遍历顺序无关。
-        let mut deny_rule = false;
-        let mut ask_rule = false;
-        let mut allow_rule = invocation
-            .facts::<FileAuthorizationFacts>()
-            .is_some_and(|facts| self.workspace_default_allows(facts.operation, &facts.path));
-        for rule in &rules {
-            if !matches_rule_with_paths(rule, self.variant, invocation, Some(&paths)) {
-                continue;
-            }
-            match rule.effect {
-                super::PermissionEffect::Deny => deny_rule = true,
-                super::PermissionEffect::Ask => ask_rule = true,
-                super::PermissionEffect::Allow => allow_rule = true,
-            };
-        }
+        let (deny_rule, ask_rule, allow_rule) = self
+            .first_layer_effect(&rules, |rule| {
+                matches_rule_with_paths(rule, self.variant, invocation, Some(&paths))
+            })
+            .unwrap_or((
+                false,
+                false,
+                invocation
+                    .facts::<FileAuthorizationFacts>()
+                    .is_some_and(|facts| {
+                        self.workspace_default_allows(facts.operation, &facts.path)
+                    }),
+            ));
 
         if deny_rule {
             return deny("tool call is denied by a permission rule");
@@ -481,11 +488,7 @@ impl RuntimeToolAuthorizer {
                 return Some(deny(mcp_failure_code(failure.kind)));
             }
         }
-        if self.variant == AgentVariant::Plan
-            && let Some(facts) = invocation.facts::<FileAuthorizationFacts>()
-            && is_mutation(facts.operation)
-            && !self.plan_mutation_is_safe(facts.path.clone()).await
-        {
+        if self.variant == AgentVariant::Plan && !self.plan_mutations_are_safe(invocation).await {
             return Some(deny("tool call became denied while approval was pending"));
         }
         if self.infrastructure_policies.iter().any(|policy| {
@@ -506,14 +509,44 @@ impl RuntimeToolAuthorizer {
                 "permission paths became unavailable while approval was pending",
             ));
         };
-        if rules.iter().any(|rule| {
-            (rule.effect == super::PermissionEffect::Deny
-                || (recheck_ask_rules && rule.effect == super::PermissionEffect::Ask))
-                && matches_rule_with_paths(rule, self.variant, invocation, Some(&paths))
-        }) {
+        let denied = if let Some(facts) = invocation.facts::<FileBatchAuthorizationFacts>() {
+            facts.paths.iter().any(|path| {
+                self.first_layer_effect(&rules, |rule| {
+                    let super::PermissionMatcher::File(matcher) = &rule.matcher else {
+                        return false;
+                    };
+                    file_matcher_matches_with_paths(matcher, facts.operation, path, Some(&paths))
+                })
+                .is_some_and(|(deny, ask, _)| deny || (recheck_ask_rules && ask))
+            })
+        } else {
+            self.first_layer_effect(&rules, |rule| {
+                matches_rule_with_paths(rule, self.variant, invocation, Some(&paths))
+            })
+            .is_some_and(|(deny, ask, _)| deny || (recheck_ask_rules && ask))
+        };
+        if denied {
             return Some(deny("tool call became denied while approval was pending"));
         }
         None
+    }
+
+    // 旧单目标与整批目标共用 Plan 硬边界；规则或一次性审批不得放宽任一位置。
+    async fn plan_mutations_are_safe(&self, invocation: &ResolvedToolInvocation) -> bool {
+        if let Some(facts) = invocation.facts::<FileAuthorizationFacts>() {
+            return !is_mutation(facts.operation)
+                || self.plan_mutation_is_safe(facts.path.clone()).await;
+        }
+        if let Some(facts) = invocation.facts::<FileBatchAuthorizationFacts>()
+            && is_mutation(facts.operation)
+        {
+            for path in &facts.paths {
+                if !self.plan_mutation_is_safe(path.clone()).await {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     async fn plan_mutation_is_safe(&self, target: AbsolutePath) -> bool {
@@ -807,6 +840,7 @@ mod tests {
         RuntimeToolAuthorizer::new(
             RunAuthorizationScope { variant },
             Arc::new(SessionController::new(crate::StoredSession {
+                server_history_key: None,
                 custom_agent: None,
                 agent_shell_environment: None,
                 agent_shell_kind: None,

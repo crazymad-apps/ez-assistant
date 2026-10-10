@@ -95,7 +95,8 @@ impl ModelAttemptObserver for ModelObservation {
             ModelAttemptEvent::RetryScheduled { .. } => {
                 self.retries_scheduled.fetch_add(1, Ordering::AcqRel);
             }
-            ModelAttemptEvent::EstablishmentFailed { .. }
+            ModelAttemptEvent::StreamFailed { .. }
+            | ModelAttemptEvent::EstablishmentFailed { .. }
             | ModelAttemptEvent::StreamEstablished { .. } => {}
         }
     }

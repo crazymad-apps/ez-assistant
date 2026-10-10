@@ -1,7 +1,9 @@
 //! Host 私有用户终端 owner：连接任务由 Supervisor 收齐，PTY 不进入 Agent 或 Runtime Store。
 
 mod process;
+mod prompt;
 mod shell;
+pub(crate) use shell::catalog as shell_catalog;
 pub(crate) mod socket;
 #[cfg(test)]
 mod tests;
@@ -173,7 +175,15 @@ impl UserTerminals {
         permit: &AccessPermit,
         domain: CancellationToken,
         events: mpsc::Sender<TerminalEvent>,
-    ) -> Result<(String, Arc<TerminalProcess>, CancellationToken), TerminalError> {
+    ) -> Result<
+        (
+            String,
+            Arc<TerminalProcess>,
+            CancellationToken,
+            assistant_protocol::UserTerminalShellEntry,
+        ),
+        TerminalError,
+    > {
         permit.check().map_err(|_| failure("登录已失效。"))?;
         if self.shutdown.is_cancelled() || domain.is_cancelled() {
             return Err(failure("用户终端已停止。"));
@@ -191,12 +201,13 @@ impl UserTerminals {
             return Err(failure("当前登录最多同时打开 8 个终端。"));
         }
         let (size, shell) = terminal;
-        let process = TerminalProcess::spawn(directory, pty_size(size)?, shell, move |event| {
-            events
-                .try_send(event)
-                .map_err(|_| failure("终端输出连接已关闭。"))
-        })
-        .await?;
+        let (process, actual) =
+            TerminalProcess::spawn(directory, pty_size(size)?, shell, move |event| {
+                events
+                    .try_send(event)
+                    .map_err(|_| failure("终端输出连接已关闭。"))
+            })
+            .await?;
         if domain.is_cancelled() || permit.check().is_err() {
             process.close().await?;
             return Err(failure("用户终端已停止。"));
@@ -217,7 +228,7 @@ impl UserTerminals {
                 cancelled: cancelled.clone(),
             },
         );
-        Ok((id, process, cancelled))
+        Ok((id, process, cancelled, actual))
     }
 
     async fn close(&self, id: &str, process: &TerminalProcess) -> Result<(), TerminalError> {

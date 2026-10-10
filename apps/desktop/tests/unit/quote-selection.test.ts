@@ -5,6 +5,20 @@ import {
 } from "../../src/features/conversation/quoteSelection";
 
 describe("conversation quote selection", () => {
+  it("keeps message-local offsets across multiple text parts in a processing turn", () => {
+    const root = document.createElement("article");
+    root.dataset.processingTurn = "true";
+    root.innerHTML = `<div data-message-id="earlier"><p data-quote-content="true">另一条消息</p></div><div data-message-id="target"><p data-quote-content="true">第一段</p></div><div data-message-id="target"><p data-quote-content="true">引用这里</p></div>`;
+    const content = root.querySelectorAll("p")[2]!;
+    const range = document.createRange();
+    range.selectNodeContents(content);
+    const quote = createQuotedTextSnapshot(root, range, { quote_id: "q", source_owner: { type: "main_session", session_id: "s" }, source_generation: 1, source_message_id: "target", source_role: "assistant", source_label: "来源" });
+    expect(quote?.text_start_utf16).toBe(4);
+    expect(quote?.exact).toBe("引用这里");
+    expect(quote && quoteSourceRange(root, quote, "target")?.toString()).toBe("引用这里");
+    expect(quote && quoteSourceRange(root, quote, "earlier")).toBeNull();
+  });
+
   it("freezes visible text across inline code, links, and emphasis", () => {
     const root = document.createElement("div");
     root.dataset.quoteRoot = "true";

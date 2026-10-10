@@ -1,12 +1,14 @@
 //! 真实本地 UTF-8 文件能力实现。
 
+mod edit;
+
 use std::{ffi::OsString, io::ErrorKind, num::NonZeroU64, path::Path};
 
 use agent_tools::{
     AbsolutePath, DeleteFileRequest, DeleteFileResult, EditFileRequest, EditFileResult, FileEntry,
     FileEntryKind, FileSystemTool, FileToolContext, FileToolError, FsFuture, ListDirectoryRequest,
     ListDirectoryResult, ReadFileRequest, ReadFileResult, SearchFilesRequest, SearchFilesResult,
-    WriteFileRequest, WriteFileResult, exact_replace, paginate_with_line_numbers,
+    WriteFileRequest, WriteFileResult, paginate_with_line_numbers,
 };
 
 use crate::{path_lock::PathLockTable, search};
@@ -122,25 +124,6 @@ impl LocalFileSystem {
         Ok(WriteFileResult {
             path: request.path,
             bytes_written,
-        })
-    }
-
-    async fn edit_locked(
-        &self,
-        request: EditFileRequest,
-        context: FileToolContext,
-    ) -> Result<EditFileResult, FileToolError> {
-        let initial = self.read_text_bytes(&request.path).await?;
-        let replacement = prepare_edit(&request, &initial, self.config.max_text_file_bytes)?;
-        let current = self.read_text_bytes(&request.path).await?;
-        ensure_unchanged(&request.path, &initial, &current)?;
-        check_cancelled(&context)?;
-        tokio::fs::write(request.path.as_path(), &replacement.bytes)
-            .await
-            .map_err(|error| map_file_io(error, &request.path, "edit write"))?;
-        Ok(EditFileResult {
-            path: request.path,
-            replacements: replacement.replacements,
         })
     }
 
@@ -308,55 +291,8 @@ impl FileSystemTool for LocalFileSystem {
         request: EditFileRequest,
         context: FileToolContext,
     ) -> FsFuture<'a, EditFileResult> {
-        Box::pin(async move {
-            check_cancelled(&context)?;
-            let lock = self.locks.lock_for(&request.path);
-            let _guard = tokio::select! {
-                biased;
-                _ = context.cancellation.cancelled() => return Err(FileToolError::Cancelled),
-                guard = lock.lock() => guard,
-            };
-            check_cancelled(&context)?;
-            self.edit_locked(request, context).await
-        })
+        Box::pin(self.edit_batch(request, context))
     }
-}
-
-struct PreparedEdit {
-    bytes: Vec<u8>,
-    replacements: u64,
-}
-
-fn prepare_edit(
-    request: &EditFileRequest,
-    initial: &[u8],
-    maximum_bytes: NonZeroU64,
-) -> Result<PreparedEdit, FileToolError> {
-    validate_text_bytes(&request.path, initial, maximum_bytes)?;
-    let (has_bom, content_bytes) = initial
-        .strip_prefix(UTF8_BOM)
-        .map_or((false, initial), |content| (true, content));
-    let content =
-        std::str::from_utf8(content_bytes).map_err(|_| FileToolError::UnsupportedEncoding {
-            path: request.path.clone(),
-        })?;
-    let (old_string, new_string) = if has_only_crlf_endings(content) {
-        (to_crlf(&request.old_string), to_crlf(&request.new_string))
-    } else {
-        (request.old_string.clone(), request.new_string.clone())
-    };
-    let (edited, replacements) =
-        exact_replace(content, &old_string, &new_string, request.replace_all)?;
-    let mut bytes = Vec::with_capacity(edited.len() + usize::from(has_bom) * UTF8_BOM.len());
-    if has_bom {
-        bytes.extend_from_slice(UTF8_BOM);
-    }
-    bytes.extend_from_slice(edited.as_bytes());
-    validate_text_bytes(&request.path, &bytes, maximum_bytes)?;
-    Ok(PreparedEdit {
-        bytes,
-        replacements,
-    })
 }
 
 fn validate_text_bytes(
@@ -467,9 +403,11 @@ mod tests {
     use tempfile::TempDir;
     use tokio_util::sync::CancellationToken;
 
+    use super::edit::prepare_edit;
     use super::*;
+    use agent_tools::{EditFileEntry, EditFileOutcome, EditReplacement};
 
-    fn fixture(maximum_bytes: u64) -> (TempDir, Arc<LocalFileSystem>) {
+    pub(super) fn fixture(maximum_bytes: u64) -> (TempDir, Arc<LocalFileSystem>) {
         let directory = tempfile::tempdir().expect("temp directory");
         let filesystem = Arc::new(LocalFileSystem::new(LocalFileSystemConfig {
             max_text_file_bytes: NonZeroU64::new(maximum_bytes).expect("non-zero"),
@@ -479,7 +417,7 @@ mod tests {
         (directory, filesystem)
     }
 
-    fn absolute(path: impl AsRef<Path>) -> AbsolutePath {
+    pub(super) fn absolute(path: impl AsRef<Path>) -> AbsolutePath {
         AbsolutePath::new(path.as_ref().to_path_buf()).expect("absolute UTF-8 temp path")
     }
 
@@ -628,10 +566,14 @@ mod tests {
         filesystem
             .edit(
                 EditFileRequest {
-                    path: absolute(&path),
-                    old_string: "one".to_owned(),
-                    new_string: "first".to_owned(),
-                    replace_all: false,
+                    files: vec![EditFileEntry {
+                        path: absolute(&path),
+                        edits: vec![EditReplacement {
+                            old_string: "one".to_owned(),
+                            new_string: "first".to_owned(),
+                            replace_all: false,
+                        }],
+                    }],
                 },
                 FileToolContext::default(),
             )
@@ -697,10 +639,14 @@ mod tests {
         filesystem
             .edit(
                 EditFileRequest {
-                    path: absolute(&path),
-                    old_string: "one\ntwo".to_owned(),
-                    new_string: "first\nsecond".to_owned(),
-                    replace_all: false,
+                    files: vec![EditFileEntry {
+                        path: absolute(&path),
+                        edits: vec![EditReplacement {
+                            old_string: "one\ntwo".to_owned(),
+                            new_string: "first\nsecond".to_owned(),
+                            replace_all: false,
+                        }],
+                    }],
                 },
                 FileToolContext::default(),
             )
@@ -711,29 +657,43 @@ mod tests {
             b"\xEF\xBB\xBFfirst\r\nsecond\r\n"
         );
 
-        tokio::fs::write(&path, "x x").await.expect("reset fixture");
+        tokio::fs::write(&path, "x y").await.expect("reset fixture");
         let first = filesystem.edit(
             EditFileRequest {
-                path: absolute(&path),
-                old_string: "x".to_owned(),
-                new_string: "y".to_owned(),
-                replace_all: true,
+                files: vec![EditFileEntry {
+                    path: absolute(&path),
+                    edits: vec![EditReplacement {
+                        old_string: "x".to_owned(),
+                        new_string: "p".to_owned(),
+                        replace_all: true,
+                    }],
+                }],
             },
             FileToolContext::default(),
         );
         let second = filesystem.edit(
             EditFileRequest {
-                path: absolute(&path),
-                old_string: "y".to_owned(),
-                new_string: "z".to_owned(),
-                replace_all: true,
+                files: vec![EditFileEntry {
+                    path: absolute(&path),
+                    edits: vec![EditReplacement {
+                        old_string: "y".to_owned(),
+                        new_string: "q".to_owned(),
+                        replace_all: true,
+                    }],
+                }],
             },
             FileToolContext::default(),
         );
         let (first, second) = tokio::join!(first, second);
-        first.expect("first edit");
-        second.expect("second edit waits for first");
-        assert_eq!(tokio::fs::read_to_string(&path).await.expect("read"), "z z");
+        assert!(matches!(
+            first.expect("first edit").files[0].outcome,
+            EditFileOutcome::Success { .. }
+        ));
+        assert!(matches!(
+            second.expect("second edit shares path lock").files[0].outcome,
+            EditFileOutcome::Success { .. }
+        ));
+        assert_eq!(tokio::fs::read_to_string(&path).await.expect("read"), "p q");
     }
 
     #[tokio::test]
@@ -765,10 +725,14 @@ mod tests {
                 ),
                 filesystem.edit(
                     EditFileRequest {
-                        path: absolute_path.clone(),
-                        old_string: "original".to_owned(),
-                        new_string: "changed".to_owned(),
-                        replace_all: false,
+                        files: vec![EditFileEntry {
+                            path: absolute_path.clone(),
+                            edits: vec![EditReplacement {
+                                old_string: "original".to_owned(),
+                                new_string: "changed".to_owned(),
+                                replace_all: false
+                            }]
+                        }]
                     },
                     context(),
                 ),
@@ -784,7 +748,12 @@ mod tests {
         .expect("cancelled lock waiters settle promptly");
         trigger.await.expect("cancellation trigger");
         assert_eq!(results.0, Err(FileToolError::Cancelled));
-        assert_eq!(results.1, Err(FileToolError::Cancelled));
+        assert!(matches!(
+            results.1.expect("complete edit list").files[0].outcome,
+            EditFileOutcome::NotExecuted {
+                reason: agent_tools::EditNotExecutedReason::Cancelled
+            }
+        ));
         assert_eq!(results.2, Err(FileToolError::Cancelled));
         assert_eq!(
             tokio::fs::read_to_string(&path)
@@ -886,10 +855,14 @@ mod tests {
             filesystem
                 .edit(
                     EditFileRequest {
-                        path: absolute(&write_link),
-                        old_string: "written".to_owned(),
-                        new_string: "edited".to_owned(),
-                        replace_all: false,
+                        files: vec![EditFileEntry {
+                            path: absolute(&write_link),
+                            edits: vec![EditReplacement {
+                                old_string: "written".to_owned(),
+                                new_string: "edited".to_owned(),
+                                replace_all: false,
+                            }],
+                        }],
                     },
                     FileToolContext::default(),
                 )
@@ -994,18 +967,23 @@ mod tests {
     fn edit_detects_changed_snapshot_and_rejects_mixed_invalid_replacements() {
         let path = absolute(std::env::temp_dir().join("edit-test.txt"));
         let request = EditFileRequest {
-            path: path.clone(),
-            old_string: "missing".to_owned(),
-            new_string: "new".to_owned(),
-            replace_all: false,
+            files: vec![EditFileEntry {
+                path: path.clone(),
+                edits: vec![EditReplacement {
+                    old_string: "missing".to_owned(),
+                    new_string: "new".to_owned(),
+                    replace_all: false,
+                }],
+            }],
         };
         assert!(matches!(
             prepare_edit(
-                &request,
+                &request.files[0],
                 b"content",
-                NonZeroU64::new(100).expect("non-zero")
+                NonZeroU64::new(100).expect("non-zero"),
+                &FileToolContext::default()
             ),
-            Err(FileToolError::InvalidInput { .. })
+            Err((FileToolError::InvalidInput { .. }, 0))
         ));
         assert_eq!(
             ensure_unchanged(&path, b"before", b"after"),

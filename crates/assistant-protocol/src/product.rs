@@ -131,6 +131,10 @@ pub struct GoalSnapshot {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ObservedSnapshot<T> {
+    /// Host 在本次读取时的墙钟，仅供客户端校准活动显示，不改变事件水位语义。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub observed_at_ms: Option<i64>,
     /// 快照完成时已经纳入投影的最后一个事件序号。
     pub observed_sequence: u64,
     /// 领域投影。
@@ -371,6 +375,10 @@ pub enum MessageFeedback {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct AssistantMessageSnapshot {
+    /// 关联 Run 被接受的可靠时间；不是这条消息的创建时间，无归属时保持未知。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub run_created_at_ms: Option<i64>,
     pub message_id: MessageId,
     pub run_id: Option<RunId>,
     pub attempt: Option<u32>,
@@ -390,14 +398,52 @@ pub struct AssistantMessageSnapshot {
     pub feedback: Option<MessageFeedback>,
 }
 
+/// 可见 reasoning 的 Provider 来源；不表示宿主生成的摘要。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningSource {
+    #[default]
+    Raw,
+    Summary,
+}
+
+impl ReasoningSource {
+    pub fn is_raw(&self) -> bool {
+        *self == Self::Raw
+    }
+}
+
+/// 活动 Run 当前 Step 的 reasoning 观察片段；可靠历史仍归 Conversation。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ReasoningPartSnapshot {
+    pub part_id: PartId,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "ReasoningSource::is_raw")]
+    #[ts(as = "Option<ReasoningSource>", optional)]
+    pub source: ReasoningSource,
+}
+
 /// 助手消息内保持原始顺序的显示片段。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AssistantSegment {
-    Reasoning { part_id: PartId, text: String },
-    Text { part_id: PartId, text: String },
-    ToolGroup { tools: Vec<ToolEventSnapshot> },
+    Reasoning {
+        part_id: PartId,
+        text: String,
+        #[serde(default, skip_serializing_if = "ReasoningSource::is_raw")]
+        #[ts(as = "Option<ReasoningSource>", optional)]
+        source: ReasoningSource,
+    },
+    Text {
+        part_id: PartId,
+        text: String,
+    },
+    ToolGroup {
+        tools: Vec<ToolEventSnapshot>,
+    },
 }
 
 /// 消息列表中的低干扰工具事件。
@@ -1078,6 +1124,7 @@ mod tests {
     #[test]
     fn conversation_item_preserves_segment_order_on_the_wire() {
         let message = AssistantMessageSnapshot {
+            run_created_at_ms: None,
             message_id: MessageId::new("message-1").expect("message id"),
             run_id: None,
             attempt: None,
@@ -1087,6 +1134,7 @@ mod tests {
             status: None,
             segments: vec![
                 AssistantSegment::Reasoning {
+                    source: Default::default(),
                     part_id: PartId::new("reasoning-1").expect("part id"),
                     text: "inspect".to_owned(),
                 },
@@ -1096,6 +1144,7 @@ mod tests {
                 },
                 AssistantSegment::ToolGroup { tools: Vec::new() },
                 AssistantSegment::Reasoning {
+                    source: Default::default(),
                     part_id: PartId::new("reasoning-2").expect("part id"),
                     text: "verify".to_owned(),
                 },
@@ -1119,6 +1168,7 @@ mod tests {
     #[test]
     fn observed_conversation_page_round_trips_with_an_opaque_cursor() {
         let snapshot = ObservedSnapshot {
+            observed_at_ms: None,
             observed_sequence: 17,
             value: ConversationPage {
                 owner: ConversationOwner::MainSession {

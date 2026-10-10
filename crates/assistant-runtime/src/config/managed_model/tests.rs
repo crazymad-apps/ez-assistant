@@ -9,6 +9,7 @@ fn known_limit(value: u64) -> ModelTokenLimit {
 }
 fn provider(kind: ProviderType, preference: ProviderProtocolPreference) -> StoredProvider {
     StoredProvider {
+        server_history_key: None,
         provider_instance_id: ProviderInstanceId::new("provider-1").unwrap(),
         connection: ProviderConnection {
             display_name: "测试".into(),
@@ -17,6 +18,8 @@ fn provider(kind: ProviderType, preference: ProviderProtocolPreference) -> Store
             protocol_preference: preference,
             models_path: "/v1/models".into(),
             discovery_format: ModelDiscoveryFormat::OpenAi,
+            server_history_enabled: false,
+            server_history_support_override: None,
         },
         api_key: SecretValue::new("private-test-key".into()),
         model_catalog: None,
@@ -234,5 +237,41 @@ fn tool_image_projection_and_deepseek_generation_must_be_encodable_by_the_provid
             }
         )
         .is_err()
+    );
+}
+
+#[test]
+fn restored_history_policy_requires_supported_responses_and_a_durable_binding() {
+    let mut provider = provider(ProviderType::Openai, ProviderProtocolPreference::Responses);
+    provider.connection.server_history_enabled = true;
+    provider.server_history_key = Some("restored-binding".into());
+    let compile = |provider: &StoredProvider| {
+        compile_managed_model(
+            provider,
+            &selection(),
+            &parameters(),
+            &GenerationConfig::default(),
+        )
+    };
+    assert!(
+        compile(&provider).is_err(),
+        "unknown custom endpoint remains closed after restore"
+    );
+    provider.connection.server_history_support_override = Some(ModelFeatureSupport::Supported);
+    let resolved = compile(&provider).unwrap();
+    assert_eq!(
+        resolved.server_history_key.as_deref(),
+        Some("restored-binding")
+    );
+    provider.server_history_key = None;
+    assert!(
+        compile(&provider).is_err(),
+        "enabled connection needs a reliable activation binding"
+    );
+    provider.server_history_key = Some("restored-binding".into());
+    provider.connection.protocol_preference = ProviderProtocolPreference::ChatCompletions;
+    assert!(
+        compile(&provider).is_err(),
+        "restored Chat cannot use Responses history"
     );
 }

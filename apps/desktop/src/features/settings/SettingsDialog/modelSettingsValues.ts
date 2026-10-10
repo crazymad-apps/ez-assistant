@@ -7,6 +7,7 @@ export const support_options: readonly { value: ModelFeatureSupport; label: stri
   { value: "unknown", label: "未知" }, { value: "supported", label: "支持" }, { value: "unsupported", label: "不支持" },
 ];
 export const empty_connection: ProviderConnection = {
+  server_history_enabled: false, server_history_support_override: null,
   display_name: "", provider_type: "openai", endpoint: "", protocol_preference: "auto", models_path: "", discovery_format: "openai",
 };
 export const token_fields = [

@@ -161,6 +161,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 });
             }
             match event {
+                ModelEvent::TurnRestarted => eprintln!("response interrupted; restarting"),
                 ModelEvent::TurnStarted { .. } => {}
                 ModelEvent::ReasoningStarted { .. } => print!("{DIM}"),
                 ModelEvent::ReasoningDelta { delta, .. } => print!("{delta}"),

@@ -197,28 +197,6 @@ impl UserPaths {
         }
         Ok(actual)
     }
-
-    /// 递归搜索从相同的拒绝规则提取排除树，必须在遍历前过滤。
-    pub(crate) fn search_exclusions(&self, root: &Path) -> io::Result<Vec<PathBuf>> {
-        use assistant_runtime::{PermissionEffect, PermissionFileOperation, PermissionMatcher};
-        let mut paths = Vec::new();
-        for rule in self.permission_document()?.rules {
-            if rule.effect != PermissionEffect::Deny {
-                continue;
-            }
-            let PermissionMatcher::File(matcher) = rule.matcher else {
-                continue;
-            };
-            if matcher.operation != PermissionFileOperation::Search {
-                continue;
-            }
-            let path = assistant_runtime::resolve_permission_path(Path::new(&matcher.path))?;
-            if path != root && path.starts_with(root) && !paths.contains(&path) {
-                paths.push(path);
-            }
-        }
-        Ok(paths)
-    }
 }
 
 impl assistant_runtime::PermissionRuleSource for UserPaths {

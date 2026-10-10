@@ -23,6 +23,18 @@ pub struct AgentBuilder {
 }
 
 impl AgentBuilder {
+    pub(crate) fn from_spec(spec: ExecutionSpec) -> Self {
+        Self {
+            model: spec.model,
+            system_prompt: spec.system_prompt,
+            context_window: spec.context_window,
+            tools: spec.tools,
+            model_request: spec.model_request,
+            budget: spec.budget,
+            guardrails: spec.guardrails,
+        }
+    }
+
     /// 使用三个必填的冻结能力创建 Builder。
     pub fn new(
         model: Arc<dyn ModelService>,

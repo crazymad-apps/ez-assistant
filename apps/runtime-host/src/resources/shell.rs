@@ -1,12 +1,20 @@
-//! Host 交互终端与 Agent 共用固定解释器探测。
+//! Host 交互终端与 Agent 共用固定解释器探测；启动参数分别归各自执行入口。
 #[cfg(test)]
 mod tests;
 
 use assistant_protocol::ShellKind;
+use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
 pub(crate) fn executable(kind: ShellKind) -> Option<std::path::PathBuf> {
-    (kind == ShellKind::PosixSh).then(|| std::path::PathBuf::from("/bin/sh"))
+    match kind {
+        ShellKind::PosixSh => {
+            Some(std::path::PathBuf::from("/bin/sh")).filter(|path| is_executable(path))
+        }
+        ShellKind::Bash => find_unix_program("bash"),
+        ShellKind::Zsh => find_unix_program("zsh"),
+        _ => None,
+    }
 }
 
 pub(crate) fn catalog() -> Vec<assistant_protocol::ShellCatalogEntry> {
@@ -16,6 +24,8 @@ pub(crate) fn catalog() -> Vec<assistant_protocol::ShellCatalogEntry> {
         ShellKind::Powershell7,
         ShellKind::GitBash,
         ShellKind::PosixSh,
+        ShellKind::Bash,
+        ShellKind::Zsh,
     ]
     .into_iter()
     .map(|kind| {
@@ -65,6 +75,16 @@ pub(crate) fn freeze(
             "",
             "Git for Windows Bash on Windows. Use Bash syntax: $NAME, single/double quotes, backslash escaping and continuation, $? status. Prefer /c/path drive paths. Commands run without a login profile; text encoding is UTF-8.",
         ),
+        ShellKind::Bash => (
+            &["--noprofile", "--norc", "-c"],
+            "",
+            "Bash on Unix. Use Bash syntax: $NAME, single/double quotes, arrays, [[ tests ]], backslash escaping and continuation, $? exit status, and POSIX paths. Commands run non-interactively without login or interactive profiles.",
+        ),
+        ShellKind::Zsh => (
+            &["-f", "-c"],
+            "",
+            "zsh on Unix. Use zsh syntax: $NAME, single/double quotes, arrays indexed from 1, [[ tests ]], backslash escaping and continuation, $? exit status, and POSIX paths. Commands run non-interactively with user startup files disabled; unmatched globs are errors by default.",
+        ),
         ShellKind::PosixSh => (
             &["-c"],
             "",
@@ -93,7 +113,6 @@ pub(super) fn launcher(
 
 #[cfg(windows)]
 pub(crate) fn executable(kind: ShellKind) -> Option<std::path::PathBuf> {
-    use std::path::PathBuf;
     let windows = std::env::var_os("SystemRoot").map(PathBuf::from)?;
     let path_program = |name: &str| {
         std::env::var_os("PATH").and_then(|path| {
@@ -161,7 +180,31 @@ pub(crate) fn executable(kind: ShellKind) -> Option<std::path::PathBuf> {
             }
             candidates.into_iter().find(|p| valid(p))?
         }
-        ShellKind::PosixSh => return None,
+        ShellKind::PosixSh | ShellKind::Bash | ShellKind::Zsh => return None,
     };
     program.is_file().then_some(program)
+}
+
+pub(crate) fn is_executable(program: &Path) -> bool {
+    if !program.is_absolute() || !program.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        nix::unistd::access(program, nix::unistd::AccessFlags::X_OK).is_ok()
+    }
+    #[cfg(windows)]
+    {
+        true
+    }
+}
+
+#[cfg(unix)]
+fn find_unix_program(name: &str) -> Option<PathBuf> {
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .chain([PathBuf::from("/bin"), PathBuf::from("/usr/bin")])
+        .map(|directory| directory.join(name))
+        .find(|program| is_executable(program))
 }

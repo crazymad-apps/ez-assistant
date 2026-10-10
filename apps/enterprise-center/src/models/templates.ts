@@ -124,8 +124,8 @@ export class ModelTemplates {
     }
   }
 
-  lookup(connection: ProviderConnection, model: string) {
-    const entry = this.entries?.find(
+  lookup(connection: ProviderConnection, model: string, entries: readonly Template[] | undefined = this.entries) {
+    const entry = entries?.find(
       (item) => item.provider_type === connection.provider_type && item.model_id === model,
     );
     if (!entry) return { parameters: emptyParameters(), document: null, checked_on: null };

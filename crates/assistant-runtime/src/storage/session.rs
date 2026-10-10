@@ -187,6 +187,8 @@ pub struct SessionHistoryCompactionFinish {
 /// 从存储恢复或创建完成的 Session 投影。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredSession {
+    /// 模型切换后替换的续接身份；None 为旧会话/初始周期，owner 仍按 Session 唯一。
+    pub server_history_key: Option<String>,
     pub custom_agent: Option<assistant_protocol::CustomAgentSnapshot>,
     pub agent_shell_environment: Option<crate::FrozenShellEnvironment>,
     pub agent_shell_kind: Option<assistant_protocol::ShellKind>,
@@ -313,6 +315,8 @@ pub struct MessageFeedbackChange {
 /// 原子切换 Session 后续 Run 使用的模型 key。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelChange {
+    /// 与模型选择同一原子提交的续接身份；同值设置保留旧绑定。
+    pub server_history_key: Option<String>,
     pub session_id: SessionId,
     pub model_selection: Option<ModelSelection>,
     pub reasoning_effort: Option<ReasoningEffortKey>,
@@ -321,6 +325,8 @@ pub struct ModelChange {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReasoningEffortChange {
+    /// 与 reasoning 设置同一提交的续接周期；同值设置保留旧值。
+    pub server_history_key: Option<String>,
     pub session_id: SessionId,
     pub reasoning_effort: Option<ReasoningEffortKey>,
     pub changed_at_ms: i64,

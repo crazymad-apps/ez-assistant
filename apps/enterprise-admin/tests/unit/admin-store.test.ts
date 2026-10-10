@@ -16,6 +16,7 @@ vi.mock('../../src/request/api', async (importOriginal) => ({
     create: vi.fn(),
     update: vi.fn(),
     reset: vi.fn(),
+    remove: vi.fn(),
     password: vi.fn(),
   },
 }));
@@ -56,6 +57,7 @@ beforeEach(() => {
   vi.mocked(api.create).mockResolvedValue(user);
   vi.mocked(api.update).mockResolvedValue(user);
   vi.mocked(api.reset).mockResolvedValue();
+  vi.mocked(api.remove).mockResolvedValue();
   vi.mocked(api.password).mockResolvedValue();
 });
 
@@ -162,4 +164,21 @@ describe('写入闭环', () => {
     await pending;
     expect(store.currentUser?.displayName).toBe('最新名称');
   });
+});
+
+it('删除他人刷新入口保留当前身份，删除本人清除登录', async () => {
+  const store = await signedIn();
+  expect(await store.deleteUser(userView({ ...user, id: 2, is_super_admin: false }))).toBeUndefined();
+  expect(api.remove).toHaveBeenCalledWith(login.token, 2);
+  expect(store.token).toBe(login.token);
+  expect(await store.deleteUser(userView({ ...user, is_super_admin: false }))).toBeUndefined();
+  expect(store.user).toBeUndefined();
+  expect(store.token).toBe('');
+});
+it('删除结果未知不清除当前身份，也不自动重试', async () => {
+  const store = await signedIn();
+  vi.mocked(api.remove).mockRejectedValue(new Error('timeout'));
+  expect(await store.deleteUser(userView({ ...user, is_super_admin: false }))).toContain('结果未确认');
+  expect(api.remove).toHaveBeenCalledTimes(1);
+  expect(store.token).toBe(login.token);
 });

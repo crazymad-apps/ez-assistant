@@ -1,4 +1,7 @@
 const controls = {
+  previous_response_not_found: [400, '续接连接已失效，请使用完整有效上下文重建。'],
+  llm_history_busy: [409, '该续接连接正在处理请求。'],
+  llm_websocket_unsupported: [501, '上游明确不支持 WebSocket 接入，请检查连接配置。'],
   llm_key_invalid: [401, '模型调用凭据无效。'],
   managed_model_configuration_stale: [409, '中心默认模型已变化，请刷新配置。'],
   managed_model_unavailable: [409, '中心默认模型不可用。'],

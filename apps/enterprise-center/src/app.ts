@@ -1,3 +1,4 @@
+import { enterpriseProtocol } from './protocol.js';
 import 'reflect-metadata';
 import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -36,8 +37,14 @@ import { PluginError } from './plugins/errors.js';
 import { AgentsController } from './agents/controller.js';
 import { AgentsService } from './agents/service.js';
 import { AgentError } from './agents/errors.js';
+import { FeedbackController } from './feedback/controller.js';
+import { FeedbackService } from './feedback/service.js';
 import type { CenterConfig } from './config.js';
 import fastifyStatic from '@fastify/static';
+import multipart from '@fastify/multipart';
+import { DesktopReleaseFiles } from './desktop-releases/files.js';
+import { DesktopReleaseService } from './desktop-releases/service.js';
+import { DesktopReleasesController } from './desktop-releases/controller.js';
 
 const version = (
   JSON.parse(readFileSync(new URL('./package-info.json', import.meta.url), 'utf8')) as { version: string }
@@ -62,10 +69,10 @@ class InfoController {
   info(): CenterInfo {
     return {
       software_version: version,
-      protocol_version: 1,
-      min_protocol_version: 1,
+      protocol_version: enterpriseProtocol.current,
+      min_protocol_version: enterpriseProtocol.minimum,
       // M1 市场分发和 M2 完整 Agent 配置读取均已通过真实 HTTP 验证。
-      capabilities: ['managed_models', 'llm_proxy', 'plugin_market', 'managed_agents'],
+      capabilities: ['managed_models', 'llm_proxy', 'plugin_market', 'managed_agents', 'feedback'],
     };
   }
 }
@@ -80,6 +87,8 @@ class InfoController {
     CallsController,
     PluginsController,
     AgentsController,
+    FeedbackController,
+    DesktopReleasesController,
   ],
 })
 class CenterModule {}
@@ -106,7 +115,7 @@ class SafeHttpErrors implements ExceptionFilter {
 export async function createHttpApp(
   identity?: { source: DataSource; origin: string } & Pick<
     CenterConfig,
-    'templatesFile' | 'snapshotRoot' | 'pluginRoot' | 'llmConnectTimeout' | 'llmIdleTimeout'
+    'desktopReleaseRoot' | 'desktopUpdateKeyFile' | 'templatesFile' | 'snapshotRoot' | 'pluginRoot' | 'llmConnectTimeout' | 'llmIdleTimeout' | 'llmWebsocket'
   >,
   adminRoot?: string,
 ): Promise<NestFastifyApplication> {
@@ -129,15 +138,18 @@ export async function createHttpApp(
   const models = new ModelsService(identities, identity?.source, templates, identity?.origin);
   const records = new CallRecords(identity?.source, new SnapshotFiles(identity?.snapshotRoot, adminRoot));
   const proxy = new ModelProxy(identities, models, records, {
-    origin: identity?.origin,
     connectTimeout: identity?.llmConnectTimeout,
     idleTimeout: identity?.llmIdleTimeout,
+    websocket: identity?.llmWebsocket,
   });
   const pluginFiles = new PluginFiles(identity?.pluginRoot, adminRoot);
+  const releaseFiles = new DesktopReleaseFiles(identity?.desktopReleaseRoot, adminRoot);
+  const releases = new DesktopReleaseService(identities, identity?.source, releaseFiles, identity?.origin, identity?.desktopUpdateKeyFile);
   const app = await NestFactory.create<NestFastifyApplication>(
     {
       module: CenterModule,
       providers: [
+        { provide: DesktopReleaseService, useValue: releases },
         { provide: ModelProxy, useValue: proxy },
         { provide: CallManagement, useValue: new CallManagement(identities, identity?.source, proxy, models) },
         {
@@ -145,6 +157,7 @@ export async function createHttpApp(
           useValue: models,
         },
         { provide: IdentityService, useValue: identities },
+        { provide: FeedbackService, useValue: new FeedbackService(identities, identity?.source) },
         { provide: UsersService, useValue: new UsersService(identities, identity?.source) },
         { provide: AuditService, useValue: new AuditService(identity?.source) },
         { provide: PluginService, useValue: new PluginService(identities, identity?.source, pluginFiles) },
@@ -154,8 +167,15 @@ export async function createHttpApp(
     adapter,
     { logger: false, abortOnError: false },
   );
+  // Center 仅接受显式 Bearer；任意来源可访问，预检无需登录，不启用跨域 Cookie。
+  app.enableCors({
+    origin: '*',
+    methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    credentials: false,
+    exposedHeaders: ['ETag', 'Content-Disposition', 'X-EZ-Call-Id', 'X-EZ-Center-Control', 'X-Request-Id', 'Retry-After'],
+  });
   app.useGlobalFilters(new SafeHttpErrors());
-  app.useGlobalGuards(new HttpSecurity(app.get(IdentityService), identity?.origin));
+  app.useGlobalGuards(new HttpSecurity(app.get(IdentityService)));
   adapter.getInstance().addHook('onSend', async (request, reply, payload) => {
     reply.header('Cache-Control', 'no-store');
     reply.header('X-Content-Type-Options', 'nosniff');
@@ -173,21 +193,26 @@ export async function createHttpApp(
     if (identity) await records.initialize();
     proxy.install(adapter.getInstance());
     const fastify = adapter.getInstance();
+    await fastify.register(multipart, { limits: { fields: 2, files: 2, parts: 4, fileSize: 512 * 1024 * 1024, fieldSize: 96 * 1024 } });
     // 原样交给上传 owner 逐块接收；通用 JSON bodyLimit 不适用于完整归档。
     fastify.addContentTypeParser(['application/zip', 'application/gzip'], (_request, body, done) => {
       done(null, body);
     });
     fastify.addHook('onRoute', options => {
       const config = options.config as { pluginUpload?: boolean; agentWrite?: boolean;
-        pluginResolve?: boolean } | undefined;
-      if (config?.pluginUpload)
+        pluginResolve?: boolean; desktopReleaseUpload?: boolean; desktopReleaseNotes?: boolean } | undefined;
+      if (config?.desktopReleaseUpload) options.bodyLimit = 1024 * 1024 * 1024 + 128 * 1024;
+      else if (config?.desktopReleaseNotes) options.bodyLimit = 256 * 1024;
+      else if (config?.pluginUpload)
         options.bodyLimit = 2 * 1024 * 1024 * 1024;
       else if (config?.agentWrite) options.bodyLimit = 2 * 1024 * 1024;
       else if (config?.pluginResolve) options.bodyLimit = 64 * 1024;
     });
     const bodyTimers = new WeakMap<FastifyRequest, NodeJS.Timeout>();
     fastify.addHook('onRequest', async (request, reply) => {
-      const upload = (request.routeOptions.config as { pluginUpload?: boolean } | undefined)?.pluginUpload === true;
+      const config = request.routeOptions.config as { pluginUpload?: boolean; desktopReleaseUpload?: boolean };
+      const desktopUpload = config?.desktopReleaseUpload === true;
+      const upload = config?.pluginUpload === true || desktopUpload;
       if (!upload) {
         // 底层接收上限因大包提高后，普通管理 JSON 仍保持原有短超时。
         if (['POST', 'PUT', 'PATCH'].includes(request.method)) {
@@ -201,7 +226,7 @@ export async function createHttpApp(
       }
       try {
         // 在读取大包正文前先鉴权，拒绝请求不占用包暂存与扫描资源。
-        const token = requestCredential(request, identity?.origin, true);
+        const token = requestCredential(request, !desktopUpload, desktopUpload);
         if (request.headers['content-encoding'] && request.headers['content-encoding'] !== 'identity')
           throw new IdentityError(400, 'INVALID_REQUEST');
         const user = (await identities.me(token)).user;
@@ -209,7 +234,7 @@ export async function createHttpApp(
         request.raw.socket.setTimeout(60000);
       } catch (error) {
         const failure = error instanceof IdentityError ? error : new IdentityError(503, 'SERVICE_UNAVAILABLE');
-        if (failure.status < 500) await identities.rejection('plugin_package_uploaded', request.id, failure);
+        if (failure.status < 500) await identities.rejection(desktopUpload ? 'desktop_release_uploaded' : 'plugin_package_uploaded', request.id, failure);
         return reply.status(failure.status).send({ error: { code: failure.code, message: failure.message, request_id: request.id } });
       }
     });
@@ -220,7 +245,8 @@ export async function createHttpApp(
     fastify.addHook('onResponse', async request => {
       const timer = bodyTimers.get(request);
       if (timer) clearTimeout(timer);
-      if ((request.routeOptions.config as { pluginUpload?: boolean } | undefined)?.pluginUpload)
+      if ((request.routeOptions.config as { pluginUpload?: boolean; desktopReleaseUpload?: boolean } | undefined)?.pluginUpload
+        || (request.routeOptions.config as { desktopReleaseUpload?: boolean } | undefined)?.desktopReleaseUpload)
         request.raw.socket.setTimeout(10000);
     });
     if (adminRoot) {
@@ -245,12 +271,15 @@ export async function createHttpApp(
     });
     await app.init();
     if (identity?.pluginRoot) await pluginFiles.initialize();
+    if (identity?.desktopReleaseRoot) await releaseFiles.initialize();
+    await releases.initialize();
     // Fastify 解析错误也由 Nest 的异常层转入全局过滤器，不重复覆盖同 scope 的 handler。
     await adapter.getInstance().ready();
     return app;
   } catch (error) {
     await proxy.close();
     await pluginFiles.close();
+    await releaseFiles.close();
     await app.close();
     throw error;
   }

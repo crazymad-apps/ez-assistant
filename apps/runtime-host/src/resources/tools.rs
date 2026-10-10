@@ -15,11 +15,11 @@ use std::{
 
 use agent_core::{PolicyEvaluation, ToolAuthorization, ToolPolicy};
 use agent_tools::{
-    AbsolutePath, FileAuthorizationFacts, FileOperation, FsDeleteTool, FsEditTool, FsFindTool,
-    FsListTool, FsReadTool, FsSearchTool, FsWriteTool, InspectImagesTool, ListPinnedMemoriesTool,
-    PinMemoryTool, ReadFileToolConfig, ReadImageTool, RecallMemoryTool, RecallMemoryToolConfig,
-    ResolvedToolBatch, ResolvedToolInvocation, SearchFilesToolConfig, SessionPathResolver,
-    ShellExecTool, ShellExecToolConfig, Tool, ToolRegistry, UnpinMemoryTool,
+    AbsolutePath, FileAuthorizationFacts, FileBatchAuthorizationFacts, FileOperation, FsDeleteTool,
+    FsEditTool, FsFindTool, FsListTool, FsReadTool, FsSearchTool, FsWriteTool, InspectImagesTool,
+    ListPinnedMemoriesTool, PinMemoryTool, ReadFileToolConfig, ReadImageTool, RecallMemoryTool,
+    RecallMemoryToolConfig, ResolvedToolBatch, ResolvedToolInvocation, SearchFilesToolConfig,
+    SessionPathResolver, ShellExecTool, ShellExecToolConfig, Tool, ToolRegistry, UnpinMemoryTool,
     UpdatePinnedMemoryTool,
 };
 use agent_tools_local::{
@@ -43,14 +43,23 @@ pub(super) struct HostRunToolFactory {
 }
 
 struct LocalToolResources {
-    filesystem: Arc<super::filesystem::UserFileSystem>,
+    filesystem: Arc<LocalFileSystem>,
+    paths: Arc<crate::user_paths::UserPaths>,
     shell: Arc<LocalShell>,
     read_config: ReadFileToolConfig,
     search_config: SearchFilesToolConfig,
     shell_config: ShellExecToolConfig,
+    feedback: Option<crate::access::enterprise::feedback::FeedbackAccess>,
 }
 
 impl HostRunToolFactory {
+    pub(super) fn with_feedback(
+        mut self,
+        feedback: Option<crate::access::enterprise::feedback::FeedbackAccess>,
+    ) -> Self {
+        self.resources.feedback = feedback;
+        self
+    }
     #[cfg(test)]
     pub(super) fn new(runtime_home: &Path) -> Result<Self, ToolResourceError> {
         Self::with_paths(
@@ -123,20 +132,21 @@ impl LocalToolResources {
         )
         .map_err(ToolResourceError::configuration)?;
         Ok(Self {
-            filesystem: Arc::new(super::filesystem::UserFileSystem {
-                paths,
-                inner: LocalFileSystem::new(LocalFileSystemConfig {
-                    max_text_file_bytes: nonzero64(MAX_TEXT_FILE_BYTES),
-                    ripgrep_program: OsString::from("rg"),
-                    max_search_stderr_bytes: nonzero64(MAX_SEARCH_STDERR_BYTES),
-                }),
-            }),
+            // Agent 文件能力由 Runtime 按用户优先的分层规则授权；不得在 I/O 层
+            // 再用内置默认规则覆盖结果。HTTP 资源入口仍单独执行用户域检查。
+            filesystem: Arc::new(LocalFileSystem::new(LocalFileSystemConfig {
+                max_text_file_bytes: nonzero64(MAX_TEXT_FILE_BYTES),
+                ripgrep_program: OsString::from("rg"),
+                max_search_stderr_bytes: nonzero64(MAX_SEARCH_STDERR_BYTES),
+            })),
+            paths,
             shell: Arc::new(LocalShell::new(LocalShellConfig::new(
                 EnvironmentPolicy::default(),
             ))),
             read_config,
             search_config,
             shell_config,
+            feedback: None,
         })
     }
 
@@ -148,6 +158,12 @@ impl LocalToolResources {
     ) -> Result<RunToolBundle, RunToolFactoryError> {
         // 注册顺序也是 Provider 可见请求的一部分，保持固定顺序可让相同工具集稳定序列化。
         let mut registry = ToolRegistry::new();
+        if let Some(feedback) = &self.feedback {
+            register(
+                &mut registry,
+                super::feedback::SubmitFeedbackTool(feedback.clone()),
+            )?;
+        }
         register(
             &mut registry,
             FsReadTool::new(self.filesystem.clone(), resolver.clone(), self.read_config),
@@ -264,11 +280,14 @@ impl LocalToolResources {
                 Arc::new(SessionPermissionFileMutationPolicy { sessions_root }),
             ],
         )
-        .with_default_rules(self.filesystem.paths.clone())
+        .with_default_rules(Arc::new(super::feedback::HostDefaultRules {
+            paths: self.paths.clone(),
+            feedback: self.feedback.is_some(),
+        }))
         .with_artifact_files(Arc::new(
             crate::http::resources::artifacts::HostArtifactFiles::new(
                 request.environment.clone(),
-                self.filesystem.paths.clone(),
+                self.paths.clone(),
             ),
         )))
     }
@@ -300,6 +319,22 @@ fn register<T: Tool>(registry: &mut ToolRegistry, tool: T) -> Result<(), RunTool
     })
 }
 
+// 三类基础设施保护均逐目标检查；任何受保护位置拒绝整批调用。
+fn file_targets(
+    invocation: &ResolvedToolInvocation,
+) -> impl Iterator<Item = (FileOperation, &AbsolutePath)> {
+    invocation
+        .facts::<FileAuthorizationFacts>()
+        .map(|facts| (facts.operation, &facts.path))
+        .into_iter()
+        .chain(
+            invocation
+                .facts::<FileBatchAuthorizationFacts>()
+                .into_iter()
+                .flat_map(|facts| facts.paths.iter().map(move |path| (facts.operation, path))),
+        )
+}
+
 struct AttachmentMutationPolicy {
     sessions_root: AbsolutePath,
 }
@@ -312,14 +347,10 @@ impl ToolPolicy for AttachmentMutationPolicy {
     ) -> PolicyEvaluation {
         // 附件是 Session 的静态参考文件。只阻止结构化文件工具修改；Shell 仍以当前用户
         // 权限运行，所以这是一条应用策略，不应被描述成 OS 沙箱或不可绕过隔离。
-        if let Some(facts) = invocation.facts::<FileAuthorizationFacts>() {
-            if is_mutation(facts.operation) && self.is_session_attachment_path(&facts.path) {
-                PolicyEvaluation::Decide(ToolAuthorization::Deny {
-                    reason: "session attachments are static and cannot be written, edited, or deleted by structured file tools".to_owned(),
-                })
-            } else {
-                PolicyEvaluation::Continue
-            }
+        if file_targets(invocation).any(|(operation, path)| {
+            is_mutation(operation) && self.is_session_attachment_path(path)
+        }) {
+            PolicyEvaluation::Decide(ToolAuthorization::Deny { reason: "session attachments are static and cannot be written, edited, or deleted by structured file tools".to_owned() })
         } else {
             PolicyEvaluation::Continue
         }
@@ -352,14 +383,10 @@ impl ToolPolicy for ToolImageMutationPolicy {
         invocation: &ResolvedToolInvocation,
         _batch: &ResolvedToolBatch,
     ) -> PolicyEvaluation {
-        if let Some(facts) = invocation.facts::<FileAuthorizationFacts>() {
-            if is_mutation(facts.operation) && self.is_session_tool_image_path(&facts.path) {
-                PolicyEvaluation::Decide(ToolAuthorization::Deny {
-                    reason: "session tool images cannot be written, edited, or deleted by structured file tools".to_owned(),
-                })
-            } else {
-                PolicyEvaluation::Continue
-            }
+        if file_targets(invocation).any(|(operation, path)| {
+            is_mutation(operation) && self.is_session_tool_image_path(path)
+        }) {
+            PolicyEvaluation::Decide(ToolAuthorization::Deny { reason: "session tool images cannot be written, edited, or deleted by structured file tools".to_owned() })
         } else {
             PolicyEvaluation::Continue
         }
@@ -394,14 +421,10 @@ impl ToolPolicy for SessionPermissionFileMutationPolicy {
         invocation: &ResolvedToolInvocation,
         _batch: &ResolvedToolBatch,
     ) -> PolicyEvaluation {
-        if let Some(facts) = invocation.facts::<FileAuthorizationFacts>() {
-            if is_mutation(facts.operation) && self.is_session_permission_file(&facts.path) {
-                PolicyEvaluation::Decide(ToolAuthorization::Deny {
-                    reason: "session permissions are managed by the Runtime and cannot be modified by structured file tools".to_owned(),
-                })
-            } else {
-                PolicyEvaluation::Continue
-            }
+        if file_targets(invocation).any(|(operation, path)| {
+            is_mutation(operation) && self.is_session_permission_file(path)
+        }) {
+            PolicyEvaluation::Decide(ToolAuthorization::Deny { reason: "session permissions are managed by the Runtime and cannot be modified by structured file tools".to_owned() })
         } else {
             PolicyEvaluation::Continue
         }
@@ -758,6 +781,13 @@ mod tests {
                     "new_string": "changed"
                 }),
             ),
+            (
+                "edit_file",
+                json!({"files":[
+                    {"path":root.path().join("work/output.txt"),"edits":[{"old_string":"allowed","new_string":"changed"}]},
+                    {"path":attachment,"edits":[{"old_string":"stable","new_string":"changed"}]}
+                ]}),
+            ),
             ("delete_file", json!({"path": attachment.to_string_lossy()})),
         ] {
             let batch = Dispatcher::resolve_batch(&tools, &[call(name, arguments)]);
@@ -824,6 +854,23 @@ mod tests {
                 .await,
             ToolAuthorization::Deny { .. }
         ));
+        let protected_batch = Dispatcher::resolve_batch(
+            &tools,
+            &[call(
+                "edit_file",
+                json!({"files":[
+                    {"path":root.path().join("work/output.txt"),"edits":[{"old_string":"allowed","new_string":"changed"}]},
+                    {"path":permission_file,"edits":[{"old_string":"rules","new_string":"changed"}]}
+                ]}),
+            )],
+        );
+        let ResolvedBatchItemRef::Valid(invocation) = protected_batch.get(0).unwrap() else {
+            panic!("valid batch");
+        };
+        assert!(matches!(
+            authorizer.authorize(invocation, &protected_batch).await,
+            ToolAuthorization::Deny { .. }
+        ));
     }
 
     #[test]
@@ -853,6 +900,19 @@ mod tests {
         );
         let encoded = serde_json::to_value(encoded).expect("encoded request");
         assert_provider_tool_subset(&encoded["tools"]);
+        let edit = &encoded["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["function"]["name"] == "edit_file")
+            .unwrap()["function"]["parameters"];
+        assert_eq!(edit["type"], "object");
+        assert_eq!(
+            edit["properties"]["files"]["items"]["properties"]["edits"]["items"]["properties"]["replace_all"]
+                ["type"],
+            "boolean"
+        );
+        assert_eq!(edit["properties"]["path"]["type"], "string");
     }
 
     fn assert_provider_tool_subset(value: &serde_json::Value) {

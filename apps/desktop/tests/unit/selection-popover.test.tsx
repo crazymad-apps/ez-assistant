@@ -49,6 +49,12 @@ function EditableSelection() {
 }
 
 describe("SelectionPopover", () => {
+  it("does not display or select the first option for an unmatched value", () => {
+    render(<SelectionPopover aria_label="默认 Shell" open on_open_change={vi.fn()} on_select={vi.fn()}
+      selected="" placeholder="系统默认 Shell" options={[{ value: "bash", label: "Bash" }]} />);
+    expect(screen.getByRole("button", { name: "默认 Shell" })).toHaveTextContent("系统默认 Shell");
+    expect(screen.getByRole("option", { name: "Bash" })).toHaveAttribute("aria-selected", "false");
+  });
   it("keeps unavailable options discoverable but rejects pointer and keyboard selection", async () => {
     const select = vi.fn();
     const user = userEvent.setup();

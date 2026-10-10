@@ -23,6 +23,8 @@ pub(super) struct ResponsesRequest {
     pub reasoning: Option<ResponsesReasoningConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub include: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_response_id: Option<String>,
     pub store: bool,
     pub stream: bool,
     #[serde(flatten)]
@@ -124,6 +126,8 @@ pub(super) struct ResponsesErrorBody {
 
 #[derive(Clone, Debug, Deserialize)]
 pub(super) struct ResponsesErrorDetail {
+    #[serde(default)]
+    pub param: Option<String>,
     pub message: String,
     #[serde(default)]
     pub code: Option<String>,

@@ -1,8 +1,7 @@
 import "./check-version.mjs";
+import { createReleaseManifest, requireUpdateSigning } from "./release-manifest.mjs";
 import { access, readFile, stat } from "node:fs/promises";
 import { constants } from "node:fs";
-import { createReadStream } from "node:fs";
-import { createHash } from "node:crypto";
 import { basename, dirname, resolve } from "node:path";
 import { arch, env, platform } from "node:process";
 import { fileURLToPath } from "node:url";
@@ -11,6 +10,7 @@ import { spawn } from "node:child_process";
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = resolve(scriptDirectory, "..");
 const workspaceRoot = resolve(desktopRoot, "../..");
+requireUpdateSigning();
 const signingIdentity = requiredEnvironment("APPLE_SIGNING_IDENTITY");
 const teamId = requiredEnvironment("APPLE_TEAM_ID");
 const apiIssuer = requiredEnvironment("APPLE_API_ISSUER");
@@ -113,8 +113,16 @@ await run(
   desktopRoot,
 );
 
+// Tauri 已完成 App 公证；最终装订后再打在线更新包，避免签名/摘要指向旧 App 字节。
+await run("xcrun", ["stapler", "validate", appPath], desktopRoot);
+const updaterPath = resolve(bundleRoot, "macos", `${productName}.app.tar.gz`);
+// AppleDouble 资源叉会生成包外的 ._App.app，更新器剥离首层目录时无法解包。
+await run("tar", ["--no-mac-metadata", "--no-xattrs", "-czf", updaterPath, "-C", dirname(appPath), basename(appPath)], desktopRoot);
+const manifest = await createReleaseManifest({ target: "darwin-aarch64", host: resolve(appPath, "Contents/MacOS/ez-assistant-runtime"),
+  installer: dmgPath, updater: updaterPath, output: resolve(bundleRoot, "desktop-release") });
+
 const dmgMetadata = await stat(dmgPath);
-const dmgSha256 = await hashFile(dmgPath);
+const dmgSha256 = manifest.files.find(file => file.purposes.includes("installer")).sha256;
 console.log("macOS release completed.");
 console.log(`App: ${appPath}`);
 console.log(`DMG: ${dmgPath}`);
@@ -161,16 +169,6 @@ function parseJsonOutput(output, operation) {
   } catch {
     throw new Error(`${operation} returned an invalid JSON response`);
   }
-}
-
-function hashFile(path) {
-  return new Promise((resolvePromise, rejectPromise) => {
-    const hash = createHash("sha256");
-    const input = createReadStream(path);
-    input.once("error", rejectPromise);
-    input.on("data", (chunk) => hash.update(chunk));
-    input.once("end", () => resolvePromise(hash.digest("hex")));
-  });
 }
 
 function requiredEnvironment(name) {

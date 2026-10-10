@@ -35,6 +35,7 @@ pub fn decode_assistant_message(
     )? && !text.is_empty()
     {
         parts.push(AssistantPart::Reasoning(ReasoningPart {
+            source: Default::default(),
             id: next_part_id(),
             text: text.to_owned(),
         }));

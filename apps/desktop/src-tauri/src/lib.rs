@@ -6,6 +6,7 @@
 mod browser_resource;
 mod desktop_lifecycle;
 mod desktop_preferences;
+mod desktop_update;
 mod external_link;
 mod native_resource;
 mod runtime_bootstrap;
@@ -26,13 +27,20 @@ fn health() -> &'static str {
 pub fn run() {
     let context = tauri::generate_context!();
     let development = context.config().identifier == "com.ez-assistant.desktop.dev";
-    let runtime_bootstrap =
-        runtime_bootstrap::RuntimeBootstrapCoordinator::for_application(development);
     let native_resources = native_resource::NativeResourceBridge::new();
     let desktop_lifecycle = desktop_lifecycle::DesktopLifecycleCoordinator::new();
-    let app = tauri::Builder::default()
+    #[cfg(windows)]
+    let startup = desktop_update::windows::StartupGuard::acquire(&context.config().identifier)
+        .expect("failed to serialize desktop startup");
+    let builder = tauri::Builder::default();
+    #[cfg(windows)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        let _ = desktop_lifecycle::show_desktop_window(app.clone());
+    }));
+    let app = builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags({
@@ -46,16 +54,22 @@ pub fn run() {
                 })
                 .build(),
         )
-        .manage(runtime_bootstrap)
         .manage(runtime_connection::RuntimeConnection::default())
         .manage(native_resources)
         .manage(browser_resource::BrowserResourceManager::default())
         .manage(desktop_lifecycle)
         .manage(system_notification::SystemNotifications::default())
-        .setup(|app| {
+        .manage(desktop_update::DesktopUpdater::default())
+        .setup(move |app| {
             let app_handle = app.handle().clone();
+            let runtime_bootstrap =
+                runtime_bootstrap::RuntimeBootstrapCoordinator::for_application(development)
+                    .with_update_home(desktop_update::DesktopUpdater::startup_home(&app_handle));
+            app.manage(runtime_bootstrap);
             let coordinator = app.state::<desktop_lifecycle::DesktopLifecycleCoordinator>();
             coordinator.install(&app_handle)?;
+            app.state::<desktop_update::DesktopUpdater>()
+                .initialize(&app_handle);
             Ok(())
         })
         .on_page_load(|view, payload| {
@@ -98,6 +112,10 @@ pub fn run() {
                 browser_resource::resource_browser_url,
                 browser_resource::close_resource_browser,
                 health,
+                desktop_update::desktop_update_state,
+                desktop_update::start_desktop_update,
+                desktop_update::cancel_desktop_update,
+                runtime_connection::prepare_desktop_update,
                 system_notification::system_notification_permission,
                 system_notification::system_notification_focused,
                 system_notification::show_system_notification,
@@ -168,6 +186,8 @@ pub fn run() {
         })
         .build(context)
         .expect("failed to build EZ Assistant");
+    #[cfg(windows)]
+    drop(startup);
     app.run(|app, event| {
         if let tauri::RunEvent::ExitRequested { api, .. } = event {
             let coordinator = app.state::<desktop_lifecycle::DesktopLifecycleCoordinator>();

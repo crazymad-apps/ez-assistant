@@ -131,8 +131,19 @@ pub(super) async fn initialize(
             )),
             None => return Err(InitializationFailed),
         };
-        let resources = HostResources::for_user(user_home, personal, model_factory, paths.clone())
-            .map_err(|_| InitializationFailed)?;
+        let resources = HostResources::for_user(
+            user_home,
+            personal,
+            model_factory,
+            paths.clone(),
+            owner.plugin_center.as_ref().map(|(credentials, key)| {
+                crate::access::enterprise::feedback::FeedbackAccess::new(
+                    credentials.clone(),
+                    Some(key.clone()),
+                )
+            }),
+        )
+        .map_err(|_| InitializationFailed)?;
         let key =
             recall_reference_key::load_or_create(user_home).map_err(|_| InitializationFailed)?;
         Ok::<_, RuntimeHostStartupError>((resources, key))

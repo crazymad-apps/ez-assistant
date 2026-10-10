@@ -1,6 +1,9 @@
 import { compatibilityHeaders } from '@ez-assistant/protocol';
 import { expect, test } from '@playwright/test';
 
+// headless-shell 的 Notification.permission 固定 denied；完整 Chromium 保留真实权限实现。
+test.use({ channel: 'chromium' });
+
 // 使用真实 Host/SSE、Chrome Notifications 与 Web Locks；OS 横幅与点击另做实包验证。
 test('F03 全局完成通知、多标签去重、重连抑制及点击定位', async ({ context, page }) => {
   test.setTimeout(60_000);
@@ -56,6 +59,14 @@ test('F03 全局完成通知、多标签去重、重连抑制及点击定位', a
   const second = await context.newPage();
   await second.goto(host.base_url);
   await expect(second.locator('[data-workspace-transition]')).toHaveAttribute('data-workspace-transition', 'complete');
+  // Playwright 默认强制所有页面 hasFocus=true；关闭该模拟，保留产品的真实焦点检查。
+  for (const tab of [page, second]) {
+    const cdp = await context.newCDPSession(tab);
+    await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: false });
+  }
+  const background = await context.newPage();
+  await background.goto('about:blank');
+  await background.bringToFront();
   const app = await command('get_application_snapshot');
   const created = await command('create_session', {
     title: 'F03 通知目标',
@@ -84,6 +95,13 @@ test('F03 全局完成通知、多标签去重、重连抑制及点击定位', a
   ))
     ? page
     : second;
+  const content = await receiver.evaluate(() => {
+    const item = (window as unknown as { notificationProbe: Notification[] }).notificationProbe[0]!;
+    return { title: item.title, body: item.body };
+  });
+  expect(content.title).toBe('F03 通知目标');
+  expect(content.body).toContain('离线回复：');
+  expect(content.body).not.toContain('点击返回会话查看结果');
   await receiver.evaluate(() =>
     (window as unknown as { notificationProbe: Notification[] }).notificationProbe[0]!.dispatchEvent(
       new Event('click'),
@@ -126,6 +144,7 @@ test('F03 全局完成通知、多标签去重、重连抑制及点击定位', a
       ],
     },
   });
+  await background.bringToFront();
   await command('submit_input', {
     session_id: approval_session.session.session_id,
     message: 'TOOL_CASE',
@@ -140,6 +159,13 @@ test('F03 全局完成通知、多标签去重、重连抑制及点击定位', a
   ))
     ? page
     : second;
+  const approval_content = await approval_receiver.evaluate(() => {
+    const item = (window as unknown as { notificationProbe: Notification[] }).notificationProbe[0]!;
+    return { title: item.title, body: item.body };
+  });
+  expect(approval_content.title).toBe('F03 审批目标');
+  expect(approval_content.body).toContain('需要审批：');
+  expect(approval_content.body).not.toContain('e2e-context-file.txt');
   await approval_receiver.evaluate(() => {
     const notification = (window as unknown as { notificationProbe: Notification[] }).notificationProbe[0]!;
     Object.assign(window, { lateNotificationClick: notification.onclick?.bind(notification) });

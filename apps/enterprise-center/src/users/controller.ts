@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, Inject, Param, Patch, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Inject, Param, Patch, Post, Query, Req } from '@nestjs/common';
 import {
   ApiBody,
   ApiCreatedResponse,
@@ -84,6 +84,17 @@ export class UsersController {
       () => this.users.update(request.token, recordId(id), updateUserInput(body), request.id),
       request.identity!.user.id,
     );
+  }
+
+  @Delete(':id')
+  @HttpCode(204)
+  @Access('admin', 'user_deleted')
+  @ApiOperation({ operationId: 'deleteUser', summary: '删除账号并撤销全部凭据；保留历史记录及 Host 本地数据' })
+  @ApiParam({ name: 'id', schema: { type: 'integer', format: 'int32', minimum: 1, maximum: 2147483647 } })
+  @ApiNoContentResponse()
+  remove(@Param('id') id: string, @Req() request: AuthenticatedRequest) {
+    return this.identity.attempt('user_deleted', request.id,
+      () => this.users.remove(request.token, recordId(id), request.id), request.identity!.user.id);
   }
 
   @Post(':id/reset-password')

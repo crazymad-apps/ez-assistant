@@ -8,7 +8,7 @@ use rusqlite::{
 };
 use std::path::Path;
 
-fn manifest() -> [Migration; 7] {
+fn manifest() -> [Migration; 8] {
     [
         v0_25_1::entry(),
         v0_25_2::entry(),
@@ -17,6 +17,7 @@ fn manifest() -> [Migration; 7] {
         v0_27_0::entry(),
         v0_28_0::entry(),
         super::v0_28_1::entry(),
+        super::v0_29_0::entry(),
     ]
 }
 

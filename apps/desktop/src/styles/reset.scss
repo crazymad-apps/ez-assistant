@@ -26,6 +26,12 @@ body {
   text-rendering: optimizeLegibility;
 }
 
+// 仅原生 macOS 工作区透出窗口材质；登录页、启动页和普通浏览器仍保留实色背景。
+// AppShell 的平台值来自原生桥接，不能用浏览器的 navigator.platform 代替。
+html:has(main[data-left-sidebar][data-platform="macos"]) body {
+  background: transparent;
+}
+
 button,
 input,
 textarea,

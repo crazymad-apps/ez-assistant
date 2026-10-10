@@ -19,7 +19,7 @@ import { loginInput, passwordInput } from './validation.js';
 @ApiTags('identity')
 @ApiDefaultResponse({
   type: CenterErrorResponse,
-  description: '400 输入无效；401 身份失败；403 来源/权限拒绝；409 状态变化；429 限流；503 服务不可用',
+  description: '400 输入无效；401 身份失败；403 权限拒绝；409 状态变化；429 限流；503 服务不可用',
 })
 export class IdentityController {
   constructor(@Inject(IdentityService) private readonly identity: IdentityService) {}

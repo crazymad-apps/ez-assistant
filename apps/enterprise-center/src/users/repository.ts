@@ -41,6 +41,10 @@ export const users = {
   async password(manager: EntityManager, id: number, password_hash: string) {
     await manager.getRepository(UserEntity).update({ id }, { password_hash, updated_at: () => 'CURRENT_TIMESTAMP' });
   },
+  async remove(manager: EntityManager, id: number) {
+    const result = await manager.getRepository(UserEntity).delete({ id });
+    if (result.affected !== 1) throw new IdentityError(404, 'USER_NOT_FOUND');
+  },
   otherAdmins(manager: EntityManager, id: number) {
     return manager.getRepository(UserEntity).createQueryBuilder('u').where('u.enabled = true')
       .andWhere('(u.role = :role OR u.is_super_admin = true)', { role: 'admin' }).andWhere('u.id <> :id', { id }).getCount();

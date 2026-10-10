@@ -120,3 +120,12 @@ cargo clippy -p agent-tools-local --all-targets --all-features -- -D warnings
 ## v0.27.0 C03 M3 搜索遍历排除
 
 `LocalFileSystem::search_excluding` 是具体本地 Adapter 的窄扩展：宿主传入搜索根内的排除路径，Adapter 转换为按根锚定且转义的 rg glob，在遍历前排除。普通 FileSystemTool SPI 不变，Adapter 不解释 Host 用户或业务目录；保护规则与授权仍归 Host 装配层。
+
+## v0.29.0 F07 M1 批量编辑
+
+首个副作用前预检全部既有普通文件，以 canonical path 和保留到批次结束的 same-file 打开句柄
+拒绝重复对象（含符号链接、硬链接和平台大小写别名）。逐文件取得逻辑路径锁，验证读写句柄身份，
+受限读取并在内存中顺序应用全部替换组；任一组失败不提交当前文件。提交前重读原字节并复核身份。
+在核验句柄上截断、写入和 flush，开始后完整等待，不采用临时文件 rename；保留 BOM、换行和链接。
+取消/首个失败停止后续，已提交成功保留；提交中错误返回 unknown，不重试、不回滚或虚报数量。
+不承诺跨文件事务、fsync 崩溃安全或外部进程/跨别名竞态隔离。

@@ -88,7 +88,7 @@ export const RuntimeDiagnosticsPage = observer(function RuntimeDiagnosticsPage({
         <h4>平台依赖</h4>
         <dl>
           <div><dt>rg</dt><dd>{rg_status}</dd></div>
-          {settings.agent_shell_settings?.catalog.filter((entry) => entry.kind !== "posix_sh").map((entry) => (
+          {settings.agent_shell_settings?.catalog.filter((entry) => !["posix_sh", "bash", "zsh"].includes(entry.kind)).map((entry) => (
             <div key={entry.kind}><dt>{shellLabels[entry.kind]}</dt><dd>{entry.available ? "可用" : entry.reason ?? "未安装"}</dd></div>
           ))}
           {!settings.agent_shell_settings ? <div><dt>Shell</dt><dd>{settings.shell_loading ? "正在读取…" : "尚未读取"}</dd></div> : null}

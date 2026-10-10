@@ -199,7 +199,9 @@ pub(crate) fn format_event(event: &AgentEvent) -> String {
         AgentEvent::TextDelta { step, id, delta } => {
             format!("agent.text_delta step={step} id={id} text={delta}")
         }
-        AgentEvent::ReasoningDelta { step, id, delta } => {
+        AgentEvent::ReasoningDelta {
+            step, id, delta, ..
+        } => {
             format!("agent.reasoning_delta step={step} id={id} text={delta}")
         }
         AgentEvent::ToolProposed { step, call } => {

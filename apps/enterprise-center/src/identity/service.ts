@@ -32,6 +32,7 @@ export class IdentityService {
   private readonly tokens = new Map<string, number>();
   private readonly llmKeys = new Map<string, string>();
   private pendingWrite: Promise<void> = Promise.resolve();
+  private readonly revoked = new Set<(user: number | null) => void>();
 
   constructor(private readonly connection?: DataSource) {}
 
@@ -43,6 +44,15 @@ export class IdentityService {
   onModuleDestroy(): void {
     this.tokens.clear();
     this.llmKeys.clear();
+    for (const notify of this.revoked) notify(null);
+  }
+
+  /** 传输 owner 订阅已提交的主体撤销；不把凭据或登录 Token 暴露给资源监听方。 */
+  onRevoked(notify: (user: number | null) => void): () => void {
+    this.revoked.add(notify);
+    return () => {
+      this.revoked.delete(notify);
+    };
   }
 
   /** 串行化身份写入直到提交后的内存变更完成，避免退出/改密/登录交错复活旧凭据。
@@ -129,6 +139,7 @@ export class IdentityService {
   /** 仅在身份事务成功提交后调用；角色和启停变化撤销；改密与重置保留已有凭据。 */
   revokeUser(id: number): void {
     for (const [token, userId] of this.tokens) if (userId === id) this.revoke(token);
+    for (const notify of this.revoked) notify(id);
   }
 
   private async userForToken(client: EntityManager, token?: string) {

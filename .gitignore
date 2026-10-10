@@ -1,19 +1,55 @@
-/target
+# 构建产物与依赖缓存
+/target/
+node_modules/
+dist/
+apps/desktop/src-tauri/binaries/
+__pycache__/
+*.py[cod]
+playwright-report/
+test-results/
+*.log
+
+# 编辑器与系统文件
 .DS_Store
 .idea/
 .vscode/
 .workbuddy/
-node_modules/
-dist/
-apps/desktop/src-tauri/binaries/
-playwright-report/
-test-results/
-*.log
+
+# 本机部署、内部环境资料与审查备份统一放在 .local/
+/.local/
+
+# 真实配置和私钥不入库；公开配置只保留明确命名的示例
 .env
-docs/开发进度.md
-docs/tmp
-tmp
-output
+.env.*
+*.env
+!.env.example
+!*.env.example
+.npmrc
+*.key
+*.pem
+*.p8
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_ed25519
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
+*.db
+*.db-wal
+*.db-shm
+
+# 已有工具约定的位置继续保留，避免影响正在使用的环境
+/docs/开发进度.md
+/docs/tmp/
+/tmp/
+/output/
+/apps/enterprise-center/deploy/deploy.sh
 
 # 项目内独立 Runtime 测试数据（包含本地凭据）
 /.runtime-test/
@@ -21,5 +57,5 @@ output
 # 本机快捷入口模板；企业版构建或显式启用打包时嵌入客户端。
 /apps/desktop/src/features/composer/ComposerDock/quick-actions.json
 
-# 项目内业务插件源码与打包素材由本地按需维护。
+# 业务插件已迁移到独立仓库；忽略旧本地目录，避免残留文件重新入库。
 /plugins/

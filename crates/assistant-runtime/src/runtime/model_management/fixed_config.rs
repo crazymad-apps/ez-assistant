@@ -75,6 +75,9 @@ impl AssistantRuntime {
         validate_provider_parameters(&provider.connection, &request.parameters)?;
         crate::validate_fixed_model_parameters(&request.parameters)
             .map_err(|_| invalid("固定参数不完整或数值、思考设置组合无效。"))?;
+        let _operation = self.operation_gate.read().await;
+        let _gate = self.model_binding_gate.write().await;
+        self.ensure_running()?;
         let existing = self
             .store
             .get_model_fixed_config(request.selection.clone())
@@ -89,10 +92,18 @@ impl AssistantRuntime {
         if request.origin == ModelConfigOrigin::Online && existing.is_none() {
             catalog_model(&provider, &request.selection.model_id)?;
         }
-        let _operation = self.operation_gate.read().await;
-        let _gate = self.model_binding_gate.write().await;
-        self.ensure_running()?;
         self.ensure_provider_current(&provider)?;
+        let server_history_key = if existing
+            .as_ref()
+            .is_none_or(|fixed| fixed.parameters != request.parameters)
+        {
+            Some(
+                crate::id::generate("history")
+                    .map_err(|_| invalid("固定参数续接绑定无法创建。"))?,
+            )
+        } else {
+            None
+        };
         let fixed = ModelFixedConfig {
             origin: request.origin,
             selection: request.selection,
@@ -100,9 +111,10 @@ impl AssistantRuntime {
             updated_at_ms: super::super::now_ms()?,
         };
         self.store
-            .put_model_fixed_config(fixed.clone())
+            .put_model_fixed_config(fixed.clone(), server_history_key.clone())
             .await
             .map_err(|e| RuntimeError::from_store("save fixed model", e))?;
+        self.invalidate_live_fixed_history(&fixed.selection, server_history_key)?;
         self.publish_provider_configuration(provider)?;
         Ok(fixed)
     }
@@ -114,11 +126,50 @@ impl AssistantRuntime {
         let _gate = self.model_binding_gate.write().await;
         self.ensure_running()?;
         let provider = self.provider(&selection.provider_instance_id)?;
+        let existing = self
+            .store
+            .get_model_fixed_config(selection.clone())
+            .await
+            .map_err(|e| RuntimeError::from_store("load fixed model", e))?;
+        let server_history_key = if existing.is_some() {
+            Some(
+                crate::id::generate("history")
+                    .map_err(|_| invalid("固定参数续接绑定无法创建。"))?,
+            )
+        } else {
+            None
+        };
         self.store
-            .reset_model_fixed_config(selection)
+            .reset_model_fixed_config(selection.clone(), server_history_key.clone())
             .await
             .map_err(|e| RuntimeError::from_store("reset fixed model", e))?;
+        self.invalidate_live_fixed_history(&selection, server_history_key)?;
         self.publish_provider_configuration(provider)
+    }
+
+    fn invalidate_live_fixed_history(
+        &self,
+        selection: &ModelSelection,
+        key: Option<String>,
+    ) -> RuntimeResult<()> {
+        let Some(key) = key else {
+            return Ok(());
+        };
+        let default = self.managed_models()?.settings.default_model.clone();
+        for session in self
+            .sessions
+            .read()
+            .map_err(|_| RuntimeError::InternalStateUnavailable {
+                component: "sessions",
+            })?
+            .values()
+        {
+            let mut state = session.lock_state()?;
+            if state.model_selection.as_ref().or(default.as_ref()) == Some(selection) {
+                state.server_history_key = Some(key.clone());
+            }
+        }
+        Ok(())
     }
 
     fn publish_provider_configuration(&self, provider: Arc<StoredProvider>) -> RuntimeResult<()> {

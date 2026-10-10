@@ -20,6 +20,7 @@ async fn spawn_builder(
             pixel_height: 0,
         },
         command,
+        None,
         move |event| tx.send(event).map_err(|_| failure("test receiver closed")),
     )
     .await
@@ -38,7 +39,15 @@ async fn installed_interactive_shells_accept_input_and_exit() {
         ShellKind::GitBash,
     ] {
         let command = match crate::user_terminal::shell::interactive(Some(kind)) {
-            Ok(command) => command,
+            Ok((mut command, actual)) => {
+                assert_eq!(actual.shell, Some(kind));
+                assert!(
+                    crate::user_terminal::prompt::configure(&mut command, actual.shell)
+                        .unwrap()
+                        .is_none()
+                );
+                command
+            }
             Err(_) if matches!(kind, ShellKind::Powershell7 | ShellKind::GitBash) => {
                 eprintln!("{kind:?}: not installed");
                 continue;
@@ -192,7 +201,15 @@ async fn ctrl_c_interrupts_a_non_reading_foreground_command() {
         ShellKind::GitBash,
     ] {
         let command = match crate::user_terminal::shell::interactive(Some(kind)) {
-            Ok(command) => command,
+            Ok((mut command, actual)) => {
+                assert_eq!(actual.shell, Some(kind));
+                assert!(
+                    crate::user_terminal::prompt::configure(&mut command, actual.shell)
+                        .unwrap()
+                        .is_none()
+                );
+                command
+            }
             Err(_) if matches!(kind, ShellKind::Powershell7 | ShellKind::GitBash) => {
                 eprintln!("{kind:?}: not installed; Ctrl+C not tested");
                 continue;
@@ -222,7 +239,7 @@ async fn verify_ctrl_c(kind: assistant_protocol::ShellKind, command: CommandBuil
             b"PS1='CTRL-'\"READY> \"; printf 'before-%s\\n' sleep; sleep 15; printf 'missed-%s\\n' interrupt\n",
             b"printf 'after-%s\\n' interrupt\n",
         ),
-        ShellKind::PosixSh => unreachable!("Windows terminal matrix"),
+        ShellKind::PosixSh | ShellKind::Bash | ShellKind::Zsh => unreachable!("Windows terminal matrix"),
     };
     let (process, mut events) = spawn_builder(command).await;
     if let TerminalEvent::Output { .. } = next(&process, &mut events).await {

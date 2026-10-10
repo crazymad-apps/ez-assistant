@@ -1,20 +1,16 @@
 import type {
-  ChildTaskId,
   ChildTaskSnapshot,
   ChildTaskStatus,
   ChildTaskTreeItemSnapshot,
 } from "@ez-assistant/protocol";
-import type { LiveRunProjection } from "../../stores/LiveExecutionStore";
 
 export function mergeChildTaskItems(
   reliable_items: readonly ChildTaskTreeItemSnapshot[],
   live_tasks: readonly ChildTaskSnapshot[],
-  live_run_for: (child_task_id: ChildTaskId) => LiveRunProjection | null,
 ): ChildTaskTreeItemSnapshot[] {
   const merged = new Map(reliable_items.map((item) => [item.task.child_task_id, item]));
   for (const live_task of live_tasks) {
     const reliable = merged.get(live_task.child_task_id);
-    const live_usage = live_run_for(live_task.child_task_id)?.usage;
     merged.set(live_task.child_task_id, {
       task: reliable
         ? {
@@ -24,17 +20,8 @@ export function mergeChildTaskItems(
             error: live_task.error ?? reliable.task.error,
           }
         : live_task,
-      usage: live_usage
-        ? {
-            context: reliable?.usage.context,
-            accumulated: {
-              input_tokens: live_usage.input_tokens,
-              output_tokens: live_usage.output_tokens,
-              total_tokens: live_usage.total_tokens,
-              cached_input_tokens: live_usage.cached_input_tokens,
-            },
-          }
-        : reliable?.usage ?? { accumulated: null },
+      // 实时 usage 只属于单个 Step；窗口与累计均沿用 Runtime 刷新后的可靠投影。
+      usage: reliable?.usage ?? { accumulated: null },
       pending_approval_count: reliable?.pending_approval_count ?? 0,
       can_cancel: !isTerminalChildTask(live_task.status),
     });

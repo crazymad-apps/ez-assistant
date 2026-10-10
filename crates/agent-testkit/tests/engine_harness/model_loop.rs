@@ -471,6 +471,7 @@ async fn multi_turn_loop_backfills_projection_with_part_fidelity() {
         model: model_identity(),
         parts: vec![
             AssistantPart::Reasoning(ReasoningPart {
+                source: agent_types::ReasoningSource::Summary,
                 id: part_id("reasoning_1"),
                 text: "Need the date first".to_owned(),
             }),
@@ -520,6 +521,7 @@ async fn multi_turn_loop_backfills_projection_with_part_fidelity() {
     assert_completed(outcome, turn3);
     // reasoning delta 桥接为同名 AgentEvent。
     assert!(events.contains(&AgentEvent::ReasoningDelta {
+        source: agent_types::ReasoningSource::Summary,
         step: 1,
         id: part_id("reasoning_1"),
         delta: "Need the date first".to_owned(),
@@ -776,4 +778,72 @@ async fn denied_memory_tools_do_not_touch_store_or_recall_capabilities() {
             .all(|result| result.status == ToolResultStatus::Error)
     );
     assert_tool_pairing(&reconstruct(&user_input, &deltas));
+}
+
+#[tokio::test]
+async fn stream_retry_preserves_committed_tools_and_discards_partial_tool_response() {
+    let log = OrderLog::new();
+    let committed = calls_message("committed", vec![call("once", "work", json!({}))]);
+    let partial = calls_message("partial", vec![call("never", "work", json!({}))]);
+    let mut broken = message_events(&partial);
+    broken.pop(); // No reliable TurnFinished: even complete ToolCall fragments cannot execute.
+    broken.push(ModelEvent::TurnFailed {
+        error: ModelError::Transport {
+            kind: agent_model::ModelTransportErrorKind::Interrupted,
+            message: "connection lost".into(),
+        },
+    });
+    let model = Arc::new(ScriptedModelService::new(
+        capabilities(),
+        TEST_CONTEXT_WINDOW_TOKENS,
+        [
+            ModelScript::Events(message_events(&committed)),
+            ModelScript::Events(broken),
+            ModelScript::Events(message_events(&text_message("final", "done"))),
+        ],
+    ));
+    let retry = Arc::new(agent_model::RetryingModelService::new(
+        model.clone(),
+        agent_model::ModelRetryPolicy::new(
+            [agent_model::ModelRetryReason::Connection]
+                .into_iter()
+                .collect(),
+            vec![Duration::ZERO],
+            Duration::ZERO,
+        ),
+    ));
+    let recorder = Arc::new(InMemoryRecorder::new(log.clone()));
+    let authorizer = Arc::new(ScriptedAuthorizer::allow_all(log.clone()));
+    let tools = snapshot_of(vec![ScriptedTool::succeed(
+        "work",
+        json!({"ok": true}),
+        log,
+    )]);
+    let (input, _) = make_input(vec![]);
+    let (outcome, events) = finish(AgentExecution::start(
+        make_spec(retry, tools, ExecutionBudget::default()),
+        input,
+        make_context(recorder, authorizer),
+    ))
+    .await;
+    assert_completed(outcome, text_message("final", "done"));
+    let requests = model.take_requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[1], requests[2]);
+    assert_eq!(requests[2].conversation.messages.len(), 3);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::ToolStarted { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::StepStarted { step: 2 }))
+            .count(),
+        2
+    );
+    assert!(!events.iter().any(|event| matches!(event, AgentEvent::ToolProposed { call, .. } if call.id == call_id("never"))));
 }

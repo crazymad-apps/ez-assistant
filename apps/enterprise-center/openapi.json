@@ -60,7 +60,7 @@
             }
           },
           "default": {
-            "description": "400 输入无效；401 身份失败；403 来源/权限拒绝；409 状态变化；429 限流；503 服务不可用",
+            "description": "400 输入无效；401 身份失败；403 权限拒绝；409 状态变化；429 限流；503 服务不可用",
             "content": {
               "application/json": {
                 "schema": {
@@ -93,7 +93,7 @@
             }
           },
           "default": {
-            "description": "400 输入无效；401 身份失败；403 来源/权限拒绝；409 状态变化；429 限流；503 服务不可用",
+            "description": "400 输入无效；401 身份失败；403 权限拒绝；409 状态变化；429 限流；503 服务不可用",
             "content": {
               "application/json": {
                 "schema": {
@@ -129,7 +129,7 @@
             "description": ""
           },
           "default": {
-            "description": "400 输入无效；401 身份失败；403 来源/权限拒绝；409 状态变化；429 限流；503 服务不可用",
+            "description": "400 输入无效；401 身份失败；403 权限拒绝；409 状态变化；429 限流；503 服务不可用",
             "content": {
               "application/json": {
                 "schema": {
@@ -170,7 +170,7 @@
             "description": ""
           },
           "default": {
-            "description": "400 输入无效；401 身份失败；403 来源/权限拒绝；409 状态变化；429 限流；503 服务不可用",
+            "description": "400 输入无效；401 身份失败；403 权限拒绝；409 状态变化；429 限流；503 服务不可用",
             "content": {
               "application/json": {
                 "schema": {
@@ -361,6 +361,41 @@
           }
         },
         "summary": "编辑显示名称、角色或启用状态，至少一项；不允许改账号/超级管理员标记",
+        "tags": [
+          "users"
+        ]
+      },
+      "delete": {
+        "operationId": "deleteUser",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 1,
+              "maximum": 2147483647
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "default": {
+            "description": "400 无效输入；401 登录失效；403 无管理权限；404 用户不存在；409 账号冲突/管理员保护；429 限流；503 服务不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "删除账号并撤销全部凭据；保留历史记录及 Host 本地数据",
         "tags": [
           "users"
         ]
@@ -2546,6 +2581,841 @@
           "agents"
         ]
       }
+    },
+    "/api/feedback": {
+      "post": {
+        "operationId": "submitFeedback",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitFeedbackRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedbackDetail"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "输入、身份、提交标识冲突或处理冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "提交反馈；同主体同次提交返回当前原记录",
+        "tags": [
+          "feedback"
+        ]
+      },
+      "get": {
+        "operationId": "listOwnFeedback",
+        "parameters": [
+          {
+            "required": false,
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "minimum": 1,
+              "maximum": 20,
+              "default": 20,
+              "type": "number"
+            }
+          },
+          {
+            "required": false,
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "minimum": 0,
+              "maximum": 1000000,
+              "default": 0,
+              "type": "number"
+            }
+          },
+          {
+            "required": false,
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "required": false,
+            "name": "target_kind",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "须同时指定目标类型，精确匹配稳定引用",
+            "required": false,
+            "name": "target_reference",
+            "in": "query",
+            "schema": {
+              "maxLength": 512,
+              "type": "string"
+            }
+          },
+          {
+            "description": "仅知识目标；true 筛选无稳定引用，false 筛选有引用",
+            "required": false,
+            "name": "target_unresolved",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "required": false,
+            "name": "submission_id",
+            "in": "query",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedbackPage"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "输入、身份、提交标识冲突或处理冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "分页查询本人反馈",
+        "tags": [
+          "feedback"
+        ]
+      }
+    },
+    "/api/feedback/{id}": {
+      "get": {
+        "operationId": "getOwnFeedback",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedbackDetail"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "输入、身份、提交标识冲突或处理冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "读取本人反馈；不可访问与不存在均为未找到",
+        "tags": [
+          "feedback"
+        ]
+      }
+    },
+    "/api/admin/feedback": {
+      "get": {
+        "operationId": "listAdminFeedback",
+        "parameters": [
+          {
+            "required": false,
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "minimum": 1,
+              "maximum": 20,
+              "default": 20,
+              "type": "number"
+            }
+          },
+          {
+            "required": false,
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "minimum": 0,
+              "maximum": 1000000,
+              "default": 0,
+              "type": "number"
+            }
+          },
+          {
+            "required": false,
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "required": false,
+            "name": "target_kind",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "须同时指定目标类型，精确匹配稳定引用",
+            "required": false,
+            "name": "target_reference",
+            "in": "query",
+            "schema": {
+              "maxLength": 512,
+              "type": "string"
+            }
+          },
+          {
+            "description": "仅知识目标；true 筛选无稳定引用，false 筛选有引用",
+            "required": false,
+            "name": "target_unresolved",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "required": false,
+            "name": "source",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "required": false,
+            "name": "owner_user_id",
+            "in": "query",
+            "schema": {
+              "minimum": 1,
+              "maximum": 2147483647,
+              "type": "number"
+            }
+          },
+          {
+            "description": "标题字面包含，不解释通配符",
+            "required": false,
+            "name": "title",
+            "in": "query",
+            "schema": {
+              "maxLength": 120,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedbackPage"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "输入、身份、提交标识冲突或处理冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "管理员按状态、来源、用户及目标查询反馈",
+        "tags": [
+          "feedback"
+        ]
+      }
+    },
+    "/api/admin/feedback/{id}": {
+      "get": {
+        "operationId": "getAdminFeedback",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedbackDetail"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "输入、身份、提交标识冲突或处理冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "管理员读取反馈详情",
+        "tags": [
+          "feedback"
+        ]
+      },
+      "patch": {
+        "operationId": "handleFeedback",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HandleFeedbackRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedbackDetail"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "输入、身份、提交标识冲突或处理冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "比较原状态和说明后处理反馈；同值不重复记账",
+        "tags": [
+          "feedback"
+        ]
+      }
+    },
+    "/api/desktop-releases": {
+      "get": {
+        "operationId": "listDesktopReleases",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DesktopReleaseSummary"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "权限、发布状态或文件校验失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "安装版本列表",
+        "tags": [
+          "desktop-releases"
+        ]
+      }
+    },
+    "/api/desktop-releases/{version}": {
+      "get": {
+        "operationId": "getDesktopRelease",
+        "parameters": [
+          {
+            "name": "version",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DesktopReleaseDetail"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "权限、发布状态或文件校验失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "安装版本详情",
+        "tags": [
+          "desktop-releases"
+        ]
+      }
+    },
+    "/api/desktop-releases/packages": {
+      "post": {
+        "operationId": "uploadDesktopRelease",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "manifest",
+                  "signature",
+                  "files"
+                ],
+                "properties": {
+                  "manifest": {
+                    "type": "string",
+                    "description": "第一个字段：release.json 原始 UTF-8 字节的 base64（最多 64 KiB 解码字节）"
+                  },
+                  "signature": {
+                    "type": "string",
+                    "description": "第二个字段：release.json.sig 原文"
+                  },
+                  "files": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 2,
+                    "items": {
+                      "type": "string",
+                      "format": "binary"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DesktopReleaseUploadResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "权限、发布状态或文件校验失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "上传完整平台发布文件，创建草稿",
+        "tags": [
+          "desktop-releases"
+        ]
+      }
+    },
+    "/api/desktop-releases/{version}/notes": {
+      "put": {
+        "operationId": "updateDesktopReleaseNotes",
+        "parameters": [
+          {
+            "name": "version",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DesktopReleaseNotesInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DesktopReleaseDetail"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "权限、发布状态或文件校验失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "修改更新说明",
+        "tags": [
+          "desktop-releases"
+        ]
+      }
+    },
+    "/api/desktop-releases/{version}/targets/{target}/publication": {
+      "put": {
+        "operationId": "setDesktopReleasePublication",
+        "parameters": [
+          {
+            "name": "version",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "target",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DesktopReleasePublicationInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DesktopReleaseDetail"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "权限、发布状态或文件校验失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "发布或撤回一个平台",
+        "tags": [
+          "desktop-releases"
+        ]
+      }
+    },
+    "/api/desktop-updates/{target}/{current_version}": {
+      "get": {
+        "operationId": "discoverDesktopUpdate",
+        "parameters": [
+          {
+            "name": "target",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "current_version",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "host_version",
+            "required": false,
+            "in": "query",
+            "description": "仅连接远程 Host 时填写，三个 Host 字段必须同时提供",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "host_min_supported_version",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "host_protocols",
+            "required": false,
+            "in": "query",
+            "description": "逗号分隔的企业协议集合",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DesktopUpdate"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "没有适用的可下载更新"
+          },
+          "default": {
+            "description": "权限、发布状态或文件校验失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [],
+        "summary": "查询当前适用更新",
+        "tags": [
+          "desktop-releases"
+        ]
+      }
+    },
+    "/api/desktop-updates/{target}/releases/{version}": {
+      "get": {
+        "operationId": "getPublishedDesktopRelease",
+        "parameters": [
+          {
+            "name": "target",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DesktopUpdate"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "权限、发布状态或文件校验失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [],
+        "summary": "复核指定已发布更新",
+        "tags": [
+          "desktop-releases"
+        ]
+      }
+    },
+    "/api/desktop-updates/{target}/releases/{version}/files/{purpose}": {
+      "get": {
+        "operationId": "downloadDesktopRelease",
+        "parameters": [
+          {
+            "name": "target",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "purpose",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "enum": [
+                "installer",
+                "updater"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "权限、发布状态或文件校验失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [],
+        "summary": "下载已发布的安装或更新文件",
+        "tags": [
+          "desktop-releases"
+        ]
+      }
     }
   },
   "info": {
@@ -2978,6 +3848,38 @@
       "AuditDetails": {
         "type": "object",
         "properties": {
+          "target": {
+            "type": "string"
+          },
+          "release_publication": {
+            "type": "string",
+            "enum": [
+              "published",
+              "withdrawn"
+            ]
+          },
+          "feedback_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "processing",
+              "resolved",
+              "closed"
+            ]
+          },
+          "previous_status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "processing",
+              "resolved",
+              "closed"
+            ]
+          },
           "name": {
             "type": "string"
           },
@@ -3067,6 +3969,10 @@
                 "$ref": "#/components/schemas/ModelSelection"
               }
             ]
+          },
+          "public_origin": {
+            "type": "string",
+            "nullable": true
           },
           "before": {
             "$ref": "#/components/schemas/AuditUserFields"
@@ -3213,6 +4119,27 @@
               "moonshot",
               "dashscope_native"
             ]
+          },
+          "responses_transport": {
+            "type": "string",
+            "enum": [
+              "http",
+              "websocket"
+            ],
+            "default": "http"
+          },
+          "server_history_enabled": {
+            "type": "boolean",
+            "default": false
+          },
+          "server_history_support_override": {
+            "type": "string",
+            "enum": [
+              "supported",
+              "unsupported",
+              null
+            ],
+            "nullable": true
           }
         },
         "required": [
@@ -3221,7 +4148,9 @@
           "endpoint",
           "protocol_preference",
           "models_path",
-          "discovery_format"
+          "discovery_format",
+          "server_history_enabled",
+          "server_history_support_override"
         ]
       },
       "ProviderSummary": {
@@ -3689,6 +4618,10 @@
               }
             ]
           },
+          "public_origin": {
+            "type": "string",
+            "nullable": true
+          },
           "state": {
             "type": "string",
             "enum": [
@@ -3712,6 +4645,7 @@
         },
         "required": [
           "default_model",
+          "public_origin",
           "state",
           "reason",
           "configuration"
@@ -3728,11 +4662,13 @@
                 "$ref": "#/components/schemas/ModelSelection"
               }
             ]
+          },
+          "public_origin": {
+            "type": "string",
+            "nullable": true,
+            "description": "客户端模型访问地址；null 恢复部署地址。与 default_model 分别提交。"
           }
-        },
-        "required": [
-          "default_model"
-        ]
+        }
       },
       "TemplateStatus": {
         "type": "object",
@@ -3807,6 +4743,21 @@
           },
           "parameters": {
             "$ref": "#/components/schemas/ModelParameters"
+          },
+          "server_history_enabled": {
+            "type": "boolean"
+          },
+          "server_history_support": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "supported",
+              "unsupported"
+            ]
+          },
+          "server_history_binding": {
+            "type": "string",
+            "nullable": true
           }
         },
         "required": [
@@ -5177,6 +6128,738 @@
           "skills",
           "mcp",
           "diagnostics"
+        ]
+      },
+      "FeedbackTarget": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "platform",
+              "plugin",
+              "knowledge"
+            ]
+          },
+          "reference": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 512
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "version": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 64
+          },
+          "content_ref": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 512
+          },
+          "location": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 512
+          }
+        },
+        "required": [
+          "kind",
+          "reference",
+          "name",
+          "version",
+          "content_ref",
+          "location"
+        ]
+      },
+      "FeedbackEnvironment": {
+        "type": "object",
+        "properties": {
+          "host_version": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 128
+          },
+          "host_os": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 128
+          },
+          "host_arch": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 128
+          },
+          "client_kind": {
+            "type": "string",
+            "enum": [
+              "desktop",
+              "web",
+              "agent"
+            ]
+          },
+          "client_version": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 128
+          },
+          "client_os": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 128
+          },
+          "client_arch": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "host_version",
+          "host_os",
+          "host_arch",
+          "client_kind",
+          "client_version",
+          "client_os",
+          "client_arch"
+        ]
+      },
+      "SubmitFeedbackRequest": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "$ref": "#/components/schemas/FeedbackTarget"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 4000
+          },
+          "reproduction": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 2000
+          },
+          "expected_result": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 2000
+          },
+          "submission_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "manual",
+              "agent"
+            ]
+          },
+          "environment": {
+            "$ref": "#/components/schemas/FeedbackEnvironment"
+          }
+        },
+        "required": [
+          "target",
+          "title",
+          "description",
+          "reproduction",
+          "expected_result",
+          "submission_id",
+          "source",
+          "environment"
+        ]
+      },
+      "FeedbackDetail": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "title": {
+            "type": "string"
+          },
+          "target_kind": {
+            "type": "string",
+            "enum": [
+              "platform",
+              "plugin",
+              "knowledge"
+            ]
+          },
+          "target_name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "processing",
+              "resolved",
+              "closed"
+            ]
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "manual",
+              "agent"
+            ]
+          },
+          "owner_user_id": {
+            "type": "number"
+          },
+          "owner_username": {
+            "type": "string"
+          },
+          "owner_display_name": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "submission_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "target": {
+            "$ref": "#/components/schemas/FeedbackTarget"
+          },
+          "description": {
+            "type": "string"
+          },
+          "reproduction": {
+            "type": "string",
+            "nullable": true
+          },
+          "expected_result": {
+            "type": "string",
+            "nullable": true
+          },
+          "environment": {
+            "$ref": "#/components/schemas/FeedbackEnvironment"
+          },
+          "handling_note": {
+            "type": "string",
+            "nullable": true
+          },
+          "handler_user_id": {
+            "type": "number",
+            "nullable": true
+          },
+          "handler_username": {
+            "type": "string",
+            "nullable": true
+          },
+          "handler_display_name": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "target_kind",
+          "target_name",
+          "status",
+          "source",
+          "owner_user_id",
+          "owner_username",
+          "owner_display_name",
+          "created_at",
+          "updated_at",
+          "submission_id",
+          "target",
+          "description",
+          "reproduction",
+          "expected_result",
+          "environment",
+          "handling_note",
+          "handler_user_id",
+          "handler_username",
+          "handler_display_name"
+        ]
+      },
+      "FeedbackSummary": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "title": {
+            "type": "string"
+          },
+          "target_kind": {
+            "type": "string",
+            "enum": [
+              "platform",
+              "plugin",
+              "knowledge"
+            ]
+          },
+          "target_name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "processing",
+              "resolved",
+              "closed"
+            ]
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "manual",
+              "agent"
+            ]
+          },
+          "owner_user_id": {
+            "type": "number"
+          },
+          "owner_username": {
+            "type": "string"
+          },
+          "owner_display_name": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "target_kind",
+          "target_name",
+          "status",
+          "source",
+          "owner_user_id",
+          "owner_username",
+          "owner_display_name",
+          "created_at",
+          "updated_at"
+        ]
+      },
+      "FeedbackPage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FeedbackSummary"
+            }
+          },
+          "total": {
+            "type": "number"
+          },
+          "limit": {
+            "type": "number"
+          },
+          "offset": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ]
+      },
+      "HandleFeedbackRequest": {
+        "type": "object",
+        "properties": {
+          "expected_status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "processing",
+              "resolved",
+              "closed"
+            ]
+          },
+          "expected_handling_note": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 2000
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "processing",
+              "resolved",
+              "closed"
+            ]
+          },
+          "handling_note": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "expected_status",
+          "expected_handling_note",
+          "status",
+          "handling_note"
+        ]
+      },
+      "DesktopTargetSummary": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "enum": [
+              "windows-x86_64",
+              "windows-aarch64",
+              "darwin-aarch64"
+            ]
+          },
+          "publication": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "published",
+              "withdrawn"
+            ]
+          }
+        },
+        "required": [
+          "target",
+          "publication"
+        ]
+      },
+      "DesktopReleaseSummary": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          },
+          "targets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DesktopTargetSummary"
+            }
+          }
+        },
+        "required": [
+          "version",
+          "notes",
+          "targets"
+        ]
+      },
+      "DesktopReleaseHost": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string"
+          },
+          "min_supported_version": {
+            "type": "string"
+          },
+          "enterprise_protocols": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          }
+        },
+        "required": [
+          "version",
+          "min_supported_version",
+          "enterprise_protocols"
+        ]
+      },
+      "DesktopReleaseFile": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "purposes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "installer",
+                "updater"
+              ]
+            }
+          },
+          "size": {
+            "type": "number",
+            "minimum": 1,
+            "maximum": 536870912
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "signature": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "purposes",
+          "size",
+          "sha256"
+        ]
+      },
+      "DesktopReleaseManifest": {
+        "type": "object",
+        "properties": {
+          "product": {
+            "type": "string",
+            "enum": [
+              "ez-assistant"
+            ]
+          },
+          "version": {
+            "type": "string"
+          },
+          "min_supported_version": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string",
+            "enum": [
+              "windows-x86_64",
+              "windows-aarch64",
+              "darwin-aarch64"
+            ]
+          },
+          "host": {
+            "$ref": "#/components/schemas/DesktopReleaseHost"
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DesktopReleaseFile"
+            }
+          }
+        },
+        "required": [
+          "product",
+          "version",
+          "min_supported_version",
+          "target",
+          "host",
+          "files"
+        ]
+      },
+      "DesktopTargetDetail": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "enum": [
+              "windows-x86_64",
+              "windows-aarch64",
+              "darwin-aarch64"
+            ]
+          },
+          "publication": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "published",
+              "withdrawn"
+            ]
+          },
+          "manifest_text": {
+            "type": "string",
+            "description": "原始清单，供上传结果核对"
+          },
+          "manifest_sha256": {
+            "type": "string"
+          },
+          "first_published_at": {
+            "type": "string",
+            "nullable": true
+          },
+          "manifest": {
+            "$ref": "#/components/schemas/DesktopReleaseManifest"
+          }
+        },
+        "required": [
+          "target",
+          "publication",
+          "manifest_text",
+          "manifest_sha256",
+          "first_published_at",
+          "manifest"
+        ]
+      },
+      "DesktopReleaseDetail": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          },
+          "targets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DesktopTargetDetail"
+            }
+          }
+        },
+        "required": [
+          "version",
+          "notes",
+          "created_at",
+          "updated_at",
+          "targets"
+        ]
+      },
+      "DesktopReleaseUploadResult": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string",
+            "enum": [
+              "windows-x86_64",
+              "windows-aarch64",
+              "darwin-aarch64"
+            ]
+          },
+          "manifest_sha256": {
+            "type": "string"
+          },
+          "result": {
+            "type": "string",
+            "enum": [
+              "created",
+              "replaced",
+              "unchanged"
+            ]
+          }
+        },
+        "required": [
+          "version",
+          "target",
+          "manifest_sha256",
+          "result"
+        ]
+      },
+      "DesktopReleaseNotesInput": {
+        "type": "object",
+        "properties": {
+          "notes": {
+            "type": "string",
+            "description": "更新说明，最多 16 KiB UTF-8"
+          },
+          "expected_notes": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "notes",
+          "expected_notes"
+        ]
+      },
+      "DesktopReleasePublicationInput": {
+        "type": "object",
+        "properties": {
+          "manifest_sha256": {
+            "type": "string"
+          },
+          "expected_publication": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "published",
+              "withdrawn"
+            ]
+          },
+          "publication": {
+            "type": "string",
+            "enum": [
+              "published",
+              "withdrawn"
+            ]
+          }
+        },
+        "required": [
+          "manifest_sha256",
+          "expected_publication",
+          "publication"
+        ]
+      },
+      "DesktopUpdate": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "signature": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          },
+          "pub_date": {
+            "type": "string"
+          },
+          "manifest": {
+            "type": "string"
+          },
+          "manifest_signature": {
+            "type": "string"
+          },
+          "manifest_sha256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "url",
+          "signature",
+          "notes",
+          "pub_date",
+          "manifest",
+          "manifest_signature",
+          "manifest_sha256"
         ]
       }
     }

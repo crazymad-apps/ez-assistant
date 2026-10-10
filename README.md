@@ -3,8 +3,8 @@
 本地优先的 AI 助手，支持桌面与 Web 客户端。你可以在本机工作，也可以连接另一台电脑上的
 Runtime，使用同一套会话、工作空间、文件与终端能力。
 
-**当前版本：v0.25.0** · [下载正式版](https://github.com/crazymad-apps/ez-assistant/releases/latest) ·
-[发布说明](docs/versions/v0.25.0/发布说明.md) · [版本路线](docs/版本管理.md)
+**源码归档版本：v0.29.0** · [下载正式版](https://github.com/crazymad-apps/ez-assistant/releases/latest) ·
+[版本总结](docs/versions/v0.29.0/版本总结.md) · [版本路线](docs/版本管理.md)
 
 ## 主要能力
 
@@ -21,8 +21,8 @@ Runtime，使用同一套会话、工作空间、文件与终端能力。
 
 ## 下载与开始使用
 
-当前提供 **macOS Apple Silicon（arm64）** 安装包，App、随包 Runtime 和 DMG 均已完成
-Developer ID 签名；App 与 DMG 已通过 Apple 公证并写入票据。
+正式安装包见 GitHub Releases，平台、签名与公证状态以对应发行说明为准。
+源码归档不代表同版本安装包已公开发布；v0.29.0 的 macOS 升级验收暂缓。
 
 1. 从 [GitHub Releases](https://github.com/crazymad-apps/ez-assistant/releases/latest) 下载 DMG，
    打开后将 **EZ Assistant** 拖入 **Applications**。
@@ -78,7 +78,19 @@ EZ_ASSISTANT_RUNTIME_HOME="$HOME/.ez-assistant-playground" npm run tauri -- dev
 多 Host 同时运行还需配置不同的监听端口。自动化测试使用临时 Runtime Home，不向用户目录写入
 测试数据。开发 Desktop 可通过普通 `npm run tauri -- dev` 连接应用版本兼容的 Release Host，
 并保留前端热更新。Host 使用统一凭据校验，不按 Vite／Tauri 页面来源区分权限；
-连接地址仍为 Host 地址，例如 `http://192.168.31.21:7240`，不填写本机前端的 1420 端口。
+连接地址仍为 Host 地址，例如 `http://192.0.2.10:7240`（文档示例地址），不填写本机前端的 1420 端口。
+
+### 公开文件与本机资料
+
+源码、通用构建工具、配置示例和技术结论提交到仓库；真实配置、个人路径、内部连接信息和
+环境专用部署脚本不提交。历史文档已移除这些环境细节，验收结论保留。
+
+- `.local/`：本机部署脚本、私有环境笔记及本地整理备份，统一忽略。
+- `.runtime-test/`：按场景新建的隔离测试 Home、临时制品和诊断数据，统一忽略。
+- `target/`、`dist/`、`node_modules/` 等：各工具约定的构建产物和依赖缓存，统一忽略。
+- `.env`、`.env.*` 和私钥文件：保持工具需要的位置但不提交；只提交 `.env.example` 等通用示例。
+
+`docs/开发进度.md` 和本机快捷入口配置沿用既有位置并忽略；版本归档只保留可公开的进度内容。
 
 ### 构建与验证
 
@@ -156,6 +168,9 @@ docs/                      规范、模块约束、版本路线与归档
 
 具体模型、本地文件／Shell 和持久化由上层装配，`agent-core` 不依赖 UI 或应用协议。
 详细边界见 [Agent 系统技术架构](docs/modules/agent-system.md)。
+
+业务插件在独立仓库 `~/projects/ez-assistant-plugins` 开发、验证、打包和发布，
+相关说明见该仓库的 `README.md`。本仓库维护插件契约、Host 安装与能力接入、企业中心管理与分发。
 
 ## Agent SDK 与验证工具
 

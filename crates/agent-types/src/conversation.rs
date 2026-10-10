@@ -437,9 +437,30 @@ pub enum AssistantPart {
     ProviderState(OpaqueProviderState),
 }
 
+/// Provider 明确声明的可见 reasoning 来源；旧记录未标注时属于普通 reasoning。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningSource {
+    /// 普通或未标注摘要的内容，不表示模型全部内部推理。
+    #[default]
+    Raw,
+    /// Provider 返回的摘要；宿主不生成或猜测摘要。
+    Summary,
+}
+
+impl ReasoningSource {
+    /// 省略缺省字段，保持旧规范消息的序列化及续接哈希稳定。
+    pub fn is_raw(&self) -> bool {
+        *self == Self::Raw
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 /// 一个 reasoning 内容片段。
 pub struct ReasoningPart {
+    /// 可见内容来源；旧 JSON 保持 raw，不能从片段 ID 推断。
+    #[serde(default, skip_serializing_if = "ReasoningSource::is_raw")]
+    pub source: ReasoningSource,
     /// 片段 ID，用于流式事件聚合。
     pub id: PartId,
     /// 已聚合完成的 reasoning 文本。
@@ -784,6 +805,7 @@ mod tests {
             model: ModelIdentity::new(id("deepseek"), "deepseek-reasoner"),
             parts: vec![
                 AssistantPart::Reasoning(ReasoningPart {
+                    source: Default::default(),
                     id: id("reasoning_1"),
                     text: "Need the date first".to_owned(),
                 }),
@@ -1319,6 +1341,27 @@ mod tests {
                 vec![0; MAX_PROVIDER_STATE_ITEM_BYTES + 1],
             ),
             Err(ProviderStateError::PayloadTooLarge)
+        );
+    }
+}
+
+#[cfg(test)]
+mod reasoning_source_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_reasoning_keeps_exact_bytes_and_summary_roundtrips() {
+        // F06 hashes the canonical message: absence must remain absence after reading.
+        let legacy = r#"{"id":"legacy-part","text":"legacy reasoning"}"#;
+        let mut part: ReasoningPart = serde_json::from_str(legacy).unwrap();
+        assert_eq!(part.source, ReasoningSource::Raw);
+        assert_eq!(serde_json::to_string(&part).unwrap(), legacy);
+        part.source = ReasoningSource::Summary;
+        let encoded = serde_json::to_string(&part).unwrap();
+        assert!(encoded.contains("\"source\":\"summary\""));
+        assert_eq!(
+            serde_json::from_str::<ReasoningPart>(&encoded).unwrap(),
+            part
         );
     }
 }

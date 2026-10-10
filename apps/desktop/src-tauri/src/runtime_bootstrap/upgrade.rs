@@ -84,9 +84,10 @@ impl RuntimeBootstrapCoordinator {
         Ok(bootstrap)
     }
 
-    /// 0.26.0 的关闭 wire 契约经过独立验证。真实软件版本不变，最低版本仅对本窄命令为 0.26.0；
+    /// 复用自 0.26.0 起稳定的本机关闭契约，供旧版迁移和 Desktop 安装交接共用。
+    /// 真实软件版本不变，最低版本仅对本窄命令为 0.26.0；
     /// 不复用本通道读取业务数据，也不按服务端声明动态降低版本下限。
-    async fn stop_for_upgrade(
+    pub(super) async fn stop_for_upgrade(
         &self,
         previous: &RuntimeBootstrap,
     ) -> Result<(), RuntimeBootstrapError> {
@@ -137,9 +138,16 @@ impl RuntimeBootstrapCoordinator {
 
 #[tauri::command]
 pub(crate) async fn upgrade_runtime(
+    updater: State<'_, crate::desktop_update::DesktopUpdater>,
     coordinator: State<'_, RuntimeBootstrapCoordinator>,
     lifecycle: State<'_, DesktopLifecycleCoordinator>,
 ) -> Result<RuntimeBootstrap, RuntimeBootstrapError> {
+    let _permit = updater.lifecycle_permit().await.map_err(|_| {
+        bootstrap_error(
+            RuntimeBootstrapErrorCode::RuntimeUnavailable,
+            "正在安装更新，请稍候。",
+        )
+    })?;
     lifecycle.update_runtime_state(NativeRuntimeState::Restarting);
     let result = coordinator.upgrade().await;
     lifecycle.update_runtime_state(if result.is_ok() {

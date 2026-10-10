@@ -109,7 +109,7 @@ fn database_upgrade_preserves_external_paths_and_verified_backup() {
                 |r| r.get::<_, String>(0)
             )
             .unwrap(),
-        "0.28.1"
+        "0.29.0"
     );
     assert_eq!(
         fs::read_to_string(target.join("data/workspaces/w/agent/notes.txt")).unwrap(),

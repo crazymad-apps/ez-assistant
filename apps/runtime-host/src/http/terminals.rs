@@ -16,6 +16,24 @@ use axum::{
 };
 use std::net::SocketAddr;
 
+/// 已登录资源组完成账号、版本及 Ready 准入后查询；阻塞探测共享有界资源读取预算。
+pub(super) async fn shells(
+    State(state): State<HttpState>,
+) -> Result<axum::Json<Vec<assistant_protocol::UserTerminalShellEntry>>, HttpError> {
+    let slot = state
+        .file_reads
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| HttpError::unavailable())?;
+    let entries = tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        crate::user_terminal::shell_catalog()
+    })
+    .await
+    .map_err(|_| HttpError::unavailable())?;
+    Ok(axum::Json(entries))
+}
+
 pub(super) async fn upgrade(
     State(state): State<HttpState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,

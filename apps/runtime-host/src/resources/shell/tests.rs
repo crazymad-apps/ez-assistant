@@ -34,7 +34,7 @@ async fn installed_launchers_preserve_unicode_quotes_workdir_and_exit_status() {
             ShellKind::Cmd => {
                 "echo hello 中文 \"quoted\" & type \"quoted file.txt\" & echo error 中文 1>&2 & exit /b 7"
             }
-            ShellKind::GitBash | ShellKind::PosixSh => {
+            ShellKind::GitBash | ShellKind::PosixSh | ShellKind::Bash | ShellKind::Zsh => {
                 "printf '%s\\n' 'hello 中文 \"quoted\"'\ncat 'quoted file.txt'\nprintf '%s' 'error 中文' >&2\nexit 7"
             }
         };

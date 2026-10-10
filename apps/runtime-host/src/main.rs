@@ -2,6 +2,7 @@
 
 mod access;
 mod attachment_hash;
+mod build_info;
 mod config;
 mod config_source;
 mod device;
@@ -48,8 +49,7 @@ fn main() {
     if matches!(action, CliAction::BuildInfoJson) {
         println!(
             "{}",
-            serde_json::to_string(&assistant_protocol::ClientCompatibility::current())
-                .expect("build info")
+            serde_json::to_string(&build_info::BuildInfo::current()).expect("build info")
         );
         return;
     }
@@ -68,7 +68,7 @@ async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
         CliAction::BuildInfoJson => {
             println!(
                 "{}",
-                serde_json::to_string(&assistant_protocol::ClientCompatibility::current())?
+                serde_json::to_string(&build_info::BuildInfo::current())?
             );
             Ok(())
         }

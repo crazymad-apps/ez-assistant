@@ -15,6 +15,7 @@ const PREFERENCE_KEY = 'ez-assistant:system-notifications';
 type Dependencies = Readonly<{
   scope: () => string | null;
   navigate: (target: NotificationTarget) => Promise<boolean | void>;
+  resolveContent: (notification: SystemNotification) => Promise<SystemNotification | null>;
 }>;
 
 /** RootStore 拥有的客户端投递状态；业务状态始终在点击时从 Runtime 重读。 */
@@ -126,7 +127,11 @@ export class NotificationStore {
       const request = event.request;
       const target = { scope, kind: 'feedback' as const, request_id: request.request_id,
         run_id: request.run_id, owner: { type: 'main_session' as const, session_id: request.session_id } };
-      if (event.type === 'feedback_published') this.feedbackPublished(target, request.mode === 'end_turn');
+      if (event.type === 'feedback_published') {
+        const question = request.questions[0]?.question.trim();
+        const count = request.questions.length > 1 ? `（共 ${request.questions.length} 题）` : '';
+        this.feedbackPublished(target, request.mode === 'end_turn', question ? `等待回复${count}：${question}` : undefined);
+      }
       else this.resolved(target);
       return;
     }
@@ -159,11 +164,11 @@ export class NotificationStore {
     };
   }
 
-  feedbackPublished(target: NotificationTarget & { kind: 'feedback' }, suppress_completion = true): void {
+  feedbackPublished(target: NotificationTarget & { kind: 'feedback' }, suppress_completion = true, body = '等待你的回复，请返回会话回答问题。'): void {
     if (target.scope !== this.dependencies.scope() || this.#disposed) return;
     if (suppress_completion) this.#feedback_runs.add(JSON.stringify([target.scope, target.run_id]));
     trimSet(this.#feedback_runs);
-    void this.publish({ target, title: '等待你的回复', body: '点击返回会话回答问题。' });
+    void this.publish({ target, title: '会话通知', body });
   }
 
   resolved(target: NotificationTarget): void {
@@ -194,15 +199,19 @@ export class NotificationStore {
         this.permission = permission;
       });
       if (permission !== 'granted') return;
+      if (await this.platform.isFocused() || !active()) return;
+      // 只读取有机会投递的内容；查询不能阻塞事件消费，也不能在切换身份后继续投递。
+      const content = await this.dependencies.resolveContent(notification);
+      if (!active() || !content || notificationKey(content.target) !== key) return;
       const send = async () => {
         // 发送前读取真实窗口焦点；前台收到的事项已消费，失焦后不补发。
         if (!active() || await this.platform.isFocused() || !active()) return;
         const close = await this.platform.show(
           crypto.randomUUID(),
-          notification.title,
-          notification.body,
+          content.title,
+          content.body,
           () => {
-            void this.#activate(notification.target);
+            void this.activate(notification.target, true);
           },
           () => this.#failure('系统未能显示通知，请检查通知权限。'),
         );
@@ -304,23 +313,25 @@ export class NotificationStore {
     this.#feedback_navigate = null;
   }
 
-  async #activate(target: NotificationTarget): Promise<void> {
-    if (this.#disposed || target.scope !== this.dependencies.scope()) return;
+  async activate(target: NotificationTarget, focus_window = false): Promise<boolean> {
+    if (this.#disposed || target.scope !== this.dependencies.scope()) return false;
     const activation = ++this.#activation;
     const current = () => !this.#disposed && activation === this.#activation && target.scope === this.dependencies.scope();
     try {
-      await this.platform.focus();
-      if (!current()) return;
+      if (focus_window) await this.platform.focus();
+      if (!current()) return false;
       if (target.kind === 'feedback') {
         if (!this.#feedback_navigate) throw new Error('当前客户端尚不能打开该反馈问题。');
         await this.#feedback_navigate(target);
-      } else if ((await this.dependencies.navigate(target)) === false) return;
+      } else if ((await this.dependencies.navigate(target)) === false) return false;
       if (current())
         runInAction(() => {
           this.focus_target = target;
         });
+      return current();
     } catch {
       if (current()) this.#failure('无法打开通知对应事项，请确认登录状态、连接和会话是否仍可访问。');
+      return false;
     }
   }
 

@@ -11,6 +11,7 @@ impl VolatileRuntimeStore {
                 return Err(conflict("session already exists in runtime storage"));
             }
             let stored = StoredSession {
+                server_history_key: None,
                 custom_agent: session.custom_agent,
                 session_id: session.session_id.clone(),
                 agent_shell_kind: session.agent_shell_kind,
@@ -547,6 +548,7 @@ impl VolatileRuntimeStore {
             let message_count = u64::try_from(conversation.messages.len())
                 .map_err(|_| conflict("fork conversation is too large"))?;
             let stored = StoredSession {
+                server_history_key: None,
                 custom_agent: fork.session.custom_agent,
                 session_id: fork.session.session_id.clone(),
                 agent_shell_kind: fork.session.agent_shell_kind,

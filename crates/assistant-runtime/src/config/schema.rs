@@ -127,6 +127,7 @@ pub(super) struct RawAgentDefaults {
 pub(super) struct RawDelegationConfig {
     pub(super) max_tasks_per_run: u32,
     pub(super) max_concurrent_tasks: u32,
+    /// 0 表示不限制子任务总耗时；单次模型/工具超时及执行预算仍独立生效。
     pub(super) task_timeout_ms: u64,
     pub(super) max_steps: u32,
     pub(super) max_tool_calls: u32,
@@ -138,7 +139,7 @@ impl Default for RawDelegationConfig {
         Self {
             max_tasks_per_run: 8,
             max_concurrent_tasks: 4,
-            task_timeout_ms: 900_000,
+            task_timeout_ms: 0,
             max_steps: 40,
             max_tool_calls: 100,
             max_output_tokens: 16_384,

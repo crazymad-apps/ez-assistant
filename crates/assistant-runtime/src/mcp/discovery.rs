@@ -76,6 +76,25 @@ pub(crate) struct McpRunDisclosure {
 }
 
 impl McpRunDisclosure {
+    /// 压缩时目录为空也必须覆盖被保留的旧披露；从未使用 MCP 的上下文无需补空目录。
+    pub(crate) fn context_for_compaction(
+        &self,
+        conversation: &agent_types::ConversationSnapshot,
+    ) -> RuntimeResult<Option<UserMessage>> {
+        if let Some(context) = &self.context {
+            return Ok(Some(context.clone()));
+        }
+        let had_mcp = conversation.messages.iter().any(|message| matches!(message,
+            agent_types::ConversationMessage::User(user) if user.parts.iter().any(|part| matches!(part,
+                agent_types::UserPart::InternalContext(part) if matches!(part.kind.as_str(),
+                    "mcp_server_directory" | "mcp_server_selection")))));
+        if had_mcp {
+            empty_directory().map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
     pub(crate) fn compile(
         registry: &McpRegistry,
         permission_coordinator: &PermissionCoordinator,
@@ -99,6 +118,48 @@ impl McpRunDisclosure {
             )),
         }
     }
+}
+
+/// 首次默认目录只随新输入落账；手选披露属于每个显式输入，不从上一轮借用。
+pub(crate) fn needs_initial_disclosure(
+    conversation: &agent_types::ConversationSnapshot,
+    context: &UserMessage,
+) -> bool {
+    let selected = context.parts.iter().any(|part| {
+        matches!(part,
+        agent_types::UserPart::InternalContext(part) if part.kind == "mcp_server_selection")
+    });
+    selected
+        || !conversation.messages.iter().any(|message| {
+            matches!(message,
+        agent_types::ConversationMessage::User(user) if user.parts.iter().any(|part| matches!(part,
+            agent_types::UserPart::InternalContext(part) if part.kind == "mcp_server_directory")))
+        })
+}
+
+/// 显式刷新即使没有可披露 Server，也记录空目录，不能让旧目录继续冒充当前事实。
+pub(crate) fn refresh_directory(
+    registry: &McpRegistry,
+    permission_coordinator: &PermissionCoordinator,
+    permission_scopes: &[PermissionFileScope],
+    variant: AgentVariant,
+) -> RuntimeResult<UserMessage> {
+    let disclosure =
+        compile_default_disclosure(registry, permission_coordinator, permission_scopes, variant);
+    if let Some(context) = disclosure.context {
+        return Ok(context);
+    }
+    empty_directory()
+}
+
+fn empty_directory() -> RuntimeResult<UserMessage> {
+    InternalBoundaryCoordinator::hidden_message(InternalBoundaryRequest {
+        source: InternalBoundarySource::McpServerDirectory,
+        text:
+            "{MCP_SERVER_DIRECTORY_V1}\nNo MCP servers are currently available for disclosure.\n[]"
+                .to_owned(),
+    })
+    .map(|(message, _)| message)
 }
 
 impl DiscoverMcpTools {

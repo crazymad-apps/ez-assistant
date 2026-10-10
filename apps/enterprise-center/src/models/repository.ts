@@ -1,4 +1,5 @@
 import type { EntityManager } from 'typeorm';
+import { randomUUID } from 'node:crypto';
 import type { CatalogModel, ModelSelection, ProviderConnection, ModelParameters } from '../contracts/models.js';
 import { ProviderEntity, FixedConfigEntity, ModelSettingsEntity } from './entity.js';
 
@@ -13,6 +14,7 @@ export const models = {
       .getRepository(ProviderEntity)
       .createQueryBuilder('p')
       .addSelect('p.api_key')
+      .addSelect('p.server_history_key')
       .where('p.provider_instance_id = :id', { id })
       .getOne();
   },
@@ -22,6 +24,7 @@ export const models = {
       provider_instance_id: id,
       connection,
       api_key,
+      server_history_key: connection.server_history_enabled ? randomUUID() : null,
       model_catalog: null,
       catalog_refreshed_at: null,
       catalog_connection_changed: false,
@@ -30,6 +33,13 @@ export const models = {
 
   update(manager: EntityManager, row: ProviderEntity) {
     return manager.getRepository(ProviderEntity).update({ provider_instance_id: row.provider_instance_id }, row);
+  },
+
+  renewHistory(manager: EntityManager, provider: ProviderEntity) {
+    return manager.getRepository(ProviderEntity).update(
+      { provider_instance_id: provider.provider_instance_id },
+      { server_history_key: provider.connection.server_history_enabled ? randomUUID() : null },
+    );
   },
 
   remove(manager: EntityManager, id: string) {
@@ -78,6 +88,14 @@ export const models = {
     return row.provider_instance_id !== null && row.model_id !== null
       ? { provider_instance_id: row.provider_instance_id, model_id: row.model_id }
       : null;
+  },
+
+  async publicOrigin(manager: EntityManager): Promise<string | null> {
+    return (await manager.getRepository(ModelSettingsEntity).findOneByOrFail({ singleton: true })).public_origin;
+  },
+
+  publicOriginSave(manager: EntityManager, public_origin: string | null) {
+    return manager.getRepository(ModelSettingsEntity).update({ singleton: true }, { public_origin });
   },
 
   settingsSave(manager: EntityManager, selection: ModelSelection | null) {

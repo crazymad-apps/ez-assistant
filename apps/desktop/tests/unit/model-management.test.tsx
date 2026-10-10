@@ -219,6 +219,32 @@ describe('provider and fixed model settings', () => {
     );
     expect(screen.queryByLabelText('API Key')).not.toBeInTheDocument();
   });
+  it('requires explicit custom Responses support and keeps a failed save draft', async () => {
+    const store = modelStore();
+    const save = vi.spyOn(store.settings, 'saveProvider').mockResolvedValue(null);
+    show(store);
+    fireEvent.click(screen.getByRole('button', { name: /测试服务商 https/ }));
+    await screen.findByRole('button', { name: '配置模型 fixture' });
+    fireEvent.click(screen.getByRole('button', { name: '编辑' }));
+    const toggle = screen.getByRole('checkbox', { name: '使用服务端历史续接' });
+    expect(toggle).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: '接口选项' }));
+    fireEvent.click(screen.getByRole('button', { name: '接口协议' }));
+    fireEvent.click(screen.getByRole('option', { name: 'Responses' }));
+    expect(toggle).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: '续接能力' }));
+    fireEvent.click(screen.getByRole('option', { name: '明确支持' }));
+    expect(toggle).toBeEnabled();
+    fireEvent.click(toggle);
+    fireEvent.click(screen.getByRole('button', { name: '保存服务商' }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith('provider-1', expect.objectContaining({ server_history_enabled: true, server_history_support_override: 'supported' }), { mode: 'unchanged' }));
+    expect(toggle).toBeChecked();
+    expect(screen.getByLabelText('服务地址')).toHaveValue(modelProvider.connection.endpoint);
+    fireEvent.click(screen.getByRole('button', { name: '接口协议' }));
+    fireEvent.click(screen.getByRole('option', { name: 'Chat Completions' }));
+    expect(toggle).toBeDisabled();
+    expect(toggle).not.toBeChecked();
+  });
   it('opens fixed models independently when the local catalog read fails', async () => {
     const store = modelStore();
     vi.mocked(store.settings.loadProviderModelCatalog).mockRejectedValue(new Error('local catalog unavailable'));

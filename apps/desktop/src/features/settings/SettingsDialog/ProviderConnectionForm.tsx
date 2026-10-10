@@ -1,3 +1,4 @@
+import { serverHistorySupport } from "@ez-assistant/protocol";
 import { Button } from "../../../components/Button";
 import { CollapsibleSection } from "../../../components/CollapsibleSection";
 import { InlineIconButton } from "../../../components/InlineIconButton";
@@ -26,7 +27,17 @@ export const ProviderConnectionForm = observer(function ProviderConnectionForm(p
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const busy = settings.pending_action !== null;
   const responses = ["openai", "deepseek", "dashscope_api", "dashscope_plan", "moonshot"].includes(connection.provider_type);
-  function change(patch: Partial<ProviderConnection>) { setConnection((current) => ({ ...current, ...patch })); setDirty(true); }
+  const history_support = serverHistorySupport(connection);
+  const history_reason = history_support === "unknown" ? "尚未确认当前接口支持续接，可在接口选项中声明能力。" : "当前接口不支持服务端历史续接。";
+
+  function change(patch: Partial<ProviderConnection>) {
+    setConnection((current) => {
+      const next = { ...current, ...patch };
+      if (serverHistorySupport(next) !== "supported") next.server_history_enabled = false;
+      return next;
+    });
+    setDirty(true);
+  }
   async function save() {
     const credential: ProviderCredentialChange = clear_secret ? { mode: "clear" } : { mode: "unchanged" };
     const command: ProviderCredentialChange = secret ? { mode: "replace", value: secret } : credential;
@@ -39,7 +50,7 @@ export const ProviderConnectionForm = observer(function ProviderConnectionForm(p
     <form onSubmit={(event) => { event.preventDefault(); void save(); }}>
       <fieldset disabled={busy} className={styles.model_fieldset}><div className={styles.model_form}>
         <label>名称<input placeholder="请输入" autoFocus aria-label="服务商名称" required maxLength={256} value={connection.display_name} onChange={(event) => change({ display_name: event.target.value })} /></label>
-        <ModelFieldSelector disabled={busy} label="服务商类型" value={connection.provider_type} options={Object.entries(provider_labels).map(([value, label]) => ({ value: value as ProviderType, label }))} onChange={(provider_type) => change({ provider_type, ...provider_defaults[provider_type], display_name: !connection.display_name || connection.display_name === provider_labels[connection.provider_type] ? provider_labels[provider_type] : connection.display_name })} />
+        <ModelFieldSelector disabled={busy} label="服务商类型" value={connection.provider_type} options={Object.entries(provider_labels).map(([value, label]) => ({ value: value as ProviderType, label }))} onChange={(provider_type) => change({ provider_type, server_history_support_override: null, ...provider_defaults[provider_type], display_name: !connection.display_name || connection.display_name === provider_labels[connection.provider_type] ? provider_labels[provider_type] : connection.display_name })} />
         <label>服务地址<input aria-label="服务地址" type="url" required maxLength={8192} placeholder="https://…/v1" value={connection.endpoint} onChange={(event) => change({ endpoint: event.target.value })} /></label>
         <div className={styles.form_field}><label htmlFor={secret_id}>API Key</label><span className={styles.secret_field}>
           <input id={secret_id} aria-label="API Key" type={show_secret ? "text" : "password"} autoComplete="off" maxLength={16384} value={secret} disabled={clear_secret} placeholder={props.provider?.has_api_key ? "已设置，留空保持" : "未设置"} onChange={(event) => { setSecret(event.target.value); setDirty(true); }} />
@@ -52,10 +63,15 @@ export const ProviderConnectionForm = observer(function ProviderConnectionForm(p
         <Button type="button" onClick={() => { setClearSecret(!clear_secret); setSecret(""); setShowSecret(false); setDirty(true); }}>{clear_secret ? "取消清除密钥" : "清除密钥"}</Button>
         {clear_secret && <span>保存后清除密钥</span>}
       </div>}
+      <div className={styles.history_policy}><label className={styles.switch}><input aria-label="使用服务端历史续接" type="checkbox" checked={connection.server_history_enabled} disabled={busy || history_support !== "supported"} onChange={(event) => change({ server_history_enabled: event.target.checked })} /><span /><b>使用服务端历史续接</b></label>
+      <p>{history_support === "supported" ? "开启后由服务商保存响应，用于后续增量续接；本地仍保留会话。" : history_reason}</p></div>
       <CollapsibleSection title="接口选项"><div className={styles.model_form}>
         <ModelFieldSelector disabled={busy} label="接口协议" value={connection.protocol_preference} options={[
           { value: "auto", label: "自动" }, { value: "chat_completions", label: "Chat Completions" }, ...(responses ? [{ value: "responses" as const, label: "Responses" }] : []),
         ]} onChange={(protocol_preference) => change({ protocol_preference })} />
+        <ModelFieldSelector disabled={busy} label="续接能力" value={connection.server_history_support_override ?? "default"} options={[
+          { value: "default", label: "使用服务商默认" }, { value: "supported", label: "明确支持" }, { value: "unsupported", label: "明确不支持" },
+        ]} onChange={(value) => change({ server_history_support_override: value === "default" ? null : value })} />
         <label>模型列表接口<input aria-label="模型列表接口" value={connection.models_path} onChange={(event) => change({ models_path: event.target.value })} placeholder="留空使用适配器默认接口" /></label>
 
       </div></CollapsibleSection>

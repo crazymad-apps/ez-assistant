@@ -449,7 +449,12 @@ fn encode_assistant_message(
                     },
                 });
             }
-            // M4 没有 Provider State 映射器；显式失败而不是静默丢弃。
+            AssistantPart::ProviderState(state)
+                if state.state_type() == "responses.continuation" =>
+            {
+                // 仅为请求优化保存的 Responses 链头，不是 Chat 需要回放的内容。
+            }
+            // 其他未知 Provider State 仍显式失败，不能笼统丢弃模型所需内容。
             AssistantPart::ProviderState(state) => {
                 return Err(ModelError::Config(format!(
                     "assistant message contains provider state `{}` that this codec cannot map",

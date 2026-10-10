@@ -24,7 +24,11 @@ export const WebLoginPage = observer(function WebLoginPage({
   return (
     <RuntimeEntryLayout>
       <section className={styles.login} aria-label="Host 登录">
-        {connection.phase !== "login" ? (
+        {connection.update_required ? <div className={styles.form} role="status">
+          <strong>需要更新后继续使用</strong>
+          <p>请联系管理员更新服务。</p>
+          <Button disabled={connection.pending} onClick={() => void connection.retryUpdateConnection()}>重新连接</Button>
+        </div> : connection.phase !== "login" ? (
           <div className={styles.form}>
             <p className={styles.loading} role="status">{connection.error ?? connection.progress ?? "正在连接 Runtime…"}</p>
             {connection.can_retry && connection.error && <Button disabled={connection.pending} onClick={() => void connection.retryInitialization()}>重试初始化</Button>}

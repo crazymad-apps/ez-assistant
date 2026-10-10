@@ -15,6 +15,7 @@ import { SessionActionDialog } from "../../features/sessions/SessionActionDialog
 import { SessionNavigation } from "../../features/sessions/SessionNavigation";
 import { isDraftCustomized } from "../../stores/NewSessionDraftStore";
 import { useRootStore } from "../../stores/RootStoreContext";
+import { PendingNotifications } from "../../features/notifications";
 import styles from "./index.module.scss";
 
 export const SessionHeader = observer(function SessionHeader({ session, sidebar_open, on_toggle_sidebar, on_search }: Readonly<{
@@ -198,6 +199,7 @@ export const SessionHeader = observer(function SessionHeader({ session, sidebar_
         )}
       </div>
       <div className={styles.session_actions}>
+        <PendingNotifications key={store.pending_notifications.scope} />
         <DropdownMenu>
           <DropdownMenuTrigger aria-label="更多会话操作" className={styles.header_icon_button} inlineIcon="more" />
           <DropdownMenuContent aria-label="会话操作" className={styles.session_menu}>

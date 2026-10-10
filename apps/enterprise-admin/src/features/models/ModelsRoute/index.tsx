@@ -7,6 +7,7 @@ import { modelApi } from '../../../request/models';
 import { useResourceQuery } from '../../../request/useResourceQuery';
 import { providerLabels, reasons } from '../model';
 import { DefaultModelDialog } from '../DefaultModelDialog';
+import { PublicOriginDialog } from '../PublicOriginDialog';
 import styles from './index.module.scss';
 
 const read = async (token: string, signal: AbortSignal) => {
@@ -23,6 +24,7 @@ export const ModelsRoute = observer(function ModelsRoute() {
     navigate = useNavigate(),
     { modal, message } = App.useApp();
   const [selecting, setSelecting] = useState(false);
+  const [editingOrigin, setEditingOrigin] = useState(false);
   const data = query.value;
 
   async function reloadTemplates() {
@@ -37,36 +39,52 @@ export const ModelsRoute = observer(function ModelsRoute() {
       {query.error && (
         <Alert type="error" title={query.error} action={<Button onClick={query.reload}>重新读取</Button>} />
       )}
-      <Card title="企业默认模型" loading={!data && query.loading}>
-        <Space wrap>
-          <Typography.Text>{data?.settings.default_model?.model_id ?? '尚未选择默认模型'}</Typography.Text>
-          <Tag color={data?.settings.state === 'ready' ? 'success' : 'warning'}>
-            {data?.settings.state === 'ready' ? '可用' : (reasons[data?.settings.reason ?? 'not_selected'] ?? '不可用')}
-          </Tag>
-          <Button disabled={adminStore.busy || !data} onClick={() => setSelecting(true)}>
-            选择默认模型
-          </Button>
-          <Button
-            disabled={adminStore.busy || !data?.settings.default_model}
-            onClick={() =>
-              modal.confirm({
-                title: '清除默认模型？',
-                content: '新的企业模型请求将不可用，已接纳的流不因本次操作主动中断。',
+      <Card title="公共配置" loading={!data && query.loading}>
+        <div className={styles.settings}>
+          <div className={styles.setting}>
+            <Typography.Text strong>企业默认模型</Typography.Text>
+            <Space wrap>
+              <Typography.Text>{data?.settings.default_model?.model_id ?? '尚未选择默认模型'}</Typography.Text>
+              <Tag color={data?.settings.state === 'ready' ? 'success' : 'warning'}>
+                {data?.settings.state === 'ready'
+                  ? '可用'
+                  : (reasons[data?.settings.reason ?? 'not_selected'] ?? '不可用')}
+              </Tag>
+              <Button disabled={adminStore.busy || !data} onClick={() => setSelecting(true)}>
+                选择默认模型
+              </Button>
+              <Button
+                disabled={adminStore.busy || !data?.settings.default_model}
+                onClick={() =>
+                  modal.confirm({
+                    title: '清除默认模型？',
+                    content: '新的企业模型请求将不可用，已接纳的流不因本次操作主动中断。',
 
-                onOk: async () => {
-                  const error = await adminStore.setDefaultModel(null);
-                  if (error) {
-                    void message.error(error);
-                    throw new Error(error);
-                  }
-                  query.reload();
-                },
-              })
-            }
-          >
-            清除
-          </Button>
-        </Space>
+                    onOk: async () => {
+                      const error = await adminStore.setDefaultModel(null);
+                      if (error) {
+                        void message.error(error);
+                        throw new Error(error);
+                      }
+                      query.reload();
+                    },
+                  })
+                }
+              >
+                清除
+              </Button>
+            </Space>
+          </div>
+          <div className={styles.setting}>
+            <Typography.Text strong>客户端模型访问地址</Typography.Text>
+            <Space wrap>
+              <Typography.Text>{data?.settings.public_origin ?? '尚未配置'}</Typography.Text>
+              <Button disabled={adminStore.busy || !data} onClick={() => setEditingOrigin(true)}>
+                设置地址
+              </Button>
+            </Space>
+          </div>
+        </div>
       </Card>
       <Card
         title="服务商"
@@ -121,6 +139,17 @@ export const ModelsRoute = observer(function ModelsRoute() {
           onSaved={() => {
             setSelecting(false);
             query.reload();
+          }}
+        />
+      )}
+      {editingOrigin && data && (
+        <PublicOriginDialog
+          origin={data.settings.public_origin}
+          onClose={() => setEditingOrigin(false)}
+          onSaved={() => {
+            setEditingOrigin(false);
+            query.reload();
+            void message.success('客户端模型访问地址已保存');
           }}
         />
       )}

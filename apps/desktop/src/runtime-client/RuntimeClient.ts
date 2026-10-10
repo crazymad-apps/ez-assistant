@@ -3,7 +3,7 @@ import { hostCompatibilityError, compatibilityMessage, isCompatibilityCode } fro
 import { TerminalSocket, type TerminalSource, type TerminalSize, type TerminalEvent } from "./TerminalSocket";
 import type {
   HostLoginResult, HostPasswordRequest, HostLogoutResult,
-  ShellKind,
+  ShellKind, UserTerminalShellEntry,
   DeviceGatewayCommand,
   HostAccessCommand,
   HostAccessStatus,
@@ -130,6 +130,10 @@ export class RuntimeClient {
       method: "PUT", body: file,
       headers: { "x-ez-plugin-sha256": sha256, "x-ez-expected-revision": revision },
     }, (response) => response.json() as Promise<PluginConfigFileSnapshot>);
+  }
+
+  listUserTerminalShells(): Promise<readonly UserTerminalShellEntry[]> {
+    return this.resource("/user-terminals/shells", { method: "GET", cache: "no-store" }, (response) => response.json());
   }
 
   openUserTerminal(source: TerminalSource, size: TerminalSize, receive: (event: TerminalEvent) => void, shell: ShellKind | null = null): TerminalSocket {

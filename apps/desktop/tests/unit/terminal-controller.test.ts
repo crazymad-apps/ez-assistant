@@ -11,7 +11,7 @@ const fake = vi.hoisted(() => ({
   write: vi.fn(), dispose: vi.fn(),
 }));
 import type { RuntimeClient } from "../../src/runtime-client/RuntimeClient";
-const client = { command: () => fake.catalog(), openUserTerminal: (source: unknown, size: unknown, receive: unknown, shell: unknown) => {
+const client = { listUserTerminalShells: () => fake.catalog(), openUserTerminal: (source: unknown, size: unknown, receive: unknown, shell: unknown) => {
   let id = "";
   return {
     created: fake.create(source, size, receive, shell).then((created: {terminal_id: string}) => { id = created.terminal_id; return created; }),
@@ -33,21 +33,76 @@ const settle = async () => { await new Promise((resolve) => setTimeout(resolve, 
 
 beforeEach(() => {
   vi.clearAllMocks(); fake.parsed = []; fake.onData = null;
-  fake.catalog.mockResolvedValue({ type: "get_agent_shell_settings", payload: { default_agent_shell: null, catalog: [{ kind: "posix_sh", available: true, reason: null }] } });
-  fake.create.mockImplementation(async (_source, _size, receive, shell) => { fake.receive = receive; return { terminal_id: "pty-1", directory_name: "fixture", shell }; });
+  fake.catalog.mockResolvedValue([{ shell: null, name: "zsh" }, { shell: "posix_sh", name: "sh" }]);
+  fake.create.mockImplementation(async (_source, _size, receive, shell) => { fake.receive = receive; return { terminal_id: "pty-1", directory_name: "fixture", shell: shell ?? "zsh", shell_name: shell ?? "zsh" }; });
   fake.close.mockResolvedValue(undefined); fake.ack.mockResolvedValue(undefined); fake.input.mockResolvedValue(undefined);
   fake.restart.mockResolvedValue(undefined);
 });
 
 describe("user terminal ownership", () => {
+  it("does not open a terminal when the Host changes during catalog discovery", async () => {
+    let resolved!: (value: unknown) => void;
+    fake.catalog.mockImplementationOnce(() => new Promise((resolve) => { resolved = resolve; }));
+    let active: RuntimeClient | null = client;
+    const controller = new TerminalController(source, vi.fn(), false, () => active);
+    active = null;
+    resolved([{ shell: null, name: "zsh" }]);
+    await settle();
+    expect(controller.error).toContain("Host 连接已切换");
+    expect(fake.create).not.toHaveBeenCalled();
+    await controller.close();
+  });
+
+  it("reclaims a creation that finishes after the Host connection changed", async () => {
+    let created!: (value: unknown) => void;
+    fake.create.mockImplementationOnce(() => new Promise((resolve) => { created = resolve; }));
+    let active: RuntimeClient | null = client;
+    const controller = new TerminalController(source, vi.fn(), false, () => active);
+    await settle();
+    active = null;
+    created({ terminal_id: "obsolete-pty", shell: "zsh", shell_name: "zsh" });
+    await settle();
+    expect(fake.close).toHaveBeenCalledWith("obsolete-pty");
+    expect(controller.terminal_id).toBeNull();
+    expect(controller.error).toContain("Host 连接已切换");
+    await controller.close();
+  });
+
+  it("closes a pending catalog request without creating a PTY", async () => {
+    let resolved!: (value: unknown) => void;
+    fake.catalog.mockImplementationOnce(() => new Promise((resolve) => { resolved = resolve; }));
+    const controller = new TerminalController(source, vi.fn(), false, () => client);
+    const closing = controller.close();
+    resolved([{ shell: null, name: "zsh" }]);
+    await closing;
+    expect(fake.create).not.toHaveBeenCalled();
+    expect(controller.status).toBe("closed");
+  });
+
+  it("retains the successful selection if a target disappears before restart", async () => {
+    const controller = new TerminalController(source, vi.fn(), false, () => client);
+    await settle();
+    fake.catalog.mockResolvedValueOnce([{ shell: null, name: "zsh" }]);
+    controller.selectShell("posix_sh");
+    await settle();
+    expect(controller.status).toBe("error");
+    expect(controller.selected_shell).toBeNull();
+    expect(controller.shell_kind).toBe("zsh");
+    expect(fake.close).not.toHaveBeenCalled();
+    expect(fake.create).toHaveBeenCalledTimes(1);
+    controller.selectShell(null);
+    await settle();
+    expect(controller.status).toBe("running");
+    await controller.close();
+  });
+
   it("opens the platform default immediately and switches only after the old PTY closes", async () => {
-    fake.catalog.mockResolvedValue({ payload: { default_agent_shell: "cmd", catalog: [
-      { kind: "windows_powershell_51", available: true }, { kind: "cmd", available: true },
-      { kind: "git_bash", available: false },
-    ] } });
+    fake.catalog.mockResolvedValue([{ shell: null, name: "powershell.exe" },
+      { shell: "windows_powershell_51", name: "powershell.exe" }, { shell: "cmd", name: "cmd.exe" },
+    ]);
     fake.create.mockImplementation(async (_source, _size, receive, shell) => {
       fake.receive = receive;
-      return { terminal_id: shell ? "pty-2" : "pty-1", shell: shell ?? "windows_powershell_51" };
+      return { terminal_id: shell ? "pty-2" : "pty-1", shell: shell ?? "windows_powershell_51", shell_name: shell ? "cmd.exe" : "powershell.exe" };
     });
     const exited = vi.fn();
     const controller = new TerminalController(source, exited, false, () => client);
@@ -55,6 +110,7 @@ describe("user terminal ownership", () => {
     expect(controller.status).toBe("running");
     expect(fake.create).toHaveBeenLastCalledWith(source, expect.anything(), expect.any(Function), null);
     expect(controller.shell_kind).toBe("windows_powershell_51");
+    expect(controller.selected_shell).toBeNull();
     controller.selectShell("git_bash");
     expect(fake.create).toHaveBeenCalledTimes(1);
     let cleaned!: () => void;
@@ -70,11 +126,17 @@ describe("user terminal ownership", () => {
     expect(controller.shell_kind).toBe("cmd");
     expect(controller.status).toBe("running");
     expect(fake.create).toHaveBeenLastCalledWith(source, expect.anything(), expect.any(Function), "cmd");
+    expect(controller.selected_shell).toBe("cmd");
+    controller.selectShell(null);
+    await settle();
+    expect(fake.create).toHaveBeenLastCalledWith(source, expect.anything(), expect.any(Function), null);
+    expect(controller.selected_shell).toBeNull();
+    expect(controller.shell_kind).toBe("windows_powershell_51");
     await controller.close();
   });
 
   it("does not create the replacement if cleanup fails", async () => {
-    fake.catalog.mockResolvedValue({ payload: { catalog: [{ kind: "cmd", available: true }] } });
+    fake.catalog.mockResolvedValue([{ shell: null, name: "zsh" }, { shell: "cmd", name: "cmd.exe" }]);
     const controller = new TerminalController(source, vi.fn(), false, () => client);
     await settle();
     fake.close.mockRejectedValueOnce(new Error("cleanup failed"));

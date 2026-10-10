@@ -14,8 +14,8 @@ use axum::{
 
 use super::{
     HttpState, MAX_COMMAND_BYTES, attachments, auth, capabilities, commands, compatibility,
-    ensure_ready, events, health, login, materializations, plugin_config, plugin_upload, resources,
-    terminals, web,
+    desktop_update_context, ensure_ready, events, health, login, materializations, plugin_config,
+    plugin_upload, resources, terminals, web,
 };
 
 pub(crate) fn router(state: HttpState) -> Router {
@@ -61,6 +61,7 @@ pub(crate) fn router(state: HttpState) -> Router {
 
     // 上传由 handler 按流入字节执行 MAX_ATTACHMENT_BYTES 限制；不能先整体读入内存。
     let files = Router::new()
+        .route("/user-terminals/shells", get(terminals::shells))
         .route("/host-files/list", post(resources::list_host_files))
         .route(
             "/host-files/select-directory",
@@ -174,6 +175,10 @@ pub(crate) fn router(state: HttpState) -> Router {
         .route(
             "/auth/login",
             post(login::login).layer((version, request_body.clone(), DefaultBodyLimit::max(4096))),
+        )
+        .route(
+            "/desktop-update-context",
+            get(desktop_update_context).layer((request_body.clone(), response_body.clone())),
         )
         .route(
             "/capabilities",

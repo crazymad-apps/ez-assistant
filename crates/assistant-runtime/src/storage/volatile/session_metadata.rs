@@ -185,6 +185,7 @@ impl VolatileRuntimeStore {
             if session.lifecycle != StoredSessionLifecycle::Active {
                 return Err(conflict("session is archived"));
             }
+            session.server_history_key = change.server_history_key;
             session.model_selection = change.model_selection;
             session.reasoning_effort = change.reasoning_effort;
             Ok(())
@@ -205,6 +206,7 @@ impl VolatileRuntimeStore {
                 return Err(conflict("session is archived"));
             }
             session.reasoning_effort = change.reasoning_effort;
+            session.server_history_key = change.server_history_key;
             Ok(())
         })
     }

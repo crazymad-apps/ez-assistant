@@ -16,6 +16,8 @@ export function PageBreadcrumb() {
     items.push({ title: <Link to="/agents">智能体管理</Link> });
   if (heading?.menu === '/plugins' && heading.title !== '插件管理')
     items.push({ title: <Link to="/plugins">插件管理</Link> });
+  if (heading?.menu === '/desktop-releases' && heading.title !== '安装包')
+    items.push({ title: <Link to="/desktop-releases">安装包</Link> });
   items.push({ title: <>{heading?.title}</> });
   return <Breadcrumb className={styles.breadcrumb} items={items} />;
 }

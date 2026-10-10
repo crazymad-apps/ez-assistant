@@ -198,6 +198,10 @@ pub(crate) fn compile_managed_model(
     if provider.provider_instance_id != selection.provider_instance_id {
         return Err(invalid("模型选择与服务商实例不匹配。"));
     }
+    // 恢复的配置也必须满足启用条件，不能仅依赖设置写入时的校验。
+    if provider.connection.server_history_enabled {
+        super::validation::validate_connection(&provider.connection)?;
+    }
     let validated = crate::validate_fixed_model_parameters(parameters)
         .map_err(|_| invalid("模型参数不完整或数值、能力组合无效，请编辑固定配置。"))?;
     let protocol = resolve_provider_protocol(&provider.connection)?;
@@ -291,6 +295,17 @@ pub(crate) fn compile_managed_model(
             .map_or(output, |budget| budget.min(output)),
     );
     Ok(ResolvedModelConfig {
+        server_history_key: if provider.connection.server_history_enabled {
+            Some(
+                provider
+                    .server_history_key
+                    .clone()
+                    .filter(|key| !key.is_empty())
+                    .ok_or_else(|| invalid("续接连接缺少可靠绑定。"))?,
+            )
+        } else {
+            None
+        },
         external_configuration: None,
         display_name: selection.model_id.clone(),
         protocol,

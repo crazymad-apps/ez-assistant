@@ -44,6 +44,10 @@
   2026-09-28 用户批准 Desktop 通知模块的只读前台查询局部 FFI：
   `system_notification/windows.rs::is_focused`。只同步读取前台窗口和所属 PID，
   不保存或关闭借用 HWND、不创建线程、不修改窗口或系统设置；不扩展到其他函数。
+  2026-10-02 用户确认 F01 技术方案中的 Windows 启动命名 mutex：
+  `desktop_update/windows.rs::StartupGuard::acquire` 与 `Drop` 允许局部 FFI，
+  仅同步获取/释放启动锁，`OwnedHandle` 关闭句柄，`!Send` 保证同线程释放；
+  不新增通知或窗口消息 FFI，正式单实例及唤起仍由已锁定版本的插件承载。
   其他代码不得借此增加 unsafe，其他 workspace 成员仍继承 `forbid`。
 
 ## 三、Workspace、package 与依赖

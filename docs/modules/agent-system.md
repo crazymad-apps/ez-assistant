@@ -307,7 +307,7 @@ pub trait ExecutionRecorder: Send + Sync {
 ```
 
 Runtime 的实现可以在内部持有 `RunId`、`SessionId`、事务和存储连接；这些信息不进入 Core 接口。
-begin 产生的 pending exchange 是可恢复写前事实，不直接进入规范快照；complete 必须原子写入整批 ToolResult 并转为 completed。Runtime 恢复 pending 时先补齐 interrupted/unknown 结果，任何 `ConversationSnapshot` 都不得暴露未配对调用。
+begin 产生的 pending exchange 是可恢复写前事实，不直接进入规范快照；complete 必须原子写入整批 ToolResult 并转为 completed。正常取消时，Core 等待工具清理并保留已返回结果，仅为尚无结果的调用补 interrupted；可靠闭合后取消终止，不继续模型调用。Runtime 异常恢复 pending 时仍按 started 事实补齐 interrupted/unknown，不从文件现状或观察事件推测结果。任何 `ConversationSnapshot` 都不得暴露未配对调用。
 
 发生工具副作用前必须完成：
 
@@ -681,3 +681,11 @@ fake authorizer 和确定性时钟，不依赖真实 Provider 的偶然输出。
 
 普通或主控会话执行 `/skill refresh` 时，Runtime 在控制队列边界扫描并提交结果，结果正文提供当时的可用目录，不替换系统提示词。扫描失败显示失败。
 `/skill` 和上下文技能列表每次进入读取当前目录，`/mcp` 查询当前服务 Registry。会话不持有目录快照或历史目录；Activation 随消息保存，恢复不依赖当前文件。
+
+
+### v0.29.0 MCP 目录刷新与压缩恢复
+
+MCP refresh 将刷新结果和目录提交为不触发 Run 的 user-role 消息；默认目录不再每 Run 临时追加。
+压缩后丢失的目录和 Shell 环境由 Runtime 在压缩点后的有效上下文中生成新的可靠内部消息，与
+replacement 原子提交。它是恢复能力事实，不是移动或改写历史消息，也不放宽完整工具交换、原样
+保留尾部或严格缩小约束。具体生命周期见 assistant-runtime 模块的 F06 修正说明。

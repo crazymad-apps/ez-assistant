@@ -30,7 +30,7 @@ use super::{ModelFailureDiagnostics, RunModelDiagnostics, is_active_run};
 /// Core 执行结果规范化后的候选终态，尚未表示 Store 已提交。
 pub(super) struct RunSettlement {
     pub(super) status: RunStatus,
-    pub(super) reasoning: Option<String>,
+    pub(super) reasoning: Option<Vec<assistant_protocol::ReasoningPartSnapshot>>,
     pub(super) text: Option<String>,
     pub(super) error: Option<RuntimeErrorInfo>,
 }
@@ -768,11 +768,13 @@ fn goal_effect_summary(effect: &StoredGoalSettlementEffect) -> String {
 /// Tool Call 与 Provider State 仍只存在于规范消息；Run 投影只聚合可展示 reasoning 和 text，不建立
 /// 第二份可恢复 Conversation。
 fn completed_settlement(message: &AssistantMessage) -> RunSettlement {
-    let mut reasoning = String::new();
+    let mut reasoning = Vec::new();
     let mut text = String::new();
     for part in &message.parts {
         match part {
-            AssistantPart::Reasoning(part) => reasoning.push_str(&part.text),
+            AssistantPart::Reasoning(part) => {
+                reasoning.push(super::project_reasoning_part(part));
+            }
             AssistantPart::Text(part) => text.push_str(&part.text),
             AssistantPart::ToolCall(_) | AssistantPart::ProviderState(_) => {}
         }

@@ -1176,6 +1176,10 @@ pub struct GetSystemContextResult {
 #[ts(export_to = "assistant-protocol.ts")]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum RuntimeCommand {
+    GetFeedbackSupport {},
+    SubmitFeedback(crate::SubmitFeedbackRequest),
+    ListSubmittedFeedback(crate::ListSubmittedFeedbackRequest),
+    GetSubmittedFeedback(crate::GetSubmittedFeedbackRequest),
     ListFeedbackRequests(crate::ListFeedbackRequestsRequest),
     AnswerFeedback(crate::AnswerFeedbackRequest),
     CancelFeedback(crate::CancelFeedbackRequest),
@@ -1382,6 +1386,10 @@ pub enum RuntimeCommand {
 #[ts(export_to = "assistant-protocol.ts")]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum RuntimeCommandResult {
+    GetFeedbackSupport(crate::FeedbackResponse<crate::FeedbackSupport>),
+    SubmitFeedback(crate::FeedbackResponse<crate::SubmittedFeedback>),
+    ListSubmittedFeedback(crate::FeedbackResponse<crate::SubmittedFeedbackPage>),
+    GetSubmittedFeedback(crate::FeedbackResponse<crate::SubmittedFeedback>),
     ListFeedbackRequests(Vec<crate::FeedbackRequestSnapshot>),
     AnswerFeedback(crate::FeedbackRequestSnapshot),
     CancelFeedback(crate::FeedbackRequestSnapshot),
@@ -1595,7 +1603,7 @@ mod tests {
             cancel_requested: false,
             active_step: None,
             model_request: None,
-            reasoning: String::new(),
+            reasoning_parts: Vec::new(),
             text: String::new(),
             tools: Vec::new(),
             error: None,

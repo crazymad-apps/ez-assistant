@@ -1,7 +1,11 @@
 //! 每用户一份当前中心凭据；与客户端登录共享同一提交锁，不把凭据绑定到任务。
 
+/// 实际准入和随包构建声明使用同一协议集合，避免发布脚本维护另一份兼容表。
+pub(crate) const SUPPORTED_PROTOCOLS: &[u32] = &[2];
+
 mod agents;
 pub(crate) mod client;
+pub(crate) mod feedback;
 mod models;
 #[cfg(test)]
 mod tests;
@@ -115,38 +119,38 @@ pub(super) struct UserState {
 }
 
 impl Credentials {
+    /// 在同一锁内取得当前登录代际及撤销域；调用者不得持锁进行网络 I/O。
+    fn current_center_login(
+        &self,
+        key: &UserKey,
+    ) -> Result<(Arc<CenterLogin>, CancellationToken), CenterError> {
+        let state = self.state.lock().expect("credential state poisoned");
+        let user = state
+            .users
+            .get(key)
+            .ok_or(CenterError::InvalidCredentials)?;
+        if user.connections.is_cancelled() {
+            return Err(CenterError::Unavailable);
+        }
+        Ok((user.login.clone(), user.connections.clone()))
+    }
     pub(crate) fn current_agent_center(
         &self,
         key: &UserKey,
     ) -> Result<(CenterClient, SecretValue, String), AccessError> {
-        let state = self.state.lock().expect("credential state poisoned");
-        let user = state
-            .users
-            .get(key)
-            .ok_or(CenterError::InvalidCredentials)?;
-        if user.connections.is_cancelled() {
-            return Err(CenterError::Unavailable.into());
-        }
+        let (login, _) = self.current_center_login(key)?;
         Ok((
-            user.login.client.clone(),
-            user.login.token.clone(),
-            user.identity.center_id.clone(),
+            login.client.clone(),
+            login.token.clone(),
+            key.center_id.clone(),
         ))
     }
-
     pub(crate) fn current_plugin_center(
         &self,
         key: &UserKey,
     ) -> Result<(CenterClient, SecretValue), AccessError> {
-        let state = self.state.lock().expect("credential state poisoned");
-        let user = state
-            .users
-            .get(key)
-            .ok_or(CenterError::InvalidCredentials)?;
-        if user.connections.is_cancelled() {
-            return Err(CenterError::Unavailable.into());
-        }
-        Ok((user.login.client.clone(), user.login.token.clone()))
+        let (login, _) = self.current_center_login(key)?;
+        Ok((login.client.clone(), login.token.clone()))
     }
     /// 用户域只捕获访问取消和活动观察句柄，绝不捕获逐登录的 Center 凭据。
     pub(crate) fn domain_access(

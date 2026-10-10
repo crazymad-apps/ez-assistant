@@ -238,7 +238,7 @@ fn map_recall_error(error: MemoryRecallError) -> ToolError {
         MemoryRecallError::SourceUnavailable => {
             stable_recall_error("recall source is unavailable", "recall_source_unavailable")
         }
-        // Core 在全局取消后不会把这条文本回喂模型；该分支只保持错误映射完备。
+        // Core 在全局取消后保存已返回的结果，但本次执行不再继续模型调用。
         MemoryRecallError::Cancelled => ToolError::execution("memory recall cancelled"),
     }
 }

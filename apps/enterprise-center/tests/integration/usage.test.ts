@@ -70,7 +70,7 @@ it('代理用量与正文策略独立，联合模型维度和调用明细一致'
       const provider = await api('POST', 'model-providers', {
         connection: { display_name: name, provider_type: 'openai',
           endpoint: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/v1`,
-          protocol_preference: 'responses', models_path: '', discovery_format: 'openai' },
+          protocol_preference: 'responses', models_path: '', discovery_format: 'openai', server_history_enabled: false, server_history_support_override: null },
         credential: { mode: 'replace', value: 'test-secret' },
       });
       const selection = { provider_instance_id: provider.provider_instance_id as string, model_id: 'gpt-6-astra' };
@@ -88,7 +88,7 @@ it('代理用量与正文策略独立，联合模型维度和调用明细一致'
     const first = await createProvider('渠道 A');
     const second = await createProvider('渠道 B');
     const invoke = async (providerId: string, expectedStatus = 200) => {
-      const raw = '{"model":"gpt-6-astra","input":"hello","stream":false}';
+      const raw = '{"model":"gpt-6-astra","store":false,"input":"hello","stream":false}';
       const response = await fetch(`${endpoint}/api/llm/providers/${providerId}/v1/responses`, {
         method: 'POST', headers: { authorization: `Bearer ${credentials.llm_key}`, 'content-type': 'application/json' }, body: raw,
       });

@@ -1,0 +1,162 @@
+[
+  {
+    "name": "official",
+    "connection": {
+      "display_name": "Fixture",
+      "provider_type": "openai",
+      "endpoint": "https://api.openai.com/v1",
+      "protocol_preference": "auto",
+      "models_path": "",
+      "discovery_format": "openai"
+    },
+    "expected": "supported"
+  },
+  {
+    "name": "chat",
+    "connection": {
+      "display_name": "Fixture",
+      "provider_type": "openai",
+      "endpoint": "https://api.openai.com/v1",
+      "protocol_preference": "chat_completions",
+      "models_path": "",
+      "discovery_format": "openai",
+      "server_history_support_override": "supported"
+    },
+    "expected": "unsupported"
+  },
+  {
+    "name": "custom",
+    "connection": {
+      "display_name": "Fixture",
+      "provider_type": "openai",
+      "endpoint": "https://proxy.test/v1",
+      "protocol_preference": "auto",
+      "models_path": "",
+      "discovery_format": "openai"
+    },
+    "expected": "unknown"
+  },
+  {
+    "name": "custom-explicit",
+    "connection": {
+      "display_name": "Fixture",
+      "provider_type": "openai",
+      "endpoint": "https://proxy.test/v1",
+      "protocol_preference": "auto",
+      "models_path": "",
+      "discovery_format": "openai",
+      "server_history_support_override": "supported"
+    },
+    "expected": "supported"
+  },
+  {
+    "name": "official-disabled",
+    "connection": {
+      "display_name": "Fixture",
+      "provider_type": "openai",
+      "endpoint": "https://api.openai.com/v1",
+      "protocol_preference": "auto",
+      "models_path": "",
+      "discovery_format": "openai",
+      "server_history_support_override": "unsupported"
+    },
+    "expected": "unsupported"
+  },
+  {
+    "name": "spoof",
+    "connection": {
+      "display_name": "Fixture",
+      "provider_type": "openai",
+      "endpoint": "https://api.openai.com.evil.test/v1",
+      "protocol_preference": "auto",
+      "models_path": "",
+      "discovery_format": "openai"
+    },
+    "expected": "unknown"
+  },
+  {
+    "name": "qwen",
+    "connection": {
+      "display_name": "Fixture",
+      "provider_type": "dashscope_api",
+      "endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1/",
+      "protocol_preference": "auto",
+      "models_path": "",
+      "discovery_format": "openai"
+    },
+    "expected": "supported"
+  },
+  {
+    "name": "qwen-workspace",
+    "connection": {
+      "display_name": "Fixture",
+      "provider_type": "dashscope_api",
+      "endpoint": "https://12345.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+      "protocol_preference": "auto",
+      "models_path": "",
+      "discovery_format": "openai"
+    },
+    "expected": "supported"
+  },
+  {
+    "name": "qwen-userinfo",
+    "connection": {
+      "display_name": "Fixture",
+      "provider_type": "dashscope_api",
+      "endpoint": "https://secret@12345.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+      "protocol_preference": "auto",
+      "models_path": "",
+      "discovery_format": "openai"
+    },
+    "expected": "unknown"
+  },
+  {
+    "name": "qwen-legacy",
+    "connection": {
+      "display_name": "Fixture",
+      "provider_type": "dashscope_api",
+      "endpoint": "https://dashscope.aliyuncs.com/api/v2/apps/protocols/compatible-mode/v1",
+      "protocol_preference": "auto",
+      "models_path": "",
+      "discovery_format": "openai"
+    },
+    "expected": "unknown"
+  },
+  {
+    "name": "qwen-custom",
+    "connection": {
+      "display_name": "Fixture",
+      "provider_type": "dashscope_api",
+      "endpoint": "https://proxy.test/compatible-mode/v1",
+      "protocol_preference": "auto",
+      "models_path": "",
+      "discovery_format": "openai"
+    },
+    "expected": "unknown"
+  },
+  {
+    "name": "moonshot",
+    "connection": {
+      "display_name": "Fixture",
+      "provider_type": "moonshot",
+      "endpoint": "https://api.openai.com/v1",
+      "protocol_preference": "auto",
+      "models_path": "",
+      "discovery_format": "openai"
+    },
+    "expected": "unsupported"
+  },
+  {
+    "name": "local-explicit",
+    "connection": {
+      "display_name": "Fixture",
+      "provider_type": "local",
+      "endpoint": "https://api.openai.com/v1",
+      "protocol_preference": "auto",
+      "models_path": "",
+      "discovery_format": "openai",
+      "server_history_support_override": "supported"
+    },
+    "expected": "unsupported"
+  }
+]

@@ -429,6 +429,7 @@ impl AssistantRuntime {
                 (projection, queue_revision)
             };
         self.publish(assistant_protocol::RuntimeEvent::RunAccepted {
+            created_at_ms: projection.run.created_at_ms,
             session_id: session.id().clone(),
             run_id: projection.run.run_id.clone(),
         });

@@ -58,6 +58,9 @@ pub enum ModelError {
         /// Provider 的 HTTP 状态码；非 HTTP 协议为 `None`。
         status: Option<u16>,
     },
+    /// 已发送的远端续接 ID 被明确拒绝；仅建流前可由宿主决定一次完整重建。
+    #[error("previous model response is unavailable")]
+    HistoryUnavailable,
     /// Provider 对当前请求实施限流。
     #[error("provider rate limited the request: {message}")]
     RateLimited {

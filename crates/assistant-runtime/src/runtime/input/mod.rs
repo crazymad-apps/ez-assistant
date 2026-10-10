@@ -66,25 +66,79 @@ struct QueueDriverContext {
     tasks: Arc<super::tasks::RuntimeTasks>,
 }
 
-fn with_disclosure_context(
-    mut conversation: agent_types::ConversationSnapshot,
-    context: Option<&agent_types::UserMessage>,
-    shell_context: Option<&agent_types::UserMessage>,
-    resources: &super::resource_reference::ResourceReferenceProjection,
-) -> agent_types::ConversationSnapshot {
-    if let Some(shell_context) = shell_context
-        && !crate::shell::context_is_current(&conversation, shell_context)
-    {
-        conversation
-            .messages
-            .push(ConversationMessage::User(shell_context.clone()));
+/// 已提交 Input 的重试/历史重入可能尚无能力上下文；在现有活动 Run 中先可靠追加再调用模型。
+/// 调用方持有 Session mutation gate，且 commit_user_message 已成功；失败交给队列 fault/recovery，
+/// 不改写旧输入、不创建新 Run，Store 成功后才同步 Journal 与 Run 消息引用。
+async fn persist_recovered_context(
+    context: &QueueDriverContext,
+    session: &SessionController,
+    run_id: &assistant_protocol::RunId,
+    mcp: Option<&agent_types::UserMessage>,
+    shell: Option<&agent_types::UserMessage>,
+) -> RuntimeResult<()> {
+    let snapshot = session
+        .lock_state()?
+        .journal
+        .as_ref()
+        .ok_or(RuntimeError::InternalStateUnavailable {
+            component: "recovered context journal",
+        })?
+        .snapshot();
+    let mut messages = Vec::new();
+    for message in [mcp, shell].into_iter().flatten() {
+        if !crate::internal_boundary::InternalBoundaryCoordinator::context_is_current(
+            &snapshot, message,
+        ) {
+            messages.push(ConversationMessage::User(message.clone()));
+        }
     }
-    if let Some(context) = context {
-        conversation
-            .messages
-            .push(ConversationMessage::User(context.clone()));
+    if messages.is_empty() {
+        return Ok(());
     }
-    resources.apply(conversation)
+    context
+        .store
+        .commit_run_continuation(crate::StoredRunContinuation {
+            operation_id: crate::id::generate("append").map_err(|_| {
+                RuntimeError::InternalStateUnavailable {
+                    component: "recovered context identity",
+                }
+            })?,
+            run_id: run_id.clone(),
+            session_id: session.id().clone(),
+            messages: messages.clone(),
+            message_step: 1,
+            goal_effect: None,
+            committed_at_ms: super::now_ms()?,
+        })
+        .await
+        .map_err(|source| RuntimeError::from_store("restore run context", source))?;
+    let mut state = session.lock_state()?;
+    for message in messages {
+        let ConversationMessage::User(user) = &message else {
+            unreachable!();
+        };
+        let id = user.id.clone();
+        state
+            .journal
+            .as_mut()
+            .ok_or(RuntimeError::InternalStateUnavailable {
+                component: "recovered context projection",
+            })?
+            .append_completed(message)
+            .map_err(|_| RuntimeError::InternalStateUnavailable {
+                component: "recovered context projection",
+            })?;
+        state.persisted_message_count += 1;
+        state.message_count += 1;
+        state
+            .runs
+            .get_mut(run_id)
+            .ok_or(RuntimeError::InternalStateUnavailable {
+                component: "recovered context run",
+            })?
+            .extend_message_ids_at_step([id], 1);
+    }
+    Ok(())
 }
 
 impl AssistantRuntime {
@@ -358,7 +412,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     attachments: context.attachments.clone(),
                     shell,
                     skill_catalog,
-                    model_factory: context.model_factory.as_ref(),
+                    model_factory: context.model_factory.clone(),
                     context_window: context.context_window.clone(),
                     run_tool_factory: context.run_tool_factory.as_ref(),
                     child_task_workspace_factory: context.child_task_workspace_factory.clone(),
@@ -455,11 +509,14 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
             Ok((compiled, leases))
         });
         let start_error = match prepared {
-            Ok((compiled, _plugin_leases)) => {
+            Ok((compiled, plugin_leases)) => {
+                // 目录正文已完成装配；租约只保护装配，不因目录含插件锁住整个 Run。
+                drop(plugin_leases);
                 let super::model::CompiledRunParts {
                     shell,
                     model_binding,
-                    agent,
+                    mut agent,
+                    history_model_binding,
                     authorizer,
                     compactor,
                     reasoning_effort,
@@ -504,7 +561,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                 } else {
                     None
                 };
-                // 首次或环境变化随用户消息一起落账；恢复/压缩续接仍从本 Run 快照补回缺失事实。
+                // 首次或环境变化随用户消息一起落账；压缩恢复由 replacement 原子提交。
                 if let (Some(message), Some(shell_context)) = (&mut message, &shell_context) {
                     let current = match session.lock_state() {
                         Ok(state) => state.journal.as_ref().is_some_and(|journal| {
@@ -517,6 +574,20 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     };
                     if !current {
                         message.parts.extend(shell_context.parts.iter().cloned());
+                    }
+                }
+                if let (Some(message), Some(disclosure)) = (&mut message, &disclosure_context) {
+                    let needs_disclosure = match session.lock_state() {
+                        Ok(state) => state.journal.as_ref().is_some_and(|journal| {
+                            crate::mcp::needs_initial_disclosure(&journal.snapshot(), disclosure)
+                        }),
+                        Err(_) => {
+                            fault_driver(&session);
+                            return;
+                        }
+                    };
+                    if needs_disclosure {
+                        message.parts.extend(disclosure.parts.iter().cloned());
                     }
                 }
                 if next.1.stored.agent_shell_target.is_some()
@@ -645,18 +716,39 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                         .snapshot();
                     (
                         ExecutionInput {
-                            conversation: with_disclosure_context(
-                                conversation,
-                                disclosure_context.as_ref(),
-                                shell_context.as_ref(),
-                                &resource_projection,
-                            ),
+                            conversation: resource_projection.apply(conversation),
                         },
                         cancellation,
                         queue_revision,
                         state.body_generation,
                     )
                 };
+                if next.1.stored.state == StoredInputState::Committed {
+                    if persist_recovered_context(
+                        &context,
+                        &session,
+                        &next.2.run_id,
+                        disclosure_context.as_ref(),
+                        shell_context.as_ref(),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        fault_driver(&session);
+                        return;
+                    }
+                    input.conversation = resource_projection.apply(match session.lock_state() {
+                        Ok(state) => state
+                            .journal
+                            .as_ref()
+                            .expect("loaded conversation")
+                            .snapshot(),
+                        Err(_) => {
+                            fault_driver(&session);
+                            return;
+                        }
+                    });
+                }
                 let _ = context.events.send(RuntimeEvent::ConversationCommitted {
                     owner: ConversationOwner::MainSession {
                         session_id: session.id().clone(),
@@ -805,12 +897,8 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                                     let Some(continued_input) =
                                         session.lock_state().ok().and_then(|state| {
                                             state.journal.as_ref().map(|journal| ExecutionInput {
-                                                conversation: with_disclosure_context(
-                                                    journal.snapshot(),
-                                                    disclosure_context.as_ref(),
-                                                    shell_context.as_ref(),
-                                                    &resource_projection,
-                                                ),
+                                                conversation: resource_projection
+                                                    .apply(journal.snapshot()),
                                             })
                                         })
                                     else {
@@ -860,12 +948,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     let Some(reason) = compaction_reason else {
                         input = match session.lock_state().ok().and_then(|state| {
                             state.journal.as_ref().map(|journal| ExecutionInput {
-                                conversation: with_disclosure_context(
-                                    journal.snapshot(),
-                                    disclosure_context.as_ref(),
-                                    shell_context.as_ref(),
-                                    &resource_projection,
-                                ),
+                                conversation: resource_projection.apply(journal.snapshot()),
                             })
                         }) {
                             Some(input) => input,
@@ -918,13 +1001,24 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     .await
                     {
                         Ok(replacement) => {
+                            // Store 换代可靠完成后才为同一 Run 派生新绑定；沿用一次恢复额度与预算。
+                            if let Some(binding) = &history_model_binding {
+                                let generation = match session.lock_state() {
+                                    Ok(state) => state.body_generation,
+                                    Err(_) => break (None, None),
+                                };
+                                let rebound = binding.compile_main(generation).and_then(|model| {
+                                    agent.try_with_model(model).map_err(|source| {
+                                        crate::RuntimeError::AgentBuildFailed { source }
+                                    })
+                                });
+                                match rebound {
+                                    Ok(updated) => agent = updated,
+                                    Err(_) => break (None, None),
+                                }
+                            }
                             input = ExecutionInput {
-                                conversation: with_disclosure_context(
-                                    replacement,
-                                    disclosure_context.as_ref(),
-                                    shell_context.as_ref(),
-                                    &resource_projection,
-                                ),
+                                conversation: resource_projection.apply(replacement),
                             };
                         }
                         Err(error) if error.is_cancelled() || cancellation.is_cancelled() => {
@@ -1329,6 +1423,7 @@ async fn fail_before_start(
     let _ = context
         .events
         .send(assistant_protocol::RuntimeEvent::RunFinished {
+            finished_at_ms: Some(finished_at),
             session_id: session.id().clone(),
             run_id: run_id.clone(),
             status: RunStatus::Failed,

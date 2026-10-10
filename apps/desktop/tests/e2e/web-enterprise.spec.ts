@@ -36,7 +36,7 @@ const center = createServer(async (request, response) => {
   response.setHeader('Content-Type', 'application/json');
   if (request.url === '/api/info')
     return response.end(
-      JSON.stringify({ protocol_version: 1, min_protocol_version: 1, capabilities: ['managed_models', 'llm_proxy'] }),
+      JSON.stringify({ protocol_version: 2, min_protocol_version: 2, capabilities: ['managed_models', 'llm_proxy'] }),
     );
   if (request.url === '/api/auth/login' && body.password === 'fixture-password') {
     const id = body.username === 'alice' ? 1 : 2;
@@ -122,10 +122,10 @@ async function login(page: Page, username: string) {
   await page.getByLabel('企业账号', { exact: true }).fill(username);
   await page.getByLabel('账号密码', { exact: true }).fill('fixture-password');
   await page.getByRole('button', { name: '进入项目' }).click();
-  await expect(page.locator('[data-app-title-bar]')).toBeVisible();
+  await expect(page.getByRole('button', { name: '账号与 Runtime', exact: true })).toContainText(username === 'alice' ? 'Alice' : 'Bob');
 }
 async function logout(page: Page, user: string, cancel = false) {
-  await page.getByRole('button', { name: user, exact: true }).click();
+  await page.getByRole('button', { name: '账号与 Runtime', exact: true }).filter({ hasText: user }).click();
   await page.getByRole('menuitem', { name: '退出登录' }).click();
   await expect(page.getByRole('dialog', { name: '确认退出登录' })).toContainText('所有任务');
   await page.getByRole('button', { name: cancel ? '取消' : '中断所有任务并退出', exact: true }).click();
@@ -210,10 +210,10 @@ test('企业登录、阻塞重试、改密、退出取消与多浏览器隔离',
   await expect(page.getByRole('button', { name: '重试初始化' })).toBeVisible();
   expect(readiness).toBe(1);
   await page.getByRole('button', { name: '重试初始化' }).click();
-  await expect(page.getByRole('button', { name: 'Alice', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '账号与 Runtime', exact: true }).filter({ hasText: 'Alice' })).toBeVisible();
   await login(bob, 'bob');
-  await page.getByRole('button', { name: 'Alice', exact: true }).click();
-  await expect(page.getByRole('menuitem')).toHaveText(['修改密码', '退出登录']);
+  await page.getByRole('button', { name: '账号与 Runtime', exact: true }).filter({ hasText: 'Alice' }).click();
+  await expect(page.getByRole('menuitem')).toHaveText(['设置', '修改密码', '退出登录']);
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await page.getByRole('menuitem', { name: '修改密码', exact: true }).click();
   await page.getByLabel('当前密码', { exact: true }).fill('fixture-password');
@@ -227,12 +227,12 @@ test('企业登录、阻塞重试、改密、退出取消与多浏览器隔离',
   const before = logout_count;
   await logout(page, 'Alice', true);
   expect(logout_count).toBe(before);
-  await expect(page.getByRole('button', { name: 'Alice', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '账号与 Runtime', exact: true }).filter({ hasText: 'Alice' })).toBeVisible();
   await page.reload();
-  await expect(page.getByRole('button', { name: 'Alice', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '账号与 Runtime', exact: true }).filter({ hasText: 'Alice' })).toBeVisible();
   await logout(page, 'Alice');
   await expect(page.getByLabel('企业账号', { exact: true })).toBeVisible();
-  await expect(bob.getByRole('button', { name: 'Bob', exact: true })).toBeVisible();
+  await expect(bob.getByRole('button', { name: '账号与 Runtime', exact: true }).filter({ hasText: 'Bob' })).toBeVisible();
   await bob.screenshot({ path: info.outputPath('enterprise-bob.png') });
   expect(errors).toEqual([]);
   await a.close();
@@ -245,7 +245,7 @@ test('同源标签页与快捷 Token 换号后重新核验且清除旧投影', a
   await login(first, 'alice');
   const second = await context.newPage();
   await second.goto(address);
-  await expect(second.getByRole('button', { name: 'Alice', exact: true })).toBeVisible();
+  await expect(second.getByRole('button', { name: '账号与 Runtime', exact: true }).filter({ hasText: 'Alice' })).toBeVisible();
   const issued = await fetch(`${address}/auth/login`, {
     method: 'POST',
     headers: { ...compatibilityHeaders(), 'Content-Type': 'application/json' },
@@ -253,9 +253,9 @@ test('同源标签页与快捷 Token 换号后重新核验且清除旧投影', a
   });
   const { token } = (await issued.json()) as { token: string };
   await second.goto(`${address}/#token=${token}`);
-  await expect(second.getByRole('button', { name: 'Bob', exact: true })).toBeVisible();
+  await expect(second.getByRole('button', { name: '账号与 Runtime', exact: true }).filter({ hasText: 'Bob' })).toBeVisible();
   await first.bringToFront();
-  await expect(first.getByRole('button', { name: 'Bob', exact: true })).toBeVisible();
+  await expect(first.getByRole('button', { name: '账号与 Runtime', exact: true }).filter({ hasText: 'Bob' })).toBeVisible();
   expect(new URL(second.url()).hash).toBe('');
   expect(await first.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }))).not.toMatch(
     /ct_|cl_|session:|login_context/,
@@ -290,6 +290,16 @@ test('管理配置保存后当前模式保持冻结并要求重启', async () =>
   expect(saved.mode).toBe('personal');
   expect(saved.restart_required).toBe(true);
   expect((await (await fetch(`${address}/capabilities`)).json()).mode).toBe('enterprise');
+  // 共用隔离 Host；恢复持久模式，避免后续登录被前一个场景的配置拒绝。
+  await command({
+    type: 'configure',
+    payload: {
+      expected_revision: saved.revision,
+      configuration: status.configuration,
+      mode: status.mode,
+      center_url: status.center_url,
+    },
+  });
 });
 
 test('中心模型只读展示、刷新切换与失败保留', async ({ page }, info) => {
@@ -310,13 +320,16 @@ test('中心模型只读展示、刷新切换与失败保留', async ({ page }, 
     reasoning_efforts: null,
     default_reasoning_effort: null,
   };
-  const configuration = (model_id: string) => ({
+  const configuration = (model_id: string, enabled = true) => ({
     state: 'ready',
+    server_history_enabled: enabled,
+    server_history_support: 'supported',
+    server_history_binding: enabled ? 'a'.repeat(64) : null,
     center_id: identity(1).center_id,
     endpoint: `http://127.0.0.1:${port}/api/llm/providers/${identity(1).center_id}/v1`,
     provider_type: 'openai',
     provider_display_name: '企业测试服务商',
-    protocol: 'open_ai_chat_completions',
+    protocol: 'open_ai_responses',
     model_id,
     parameters,
   });
@@ -327,15 +340,22 @@ test('中心模型只读展示、刷新切换与失败保留', async ({ page }, 
   await expect(page.getByRole('menuitemradio', { name: 'center-model-a', exact: true })).toBeDisabled();
   await page.screenshot({ path: info.outputPath('managed-model-menu.png'), animations: 'disabled' });
   await page.keyboard.press('Escape');
-  await page.getByRole('button', { name: '设置', exact: true }).click();
+  await page.getByRole('button', { name: '账号与 Runtime', exact: true }).click();
+  await page.getByRole('menuitem', { name: '设置', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: '设置', exact: true });
   await dialog.getByRole('button', { name: '模型', exact: true }).click();
   await expect(dialog.getByRole('button', { name: '默认模型', exact: true })).toContainText('center-model-a');
   await expect(dialog.getByRole('button', { name: '添加服务商' })).toHaveCount(0);
-  managed_model = configuration('center-model-b');
+  await dialog.getByRole('button', { name: /管理服务商 企业测试服务商/ }).click();
+  await expect(dialog.getByText('由企业管理员管理；已启用', { exact: true })).toBeVisible();
+  await expect(dialog.getByRole('button', { name: '编辑', exact: true })).toHaveCount(0);
+  await dialog.getByRole('button', { name: '返回', exact: true }).click();
+  managed_model = configuration('center-model-b', false);
   await dialog.getByRole('button', { name: '刷新配置' }).click();
   await expect(dialog.getByRole('button', { name: '默认模型', exact: true })).toContainText('center-model-b');
   await dialog.getByRole('button', { name: /管理服务商 企业测试服务商/ }).click();
+  await expect(dialog.getByText('由企业管理员管理；已关闭', { exact: true })).toBeVisible();
+  await expect(dialog.getByRole('button', { name: '编辑', exact: true })).toHaveCount(0);
   await expect(dialog.getByRole('button', { name: '添加模型' })).toHaveCount(0);
   await dialog.getByRole('button', { name: '配置模型 center-model-b', exact: true }).click();
   await expect(dialog.getByLabel('上下文窗口（Token）', { exact: true })).toBeDisabled();

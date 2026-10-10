@@ -1,6 +1,8 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { ModelSelection } from './models.js';
 import { PluginPlatform } from './plugins.js';
+import { feedbackStatuses } from './feedback.js';
+import type { FeedbackStatus } from './feedback.js';
 import { PageQuery } from './users.js';
 
 export class AuditQuery extends PageQuery {
@@ -27,6 +29,11 @@ export class AuditUserFields {
   @ApiPropertyOptional({ type: Boolean }) readonly enabled?: boolean;
 }
 export class AuditDetails {
+  @ApiPropertyOptional({ type: String }) target?: string;
+  @ApiPropertyOptional({ enum: ['published', 'withdrawn'] }) release_publication?: 'published' | 'withdrawn';
+  @ApiPropertyOptional({ type: String, format: 'uuid' }) feedback_id?: string;
+  @ApiPropertyOptional({ enum: feedbackStatuses }) status?: FeedbackStatus;
+  @ApiPropertyOptional({ enum: feedbackStatuses }) previous_status?: FeedbackStatus;
   @ApiPropertyOptional({ type: String }) name?: string;
   @ApiPropertyOptional({ type: String }) version?: string;
   @ApiPropertyOptional({ type: [PluginPlatform] }) platforms?: PluginPlatform[];
@@ -47,6 +54,7 @@ export class AuditDetails {
   @ApiPropertyOptional({ type: Number, minimum: 0 }) model_count?: number;
   @ApiPropertyOptional({ type: Number, minimum: 0 }) count?: number;
   @ApiPropertyOptional({ type: ModelSelection, nullable: true }) default_model?: ModelSelection | null;
+  @ApiPropertyOptional({ type: String, nullable: true }) public_origin?: string | null;
   @ApiPropertyOptional({ type: AuditUserFields }) before?: AuditUserFields;
   @ApiPropertyOptional({ type: AuditUserFields }) after?: AuditUserFields;
 }

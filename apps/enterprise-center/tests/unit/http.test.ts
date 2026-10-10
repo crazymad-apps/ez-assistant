@@ -1,7 +1,9 @@
-import { afterAll, beforeAll, expect, it } from 'vitest';
+import { afterAll, beforeAll, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { createOpenApiDocument } from '../../dist/openapi.js';
 import { createHttpApp } from '../../dist/app.js';
+import { IdentityService } from '../../dist/identity/service.js';
+import { IdentityError } from '../../dist/identity/errors.js';
 
 let app: Awaited<ReturnType<typeof createHttpApp>>;
 beforeAll(async () => {
@@ -16,11 +18,55 @@ it('GET /api/info 只暴露软件与协议兼容事实', async () => {
   expect(response.statusCode).toBe(200);
   expect(response.json()).toEqual({
     software_version: '0.1.0',
-    protocol_version: 1,
-    min_protocol_version: 1,
-    capabilities: ['managed_models', 'llm_proxy', 'plugin_market', 'managed_agents'],
+    protocol_version: 2,
+    min_protocol_version: 2,
+    capabilities: ['managed_models', 'llm_proxy', 'plugin_market', 'managed_agents', 'feedback'],
   });
   expect(response.headers['cache-control']).toBe('no-store');
+});
+
+it.each(['https://client.example', 'http://localhost:7310', 'null'])('任意来源 %s 可读取公开 API', async (origin) => {
+  const response = await app.inject({ method: 'GET', url: '/api/info', headers: { origin, 'sec-fetch-site': 'cross-site' } });
+  expect(response.statusCode).toBe(200);
+  expect(response.headers['access-control-allow-origin']).toBe('*');
+  expect(response.headers['access-control-allow-credentials']).toBeUndefined();
+});
+
+it.each([
+  ['/api/auth/login', 'POST'],
+  ['/api/users/1', 'PATCH'],
+  ['/api/model-providers/00000000-0000-0000-0000-000000000001', 'DELETE'],
+  ['/api/custom-agents/example', 'PUT'],
+  ['/api/plugin-packages', 'POST'],
+  ['/api/llm/providers/00000000-0000-0000-0000-000000000001/v1/responses', 'POST'],
+])('跨域预检 %s %s 无需身份并允许业务请求头', async (url, method) => {
+  const requestedHeaders = 'authorization,content-type,if-match,x-ez-center-history-binding';
+  const response = await app.inject({ method: 'OPTIONS', url, headers: {
+    origin: 'https://client.example', 'sec-fetch-site': 'cross-site',
+    'access-control-request-method': method, 'access-control-request-headers': requestedHeaders,
+  } });
+  expect(response.statusCode).toBe(204);
+  expect(response.headers['access-control-allow-origin']).toBe('*');
+  expect(response.headers['access-control-allow-methods']).toContain(method);
+  expect(response.headers['access-control-allow-headers']).toBe(requestedHeaders);
+  expect(response.headers['access-control-allow-credentials']).toBeUndefined();
+});
+
+it('跨域实际请求仍要求 Bearer，拒绝响应也可被浏览器读取', async () => {
+  const me = vi.spyOn(app.get(IdentityService), 'me').mockRejectedValue(new IdentityError(401, 'TOKEN_INVALID'));
+  try {
+    for (const origin of ['https://client.example', 'null']) {
+      const response = await app.inject({ method: 'GET', url: '/api/auth/me', headers: {
+        origin, 'sec-fetch-site': 'cross-site', cookie: 'token=not-a-bearer',
+      } });
+      expect(response.statusCode).toBe(401);
+      expect(response.json().error.code).toBe('TOKEN_INVALID');
+      expect(response.headers['access-control-allow-origin']).toBe('*');
+      expect(me).toHaveBeenLastCalledWith(undefined);
+    }
+  } finally {
+    me.mockRestore();
+  }
 });
 
 it('不存在的接口不回显 URL 或客户端 request id', async () => {

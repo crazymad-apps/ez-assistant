@@ -45,6 +45,7 @@ pub(crate) struct SessionController {
 ///
 /// 字段同时包含可恢复业务事实和明确标注的进程内状态，恢复时由 Store 重新构建而非序列化本结构。
 pub(crate) struct SessionState {
+    pub(crate) server_history_key: Option<String>,
     pub(crate) feedback: BTreeMap<String, assistant_protocol::FeedbackRequestSnapshot>,
     pub(crate) agent_shell_kind: Option<assistant_protocol::ShellKind>,
     pub(crate) agent_shell_environment: Option<crate::FrozenShellEnvironment>,
@@ -214,6 +215,7 @@ impl SessionController {
                 title: stored.title,
                 is_pinned: stored.is_pinned,
                 title_origin: stored.title_origin,
+                server_history_key: stored.server_history_key,
                 model_selection: stored.model_selection,
                 model_binding: None,
                 reasoning_effort: stored.reasoning_effort,
@@ -350,6 +352,7 @@ impl SessionController {
                 title: stored.title,
                 is_pinned: stored.is_pinned,
                 title_origin: stored.title_origin,
+                server_history_key: stored.server_history_key,
                 model_selection: stored.model_selection,
                 model_binding: None,
                 reasoning_effort: stored.reasoning_effort,

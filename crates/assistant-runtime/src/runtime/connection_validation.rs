@@ -203,7 +203,8 @@ fn connection_validation_failure_kind(error: &ModelError) -> ConnectionValidatio
         ModelError::RateLimited { .. } => ConnectionValidationFailureKind::RateLimited,
         ModelError::Unavailable { .. } => ConnectionValidationFailureKind::ServiceUnavailable,
         ModelError::ContextOverflow { .. } => ConnectionValidationFailureKind::ModelUnavailable,
-        ModelError::Protocol(_)
+        ModelError::HistoryUnavailable
+        | ModelError::Protocol(_)
         | ModelError::ToolArguments(_)
         | ModelError::Resource(_)
         | ModelError::Cancelled => ConnectionValidationFailureKind::Protocol,

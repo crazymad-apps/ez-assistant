@@ -1,6 +1,7 @@
 //! Center 私有协议适配；限制时间、响应体与重定向，不向应用协议暴露后端秘密。
 
 mod agents;
+mod feedback;
 mod models;
 pub(crate) mod plugins;
 pub(crate) use models::ModelConfiguration;
@@ -85,6 +86,20 @@ fn valid_secret(value: &SecretValue, prefix: &str) -> bool {
     })
 }
 
+/// 无效声明只是中心故障；只有完整有效且不相交的范围才允许上层要求更新。
+fn check_protocol_range(minimum: u32, current: u32) -> Result<(), CenterError> {
+    if minimum == 0 || minimum > current || current > 65535 {
+        return Err(CenterError::Unavailable);
+    }
+    if !super::SUPPORTED_PROTOCOLS
+        .iter()
+        .any(|value| (minimum..=current).contains(value))
+    {
+        return Err(CenterError::ProtocolIncompatible);
+    }
+    Ok(())
+}
+
 impl CenterClient {
     pub(crate) fn new(url: String) -> Result<Self, CenterError> {
         let client = Client::builder()
@@ -111,12 +126,7 @@ impl CenterClient {
             min_protocol_version: u32,
         }
         let info: Info = decode(self.client.get(self.endpoint("info"))).await?;
-        if info.min_protocol_version == 0
-            || info.min_protocol_version > info.protocol_version
-            || !(info.min_protocol_version..=info.protocol_version).contains(&1)
-        {
-            return Err(CenterError::ProtocolIncompatible);
-        }
+        check_protocol_range(info.min_protocol_version, info.protocol_version)?;
         let login: Login = decode(
             self.client
                 .post(self.endpoint("auth/login"))
@@ -245,7 +255,7 @@ mod tests {
                 _ => Router::new().route(
                     "/api/info",
                     get(|| async {
-                        Json(serde_json::json!({"protocol_version":2,"min_protocol_version":2}))
+                        Json(serde_json::json!({"protocol_version":1,"min_protocol_version":1}))
                     }),
                 ),
             };
@@ -263,6 +273,23 @@ mod tests {
             task.abort();
         }
     }
+    #[test]
+    fn only_valid_disjoint_protocol_ranges_require_update() {
+        for (minimum, current, expected) in [
+            (0, 2, Err(CenterError::Unavailable)),
+            (3, 2, Err(CenterError::Unavailable)),
+            (0, 0, Err(CenterError::Unavailable)),
+            (65536, 65536, Err(CenterError::Unavailable)),
+            (1, u32::MAX, Err(CenterError::Unavailable)),
+            (3, 3, Err(CenterError::ProtocolIncompatible)),
+            (1, 1, Err(CenterError::ProtocolIncompatible)),
+            (1, 3, Ok(())),
+            (2, 2, Ok(())),
+        ] {
+            assert_eq!(check_protocol_range(minimum, current), expected);
+        }
+    }
+
     #[test]
     fn identity_and_credential_purposes_are_validated() {
         for id in ["127.0.0.1", "", "01234567-89AB-4cde-8f01-23456789abcd"] {

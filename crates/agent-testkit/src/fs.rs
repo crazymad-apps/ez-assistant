@@ -8,11 +8,12 @@
 use std::{collections::BTreeMap, num::NonZeroU32, path::Path, sync::Mutex};
 
 use agent_tools::{
-    AbsolutePath, DeleteFileRequest, DeleteFileResult, EditFileRequest, EditFileResult, FileEntry,
-    FileEntryKind, FileSystemTool, FileToolContext, FileToolError, FsFuture, ListDirectoryRequest,
-    ListDirectoryResult, PathResolutionError, ReadFileRequest, ReadFileResult, SearchFilesRequest,
-    SearchFilesResult, SearchKind, SearchMatch, SearchTruncationReason, SessionPathResolver,
-    WriteFileRequest, WriteFileResult, exact_replace, paginate_with_line_numbers,
+    AbsolutePath, DeleteFileRequest, DeleteFileResult, EditFileOutcome, EditFileRequest,
+    EditFileResult, EditNotExecutedReason, FileEntry, FileEntryKind, FileSystemTool,
+    FileToolContext, FileToolError, FsFuture, ListDirectoryRequest, ListDirectoryResult,
+    PathResolutionError, ReadFileRequest, ReadFileResult, SearchFilesRequest, SearchFilesResult,
+    SearchKind, SearchMatch, SearchTruncationReason, SessionPathResolver, WriteFileRequest,
+    WriteFileResult, exact_replace, paginate_with_line_numbers,
 };
 
 /// 内存文件树 Fake；保存和返回的路径始终是绝对逻辑路径。
@@ -264,22 +265,79 @@ impl FileSystemTool for FakeFileSystemTool {
         context: FileToolContext,
     ) -> FsFuture<'a, EditFileResult> {
         Box::pin(async move {
-            self.check(&context)?;
+            request.validate()?;
+            if context.cancellation.is_cancelled() {
+                return Ok(EditFileResult::not_executed(
+                    &request,
+                    EditNotExecutedReason::Cancelled,
+                ));
+            }
+            let mut result =
+                EditFileResult::not_executed(&request, EditNotExecutedReason::PreflightFailed);
             let mut files = self.files.lock().expect("lock files");
-            let Some(content) = files.get(&request.path).cloned() else {
-                return Err(FileToolError::NotFound {
-                    path: request.path.clone(),
-                });
-            };
-            let (replaced, replacements) = exact_replace(
-                &content,
-                &request.old_string,
-                &request.new_string,
-                request.replace_all,
-            )?;
-            let path = request.path;
-            files.insert(path.clone(), replaced);
-            Ok(EditFileResult { path, replacements })
+            for (index, entry) in request.files.iter().enumerate() {
+                if !files.contains_key(&entry.path)
+                    || request.files[..index]
+                        .iter()
+                        .any(|previous| previous.path == entry.path)
+                {
+                    result.files[index].outcome = EditFileOutcome::failed(
+                        &FileToolError::invalid_input("missing or duplicate target"),
+                        None,
+                    );
+                    return Ok(result);
+                }
+            }
+            result = EditFileResult::not_executed(&request, EditNotExecutedReason::PreviousFailure);
+            for (index, entry) in request.files.into_iter().enumerate() {
+                if let Err(error) = self.check(&context) {
+                    if error == FileToolError::Cancelled {
+                        for file in result.files.iter_mut().skip(index) {
+                            file.outcome = EditFileOutcome::NotExecuted {
+                                reason: EditNotExecutedReason::Cancelled,
+                            };
+                        }
+                    } else {
+                        result.files[index].outcome = EditFileOutcome::failed(&error, None);
+                    }
+                    break;
+                }
+                let mut content = files[&entry.path].clone();
+                let mut replacements = 0;
+                let mut failure = None;
+                for (edit_index, edit) in entry.edits.iter().enumerate() {
+                    match exact_replace(
+                        &content,
+                        &edit.old_string,
+                        &edit.new_string,
+                        edit.replace_all,
+                    ) {
+                        Ok((next, count)) => {
+                            content = next;
+                            replacements += count;
+                        }
+                        Err(error) => {
+                            failure = Some(EditFileOutcome::failed(&error, Some(edit_index)));
+                            break;
+                        }
+                    }
+                }
+                if let Some(failure) = failure {
+                    result.files[index].outcome = failure;
+                    break;
+                }
+                if context.cancellation.is_cancelled() {
+                    for file in result.files.iter_mut().skip(index) {
+                        file.outcome = EditFileOutcome::NotExecuted {
+                            reason: EditNotExecutedReason::Cancelled,
+                        };
+                    }
+                    break;
+                }
+                files.insert(entry.path, content);
+                result.files[index].outcome = EditFileOutcome::Success { replacements };
+            }
+            Ok(result)
         })
     }
 }
@@ -293,6 +351,7 @@ mod tests {
     };
 
     use super::*;
+    use agent_tools::{EditFileEntry, EditReplacement};
 
     fn block_on<F: Future>(future: F) -> F::Output {
         let mut cx = Context::from_waker(Waker::noop());
@@ -381,10 +440,14 @@ mod tests {
         let fake = fake();
         block_on(fake.edit(
             EditFileRequest {
-                path: path("src/lib.rs"),
-                old_string: "helper".to_owned(),
-                new_string: "utils".to_owned(),
-                replace_all: false,
+                files: vec![EditFileEntry {
+                    path: path("src/lib.rs"),
+                    edits: vec![EditReplacement {
+                        old_string: "helper".to_owned(),
+                        new_string: "utils".to_owned(),
+                        replace_all: false,
+                    }],
+                }],
             },
             FileToolContext::default(),
         ))

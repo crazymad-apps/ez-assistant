@@ -33,7 +33,7 @@ function fixture(mode?: 'public' | 'optional' | 'admin', method = 'GET') {
     if (token !== 'valid') throw new IdentityError(401, 'TOKEN_INVALID');
     return { center_id: 'center', user };
   });
-  return { context, request, me, user, guard: new HttpSecurity(identity, origin) };
+  return { context, request, me, user, guard: new HttpSecurity(identity) };
 }
 
 it('默认接口必须登录；只接受 Bearer，不从 Cookie 或 URL 取 Token', async () => {
@@ -47,23 +47,24 @@ it('默认接口必须登录；只接受 Bearer，不从 Cookie 或 URL 取 Toke
   await expect(f.guard.canActivate(f.context)).rejects.toMatchObject({ code: 'TOKEN_INVALID' });
 });
 
-it.each(['public', 'optional'] as const)('%s 放行认证但不跳过来源与 JSON 检查', async (mode) => {
+it.each(['public', 'optional'] as const)('%s 允许跨域但不跳过 JSON 检查', async (mode) => {
   const f = fixture(mode);
   await expect(f.guard.canActivate(f.context)).resolves.toBe(true);
   expect(f.me).not.toHaveBeenCalled();
-  f.request.headers.origin = 'https://evil.example';
-  await expect(f.guard.canActivate(f.context)).rejects.toMatchObject({ code: 'FORBIDDEN' });
+  f.request.headers.origin = 'https://client.example';
+  await expect(f.guard.canActivate(f.context)).resolves.toBe(true);
   const post = fixture(mode, 'POST');
   post.request.headers = { origin };
   await expect(post.guard.canActivate(post.context)).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
   post.request.headers['content-type'] = 'application/json';
   await expect(post.guard.canActivate(post.context)).resolves.toBe(true);
   post.request.headers['sec-fetch-site'] = 'cross-site';
-  await expect(post.guard.canActivate(post.context)).rejects.toMatchObject({ code: 'FORBIDDEN' });
+  await expect(post.guard.canActivate(post.context)).resolves.toBe(true);
 });
 
 it('管理员规则读取用户权限，超级管理员标记同样生效', async () => {
   const f = fixture('admin');
+  f.request.headers = { origin: 'https://client.example', 'sec-fetch-site': 'cross-site' };
   f.request.headers.authorization = 'Bearer valid';
   await expect(f.guard.canActivate(f.context)).rejects.toMatchObject({ code: 'ADMIN_REQUIRED' });
   f.me.mockResolvedValue({ center_id: 'center', user: { ...f.user, role: 'admin' } });

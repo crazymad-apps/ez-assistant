@@ -37,7 +37,7 @@ fn denied_tree(
 }
 
 #[tokio::test]
-async fn injected_denies_merge_with_user_rules_and_auto_for_single_and_batch_calls() {
+async fn user_allow_overrides_defaults_while_unmatched_batch_paths_remain_denied() {
     let root = TempDir::new().unwrap();
     let environment = environment(&root);
     let shared = root.path().join("shared");
@@ -67,7 +67,7 @@ async fn injected_denies_merge_with_user_rules_and_auto_for_single_and_batch_cal
     .with_default_rules(Some(source.clone()));
     assert_eq!(
         authorize_file(&authorizer, &environment, &allowed).await,
-        deny("tool call is denied by a permission rule")
+        ToolAuthorization::Allow
     );
     assert_eq!(
         authorize_file(&authorizer, &environment, &own.join("SKILL.md")).await,
@@ -244,4 +244,115 @@ fn injected_exceptions_cannot_be_silently_saved_as_broader_user_rules() {
         serde_json::from_slice(&file_rule_document("deny", root.path().to_str().unwrap())).unwrap();
     json["rules"][0]["matcher"]["excluded_paths"] = json!([]);
     assert!(PermissionDocument::parse(&serde_json::to_vec(&json).unwrap()).is_err());
+}
+
+#[tokio::test]
+async fn nearest_matching_scope_wins_and_same_scope_deny_still_wins() {
+    let root = TempDir::new().unwrap();
+    let environment = environment(&root);
+    let target = root.path().join("outside/file");
+    for (session, workspace, global, expected) in [
+        ("allow", "deny", "deny", ToolAuthorization::Allow),
+        ("", "allow", "deny", ToolAuthorization::Allow),
+        ("", "", "allow", ToolAuthorization::Allow),
+        (
+            "deny",
+            "allow",
+            "allow",
+            deny("tool call is denied by a permission rule"),
+        ),
+        ("ask", "deny", "deny", deny("scripted rejection")),
+    ] {
+        let bytes = |effect: &str| {
+            if effect.is_empty() {
+                empty_document()
+            } else {
+                file_rule_document(effect, target.to_str().unwrap())
+            }
+        };
+        let permissions = coordinator([
+            (PermissionFileScope::Global, bytes(global)),
+            (workspace_scope(), bytes(workspace)),
+            (session_scope(), bytes(session)),
+        ])
+        .await;
+        let authorizer = test_authorizer(
+            AgentVariant::Build,
+            ApprovalMode::Auto,
+            scopes(),
+            permissions,
+            Vec::new(),
+            &environment,
+            Arc::new(StaticApproval(deny("scripted rejection"))),
+        )
+        .unwrap()
+        .with_default_rules(Some(Arc::new(Defaults(RwLock::new(denied_tree(
+            root.path(),
+            PermissionFileOperation::Write,
+            Vec::new(),
+        ))))));
+        assert_eq!(
+            authorize_file(&authorizer, &environment, &target).await,
+            expected
+        );
+    }
+    let mut document =
+        PermissionDocument::parse(&file_rule_document("allow", target.to_str().unwrap())).unwrap();
+    let mut denied =
+        PermissionDocument::parse(&file_rule_document("deny", target.to_str().unwrap())).unwrap();
+    denied.rules[0].id = "same-layer-deny".into();
+    document.rules.extend(denied.rules);
+    let permissions = coordinator([(session_scope(), document.render().unwrap())]).await;
+    let authorizer = test_authorizer(
+        AgentVariant::Build,
+        ApprovalMode::Auto,
+        vec![session_scope()],
+        permissions,
+        Vec::new(),
+        &environment,
+        Arc::new(StaticApproval(ToolAuthorization::Allow)),
+    )
+    .unwrap();
+    assert_eq!(
+        authorize_file(&authorizer, &environment, &target).await,
+        deny("tool call is denied by a permission rule")
+    );
+}
+
+#[tokio::test]
+async fn batch_user_read_allow_overrides_default_deny_only_for_matching_paths() {
+    let root = TempDir::new().unwrap();
+    let environment = environment(&root);
+    let allowed = root.path().join("outside/a.png");
+    let other = root.path().join("outside/b.png");
+    let mut document =
+        PermissionDocument::parse(&file_rule_document("allow", allowed.to_str().unwrap())).unwrap();
+    let PermissionMatcher::File(matcher) = &mut document.rules[0].matcher else {
+        panic!("file matcher");
+    };
+    matcher.operation = PermissionFileOperation::Read;
+    let permissions = coordinator([(session_scope(), document.render().unwrap())]).await;
+    let authorizer = test_authorizer(
+        AgentVariant::Build,
+        ApprovalMode::Auto,
+        vec![session_scope()],
+        permissions,
+        Vec::new(),
+        &environment,
+        Arc::new(StaticApproval(ToolAuthorization::Allow)),
+    )
+    .unwrap()
+    .with_default_rules(Some(Arc::new(Defaults(RwLock::new(denied_tree(
+        root.path(),
+        PermissionFileOperation::Read,
+        Vec::new(),
+    ))))));
+    assert_eq!(
+        authorize_batch_read(&authorizer, &environment, &[&allowed]).await,
+        ToolAuthorization::Allow
+    );
+    assert_eq!(
+        authorize_batch_read(&authorizer, &environment, &[&allowed, &other]).await,
+        deny("tool call is denied by a permission rule")
+    );
 }

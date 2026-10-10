@@ -36,8 +36,17 @@ impl ExternalModelConfiguration {
         model_id: String,
         parameters: ModelParameters,
         fetched_at_ms: i64,
+        server_history_binding: Option<String>,
     ) -> RuntimeResult<Self> {
         super::validation::validate_provider_parameters(&connection, &parameters)?;
+        // 宿主核验来源与主体，Runtime 只接纳与启用策略一致的、不含传输控制字符的绑定。
+        if connection.server_history_enabled != server_history_binding.is_some()
+            || server_history_binding.as_ref().is_some_and(|binding| {
+                binding.is_empty() || binding.len() > 1024 || binding.chars().any(char::is_control)
+            })
+        {
+            return Err(RuntimeError::ConfigurationUnavailable);
+        }
         let selection = ModelSelection {
             provider_instance_id: ProviderInstanceId::new("managed".to_owned())
                 .map_err(|_| RuntimeError::ConfigurationUnavailable)?,
@@ -45,6 +54,7 @@ impl ExternalModelConfiguration {
         };
         super::validation::validate_selection(&selection)?;
         let provider = Arc::new(StoredProvider {
+            server_history_key: server_history_binding,
             provider_instance_id: selection.provider_instance_id.clone(),
             connection,
             api_key: SecretValue::new(String::new()),
@@ -97,6 +107,11 @@ impl ExternalModelConfiguration {
 
     pub fn parameters(&self) -> &ModelParameters {
         &self.parameters
+    }
+
+    /// 受信宿主随冻结配置携带的绑定；不进入客户端投影或模型请求正文。
+    pub fn server_history_binding(&self) -> Option<&str> {
+        self.provider.server_history_key.as_deref()
     }
 
     pub(crate) fn selection(&self) -> &ModelSelection {

@@ -40,6 +40,10 @@ export async function invokeRuntime<T>(command: string, args?: InvokeArgs, optio
 export function probeRuntimeTarget(origin: string): Promise<RuntimeHostCapabilities> {
   return invoke("probe_runtime_target", { origin });
 }
+
+export function prepareDesktopUpdate(binding: string, origin: string | null): Promise<void> {
+  return invoke("prepare_desktop_update", { bindingId: binding, origin });
+}
 export async function restoreRuntimeConnection(): Promise<RuntimeBootstrap | null> {
   return invoke("restore_runtime_connection");
 }

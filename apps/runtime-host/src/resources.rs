@@ -1,7 +1,7 @@
 //! 正式 Host 的 Provider、Session 环境与按 Run 工具装配。
 
 mod environment;
-mod filesystem;
+mod feedback;
 pub(crate) mod model;
 pub(crate) mod shell;
 mod skills;
@@ -40,6 +40,7 @@ impl HostResources {
             true,
             Arc::new(HostModelServiceFactory::new(runtime_home)),
             Arc::new(crate::user_paths::UserPaths::new(runtime_home, Vec::new())),
+            None,
         )
     }
 
@@ -48,6 +49,7 @@ impl HostResources {
         personal: bool,
         model_factory: Arc<dyn ModelServiceFactory>,
         paths: Arc<crate::user_paths::UserPaths>,
+        feedback: Option<crate::access::enterprise::feedback::FeedbackAccess>,
     ) -> Result<Self, ToolResourceError> {
         Ok(Self {
             model_factory,
@@ -55,10 +57,10 @@ impl HostResources {
                 runtime_home,
                 paths.clone(),
             )),
-            run_tool_factory: Arc::new(HostRunToolFactory::with_paths(
-                runtime_home,
-                paths.clone(),
-            )?),
+            run_tool_factory: Arc::new(
+                HostRunToolFactory::with_paths(runtime_home, paths.clone())?
+                    .with_feedback(feedback),
+            ),
             child_task_workspace_factory: Arc::new(HostChildTaskWorkspaceFactory),
             skill_package_source: Arc::new(if personal {
                 HostSkillPackageSource::personal(runtime_home, paths.clone())

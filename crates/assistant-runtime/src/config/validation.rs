@@ -55,6 +55,18 @@ pub(crate) fn validate_connection(connection: &ProviderConnection) -> RuntimeRes
         ));
     }
     crate::config::resolve_provider_protocol(connection)?;
+    if connection.server_history_support_override
+        == Some(assistant_protocol::ModelFeatureSupport::Unknown)
+    {
+        return Err(invalid("续接能力覆盖必须为支持、不支持或使用服务商默认。"));
+    }
+    if connection.server_history_enabled
+        && connection.server_history_support() != assistant_protocol::ModelFeatureSupport::Supported
+    {
+        return Err(invalid(
+            "当前接口未声明支持服务端历史续接，请关闭开关或核实接口能力。",
+        ));
+    }
     Ok(())
 }
 pub(crate) fn validate_provider_parameters(

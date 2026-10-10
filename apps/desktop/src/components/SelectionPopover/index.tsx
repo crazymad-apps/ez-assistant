@@ -49,6 +49,8 @@ export function SelectionPopover<T extends string>(props: SelectionPopoverProps<
   const visible_options = props.editable && query
     ? props.options.filter((option) => `${option.label} ${option.value}`.toLocaleLowerCase().includes(query.toLocaleLowerCase()))
     : props.options;
+  // 焦点可以从首项开始，但不能把未知选中值显示成首项。
+  const selected_option = props.options.find((option) => option.value === props.selected);
   const selected_index = Math.max(0, visible_options.findIndex((option) => option.value === props.selected));
   const listbox_visible = props.open && visible_options.length > 0;
   const listbox_presence = usePresence(listbox_visible, 90);
@@ -237,7 +239,7 @@ export function SelectionPopover<T extends string>(props: SelectionPopoverProps<
           }}
           type="button"
         >
-          {props.trigger_content ?? <span className={styles.trigger_label}>{visible_options[selected_index]?.label ?? props.selected}</span>}
+          {props.trigger_content ?? <span className={styles.trigger_label}>{selected_option?.label ?? props.placeholder ?? (props.selected || "请选择")}</span>}
           <Icon name="chevron-down" size={14} />
         </button>
       )}

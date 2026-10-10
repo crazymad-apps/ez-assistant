@@ -175,21 +175,7 @@ pub(crate) fn context_is_current(
     conversation: &agent_types::ConversationSnapshot,
     context: &agent_types::UserMessage,
 ) -> bool {
-    use agent_types::{ConversationMessage, UserPart};
-    let expected = context.parts.iter().find_map(|part| match part {
-        UserPart::InternalContext(part) if part.kind == "shell_environment" => Some(&part.text),
-        _ => None,
-    });
-    let actual = conversation.messages.iter().rev().find_map(|message| {
-        let ConversationMessage::User(message) = message else {
-            return None;
-        };
-        message.parts.iter().rev().find_map(|part| match part {
-            UserPart::InternalContext(part) if part.kind == "shell_environment" => Some(&part.text),
-            _ => None,
-        })
-    });
-    expected.is_some() && actual == expected
+    crate::internal_boundary::InternalBoundaryCoordinator::context_is_current(conversation, context)
 }
 
 #[cfg(test)]

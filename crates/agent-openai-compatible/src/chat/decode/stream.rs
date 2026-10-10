@@ -236,6 +236,7 @@ impl ChunkAssembler {
         if let Some(OpenPart::Reasoning { id, text: buffer }) = &mut self.open_part {
             buffer.push_str(text);
             events.push(ModelEvent::ReasoningDelta {
+                source: Default::default(),
                 id: id.clone(),
                 delta: text.to_owned(),
             });
@@ -267,8 +268,11 @@ impl ChunkAssembler {
         match self.open_part.take() {
             Some(OpenPart::Reasoning { id, text }) => {
                 events.push(ModelEvent::ReasoningFinished { id: id.clone() });
-                self.parts
-                    .push(AssistantPart::Reasoning(ReasoningPart { id, text }));
+                self.parts.push(AssistantPart::Reasoning(ReasoningPart {
+                    source: Default::default(),
+                    id,
+                    text,
+                }));
             }
             Some(OpenPart::Text { id, text }) => {
                 events.push(ModelEvent::TextFinished { id: id.clone() });

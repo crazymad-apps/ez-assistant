@@ -25,6 +25,7 @@
     "openapi:check": "npm run build && node scripts/openapi.mjs check"
   },
   "dependencies": {
+    "@fastify/multipart": "10.1.2",
     "@fastify/static": "10.1.4",
     "@nestjs/common": "12.0.3",
     "@nestjs/core": "12.0.3",
@@ -37,12 +38,14 @@
     "rxjs": "7.8.2",
     "tar": "7.5.22",
     "typeorm": "1.1.1",
+    "ws": "8.22.0",
     "yaml": "2.9.1",
     "yauzl": "3.4.0"
   },
   "devDependencies": {
     "@types/node": "24.0.0",
     "@types/pg": "8.15.5",
+    "@types/ws": "8.18.2",
     "@types/yauzl": "3.4.0",
     "@types/yazl": "3.3.0",
     "oxlint": "1.78.0",

@@ -442,6 +442,7 @@ super::agent_shell::encode_environment(fork.session.agent_shell_environment.as_r
         }
         let stored = StoredSessionFork {
             session: StoredSession {
+                server_history_key: None,
                 custom_agent: fork.session.custom_agent,
                 agent_shell_kind: fork.session.agent_shell_kind,
                 agent_shell_environment: fork.session.agent_shell_environment.clone(),

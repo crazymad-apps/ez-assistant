@@ -225,3 +225,61 @@ async fn explicit_disable_and_auth_failure_never_retry() {
         assert_eq!(model.take_requests().len(), 1);
     }
 }
+
+#[tokio::test]
+async fn stream_retry_recovers_and_preserves_one_user_input() {
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(false),
+        8_192,
+        [
+            ModelScript::Events(vec![agent_model::ModelEvent::TurnFailed {
+                error: ModelError::Transport {
+                    kind: agent_model::ModelTransportErrorKind::Interrupted,
+                    message: "stream disconnected".into(),
+                },
+            }]),
+            ModelScript::Events(message_events(&assistant_text("final", "recovered"))),
+        ],
+    ));
+    let runtime = runtime(model.clone());
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    let run_id = submit(&runtime, &session_id).await;
+    // 产品默认首次等待一秒；本测试覆盖真实默认值，超时只约束验收而不修改策略。
+    let terminal = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let run = runtime
+                .get_run(GetRunRequest {
+                    session_id: session_id.clone(),
+                    run_id: run_id.clone(),
+                })
+                .await
+                .unwrap()
+                .run;
+            if run.status.is_terminal() {
+                break run;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(terminal.status, assistant_protocol::RunStatus::Completed);
+    assert!(terminal.model_request.is_none());
+    let requests = model.take_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0], requests[1]);
+    let conversation = runtime.conversation_snapshot(&session_id).await.unwrap();
+    assert_eq!(
+        conversation
+            .messages
+            .iter()
+            .filter(|m| matches!(m, ConversationMessage::User(_)))
+            .count(),
+        1
+    );
+}

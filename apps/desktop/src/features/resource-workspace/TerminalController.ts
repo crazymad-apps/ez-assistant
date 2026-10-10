@@ -1,5 +1,5 @@
 import { action, computed, makeObservable, observable, observableRef, runInAction } from "mobx";
-import type { ShellCatalogEntry, ShellKind } from "@ez-assistant/protocol";
+import type { UserTerminalShellEntry, ShellKind } from "@ez-assistant/protocol";
 import type { TerminalEvent, TerminalSize, TerminalSource, TerminalSocket } from "../../runtime-client/TerminalSocket";
 import type { RuntimeClient } from "../../runtime-client/RuntimeClient";
 import { createTerminalEmulator, type TerminalEmulator } from "./terminalEmulator";
@@ -16,7 +16,10 @@ export class TerminalController {
   terminal_id: string | null = null;
   shell_kind: ShellKind | null = null;
   selected_shell: ShellKind | null = null;
-  shell_catalog: readonly ShellCatalogEntry[] = [];
+  shell_name: string | null = null;
+  #requested_shell: ShellKind | null = null;
+  #client: RuntimeClient | null = null;
+  shell_catalog: readonly UserTerminalShellEntry[] = [];
   ready = false;
   readonly source: TerminalSource;
   readonly title = "终端";
@@ -39,7 +42,7 @@ export class TerminalController {
     this.#on_exit = onExit;
     makeObservable(this, {
       status: observable, error: observable, exit_code: observable, terminal_id: observable,
-      shell_kind: observable, selected_shell: observable, shell_catalog: observableRef,
+      shell_kind: observable, selected_shell: observable, shell_name: observable, shell_catalog: observableRef,
       ready: observable, needs_close_confirmation: computed,
       start: action, restart: action, reportError: action, selectShell: action,
     });
@@ -53,22 +56,28 @@ export class TerminalController {
     this.#pending = this.#prepare();
   }
 
-  selectShell(shell: ShellKind): void {
-    if (this.#closing || !["running", "error", "exited"].includes(this.status) || shell === this.shell_kind) return;
-    if (!this.shell_catalog.some((entry) => entry.kind === shell && entry.available)) return;
-    this.selected_shell = shell;
+  selectShell(shell: ShellKind | null): void {
+    if (this.#closing || !["running", "error", "exited"].includes(this.status)) return;
+    if (this.status === "running" && shell === this.selected_shell) return;
+    if (!this.shell_catalog.some((entry) => entry.shell === shell)) return;
+    this.#requested_shell = shell;
     this.restart();
   }
+
   async #prepare(): Promise<void> {
     try {
       const client = this.getClient();
       if (!client) throw new Error("Host 尚未连接。");
-      const result = await client.command({ type: "get_agent_shell_settings", payload: {} });
+      this.#client ??= client;
+      if (client !== this.#client) throw new Error("Host 连接已切换，请重新创建终端。");
+      const catalog = await client.listUserTerminalShells();
       if (this.status === "closing" || this.status === "closed") return;
       if (client !== this.getClient()) throw new Error("Host 连接已切换，请重新创建终端。");
-      runInAction(() => { this.shell_catalog = result.payload.catalog; });
-      // 新标签不指定类型，由 Host 使用平台默认交互 Shell；不继承 Agent 配置或上次选择。
-      await this.#start();
+      runInAction(() => { this.shell_catalog = catalog; });
+      if (!catalog.some((entry) => entry.shell === this.#requested_shell)) {
+        throw new Error("所选 Shell 当前不可用，请选择其他 Shell 或重新启动以刷新列表。");
+      }
+      await this.#start(client, this.#requested_shell);
     } catch (failure: unknown) { if (this.status !== "closing" && this.status !== "closed") this.reportError(failure); }
   }
 
@@ -112,7 +121,7 @@ export class TerminalController {
     this.#last_size = "";
     this.#input = [];
     this.#input_bytes = 0;
-    this.#pending = this.#pending.then(() => this.selected_shell || this.shell_kind ? this.#start() : this.#prepare());
+    this.#pending = this.#pending.then(() => this.#prepare());
   }
 
   close(): Promise<void> {
@@ -143,7 +152,7 @@ export class TerminalController {
     this.status = "error";
   }
 
-  async #start(): Promise<void> {
+  async #start(client: RuntimeClient, shell: ShellKind | null): Promise<void> {
     try {
       if (!this.#emulator) {
         this.#emulator = await createTerminalEmulator();
@@ -161,12 +170,20 @@ export class TerminalController {
       if (this.#closing) return;
       this.#emulator.terminal.reset();
       runInAction(() => { this.terminal_id = null; });
-      const client = this.getClient();
-      if (!client) throw new Error("Host 尚未连接。");
-      const socket = client.openUserTerminal(this.source, size, (event) => { if (socket === this.#socket) this.#receive(event, socket); }, this.selected_shell);
+      if (client !== this.getClient()) throw new Error("Host 连接已切换，请重新创建终端。");
+      const socket = client.openUserTerminal(this.source, size, (event) => { if (socket === this.#socket) this.#receive(event, socket); }, shell);
       this.#socket = socket;
       const created = await socket.created;
-      runInAction(() => { this.terminal_id = created.terminal_id; this.shell_kind = created.shell; });
+      if (client !== this.getClient()) {
+        await socket.close();
+        throw new Error("Host 连接已切换，请重新创建终端。");
+      }
+      runInAction(() => {
+        this.terminal_id = created.terminal_id;
+        this.shell_kind = created.shell;
+        this.shell_name = created.shell_name;
+        this.selected_shell = shell;
+      });
 
       runInAction(() => { if (this.status === "starting") this.status = "running"; });
       this.fit();

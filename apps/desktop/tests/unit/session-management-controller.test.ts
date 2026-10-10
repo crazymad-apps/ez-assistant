@@ -1,7 +1,8 @@
 import { ClientResources } from "../../src/runtime-client/ClientResources";
 import { ResourceWorkspaceStore } from "../../src/features/resource-workspace/ResourceWorkspaceStore";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { WorkspaceSummary } from "@ez-assistant/protocol";
+import type { WorkspaceId, WorkspaceSummary } from "@ez-assistant/protocol";
+import { draftKeyForWorkspace } from "../../src/stores/NewSessionDraftStore";
 import { ConnectionStore } from "../../src/stores/ConnectionStore";
 import { NavigationStore } from "../../src/stores/NavigationStore";
 import type { RuntimeLifecycleCoordinator } from "../../src/stores/RuntimeLifecycleCoordinator";
@@ -87,6 +88,56 @@ describe("SessionManagementController workspace registration", () => {
   });
 });
 
+describe("SessionManagementController session archiving", () => {
+  it("opens a new draft with the active list after archiving the selected session", async () => {
+    const fixture = controllerFixture(false);
+    fixture.command.mockReset().mockResolvedValue({});
+    fixture.navigation.selectSession("session-current");
+    fixture.navigation.openChildTask("child-current");
+    fixture.navigation.setListMode("archived");
+
+    expect(await fixture.controller.archiveSession("session-current")).toBe(true);
+
+    expect(fixture.command).toHaveBeenCalledWith({ type: "archive_session", payload: { session_id: "session-current" } });
+    expect(fixture.load_session).toHaveBeenCalledWith("session-current");
+    expect(fixture.load_application).toHaveBeenCalledOnce();
+    expect(fixture.select_draft).toHaveBeenCalledWith(null);
+    expect(fixture.navigation.selected_session_id).toBeNull();
+    expect(fixture.navigation.selected_child_task_id).toBeNull();
+    expect(fixture.navigation.selected_draft_key).toBe("unbound");
+    expect(fixture.navigation.list_mode).toBe("active");
+  });
+
+  it("preserves the current view when archiving fails", async () => {
+    const fixture = controllerFixture(false);
+    fixture.command.mockReset().mockRejectedValue(new Error("archive failed"));
+    fixture.navigation.selectSession("session-current");
+
+    expect(await fixture.controller.archiveSession("session-current")).toBe(false);
+
+    expect(fixture.select_draft).not.toHaveBeenCalled();
+    expect(fixture.navigation.selected_session_id).toBe("session-current");
+    expect(fixture.navigation.list_mode).toBe("active");
+    expect(fixture.state.interaction_error).toBe("archive failed");
+  });
+
+  it("does not replace another session opened while archiving is pending", async () => {
+    const fixture = controllerFixture(false);
+    let finish_archive!: () => void;
+    fixture.command.mockReset().mockImplementation(() => new Promise<void>((resolve) => { finish_archive = resolve; }));
+    fixture.navigation.selectSession("session-current");
+
+    const archiving = fixture.controller.archiveSession("session-current");
+    fixture.navigation.selectSession("session-other");
+    finish_archive();
+    expect(await archiving).toBe(true);
+
+    expect(fixture.select_draft).not.toHaveBeenCalled();
+    expect(fixture.navigation.selected_session_id).toBe("session-other");
+    expect(fixture.navigation.list_mode).toBe("active");
+  });
+});
+
 function controllerFixture(restored: boolean) {
   const workspace: WorkspaceSummary = {
     workspace_id: "workspace-1",
@@ -123,7 +174,7 @@ function controllerFixture(restored: boolean) {
     features: [],
   });
   const select_session = vi.fn().mockResolvedValue(undefined);
-  const select_draft = vi.fn();
+  const select_draft = vi.fn((workspace_id: WorkspaceId | null) => navigation.selectDraft(draftKeyForWorkspace(workspace_id)));
   const state = {
     composer_pending: false,
     interaction_error: null,

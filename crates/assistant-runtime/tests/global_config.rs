@@ -43,7 +43,7 @@ fn optional_tables_keep_declared_defaults_without_a_model_catalog() {
     let delegation = active.delegation();
     assert_eq!(delegation.max_tasks_per_run().get(), 8);
     assert_eq!(delegation.max_concurrent_tasks().get(), 4);
-    assert_eq!(delegation.task_timeout(), Duration::from_secs(900));
+    assert_eq!(delegation.task_timeout(), Duration::ZERO);
     assert_eq!(delegation.max_steps().get(), 40);
     assert_eq!(delegation.max_tool_calls().get(), 100);
     assert_eq!(delegation.max_output_tokens().get(), 16_384);
@@ -131,7 +131,6 @@ fn invalid_global_policy_rejects_the_whole_snapshot() {
         "[agent.defaults.execution_limits]\nmax_steps=0",
         "[agent.defaults.execution_limits]\nmax_tool_calls=0",
         "[agent.defaults.delegation]\nmax_concurrent_tasks=9",
-        "[agent.defaults.delegation]\ntask_timeout_ms=0",
         "[agent.defaults.delegation]\nmax_output_tokens=0",
         "[agent.vision]\ntimeout_ms=0\nmax_output_tokens=1",
         "[mcp]\nconnect_timeout_ms=999",
@@ -201,4 +200,17 @@ fn explicit_retry_disable_keeps_single_attempt_semantics() {
     let result = compile_runtime_config("schema_version=1\n[runtime.model_retry]\nenabled=false\n");
     assert_eq!(result.state(), ConfigState::Ready);
     assert!(result.active().unwrap().retry_policy().is_none());
+}
+
+#[test]
+fn child_total_timeout_can_be_disabled_or_explicitly_bounded() {
+    for (milliseconds, expected) in [(0, Duration::ZERO), (900_000, Duration::from_secs(900))] {
+        let result = compile_runtime_config(&format!(
+            "schema_version=1\n[agent.defaults.delegation]\ntask_timeout_ms={milliseconds}\n"
+        ));
+        assert_eq!(
+            result.active().unwrap().delegation().task_timeout(),
+            expected
+        );
+    }
 }

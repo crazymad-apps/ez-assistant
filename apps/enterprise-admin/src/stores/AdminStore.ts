@@ -44,6 +44,7 @@ export class AdminStore {
       testModel: action.bound,
       saveUser: action.bound,
       toggle: action.bound,
+      deleteUser: action.bound,
       resetPassword: action.bound,
       changePassword: action.bound,
       saveModelProvider: action.bound,
@@ -52,6 +53,7 @@ export class AdminStore {
       saveModel: action.bound,
       resetModel: action.bound,
       setDefaultModel: action.bound,
+      setModelPublicOrigin: action.bound,
       reloadModelTemplates: action.bound,
       manage: action.bound,
     });
@@ -254,6 +256,10 @@ export class AdminStore {
     return this.write((token) => modelApi.setDefault(token, selection));
   }
 
+  setModelPublicOrigin(origin: string | null) {
+    return this.write((token) => modelApi.setPublicOrigin(token, origin));
+  }
+
   reloadModelTemplates() {
     return this.write((token) => modelApi.reload(token));
   }
@@ -282,6 +288,10 @@ export class AdminStore {
 
   toggle(user: UserView) {
     return this.write((token) => api.update(token, user.id, { enabled: !user.enabled }), user.id === this.user?.id);
+  }
+
+  deleteUser(user: UserView) {
+    return this.write((token) => api.remove(token, user.id), user.id === this.user?.id);
   }
 
   resetPassword(user: UserView, password: string) {

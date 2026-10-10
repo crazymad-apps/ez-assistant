@@ -5,7 +5,9 @@ export const requestLimit = 32 * 1024 * 1024;
 const totalLimit = 128 * 1024 * 1024;
 
 /** 只提取准入字段；原始 Buffer 始终用于出站，避免重编码改变数字和未知字段。 */
-export function requestModel(body: Buffer): { model: string; stream: boolean } {
+export type RequestModel = { model: string; stream: boolean; store?: boolean; previous_response_id?: string | null };
+
+export function requestModel(body: Buffer): RequestModel {
   let text: string;
   let value: unknown;
   try {
@@ -22,6 +24,11 @@ export function requestModel(body: Buffer): { model: string; stream: boolean } {
     object.model.length > 1024 ||
     /[\p{Cc}]/u.test(object.model) ||
     (object.stream !== undefined && typeof object.stream !== 'boolean')
+    || (Object.hasOwn(object, 'store') && typeof object.store !== 'boolean')
+    || (Object.hasOwn(object, 'previous_response_id') && object.previous_response_id !== null && (
+      typeof object.previous_response_id !== 'string' || !object.previous_response_id
+      || object.previous_response_id.length > 4096 || /[\p{Cc}]/u.test(object.previous_response_id)
+    ))
   )
     throw new ControlError('llm_request_invalid');
   // JSON.parse 已校验语法；线性扫描层级与字符串，拒绝转义拼写的重复准入键，避免 last-wins 歧义。
@@ -42,12 +49,16 @@ export function requestModel(body: Buffer): { model: string; stream: boolean } {
       while (/\s/.test(text[next] ?? '') && next < text.length) next++;
       if (text[next] !== ':') continue;
       const key: string = JSON.parse(text.slice(start, i + 1));
-      if (key !== 'model' && key !== 'stream') continue;
+      if (!['model', 'stream', 'store', 'previous_response_id'].includes(key)) continue;
       if (keys.has(key)) throw new ControlError('llm_request_invalid');
       keys.add(key);
     }
   }
-  return { model: object.model, stream: object.stream === true };
+  return {
+    model: object.model, stream: object.stream === true,
+    ...(Object.hasOwn(object, 'store') ? { store: object.store as boolean } : {}),
+    ...(Object.hasOwn(object, 'previous_response_id') ? { previous_response_id: object.previous_response_id as string | null } : {}),
+  };
 }
 
 /** 每个 scope 一个预算 owner；逐 chunk 预留，所有失败/断连/正常回复共用幂等释放。 */

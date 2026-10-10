@@ -7,6 +7,7 @@ use assistant_protocol::{
 
 fn provider(id: &str) -> StoredProvider {
     StoredProvider {
+        server_history_key: None,
         provider_instance_id: ProviderInstanceId::new(id).unwrap(),
         api_key: SecretValue::new("isolated-secret".into()),
         connection: ProviderConnection {
@@ -16,6 +17,8 @@ fn provider(id: &str) -> StoredProvider {
             protocol_preference: ProviderProtocolPreference::ChatCompletions,
             models_path: "/v1/models".into(),
             discovery_format: ModelDiscoveryFormat::OpenAi,
+            server_history_enabled: false,
+            server_history_support_override: None,
         },
         model_catalog: None,
         model_catalog_diagnostic: None,
@@ -72,17 +75,17 @@ fn fixed_values_roundtrip_reset_and_provider_delete_preserve_selections_and_othe
     let first = fixed("one", 1024);
     let mut second = fixed("two", 2048);
     second.origin = assistant_protocol::ModelConfigOrigin::Manual;
-    engine.put_model_fixed_config(first.clone()).unwrap();
-    engine.put_model_fixed_config(second.clone()).unwrap();
+    engine.put_model_fixed_config(first.clone(), None).unwrap();
+    engine.put_model_fixed_config(second.clone(), None).unwrap();
     let mut changed_origin = second.clone();
     changed_origin.origin = assistant_protocol::ModelConfigOrigin::Online;
-    assert!(engine.put_model_fixed_config(changed_origin).is_err());
+    assert!(engine.put_model_fixed_config(changed_origin, None).is_err());
     let settings = ModelSettings {
         management: None,
         default_model: Some(first.selection.clone()),
         vision_model: Some(second.selection.clone()),
     };
-    engine.save_model_settings(settings.clone()).unwrap();
+    engine.save_model_settings(settings.clone(), None).unwrap();
     assert_eq!(
         engine
             .get_model_fixed_config(first.selection.clone())
@@ -103,10 +106,10 @@ fn fixed_values_roundtrip_reset_and_provider_delete_preserve_selections_and_othe
     );
     // 模拟用户重置，只删除固定值，重复操作成功；不用网络决定结果。
     engine
-        .reset_model_fixed_config(first.selection.clone())
+        .reset_model_fixed_config(first.selection.clone(), None)
         .unwrap();
     engine
-        .reset_model_fixed_config(first.selection.clone())
+        .reset_model_fixed_config(first.selection.clone(), None)
         .unwrap();
     assert_eq!(engine.load_model_settings().unwrap(), settings);
     assert!(
@@ -115,7 +118,7 @@ fn fixed_values_roundtrip_reset_and_provider_delete_preserve_selections_and_othe
             .unwrap()
             .is_none()
     );
-    engine.put_model_fixed_config(first.clone()).unwrap();
+    engine.put_model_fixed_config(first.clone(), None).unwrap();
     let preview = engine
         .provider_usage(one.provider_instance_id.clone())
         .unwrap();
@@ -124,7 +127,9 @@ fn fixed_values_roundtrip_reset_and_provider_delete_preserve_selections_and_othe
     assert!(!preview.vision_model);
     let mut added_after_preview = first.clone();
     added_after_preview.selection.model_id = "org/added-after-confirmation".into();
-    engine.put_model_fixed_config(added_after_preview).unwrap();
+    engine
+        .put_model_fixed_config(added_after_preview, None)
+        .unwrap();
     let removed = engine.remove_provider(one.provider_instance_id).unwrap();
     assert_eq!(removed.fixed_config_count, 2);
     assert!(removed.default_model);
@@ -165,7 +170,9 @@ fn provider_update_keeps_fixed_records_and_secrets_are_not_in_debug_output() {
     let engine = engine(home.path());
     let mut value = provider("one");
     engine.put_provider(value.clone()).unwrap();
-    engine.put_model_fixed_config(fixed("one", 1024)).unwrap();
+    engine
+        .put_model_fixed_config(fixed("one", 1024), None)
+        .unwrap();
     value.connection.display_name = "新的显示名".into();
     value.api_key = SecretValue::new("replacement-secret".into());
     engine.put_provider(value.clone()).unwrap();
@@ -185,13 +192,17 @@ fn invalid_fixed_limits_or_missing_provider_cannot_replace_valid_values() {
     let engine = engine(home.path());
     engine.put_provider(provider("one")).unwrap();
     let valid = fixed("one", 1024);
-    engine.put_model_fixed_config(valid.clone()).unwrap();
-    assert!(engine.put_model_fixed_config(fixed("one", 9000)).is_err());
+    engine.put_model_fixed_config(valid.clone(), None).unwrap();
+    assert!(
+        engine
+            .put_model_fixed_config(fixed("one", 9000), None)
+            .is_err()
+    );
     let mut inconsistent = valid.clone();
     inconsistent.parameters.reasoning = assistant_protocol::ModelFeatureSupport::Unsupported;
     inconsistent.parameters.reasoning_max_output_tokens =
         ModelTokenLimit::Known(512.try_into().unwrap());
-    assert!(engine.put_model_fixed_config(inconsistent).is_err());
+    assert!(engine.put_model_fixed_config(inconsistent, None).is_err());
     assert_eq!(
         engine
             .get_model_fixed_config(valid.selection.clone())
@@ -200,7 +211,7 @@ fn invalid_fixed_limits_or_missing_provider_cannot_replace_valid_values() {
     );
     assert!(
         engine
-            .put_model_fixed_config(fixed("missing", 1024))
+            .put_model_fixed_config(fixed("missing", 1024), None)
             .is_err()
     );
     assert_eq!(
@@ -309,4 +320,140 @@ fn v0_25_3_provider_upsert_does_not_clear_additive_catalog_columns() {
     let loaded = engine.load_providers().unwrap().remove(0);
     assert_eq!(loaded.connection.display_name, "old host update");
     assert_eq!(loaded.model_catalog, Some(catalog(100)));
+}
+
+#[test]
+fn history_binding_changes_are_atomic_selective_and_survive_reopen() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.runtime-test");
+    std::fs::create_dir_all(&root).unwrap();
+    let home = tempfile::Builder::new()
+        .prefix("f06-m1-store-")
+        .tempdir_in(root)
+        .unwrap();
+    let mut engine = engine(home.path());
+    engine.put_provider(provider("one")).unwrap();
+    let model = fixed("one", 1024);
+    engine.put_model_fixed_config(model.clone(), None).unwrap();
+    let settings = ModelSettings {
+        default_model: Some(model.selection.clone()),
+        ..Default::default()
+    };
+    engine.save_model_settings(settings.clone(), None).unwrap();
+    for name in ["follower", "pinned", "unrelated"] {
+        let mut session = super::super::tests::new_session(name, &engine.sessions_directory);
+        session.model_selection = match name {
+            "follower" => None,
+            "pinned" => Some(model.selection.clone()),
+            _ => Some(ModelSelection {
+                model_id: "another".into(),
+                ..model.selection.clone()
+            }),
+        };
+        engine.create_session(session).unwrap();
+    }
+    let keys = |engine: &StorageEngine| {
+        engine
+            .connection
+            .prepare("SELECT session_id, server_history_key FROM sessions ORDER BY session_id")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>()
+    };
+    engine
+        .save_model_settings(settings.clone(), Some("default-epoch".into()))
+        .unwrap();
+    assert_eq!(
+        keys(&engine),
+        vec![
+            ("follower".into(), Some("default-epoch".into())),
+            ("pinned".into(), None),
+            ("unrelated".into(), None)
+        ]
+    );
+    engine
+        .put_model_fixed_config(fixed("one", 2048), Some("fixed-epoch".into()))
+        .unwrap();
+    let changed = keys(&engine);
+    assert_eq!(
+        changed,
+        vec![
+            ("follower".into(), Some("fixed-epoch".into())),
+            ("pinned".into(), Some("fixed-epoch".into())),
+            ("unrelated".into(), None)
+        ]
+    );
+    // Force a failed invalidation after the fixed row write. Both updates must roll back.
+    assert!(
+        engine
+            .put_model_fixed_config(fixed("one", 3072), Some(String::new()))
+            .is_err()
+    );
+    assert_eq!(keys(&engine), changed);
+    assert_eq!(
+        engine
+            .get_model_fixed_config(model.selection.clone())
+            .unwrap()
+            .unwrap()
+            .parameters
+            .max_output_tokens,
+        ModelTokenLimit::Known(NonZeroU64::new(2048).unwrap())
+    );
+    // The settings singleton check fails after the follower update; no half-commit is allowed.
+    engine
+        .connection
+        .execute("DELETE FROM model_settings", [])
+        .unwrap();
+    assert!(
+        engine
+            .save_model_settings(settings.clone(), Some("failed-default".into()))
+            .is_err()
+    );
+    assert_eq!(keys(&engine), changed);
+    engine
+        .connection
+        .execute("INSERT INTO model_settings(singleton_key) VALUES (1)", [])
+        .unwrap();
+    engine.save_model_settings(settings, None).unwrap();
+    drop(engine);
+    let reopened = self::engine(home.path());
+    assert_eq!(keys(&reopened), changed);
+    let sessions = reopened
+        .load_sessions_scoped(Some(&SessionId::new("pinned").unwrap()))
+        .unwrap();
+    assert_eq!(
+        sessions[0].server_history_key.as_deref(),
+        Some("fixed-epoch")
+    );
+    reopened
+        .reset_model_fixed_config(model.selection, Some("reset-epoch".into()))
+        .unwrap();
+    assert_eq!(
+        keys(&reopened),
+        vec![
+            ("follower".into(), Some("reset-epoch".into())),
+            ("pinned".into(), Some("reset-epoch".into())),
+            ("unrelated".into(), None)
+        ]
+    );
+    reopened
+        .invalidate_server_history_bindings("global-epoch".into())
+        .unwrap();
+    let global = keys(&reopened);
+    assert!(
+        global
+            .iter()
+            .all(|(_, key)| key.as_deref() == Some("global-epoch"))
+    );
+    assert!(
+        reopened
+            .invalidate_server_history_bindings(String::new())
+            .is_err()
+    );
+    assert_eq!(keys(&reopened), global);
+    drop(reopened);
+    assert_eq!(keys(&self::engine(home.path())), global);
 }

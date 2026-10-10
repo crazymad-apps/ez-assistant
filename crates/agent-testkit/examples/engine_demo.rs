@@ -44,6 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         model: demo_model(),
         parts: vec![
             AssistantPart::Reasoning(ReasoningPart {
+                source: Default::default(),
                 id: PartId::new("reasoning_1")?,
                 text: "需要先查询天气工具。".to_owned(),
             }),

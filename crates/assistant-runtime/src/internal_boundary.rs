@@ -89,6 +89,30 @@ pub(crate) struct InternalBoundaryIdentity {
 pub(crate) struct InternalBoundaryCoordinator;
 
 impl InternalBoundaryCoordinator {
+    /// 比较当前有效历史中各类内部上下文的最新正文，不比较每次构造产生的临时 ID。
+    pub(crate) fn context_is_current(
+        conversation: &agent_types::ConversationSnapshot,
+        context: &UserMessage,
+    ) -> bool {
+        !context.parts.is_empty()
+            && context.parts.iter().all(|expected| {
+                let UserPart::InternalContext(expected) = expected else {
+                    return false;
+                };
+                conversation.messages.iter().rev().find_map(|message| {
+                    let agent_types::ConversationMessage::User(user) = message else {
+                        return None;
+                    };
+                    user.parts.iter().rev().find_map(|part| match part {
+                        UserPart::InternalContext(part) if part.kind == expected.kind => {
+                            Some(&part.text)
+                        }
+                        _ => None,
+                    })
+                }) == Some(&expected.text)
+            })
+    }
+
     /// 构造一份规范内部 Part 插入计划。
     pub(crate) fn plan(
         request: InternalBoundaryRequest,

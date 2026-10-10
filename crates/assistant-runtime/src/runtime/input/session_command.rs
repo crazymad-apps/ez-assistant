@@ -233,6 +233,15 @@ pub(super) async fn execute_session_command(
     if let StoredSessionCommandResult::ShellSwitch { previous_shell, .. } = &result {
         crate::shell::append_switch_previous(&mut message, *previous_shell)?;
     }
+    if matches!(result, StoredSessionCommandResult::Mcp(_)) {
+        let directory = crate::mcp::refresh_directory(
+            context.mcp_registry.as_ref(),
+            context.permission_coordinator.as_ref(),
+            &session.permission_scopes(),
+            command.agent_variant,
+        )?;
+        message.parts.extend(directory.parts);
+    }
     let _mutation = session.mutation().await;
     let committed_at_ms = super::super::now_ms()?;
     let committed = context

@@ -78,8 +78,15 @@ pub(super) fn run_worker(
             Command::LoadModelSettings { reply } => {
                 let _ = reply.send(engine.load_model_settings());
             }
-            Command::SaveModelSettings { settings, reply } => {
-                let _ = reply.send(engine.save_model_settings(settings));
+            Command::SaveModelSettings {
+                settings,
+                server_history_key,
+                reply,
+            } => {
+                let _ = reply.send(engine.save_model_settings(settings, server_history_key));
+            }
+            Command::InvalidateServerHistoryBindings { key, reply } => {
+                let _ = reply.send(engine.invalidate_server_history_bindings(key));
             }
             Command::GetModelFixedConfig { selection, reply } => {
                 let _ = reply.send(engine.get_model_fixed_config(selection));
@@ -92,11 +99,19 @@ pub(super) fn run_worker(
             } => {
                 let _ = reply.send(engine.list_model_fixed_configs(id, offset, limit));
             }
-            Command::PutModelFixedConfig { config, reply } => {
-                let _ = reply.send(engine.put_model_fixed_config(config));
+            Command::PutModelFixedConfig {
+                config,
+                server_history_key,
+                reply,
+            } => {
+                let _ = reply.send(engine.put_model_fixed_config(config, server_history_key));
             }
-            Command::ResetModelFixedConfig { selection, reply } => {
-                let _ = reply.send(engine.reset_model_fixed_config(selection));
+            Command::ResetModelFixedConfig {
+                selection,
+                server_history_key,
+                reply,
+            } => {
+                let _ = reply.send(engine.reset_model_fixed_config(selection, server_history_key));
             }
 
             #[cfg(test)]

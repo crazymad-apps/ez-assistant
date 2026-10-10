@@ -65,12 +65,18 @@ impl CenterModelTransport {
                 "模型请求不属于受信中心。".to_owned(),
             )));
         }
-        request
-            .headers
-            .retain(|(name, _)| !name.eq_ignore_ascii_case("authorization"));
+        request.headers.retain(|(name, _)| {
+            !name.eq_ignore_ascii_case("authorization")
+                && !name.eq_ignore_ascii_case("x-ez-center-history-binding")
+        });
         request
             .headers
             .push(("authorization".to_owned(), login.model_authorization()));
+        if let Some(binding) = self.configuration.server_history_binding() {
+            request
+                .headers
+                .push(("x-ez-center-history-binding".to_owned(), binding.to_owned()));
+        }
         let mut response = self.inner.execute(request).await?;
         if !response
             .headers
@@ -125,9 +131,14 @@ impl CenterModelTransport {
                     .reject_model_login(&self.loader.key, &domain, &login);
                 Some(ModelError::Auth("模型凭据已失效，请重新登录。".to_owned()))
             }
-            (400, Some("llm_request_invalid"))
-            | (413, Some("llm_request_too_large"))
-            | (503, Some("llm_record_unavailable" | "llm_proxy_unavailable")) => {
+            (503, Some("llm_record_unavailable" | "llm_proxy_unavailable")) => {
+                Some(ModelError::Unavailable {
+                    message: "中心模型服务暂时不可用。".to_owned(),
+                    status: Some(response.status),
+                    retry_after_ms: None,
+                })
+            }
+            (400, Some("llm_request_invalid")) | (413, Some("llm_request_too_large")) => {
                 Some(ModelError::Provider {
                     message: "中心未接纳本次模型请求，请稍后重试或联系管理员。".to_owned(),
                     status: Some(response.status),

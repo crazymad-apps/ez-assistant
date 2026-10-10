@@ -15,6 +15,7 @@ async fn spawn(script: &str) -> (Arc<TerminalProcess>, mpsc::UnboundedReceiver<T
         std::env::temp_dir(),
         super::pty_size(assistant_protocol::UserTerminalSize { cols: 80, rows: 24 }).expect("size"),
         command,
+        None,
         move |event| {
             tx.send(event)
                 .map_err(|_| super::failure("test receiver closed"))
@@ -109,6 +110,7 @@ async fn invalid_shell_does_not_create_a_terminal() {
         std::env::temp_dir(),
         super::pty_size(assistant_protocol::UserTerminalSize { cols: 80, rows: 24 }).expect("size"),
         CommandBuilder::new("/nonexistent/ez-test-shell"),
+        None,
         |_| Ok(()),
     )
     .await;

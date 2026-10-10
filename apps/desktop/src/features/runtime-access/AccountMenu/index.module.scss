@@ -10,7 +10,7 @@
   border: 0;
   border-top: 1px solid var(--ez-border);
   color: var(--ez-text-secondary);
-  background: var(--ez-sidebar);
+  background: var(--ez-left-account-background, var(--ez-sidebar));
   text-align: left;
 
   &:hover { background: var(--ez-surface-muted); }
@@ -70,3 +70,5 @@
   strong, small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   small { color: var(--ez-text-muted); font-size: var(--ez-font-small); }
 }
+.summary_heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.update_button { width: auto; min-height: 26px; padding: 3px 8px; color: var(--ez-primary); }

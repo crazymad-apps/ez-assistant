@@ -879,8 +879,8 @@ async fn shell_context_returns_after_real_compaction_without_changing_the_bindin
     ));
     let conversation = runtime.conversation_snapshot(&session_id).await.unwrap();
     assert!(
-        !crate::shell::context_is_current(&conversation, &expected),
-        "the older environment must actually leave the effective context"
+        crate::shell::context_is_current(&conversation, &expected),
+        "compaction must persist the restored environment before any new Run"
     );
     let accepted = runtime.submit_input(request).await.unwrap();
     assert_eq!(

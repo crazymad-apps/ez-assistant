@@ -123,7 +123,7 @@ pub fn normalize_context_usage_adjustments(conversation: &mut ConversationSnapsh
 
 /// 把一次压缩后的执行上下文合并回唯一、完整的产品 Conversation。
 ///
-/// replacement 必须是 `System prefix → 新 Context Summary → 当前完整历史的原样尾部`。
+/// replacement 必须是 `System prefix → 新 Context Summary → 当前完整历史的原样尾部 → 可选恢复消息`。
 /// 合并时复用产品历史开头的 System prefix，只把新摘要插入保留尾部之前，因此保留全部旧
 /// 轮次且不会复制稳定消息 ID。
 pub fn merge_context_replacement_with_product_history(
@@ -155,7 +155,28 @@ pub fn merge_context_replacement_with_product_history(
             "context replacement changed the protected system prefix",
         ));
     }
-    let retained = &replacement.messages[replacement_prefix_end + 1..];
+    let mut retained = &replacement.messages[replacement_prefix_end + 1..];
+    // 只允许一条新建的隐藏能力上下文；不允许普通正文借压缩被修改或追加。
+    if let Some(ConversationMessage::User(user)) = retained.last()
+        && !history.messages.iter().any(|message| match message {
+            ConversationMessage::User(message) => message.id == user.id,
+            ConversationMessage::Assistant(message) => message.id == user.id,
+            ConversationMessage::Tool(message) => message.id == user.id,
+            ConversationMessage::System(message) => message.id == user.id,
+            ConversationMessage::ContextSummary(message) => message.id == user.id,
+        })
+        && user.origin == agent_types::UserMessageOrigin::Runtime
+        && user.transcript_visibility == agent_types::TranscriptVisibility::Hidden
+        && !user.parts.is_empty()
+        && user.parts.len() <= 2
+        && user.parts.iter().all(|part| {
+            matches!(part,
+            agent_types::UserPart::InternalContext(part) if matches!(part.kind.as_str(),
+                "mcp_server_directory" | "mcp_server_selection" | "shell_environment"))
+        })
+    {
+        retained = &retained[..retained.len() - 1];
+    }
     if history.messages.len() < retained.len()
         || history.messages[history.messages.len() - retained.len()..] != *retained
     {
@@ -349,6 +370,50 @@ mod tests {
             execution_context_from_product_history(&second_product),
             second_replacement
         );
+    }
+
+    #[test]
+    fn compaction_restores_only_new_hidden_capability_context_and_preserves_the_suffix() {
+        use crate::internal_boundary::{
+            InternalBoundaryCoordinator, InternalBoundaryRequest, InternalBoundarySource,
+        };
+        let history = ConversationSnapshot::new(vec![user("first"), user("last")]);
+        let restored = InternalBoundaryCoordinator::hidden_message(InternalBoundaryRequest {
+            source: InternalBoundarySource::McpServerDirectory,
+            text: "current directory".into(),
+        })
+        .unwrap()
+        .0;
+        let replacement = ConversationSnapshot::new(vec![
+            summary("summary"),
+            user("last"),
+            ConversationMessage::User(restored.clone()),
+        ]);
+        let merged =
+            merge_context_replacement_with_product_history(&history, &replacement).unwrap();
+        assert_eq!(merged.messages[0], history.messages[0]);
+        assert_eq!(execution_context_from_product_history(&merged), replacement);
+        for invalid in [
+            user("extra"),
+            ConversationMessage::User(agent_types::UserMessage {
+                id: message_id("first"),
+                ..restored.clone()
+            }),
+            ConversationMessage::User(agent_types::UserMessage {
+                transcript_visibility: agent_types::TranscriptVisibility::Visible,
+                ..restored
+            }),
+        ] {
+            let mut invalid_replacement = replacement.clone();
+            *invalid_replacement.messages.last_mut().unwrap() = invalid;
+            assert!(
+                merge_context_replacement_with_product_history(&history, &invalid_replacement)
+                    .is_err()
+            );
+        }
+        let mut changed = replacement;
+        changed.messages[1] = user("rewritten");
+        assert!(merge_context_replacement_with_product_history(&history, &changed).is_err());
     }
 
     #[test]

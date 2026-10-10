@@ -8,7 +8,7 @@ import { validServerName } from "../dist/config/index.js";
 import { SOFTWARE_VERSION } from "@ez-assistant/protocol/node";
 
 test("访问配置接受 IPv4、IPv6 和域名，不按地址类别拒绝", () => {
-  for (const name of ["127.0.0.1", "172.16.20.4", "0.0.0.0", "::", "::1", "[::1]", "2001:db8::1", "localhost", "RUNTIME.EXAMPLE", "例子.测试"])
+  for (const name of ["127.0.0.1", "192.0.2.10", "0.0.0.0", "::", "::1", "[::1]", "2001:db8::1", "localhost", "RUNTIME.EXAMPLE", "例子.测试"])
     assert.equal(validServerName(name), true, name);
   for (const name of ["", "http://runtime.example", "runtime.example:7240", "127.0.0.1:7240", "[::1]:7240", "[127.0.0.1]", "runtime.example/path", "runtime.example?x=1", "user@runtime.example", "999.999.999.999", "runtime example"])
     assert.equal(validServerName(name), false, name);

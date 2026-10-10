@@ -21,10 +21,12 @@ mod tool;
 
 pub use capability::{
     fs::{
-        DeleteFileRequest, DeleteFileResult, EditFileRequest, EditFileResult,
+        DeleteFileRequest, DeleteFileResult, EditFileEntry, EditFileEntryResult, EditFileOutcome,
+        EditFileRequest, EditFileResult, EditNotExecutedReason, EditReplacement,
         FileAuthorizationFacts, FileBatchAuthorizationFacts, FileEntry, FileEntryKind,
         FileOperation, FileSystemTool, FileToolContext, FileToolError, FsFuture,
-        ListDirectoryRequest, ListDirectoryResult, ReadFileRequest, ReadFileResult,
+        ListDirectoryRequest, ListDirectoryResult, MAX_EDIT_FILES, MAX_EDIT_GROUPS,
+        MAX_EDIT_INPUT_BYTES, MAX_EDITS_PER_FILE, ReadFileRequest, ReadFileResult,
         SearchFilesRequest, SearchFilesResult, SearchKind, SearchMatch, SearchTruncationReason,
         WriteFileRequest, WriteFileResult, exact_replace, paginate_with_line_numbers,
     },
@@ -48,9 +50,10 @@ pub use resolution::{
 pub use standard::{
     ToolConfigurationError,
     fs::{
-        DeleteFileInput, EditFileInput, FindFilesInput, FsDeleteTool, FsEditTool, FsFindTool,
-        FsListTool, FsReadTool, FsSearchTool, FsWriteTool, ListDirectoryInput, ReadFileInput,
-        ReadFileToolConfig, SearchContentInput, SearchFilesToolConfig, WriteFileInput,
+        DeleteFileInput, EditFileInput, EditFileInputEntry, FindFilesInput, FsDeleteTool,
+        FsEditTool, FsFindTool, FsListTool, FsReadTool, FsSearchTool, FsWriteTool,
+        ListDirectoryInput, ReadFileInput, ReadFileToolConfig, SearchContentInput,
+        SearchFilesToolConfig, WriteFileInput,
     },
     inspect_images::{
         InspectImagesInput, InspectImagesOutput, InspectImagesTool, ResolvedInspectImagesInput,

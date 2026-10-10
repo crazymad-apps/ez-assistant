@@ -52,7 +52,7 @@ export function createQuotedTextSnapshot(
   }
   if (rangeIntersectsExcludedContent(root, range)) return null;
 
-  const projection = buildQuoteTextProjection(root);
+  const projection = buildQuoteTextProjection(root, metadata.source_message_id);
   const text_start_utf16 = projectionOffset(range.startContainer, range.startOffset, projection);
   const text_end_utf16 = projectionOffset(range.endContainer, range.endOffset, projection);
   if (text_start_utf16 === null || text_end_utf16 === null || text_start_utf16 >= text_end_utf16) {
@@ -84,8 +84,9 @@ export function createQuotedTextSnapshot(
 export function quoteSourceRange(
   root: HTMLElement,
   quote: Pick<QuotedTextSnapshot, "exact" | "text_start_utf16" | "text_end_utf16">,
+  message_id?: MessageId,
 ): Range | null {
-  const projection = buildQuoteTextProjection(root);
+  const projection = buildQuoteTextProjection(root, message_id);
   if (projection.text.slice(quote.text_start_utf16, quote.text_end_utf16) !== quote.exact) {
     return null;
   }
@@ -98,7 +99,9 @@ export function quoteSourceRange(
   return range;
 }
 
-function buildQuoteTextProjection(root: HTMLElement): QuoteTextProjection {
+// 过程折叠会把同一消息的正文片段放在 Turn 根下。仍按原 message ID 投影全部文本，
+// 保持 UTF-16 locator 与旧消息根一致，不让相邻 Step 的正文混入引用。
+function buildQuoteTextProjection(root: HTMLElement, message_id?: MessageId): QuoteTextProjection {
   const entries: ProjectionEntry[] = [];
   let text = "";
   let previous_block: Element | null = null;
@@ -107,6 +110,8 @@ function buildQuoteTextProjection(root: HTMLElement): QuoteTextProjection {
       if (!(node instanceof Text) || node.data.length === 0 || !isIncludedText(root, node)) {
         return NodeFilter.FILTER_REJECT;
       }
+      if (message_id && root.matches("[data-processing-turn]")
+        && node.parentElement?.closest<HTMLElement>("[data-message-id]")?.dataset.messageId !== message_id) return NodeFilter.FILTER_REJECT;
       return NodeFilter.FILTER_ACCEPT;
     },
   });

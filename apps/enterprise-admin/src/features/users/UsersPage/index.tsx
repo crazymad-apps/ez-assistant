@@ -19,6 +19,7 @@ type UsersPageProps = Readonly<{
   onCreate: () => void;
   onEdit: (user: UserView) => void;
   onResetPassword: (user: UserView) => void;
+  onDelete: (user: UserView) => Promise<void>;
   onToggle: (user: UserView) => Promise<void>;
 }>;
 
@@ -50,6 +51,19 @@ export function UsersPage(props: UsersPageProps) {
     });
   }
 
+  function remove(user: UserView) {
+    if (user.superAdmin || props.busy) return;
+    modal.confirm({
+      title: `删除用户 ${user.username}？`,
+      content:
+        '账号删除后无法恢复，全部登录及模型凭据立即失效。历史反馈、调用和审计记录保留，Host 本地数据不会清理；重新创建同名账号不会继承原数据。',
+      okText: '删除用户',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: () => props.onDelete(user),
+    });
+  }
+
   const columns: TableProps<UserView>['columns'] = [
     // “用户名”为显示名称的界面文案，与用于登录的账号分列展示。
     { title: '用户名', dataIndex: 'displayName', width: 160, render: (name: string) => <strong>{name}</strong> },
@@ -77,7 +91,7 @@ export function UsersPage(props: UsersPageProps) {
     {
       title: '操作',
       key: 'actions',
-      width: 240,
+      width: 290,
       align: 'center',
       fixed: 'right',
       render: (_, user) => (
@@ -96,6 +110,9 @@ export function UsersPage(props: UsersPageProps) {
             onClick={() => toggle(user)}
           >
             {user.enabled ? '停用' : '启用'}
+          </Button>
+          <Button type="link" size="small" danger disabled={props.busy || user.superAdmin} onClick={() => remove(user)}>
+            删除
           </Button>
         </Space>
       ),

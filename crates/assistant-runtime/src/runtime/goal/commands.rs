@@ -367,6 +367,7 @@ impl AssistantRuntime {
 
         // 事件发布和队列唤醒必须晚于内存投影，使观察者看到 RunAccepted 时已能读取完整状态。
         self.publish(assistant_protocol::RuntimeEvent::RunAccepted {
+            created_at_ms: projection.run.created_at_ms,
             session_id: request.session_id.clone(),
             run_id: projection.run.run_id.clone(),
         });

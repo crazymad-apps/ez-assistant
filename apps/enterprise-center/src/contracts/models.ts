@@ -56,6 +56,11 @@ export class ProviderConnection {
   @ApiProperty() models_path!: string;
   @ApiProperty({ enum: ['openai', 'vllm', 'moonshot', 'dashscope_native'] }) discovery_format!:
     'openai' | 'vllm' | 'moonshot' | 'dashscope_native';
+  @ApiPropertyOptional({ enum: ['http', 'websocket'], default: 'http' })
+  responses_transport?: 'http' | 'websocket';
+  @ApiProperty({ default: false }) server_history_enabled!: boolean;
+  @ApiProperty({ type: String, enum: ['supported', 'unsupported', null], nullable: true })
+  server_history_support_override!: 'supported' | 'unsupported' | null;
 }
 export class CredentialChange {
   @ApiProperty({ enum: ['unchanged', 'replace', 'clear'] }) mode!: 'unchanged' | 'replace' | 'clear';
@@ -115,9 +120,13 @@ export class ProviderUsage {
   @ApiProperty() default_model!: boolean;
 }
 export class SaveModelSettings {
-  @ApiProperty({ type: ModelSelection, nullable: true }) default_model!: ModelSelection | null;
+  @ApiPropertyOptional({ type: ModelSelection, nullable: true }) default_model?: ModelSelection | null;
+  @ApiPropertyOptional({ type: String, nullable: true, description: '客户端模型访问地址；null 恢复部署地址。与 default_model 分别提交。' })
+  public_origin?: string | null;
 }
-export class ModelSettings extends SaveModelSettings {
+export class ModelSettings {
+  @ApiProperty({ type: ModelSelection, nullable: true }) default_model!: ModelSelection | null;
+  @ApiProperty({ type: String, nullable: true }) public_origin!: string | null;
   @ApiProperty({ enum: ['ready', 'unavailable'] }) state!: 'ready' | 'unavailable';
   @ApiProperty({ type: String, nullable: true }) reason!: string | null;
   @ApiProperty({ type: ModelConfiguration, nullable: true }) configuration!: ModelConfiguration | null;
@@ -138,4 +147,7 @@ export class RuntimeModelConfiguration {
   @ApiPropertyOptional({ enum: protocols }) protocol?: Protocol;
   @ApiPropertyOptional() model_id?: string;
   @ApiPropertyOptional({ type: ModelParameters }) parameters?: ModelParameters;
+  @ApiPropertyOptional() server_history_enabled?: boolean;
+  @ApiPropertyOptional({ enum: supports }) server_history_support?: Support;
+  @ApiPropertyOptional({ type: String, nullable: true }) server_history_binding?: string | null;
 }

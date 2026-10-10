@@ -85,9 +85,35 @@ impl VolatileRuntimeStore {
     pub(super) fn save_model_settings(
         &self,
         settings: assistant_protocol::ModelSettings,
+        server_history_key: Option<String>,
     ) -> StoreFuture<'_, ()> {
         Box::pin(async move {
-            self.lock()?.model_settings = settings;
+            let mut state = self.lock()?;
+            if let Some(key) = server_history_key {
+                for session in state
+                    .sessions
+                    .values_mut()
+                    .filter(|s| s.model_selection.is_none())
+                {
+                    session.server_history_key = Some(key.clone());
+                }
+            }
+            state.model_settings = settings;
+            Ok(())
+        })
+    }
+
+    pub(super) fn invalidate_server_history_bindings(&self, key: String) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            if key.is_empty() {
+                return Err(StoreError::new(
+                    StoreErrorKind::InvalidData,
+                    "history binding is empty",
+                ));
+            }
+            for session in self.lock()?.sessions.values_mut() {
+                session.server_history_key = Some(key.clone());
+            }
             Ok(())
         })
     }
@@ -121,6 +147,7 @@ impl VolatileRuntimeStore {
     pub(super) fn put_model_fixed_config(
         &self,
         config: assistant_protocol::ModelFixedConfig,
+        server_history_key: Option<String>,
     ) -> StoreFuture<'_, ()> {
         Box::pin(async move {
             crate::validate_fixed_model_parameters(&config.parameters).map_err(|_| {
@@ -149,6 +176,7 @@ impl VolatileRuntimeStore {
                     "model origin cannot change",
                 ));
             }
+            invalidate_fixed_history(&mut state, &config.selection, server_history_key);
             state.fixed_models.insert(config.selection.clone(), config);
             Ok(())
         })
@@ -157,10 +185,34 @@ impl VolatileRuntimeStore {
     pub(super) fn reset_model_fixed_config(
         &self,
         selection: assistant_protocol::ModelSelection,
+        server_history_key: Option<String>,
     ) -> StoreFuture<'_, ()> {
         Box::pin(async move {
-            self.lock()?.fixed_models.remove(&selection);
+            let mut state = self.lock()?;
+            invalidate_fixed_history(&mut state, &selection, server_history_key);
+            state.fixed_models.remove(&selection);
             Ok(())
         })
+    }
+}
+
+/// 与固定参数的写入共享同一锁；默认跟随者只受当前默认模型影响。
+fn invalidate_fixed_history(
+    state: &mut State,
+    selection: &assistant_protocol::ModelSelection,
+    key: Option<String>,
+) {
+    let Some(key) = key else {
+        return;
+    };
+    for session in state.sessions.values_mut() {
+        if session
+            .model_selection
+            .as_ref()
+            .or(state.model_settings.default_model.as_ref())
+            == Some(selection)
+        {
+            session.server_history_key = Some(key.clone());
+        }
     }
 }

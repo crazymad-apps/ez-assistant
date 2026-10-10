@@ -50,6 +50,17 @@ export const UsersRoute = observer(function UsersRoute() {
           rememberDialogTrigger();
           setPasswordTarget(user);
         }}
+        onDelete={async (user) => {
+          const error = await adminStore.deleteUser(user);
+          if (error) {
+            void message.error(error);
+            throw new Error('删除未成功确认');
+          }
+          if (adminStore.user) {
+            void message.success('用户已删除');
+            data.onRecover();
+          }
+        }}
         onToggle={async (user) => {
           const error = await adminStore.toggle(user);
           if (error) {

@@ -82,6 +82,7 @@ fn summarize(record: &TraceRecord) -> String {
 
 fn summarize_model_event(event: &ModelEvent) -> String {
     match event {
+        ModelEvent::TurnRestarted => "model_event turn_restarted".into(),
         ModelEvent::TurnStarted { .. } => "model_event turn_started".into(),
         ModelEvent::ReasoningStarted { .. } => "model_event reasoning_started".into(),
         ModelEvent::ReasoningDelta { delta, .. } => {
@@ -112,6 +113,14 @@ fn summarize_attempt_event(event: &ModelAttemptEvent) -> String {
         ModelAttemptEvent::Started { attempt, .. } => {
             format!("model_attempt started attempt={attempt}")
         }
+        ModelAttemptEvent::StreamFailed {
+            attempt,
+            retry_reason,
+            will_retry,
+            ..
+        } => format!(
+            "model_attempt stream_failed attempt={attempt} reason={retry_reason:?} will_retry={will_retry}"
+        ),
         ModelAttemptEvent::EstablishmentFailed {
             attempt,
             retry_reason,

@@ -1,3 +1,4 @@
+import appLogo from "../../../../app-icon.svg";
 import { observer } from "mobx-react-lite";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "../../../components/DropdownMenu";
 import { Icon } from "../../../components/Icon";
@@ -16,7 +17,8 @@ export const SessionNavigation = observer(function SessionNavigation({ sidebar_o
     .sort((left, right) => (right.updated_at_ms ?? 0) - (left.updated_at_ms ?? 0))
     .slice(0, 8);
 
-  return <nav aria-label="会话导航操作" className={styles.navigation}>
+  return <nav aria-label="会话导航操作" className={styles.navigation} data-sidebar-open={sidebar_open}>
+    <img alt="" aria-hidden="true" className={styles.app_logo} draggable={false} src={appLogo} />
     <InlineIconButton className={styles.icon_button} icon="sidebar-left" label={sidebar_open ? "收起会话栏" : "展开会话栏"} onClick={on_toggle} />
     <InlineIconButton className={styles.icon_button} icon="search" label="搜索会话" onClick={on_search} />
     <InlineIconButton className={styles.icon_button} disabled={!store.navigation.can_go_back} icon="chevron-left" label="返回上一处会话位置" onClick={() => void store.navigateBack()} />

@@ -685,7 +685,7 @@ pub struct RunSnapshot {
     #[ts(optional)]
     pub model_request: Option<ModelRequestStatus>,
     /// 截至快照时观察到的 reasoning；运行中可能因事件丢失而不完整。
-    pub reasoning: String,
+    pub reasoning_parts: Vec<crate::ReasoningPartSnapshot>,
     /// 截至快照时观察到的正文；正常完成时由最终 AssistantMessage 校准。
     pub text: String,
     /// 当前已观察到的工具调用。
@@ -815,7 +815,11 @@ mod tests {
             cancel_requested: false,
             active_step: Some(1),
             model_request: None,
-            reasoning: "checked".to_owned(),
+            reasoning_parts: vec![crate::ReasoningPartSnapshot {
+                part_id: crate::PartId::new("r1").expect("id"),
+                text: "checked".to_owned(),
+                source: Default::default(),
+            }],
             text: "partial".to_owned(),
             tools: vec![ToolActivitySnapshot {
                 step: Some(1),
@@ -877,7 +881,7 @@ mod tests {
             "attempt": 1,
             "status": "completed",
             "cancel_requested": false,
-            "reasoning": "",
+            "reasoning_parts": [],
             "text": "done",
             "tools": [],
             "error": null

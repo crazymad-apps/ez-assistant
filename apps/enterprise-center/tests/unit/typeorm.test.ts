@@ -18,7 +18,7 @@ it('业务 DataSource 禁止隐式升级/同步/扩展安装，使用有界连�
     connectTimeoutMS: 3000,
     extra: { statement_timeout: 5000, lock_timeout: 2000, idle_in_transaction_session_timeout: 10000 },
   });
-  expect(source.options.entities).toHaveLength(11);
+  expect(source.options.entities).toHaveLength(14);
 });
 
 function fixture() {

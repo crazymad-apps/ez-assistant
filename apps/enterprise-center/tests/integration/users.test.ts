@@ -227,7 +227,8 @@ it('数据库赋予任意用户超级管理员标记立即生效；不绑定初�
   expect((await patch(f, promoted.token, user.id, { display_name: '第二超管' })).statusCode).toBe(200);
   for (const target of [root.user.id, user.id]) {
     expect((await patch(f, promoted.token, target, { is_super_admin: false })).statusCode).toBe(400);
-    expect((await request(f, promoted.token, 'DELETE', '/api/users/' + target)).statusCode).toBe(404);
+    if (target === user.id)
+      expect((await request(f, promoted.token, 'DELETE', '/api/users/' + target)).json().error.code).toBe('SUPER_ADMIN_PROTECTED');
   }
   expect((await f.pool.query('SELECT count(*) FROM users WHERE is_super_admin')).rows[0].count).toBe('1');
 });

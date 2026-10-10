@@ -38,7 +38,9 @@ pub(super) struct FaultInjectingStore {
     inner: VolatileRuntimeStore,
     panic_next_settlement: AtomicBool,
     fail_settlement: bool,
+    pub(super) fail_next_begin: AtomicBool,
     pub(super) feedback_failure: AtomicUsize,
+    pub(super) fail_next_history_binding: AtomicBool,
     hang_shutdown: bool,
     shutdown_called: AtomicBool,
     unavailable_session: Mutex<Option<SessionId>>,
@@ -59,7 +61,9 @@ impl FaultInjectingStore {
             inner: VolatileRuntimeStore::default(),
             panic_next_settlement: AtomicBool::new(false),
             fail_settlement: false,
+            fail_next_begin: AtomicBool::new(false),
             feedback_failure: AtomicUsize::new(0),
+            fail_next_history_binding: AtomicBool::new(false),
             hang_shutdown: false,
             shutdown_called: AtomicBool::new(false),
             unavailable_session: Mutex::new(None),
@@ -80,7 +84,9 @@ impl FaultInjectingStore {
             inner: VolatileRuntimeStore::default(),
             panic_next_settlement: AtomicBool::new(true),
             fail_settlement: false,
+            fail_next_begin: AtomicBool::new(false),
             feedback_failure: AtomicUsize::new(0),
+            fail_next_history_binding: AtomicBool::new(false),
             hang_shutdown: false,
             shutdown_called: AtomicBool::new(false),
             unavailable_session: Mutex::new(None),
@@ -101,7 +107,9 @@ impl FaultInjectingStore {
             inner: VolatileRuntimeStore::default(),
             panic_next_settlement: AtomicBool::new(false),
             fail_settlement: true,
+            fail_next_begin: AtomicBool::new(false),
             feedback_failure: AtomicUsize::new(0),
+            fail_next_history_binding: AtomicBool::new(false),
             hang_shutdown: false,
             shutdown_called: AtomicBool::new(false),
             unavailable_session: Mutex::new(None),
@@ -122,7 +130,9 @@ impl FaultInjectingStore {
             inner: VolatileRuntimeStore::default(),
             panic_next_settlement: AtomicBool::new(false),
             fail_settlement: false,
+            fail_next_begin: AtomicBool::new(false),
             feedback_failure: AtomicUsize::new(0),
+            fail_next_history_binding: AtomicBool::new(false),
             hang_shutdown: true,
             shutdown_called: AtomicBool::new(false),
             unavailable_session: Mutex::new(None),
@@ -256,9 +266,22 @@ impl RuntimeStore for FaultInjectingStore {
     fn save_model_settings(
         &self,
         settings: assistant_protocol::ModelSettings,
+        server_history_key: Option<String>,
     ) -> StoreFuture<'_, ()> {
-        self.inner.save_model_settings(settings)
+        self.inner.save_model_settings(settings, server_history_key)
     }
+    fn invalidate_server_history_bindings(&self, key: String) -> StoreFuture<'_, ()> {
+        if self.fail_next_history_binding.swap(false, Ordering::SeqCst) {
+            return Box::pin(async {
+                Err(StoreError::new(
+                    StoreErrorKind::Unavailable,
+                    "fixture history binding write failed",
+                ))
+            });
+        }
+        self.inner.invalidate_server_history_bindings(key)
+    }
+
     fn get_model_fixed_config(
         &self,
         selection: assistant_protocol::ModelSelection,
@@ -285,14 +308,18 @@ impl RuntimeStore for FaultInjectingStore {
     fn put_model_fixed_config(
         &self,
         config: assistant_protocol::ModelFixedConfig,
+        server_history_key: Option<String>,
     ) -> StoreFuture<'_, ()> {
-        self.inner.put_model_fixed_config(config)
+        self.inner
+            .put_model_fixed_config(config, server_history_key)
     }
     fn reset_model_fixed_config(
         &self,
         selection: assistant_protocol::ModelSelection,
+        server_history_key: Option<String>,
     ) -> StoreFuture<'_, ()> {
-        self.inner.reset_model_fixed_config(selection)
+        self.inner
+            .reset_model_fixed_config(selection, server_history_key)
     }
 
     fn search_conversation_titles(
@@ -688,6 +715,14 @@ impl RuntimeStore for FaultInjectingStore {
     }
 
     fn begin_tool_exchange(&self, pending: PendingToolExchange) -> StoreFuture<'_, ()> {
+        if self.fail_next_begin.swap(false, Ordering::SeqCst) {
+            return Box::pin(async {
+                Err(StoreError::new(
+                    StoreErrorKind::Unavailable,
+                    "injected begin failure",
+                ))
+            });
+        }
         self.inner.begin_tool_exchange(pending)
     }
 

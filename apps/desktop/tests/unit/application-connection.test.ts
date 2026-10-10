@@ -5,10 +5,12 @@ import type { RuntimeBootstrap } from "../../src/native-bridge/runtimeBootstrap"
 const native = vi.hoisted(() => ({
   desktop: true,
   local: vi.fn<() => Promise<RuntimeBootstrap>>(), begin: vi.fn<() => Promise<string>>(),
-  upgrade: vi.fn<() => Promise<RuntimeBootstrap>>(),
+  upgrade: vi.fn<() => Promise<RuntimeBootstrap>>(), prepare: vi.fn(async () => undefined),
   connect: vi.fn<(binding: string, origin: string | null, password: string, remember: boolean) => Promise<{ bootstrap: RuntimeBootstrap; warning: string | null }>>(),
   activate: vi.fn(), clear: vi.fn(), restore: vi.fn(async (): Promise<RuntimeBootstrap | null> => null),
 }));
+const update = vi.hoisted(() => ({ read: vi.fn(), listen: vi.fn(), start: vi.fn(), cancel: vi.fn() }));
+vi.mock("../../src/native-bridge/desktopUpdate", () => ({ readDesktopUpdate: update.read, listenDesktopUpdate: update.listen, startDesktopUpdate: update.start, cancelDesktopUpdate: update.cancel }));
 const web = vi.hoisted(() => ({ login: vi.fn(), bootstrap: vi.fn(), logout: vi.fn(), token: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => native.desktop }));
 vi.mock("../../src/runtime-client/webLogin", () => ({
@@ -16,7 +18,7 @@ vi.mock("../../src/runtime-client/webLogin", () => ({
   WebLoginError: class extends Error {},
 }));
 vi.mock("../../src/native-bridge/runtimeBootstrap", () => ({ bootstrapRuntime: native.local, upgradeRuntime: native.upgrade }));
-vi.mock("../../src/native-bridge/runtimeConnection", () => ({ beginRuntimeConnection: native.begin, connectRuntimeTarget: native.connect, activateRuntimeBinding: native.activate, clearRuntimeBinding: native.clear, openRuntimeWeb: vi.fn(), restoreRuntimeConnection: native.restore, probeRuntimeTarget: vi.fn() }));
+vi.mock("../../src/native-bridge/runtimeConnection", () => ({ beginRuntimeConnection: native.begin, connectRuntimeTarget: native.connect, activateRuntimeBinding: native.activate, clearRuntimeBinding: native.clear, openRuntimeWeb: vi.fn(), restoreRuntimeConnection: native.restore, probeRuntimeTarget: vi.fn(), prepareDesktopUpdate: native.prepare }));
 vi.mock("../../src/stores/RootStore", () => ({ RootStore: class {
   connection = observable({ markDisconnected: vi.fn(), state: "disconnected", last_error_code: null as string | null, error_message: null as string | null, address: "" });
   settings = { open: vi.fn(), close: vi.fn(), showNotice: vi.fn() };
@@ -28,7 +30,10 @@ import { ApplicationConnectionStore } from "../../src/features/runtime-access/Ap
 
 const bootstrap = (origin: string): RuntimeBootstrap => ({ base_url: origin, instance_id: origin, access_token: "fixture", capabilities: { mode: "personal", min_compatible_version: "0.25.2", runtime_version: "0.25.2", max_command_bytes: 1048576, max_attachment_bytes: null, sse: true, streaming_upload: true, features: ["web_login"] }, started_runtime: false, session: { token: null, expires_at_ms: 0, instance_id: origin, mode: "personal", kind: "user", identity: null, login_context: origin } });
 const deferred = <T>() => { let resolve!: (value: T) => void; const promise = new Promise<T>((done) => { resolve = done; }); return { promise, resolve }; };
-beforeEach(() => { vi.stubGlobal("BroadcastChannel", undefined); vi.clearAllMocks(); native.desktop = true; native.local.mockResolvedValue(bootstrap("http://local")); native.begin.mockResolvedValue("binding"); native.connect.mockImplementation(async (_binding, origin) => ({ bootstrap: bootstrap(origin ?? "http://local"), warning: null })); web.login.mockResolvedValue(undefined); web.logout.mockResolvedValue(undefined); web.token.mockReturnValue(null); web.bootstrap.mockResolvedValue(bootstrap("http://web")); });
+beforeEach(() => {
+  update.read.mockResolvedValue({ revision: 1, phase: "idle", available: false, required: false, notes: "", received: 0, total: 0, error: null, resume_remote: null, stops_local_host: false, binding_id: null, host_mode: null });
+  update.listen.mockResolvedValue(() => undefined);
+  vi.stubGlobal("BroadcastChannel", undefined); vi.clearAllMocks(); native.desktop = true; native.local.mockResolvedValue(bootstrap("http://local")); native.begin.mockResolvedValue("binding"); native.connect.mockImplementation(async (_binding, origin) => ({ bootstrap: bootstrap(origin ?? "http://local"), warning: null })); web.login.mockResolvedValue(undefined); web.logout.mockResolvedValue(undefined); web.token.mockReturnValue(null); web.bootstrap.mockResolvedValue(bootstrap("http://web")); });
 
 afterEach(() => { vi.unstubAllGlobals(); });
 
@@ -230,5 +235,90 @@ describe("Web login lifecycle", () => {
     entry.dispose();
     delayed.resolve(bootstrap("http://stale")); await accepting;
     expect(entry.current).toBeNull();
+  });
+});
+
+describe("Update admission", () => {
+  it("retains native admission while reconnecting the same target during a network failure", async () => {
+    const entry = new ApplicationConnectionStore(new RootStore()); await entry.initialize();
+    entry.updates.receive({ ...entry.updates.snapshot, revision: 2, required: true, binding_id: "binding" });
+    const begins = native.begin.mock.calls.length;
+    native.prepare.mockRejectedValueOnce(new Error("offline"));
+    await entry.retryUpdateConnection();
+    expect(entry.update_required).toBe(true); expect(entry.phase).toBe("entry");
+    expect(native.begin).toHaveBeenCalledTimes(begins);
+    expect(native.prepare).toHaveBeenLastCalledWith("binding", null);
+    entry.updates.receive({ ...entry.updates.snapshot, revision: 3, required: false });
+    expect(entry.update_required).toBe(false); entry.dispose();
+  });
+
+  it("leaves the workspace without logging out or cancelling the native update", async () => {
+    const entry = new ApplicationConnectionStore(new RootStore());
+    await entry.initialize(); await entry.connectDesktop(null, "", false);
+    const previous = entry.current!;
+    const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);
+    entry.updates.receive({ ...entry.updates.snapshot, revision: 2, required: true, available: true, binding_id: "binding" });
+    expect(previous.dispose).toHaveBeenCalled();
+    expect(entry.phase).toBe("entry"); expect(entry.update_required).toBe(true);
+    entry.updates.show(); entry.updates.hide();
+    const attempts = native.connect.mock.calls.length;
+    await entry.retryInitialization(); await entry.connectDesktop(null, "new-password", false);
+    expect(native.connect).toHaveBeenCalledTimes(attempts);
+    expect(fetcher).not.toHaveBeenCalled(); expect(update.cancel).not.toHaveBeenCalled();
+    entry.dispose();
+  });
+
+  it.each(["authentication_required", "center_unavailable", "center_identity_mismatch", "runtime_unavailable", "center_protocol_incompatible"])("keeps the exact classification of %s", async (code) => {
+    const entry = new ApplicationConnectionStore(new RootStore()); await entry.initialize();
+    native.connect.mockRejectedValueOnce({ code, message: "fixture" });
+    await entry.connectDesktop("http://remote", "fixture", false);
+    expect(entry.update_required).toBe(code === "center_protocol_incompatible");
+    expect(entry.phase).toBe("entry");
+    if (code !== "center_protocol_incompatible") expect(entry.error).toBe("fixture");
+    entry.dispose();
+  });
+
+  it("rejects a late successful login after the active target requires an update", async () => {
+    const entry = new ApplicationConnectionStore(new RootStore()); await entry.initialize();
+    const late = deferred<{ bootstrap: RuntimeBootstrap; warning: string | null }>();
+    native.connect.mockReturnValueOnce(late.promise);
+    const connecting = entry.connectDesktop("http://remote", "fixture", false);
+    await vi.waitFor(() => expect(native.connect).toHaveBeenCalledOnce());
+    entry.updates.receive({ ...entry.updates.snapshot, revision: 2, required: true, binding_id: "binding", resume_remote: "http://remote" });
+    late.resolve({ bootstrap: bootstrap("http://remote"), warning: null }); await connecting;
+    expect(entry.phase).toBe("entry"); expect(entry.update_required).toBe(true);
+    expect(native.activate).not.toHaveBeenCalled();
+    entry.dispose();
+  });
+
+  it.each([false, true])("restores a pre-login native download across a WebView reload (required=%s)", async (required) => {
+    update.read.mockResolvedValue({ revision: 7, phase: "downloading", available: true, required, notes: "", received: 40, total: 100, error: null, resume_remote: "http://remote", stops_local_host: false, binding_id: "existing", host_mode: "enterprise" });
+    const entry = new ApplicationConnectionStore(new RootStore()); await entry.initialize();
+    expect(entry.target).toBe("remote"); expect(entry.address).toBe("http://remote");
+    expect(entry.mode).toBe("enterprise"); expect(entry.updates.snapshot.received).toBe(40);
+    expect(native.begin).not.toHaveBeenCalled(); expect(native.local).not.toHaveBeenCalled(); expect(update.cancel).not.toHaveBeenCalled();
+    await entry.connectDesktop("http://remote", "fixture", false);
+    expect(native.connect).not.toHaveBeenCalled();
+    entry.dispose();
+  });
+
+  it("blocks a restored authenticated connection before rebuilding its workspace", async () => {
+    update.read.mockResolvedValue({ revision: 8, phase: "idle", available: false, required: true, notes: "", received: 0, total: 0, error: null, resume_remote: null, stops_local_host: true, binding_id: "existing", host_mode: "enterprise" });
+    native.restore.mockResolvedValueOnce(bootstrap("http://local"));
+    const initial = new RootStore(), entry = new ApplicationConnectionStore(initial); await entry.initialize();
+    expect(initial.connect).not.toHaveBeenCalled(); expect(entry.phase).toBe("entry");
+    expect(entry.update_required).toBe(true); expect(native.begin).not.toHaveBeenCalled();
+    entry.dispose(); native.restore.mockReset(); native.restore.mockResolvedValue(null);
+  });
+
+  it("keeps a known Web requirement through a network failure until verified recovery", async () => {
+    native.desktop = false;
+    const entry = new ApplicationConnectionStore(new RootStore());
+    web.login.mockRejectedValueOnce({ code: "center_protocol_incompatible", message: "fixture" });
+    await entry.login("fixture"); expect(entry.update_required).toBe(true);
+    web.bootstrap.mockRejectedValueOnce({ code: "center_unavailable", message: "offline" });
+    await entry.recheckSession(); expect(entry.update_required).toBe(true);
+    await entry.recheckSession(); expect(entry.update_required).toBe(false); expect(entry.phase).toBe("workspace");
+    entry.dispose();
   });
 });

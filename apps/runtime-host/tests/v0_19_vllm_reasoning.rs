@@ -35,7 +35,7 @@ fn formal_host_projects_vllm_reasoning_into_run_and_conversation() {
         )["run"]["run_id"],
     );
     let run = client.wait_for_status("vLLM reasoning", &session_id, &run_id, &["completed"]);
-    assert_eq!(run["reasoning"], "offline vLLM thought");
+    assert_eq!(run["reasoning_parts"][0]["text"], "offline vLLM thought");
     assert_eq!(run["text"], "offline vLLM answer");
 
     let conversation = client.conversation(&session_id);

@@ -79,6 +79,20 @@ describe("ToolDetailDialog", () => {
     expect(blocks[1]).toHaveTextContent('"count": 2');
   });
 
+  it("keeps every batch outcome readable when the overall edit fails", () => {
+    const paths = Array.from({ length: 16 }, (_, index) => `/workspace/edit-${index}.txt`);
+    const files = paths.map((path, index) => ({ path, status: index === 0 ? "success" : index === 1 ? "failed" : index === 2 ? "unknown" : "not_executed", ...(index === 0 ? { replacements: 2 } : { reason: "previous_failure" }) }));
+    render(<ToolDetailDialog detail={detailView({ tool_name: "edit_file", status: "failed",
+      input: { value: { type: "files", operation: "edit_file", paths }, redacted: false, truncated: true },
+      result_json: JSON.stringify({ files }, null, 2), output_truncated: true,
+    })} error={null} is_loading={false} on_close={vi.fn()} />);
+    expect(screen.getByText("部分记录已按安全上限截断。", { exact: true })).toBeVisible();
+    const result = document.querySelector("pre");
+    expect(result).toHaveTextContent(paths[15]);
+    for (const status of ["success", "failed", "unknown", "not_executed"]) expect(result).toHaveTextContent(status);
+    expect(screen.getByText("执行失败", { exact: true })).toBeVisible();
+  });
+
   it("keeps Recall results readable and exposes their navigation target", () => {
     const on_navigate = vi.fn();
     render(<ToolDetailDialog

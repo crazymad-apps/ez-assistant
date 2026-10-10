@@ -17,6 +17,7 @@ mod v0_26_0;
 mod v0_27_0;
 mod v0_28_0;
 mod v0_28_1;
+mod v0_29_0;
 
 #[cfg(test)]
 use std::fs;
@@ -126,6 +127,7 @@ pub(super) fn align(
             v0_27_0::entry(),
             v0_28_0::entry(),
             v0_28_1::entry(),
+            v0_29_0::entry(),
         ],
         progress,
     )

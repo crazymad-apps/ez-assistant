@@ -71,18 +71,24 @@ export const CallDetailRoute = observer(function CallDetailRoute() {
       </Card>
       <Alert type="info" title="转发完成仅表示 HTTP 2xx 正文完整转发，不代表模型业务或任务成功。" />
       {row && (
-        <Tabs
-          key={id}
-          className={styles.tabs}
-          destroyOnHidden
-          items={(['request', 'response'] as const).map((side) => ({
-            key: side,
-            label: side === 'request' ? '请求正文' : '响应正文',
-            children: (
-              <SnapshotPanel key={`${row[side].state}:${row[side].sha256}`} id={id} side={side} snapshot={row[side]} />
-            ),
-          }))}
-        />
+        <Card className={styles.body_section}>
+          <Tabs
+            key={id}
+            destroyOnHidden
+            items={(['request', 'response'] as const).map((side) => ({
+              key: side,
+              label: side === 'request' ? '请求正文' : '响应正文',
+              children: (
+                <SnapshotPanel
+                  key={`${row[side].state}:${row[side].sha256}`}
+                  id={id}
+                  side={side}
+                  snapshot={row[side]}
+                />
+              ),
+            }))}
+          />
+        </Card>
       )}
     </section>
   );

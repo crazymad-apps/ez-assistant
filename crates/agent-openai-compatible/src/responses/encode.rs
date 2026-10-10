@@ -52,65 +52,7 @@ pub(super) fn encode_request_with_images(
         .validate_tool_exchange_pairs()
         .map_err(|error| ModelError::Config(error.to_string()))?;
 
-    let mut input = Vec::new();
-    let mut index = 0_usize;
-    while index < request.conversation.messages.len() {
-        let message = &request.conversation.messages[index];
-        match message {
-            ConversationMessage::System(message) => input.push(message_item(
-                ResponsesRole::System,
-                ResponsesContent::InputText {
-                    text: message.text.clone(),
-                },
-            )),
-            ConversationMessage::ContextSummary(message) => input.push(message_item(
-                ResponsesRole::System,
-                ResponsesContent::InputText {
-                    text: format!("{CONTEXT_SUMMARY_PREFIX}\n{}", message.model_visible_text()),
-                },
-            )),
-            ConversationMessage::User(message) => {
-                input.push(encode_user_message(message, prepared_images));
-            }
-            ConversationMessage::Assistant(message) => {
-                encode_assistant_message(message, &mut input, adapter)?;
-                let has_tool_calls = message
-                    .parts
-                    .iter()
-                    .any(|part| matches!(part, AssistantPart::ToolCall(_)));
-                index += 1;
-                if !has_tool_calls {
-                    continue;
-                }
-                let mut tool_messages = Vec::new();
-                while let Some(ConversationMessage::Tool(tool)) =
-                    request.conversation.messages.get(index)
-                {
-                    input.push(encode_tool_result(tool, prepared_images, adapter)?);
-                    tool_messages.push(tool);
-                    index += 1;
-                }
-                if adapter.tool_image_projection == ToolImageProjection::AggregatedUserInput
-                    && let Some(plan) = plan_tool_result_image_envelope(message, &tool_messages)
-                {
-                    let image_envelope =
-                        encode_tool_image_envelope(&plan.payload, prepared_images)?;
-                    input.push(ResponsesInputItem::Message {
-                        role: ResponsesRole::User,
-                        content: image_envelope,
-                    });
-                }
-                continue;
-            }
-            ConversationMessage::Tool(_) => {
-                return Err(ModelError::Config(
-                    "function output must be encoded with its complete function-call batch"
-                        .to_owned(),
-                ));
-            }
-        }
-        index += 1;
-    }
+    let input = encode_input_from(request, prepared_images, adapter, 0)?;
 
     let tools = if request.tools.is_empty() {
         None
@@ -222,10 +164,109 @@ pub(super) fn encode_request_with_images(
         include: adapter
             .include_encrypted_reasoning
             .then(|| vec!["reasoning.encrypted_content".to_owned()]),
+        previous_response_id: None,
         store: false,
         stream: true,
         extra,
     })
+}
+
+/// 调用者必须先校验完整快照的工具配对；start_index 只改变 wire，不裁剪本地历史。
+pub(super) fn encode_input_from(
+    request: &ModelRequest,
+    prepared_images: &agent_model::PreparedModelImages,
+    adapter: &ResponsesProtocolAdapter,
+    start_index: usize,
+) -> Result<Vec<ResponsesInputItem>, ModelError> {
+    let mut input = Vec::new();
+    let mut index = start_index;
+    while index < request.conversation.messages.len() {
+        let message = &request.conversation.messages[index];
+        match message {
+            ConversationMessage::System(message) => input.push(message_item(
+                ResponsesRole::System,
+                ResponsesContent::InputText {
+                    text: message.text.clone(),
+                },
+            )),
+            ConversationMessage::ContextSummary(message) => input.push(message_item(
+                ResponsesRole::System,
+                ResponsesContent::InputText {
+                    text: format!("{CONTEXT_SUMMARY_PREFIX}\n{}", message.model_visible_text()),
+                },
+            )),
+            ConversationMessage::User(message) => {
+                input.push(encode_user_message(message, prepared_images));
+            }
+            ConversationMessage::Assistant(message) => {
+                encode_assistant_message(message, &mut input, adapter)?;
+                let has_tool_calls = message
+                    .parts
+                    .iter()
+                    .any(|part| matches!(part, AssistantPart::ToolCall(_)));
+                index += 1;
+                if !has_tool_calls {
+                    continue;
+                }
+                let mut tool_messages = Vec::new();
+                while let Some(ConversationMessage::Tool(tool)) =
+                    request.conversation.messages.get(index)
+                {
+                    input.push(encode_tool_result(tool, prepared_images, adapter)?);
+                    tool_messages.push(tool);
+                    index += 1;
+                }
+                if adapter.tool_image_projection == ToolImageProjection::AggregatedUserInput
+                    && let Some(plan) = plan_tool_result_image_envelope(message, &tool_messages)
+                {
+                    let image_envelope =
+                        encode_tool_image_envelope(&plan.payload, prepared_images)?;
+                    input.push(ResponsesInputItem::Message {
+                        role: ResponsesRole::User,
+                        content: image_envelope,
+                    });
+                }
+                continue;
+            }
+            ConversationMessage::Tool(_) if index == start_index && start_index > 0 => {
+                // 增量边界在已保存的 Assistant 后；原始完整快照已验证整批配对。
+                // 图片信封仍由原调用批次派生，不能重发旧 function_call。
+                let Some(ConversationMessage::Assistant(assistant)) =
+                    request.conversation.messages.get(index - 1)
+                else {
+                    return Err(ModelError::Config(
+                        "incremental function output has no assistant batch".into(),
+                    ));
+                };
+                let mut tool_messages = Vec::new();
+                while let Some(ConversationMessage::Tool(tool)) =
+                    request.conversation.messages.get(index)
+                {
+                    input.push(encode_tool_result(tool, prepared_images, adapter)?);
+                    tool_messages.push(tool);
+                    index += 1;
+                }
+                if adapter.tool_image_projection == ToolImageProjection::AggregatedUserInput
+                    && let Some(plan) = plan_tool_result_image_envelope(assistant, &tool_messages)
+                {
+                    input.push(ResponsesInputItem::Message {
+                        role: ResponsesRole::User,
+                        content: encode_tool_image_envelope(&plan.payload, prepared_images)?,
+                    });
+                }
+                continue;
+            }
+            ConversationMessage::Tool(_) => {
+                return Err(ModelError::Config(
+                    "function output must be encoded with its complete function-call batch"
+                        .to_owned(),
+                ));
+            }
+        }
+        index += 1;
+    }
+
+    Ok(input)
 }
 
 fn message_item(role: ResponsesRole, content: ResponsesContent) -> ResponsesInputItem {
@@ -306,6 +347,10 @@ fn encode_assistant_message(
             || state.protocol() != &adapter.protocol
             || state.route_fingerprint() != Some(route_fingerprint)
         {
+            continue;
+        }
+        if state.state_type() == super::continuation::STATE_TYPE {
+            // 续接元数据不是 reasoning item；关闭或重建时也不能发送给 Provider。
             continue;
         }
         if adapter.opaque_reasoning != super::adapter::OpaqueReasoningPolicy::PreserveEncryptedItem

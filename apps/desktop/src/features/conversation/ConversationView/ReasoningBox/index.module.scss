@@ -1,0 +1,67 @@
+.reasoning {
+  min-width: 0;
+  color: var(--ez-text-secondary);
+}
+.header {
+  --ez-control-default-height: var(--ez-control-height-small);
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  height: auto;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font-size: var(--ez-font-base);
+  line-height: 1.6;
+  text-align: left;
+}
+.header > :first-child {
+  flex-shrink: 0;
+}
+button.header:hover {
+  color: var(--ez-text);
+}
+.header:focus-visible {
+  outline: 2px solid var(--ez-primary);
+  outline-offset: 3px;
+  border-radius: var(--ez-radius-small);
+}
+.preview {
+  flex: 1;
+  min-width: 0;
+  overflow: auto hidden;
+  scrollbar-width: none;
+  white-space: nowrap;
+  color: var(--ez-text-muted);
+}
+.content {
+  overflow-anchor: none;
+  max-height: 180px;
+  overflow-y: auto;
+  margin-top: 5px;
+  padding-left: 10px;
+  border-left: 2px solid var(--ez-border);
+  font-size: var(--ez-font-base);
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.summary {
+  display: flex;
+  min-width: 0;
+  min-height: var(--ez-control-height-small);
+  align-items: center;
+  padding: 2px 0;
+  font-size: var(--ez-font-base);
+  line-height: 1.6;
+}
+
+.summary_text {
+  // Markdown 在自己的自然宽度排版，由外层单行预览负责局部横向跟随。
+  width: max-content;
+  min-width: 100%;
+}

@@ -78,6 +78,8 @@ pub trait ChildTaskWorkspaceFactory: Send + Sync {
 ///
 /// 本类型不实现 `Debug`，因为它短暂借用 API Key。工厂不得保存借用或输出 credential。
 pub struct ModelServiceFactoryRequest<'a> {
+    /// 已解析续接策略与 owner 的不透明绑定；None 用于所有旁路调用。
+    pub server_history_binding: Option<&'a str>,
     /// 外部来源的冻结身份，仅供受信宿主处理当前请求拒绝；不含凭据。
     pub external_configuration: Option<&'a Arc<crate::ExternalModelConfiguration>>,
     pub provider: &'a ProviderId,

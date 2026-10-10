@@ -307,6 +307,17 @@ describe("SettingsStore model writes", () => {
     expect(store.notice_message).toContain("辅助识图模型需重选");
     expect(command).toHaveBeenCalledExactlyOnceWith({ type: "delete_provider", payload: { provider_instance_id: "provider-1" } });
   });
+  it("rejects a save response that silently drops the requested continuation policy", async () => {
+    const command = vi.fn(async () => ({ type: "update_provider", payload: modelProvider }));
+    const store = permissionStore({ command } as unknown as RuntimeClient);
+    store.providers = [modelProvider];
+    const connection = { ...modelProvider.connection, protocol_preference: "responses" as const, server_history_enabled: true, server_history_support_override: "supported" as const };
+    expect(await store.saveProvider("provider-1", connection, { mode: "unchanged" })).toBeNull();
+    expect(store.providers).toEqual([modelProvider]);
+    expect(store.error_message).toContain("续接");
+    expect(command).toHaveBeenCalledOnce();
+  });
+
   it("ignores an older list response after a provider save has committed", async () => {
     let resolve_list!: (value: unknown) => void;
     const client = { command: async (command: RuntimeCommand) => {

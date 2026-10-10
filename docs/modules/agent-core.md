@@ -39,7 +39,7 @@ Context Window Evaluator、历史布局和 replacement 校验归
   Provider Options；Core 在每个 Model Step 原样克隆这四项，不按 Provider 名称注入默认值。
 - `ExecutionSpec` 只消费冻结的完整 System Prompt；同一次执行的所有 Model Step 和压缩
   交接均复用该快照，Core 不读取或刷新 Pinned Memory Store。
-- 执行必须可取消，模型流和工具调用都要观察取消信号；工具取消后 Core 等待 dispatch 完成资源清理，不直接丢弃 future；取消收敛前为批次内未结算调用补记 interrupted 错误 ToolResult，并原子完成 pending exchange。
+- 执行必须可取消，模型流和工具调用都要观察取消信号；工具取消后 Core 等待 dispatch 完成资源清理，不直接丢弃 future；取消收敛时保留工具已返回的实际结果，仅为尚无结果的调用补记 interrupted 错误 ToolResult，并原子完成 pending exchange；取消不触发结果型 Guardrail，也不继续本次模型调用。
 - 资源预算使用显式 `Option`；Core 不注入隐藏的最大轮次、超时或输出限制；预算是副作用前硬边界（`max_steps` 模型调用前预检、`max_tool_calls` dispatch 前预检）。
 - 启发式 Guardrail 检测器必须支持未配置、`Observe`、`Enforce`；未配置表示关闭，
   不能以未声明规则静默中止执行。
@@ -97,7 +97,7 @@ Context Window Evaluator、历史布局和 replacement 校验归
   `ParallelEligible` 的 valid invocation 会同时等待授权，并在预算与 started 可靠边界完成后
   并发执行；Invalid 或 Serial 项构成顺序屏障，不跨越屏障重排副作用。
 - 并行组结果必须按原 Tool Call 顺序观察 Guardrail、形成 ToolMessage 并原子完成 exchange；
-  取消时先等待组内 Tool SPI 完成清理，再为未结算组统一形成 interrupted 结果。
+  取消时先等待组内 Tool SPI 完成清理，按原序保留已返回结果，仅为后续尚无结果的调用补 interrupted。
 - `ToolCompleted` 只能在 Recorder 可靠完成整批 exchange 后发布；Recorder/Store 失败不得先产生
   伪成功的工具完成事件，Core 随后收敛到 Failed。
 - 审批编排（串行询问、攒批询问、规则自动放行）归 Runtime authorizer 实现；Core 在
@@ -161,3 +161,7 @@ Context Window Evaluator、历史布局和 replacement 校验归
 cargo test -p agent-testkit
 cargo clippy -p agent-core --all-targets --all-features -- -D warnings
 ```
+
+模型有限重试的 `TurnRestarted` 只重置当前未提交响应的流式投影与 usage；重复的
+`StepStarted` 表示当前响应重新开始。已落账的对话及工具结果保持不变，未完成响应
+中的 Tool Call 不得进入授权、落账或执行。

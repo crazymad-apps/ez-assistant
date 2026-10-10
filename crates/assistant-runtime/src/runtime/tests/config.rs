@@ -624,3 +624,159 @@ fn test_input(session_id: &SessionId, message: &str) -> SubmitInputRequest {
         idempotency_key: None,
     }
 }
+
+#[tokio::test]
+async fn history_global_generation_reload_is_durable_and_publishes_only_after_invalidation() {
+    let a = "schema_version=1\n[agent.defaults.generation]\ntemperature=0.2";
+    let b = "schema_version=1\n[agent.defaults.generation]\ntemperature=0.7";
+    let source = Arc::new(MutableConfigSource::new(a.into()));
+    let store = Arc::new(FaultInjectingStore::healthy());
+    let runtime = AssistantRuntime::open(
+        RuntimeConfig::new(NonZeroUsize::new(32).unwrap()),
+        source.clone(),
+        Arc::new(StaticModelFactory::new(empty_model())),
+        Arc::new(StaticSystemPromptFactory),
+        static_run_tool_factory(ToolSetSnapshot::default()),
+        Arc::new(TestChildWorkspaceFactory::default()),
+        store.clone(),
+        Arc::new(crate::permission::VolatilePermissionFileStore::default()),
+    )
+    .await
+    .unwrap();
+    model_fixture::seed(&runtime, "test-only").await;
+    runtime
+        .reload_config(ReloadConfigRequest::default())
+        .await
+        .unwrap();
+    let follower = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    let pinned = runtime
+        .create_session(CreateSessionRequest {
+            model_selection: Some(test_model_selection("fixture")),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    let key = |id: &SessionId| {
+        runtime
+            .sessions
+            .read()
+            .unwrap()
+            .get(id)
+            .unwrap()
+            .lock_state()
+            .unwrap()
+            .server_history_key
+            .clone()
+    };
+    let initial = key(&pinned);
+    store
+        .fail_next_history_binding
+        .store(true, Ordering::SeqCst);
+    source.replace(Some(b.into()));
+    assert!(
+        runtime
+            .reload_config(ReloadConfigRequest::default())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        runtime
+            .config_registry
+            .snapshot()
+            .unwrap()
+            .active()
+            .unwrap()
+            .generation()
+            .temperature,
+        Some(0.2)
+    );
+    assert_eq!(key(&pinned), initial);
+    let persisted = runtime
+        .store
+        .load_session_state(&pinned)
+        .await
+        .unwrap()
+        .state
+        .sessions
+        .pop()
+        .unwrap()
+        .server_history_key;
+    assert_eq!(persisted, initial);
+    for document in ["invalid global TOML", b, "invalid global TOML", a] {
+        source.replace(Some(document.into()));
+        runtime
+            .reload_config(ReloadConfigRequest::default())
+            .await
+            .unwrap();
+    }
+    let changed = key(&pinned);
+    assert_ne!(
+        changed, initial,
+        "sampling ABA without model calls invalidates pinned sessions too"
+    );
+    assert_eq!(key(&follower), changed);
+    runtime
+        .reload_config(ReloadConfigRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        key(&pinned),
+        changed,
+        "same effective configuration preserves the chain"
+    );
+    for id in [&follower, &pinned] {
+        assert_eq!(
+            runtime
+                .store
+                .load_session_state(id)
+                .await
+                .unwrap()
+                .state
+                .sessions
+                .pop()
+                .unwrap()
+                .server_history_key,
+            changed,
+            "persisted epoch before reopen for {id}"
+        );
+    }
+    let reopened = AssistantRuntime::open(
+        RuntimeConfig::new(NonZeroUsize::new(32).unwrap()),
+        source,
+        Arc::new(StaticModelFactory::new(empty_model())),
+        Arc::new(StaticSystemPromptFactory),
+        static_run_tool_factory(ToolSetSnapshot::default()),
+        Arc::new(TestChildWorkspaceFactory::default()),
+        store,
+        Arc::new(crate::permission::VolatilePermissionFileStore::default()),
+    )
+    .await
+    .unwrap();
+    reopened
+        .reload_config(ReloadConfigRequest::default())
+        .await
+        .unwrap();
+    for id in [&follower, &pinned] {
+        assert_eq!(
+            reopened
+                .store
+                .load_session_state(id)
+                .await
+                .unwrap()
+                .state
+                .sessions
+                .pop()
+                .unwrap()
+                .server_history_key,
+            changed,
+            "ordinary reopen preserves the accepted epoch"
+        );
+    }
+}

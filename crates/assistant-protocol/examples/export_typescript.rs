@@ -3,7 +3,7 @@
 use std::{env, error::Error, fs, path::PathBuf, process};
 
 use assistant_protocol::{
-    DeviceGatewayCommand, DeviceGatewayCommandResult, DeviceGatewayEvent,
+    DesktopUpdateContext, DeviceGatewayCommand, DeviceGatewayCommandResult, DeviceGatewayEvent,
     GetApplicationSnapshotRequest, GetApplicationSnapshotResult, GetChildTaskViewRequest,
     GetChildTaskViewResult, GetConversationPageAroundRunRequest,
     GetConversationPageAroundRunResult, GetSessionViewRequest, GetSessionViewResult,
@@ -42,9 +42,11 @@ fn export_all(output_directory: PathBuf) -> Result<PathBuf, Box<dyn Error>> {
         assistant_protocol::RuntimeCompatibilityError,
         UserTerminalControl,
         UserTerminalNotice,
+        assistant_protocol::UserTerminalShellEntry,
         assistant_protocol::ShellCatalogEntry,
         HostAccessCommand,
         HostAccessStatus,
+        DesktopUpdateContext,
         HostLoginRequest,
         HostLoginResult,
         HostPasswordRequest,

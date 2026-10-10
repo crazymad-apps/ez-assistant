@@ -93,7 +93,7 @@ impl ModelService for DeterministicModel {
                                 () = cancellation.cancelled() => { yield ModelEvent::TurnFailed { error: ModelError::Cancelled }; return; }
                                 () = tokio::time::sleep(chunk_delay) => {}
                             }
-                            yield ModelEvent::ReasoningDelta { id: reasoning_id.clone(), delta };
+                            yield ModelEvent::ReasoningDelta { source: Default::default(), id: reasoning_id.clone(), delta };
                         }
                         yield ModelEvent::ReasoningFinished { id: reasoning_id };
                         yield ModelEvent::TextStarted { id: text_id.clone() };
@@ -198,6 +198,7 @@ fn text_response(sequence: u64, user_text: &str, text: String) -> DemoResponse {
         model: demo_model_identity(),
         parts: vec![
             AssistantPart::Reasoning(ReasoningPart {
+                source: Default::default(),
                 id: valid_part_id(&format!("demo-reasoning-{sequence}")),
                 text: reasoning.clone(),
             }),

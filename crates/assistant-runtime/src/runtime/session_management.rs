@@ -975,9 +975,22 @@ impl AssistantRuntime {
             .as_ref()
             .and_then(|model| downgrade_effort(current_effort, model.model.capabilities()));
         let model_selection = request.model_selection;
+        let server_history_key = {
+            let state = session.lock_state()?;
+            if state.model_selection == model_selection {
+                state.server_history_key.clone()
+            } else {
+                Some(crate::id::generate("history").map_err(|_| {
+                    RuntimeError::InternalStateUnavailable {
+                        component: "session history binding",
+                    }
+                })?)
+            }
+        };
         let changed_at_ms = now_ms()?;
         self.store
             .set_session_model(ModelChange {
+                server_history_key: server_history_key.clone(),
                 session_id: request.session_id.clone(),
                 model_selection: model_selection.clone(),
                 reasoning_effort,
@@ -987,6 +1000,7 @@ impl AssistantRuntime {
             .map_err(|source| RuntimeError::from_store("change session model", source))?;
         {
             let mut state = session.lock_state()?;
+            state.server_history_key = server_history_key;
             state.model_selection = model_selection;
             state.model_binding = prepared.map(Arc::new);
             state.reasoning_effort = reasoning_effort;
@@ -1039,8 +1053,21 @@ impl AssistantRuntime {
                 reason: "reasoning effort is not supported by the current model",
             });
         }
+        let server_history_key = {
+            let state = session.lock_state()?;
+            if state.reasoning_effort == request.effort {
+                state.server_history_key.clone()
+            } else {
+                Some(crate::id::generate("history").map_err(|_| {
+                    RuntimeError::InternalStateUnavailable {
+                        component: "history binding",
+                    }
+                })?)
+            }
+        };
         self.store
             .set_session_reasoning_effort(ReasoningEffortChange {
+                server_history_key: server_history_key.clone(),
                 session_id: request.session_id.clone(),
                 reasoning_effort: request.effort,
                 changed_at_ms: now_ms()?,
@@ -1049,7 +1076,11 @@ impl AssistantRuntime {
             .map_err(|source| {
                 RuntimeError::from_store("change session reasoning effort", source)
             })?;
-        session.lock_state()?.reasoning_effort = request.effort;
+        {
+            let mut state = session.lock_state()?;
+            state.reasoning_effort = request.effort;
+            state.server_history_key = server_history_key;
+        }
         self.publish(assistant_protocol::RuntimeEvent::SessionChanged {
             session_id: request.session_id,
         });
@@ -1247,7 +1278,7 @@ impl AssistantRuntime {
                 attachments: self.attachments.clone(),
                 shell: None,
                 skill_catalog: self.current_skill_catalog(&session).await?,
-                model_factory: self.model_factory.as_ref(),
+                model_factory: self.model_factory.clone(),
                 context_window: self.context_window.clone(),
                 run_tool_factory: self.run_tool_factory.as_ref(),
                 child_task_workspace_factory: self.child_task_workspace_factory.clone(),
@@ -1382,6 +1413,7 @@ impl AssistantRuntime {
             );
         }
         self.publish(assistant_protocol::RuntimeEvent::RunAccepted {
+            created_at_ms: run_snapshot.created_at_ms,
             session_id: session.id().clone(),
             run_id: run_id.clone(),
         });

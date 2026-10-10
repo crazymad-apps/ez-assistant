@@ -16,13 +16,14 @@
 - 请求和调用上下文不携带业务 `RunId`、应用 Session 或 credential 明文。
 - 错误区分建立前失败、流中失败和取消，不泄露 prompt、credential 或完整响应正文。
 - 建立错误提供 Connection、Timeout、RateLimited、Unavailable 与 Retry-After 等稳定事实，
-  不通过展示文本解析重试资格；流中失败继续只通过唯一 `TurnFailed` 终态表达。
+  不通过展示文本解析重试资格；流中瞬态失败由显式重试装配决定是否恢复，最终仍只产生一个终态。
 - `TraceContext` 只承载逻辑模型调用与 attempt 的诊断关联，不代表业务 Run，也不进入
   Provider HTTP header。
-- `RetryingModelService` 只包装 `stream()` 直接错误，策略必须显式且 attempt 有限；一旦
-  获得事件流就透明返回，绝不重试后续失败。
+- `RetryingModelService` 对建流与流中瞬态错误共用显式有限 attempt 预算；流中断开
+  释放旧流后从同一可靠请求恢复。`TurnRestarted` 只废弃未提交的响应，之后重新开始
+  Part 生命周期；不允许重放工具。认证、配置、协议、上下文溢出及取消不进入瞬态重试。
 - 重试等待必须响应取消，复用完全相同的 `ModelRequest`，并透明委托 capabilities 与
-  context window 与独立输入限制；Core 不感知 attempt。
+  context window 与独立输入限制；Core 不解释重试策略，只将 TurnRestarted 投影为当前 Step 重新开始并清除未提交 usage。
 - `ModelService` 直接暴露当前实例绑定模型的 `context_window_tokens`；调用方不得按
   provider/model 名称猜测窗口。`max_input_tokens()` 提供当前实例绑定模式的可选输入上限；
   未声明返回 None，不从窗口大小补值。
@@ -54,3 +55,11 @@
 cargo test -p agent-model
 cargo clippy -p agent-model --all-targets --all-features -- -D warnings
 ```
+
+## v0.29.0 F06 M1 宿主历史重建控制
+
+`HistoryUnavailable` 表示 Adapter 已核实本次旧 ID 在建流前被明确拒绝；它不是通用瞬态重试原因。`ModelCallContext.rebuild_server_history` 是宿主本次调用的显式控制面指令，默认 false，不进入请求、事件或持久化；RetryingModelService 和其他装饰器必须原样转交。是否允许重建及其额度归宿主，不在 agent-model/Core 实现 Session、Journal 或工具重放。
+
+## v0.29.0 F03 M1 过程事实
+
+ReasoningDelta 每个增量携带中立 source；缺失按 raw 读取并省略 raw 序列化。LifecycleValidator 拒绝同一 part 来源变化或最终消息与已观察来源不一致，完整 ReasoningPart 仍随 TurnFinished 可靠交付。

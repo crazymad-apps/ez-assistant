@@ -44,7 +44,6 @@ export const SessionSidebar = observer(function SessionSidebar({ hidden = false,
   const unpinned = visible_sessions.filter((session) => !session.is_pinned);
   const controller_id = application?.controller_availability.status === "available"
     ? application.controller_availability.session_id : null;
-  const controller_session = application?.active_sessions.find((session) => session.session_id === controller_id);
 
   async function loadMore() {
     if (list_loading || next_offset == null) return;
@@ -87,51 +86,42 @@ export const SessionSidebar = observer(function SessionSidebar({ hidden = false,
         <SessionNavigation on_search={on_search} on_toggle={on_toggle} sidebar_open />
       </div>
       <div className={styles.primary_actions}>
-        <Tooltip content="新建会话">
-          <button
-            aria-label="新建会话"
-            aria-current={store.navigation.selected_draft_key === draftKeyForWorkspace(null) ? "page" : undefined}
-            className={styles.quick_action}
-            data-navigation-action
-            disabled={store.connection.state !== "connected" || store.pending_session_action || store.pending_workspace_action}
-            onClick={() => store.openNewSessionDraft(null)}
-            type="button"
-          ><Icon name="plus" size={17} /><span>新建会话</span></button>
-        </Tooltip>
-        <Tooltip content={controller_id ? "助理会话" : "助理会话暂不可用"}>
-          <button
-            aria-label="助理会话"
-            aria-current={controller_id && store.navigation.selected_session_id === controller_id ? "page" : undefined}
-            className={styles.quick_action}
-            data-navigation-action
-            disabled={!controller_id || store.connection.state !== "connected"}
-            onClick={() => { if (controller_id) void store.selectSession(controller_id); }}
-            title={controller_session?.title}
-            type="button"
-          ><Icon name="bot" size={17} /><span>助理会话</span></button>
-        </Tooltip>
-        <Tooltip content="智能体管理">
-          <button
-            aria-current={store.settings.is_open && store.settings.page === "agents" ? "page" : undefined}
-            className={styles.quick_action}
-            data-navigation-action
-            onClick={() => store.settings.open("agents")}
-            type="button"
-          >
-            <Icon name="bot" size={17} /><span>智能体管理</span>
-          </button>
-        </Tooltip>
-        <Tooltip content="插件管理">
-          <button
-            aria-current={store.settings.is_open && store.settings.page === "plugins" ? "page" : undefined}
-            className={styles.quick_action}
-            data-navigation-action
-            onClick={() => store.settings.open("plugins")}
-            type="button"
-          >
-            <Icon name="plugin" size={17} /><span>插件管理</span>
-          </button>
-        </Tooltip>
+        <button
+          aria-label="新建会话"
+          aria-current={store.navigation.selected_draft_key === draftKeyForWorkspace(null) ? "page" : undefined}
+          className={styles.quick_action}
+          data-navigation-action
+          disabled={store.connection.state !== "connected" || store.pending_session_action || store.pending_workspace_action}
+          onClick={() => store.openNewSessionDraft(null)}
+          type="button"
+        ><Icon name="plus" size={17} /><span>新建会话</span></button>
+        <button
+          aria-label="助理会话"
+          aria-current={controller_id && store.navigation.selected_session_id === controller_id ? "page" : undefined}
+          className={styles.quick_action}
+          data-navigation-action
+          disabled={!controller_id || store.connection.state !== "connected"}
+          onClick={() => { if (controller_id) void store.selectSession(controller_id); }}
+          type="button"
+        ><Icon name="bot" size={17} /><span>助理会话</span></button>
+        <button
+          aria-current={store.settings.is_open && store.settings.page === "agents" ? "page" : undefined}
+          className={styles.quick_action}
+          data-navigation-action
+          onClick={() => store.settings.open("agents")}
+          type="button"
+        >
+          <Icon name="bot" size={17} /><span>智能体管理</span>
+        </button>
+        <button
+          aria-current={store.settings.is_open && store.settings.page === "plugins" ? "page" : undefined}
+          className={styles.quick_action}
+          data-navigation-action
+          onClick={() => store.settings.open("plugins")}
+          type="button"
+        >
+          <Icon name="plugin" size={17} /><span>插件管理</span>
+        </button>
       </div>
 
       <div className={styles.session_scroll}>

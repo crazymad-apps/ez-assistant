@@ -171,6 +171,11 @@ export const ProviderSettingsPage = observer(function ProviderSettingsPage(
         <dd>{props.provider.connection.endpoint}</dd>
         <dt>凭据</dt>
         <dd>{read_only ? '由配置源管理' : props.provider.has_api_key ? '已设置' : '未设置'}</dd>
+        <dt>服务端历史续接</dt>
+        <dd>
+          {read_only && '由企业管理员管理；'}
+          {props.provider.connection.server_history_enabled ? '已启用' : '已关闭'}
+        </dd>
       </dl>
       <div className={styles.model_section_heading}>
         <h4>模型</h4>

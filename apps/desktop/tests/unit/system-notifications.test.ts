@@ -6,6 +6,7 @@ import {
   notificationFromEvent,
   type NotificationPlatform,
   type NotificationTarget,
+  type SystemNotification,
 } from '../../src/features/notifications/types';
 import { deliverOnce } from '../../src/features/notifications/delivery';
 
@@ -25,7 +26,8 @@ function fixture() {
     focus: vi.fn(async () => {}),
   };
   const navigate = vi.fn(async (): Promise<boolean | void> => {});
-  const store = new NotificationStore({ scope: () => scope, navigate }, platform);
+  const resolveContent = vi.fn(async (value: SystemNotification): Promise<SystemNotification | null> => value);
+  const store = new NotificationStore({ scope: () => scope, navigate, resolveContent }, platform);
   stores.push(store);
   store.setEnabled(true);
   return {
@@ -33,6 +35,7 @@ function fixture() {
     platform,
     navigate,
     close,
+    resolveContent,
     changeScope: (value: string | null) => {
       scope = value;
     },
@@ -61,6 +64,45 @@ afterEach(() => {
 });
 
 describe('系统通知投递与业务隔离', () => {
+  it.each(['identity', 'dispose', 'disabled', 'resolved', 'focused'] as const)('内容读取期间 %s 改变时丢弃迟到结果', async (change) => {
+    const { store, platform, resolveContent, changeScope } = fixture();
+    let finish!: (value: SystemNotification) => void;
+    resolveContent.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    const publishing = store.publish(notification);
+    await vi.waitFor(() => expect(resolveContent).toHaveBeenCalledOnce());
+    if (change === 'identity') changeScope('another-user');
+    if (change === 'dispose') store.dispose();
+    if (change === 'disabled') store.setEnabled(false);
+    if (change === 'resolved') store.resolved(target);
+    if (change === 'focused') vi.mocked(platform.isFocused).mockResolvedValue(true);
+    finish({ ...notification, title: '来源会话', body: '可靠正文' });
+    await publishing;
+    expect(platform.show).not.toHaveBeenCalled();
+  });
+
+  it('内容读取去重，不因后继消息重读，且向平台传入解析后的标题正文', async () => {
+    const { store, platform, resolveContent } = fixture();
+    resolveContent.mockResolvedValue({ ...notification, title: '来源会话', body: '精确回复' });
+    await Promise.all([store.publish(notification), store.publish(notification)]);
+    expect(resolveContent).toHaveBeenCalledOnce();
+    expect(platform.show).toHaveBeenCalledWith(expect.any(String), '来源会话', '精确回复', expect.any(Function), expect.any(Function));
+  });
+
+  it('内容不可读时静默消费，前台或权限关闭时不读取正文', async () => {
+    const { store, platform, resolveContent } = fixture();
+    resolveContent.mockResolvedValue(null);
+    await store.publish(notification);
+    expect(platform.show).not.toHaveBeenCalled();
+    expect(store.error_message).toBeNull();
+    resolveContent.mockClear();
+    vi.mocked(platform.isFocused).mockResolvedValue(true);
+    await store.publish({ ...notification, target: { ...target, run_id: 'foreground' } });
+    vi.mocked(platform.permission).mockResolvedValue('denied');
+    vi.mocked(platform.isFocused).mockResolvedValue(false);
+    await store.publish({ ...notification, target: { ...target, run_id: 'denied' } });
+    expect(resolveContent).not.toHaveBeenCalled();
+  });
+
   it.each(['turn', 'approval', 'feedback'] as const)('窗口聚焦时不发送 %s 通知，失焦后不补发旧事项', async (kind) => {
     const { store, platform } = fixture();
     vi.mocked(platform.isFocused).mockResolvedValue(true);
@@ -260,6 +302,23 @@ describe('系统通知投递与业务隔离', () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
+  it('问答事件冻结第一题与题数，end_turn 不重复发完成通知', async () => {
+    const { store, platform, resolveContent } = fixture();
+    store.ingest({ sequence: 1, emitted_at_ms: 1, event: { type: 'feedback_published', request: {
+      request_id: 'questions', session_id: owner.session_id, run_id: target.run_id, tool_call_id: 'ask', mode: 'end_turn',
+      status: 'pending', answers: null, questions: [
+        { question: '选择哪种格式？', header: null, options: [], multiple: false },
+        { question: '需要哪些章节？', header: null, options: [], multiple: false },
+      ],
+    } } });
+    store.ingest(finished(2));
+    await vi.waitFor(() => expect(platform.show).toHaveBeenCalledOnce());
+    expect(resolveContent).toHaveBeenCalledWith(expect.objectContaining({
+      body: '等待回复（共 2 题）：选择哪种格式？',
+      target: expect.objectContaining({ kind: 'feedback', request_id: 'questions', run_id: target.run_id }),
+    }));
+  });
+
   it('两个 Host 的同名事项不互相去重', async () => {
     const { store, platform, changeScope } = fixture();
     await store.publish(notification);
@@ -356,4 +415,15 @@ it('F04 轮后只提醒待反馈，轮内回答后仍可收到完成通知；重
   await vi.waitFor(() => expect(platform.show).toHaveBeenCalledTimes(2));
   if (end.event.type === 'run_finished') store.ingest({ ...end, sequence: 6, event: { ...end.event, run_id: 'run-wait' } });
   await vi.waitFor(() => expect(platform.show).toHaveBeenCalledTimes(3));
+});
+
+
+it('应用内点击不依赖系统开关或权限，也不要求原生窗口聚焦', async () => {
+  const { store, platform, navigate } = fixture();
+  store.setEnabled(false);
+  expect(await store.activate(target)).toBe(true);
+  expect(navigate).toHaveBeenCalledWith(target);
+  expect(platform.permission).not.toHaveBeenCalled();
+  expect(platform.focus).not.toHaveBeenCalled();
+  expect(store.focus_target).toEqual(target);
 });

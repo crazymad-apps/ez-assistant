@@ -115,10 +115,14 @@ pub trait RuntimeStore: Send + Sync {
     /// 全局 Shell 默认仅用于新 Session；不修改既有绑定。
     fn load_default_agent_shell(&self) -> StoreFuture<'_, Option<assistant_protocol::ShellKind>>;
     fn save_default_agent_shell(&self, kind: assistant_protocol::ShellKind) -> StoreFuture<'_, ()>;
+    /// 默认选择变更时，同一提交更新所有默认跟随 Session 的续接周期；None 不失效。
     fn save_model_settings(
         &self,
         settings: assistant_protocol::ModelSettings,
+        server_history_key: Option<String>,
     ) -> StoreFuture<'_, ()>;
+    /// 全局生成参数换代时，原子更新全部 Session 的远端续接周期，不改写本地正文。
+    fn invalidate_server_history_bindings(&self, key: String) -> StoreFuture<'_, ()>;
     fn get_model_fixed_config(
         &self,
         selection: assistant_protocol::ModelSelection,
@@ -129,13 +133,17 @@ pub trait RuntimeStore: Send + Sync {
         offset: u32,
         limit: u32,
     ) -> StoreFuture<'_, Vec<assistant_protocol::ModelFixedConfig>>;
+    /// 固定参数及受影响 Session（含当前默认跟随者）的周期必须原子提交。
     fn put_model_fixed_config(
         &self,
         config: assistant_protocol::ModelFixedConfig,
+        server_history_key: Option<String>,
     ) -> StoreFuture<'_, ()>;
+    /// 重置固定参数共享相同失效边界；不存在或同值操作传 None。
     fn reset_model_fixed_config(
         &self,
         selection: assistant_protocol::ModelSelection,
+        server_history_key: Option<String>,
     ) -> StoreFuture<'_, ()>;
 
     /// 启动只读取全局设备与工作区事实，不恢复或加载历史会话。

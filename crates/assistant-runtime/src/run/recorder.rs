@@ -467,31 +467,37 @@ mod tests {
             .mark_tool_execution_started(&receipt, &call_id)
             .await
             .expect("mark child tool started");
+        // 正常取消也可能返回部分成功事实；Recorder 必须保留原始 Error 状态和完整正文，
+        // 不能因结果不是 Success 就把它改成 interrupted/unknown 或写入父 Journal。
+        let partial_result = ToolResult {
+            call_id,
+            status: ToolResultStatus::Error,
+            content: ToolResultContent::json(json!({"files": [
+                {"path": "a.txt", "status": "success", "replacements": 1},
+                {"path": "b.txt", "status": "not_executed", "reason": "cancelled"}
+            ]})),
+            metadata: None,
+        };
         recorder
             .complete_tool_exchange(
                 &receipt,
                 vec![ToolMessage {
                     id: MessageId::new("child-tool-result").expect("message id"),
-                    result: ToolResult {
-                        call_id,
-                        status: ToolResultStatus::Success,
-                        content: ToolResultContent::text("done".to_owned()),
-                        metadata: None,
-                    },
+                    result: partial_result.clone(),
                 }],
             )
             .await
             .expect("complete child exchange");
 
-        assert_eq!(
-            store
-                .load_child_conversation(&session_id, &child_task_id)
-                .await
-                .expect("load persisted child conversation")
-                .messages
-                .len(),
-            3
-        );
+        let persisted = store
+            .load_child_conversation(&session_id, &child_task_id)
+            .await
+            .expect("load persisted child conversation");
+        assert_eq!(persisted.messages.len(), 3);
+        let agent_types::ConversationMessage::Tool(message) = &persisted.messages[2] else {
+            panic!("third child message must be the reliable tool result");
+        };
+        assert_eq!(message.result, partial_result);
         assert!(
             store
                 .load_conversation(&session_id)

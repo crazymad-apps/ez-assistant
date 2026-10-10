@@ -185,7 +185,6 @@ fn compile_global(
 
     if delegation.max_tasks_per_run == 0
         || delegation.max_concurrent_tasks == 0
-        || delegation.task_timeout_ms == 0
         || delegation.max_steps == 0
         || delegation.max_tool_calls == 0
         || delegation.max_output_tokens == 0

@@ -1,8 +1,6 @@
 import type {
   AssistantMessageSnapshot,
-  AssistantSegment,
   ConversationItem,
-  MessageId,
   ModelFailureKind,
   RuntimeErrorCode,
   ToolActivityStatus,
@@ -10,7 +8,6 @@ import type {
   UserMessageSnapshot,
 } from "@ez-assistant/protocol";
 import type {
-  LiveExecutionSegment,
   LiveRunProjection,
   LiveToolSnapshot,
 } from "../../../stores/LiveExecutionStore";
@@ -19,7 +16,7 @@ export type ConversationRow =
   | { type: "user"; message: UserMessageSnapshot }
   | { type: "context_summary"; message: Extract<ConversationItem, { type: "context_summary" }> }
   | { type: "control_result"; message: Extract<ConversationItem, { type: "control_result" | "skill_refresh_result" | "shell_switch_result" }> }
-  | { type: "assistant_turn"; key: string; run_id: string | null; messages: AssistantMessageSnapshot[] };
+  | { type: "assistant_turn"; key: string; run_id: string | null; messages: AssistantMessageSnapshot[]; live_run?: LiveRunProjection | null };
 
 export function groupConversationTurns(
   items: readonly ConversationItem[],
@@ -54,43 +51,14 @@ export function groupConversationTurns(
     } else {
       rows.push({
         type: "assistant_turn",
-        key: `assistant:${item.run_id ?? item.message_id}`,
+        key: rows.some((row) => row.type === "assistant_turn" && row.run_id === item.run_id && item.run_id !== null)
+          ? `assistant:${item.run_id}:${item.message_id}` : `assistant:${item.run_id ?? item.message_id}`,
         run_id: item.run_id,
         messages: [item],
       });
     }
   }
   return rows;
-}
-
-export function segmentStateKey(
-  message_id: MessageId,
-  segment: AssistantSegment,
-  index: number,
-): string {
-  if (segment.type === "tool_group") {
-    return `${message_id}:tools:${segment.tools.map((tool) => tool.call_id).join(":")}:${index}`;
-  }
-  return `${message_id}:${segment.type}:${segment.part_id}:${index}`;
-}
-
-export function liveSegmentStateKey(
-  run_id: string,
-  step: number,
-  segment: LiveExecutionSegment,
-  index: number,
-): string {
-  return segment.type === "tool_group"
-    ? `${run_id}:${step}:${segment.group_id}:${index}`
-    : `${run_id}:${step}:${segment.type}:${segment.part_id}:${index}`;
-}
-
-export function collapsedSummary(segments: readonly AssistantSegment[]): string {
-  const reasoning = segments.filter((segment) => segment.type === "reasoning").length;
-  const tools = segments.flatMap((segment) => segment.type === "tool_group" ? segment.tools : []).length;
-  return [reasoning ? `${reasoning} 段思考` : "", tools ? `${tools} 个工具` : ""]
-    .filter(Boolean)
-    .join(" · ") || "助手回复";
 }
 
 export function toolSummary(tool: LiveToolSnapshot): string | null {
@@ -226,4 +194,16 @@ export function formatDateTime(timestamp: number | null): string {
   const date = new Date(timestamp);
   const pad = (value: number) => String(value).padStart(2, "0");
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+/** 将实时尾部并入同一行，首次提交时保持 React 身份；child 只接自己的最后一个消息段。 */
+export function attachLiveTurn(rows: ConversationRow[], live: LiveRunProjection | null, child_id: string | null): ConversationRow[] {
+  const target = [...rows].reverse().find((row) => row.type === "assistant_turn" && (child_id ? row.run_id === null : row.run_id === live?.run_id));
+  if (target?.type === "assistant_turn") {
+    target.live_run = live;
+    if (child_id) target.key = `assistant:child:${child_id}`;
+  } else if (live) {
+    rows.push({ type: "assistant_turn", key: child_id ? `assistant:child:${child_id}` : `assistant:${live.run_id}`, run_id: live.run_id, messages: [], live_run: live });
+  }
+  return rows;
 }

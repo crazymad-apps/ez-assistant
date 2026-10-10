@@ -9,7 +9,8 @@ use std::{
     pin::Pin,
 };
 
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
@@ -21,7 +22,7 @@ pub type FsFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, FileToolError>>
 /// 单次文件能力执行的控制上下文。
 #[derive(Clone, Debug)]
 pub struct FileToolContext {
-    /// 取消信号；实现收到取消后必须完成必要清理再返回 [`FileToolError::Cancelled`]。
+    /// 取消信号；实现收到取消后必须完成必要清理，edit 保留逐文件结果，其他操作返回取消错误。
     pub cancellation: CancellationToken,
 }
 
@@ -60,13 +61,13 @@ pub struct FileAuthorizationFacts {
     pub path: AbsolutePath,
 }
 
-/// 一次只读工具调用涉及多条路径时提供的类型化授权事实。
+/// 一次工具调用涉及多条路径时提供的类型化授权事实。
 ///
-/// 多路径不能压缩成共同父目录，否则会把实际读取范围错误扩大为目录授权。Runtime 必须逐条
+/// 多路径不能压缩成共同父目录，否则会把实际操作范围错误扩大为目录授权。Runtime 必须逐条
 /// 应用文件规则，并且只有全部路径均获准时才允许执行。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileBatchAuthorizationFacts {
-    /// 当前工具壳对应的文件操作；首版只用于批量读取。
+    /// 当前工具壳对应的文件操作（批量读取或编辑）。
     pub operation: FileOperation,
     /// 已按 Session 工作目录分别完成词法归一化、保持模型输入顺序的绝对逻辑路径。
     pub paths: Vec<AbsolutePath>,
@@ -257,24 +258,184 @@ pub struct DeleteFileResult {
     pub deleted: AbsolutePath,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct EditFileRequest {
-    /// 需要编辑的绝对逻辑路径。
-    pub path: AbsolutePath,
-    /// 需要精确匹配的原文本。
+/// 批量编辑固定契约限额，执行入口和工具 resolve 共用。
+pub const MAX_EDIT_FILES: usize = 16;
+pub const MAX_EDITS_PER_FILE: usize = 64;
+pub const MAX_EDIT_GROUPS: usize = 128;
+pub const MAX_EDIT_INPUT_BYTES: usize = 256 * 1024;
+
+/// 一组精确替换；按输入顺序作用于上一组的内存结果。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EditReplacement {
     pub old_string: String,
-    /// 替换后的新文本。
     pub new_string: String,
-    /// 是否替换全部匹配。
+    #[serde(default)]
+    #[schemars(default)]
     pub replace_all: bool,
 }
 
+/// 单文件的全部替换组；任何组失败均不提交该文件。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct EditFileEntry {
+    pub path: AbsolutePath,
+    pub edits: Vec<EditReplacement>,
+}
+
+/// 已解析的整批编辑请求；能力实现必须再次核对限额。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct EditFileRequest {
+    pub files: Vec<EditFileEntry>,
+}
+
+impl EditFileRequest {
+    /// 校验冻结请求的数量、参数及完整路径/正文预算，不访问文件系统。
+    ///
+    /// # Errors
+    /// 超出契约预算或含无效替换时返回 InvalidInput，整批不得执行。
+    pub fn validate(&self) -> Result<(), FileToolError> {
+        if self.files.is_empty() || self.files.len() > MAX_EDIT_FILES {
+            return Err(FileToolError::invalid_input(
+                "files must contain 1..16 entries",
+            ));
+        }
+        let mut groups = 0;
+        let mut path_bytes = 0;
+        let mut text_json_bytes = 0;
+        let mut paths = Vec::new();
+        for file in &self.files {
+            if file.edits.is_empty() || file.edits.len() > MAX_EDITS_PER_FILE {
+                return Err(FileToolError::invalid_input(
+                    "edits must contain 1..64 entries",
+                ));
+            }
+            groups += file.edits.len();
+            if file.path.as_str().len() > 1024 {
+                return Err(FileToolError::invalid_input("resolved path exceeds 1 KiB"));
+            }
+            path_bytes += file.path.as_str().len();
+            paths.push(file.path.as_str());
+            for edit in &file.edits {
+                // 原始完整 JSON 的 256 KiB 由输入反序列化核对。这里独立限制正文，
+                // 不把默认值补齐/绝对路径展开增加的字节误算为模型原始输入。
+                for text in [&edit.old_string, &edit.new_string] {
+                    text_json_bytes += serde_json::to_vec(text)
+                        .map_err(|_| FileToolError::invalid_input("invalid edit text"))?
+                        .len();
+                }
+                if edit.old_string.is_empty() || edit.old_string == edit.new_string {
+                    return Err(FileToolError::invalid_input(
+                        "old_string must be nonempty and differ from new_string",
+                    ));
+                }
+            }
+        }
+        if groups > MAX_EDIT_GROUPS || path_bytes > 4096 {
+            return Err(FileToolError::invalid_input(
+                "edit group or path budget exceeded",
+            ));
+        }
+        if serde_json::to_vec(&paths).map_or(true, |json| json.len() > 8192)
+            || text_json_bytes > MAX_EDIT_INPUT_BYTES
+        {
+            return Err(FileToolError::invalid_input("edit JSON budget exceeded"));
+        }
+        Ok(())
+    }
+}
+
+/// 尚未执行的文件位置原因；不代表该文件已经核验或提交。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EditNotExecutedReason {
+    Cancelled,
+    PreviousFailure,
+    PreflightFailed,
+}
+
+/// 逐文件提交事实；只有完整提交才携带完成替换次数。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum EditFileOutcome {
+    Success {
+        replacements: u64,
+    },
+    Failed {
+        code: String,
+        reason: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        edit_index: Option<usize>,
+    },
+    Unknown {
+        code: String,
+        reason: String,
+    },
+    NotExecuted {
+        reason: EditNotExecutedReason,
+    },
+}
+
+impl EditFileOutcome {
+    /// 未开始文件写入时形成稳定失败；不重复路径和替换正文。
+    pub fn failed(error: &FileToolError, edit_index: Option<usize>) -> Self {
+        let (code, reason) = match error {
+            FileToolError::InvalidInput { message } => ("invalid_input", message.as_str()),
+            FileToolError::NotFound { .. } => ("not_found", "file not found"),
+            FileToolError::UnsupportedEncoding { .. } => {
+                ("unsupported_encoding", "file is not supported UTF-8 text")
+            }
+            FileToolError::UnsupportedFileType { .. } => {
+                ("unsupported_file_type", "target must be a regular file")
+            }
+            FileToolError::TooLarge { .. } => {
+                ("too_large", "file exceeds the configured size limit")
+            }
+            FileToolError::ConcurrentModification { .. } => {
+                ("concurrent_modification", "file changed before commit")
+            }
+            FileToolError::Cancelled => ("cancelled", "cancelled before commit"),
+            _ => ("io", "file I/O could not be completed"),
+        };
+        let mut end = reason.len().min(256);
+        while !reason.is_char_boundary(end) {
+            end -= 1;
+        }
+        Self::Failed {
+            code: code.to_owned(),
+            reason: reason[..end].to_owned(),
+            edit_index,
+        }
+    }
+}
+
+/// 每条输入位置的结果；路径为授权时冻结的逻辑路径。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct EditFileEntryResult {
+    pub path: AbsolutePath,
+    #[serde(flatten)]
+    pub outcome: EditFileOutcome,
+}
+
+/// 完整批量结果，始终保持输入顺序和条目数；不做执行后裁剪。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct EditFileResult {
-    /// 实际编辑的绝对逻辑路径。
-    pub path: AbsolutePath,
-    /// 完成的替换次数。
-    pub replacements: u64,
+    pub files: Vec<EditFileEntryResult>,
+}
+
+impl EditFileResult {
+    /// 创建全部尚未执行的清单，执行时只替换已有输入位置。
+    pub fn not_executed(request: &EditFileRequest, reason: EditNotExecutedReason) -> Self {
+        Self {
+            files: request
+                .files
+                .iter()
+                .map(|file| EditFileEntryResult {
+                    path: file.path.clone(),
+                    outcome: EditFileOutcome::NotExecuted { reason },
+                })
+                .collect(),
+        }
+    }
 }
 
 /// Provider-neutral 文件能力；所有方法都接收显式取消上下文。

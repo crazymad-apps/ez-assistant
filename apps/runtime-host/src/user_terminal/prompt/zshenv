@@ -1,0 +1,16 @@
+# 只在此终端转发用户启动文件；不把临时 ZDOTDIR 留给用户配置或后续子 Shell。
+typeset -g __ez_terminal_startup=$ZDOTDIR
+if [[ ${EZ_TERMINAL_HAS_ZDOTDIR-} == 1 ]]; then
+    ZDOTDIR=$EZ_TERMINAL_USER_ZDOTDIR
+else
+    unset ZDOTDIR
+fi
+unset EZ_TERMINAL_HAS_ZDOTDIR EZ_TERMINAL_USER_ZDOTDIR
+if [[ -r ${ZDOTDIR-$HOME}/.zshenv ]]; then source "${ZDOTDIR-$HOME}/.zshenv"; fi
+if [[ -o rcs ]]; then
+    typeset -g __ez_terminal_has_zdotdir=${+ZDOTDIR}
+    typeset -g __ez_terminal_user_zdotdir=${ZDOTDIR-}
+    ZDOTDIR=$__ez_terminal_startup
+else
+    unset __ez_terminal_startup
+fi

@@ -5,6 +5,7 @@ import type {
   RuntimeEventEnvelope,
   SessionViewSnapshot,
 } from "@ez-assistant/protocol";
+import { executionElapsedMs, hostClockAnchor, restartStep } from "../../src/stores/liveExecutionProjection";
 import { LiveExecutionStore } from "../../src/stores/LiveExecutionStore";
 
 describe("LiveExecutionStore", () => {
@@ -225,8 +226,8 @@ describe("LiveExecutionStore", () => {
 
     const run = store.runForSession("session-1");
     expect(run?.steps.map((step) => step.segments)).toEqual([
-      [{ type: "reasoning", part_id: "part-1", text: "第一步" }],
-      [{ type: "reasoning", part_id: "part-1", text: "第二步" }],
+      [{ type: "reasoning", source: "raw", part_id: "part-1", text: "第一步" }],
+      [{ type: "reasoning", source: "raw", part_id: "part-1", text: "第二步" }],
     ]);
   });
 
@@ -290,7 +291,7 @@ describe("LiveExecutionStore", () => {
       {
         step: 1,
         segments: [
-          { type: "reasoning", part_id: "reasoning-1", text: "先读取图片" },
+          { type: "reasoning", source: "raw", part_id: "reasoning-1", text: "先读取图片" },
           {
             type: "tool_group",
             group_id: "live-tools:call-read-image",
@@ -308,7 +309,7 @@ describe("LiveExecutionStore", () => {
       {
         step: 2,
         segments: [
-          { type: "reasoning", part_id: "reasoning-1", text: "图片中存在一张表格" },
+          { type: "reasoning", source: "raw", part_id: "reasoning-1", text: "图片中存在一张表格" },
           {
             type: "tool_group",
             group_id: "live-tools:call-next",
@@ -427,7 +428,7 @@ describe("LiveExecutionStore", () => {
         session_id: "session-1",
         status: "running",
         active_step: 2,
-        reasoning: "继续",
+        reasoning_parts: [{ part_id: "reasoning-2", text: "继续" }],
         text: "",
         tools: [{
           step: 1,
@@ -453,7 +454,7 @@ describe("LiveExecutionStore", () => {
     } as unknown as SessionViewSnapshot);
 
     expect(store.runForSession("session-1")?.steps).toEqual([
-      { step: 2, segments: [{ type: "reasoning", part_id: "part-1", text: "继续" }] },
+      { step: 2, segments: [{ type: "reasoning", source: "raw", part_id: "part-1", text: "继续" }] },
     ]);
   });
 
@@ -814,7 +815,7 @@ function activeSessionView(generation: number): SessionViewSnapshot {
       session_id: "session-1",
       status: "running",
       active_step: 1,
-      reasoning: "",
+      reasoning_parts: [],
       text: "",
       tools: [],
     },
@@ -868,4 +869,123 @@ describe("model request progress", () => {
     expect(store.runForSession("session-2")?.model_request?.type).toBe("retry_waiting");
     store.dispose();
   });
+});
+
+
+describe("reasoning source and reliable execution time", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  function store() {
+    vi.stubGlobal("requestAnimationFrame", vi.fn(() => 1));
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    return new LiveExecutionStore();
+  }
+
+  it("restores exact reasoning identities and sources before appending later deltas", () => {
+    const live = store();
+    const view = activeSessionView(1);
+    view.active_run!.created_at_ms = 100;
+    view.active_run!.finished_at_ms = null;
+    view.active_run!.reasoning_parts = [
+      { part_id: "summary", source: "summary", text: "short" },
+      { part_id: "raw", text: "long" },
+    ];
+    live.reconcileSession(view, 200);
+    live.buffer(envelope(2, { type: "reasoning_delta", session_id: "session-1", run_id: "run-1", step: 1, part_id: "summary", source: "summary", delta: " summary" }));
+    live.flush();
+    expect(live.runForSession("session-1")?.steps[0]?.segments).toEqual([
+      { type: "reasoning", part_id: "summary", source: "summary", text: "short summary" },
+      { type: "reasoning", part_id: "raw", source: "raw", text: "long" },
+    ]);
+    expect(live.runForSession("session-1")?.created_at_ms).toBe(100);
+  });
+
+  it("seals snapshot reasoning deltas without swallowing later or other-owner events", () => {
+    const live = store();
+    live.buffer(envelope(1, { type: "run_started", session_id: "session-1", run_id: "run-1" }));
+    live.flush();
+    const view = activeSessionView(1);
+    view.active_run!.reasoning_parts = [{ part_id: "p", source: "summary", text: "already observed" }];
+    live.reconcileSession(view, 100, 10);
+    live.buffer(envelope(5, { type: "reasoning_delta", session_id: "session-1", run_id: "run-1", step: 1, part_id: "p", source: "summary", delta: "already observed" }));
+    live.buffer(envelope(6, { type: "reasoning_delta", session_id: "other", run_id: "other-run", step: 1, part_id: "p", delta: "other owner" }));
+    live.buffer(envelope(11, { type: "reasoning_delta", session_id: "session-1", run_id: "run-1", step: 1, part_id: "p", source: "summary", delta: " later" }));
+    live.flush();
+    expect(live.runForSession("session-1")?.steps[0]?.segments).toEqual([
+      { type: "reasoning", part_id: "p", source: "summary", text: "already observed later" },
+    ]);
+    expect(live.runForSession("other")?.steps[0]?.segments[0]).toMatchObject({ text: "other owner" });
+    // A late snapshot cannot erase a newer live suffix.
+    live.reconcileSession(view, 100, 10);
+    expect(live.runForSession("session-1")?.steps[0]?.segments[0]).toMatchObject({ text: "already observed later" });
+  });
+
+  it("captures the clock before the frame delay and clears it on owner reset", () => {
+    const live = store();
+    const now = vi.spyOn(performance, "now").mockReturnValue(50);
+    live.buffer({ ...envelope(1, { type: "run_accepted", session_id: "s", run_id: "r", created_at_ms: 100 }), emitted_at_ms: 1000 });
+    expect(live.clock_anchor).toBeNull();
+    now.mockReturnValue(500);
+    live.flush();
+    expect(live.clock_anchor).toEqual({ host_at_ms: 1000, received_at_ms: 50 });
+    expect(executionElapsedMs(live.runForSession("s")!, live.clock_anchor, 500)).toBe(1350);
+    live.clear();
+    expect(live.clock_anchor).toBeNull();
+    now.mockRestore();
+  });
+
+  it("never invents an acceptance time from late events and reconciles reliable terminal time", () => {
+    const live = store();
+    live.buffer(envelope(999, { type: "text_delta", session_id: "session-1", run_id: "run-1", step: 1, part_id: "p", delta: "late" }));
+    live.flush();
+    expect(live.runForSession("session-1")?.created_at_ms).toBeNull();
+    const view = activeSessionView(1);
+    view.active_run!.created_at_ms = 100;
+    view.active_run!.finished_at_ms = null;
+    live.reconcileSession(view, 1000);
+    live.buffer(envelope(2000, { type: "run_finished", session_id: "session-1", run_id: "run-1", status: "failed", error: null, finished_at_ms: 1500 }));
+    live.flush();
+    const run = live.runForSession("session-1")!;
+    expect(executionElapsedMs(run, live.clock_anchor, 9999999)).toBe(1400);
+    live.invalidateForGap();
+    expect(live.clock_anchor).toBeNull();
+  });
+
+  it("keeps child source and child times separate from the parent", () => {
+    const live = store();
+    live.buffer(envelope(99, { type: "child_task_event", session_id: "session-1", parent_run_id: "parent", child_task_id: "child", event: { type: "reasoning_delta", step: 1, part_id: "p", source: "summary", delta: "child summary" } }));
+    live.flush();
+    expect(live.runForChildTask("child")?.created_at_ms).toBeNull();
+    expect(live.runForChildTask("child")?.steps[0]?.segments[0]).toMatchObject({ source: "summary" });
+    live.buffer(envelope(101, { type: "child_task_event", session_id: "session-1", parent_run_id: "parent", child_task_id: "child", event: { type: "finished", status: "cancelled", error: null, finished_at_ms: 100 } }));
+    live.flush();
+    expect(live.runForChildTask("child")?.finished_at_ms).toBe(100);
+    expect(live.runForSession("session-1")).toBeNull();
+  });
+
+  it("uses monotonic time against a Host anchor for active waits and freezes all terminal outcomes", () => {
+    const run = { created_at_ms: 1000, finished_at_ms: null, status: "running" as const };
+    const anchor = hostClockAnchor(6000, 30)!;
+    expect(executionElapsedMs(run, anchor, 530)).toBe(5500);
+    for (const status of ["completed", "failed", "cancelled", "interrupted", "compaction_required"] as const) {
+      expect(executionElapsedMs({ ...run, status, finished_at_ms: 8000 }, anchor, 999999)).toBe(7000);
+      expect(executionElapsedMs({ ...run, status }, anchor, 999999)).toBeNull();
+    }
+    for (const created_at_ms of [null, NaN, Infinity, -1, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(executionElapsedMs({ ...run, created_at_ms }, anchor, 530)).toBeNull();
+    }
+    expect(executionElapsedMs({ ...run, status: "completed", finished_at_ms: 999 }, anchor, 530)).toBeNull();
+    expect(executionElapsedMs(run, null, 530)).toBeNull();
+  });
+});
+
+
+it("discards interrupted text and reasoning while retaining settled tools", () => {
+  const tool = { type: "tool_group" as const, group_id: "group", tools: [] };
+  const steps = restartStep([{ step: 2, segments: [
+    { type: "text", part_id: "old", text: "partial" },
+    { type: "reasoning", part_id: "reason", text: "partial", source: "raw" },
+    tool,
+  ] }], 2);
+  expect(steps).toEqual([{ step: 2, segments: [tool] }]);
 });

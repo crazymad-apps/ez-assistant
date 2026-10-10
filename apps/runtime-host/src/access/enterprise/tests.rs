@@ -43,6 +43,7 @@ struct Mock {
     model_unavailable: AtomicBool,
     proxy_requests: Mutex<Vec<(String, Value)>>,
     proxy_control: Mutex<Option<(u16, String)>>,
+    proxy_script: Mutex<std::collections::VecDeque<Response>>,
     proxy_hold: Mutex<Option<Arc<Held>>>,
     plugin: Mutex<Option<PluginFixture>>,
 }
@@ -208,7 +209,7 @@ impl Fixture {
         let center_router = Router::new()
             .route(
                 "/api/info",
-                get(|| async { Json(json!({"protocol_version":1,"min_protocol_version":1,"capabilities":["managed_models","llm_proxy"]})) }),
+                get(|| async { Json(json!({"protocol_version":2,"min_protocol_version":2,"capabilities":["managed_models","llm_proxy"]})) }),
             )
             .route("/api/runtime/model-configuration", get(runtime::models::configuration))
             .route("/api/llm/providers/{provider}/v1/chat/completions", post(runtime::models::proxy))
@@ -432,6 +433,19 @@ async fn bootstrap_cannot_impersonate_user_and_cookie_exchange_keeps_identity() 
     let value = capabilities.json::<Value>().await.unwrap();
     assert_eq!(value["mode"], "enterprise");
     assert!(value.get("platform").is_none());
+    let update = f
+        .request(reqwest::Method::GET, "/desktop-update-context", None)
+        .header(assistant_protocol::CLIENT_VERSION_HEADER, "invalid")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(update.status(), StatusCode::OK);
+    let update = update.json::<Value>().await.unwrap();
+    assert_eq!(update.as_object().unwrap().len(), 2);
+    assert_eq!(update["enterprise_protocols"], json!([2]));
+    let config = std::fs::read_to_string(f.home.path().join("host.toml")).unwrap();
+    assert!(config.contains(update["center_url"].as_str().unwrap()));
+    assert!(!f.home.path().join("users").exists());
     let denied = f
         .request(
             reqwest::Method::POST,

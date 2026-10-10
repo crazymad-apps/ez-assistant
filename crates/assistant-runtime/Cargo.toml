@@ -34,5 +34,6 @@ toml_edit.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+agent-openai-compatible = { path = "../agent-openai-compatible" }
 agent-testkit = { path = "../agent-testkit" }
 tempfile.workspace = true

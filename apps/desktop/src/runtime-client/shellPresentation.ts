@@ -7,8 +7,10 @@ export const shellLabels: Readonly<Record<ShellKind, string>> = {
   powershell_7: "PowerShell 7",
   git_bash: "Git Bash",
   posix_sh: "/bin/sh",
+  bash: "Bash",
+  zsh: "zsh",
 };
 
 export const shellBadges: Readonly<Record<ShellKind, string>> = {
-  windows_powershell_51: "PS 5.1", cmd: "CMD", powershell_7: "PS 7", git_bash: "Bash", posix_sh: "sh",
+  windows_powershell_51: "PS 5.1", cmd: "CMD", powershell_7: "PS 7", git_bash: "Bash", posix_sh: "sh", bash: "Bash", zsh: "zsh",
 };

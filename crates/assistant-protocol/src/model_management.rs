@@ -164,6 +164,77 @@ pub struct ProviderConnection {
     pub protocol_preference: ProviderProtocolPreference,
     pub models_path: String,
     pub discovery_format: ModelDiscoveryFormat,
+    /// 连接级策略；旧持久配置和缺失字段默认关闭。
+    #[serde(default)]
+    pub server_history_enabled: bool,
+    /// None 使用服务商默认；Unknown 不是有效的显式覆盖。
+    #[serde(default)]
+    pub server_history_support_override: Option<ModelFeatureSupport>,
+}
+
+impl ProviderConnection {
+    /// 只判断已核实的接口身份；自定义服务地址不继承官方部署能力。
+    /// Chat 协议始终不能被能力覆盖提升为 Responses 续接。
+    pub fn server_history_support(&self) -> ModelFeatureSupport {
+        use ModelFeatureSupport::*;
+        let responses = matches!(
+            self.provider_type,
+            ProviderType::Openai
+                | ProviderType::Deepseek
+                | ProviderType::DashscopeApi
+                | ProviderType::DashscopePlan
+                | ProviderType::Moonshot
+        ) && self.protocol_preference
+            != ProviderProtocolPreference::ChatCompletions;
+        if !responses {
+            return Unsupported;
+        }
+        if let Some(value) = self.server_history_support_override {
+            return value;
+        }
+        let endpoint = self.endpoint.trim_end_matches('/');
+        match self.provider_type {
+            ProviderType::Openai if endpoint == "https://api.openai.com/v1" => Supported,
+            ProviderType::DashscopeApi if dashscope_history_endpoint(endpoint) => Supported,
+            ProviderType::Deepseek | ProviderType::Moonshot => Unsupported,
+            _ => Unknown,
+        }
+    }
+}
+
+// 仅接受官方当前 Responses 路径；workspace 子域不接受用户信息、端口或额外域名。
+fn dashscope_history_endpoint(endpoint: &str) -> bool {
+    let Some(host) = endpoint
+        .strip_prefix("https://")
+        .and_then(|rest| rest.strip_suffix("/compatible-mode/v1"))
+    else {
+        return false;
+    };
+    if matches!(
+        host,
+        "dashscope.aliyuncs.com"
+            | "dashscope-intl.aliyuncs.com"
+            | "dashscope-us.aliyuncs.com"
+            | "cn-hongkong.dashscope.aliyuncs.com"
+    ) {
+        return true;
+    }
+    let Some((workspace, region)) = host.split_once('.') else {
+        return false;
+    };
+    !workspace.is_empty()
+        && workspace
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        && matches!(
+            region,
+            "cn-beijing.maas.aliyuncs.com"
+                | "ap-southeast-1.maas.aliyuncs.com"
+                | "us-east-1.maas.aliyuncs.com"
+                | "eu-central-1.maas.aliyuncs.com"
+                | "cn-hongkong.maas.aliyuncs.com"
+                | "ap-northeast-1.maas.aliyuncs.com"
+        )
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]

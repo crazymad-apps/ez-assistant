@@ -16,6 +16,8 @@ npm run dev
 
 地址为 <http://127.0.0.1:7310/admin/>。`/api` 代理到本机 Center `127.0.0.1:7320`；
 Center 的 `CENTER_PUBLIC_ORIGIN` 应设置为浏览器访问来源（默认 `http://127.0.0.1:7310`）。
+“模型管理 → 公共配置”可单独设置客户端模型访问地址，保存后持久化到 Center；留空恢复部署地址。
+默认模型与地址分别保存，客户端下次读取模型配置时使用新地址。
 开发 HTTP 还需显式开启 `CENTER_ALLOW_HTTP_LOOPBACK=true`。不把数据库密码或真实模型 key 配到前端。
 
 身份与列表均来自实际 API，不含演示账户或本地成功审计。前端会话 Cookie 只保存后台 Token，

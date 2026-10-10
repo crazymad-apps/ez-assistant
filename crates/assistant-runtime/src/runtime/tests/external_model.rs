@@ -42,6 +42,7 @@ fn configuration(model: &str) -> Arc<ExternalModelConfiguration> {
             model.to_owned(),
             model_fixture::parameters(),
             42,
+            None,
         )
         .unwrap(),
     )

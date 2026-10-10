@@ -281,8 +281,8 @@ fn map_shell_error(error: ShellToolError) -> ToolError {
             }),
         ),
         ShellToolError::Io { message } => ToolError::execution(message),
-        // Engine 在执行取消后会直接收敛到 Cancelled，不会把这条文本回喂模型；
-        // 此分支只为 ShellToolError 到 ToolError 的类型映射保持完备。
+        // Engine 等待 Shell 清理后保存这条实际结果，再收敛到 Cancelled。
+        // 本次不再请求模型；后续执行仍能从可靠历史识别取消，不推断命令副作用回滚。
         ShellToolError::Cancelled => ToolError::execution("shell execution cancelled"),
     }
 }

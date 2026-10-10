@@ -1,4 +1,5 @@
 import { once } from 'node:events';
+import type { IncomingHttpHeaders } from 'node:http';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { IdentityService } from '../identity/service.js';
 import { IdentityError } from '../identity/errors.js';
@@ -14,30 +15,60 @@ import { UsageObserver } from './usage.js';
 import { ControlError } from './errors.js';
 import { transfer, responseHeaders, TransferError } from './transport.js';
 import type { TransferSink } from './transport.js';
+import { ResponsesWebsocket, WebsocketResponseError } from './websocket.js';
+import type { WebsocketLimits } from './websocket.js';
 
-export type ProxyOptions = { origin?: string; connectTimeout?: number; idleTimeout?: number };
+export type ProxyOptions = { connectTimeout?: number; idleTimeout?: number; websocket?: WebsocketLimits };
 
 function control(reply: FastifyReply, requestId: string, error: unknown): void {
+  if (error instanceof WebsocketResponseError) {
+    void reply.header('cache-control', 'no-store').status(error.status).send(error.body);
+    return;
+  }
   const failure = error instanceof ControlError ? error : new ControlError('llm_proxy_unavailable');
   void reply
     .header('x-ez-center-control', '1')
     .header('cache-control', 'no-store')
     .header('x-content-type-options', 'nosniff')
     .status(failure.status)
-    .send({ error: { code: failure.code, message: failure.message, request_id: requestId } });
+    .send({
+      error: {
+        code: failure.code,
+        message: failure.message,
+        request_id: requestId,
+        ...(failure.code === 'previous_response_not_found'
+          ? { type: 'invalid_request_error', param: 'previous_response_id' }
+          : {}),
+      },
+    });
 }
 
 /** 服务 owner 跟踪从准入到文件结算的整个 Promise，关闭先取消网络再等待记录。 */
 export class ModelProxy {
   private readonly shutdown = new AbortController();
   private readonly pending = new Set<Promise<unknown>>();
+  private readonly websocket: ResponsesWebsocket;
+  private readonly unsubscribe: (() => void)[];
+  private readonly bridgeRequests = new Set<{ user: number; provider: string; abort: AbortController }>();
 
   constructor(
     private readonly identities: IdentityService,
     private readonly models: ModelsService,
     readonly records: CallRecords,
     private readonly options: ProxyOptions,
-  ) {}
+  ) {
+    this.websocket = new ResponsesWebsocket(options.websocket);
+    this.unsubscribe = [
+      identities.onRevoked((user) => {
+        for (const request of this.bridgeRequests) if (user === null || request.user === user) request.abort.abort();
+        this.websocket.revokeUser(user);
+      }),
+      models.onHistoryInvalidated((provider) => {
+        for (const request of this.bridgeRequests) if (request.provider === provider) request.abort.abort();
+        this.websocket.revokeProvider(provider);
+      }),
+    ];
+  }
 
   run<T>(work: () => Promise<T>): Promise<T> {
     if (this.shutdown.signal.aborted) return Promise.reject(new ControlError('llm_proxy_unavailable'));
@@ -56,6 +87,8 @@ export class ModelProxy {
 
   async close(): Promise<void> {
     this.shutdown.abort();
+    for (const unsubscribe of this.unsubscribe.splice(0)) unsubscribe();
+    this.websocket.close();
     let timer: NodeJS.Timeout | undefined;
     const done = Promise.allSettled([...this.pending, this.records.close(), this.models.onModuleDestroy()]);
     const timeout = new Promise<void>((resolve) => {
@@ -77,6 +110,7 @@ export class ModelProxy {
     signal: AbortSignal;
     sink: TransferSink;
     kind: 'proxy' | 'admin_test';
+    historyBinding?: string;
     finish?: (signal: AbortSignal) => Promise<void>;
     admitted?: (record: CallRecording) => void;
     sent?: () => void;
@@ -96,19 +130,42 @@ export class ModelProxy {
       recording.request?.append(input.body);
       let status: number | null = null;
       let upstream = false;
+      let transferSignal = signal;
+      const bridgeRequest = {
+        user: input.user.id,
+        provider: input.selection.provider_instance_id,
+        abort: new AbortController(),
+      };
       try {
-        const route = await this.models.admit(input.key, input.selection, input.protocol, input.kind === 'admin_test');
+        const parsed = requestModel(input.body);
+        if (parsed.model !== input.selection.model_id) throw new ControlError('llm_request_invalid');
+        // 先登记准入等待期，覆盖异步准入结束到实际建连间的配置/主体撤销。
+        // 只有最终走 WS 的请求使用此取消信号，不改变普通 HTTP 的生命周期。
+        this.bridgeRequests.add(bridgeRequest);
+        const route = await this.models.admit(input.key, input.selection, input.protocol, input.kind === 'admin_test', {
+          request: parsed,
+          binding: input.historyBinding,
+        });
         signal.throwIfAborted();
         recording.row.provider_name = route.provider.connection.display_name;
         recording.usage = new UsageObserver(input.protocol, route.provider.connection.provider_type);
         signal.throwIfAborted();
-        upstream = true;
-        const result = await transfer({
+        const bridge =
+          route.provider.connection.responses_transport === 'websocket' &&
+          input.protocol === 'open_ai_responses' &&
+          parsed.store === true &&
+          input.kind === 'proxy';
+        if (!bridge) this.bridgeRequests.delete(bridgeRequest);
+        transferSignal = bridge ? AbortSignal.any([signal, bridgeRequest.abort.signal]) : signal;
+        transferSignal.throwIfAborted();
+        upstream = !bridge;
+        // 仅已准入的业务接续转换协议；HTTP 与辅助调用继续保留原始 Buffer。
+        const transferInput = {
           endpoint: route.provider.connection.endpoint,
           protocol: input.protocol,
           apiKey: route.provider.api_key,
           body: input.body,
-          signal,
+          signal: transferSignal,
           connectTimeout: this.options.connectTimeout ?? 10000,
           idleTimeout: this.options.idleTimeout ?? 300000,
 
@@ -118,7 +175,7 @@ export class ModelProxy {
           },
 
           sink: {
-            headers: (code, headers) => {
+            headers: (code: number, headers: IncomingHttpHeaders) => {
               status = code;
               recording.responseUnsupported =
                 !!headers['content-encoding'] && headers['content-encoding'] !== 'identity';
@@ -126,14 +183,26 @@ export class ModelProxy {
               input.sink.headers(code, headers);
             },
 
-            chunk: async (chunk, signal) => {
+            chunk: async (chunk: Buffer, signal: AbortSignal) => {
               if (!recording.responseUnsupported) recording.response?.append(chunk);
               recording.usage?.chunk(chunk);
               await input.sink.chunk(chunk, signal);
             },
           },
-        });
-        await input.finish?.(signal);
+        };
+        const result = bridge
+          ? await this.websocket.transfer({
+              ...transferInput,
+              user: input.user.id,
+              provider: input.selection.provider_instance_id,
+              binding: input.historyBinding!,
+              finish: input.finish,
+              started: () => {
+                upstream = true;
+              },
+            })
+          : await transfer(transferInput);
+        if (!bridge) await input.finish?.(signal);
         await recording.settle(result >= 200 && result < 300 ? 'forwarded' : 'upstream_error', result, null);
         return { call_id: recording.row.id, http_status: result };
       } catch (error) {
@@ -142,12 +211,21 @@ export class ModelProxy {
             ? error.code
             : error instanceof TransferError
               ? error.reason
-              : signal.aborted
+              : transferSignal.aborted
                 ? 'cancelled'
                 : 'center_failure';
-        const recordedStatus = status ?? (error instanceof ControlError ? error.status : null);
-        await recording.settle(upstream || signal.aborted ? 'interrupted' : 'rejected', recordedStatus, reason);
+        const recordedStatus =
+          status ?? (error instanceof ControlError || error instanceof WebsocketResponseError ? error.status : null);
+        let outcome: 'upstream_error' | 'interrupted' | 'rejected' =
+          upstream || transferSignal.aborted ? 'interrupted' : 'rejected';
+        if (error instanceof WebsocketResponseError) {
+          outcome = 'upstream_error';
+          recording.response?.append(Buffer.from(JSON.stringify(error.body)));
+        }
+        await recording.settle(outcome, recordedStatus, reason);
         throw error;
+      } finally {
+        this.bridgeRequests.delete(bridgeRequest);
       }
     });
   }
@@ -172,7 +250,7 @@ export class ModelProxy {
       scope.addHook('onRequest', async (request) => {
         let key: string | undefined;
         try {
-          key = requestCredential(request, this.options.origin);
+          key = requestCredential(request);
         } catch {
           throw new ControlError('llm_request_invalid');
         }
@@ -223,6 +301,10 @@ export class ModelProxy {
               body,
               signal: cancelled.signal,
               kind: 'proxy',
+              historyBinding:
+                typeof request.headers['x-ez-center-history-binding'] === 'string'
+                  ? request.headers['x-ez-center-history-binding']
+                  : undefined,
 
               admitted: (record) => reply.header('x-ez-call-id', record.row.id),
 
@@ -246,6 +328,10 @@ export class ModelProxy {
               sink: {
                 headers: (status, headers) => {
                   reply.hijack();
+                  // hijack 绕过 Fastify 的发送流程，保留 CORS 在 onRequest 写入的响应头。
+                  for (const [name, value] of Object.entries(reply.getHeaders())) {
+                    if (value !== undefined) reply.raw.setHeader(name, value);
+                  }
                   reply.raw.writeHead(status, {
                     ...responseHeaders(headers),
                     'x-ez-call-id': String(reply.getHeader('x-ez-call-id')),
@@ -254,7 +340,7 @@ export class ModelProxy {
                   });
                 },
 
-                chunk: async (chunk, signal) => {
+                chunk: async (chunk: Buffer, signal: AbortSignal) => {
                   if (!reply.raw.write(chunk)) await once(reply.raw, 'drain', { signal });
                 },
               },

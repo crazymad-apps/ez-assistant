@@ -4,6 +4,7 @@ use assistant_protocol::*;
 
 pub(super) fn provider(api_key: &str) -> crate::StoredProvider {
     crate::StoredProvider {
+        server_history_key: None,
         provider_instance_id: test_model_selection("fixture").provider_instance_id,
         connection: ProviderConnection {
             display_name: "Runtime test provider".into(),
@@ -12,6 +13,8 @@ pub(super) fn provider(api_key: &str) -> crate::StoredProvider {
             protocol_preference: ProviderProtocolPreference::ChatCompletions,
             models_path: "/v1/models".into(),
             discovery_format: ModelDiscoveryFormat::OpenAi,
+            server_history_enabled: false,
+            server_history_support_override: None,
         },
         api_key: SecretValue::new(api_key.into()),
         model_catalog: None,
@@ -47,12 +50,15 @@ pub(super) async fn save_fixed(
 ) {
     runtime
         .store
-        .put_model_fixed_config(ModelFixedConfig {
-            origin: assistant_protocol::ModelConfigOrigin::Online,
-            selection: test_model_selection(model_id),
-            parameters,
-            updated_at_ms: 1,
-        })
+        .put_model_fixed_config(
+            ModelFixedConfig {
+                origin: assistant_protocol::ModelConfigOrigin::Online,
+                selection: test_model_selection(model_id),
+                parameters,
+                updated_at_ms: 1,
+            },
+            None,
+        )
         .await
         .unwrap();
 }
@@ -62,11 +68,14 @@ pub(super) async fn seed(runtime: &AssistantRuntime, api_key: &str) {
     save_fixed(runtime, "fixture", parameters()).await;
     runtime
         .store
-        .save_model_settings(ModelSettings {
-            management: None,
-            default_model: Some(test_model_selection("fixture")),
-            vision_model: None,
-        })
+        .save_model_settings(
+            ModelSettings {
+                management: None,
+                default_model: Some(test_model_selection("fixture")),
+                vision_model: None,
+            },
+            None,
+        )
         .await
         .unwrap();
     runtime.restore_model_settings().await.unwrap();

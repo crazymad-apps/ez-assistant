@@ -12,17 +12,18 @@ import type {
   SessionViewSnapshot,
 } from "@ez-assistant/protocol";
 import {
+  hostClockAnchor,
   appendTextDelta,
   appendTool,
   emptyRun,
-  ensureStep,
+  restartStep,
   reconcileTools,
   runKey,
   updateStep,
   updateRunToolOutput,
   updateRunTools,
 } from "./liveExecutionProjection";
-import type { LiveExecutionSegment, LiveRunProjection } from "./liveExecutionProjection";
+import type { HostClockAnchor, LiveExecutionSegment, LiveRunProjection } from "./liveExecutionProjection";
 
 export type {
   LiveExecutionSegment,
@@ -38,6 +39,10 @@ export class LiveExecutionStore {
   readonly runs = observable.map<string, LiveRunProjection>(undefined, { deep: false });
   readonly child_runs = observable.map<ChildTaskId, LiveRunProjection>(undefined, { deep: false });
   readonly child_tasks = observable.map<ChildTaskId, ChildTaskSnapshot>(undefined, { deep: false });
+  clock_anchor: HostClockAnchor | null = null;
+  #pending_clock_anchor: HostClockAnchor | null = null;
+  // 只封住本 Run 已纳入快照的 reasoning，不能用页面水位吞掉其他 owner 的事件。
+  #reasoning_waterlines = new Map<string, { snapshot: number; latest: number }>();
   #pending: RuntimeEventEnvelope[] = [];
   #animation_frame: number | null = null;
   #sealed_run_steps = new Map<string, Set<number>>();
@@ -47,6 +52,7 @@ export class LiveExecutionStore {
 
   constructor() {
     makeObservable(this, {
+      clock_anchor: observable,
       runs: observable,
       child_runs: observable,
       child_tasks: observable,
@@ -59,9 +65,11 @@ export class LiveExecutionStore {
   }
 
   buffer(envelope: RuntimeEventEnvelope): void {
+    // 在进入帧缓冲前取接收基准，后台页延迟 flush 不会重置业务起点。
     if (!isLiveExecutionEvent(envelope)) {
       return;
     }
+    this.#pending_clock_anchor = hostClockAnchor(envelope.emitted_at_ms, performance.now()) ?? this.#pending_clock_anchor;
     this.#pending.push(envelope);
     if (this.#animation_frame === null) {
       this.#animation_frame = requestAnimationFrame(() => this.flush());
@@ -69,6 +77,9 @@ export class LiveExecutionStore {
   }
 
   flush(): void {
+    // 显示时钟与正文一起按帧发布，避免每个 delta 触发一次独立 UI 更新。
+    this.clock_anchor = this.#pending_clock_anchor ?? this.clock_anchor;
+    this.#pending_clock_anchor = null;
     if (this.#animation_frame !== null) {
       cancelAnimationFrame(this.#animation_frame);
     }
@@ -79,12 +90,14 @@ export class LiveExecutionStore {
     this.#animation_frame = null;
   }
 
-  reconcileSession(view: SessionViewSnapshot): void {
+  reconcileSession(view: SessionViewSnapshot, observed_at_ms?: number | null, observed_sequence?: number): void {
+    const received_at_ms = performance.now();
     // Apply events accepted before this snapshot first, so a delayed animation
     // frame cannot recreate a terminal live projection after reconciliation.
     if (this.#pending.length > 0) {
       this.flush();
     }
+    this.clock_anchor = hostClockAnchor(observed_at_ms, received_at_ms) ?? this.clock_anchor;
     const session_id = view.session.session_id;
     if (view.conversation.owner?.type === "main_session"
       && view.conversation.owner.session_id === session_id) {
@@ -116,6 +129,14 @@ export class LiveExecutionStore {
     const committed_steps = new Map<string, Set<number>>();
     for (const item of view.child_tasks ?? []) {
       this.child_tasks.set(item.task.child_task_id, item.task);
+      const child_run = this.child_runs.get(item.task.child_task_id);
+      if (child_run) {
+        this.child_runs.set(item.task.child_task_id, {
+          ...child_run,
+          created_at_ms: item.task.created_at_ms,
+          finished_at_ms: item.task.finished_at_ms,
+        });
+      }
     }
     for (const item of view.conversation.items) {
       if (item.type !== "assistant" || !item.run_id) {
@@ -137,6 +158,7 @@ export class LiveExecutionStore {
       if (is_current_session && (!view.active_run || (run.status !== "accepted" && !is_authoritatively_active))
         && !retain_terminal_error) {
         this.runs.delete(key);
+        this.#reasoning_waterlines.delete(key);
         this.#sealed_run_steps.delete(key);
         continue;
       }
@@ -157,10 +179,11 @@ export class LiveExecutionStore {
       this.#reconcileRunSnapshot(
         view.active_run,
         baseline,
+        observed_sequence,
       );
     } else if (latest_run?.status === "failed" && latest_run.error) {
       // 重连后失败事实来自既有持久 Run，不能只保留收到过终态 SSE 的页面。
-      this.#reconcileRunSnapshot(latest_run);
+      this.#reconcileRunSnapshot(latest_run, new Set(), observed_sequence);
     }
   }
 
@@ -179,10 +202,12 @@ export class LiveExecutionStore {
       .sort((left, right) => left.created_at_ms - right.created_at_ms);
   }
 
-  reconcileChildTask(view: ChildTaskViewSnapshot): void {
+  reconcileChildTask(view: ChildTaskViewSnapshot, observed_at_ms?: number | null): void {
+    const received_at_ms = performance.now();
     if (this.#pending.length > 0) {
       this.flush();
     }
+    this.clock_anchor = hostClockAnchor(observed_at_ms, received_at_ms) ?? this.clock_anchor;
     const child_task_id = view.task.task.child_task_id;
     const previous_generation = this.#child_generations.get(child_task_id);
     if (previous_generation !== undefined && previous_generation !== view.conversation.generation) {
@@ -204,6 +229,8 @@ export class LiveExecutionStore {
     );
     this.child_runs.set(child_task_id, {
       ...base,
+      created_at_ms: view.task.task.created_at_ms,
+      finished_at_ms: view.task.task.finished_at_ms,
       status,
       active_step: base.active_step,
       steps: base.steps,
@@ -216,7 +243,10 @@ export class LiveExecutionStore {
     }
     this.#animation_frame = null;
     this.#pending = [];
+    this.clock_anchor = null;
+    this.#pending_clock_anchor = null;
     this.runs.clear();
+    this.#reasoning_waterlines.clear();
     this.child_runs.clear();
     this.child_tasks.clear();
     this.#sealed_run_steps.clear();
@@ -231,7 +261,10 @@ export class LiveExecutionStore {
     }
     this.#animation_frame = null;
     this.#pending = [];
+    this.clock_anchor = null;
+    this.#pending_clock_anchor = null;
     this.runs.clear();
+    this.#reasoning_waterlines.clear();
     this.child_runs.clear();
     this.#sealed_run_steps.clear();
     this.#sealed_child_steps.clear();
@@ -252,7 +285,7 @@ export class LiveExecutionStore {
         return;
       }
       const current = this.child_runs.get(event.child_task_id)
-        ?? emptyRun(event.session_id, `child:${event.child_task_id}`, envelope.emitted_at_ms);
+        ?? emptyRun(event.session_id, `child:${event.child_task_id}`, this.child_tasks.get(event.child_task_id)?.created_at_ms ?? null);
       if ("step" in child_event && !isNonterminalRun(current.status)) {
         return;
       }
@@ -260,17 +293,18 @@ export class LiveExecutionStore {
       switch (child_event.type) {
         case "created":
           this.child_tasks.set(event.child_task_id, child_event.task);
-          next = { ...current, status: childRunStatus(child_event.task.status) };
+          next = { ...current, status: childRunStatus(child_event.task.status), created_at_ms: child_event.task.created_at_ms, finished_at_ms: child_event.task.finished_at_ms };
           break;
         case "started":
           this.#updateChildTask(event.child_task_id, {
             status: "running",
-            started_at_ms: envelope.emitted_at_ms,
+            // Started 不携带可靠时刻；等待 child 快照补齐。
+            started_at_ms: this.child_tasks.get(event.child_task_id)?.started_at_ms ?? null,
           });
           next = { ...current, status: "running" };
           break;
         case "step_started":
-          next = { ...current, active_step: child_event.step, steps: ensureStep(current.steps, child_event.step) };
+          next = { ...current, active_step: child_event.step, steps: restartStep(current.steps, child_event.step) };
           break;
         case "text_delta":
         case "reasoning_delta":
@@ -279,6 +313,7 @@ export class LiveExecutionStore {
             child_event.type === "text_delta" ? "text" : "reasoning",
             child_event.part_id,
             child_event.delta,
+            child_event.type === "reasoning_delta" ? child_event.source : undefined,
           ));
           break;
         case "tool_proposed":
@@ -307,11 +342,12 @@ export class LiveExecutionStore {
           this.#updateChildTask(event.child_task_id, {
             status: child_event.status,
             error: child_event.error,
-            finished_at_ms: envelope.emitted_at_ms,
+            finished_at_ms: child_event.finished_at_ms ?? null,
           });
           next = {
             ...current,
             status: childRunStatus(child_event.status),
+            finished_at_ms: child_event.finished_at_ms ?? null,
             error_message: child_event.error?.message ?? current.error_message,
           };
           this.#sealed_child_steps.delete(event.child_task_id);
@@ -328,7 +364,12 @@ export class LiveExecutionStore {
       return;
     }
     const key = runKey(event.session_id, event.run_id);
-    const current = this.runs.get(key) ?? emptyRun(event.session_id, event.run_id, envelope.emitted_at_ms);
+    const current = this.runs.get(key) ?? emptyRun(event.session_id, event.run_id, null);
+    if (event.type === "reasoning_delta") {
+      const waterline = this.#reasoning_waterlines.get(key) ?? { snapshot: 0, latest: 0 };
+      if (envelope.sequence <= waterline.snapshot) return;
+      this.#reasoning_waterlines.set(key, { ...waterline, latest: envelope.sequence });
+    }
     if ("step" in event) {
       if (!isNonterminalRun(current.status) || this.#sealed_run_steps.get(key)?.has(event.step)) {
         return;
@@ -346,10 +387,11 @@ export class LiveExecutionStore {
           if (existing_key !== key && existing_run.session_id === event.session_id
             && existing_run.error_message !== null) {
             this.runs.delete(existing_key);
+            this.#reasoning_waterlines.delete(existing_key);
             this.#sealed_run_steps.delete(existing_key);
           }
         }
-        next = { ...current, status: "accepted" };
+        next = { ...current, status: "accepted", created_at_ms: event.created_at_ms ?? current.created_at_ms };
         break;
       case "run_started":
         next = { ...current, status: "running" };
@@ -377,7 +419,7 @@ export class LiveExecutionStore {
         next = {
           ...current,
           active_step: event.step,
-          steps: ensureStep(current.steps, event.step),
+          steps: restartStep(current.steps, event.step),
         };
         break;
       case "text_delta":
@@ -388,6 +430,7 @@ export class LiveExecutionStore {
             event.type === "text_delta" ? "text" : "reasoning",
             event.part_id,
             event.delta,
+            event.type === "reasoning_delta" ? event.source : undefined,
           ),
         );
         break;
@@ -419,6 +462,7 @@ export class LiveExecutionStore {
         next = {
           ...current,
           status: event.status,
+          finished_at_ms: event.finished_at_ms ?? null,
           model_request: null,
           error_code: event.error?.code ?? null,
           error_message: event.error?.message ?? null,
@@ -474,6 +518,7 @@ export class LiveExecutionStore {
     for (const [key, run] of this.runs) {
       if (run.session_id === session_id) {
         this.runs.delete(key);
+        this.#reasoning_waterlines.delete(key);
         this.#sealed_run_steps.delete(key);
       }
     }
@@ -499,9 +544,16 @@ export class LiveExecutionStore {
   #reconcileRunSnapshot(
     snapshot: RunSnapshot,
     committed_steps: ReadonlySet<number> = new Set<number>(),
+    observed_sequence?: number,
   ): void {
     const key = runKey(snapshot.session_id, snapshot.run_id);
     const current = this.runs.get(key);
+    const waterline = this.#reasoning_waterlines.get(key);
+    const replace_reasoning = observed_sequence !== undefined
+      && observed_sequence >= (waterline?.latest ?? 0);
+    if (replace_reasoning) {
+      this.#reasoning_waterlines.set(key, { snapshot: observed_sequence, latest: observed_sequence });
+    }
     const active_step = snapshot.active_step ?? current?.active_step ?? 0;
     const snapshot_tools = snapshot.tools.filter((tool) =>
       tool.step === undefined || !committed_steps.has(tool.step));
@@ -510,6 +562,18 @@ export class LiveExecutionStore {
         ...current,
         steps: current.steps.filter((step) => !committed_steps.has(step.step)),
       };
+      if (replace_reasoning && active_step > 0 && !committed_steps.has(active_step)) {
+        next = updateStep(next, active_step, (segments) => {
+          const parts = snapshot.reasoning_parts.map((part) => ({ ...part, type: "reasoning" as const, source: part.source ?? "raw" as const }));
+          const existing_ids = new Set(segments.filter((part) => part.type === "reasoning").map((part) => part.part_id));
+          return [
+            ...parts.filter((part) => !existing_ids.has(part.part_id)),
+            ...segments.flatMap((segment): LiveExecutionSegment[] => segment.type === "reasoning"
+              ? parts.filter((part) => part.part_id === segment.part_id)
+              : [segment]),
+          ];
+        });
+      }
       for (const tool of snapshot_tools) {
         const step = tool.step ?? active_step;
         if (step > 0) {
@@ -519,6 +583,8 @@ export class LiveExecutionStore {
       this.runs.set(key, {
         ...next,
         status: snapshot.status,
+        created_at_ms: snapshot.created_at_ms,
+        finished_at_ms: snapshot.finished_at_ms,
         model_request: snapshot.model_request ?? null,
         error_code: snapshot.error?.code ?? current.error_code,
         error_message: snapshot.error?.message ?? current.error_message,
@@ -527,8 +593,8 @@ export class LiveExecutionStore {
       return;
     }
     const segments: LiveExecutionSegment[] = [];
-    if (snapshot.reasoning) {
-      segments.push({ type: "reasoning", part_id: `snapshot-reasoning:${snapshot.run_id}`, text: snapshot.reasoning });
+    for (const part of snapshot.reasoning_parts) {
+      segments.push({ type: "reasoning", part_id: part.part_id, text: part.text, source: part.source ?? "raw" });
     }
     if (snapshot.text) {
       segments.push({ type: "text", part_id: `snapshot-text:${snapshot.run_id}`, text: snapshot.text });
@@ -544,15 +610,19 @@ export class LiveExecutionStore {
     const extra_steps = snapshot_tools
       .filter((tool) => tool.step !== undefined && tool.step !== active_step)
       .reduce<LiveRunProjection>((run, tool) => updateStep(run, tool.step!, (items) => reconcileTools(items, [tool])), {
-        ...emptyRun(snapshot.session_id, snapshot.run_id, snapshot.created_at_ms ?? Date.now()),
+        ...emptyRun(snapshot.session_id, snapshot.run_id, snapshot.created_at_ms),
         status: snapshot.status,
+        created_at_ms: snapshot.created_at_ms,
+        finished_at_ms: snapshot.finished_at_ms,
         model_request: snapshot.model_request ?? null,
         active_step,
-        steps: segments.length > 0 && active_step > 0 ? [{ step: active_step, segments }] : [],
+        steps: segments.length > 0 && active_step > 0 && !committed_steps.has(active_step) ? [{ step: active_step, segments }] : [],
       });
     this.runs.set(key, {
       ...extra_steps,
       status: snapshot.status,
+      created_at_ms: snapshot.created_at_ms,
+      finished_at_ms: snapshot.finished_at_ms,
       model_request: snapshot.model_request ?? null,
       active_step,
       error_code: snapshot.error?.code ?? null,

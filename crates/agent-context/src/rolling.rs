@@ -588,6 +588,7 @@ mod tests {
                         id: part.id.clone(),
                     });
                     events.push(ModelEvent::ReasoningDelta {
+                        source: part.source,
                         id: part.id.clone(),
                         delta: part.text.clone(),
                     });
@@ -683,6 +684,7 @@ mod tests {
             "summary_1",
             vec![
                 AssistantPart::Reasoning(ReasoningPart {
+                    source: Default::default(),
                     id: part_id("reasoning_1"),
                     text: "private reasoning".to_owned(),
                 }),
@@ -1118,6 +1120,7 @@ mod tests {
                 "summary_empty",
                 vec![
                     AssistantPart::Reasoning(ReasoningPart {
+                        source: Default::default(),
                         id: part_id("reasoning_empty"),
                         text: "reasoning only".to_owned(),
                     }),

@@ -10,6 +10,7 @@ mod device_gateway;
 mod error;
 mod event;
 mod feedback;
+mod feedback_center;
 mod host;
 mod host_access;
 mod id;
@@ -38,9 +39,9 @@ pub const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const MIN_COMPATIBLE_VERSION: &str = env!("EZ_ASSISTANT_MIN_COMPATIBLE_VERSION");
 
 pub use host_access::{
-    HostAccessCommand, HostAccessConfiguration, HostAccessScheme, HostAccessStatus,
-    HostIdentityKind, HostListenerState, HostLoginRequest, HostLoginResult, HostLogoutResult,
-    HostMode, HostPasswordRequest, HostUserIdentity,
+    DesktopUpdateContext, HostAccessCommand, HostAccessConfiguration, HostAccessScheme,
+    HostAccessStatus, HostIdentityKind, HostListenerState, HostLoginRequest, HostLoginResult,
+    HostLogoutResult, HostMode, HostPasswordRequest, HostUserIdentity,
 };
 
 pub use command::{
@@ -172,14 +173,14 @@ pub use product::{
     ListConversationPageResult, MessageFeedback, ObservedSnapshot, OutputPreferenceSnapshot,
     PrioritizeQueuedInputRequest, PrioritizeQueuedInputResult, QueueExecutionState, QueueSnapshot,
     QueuedInputSnapshot, QuotedTextSnapshot, QuotedTextSourceRoleSnapshot,
-    ReasoningEffortOptionSnapshot, RecallNavigationTarget, RecallToolDetailFailure,
-    RecallToolDetailItem, RecallToolDetailSnapshot, RejectApprovalAndStopRunRequest,
-    RejectApprovalAndStopRunResult, ResumeQueuedInputRequest, ResumeQueuedInputResult,
-    SearchConversationHistoryRequest, SearchConversationHistoryResult, SessionUsageSnapshot,
-    SessionViewSnapshot, SessionWorkspaceSnapshot, TodoItemStatusSnapshot, ToolDetailSnapshot,
-    ToolEventSnapshot, ToolFileReference, ToolFileResourceOrigin, ToolFileResourceState,
-    ToolInputProjection, ToolInputSnapshot, UsageTotals, UserMessageSnapshot, WorkPlanItemSnapshot,
-    WorkPlanSnapshot,
+    ReasoningEffortOptionSnapshot, ReasoningPartSnapshot, ReasoningSource, RecallNavigationTarget,
+    RecallToolDetailFailure, RecallToolDetailItem, RecallToolDetailSnapshot,
+    RejectApprovalAndStopRunRequest, RejectApprovalAndStopRunResult, ResumeQueuedInputRequest,
+    ResumeQueuedInputResult, SearchConversationHistoryRequest, SearchConversationHistoryResult,
+    SessionUsageSnapshot, SessionViewSnapshot, SessionWorkspaceSnapshot, TodoItemStatusSnapshot,
+    ToolDetailSnapshot, ToolEventSnapshot, ToolFileReference, ToolFileResourceOrigin,
+    ToolFileResourceState, ToolInputProjection, ToolInputSnapshot, UsageTotals,
+    UserMessageSnapshot, WorkPlanItemSnapshot, WorkPlanSnapshot,
 };
 pub use resource::{
     HostFileEntry, HostFileRequest, ListHostFilesRequest, ListHostFilesResult,
@@ -211,7 +212,7 @@ pub use snapshot::{
 mod user_terminal;
 pub use user_terminal::{
     AgentShellSettings, ShellCatalogEntry, ShellKind, UserTerminalControl, UserTerminalNotice,
-    UserTerminalSize, UserTerminalSource,
+    UserTerminalShellEntry, UserTerminalSize, UserTerminalSource,
 };
 
 pub use model_management::{
@@ -229,4 +230,12 @@ pub use model_management::{
 pub use feedback::{
     AnswerFeedbackRequest, CancelFeedbackRequest, FeedbackAnswer, FeedbackMode, FeedbackOption,
     FeedbackQuestion, FeedbackRequestSnapshot, FeedbackStatus, ListFeedbackRequestsRequest,
+};
+
+pub use feedback_center::{
+    FeedbackClientEnvironment, FeedbackClientKind, FeedbackContent, FeedbackEnvironment,
+    FeedbackFailure, FeedbackResponse, FeedbackSource, FeedbackSupport, FeedbackTarget,
+    FeedbackTargetKind, GetSubmittedFeedbackRequest, ListSubmittedFeedbackRequest,
+    SubmitFeedbackRequest, SubmittedFeedback, SubmittedFeedbackPage, SubmittedFeedbackStatus,
+    SubmittedFeedbackSummary,
 };

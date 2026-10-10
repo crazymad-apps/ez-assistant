@@ -1,0 +1,1 @@
+F01 stream-verification fixture, not an installable application.

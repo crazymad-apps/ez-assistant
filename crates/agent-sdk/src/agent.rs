@@ -20,6 +20,20 @@ pub struct Agent {
 }
 
 impl Agent {
+    /// 为一个新的独立 owner 派生冻结模型服务，复用其余规格并重新校验跨字段约束。
+    /// 不替换正在运行的执行，也不持有 owner、历史或恢复策略。
+    ///
+    /// # Errors
+    /// 新服务不满足原规格的窗口、工具或 reasoning 要求时返回构建错误。
+    pub fn try_with_model(
+        &self,
+        model: Arc<dyn agent_model::ModelService>,
+    ) -> Result<Self, crate::AgentBuildError> {
+        let mut spec = self.spec.clone();
+        spec.model = model;
+        crate::AgentBuilder::from_spec(spec).build()
+    }
+
     pub(crate) fn from_spec(spec: ExecutionSpec) -> Self {
         Self { spec }
     }

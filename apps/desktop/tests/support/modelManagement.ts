@@ -4,7 +4,7 @@ export const modelSelection: ModelSelection = { provider_instance_id: "provider-
 export const modelProvider: ProviderSummary = {
   provider_instance_id: "provider-1", has_api_key: true, connection: {
     display_name: "测试服务商", provider_type: "openai", endpoint: "https://example.test/v1",
-    protocol_preference: "chat_completions", models_path: "/v1/models", discovery_format: "openai",
+    protocol_preference: "chat_completions", models_path: "/v1/models", discovery_format: "openai", server_history_enabled: false, server_history_support_override: null,
   },
 };
 export function modelParameters(): ModelParameters {

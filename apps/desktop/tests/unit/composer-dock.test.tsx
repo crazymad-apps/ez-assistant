@@ -970,6 +970,18 @@ describe("ComposerDock", () => {
     expect(screen.getAllByText("当前会话", { exact: true })).toHaveLength(2);
   });
 
+  it("shows all sixteen batch edit targets in the existing approval workspace", () => {
+    const paths = Array.from({ length: 16 }, (_, index) => `/workspace/edit-${index}.txt`);
+    const subject = { type: "files" as const, tool_name: "edit_file", operation: "edit", paths };
+    renderComposer({ approvals: [{ ...approvalSnapshot(), subject,
+      input: { value: { type: "files", operation: "edit_file", paths }, redacted: false, truncated: false },
+      exact_rule_preview: subject,
+    }] });
+    expect(screen.getByText("允许执行 edit_file？", { exact: true })).toBeVisible();
+    expect(screen.getByText("edit_file · 16 个文件", { exact: true })).toBeVisible();
+    for (const path of paths) expect(screen.getByText(path, { exact: true })).toBeVisible();
+  });
+
   it("keeps native selections local until send and submits stable attachment ids", async () => {
     const user = userEvent.setup();
     const store = renderComposer();
@@ -1213,7 +1225,7 @@ describe("ComposerDock", () => {
       const view = store.projection.session_views.get("session-1")!;
       store.projection.applySessionSnapshot({ observed_sequence: 2, value: {
         ...view,
-        active_run: { run_id: "run-1", session_id: "session-1", input_id: "input-1", attempt: 1, status: "running", variant: "build", approval_mode: "ask", created_at_ms: 1, finished_at_ms: null, cancel_requested: false, reasoning: "", text: "", tools: [], error: null },
+        active_run: { run_id: "run-1", session_id: "session-1", input_id: "input-1", attempt: 1, status: "running", variant: "build", approval_mode: "ask", created_at_ms: 1, finished_at_ms: null, cancel_requested: false, reasoning_parts: [], text: "", tools: [], error: null },
       } });
       store.live_execution.buffer({ sequence: 3, emitted_at_ms: 1, event: {
         type: "usage_updated", session_id: "session-1", run_id: "run-1", step: 1,

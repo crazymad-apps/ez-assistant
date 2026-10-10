@@ -1103,3 +1103,79 @@ async fn duplicate_provider_message_id_settles_as_failure_without_replaying_tool
     assert_eq!(terminal.status, assistant_protocol::RunStatus::Failed);
     assert_eq!(tool.executed_inputs().len(), 1);
 }
+
+#[tokio::test]
+async fn uncommitted_continuation_candidate_is_absent_after_recorder_failure_and_restart() {
+    let mut assistant = assistant_tool_call("uncommitted-response", "echo_tool");
+    assistant
+        .parts
+        .push(agent_types::AssistantPart::ProviderState(
+            agent_types::OpaqueProviderState::new_routed(
+                agent_types::ProviderId::new("openai").unwrap(),
+                agent_types::ProtocolId::new("responses").unwrap(),
+                "responses.continuation",
+                "application/json",
+                1,
+                None,
+                "a".repeat(64),
+                br#"{"response_id":"uncommitted-response"}"#.to_vec(),
+            )
+            .unwrap(),
+        ));
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(true),
+        8192,
+        [ModelScript::Events(message_events(&assistant))],
+    ));
+    let store = Arc::new(FaultInjectingStore::healthy());
+    store.fail_next_begin.store(true, Ordering::SeqCst);
+    let runtime = runtime_with_store(
+        model.clone(),
+        store.clone(),
+        RuntimeConfig::new(NonZeroUsize::new(64).unwrap()),
+    )
+    .await;
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    let submitted = runtime
+        .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            variant: assistant_protocol::AgentVariant::Build,
+            session_id: session_id.clone(),
+            message: "failed durable candidate".into(),
+            attachment_ids: vec![],
+            quotes: vec![],
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+        })
+        .await
+        .unwrap();
+    let result = wait_for_terminal(&runtime, &session_id, &submitted.run.run_id).await;
+    assert_eq!(result.status, assistant_protocol::RunStatus::Failed);
+    assert_eq!(
+        model.take_requests().len(),
+        1,
+        "persistence failure cannot start a continuation request"
+    );
+    let saved = store.load_conversation(&session_id).await.unwrap();
+    assert!(
+        !saved
+            .messages
+            .iter()
+            .any(|message| matches!(message, ConversationMessage::Assistant(_)))
+    );
+    runtime.shutdown(Default::default()).await.unwrap();
+    let restarted = runtime_with_store(
+        empty_model(),
+        store,
+        RuntimeConfig::new(NonZeroUsize::new(64).unwrap()),
+    )
+    .await;
+    let restored = restarted.conversation_snapshot(&session_id).await.unwrap();
+    assert_eq!(restored, saved);
+}

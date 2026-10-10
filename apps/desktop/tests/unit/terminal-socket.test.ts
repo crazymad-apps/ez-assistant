@@ -29,7 +29,7 @@ it("uses matching WSS with the credential only in the first frame; input awaits 
   expect(socket.url.toString()).toBe("wss://runtime.test:7240/user-terminals/socket");
   socket.open();
   expect(JSON.parse(socket.sent[0] as string)).toMatchObject({ type: "open", bearer: "private-token", source, client_compatibility: currentCompatibility(), shell: "powershell_7" });
-  socket.message({ type: "created", terminal_id: "owned", directory_name: "workspace", shell: "powershell_7" });
+  socket.message({ type: "created", terminal_id: "owned", directory_name: "workspace", shell: "powershell_7", shell_name: "pwsh.exe" });
   expect((await terminal.created).shell).toBe("powershell_7");
   let written = false;
   const input = terminal.write(new TextEncoder().encode("中文")).then(() => { written = true; });
@@ -49,7 +49,7 @@ it("disposing one client closes only its socket and never reconnects after a dro
   const a = new TerminalSocket("http://one.test", "one", source, { cols: 80, rows: 24 }, event, first.signal);
   const b = new TerminalSocket("http://two.test", "two", source, { cols: 80, rows: 24 }, event, second.signal);
   for (const [index, socket] of SocketFixture.connections.entries()) {
-    socket.open(); socket.message({ type: "created", terminal_id: String(index), directory_name: "workspace" });
+    socket.open(); socket.message({ type: "created", terminal_id: String(index), directory_name: "workspace", shell: "zsh", shell_name: "zsh" });
   }
   await Promise.all([a.created, b.created]);
   first.abort();
@@ -73,7 +73,7 @@ it("an aborted pending connection cannot send credentials or create a terminal l
 it("does not report successful cleanup when Host reports failure without Closed", async () => {
   const terminal = new TerminalSocket("http://runtime.test", "token", source, { cols: 80, rows: 24 }, vi.fn(), new AbortController().signal);
   const socket = SocketFixture.connections[0]!;
-  socket.open(); socket.message({ type: "created", terminal_id: "owned", directory_name: "workspace" });
+  socket.open(); socket.message({ type: "created", terminal_id: "owned", directory_name: "workspace", shell: "zsh", shell_name: "zsh" });
   await terminal.created;
   const closed = expect(terminal.close()).rejects.toThrow("终端清理失败");
   socket.message({ type: "error", message: "终端清理失败" });
@@ -98,7 +98,7 @@ it("sends the captured Cookie login context in Open without putting it in the UR
   socket.open();
   expect(socket.url.search).toBe("");
   expect(JSON.parse(socket.sent[0] as string)).toMatchObject({ type: "open", bearer: null, login_context: "login-a" });
-  socket.message({ type: "created", terminal_id: "owned", directory_name: "workspace" });
+  socket.message({ type: "created", terminal_id: "owned", directory_name: "workspace", shell: "zsh", shell_name: "zsh" });
   await terminal.created;
   owner.abort();
 });

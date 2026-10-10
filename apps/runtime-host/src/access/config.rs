@@ -301,7 +301,7 @@ mod tests {
         assert!(validate(&configuration).is_ok());
         for valid in [
             "127.0.0.1",
-            "172.16.20.4",
+            "192.0.2.10",
             "0.0.0.0",
             "::",
             "::1",

@@ -26,3 +26,21 @@
   color: var(--ez-text-muted);
   font-size: var(--ez-font-small);
 }
+
+// 使用原生客户端平台标记；连接的 Host 平台不决定窗口装饰。
+.app_logo {
+  display: none;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  margin-right: 8px;
+  pointer-events: none;
+  user-select: none;
+}
+
+:global(html[data-platform="windows"]) .app_logo { display: block; }
+
+:global(html[data-platform="windows"]) .navigation[data-sidebar-open="true"] {
+  flex: 1 1 auto;
+  .app_logo { margin-right: auto; }
+}

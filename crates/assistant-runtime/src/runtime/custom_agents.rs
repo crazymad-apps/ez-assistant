@@ -137,9 +137,11 @@ impl AssistantRuntime {
                     DependencyFacts {
                         ready,
                         wrong_origin,
-                        capability_disabled: skill_states
-                            .iter()
-                            .any(|state| state.name.as_str() == reference.name && !state.enabled),
+                        capability_disabled: !crate::SkillNameState::enabled_for(
+                            &reference.name,
+                            reference.plugin.as_deref(),
+                            &skill_states,
+                        ),
                         catalog_unavailable: skills.status
                             == crate::SkillDiscoveryStatus::Unavailable,
                         declared,
@@ -561,4 +563,75 @@ pub(super) fn with_agent_prompt(
         parts.push(directory);
     }
     agent_model::SystemPromptSnapshot::new(parts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plugin_dependency_ignores_disabled_independent_skill_name() {
+        let name = "compact-shelving-cad";
+        let reference = AgentCapabilityReference {
+            name: name.into(),
+            plugin: Some("warehouse-cad-guidance".into()),
+        };
+        let states = [crate::SkillNameState {
+            name: crate::SkillName::parse(name).unwrap(),
+            enabled: false,
+            updated_at_ms: 1,
+        }];
+        let plugin = assistant_protocol::InstalledPluginSnapshot {
+            name: reference.plugin.clone().unwrap(),
+            display_name: "CAD".into(),
+            description: String::new(),
+            origin: PluginPackageOrigin::Upload,
+            version: Some("0.3.5".into()),
+            sha256: Some("a".repeat(64)),
+            enabled: true,
+            package_state: PluginPackageState::Available,
+            settings_revision: String::new(),
+            configuration: Vec::new(),
+            external_software: Vec::new(),
+            skills: vec![name.into()],
+            mcp: Vec::new(),
+        };
+        let facts = || DependencyFacts {
+            ready: true,
+            wrong_origin: false,
+            capability_disabled: !crate::SkillNameState::enabled_for(
+                name,
+                reference.plugin.as_deref(),
+                &states,
+            ),
+            catalog_unavailable: false,
+            declared: true,
+            name_occupied: true,
+        };
+        assert_eq!(
+            dependency_status(&reference, Some(&plugin), facts()),
+            AgentDependencyStatus::Available
+        );
+        let mut disabled_plugin = plugin;
+        disabled_plugin.enabled = false;
+        assert_eq!(
+            dependency_status(&reference, Some(&disabled_plugin), facts()),
+            AgentDependencyStatus::PluginDisabled
+        );
+        let independent = AgentCapabilityReference {
+            name: name.into(),
+            plugin: None,
+        };
+        assert_eq!(
+            dependency_status(
+                &independent,
+                None,
+                DependencyFacts {
+                    capability_disabled: !crate::SkillNameState::enabled_for(name, None, &states),
+                    ..facts()
+                }
+            ),
+            AgentDependencyStatus::CapabilityDisabled
+        );
+    }
 }

@@ -23,12 +23,15 @@ import {
   mergeParameters,
   parseConnection,
   parseParameters,
+  parsePublicOrigin,
   resolveProtocol,
   text,
   uuid,
   validParameters,
 } from './parameters.js';
 import { discover } from './discovery.js';
+import { configurationIdentity, historyBinding, historyConnectionIdentity, serverHistorySupport } from './history.js';
+import type { RequestModel } from '../llm/body.js';
 
 const summary = (row: ProviderEntity): ProviderSummary => ({
   provider_instance_id: row.provider_instance_id,
@@ -65,6 +68,7 @@ const discoveryIdentity = (connection: ProviderConnection, key: string) =>
 export class ModelsService {
   private readonly shutdown = new AbortController();
   private readonly refreshes = new Map<string, Promise<unknown>>();
+  private readonly invalidated = new Set<(provider: string) => void>();
 
   constructor(
     private readonly identity: IdentityService,
@@ -76,6 +80,18 @@ export class ModelsService {
   private get manager() {
     if (!this.source) throw new IdentityError(503, 'SERVICE_UNAVAILABLE');
     return this.source.manager;
+  }
+
+  /** 配置持久提交后同步撤销传输资源；监听方不保存另一份模型配置。 */
+  onHistoryInvalidated(notify: (provider: string) => void): () => void {
+    this.invalidated.add(notify);
+    return () => {
+      this.invalidated.delete(notify);
+    };
+  }
+
+  private invalidate(providers: Set<string>): void {
+    for (const provider of providers) for (const notify of this.invalidated) notify(provider);
   }
 
   async onModuleDestroy(): Promise<void> {
@@ -100,15 +116,21 @@ export class ModelsService {
     token: string | undefined,
     requestId: string,
     action: string,
-    work: (manager: EntityManager) => Promise<T>,
+    work: (manager: EntityManager, invalidate: (provider: string) => void) => Promise<T>,
     details: object = {},
   ): Promise<T> {
-    return this.identity.write(async (manager) => {
-      const actor = await this.identity.requireAdmin(manager, token);
-      const result = await work(manager);
-      await this.identity.audit(manager, action, requestId, actor.id, undefined, null, details);
-      return result;
-    });
+    const invalidated = new Set<string>();
+    return this.identity.write(
+      async (manager) => {
+        const actor = await this.identity.requireAdmin(manager, token);
+        const result = await work(manager, (provider) => {
+          invalidated.add(provider);
+        });
+        await this.identity.audit(manager, action, requestId, actor.id, undefined, null, details);
+        return result;
+      },
+      () => this.invalidate(invalidated),
+    );
   }
 
   async list(token?: string) {
@@ -140,8 +162,14 @@ export class ModelsService {
       token,
       requestId,
       id === undefined ? 'model_provider_created' : 'model_provider_updated',
-      async (manager) => {
+      async (manager, invalidate) => {
         const previous = id === undefined ? null : await this.provider(manager, providerId);
+        // 旧 Admin 缺少传输字段时不得把已启用的 WebSocket 静默改回 HTTP。
+        if (
+          previous?.connection.responses_transport === 'websocket' &&
+          !Object.hasOwn((value as { connection: object }).connection, 'responses_transport')
+        )
+          invalid();
         let key = previous?.api_key ?? '';
         if (input.credential.mode === 'replace') key = input.credential.value!;
         if (input.credential.mode === 'clear') key = '';
@@ -150,10 +178,22 @@ export class ModelsService {
         else {
           const changed =
             discoveryIdentity(previous.connection, previous.api_key) !== discoveryIdentity(input.connection, key);
+          let server_history_key = null;
+          if (input.connection.server_history_enabled) {
+            server_history_key = previous.server_history_key;
+            if (
+              !server_history_key ||
+              historyConnectionIdentity(previous.connection, previous.api_key) !==
+                historyConnectionIdentity(input.connection, key)
+            )
+              server_history_key = randomUUID();
+          }
+          if (server_history_key !== previous.server_history_key) invalidate(providerId);
           await models.update(manager, {
             ...previous,
             connection: input.connection,
             api_key: key,
+            server_history_key,
             catalog_connection_changed:
               previous.catalog_connection_changed || (previous.model_catalog !== null && changed),
           });
@@ -182,9 +222,10 @@ export class ModelsService {
       token,
       requestId,
       'model_provider_deleted',
-      async (manager) => {
+      async (manager, invalidate) => {
         const usage = await this.usageIn(manager, id);
         await models.remove(manager, id);
+        invalidate(id);
         return usage;
       },
       { provider_instance_id: uuid(id) },
@@ -232,7 +273,7 @@ export class ModelsService {
         token,
         requestId,
         'model_catalog_refreshed',
-        async (manager) => {
+        async (manager, invalidate) => {
           const current = await this.provider(manager, id);
           if (this.shutdown.signal.aborted) throw new IdentityError(503, 'SERVICE_UNAVAILABLE');
           if (
@@ -240,7 +281,17 @@ export class ModelsService {
             discoveryIdentity(captured.connection, captured.api_key)
           )
             throw new IdentityError(409, 'MODEL_CONFIGURATION_CHANGED');
+          const selected = await models.settings(manager);
+          const before = selected?.provider_instance_id === id ? await this.settingsIn(manager) : null;
           await models.catalog(manager, id, catalog);
+          if (
+            before &&
+            configurationIdentity(before.configuration?.parameters) !==
+              configurationIdentity((await this.settingsIn(manager)).configuration?.parameters)
+          ) {
+            await models.renewHistory(manager, current);
+            invalidate(id);
+          }
           return this.catalogView(await this.provider(manager, id));
         },
         { provider_instance_id: id, model_count: catalog.length },
@@ -273,13 +324,14 @@ export class ModelsService {
     manager: EntityManager,
     selection: ModelSelection,
     origin: 'online' | 'manual',
+    templates?: Awaited<ReturnType<ModelTemplates['read']>>,
   ): Promise<ModelConfiguration> {
     const provider = await this.provider(manager, selection.provider_instance_id),
       fixed = await models.fixed(manager, selection);
     if (fixed) return this.fixedView(fixed, provider.connection);
     const online = provider.model_catalog?.find((model) => model.model_id === selection.model_id);
     if (!online && origin !== 'manual') throw new IdentityError(404, 'MODEL_NOT_FOUND');
-    const template = this.templates.lookup(provider.connection, selection.model_id);
+    const template = this.templates.lookup(provider.connection, selection.model_id, templates);
     const merged = mergeParameters(online?.metadata ?? emptyParameters(), template.parameters);
     return {
       ...selection,
@@ -318,7 +370,7 @@ export class ModelsService {
       token,
       requestId,
       'model_configuration_saved',
-      async (manager) => {
+      async (manager, invalidate) => {
         const provider = await this.provider(manager, selection.provider_instance_id),
           previous = await models.fixed(manager, selection);
         if (previous && previous.origin !== origin) invalid();
@@ -334,7 +386,16 @@ export class ModelsService {
             parameters.tool_image_projection === 'native_tool_result')
         )
           throw new IdentityError(400, 'MODEL_CONFIGURATION_INVALID');
+        const before = await this.settingsIn(manager);
         await models.saveFixed(manager, selection, origin, parameters);
+        if (
+          before.default_model?.provider_instance_id === selection.provider_instance_id &&
+          before.default_model.model_id === selection.model_id &&
+          configurationIdentity(before.configuration?.parameters) !== configurationIdentity(parameters)
+        ) {
+          await models.renewHistory(manager, provider);
+          invalidate(provider.provider_instance_id);
+        }
         return this.configurationIn(manager, selection, origin);
       },
       selection,
@@ -347,9 +408,19 @@ export class ModelsService {
       token,
       requestId,
       'model_configuration_reset',
-      async (manager) => {
-        await this.provider(manager, selection.provider_instance_id);
+      async (manager, invalidate) => {
+        const provider = await this.provider(manager, selection.provider_instance_id);
+        const before = await this.settingsIn(manager);
         await models.removeFixed(manager, selection);
+        if (
+          before.default_model?.provider_instance_id === selection.provider_instance_id &&
+          before.default_model.model_id === selection.model_id &&
+          configurationIdentity(before.configuration?.parameters) !==
+            configurationIdentity((await this.settingsIn(manager)).configuration?.parameters)
+        ) {
+          await models.renewHistory(manager, provider);
+          invalidate(provider.provider_instance_id);
+        }
       },
       selection,
     );
@@ -357,18 +428,20 @@ export class ModelsService {
 
   private async settingsIn(manager: EntityManager): Promise<ModelSettings> {
     const selection = await models.settings(manager);
-    if (!selection) return { default_model: null, state: 'unavailable', reason: 'not_selected', configuration: null };
+    const common = { public_origin: (await models.publicOrigin(manager)) ?? this.origin ?? null };
+    if (!selection) return { ...common, default_model: null, state: 'unavailable', reason: 'not_selected', configuration: null };
     const provider = await models.provider(manager, selection.provider_instance_id);
     if (!provider)
-      return { default_model: selection, state: 'unavailable', reason: 'provider_deleted', configuration: null };
+      return { ...common, default_model: selection, state: 'unavailable', reason: 'provider_deleted', configuration: null };
     let configuration: ModelConfiguration;
     try {
       configuration = await this.configurationIn(manager, selection, 'online');
     } catch (error) {
       if (!(error instanceof IdentityError) || error.code !== 'MODEL_NOT_FOUND') throw error;
-      return { default_model: selection, state: 'unavailable', reason: 'model_absent', configuration: null };
+      return { ...common, default_model: selection, state: 'unavailable', reason: 'model_absent', configuration: null };
     }
     return {
+      ...common,
       default_model: selection,
       state: configuration.requires_configuration ? 'unavailable' : 'ready',
       reason: configuration.requires_configuration ? 'invalid_parameters' : null,
@@ -381,15 +454,37 @@ export class ModelsService {
   }
 
   setDefault(token: string | undefined, value: unknown, requestId: string) {
-    const input = fields(value, ['default_model']),
+    const input = fields(value, [], ['default_model', 'public_origin']);
+    if (!Object.keys(input).length) invalid();
+    if (Object.hasOwn(input, 'public_origin')) {
+      // 两个设置独立提交，避免旧页面草稿覆盖另一项刚保存的配置。
+      if (Object.hasOwn(input, 'default_model')) invalid();
+      const origin = input.public_origin === null ? null : parsePublicOrigin(input.public_origin);
+      return this.write(token, requestId, 'model_public_origin_changed', async (manager) => {
+        await models.publicOriginSave(manager, origin);
+        return this.settingsIn(manager);
+      }, { public_origin: origin });
+    }
+    const
       selection = input.default_model === null ? null : selectionInput(input.default_model);
     return this.write(
       token,
       requestId,
       'model_default_changed',
-      async (manager) => {
+      async (manager, invalidate) => {
         if (selection && (await this.configurationIn(manager, selection, 'online')).requires_configuration)
           throw new IdentityError(400, 'MODEL_CONFIGURATION_INVALID');
+        const previous = await models.settings(manager);
+        if (configurationIdentity(previous) !== configurationIdentity(selection)) {
+          for (const id of new Set([previous?.provider_instance_id, selection?.provider_instance_id])) {
+            if (!id) continue;
+            const provider = await models.provider(manager, id);
+            if (provider) {
+              await models.renewHistory(manager, provider);
+              invalidate(id);
+            }
+          }
+        }
         await models.settingsSave(manager, selection);
         return this.settingsIn(manager);
       },
@@ -406,26 +501,54 @@ export class ModelsService {
       this.templates.failed();
       throw new IdentityError(400, 'MODEL_TEMPLATES_INVALID');
     }
+    const invalidated = new Set<string>();
     return this.identity
       .write(
         async (manager) => {
           const actor = await this.identity.requireAdmin(manager, token);
+          const settings = await this.settingsIn(manager);
+          if (settings.default_model && settings.configuration?.source !== 'fixed') {
+            const selected = settings.default_model;
+            let next: ModelConfiguration | undefined;
+            try {
+              next = await this.configurationIn(manager, selected, 'online', entries);
+            } catch (error) {
+              if (!(error instanceof IdentityError) || error.code !== 'MODEL_NOT_FOUND') throw error;
+            }
+            if (configurationIdentity(settings.configuration?.parameters) !== configurationIdentity(next?.parameters)) {
+              const provider = await models.provider(manager, selected.provider_instance_id);
+              if (provider) {
+                await models.renewHistory(manager, provider);
+                invalidated.add(provider.provider_instance_id);
+              }
+            }
+          }
           await this.identity.audit(manager, 'model_templates_reloaded', requestId, actor.id, undefined, null, {
             count: entries.length,
           });
         },
-        () => this.templates.publish(entries),
+        () => {
+          this.templates.publish(entries);
+          this.invalidate(invalidated);
+        },
       )
       .then(() => this.templates.status());
   }
 
   /** 准入与身份变更共用串行门；返回当前秘密连接给内部传输，绝不作为公共 DTO 返回。 */
-  async admit(key: string, selected: ModelSelection, protocol: Protocol, adminTest = false) {
+  async admit(
+    key: string,
+    selected: ModelSelection,
+    protocol: Protocol,
+    adminTest = false,
+    history?: { request: RequestModel; binding?: string },
+  ) {
     return this.identity.write(async (manager) => {
+      let subject: Awaited<ReturnType<IdentityService['llmIdentity']>> | undefined;
       if (adminTest) await this.identity.requireAdmin(manager, key);
       else {
         try {
-          await this.identity.llmIdentity(key);
+          subject = await this.identity.llmIdentity(key);
         } catch (error) {
           if (error instanceof IdentityError && error.status === 401) throw new ControlError('llm_key_invalid');
           throw error;
@@ -446,6 +569,28 @@ export class ModelsService {
         throw new IdentityError(400, 'MODEL_CONFIGURATION_INVALID');
       const configuration = await this.configurationIn(manager, selected, 'online');
       if (configuration.requires_configuration) throw new ControlError('managed_model_unavailable');
+      if (
+        history &&
+        protocol === 'open_ai_chat_completions' &&
+        (history.request.store === true ||
+          history.request.previous_response_id != null ||
+          history.binding !== undefined)
+      )
+        throw new ControlError('llm_request_invalid');
+      if (history && protocol === 'open_ai_responses') {
+        const { request, binding } = history;
+        const expected = subject ? historyBinding(provider, configuration, subject.center_id, subject.user.id) : null;
+        if (request.store === undefined || (request.previous_response_id != null && request.store !== true))
+          throw new ControlError('llm_request_invalid');
+        if (adminTest && (request.store !== false || binding !== undefined))
+          throw new ControlError('llm_request_invalid');
+        if (
+          (binding !== undefined && (!expected || binding !== expected)) ||
+          (request.store &&
+            (!expected || binding !== expected || serverHistorySupport(provider.connection) !== 'supported'))
+        )
+          throw new ControlError('managed_model_configuration_stale');
+      }
       return { provider, configuration };
     });
   }
@@ -458,16 +603,19 @@ export class ModelsService {
         return { state: 'unavailable' as const, center_id: identity.center_id, reason: settings.reason! };
       const selected = settings.default_model!,
         provider = await this.provider(manager, selected.provider_instance_id);
-      if (!this.origin) throw new IdentityError(503, 'SERVICE_UNAVAILABLE');
+      if (!settings.public_origin) throw new IdentityError(503, 'SERVICE_UNAVAILABLE');
       return {
         state: 'ready' as const,
         center_id: identity.center_id,
-        endpoint: `${this.origin}/api/llm/providers/${selected.provider_instance_id}/v1`,
+        endpoint: `${settings.public_origin}/api/llm/providers/${selected.provider_instance_id}/v1`,
         provider_type: provider.connection.provider_type,
         provider_display_name: provider.connection.display_name,
         protocol: resolveProtocol(provider.connection),
         model_id: selected.model_id,
         parameters: settings.configuration!.parameters,
+        server_history_enabled: provider.connection.server_history_enabled,
+        server_history_support: serverHistorySupport(provider.connection),
+        server_history_binding: historyBinding(provider, settings.configuration!, identity.center_id, identity.user.id),
       };
     });
   }

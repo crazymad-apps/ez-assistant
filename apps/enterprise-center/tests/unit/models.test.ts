@@ -83,7 +83,7 @@ it('连接按实例类型解析协议并拒绝跨源发现路径', () => {
     endpoint: 'http://127.0.0.1:12345/v1',
     protocol_preference: 'auto',
     models_path: '',
-    discovery_format: 'openai',
+    discovery_format: 'openai', server_history_enabled: false, server_history_support_override: null,
   };
   expect(resolveProtocol(parseConnection(connection))).toBe('open_ai_responses');
   expect(() => parseConnection({ ...connection, models_path: '//evil.test/models' })).toThrow();

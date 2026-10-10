@@ -192,7 +192,7 @@ fn model_selection(model_id: &str) -> ModelSelection {
     }
 }
 
-fn new_session(value: &str, sessions_directory: &Path) -> NewStoredSession {
+pub(super) fn new_session(value: &str, sessions_directory: &Path) -> NewStoredSession {
     let session_directory = sessions_directory.join(value);
     let private_directory = session_directory.join("private");
     NewStoredSession {
@@ -1438,6 +1438,7 @@ fn assistant_message(value: &str, text: &str) -> ConversationMessage {
         ),
         parts: vec![
             AssistantPart::Reasoning(ReasoningPart {
+                source: agent_types::ReasoningSource::Summary,
                 id: PartId::new(format!("reasoning-{value}")).expect("part id"),
                 text: "private reasoning".to_owned(),
             }),
@@ -4505,6 +4506,7 @@ fn known_unversioned_storage_migrates_without_losing_existing_business_data() {
              ALTER TABLE sessions DROP COLUMN agent_shell_kind;
              ALTER TABLE sessions DROP COLUMN agent_shell_environment_json;
              ALTER TABLE sessions DROP COLUMN custom_agent_json;
+             ALTER TABLE sessions DROP COLUMN server_history_key;
              ALTER TABLE inputs DROP COLUMN agent_shell_target;
              ALTER TABLE runs DROP COLUMN shell_snapshot_json;
              ALTER TABLE sessions DROP COLUMN model_id;
@@ -8088,6 +8090,7 @@ fn archive_and_model_changes_are_persisted_and_recheck_idle_state() {
         .expect("archive");
     assert!(matches!(
         engine.set_session_model(ModelChange {
+            server_history_key: None,
             session_id: session.clone(),
             model_selection: Some(model_selection("other-model")),
             reasoning_effort: None,
@@ -8104,6 +8107,7 @@ fn archive_and_model_changes_are_persisted_and_recheck_idle_state() {
         .expect("restore");
     engine
         .set_session_model(ModelChange {
+            server_history_key: None,
             session_id: session.clone(),
             model_selection: Some(model_selection("other-model")),
             reasoning_effort: None,
@@ -8701,6 +8705,7 @@ fn recall_index_normalizes_queries_and_only_indexes_visible_message_content() {
             ),
             parts: vec![
                 AssistantPart::Reasoning(ReasoningPart {
+                    source: Default::default(),
                     id: PartId::new("recall-reasoning").expect("part id"),
                     text: "hidden-reasoning-token".to_owned(),
                 }),

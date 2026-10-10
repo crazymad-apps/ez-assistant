@@ -90,7 +90,7 @@ it('真实 HTTP 的代理、配置测试与快照管理闭环，启动恢复保�
         endpoint: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/v1`,
         protocol_preference: 'responses',
         models_path: '',
-        discovery_format: 'openai',
+        discovery_format: 'openai', server_history_enabled: false, server_history_support_override: null,
       },
       credential: { mode: 'replace', value: 'test-provider-secret' },
     });
@@ -105,7 +105,7 @@ it('真实 HTTP 的代理、配置测试与快照管理闭环，启动恢复保�
       index_retention_days: 90,
     });
     const proxyUrl = `${endpoint}/api/llm/providers/${selection.provider_instance_id}/v1/responses`;
-    const raw = '{ "model":"gpt-6-astra", "input":"hello", "unknown":9007199254740993 }';
+    const raw = '{ "model":"gpt-6-astra", "input":"hello", "store":false, "unknown":9007199254740993 }';
 
     const post = (body = raw, key = identity.llm_key) =>
       fetch(proxyUrl, {

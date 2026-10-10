@@ -28,10 +28,10 @@ export const AgentShellSetting = observer(function AgentShellSetting() {
       trigger_class_name={styles.shell_selector}
       open={open}
       on_open_change={setOpen}
-      disabled={!snapshot || settings.shell_loading || settings.pending_action !== null || unix}
+      disabled={!snapshot || settings.shell_loading || settings.pending_action !== null}
       selected={selected}
       trigger_content={!snapshot ? (settings.shell_loading ? "正在读取…" : "尚未读取") : `${labels[selected]}${available ? "" : "（不可用）"}`}
-      options={(snapshot?.catalog ?? []).filter((entry) => unix ? entry.kind === "posix_sh" : entry.kind !== "posix_sh").map((entry) => ({
+      options={(snapshot?.catalog ?? []).filter((entry) => entry.available).map((entry) => ({
         value: entry.kind,
         label: `${labels[entry.kind]}${entry.available ? "" : "（未安装）"}`,
         disabled: !entry.available,

@@ -953,3 +953,57 @@ M3 已通过 macOS 四组真实 Host 隔离验收（后台与信号、双启动�
 ## v0.28.1 F04 问答持久化
 
 Host 只转发问答命令，权威状态仍归 Runtime。每个用户域的既有 SQLite 增加 `session_feedback`，Session/Run 外键管理清理，pending 状态比较更新；轮后回答与 Input 接纳共用事务。迁移版本和数据库最低 Host 版本为 `0.28.1`，使用既有迁移框架的独立备份与验证。
+
+## v0.29.0 F06 M0 连接持久化
+
+个人 `providers` 增加 `server_history_enabled`、`server_history_support_override` 和内部 `server_history_key`；旧记录默认关闭、默认能力判断、无绑定。启用周期绑定与连接同事务保存，普通查询不暴露内部绑定。迁移与数据库最低兼容 Host 均为 `0.29.0`，复用既有事务、账本和独立 SQLite 备份验证。消息与附件文件不在 SQLite 备份范围，升级后回退必须恢复同一时点完整 Runtime Home，禁止原地降级。Host 装配 Responses 时接收 Runtime 的 owner 绑定，M0 当时未启用企业模型，当前企业接入见下文 M2。
+
+## v0.29.0 F06 M1 持久失效周期
+
+同一未发布的 v0.29.0 迁移在现有 `sessions` 增加内部 nullable `server_history_key`，初始/旧会话为空；实际 Session ID 仍保证 owner 唯一。显式选择与 reasoning 设置同时提交周期；默认选择仅更新默认跟随者，固定参数写入/重置仅更新使用该模型的显式会话与当前默认跟随者。全局生成参数接纳前通过同一 Store worker 原子更新全部会话的周期，写入失败不发布新配置。任何事务失败均回滚参数与周期，恢复必须读取持久字段，不从当前路由或时间戳推导是否经历切换。该字段不加入公共 Session DTO，不对 M0 临时数据库形态建立降级或中间迁移。
+
+## v0.29.0 F06 M2 企业续接配置与传输
+
+Host ↔ Center 企业协议及最低版本均为 2，旧版本拒绝混用。加载器继续检查中心身份、同源代理路径与当前用户域，使用中心下发的实际上游能力、启用策略及不透明绑定；不能用代理 URL 推断服务商能力。启用只接受 Responses、Supported 及有效绑定的完整组合，企业普通用户继续只读。
+
+企业 transport 使用冻结配置的私有绑定头和当前登录 key；剥除调用者自带的授权/绑定头，不向上游传播中心绑定。绑定接入 Runtime 既有 owner/ProviderState；同主体换 Token、普通 Host/Center 重启不换链。中心拒绝旧绑定沿用配置失效与刷新机制，不自动重发模型请求或重放工具。
+
+## v0.29.0 F02 M1 交互 Shell 解析
+
+`GET /user-terminals/shells` 归已登录、账号上下文、应用兼容和用户 Ready 保护的资源路由，阻塞探测复用 file_reads 预算。目录和启动共用 user_terminal 的固定解析器，过滤不可执行或不适用项；默认不可用不暗中回退。Unix 默认解析 SHELL/系统用户登录 Shell，明确程序以 -l 启动，显式 zsh/bash/sh 以 -i 启动；Windows 保持既有 PowerShell 默认与固定探测。Created 从本次解析取得实际类型和程序名。Agent Shell 设置和 Session/Run 持久化不变，既有 PTY Supervisor、来源鉴权、限额、回收与背压保持。
+
+
+## v0.29.0 F02 M2 交互提示符
+
+提示符仅在 user_terminal 创建真实交互进程时配置，不参与目录探测、不变更 Agent Shell。已知 Shell 使用进程局部环境或固定启动脚本，目录文本不拼入可执行代码；未知默认 Shell 保留自身语义。bash/zsh 仅转换标准路径片段并尊重用户动态主题覆盖，sh 显示目录尾名，PowerShell 保留 PS 前缀，CMD 使用盘符提示。
+
+zsh 使用本次受管私有启动文件转发原配置，在进入真实用户配置时恢复其 ZDOTDIR；不写用户启动文件。临时目录归现有 PTY 监督任务，失败启动释放，进程和 I/O 回收后显式清理，关闭回执等待清理完成。该适配不新增协议、持久化结构或独立生命周期服务。具体主题和平台验证边界见 [F02 技术方案](../versions/v0.29.0/features/F02-跨平台桌面与终端体验/技术方案.md)。
+
+
+### F02 M2 补充：Agent 与 PTY 同源固定目录
+
+resources::shell 统一维护 ShellKind 的可用程序，Unix 支持 sh/bash/zsh；Agent 与 user_terminal 共用探测，可执行校验与 UI 显式目录必须一致。Agent 使用非交互参数和对应方言快照，PTY 独立保留交互启动及提示符，不混用配置。v0.29.0 最终迁移扩展 sessions/inputs/agent_shell_settings 既有 Shell 列的 CHECK；正常升级仍由迁移执行器统一备份与事务管理，旧在途 0.29.0 结构拒绝并要求确认后单独对齐。
+
+## v0.29.0 F04 反馈接入
+
+- `access/enterprise/feedback` 以稳定 UserKey 取得 Credentials 的当前登录，和 Agent/插件共享
+  `current_center_login`；不保存第二套 Token Map。手动命令同时绑定原 AccessPermit，工具只绑定用户域，
+  每次调用读取最新凭据。能力查询后、POST 前与回执后复核登录代际，不持锁进行网络 I/O。
+- CenterClient 的反馈适配固定路径、禁止重定向/自动重试，3 秒连接、5 秒请求、64 KiB 响应上限。
+  未取得可靠写入回执时返回 `submission_unknown`，不能推断未落库或后台重放；明确凭据失效才撤销该登录。
+- 四个反馈 Command 在 Host 分发，Center 是记录、归属、幂等、状态和审计的唯一权威；Host 不增反馈 Store、迁移或事件。
+- `resources/feedback` 只在企业用户 Run 工具集中装配 `submit_feedback`，主/子 Agent 共用用户域。
+  resolve 无 I/O；execute 每次生成独立 UUID，复用同一提交服务。工具输入不含身份、环境、中心地址或处理状态。
+- 工具使用 General facts 与 Serial 执行。默认 Allow 与文件保护规则一起注入现有 Authorizer；显式 Deny/Ask
+  优先级不变，Plan/Build 定义相同。失败返回真实工具错误并提示继续原任务，不产生问答、待办或递归反馈。
+
+## v0.29.0 F01 M0 发布构建信息
+
+`--build-info-json` 保留原软件版本字段，追加目标 `os`、`arch` 及 `enterprise_protocols`；
+协议数组与实际中心准入使用 `access::enterprise::SUPPORTED_PROTOCOLS` 同一常量。
+该入口不初始化 Runtime Home 或存储，仅供发布脚本读取实际随包二进制的构建事实。
+本阶段不改变 Host 停止、替换或登录门禁流程，后续按 F01 里程碑接入。
+
+中心模型控制响应中，503 的 `llm_proxy_unavailable` 与 `llm_record_unavailable`
+映射为模型暂时不可用，交由现有有限重试策略处理；400 格式错误、413 请求过大、
+鉴权和配置失效保持各自的永久错误或显式刷新语义，不能笼统放宽重试。

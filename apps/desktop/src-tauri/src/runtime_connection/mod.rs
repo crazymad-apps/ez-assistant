@@ -10,7 +10,7 @@ use serde::Serialize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{
-    AppHandle, State,
+    AppHandle, Manager as _, State,
     ipc::{CommandArg, CommandItem, InvokeError},
 };
 use tauri_plugin_opener::OpenerExt as _;
@@ -247,11 +247,16 @@ pub(crate) struct PreparedConnection {
 
 #[tauri::command]
 pub(crate) async fn begin_runtime_connection(
+    app: AppHandle,
+    updater: State<'_, crate::desktop_update::DesktopUpdater>,
     connection: State<'_, RuntimeConnection>,
     resources: State<'_, crate::native_resource::NativeResourceBridge>,
     browsers: State<'_, crate::browser_resource::BrowserResourceManager>,
 ) -> Result<String, ConnectionError> {
-    let id = connection.begin()?;
+    let id = updater
+        .replace_connection(&app, || connection.begin())
+        .await
+        .map_err(|_| failure("desktop_update_installing", "正在安装更新，请稍候。"))??;
     resources.clear_target_resources();
     browsers.close_all();
     connection.cancellation(&id)?;
@@ -277,17 +282,37 @@ pub(crate) async fn connect_runtime_target(
         biased;
         () = cancellation.cancelled() => return Err(stale()),
         result = async {
+            let updater = app.state::<crate::desktop_update::DesktopUpdater>();
+            let permit = updater.lifecycle_permit().await.map_err(|_| failure("desktop_update_installing", "正在安装更新，请稍候。"))?;
             let management = if normalized.is_none() { Some(local.bootstrap().await.map_err(|_| unavailable())?) } else { None };
+            drop(permit);
             let origin = normalized.as_deref().or_else(|| management.as_ref().map(|value| value.base_url.as_str())).ok_or_else(unavailable)?;
             let capabilities = discover(origin).await?;
+            app.state::<crate::desktop_update::DesktopUpdater>().prepare(&app, binding_id.clone(), origin, &capabilities, management.clone(), cancellation.clone()).await;
+            if updater.update_required(&binding_id) { return Err(failure("center_protocol_incompatible", "需要更新后继续使用。")); }
             let proof = management.as_ref().map(|value| value.access_token.clone());
             let bootstrap = if capabilities.mode == HostMode::Enterprise {
                 login(origin, HostLoginRequest::Enterprise { username: username.unwrap_or_default(), password: SecretValue::new(password.clone()), native: true }).await?
             } else if let Some(management) = management { management }
             else { remote_login(origin, &password).await? };
             Ok::<_, ConnectionError>((bootstrap, proof))
-        } => result?,
-    };
+        } => result,
+    }.inspect_err(|error| {
+        if error.code == "center_protocol_incompatible" {
+            app.state::<crate::desktop_update::DesktopUpdater>().require_update(&app, &binding_id);
+        }
+    })?;
+    let updater = app.state::<crate::desktop_update::DesktopUpdater>();
+    let _permit = updater
+        .lifecycle_permit()
+        .await
+        .map_err(|_| failure("desktop_update_installing", "正在安装更新，请稍候。"))?;
+    if updater.update_required(&binding_id) {
+        return Err(failure(
+            "center_protocol_incompatible",
+            "需要更新后继续使用。",
+        ));
+    }
     connection.bind_with_proof(
         &binding_id,
         bootstrap.clone(),
@@ -308,14 +333,49 @@ pub(crate) async fn connect_runtime_target(
     Ok(PreparedConnection { bootstrap, warning })
 }
 
+/// 登录前选中 Host 即可发现更新；Center 地址仍由该 Host 的有效配置提供。
+#[tauri::command]
+pub(crate) async fn prepare_desktop_update(
+    app: AppHandle,
+    connection: State<'_, RuntimeConnection>,
+    local: State<'_, RuntimeBootstrapCoordinator>,
+    binding_id: String,
+    origin: Option<String>,
+) -> Result<(), ConnectionError> {
+    let cancellation = connection.cancellation(&binding_id)?;
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => Err(stale()),
+        result = async {
+            let management = if origin.is_none() { Some(local.desktop_update_target().await.map_err(|_| unavailable())?) } else { None };
+            let origin = match origin { Some(origin) => normalize_origin(&origin)?, None => management.as_ref().ok_or_else(unavailable)?.base_url.clone() };
+            let capabilities = discover(&origin).await?;
+            app.state::<crate::desktop_update::DesktopUpdater>().prepare(&app, binding_id, &origin, &capabilities, management, cancellation.clone()).await;
+            Ok(())
+        } => result,
+    }
+}
+
 #[tauri::command]
 pub(crate) async fn refresh_runtime_connection(
+    app: AppHandle,
+    updater: State<'_, crate::desktop_update::DesktopUpdater>,
     browsers: State<'_, crate::browser_resource::BrowserResourceManager>,
     connection: State<'_, RuntimeConnection>,
     local: State<'_, RuntimeBootstrapCoordinator>,
     binding_id: String,
 ) -> Result<RuntimeBootstrap, ConnectionError> {
+    let _permit = updater
+        .lifecycle_permit()
+        .await
+        .map_err(|_| failure("desktop_update_installing", "正在安装更新，请稍候。"))?;
     let target = connection.target(&binding_id)?;
+    if updater.update_required(&binding_id) {
+        return Err(failure(
+            "center_protocol_incompatible",
+            "需要更新后继续使用。",
+        ));
+    }
     let bootstrap = tokio::select! {
         biased;
         () = target.cancellation.cancelled() => return Err(stale()),
@@ -326,8 +386,12 @@ pub(crate) async fn refresh_runtime_connection(
                 Ok(bootstrap)
             }
             else { verify_remote(&target.context.bootstrap.base_url, &target.context.bootstrap.access_token).await }
-        } => result?,
-    };
+        } => result,
+    }.inspect_err(|error| {
+        if error.code == "center_protocol_incompatible" {
+            updater.require_update(&app, &binding_id);
+        }
+    })?;
     connection.bind_with_proof(
         &binding_id,
         bootstrap.clone(),
@@ -460,10 +524,9 @@ async fn decode_login(response: reqwest::Response) -> Result<HostLoginResult, Co
                 "center_identity_mismatch",
                 "企业中心身份与本机绑定不一致，请由本机管理者检查中心配置。",
             ),
-            Some("center_protocol_incompatible") => (
-                "center_protocol_incompatible",
-                "企业中心协议不兼容，请更新服务。",
-            ),
+            Some("center_protocol_incompatible") => {
+                ("center_protocol_incompatible", "需要更新后继续使用。")
+            }
             Some("client_too_old" | "host_too_old" | "component_mismatch") => (
                 "component_mismatch",
                 "Host 与 Desktop 版本不兼容，请更新对应应用。",

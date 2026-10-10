@@ -511,6 +511,7 @@ impl ModelService for ObservedModelService {
                 .stream(
                     request,
                     ModelCallContext {
+                        rebuild_server_history: context.rebuild_server_history,
                         cancellation: context.cancellation,
                         trace: Some(trace.clone()),
                         prepared_images: context.prepared_images,

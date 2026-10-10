@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router';
-import { Alert, Button, Card, Form, Input, Select, Space, Typography } from 'antd';
+import { Alert, Button, Card, Form, Input, Select, Space, Switch, Typography } from 'antd';
 import { observer } from 'mobx-react-lite';
 import type { ProviderConnection, SaveProviderWritable as SaveProvider } from '../../../request/openapi';
 import adminStore from '../../../stores/AdminStore';
 import { useLeaveConfirmation } from '../../../app/NavigationGuard/context';
 import { modelApi } from '../../../request/models';
-import { providerLabels } from '../model';
+import { providerLabels, serverHistorySupport } from '../model';
 import { useResourceQuery } from '../../../request/useResourceQuery';
 import styles from './index.module.scss';
 
@@ -17,6 +17,9 @@ const defaultConnection: ProviderConnection = {
   protocol_preference: 'auto',
   models_path: '',
   discovery_format: 'openai',
+  responses_transport: 'http',
+  server_history_enabled: false,
+  server_history_support_override: null,
 };
 
 export function ProviderEditor() {
@@ -43,10 +46,23 @@ const ProviderEditorForm = observer(function ProviderEditorForm() {
   const type = Form.useWatch(['connection', 'provider_type'], form) ?? 'openai';
   const credentialMode = Form.useWatch(['credential', 'mode'], form);
   const responses = ['openai', 'deepseek', 'dashscope_api', 'dashscope_plan', 'moonshot'].includes(type);
+  const watchedConnection = Form.useWatch('connection', form);
+  const historySupport = serverHistorySupport({ ...defaultConnection, ...watchedConnection });
+  useEffect(() => {
+    const current = form.getFieldValue('connection') as ProviderConnection | undefined;
+    if (current?.server_history_enabled && serverHistorySupport(current) !== 'supported') {
+      form.setFieldValue(['connection', 'server_history_enabled'], false);
+      setDirty(true);
+    }
+  }, [historySupport, form]);
 
   const back = () => navigate(id ? `/models/providers/${id}` : '/models');
 
   async function save(input: SaveProvider) {
+    if (input.connection.server_history_enabled && serverHistorySupport(input.connection) !== 'supported') {
+      setError('当前接口尚未确认支持服务端历史续接，请先调整续接能力。');
+      return;
+    }
     let discovery_format: ProviderConnection['discovery_format'] = 'openai';
     if (input.connection.provider_type === 'dashscope_api') discovery_format = 'dashscope_native';
     else if (input.connection.provider_type === 'moonshot' || input.connection.provider_type === 'vllm')
@@ -102,7 +118,11 @@ const ProviderEditorForm = observer(function ProviderEditorForm() {
           <Form.Item name={['connection', 'provider_type']} label="服务商类型">
             <Select
               options={Object.entries(providerLabels).map(([value, label]) => ({ value, label }))}
-              onChange={() => form.setFieldValue(['connection', 'protocol_preference'], 'auto')}
+              onChange={() => {
+                form.setFieldValue(['connection', 'protocol_preference'], 'auto');
+                form.setFieldValue(['connection', 'responses_transport'], 'http');
+                form.setFieldValue(['connection', 'server_history_support_override'], null);
+              }}
             />
           </Form.Item>
           <Form.Item
@@ -137,10 +157,26 @@ const ProviderEditorForm = observer(function ProviderEditorForm() {
             extra={`自动选择：${responses ? 'Responses' : 'Chat Completions'}`}
           >
             <Select
+              onChange={(value) => {
+                if (value === 'chat_completions') form.setFieldValue(['connection', 'responses_transport'], 'http');
+              }}
               options={[
                 { value: 'auto', label: '自动' },
                 ...(responses ? [{ value: 'responses', label: 'Responses' }] : []),
                 { value: 'chat_completions', label: 'Chat Completions' },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item
+            name={['connection', 'responses_transport']}
+            label="Responses 上游传输"
+            extra="WebSocket 需要上游入口及对应凭据支持；客户端仍通过 HTTP 调用企业中心。"
+          >
+            <Select
+              disabled={!responses || watchedConnection?.protocol_preference === 'chat_completions'}
+              options={[
+                { value: 'http', label: 'HTTP' },
+                { value: 'websocket', label: 'WebSocket' },
               ]}
             />
           </Form.Item>
@@ -150,6 +186,34 @@ const ProviderEditorForm = observer(function ProviderEditorForm() {
             extra="留空使用默认路径；填写同源绝对路径。"
           >
             <Input placeholder="例如 /v1/models" />
+          </Form.Item>
+          <Form.Item
+            name={['connection', 'server_history_support_override']}
+            label="续接能力"
+            getValueProps={(value: ProviderConnection['server_history_support_override']) => ({
+              value: value ?? 'default',
+            })}
+            getValueFromEvent={(value: 'default' | 'supported' | 'unsupported') => (value === 'default' ? null : value)}
+          >
+            <Select
+              options={[
+                { value: 'default', label: '使用服务商默认' },
+                { value: 'supported', label: '明确支持' },
+                { value: 'unsupported', label: '明确不支持' },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item
+            name={['connection', 'server_history_enabled']}
+            label="使用服务端历史续接"
+            valuePropName="checked"
+            extra={
+              historySupport === 'supported'
+                ? '开启后复用服务端上下文，减少历史上传；连接或历史失效时用本地上下文重建。'
+                : '当前接口尚未确认支持续接。自定义接口需先声明支持；Chat Completions 不支持续接。'
+            }
+          >
+            <Switch disabled={historySupport !== 'supported' || adminStore.busy || Boolean(id && !query.value)} />
           </Form.Item>
           <Typography.Paragraph type="secondary">
             发现格式由服务商类型决定。保存连接不会自动刷新在线模型。

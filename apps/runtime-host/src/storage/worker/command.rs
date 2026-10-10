@@ -100,6 +100,11 @@ pub(super) enum Command {
     },
     SaveModelSettings {
         settings: assistant_protocol::ModelSettings,
+        server_history_key: Option<String>,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    InvalidateServerHistoryBindings {
+        key: String,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
     GetModelFixedConfig {
@@ -114,10 +119,12 @@ pub(super) enum Command {
     },
     PutModelFixedConfig {
         config: assistant_protocol::ModelFixedConfig,
+        server_history_key: Option<String>,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
     ResetModelFixedConfig {
         selection: assistant_protocol::ModelSelection,
+        server_history_key: Option<String>,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
 

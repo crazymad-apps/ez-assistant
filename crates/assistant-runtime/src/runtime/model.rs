@@ -46,7 +46,7 @@ use crate::{
 /// timeout 和 retry 产生不同解释；两者的请求内容仍分别构造。
 pub(super) struct CompiledModelService {
     pub(super) model: Arc<dyn ModelService>,
-    /// 子任务与压缩共享无父 Run 观察器的服务，避免并发 attempt 污染父诊断。
+    /// 压缩与无状态子任务模板使用无父观察器的服务；续接 child 派生独立服务。
     background_model: Arc<dyn ModelService>,
     pub(super) provider: agent_types::ProviderId,
     pub(super) protocol: ModelProtocol,
@@ -55,6 +55,56 @@ pub(super) struct CompiledModelService {
     pub(super) request_timeout: Duration,
     pub(super) image_preprocessor: Option<Arc<dyn ModelImagePreprocessor>>,
 }
+
+/// 父 Run 冻结的模型装配输入；每个 child owner/正文 generation 派生服务，
+/// 不重新选择配置，不复制 Journal，压缩服务仍保持无状态。
+pub(crate) struct HistoryModelBinding {
+    snapshot: Arc<ConfigSnapshot>,
+    model: ResolvedModelConfig,
+    factory: Arc<dyn crate::ModelServiceFactory>,
+    environment: crate::SessionExecutionEnvironment,
+    owner: String,
+    session: Arc<SessionController>,
+    observer: Option<Arc<dyn ModelAttemptObserver>>,
+}
+impl HistoryModelBinding {
+    pub(crate) fn compile_child(
+        &self,
+        child: &assistant_protocol::ChildTaskId,
+        generation: u64,
+    ) -> RuntimeResult<Arc<dyn ModelService>> {
+        self.compile(
+            &format!("{}:child:{}:{generation}", self.owner, child.as_str()),
+            None,
+        )
+    }
+    pub(super) fn compile_main(&self, generation: u64) -> RuntimeResult<Arc<dyn ModelService>> {
+        self.compile(
+            &format!("{}:{generation}", self.owner),
+            self.observer.clone(),
+        )
+    }
+    fn compile(
+        &self,
+        owner: &str,
+        observer: Option<Arc<dyn ModelAttemptObserver>>,
+    ) -> RuntimeResult<Arc<dyn ModelService>> {
+        let mut compiled = compile_resolved_model_service_with_history(
+            &self.snapshot,
+            &self.model,
+            self.factory.as_ref(),
+            observer,
+            Some(owner),
+        )?;
+        bind_image_preparation(&mut compiled, &self.environment);
+        Ok(compiled.model)
+    }
+}
+
+mod history_recovery;
+use history_recovery::CallScopedHistoryModelService;
+#[cfg(test)]
+use history_recovery::RecoveringHistoryModelService;
 
 /// 未启用重试时只补充 attempt 观察，不改变下层取消、超时或建流语义。
 struct ObservedModelService {
@@ -371,6 +421,7 @@ impl ModelService for ObservedModelService {
 
 /// 单次 Run 已同时冻结 Agent 规格和对应授权闸。
 pub(super) struct CompiledRunAgent {
+    history_model_binding: Option<Arc<HistoryModelBinding>>,
     shell: Option<crate::FrozenShellEnvironment>,
     prepared_model: crate::config::PreparedModel,
     auxiliary_model: Option<crate::config::PreparedModel>,
@@ -387,6 +438,7 @@ pub(super) struct CompiledRunAgent {
 }
 
 pub(super) struct CompiledRunParts {
+    pub(super) history_model_binding: Option<Arc<HistoryModelBinding>>,
     pub(super) shell: Option<crate::FrozenShellEnvironment>,
     pub(super) model_binding: Arc<crate::config::PreparedModel>,
     pub(super) agent: Agent,
@@ -407,6 +459,18 @@ impl CompiledRunAgent {
         registry: &crate::config::ConfigRegistry,
     ) -> RuntimeResult<()> {
         self.prepared_model.ensure_current(registry)?;
+        if let Some(binding) = &self.history_model_binding {
+            let state = binding.session.lock_state()?;
+            if binding.owner
+                != format!(
+                    "{}:{}",
+                    binding.session.id().as_str(),
+                    state.server_history_key.as_deref().unwrap_or("initial")
+                )
+            {
+                return Err(RuntimeError::ConfigurationConflict);
+            }
+        }
         if let Some(auxiliary) = &self.auxiliary_model {
             auxiliary.ensure_current(registry)?;
         }
@@ -418,6 +482,7 @@ impl CompiledRunAgent {
 
     pub(super) fn into_parts(self) -> CompiledRunParts {
         CompiledRunParts {
+            history_model_binding: self.history_model_binding,
             shell: self.shell,
             model_binding: Arc::new(self.prepared_model),
             agent: self.agent,
@@ -454,7 +519,7 @@ pub(super) struct RunCompilationResources<'a> {
     >,
     pub(super) shell: Option<crate::FrozenShellEnvironment>,
     pub(super) skill_catalog: crate::SkillCatalog,
-    pub(super) model_factory: &'a dyn crate::ModelServiceFactory,
+    pub(super) model_factory: Arc<dyn crate::ModelServiceFactory>,
     pub(super) context_window: Arc<agent_sdk::ContextWindowEvaluator>,
     pub(super) run_tool_factory: &'a dyn RunToolFactory,
     pub(super) child_task_workspace_factory: Arc<dyn ChildTaskWorkspaceFactory>,
@@ -528,12 +593,38 @@ impl AssistantRuntime {
             reasoning,
             provider_options,
         };
+        let (variant, shell) = {
+            let state = session.lock_state()?;
+            (state.current_variant, state.agent_shell_environment.clone())
+        };
+        let disclosure = McpRunDisclosure::compile(
+            self.mcp_service.registry.as_ref(),
+            self.permission_coordinator.as_ref(),
+            &session.permission_scopes(),
+            variant,
+            None,
+        )?;
+        let mcp = {
+            let state = session.lock_state()?;
+            let journal = state
+                .journal
+                .as_ref()
+                .ok_or(RuntimeError::InternalStateUnavailable {
+                    component: "manual compaction MCP context",
+                })?;
+            disclosure.context_for_compaction(&journal.snapshot())?
+        };
+        let shell_context = shell
+            .as_ref()
+            .map(|shell| shell.context_message(&session.environment().working_directory))
+            .transpose()?;
         Ok((
             RuntimeContextCompactor::for_manual(
                 compiled.model,
                 session.current_system_prompt()?,
                 request,
-            ),
+            )
+            .with_restored_context(mcp, shell_context),
             prepared,
         ))
     }
@@ -556,11 +647,34 @@ pub(super) async fn compile_run_agent(
         .prepare_model(snapshot, selection.as_ref(), resources.store.as_ref())
         .await?;
     let model_config = &prepared.model;
-    let mut compiled = compile_resolved_model_service(
+    let history_owner = {
+        let state = session.lock_state()?;
+        format!(
+            "{}:{}",
+            session.id().as_str(),
+            state.server_history_key.as_deref().unwrap_or("initial")
+        )
+    };
+    let history_model_binding = model_config.server_history_key.as_ref().map(|_| {
+        Arc::new(HistoryModelBinding {
+            snapshot: Arc::new(snapshot.clone()),
+            model: model_config.clone(),
+            factory: resources.model_factory.clone(),
+            environment: session.environment().clone(),
+            session: session.clone(),
+            owner: history_owner.clone(),
+            observer: model_attempt_observer.clone(),
+        })
+    });
+    let mut compiled = compile_resolved_model_service_with_history(
         snapshot,
         model_config,
-        resources.model_factory,
+        resources.model_factory.as_ref(),
         model_attempt_observer,
+        Some(&format!(
+            "{history_owner}:{}",
+            session.lock_state()?.body_generation
+        )),
     )?;
     let auxiliary_selection = registry.managed_models()?.settings.vision_model.clone();
     let mut auxiliary_prepared = None;
@@ -573,7 +687,7 @@ pub(super) async fn compile_run_agent(
                 let mut auxiliary = compile_resolved_model_service(
                     snapshot,
                     &prepared_auxiliary.model,
-                    resources.model_factory,
+                    resources.model_factory.as_ref(),
                     None,
                 )?;
                 if !auxiliary.capabilities.image_input {
@@ -719,10 +833,6 @@ pub(super) async fn compile_run_agent(
             .collect::<Vec<_>>()
     };
     let skill_activation_latch = Arc::new(SkillActivationLatch::new(active_skill_names));
-    let parent_compactor = Arc::new(RuntimeContextCompactor::for_parent(
-        compiled.background_model.clone(),
-        session.current_system_prompt()?,
-    ));
     let goal_signal_latch = if let Some(binding) = authorization.goal_binding.as_ref() {
         let state = session.lock_state()?;
         let goal = state
@@ -802,6 +912,28 @@ pub(super) async fn compile_run_agent(
         authorization.variant,
         mcp_selection.as_ref(),
     )?;
+    let shell_context = resources
+        .shell
+        .as_ref()
+        .map(|shell| shell.context_message(&session.environment().working_directory))
+        .transpose()?;
+    let restored_mcp_context = {
+        let state = session.lock_state()?;
+        let journal = state
+            .journal
+            .as_ref()
+            .ok_or(RuntimeError::InternalStateUnavailable {
+                component: "Run compaction MCP context",
+            })?;
+        mcp_disclosure.context_for_compaction(&journal.snapshot())?
+    };
+    let parent_compactor = Arc::new(
+        RuntimeContextCompactor::for_parent(
+            compiled.background_model.clone(),
+            session.current_system_prompt()?,
+        )
+        .with_restored_context(restored_mcp_context.clone(), shell_context.clone()),
+    );
     let mcp_scope = mcp_disclosure.scope.clone();
     let authorizer = Arc::new(
         RuntimeToolAuthorizer::new(
@@ -989,10 +1121,13 @@ pub(super) async fn compile_run_agent(
         let mut child_prompt_parts = session.current_system_prompt()?.parts().to_vec();
         child_prompt_parts.push(crate::delegation::CHILD_AGENT_INSTRUCTION_V1.to_owned());
         let child_prompt = SystemPromptSnapshot::new(child_prompt_parts);
-        let child_compactor = Arc::new(RuntimeContextCompactor::for_child(
-            compiled.background_model.clone(),
-            child_prompt.clone(),
-        ));
+        let child_compactor = Arc::new(
+            RuntimeContextCompactor::for_child(
+                compiled.background_model.clone(),
+                child_prompt.clone(),
+            )
+            .with_restored_context(mcp_disclosure.context.clone(), shell_context.clone()),
+        );
         let mut child_builder = AgentBuilder::new(
             compiled.background_model.clone(),
             child_prompt,
@@ -1023,6 +1158,7 @@ pub(super) async fn compile_run_agent(
                 parent_run_id: authorization.run_id,
                 variant: authorization.variant,
                 child_agent,
+                child_model_binding: history_model_binding.clone(),
                 child_compactor,
                 store: resources.store,
                 registry: resources.child_tasks,
@@ -1037,11 +1173,7 @@ pub(super) async fn compile_run_agent(
                 mcp_registry: resources.mcp_registry.clone(),
                 disclosure_context: mcp_disclosure.context.clone(),
                 resource_projection: resource_projection.for_child(),
-                shell_context: resources
-                    .shell
-                    .as_ref()
-                    .map(|shell| shell.context_message(&session.environment().working_directory))
-                    .transpose()?,
+                shell_context,
             }));
         tool_assembly.contribute(
             RunToolContribution::tool(DelegateTaskTool::new(delegation_controller)).map_err(
@@ -1078,6 +1210,7 @@ pub(super) async fn compile_run_agent(
         .build()
         .map_err(|source| RuntimeError::AgentBuildFailed { source })?;
     let result = CompiledRunAgent {
+        history_model_binding,
         shell: resources.shell,
         prepared_model: prepared,
         auxiliary_model: auxiliary_prepared,
@@ -1102,49 +1235,86 @@ pub(super) fn compile_resolved_model_service(
     model_factory: &dyn crate::ModelServiceFactory,
     model_attempt_observer: Option<Arc<dyn ModelAttemptObserver>>,
 ) -> RuntimeResult<CompiledModelService> {
+    compile_resolved_model_service_with_history(
+        snapshot,
+        model_config,
+        model_factory,
+        model_attempt_observer,
+        None,
+    )
+}
+
+/// 主会话服务只读取当前可靠历史；旁路服务单独按同一配置装配为无状态，
+/// 不允许摘要、标题和辅助识图创建或消费业务续接凭据。
+fn compile_resolved_model_service_with_history(
+    snapshot: &ConfigSnapshot,
+    model_config: &ResolvedModelConfig,
+    model_factory: &dyn crate::ModelServiceFactory,
+    model_attempt_observer: Option<Arc<dyn ModelAttemptObserver>>,
+    history_owner: Option<&str>,
+) -> RuntimeResult<CompiledModelService> {
     model_factory.ensure_available()?;
     let active = snapshot
         .active()
         .ok_or(RuntimeError::ConfigurationUnavailable)?;
     let transport = active.transport();
-    let bundle = model_factory
-        .create_model(ModelServiceFactoryRequest {
-            external_configuration: model_config.external_configuration.as_ref(),
-            provider: model_config.provider(),
-            protocol: model_config.protocol(),
-            capabilities: model_config.capabilities(),
-            endpoint: model_config.endpoint(),
-            model: model_config.model(),
-            api_key: model_config.api_key(),
-            context_window_tokens: model_config.context_window_tokens(),
-            max_input_tokens: model_config.max_input_tokens(),
-            connect_timeout: transport.connect_timeout(),
-            request_timeout: transport.request_timeout(),
-        })
-        .map_err(|source| RuntimeError::ModelBuildFailed { source })?;
+    let history_binding = history_owner
+        .zip(model_config.server_history_key.as_deref())
+        .map(|(owner, key)| format!("{owner}:{key}"));
+    let create_bundle = |binding: Option<&str>| {
+        model_factory
+            .create_model(ModelServiceFactoryRequest {
+                server_history_binding: binding,
+                external_configuration: model_config.external_configuration.as_ref(),
+                provider: model_config.provider(),
+                protocol: model_config.protocol(),
+                capabilities: model_config.capabilities(),
+                endpoint: model_config.endpoint(),
+                model: model_config.model(),
+                api_key: model_config.api_key(),
+                context_window_tokens: model_config.context_window_tokens(),
+                max_input_tokens: model_config.max_input_tokens(),
+                connect_timeout: transport.connect_timeout(),
+                request_timeout: transport.request_timeout(),
+            })
+            .map_err(|source| RuntimeError::ModelBuildFailed { source })
+    };
+    let bundle = create_bundle(history_binding.as_deref())?;
+    let background_base = if history_binding.is_some() {
+        create_bundle(None)?.model
+    } else {
+        bundle.model.clone()
+    };
     let base_model = bundle.model;
     let image_preprocessor = bundle.image_preprocessor;
     let background_model: Arc<dyn ModelService> = match active.retry_policy() {
         Some(policy) => Arc::new(RetryingModelService::new(
-            base_model.clone(),
+            background_base.clone(),
             policy.clone(),
         )),
-        None => base_model.clone(),
+        None => background_base,
     };
-    let model = match (active.retry_policy(), model_attempt_observer) {
-        (Some(policy), Some(observer)) => Arc::new(RetryingModelService::with_observer(
+    let model: Arc<dyn ModelService> = if history_binding.is_some() {
+        Arc::new(CallScopedHistoryModelService::new(
             base_model,
-            policy.clone(),
-            observer,
-        )) as Arc<dyn ModelService>,
-        (Some(policy), None) => {
-            Arc::new(RetryingModelService::new(base_model, policy.clone())) as Arc<dyn ModelService>
+            active.retry_policy().cloned(),
+            model_attempt_observer,
+        ))
+    } else {
+        match (active.retry_policy(), model_attempt_observer) {
+            (Some(policy), Some(observer)) => Arc::new(RetryingModelService::with_observer(
+                base_model,
+                policy.clone(),
+                observer,
+            )) as Arc<dyn ModelService>,
+            (Some(policy), None) => Arc::new(RetryingModelService::new(base_model, policy.clone()))
+                as Arc<dyn ModelService>,
+            (None, Some(observer)) => Arc::new(ObservedModelService {
+                inner: base_model,
+                observer,
+            }) as Arc<dyn ModelService>,
+            (None, None) => base_model,
         }
-        (None, Some(observer)) => Arc::new(ObservedModelService {
-            inner: base_model,
-            observer,
-        }) as Arc<dyn ModelService>,
-        (None, None) => base_model,
     };
     Ok(CompiledModelService {
         model,
@@ -1340,5 +1510,414 @@ mod tests {
             Err(ModelError::Provider { message, status: Some(400) })
                 if message == "provider image limit"
         ));
+    }
+
+    struct HistoryScript {
+        capabilities: ModelCapabilities,
+        replies: std::sync::Mutex<
+            std::collections::VecDeque<Result<Vec<agent_model::ModelEvent>, ModelError>>,
+        >,
+        calls: std::sync::Mutex<Vec<(ModelRequest, ModelCallContext)>>,
+        cancel_on_rejection: bool,
+    }
+    impl ModelService for HistoryScript {
+        fn capabilities(&self) -> &ModelCapabilities {
+            &self.capabilities
+        }
+        fn context_window_tokens(&self) -> u64 {
+            8192
+        }
+        fn stream(
+            &self,
+            request: ModelRequest,
+            context: ModelCallContext,
+        ) -> ModelStreamFuture<'_> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push((request, context.clone()));
+                let reply = self
+                    .replies
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .expect("script reply");
+                if self.cancel_on_rejection && matches!(reply, Err(ModelError::HistoryUnavailable))
+                {
+                    context.cancellation.cancel();
+                }
+                reply.map(|events| {
+                    Box::pin(futures_util::stream::iter(events)) as agent_model::ModelEventStream
+                })
+            })
+        }
+    }
+    fn history_script(
+        replies: Vec<Result<Vec<agent_model::ModelEvent>, ModelError>>,
+        cancel_on_rejection: bool,
+    ) -> Arc<HistoryScript> {
+        Arc::new(HistoryScript {
+            capabilities: Default::default(),
+            replies: std::sync::Mutex::new(replies.into()),
+            calls: Default::default(),
+            cancel_on_rejection,
+        })
+    }
+    fn history_request() -> ModelRequest {
+        ModelRequest {
+            system: SystemPromptSnapshot::new(vec!["frozen prompt".into()]),
+            conversation: ConversationSnapshot::new(vec![]),
+            tools: vec![],
+            tool_choice: ToolChoice::None,
+            generation: GenerationConfig::default(),
+            reasoning: None,
+            provider_options: ProviderOptions::new(),
+        }
+    }
+    fn history_finished() -> Vec<agent_model::ModelEvent> {
+        let message = agent_types::AssistantMessage {
+            id: MessageId::new("history-final").unwrap(),
+            model: agent_types::ModelIdentity::new(
+                agent_types::ProviderId::new("fixture").unwrap(),
+                "fixture",
+            ),
+            parts: vec![],
+            finish_reason: agent_types::FinishReason::Stop,
+            usage: None,
+        };
+        vec![
+            agent_model::ModelEvent::TurnStarted {
+                message_id: message.id.clone(),
+                model: message.model.clone(),
+            },
+            agent_model::ModelEvent::TurnFinished { message },
+        ]
+    }
+    fn history_interrupted() -> Vec<agent_model::ModelEvent> {
+        vec![agent_model::ModelEvent::TurnFailed {
+            error: ModelError::Transport {
+                kind: agent_model::ModelTransportErrorKind::Interrupted,
+                message: "disconnected".into(),
+            },
+        }]
+    }
+    fn call_scoped_history(inner: Arc<dyn ModelService>) -> CallScopedHistoryModelService {
+        CallScopedHistoryModelService::new(
+            inner,
+            Some(agent_model::ModelRetryPolicy::new(
+                [agent_model::ModelRetryReason::Connection]
+                    .into_iter()
+                    .collect(),
+                vec![Duration::ZERO; 3],
+                Duration::ZERO,
+            )),
+            None,
+        )
+    }
+    #[tokio::test]
+    async fn history_rebuild_transient_failure_keeps_full_context_on_next_attempt() {
+        let inner = history_script(
+            vec![
+                Ok(history_interrupted()),
+                Err(ModelError::HistoryUnavailable),
+                Err(ModelError::Unavailable {
+                    message: "center proxy temporarily unavailable".into(),
+                    status: Some(503),
+                    retry_after_ms: None,
+                }),
+                Ok(history_finished()),
+            ],
+            false,
+        );
+        let model = CallScopedHistoryModelService::new(
+            inner.clone(),
+            Some(agent_model::ModelRetryPolicy::new(
+                [
+                    agent_model::ModelRetryReason::Connection,
+                    agent_model::ModelRetryReason::Unavailable,
+                ]
+                .into_iter()
+                .collect(),
+                vec![Duration::ZERO; 3],
+                Duration::ZERO,
+            )),
+            None,
+        );
+        agent_model::collect_model_turn(&model, history_request(), ModelCallContext::default())
+            .await
+            .unwrap();
+        let calls = inner.calls.lock().unwrap();
+        assert_eq!(
+            calls
+                .iter()
+                .map(|(_, c)| c.rebuild_server_history)
+                .collect::<Vec<_>>(),
+            [false, false, true, true]
+        );
+        assert!(
+            calls
+                .iter()
+                .all(|(request, _)| request == &history_request())
+        );
+    }
+    #[tokio::test]
+    async fn history_rebuild_temporary_failures_exhaust_existing_retry_budget() {
+        let unavailable = ModelError::Unavailable {
+            message: "temporary proxy failure".into(),
+            status: Some(503),
+            retry_after_ms: None,
+        };
+        let inner = history_script(
+            vec![
+                Ok(history_interrupted()),
+                Err(ModelError::HistoryUnavailable),
+                Err(unavailable.clone()),
+                Err(unavailable.clone()),
+                Err(unavailable.clone()),
+            ],
+            false,
+        );
+        let model = CallScopedHistoryModelService::new(
+            inner.clone(),
+            Some(agent_model::ModelRetryPolicy::new(
+                [
+                    agent_model::ModelRetryReason::Connection,
+                    agent_model::ModelRetryReason::Unavailable,
+                ]
+                .into_iter()
+                .collect(),
+                vec![Duration::ZERO; 3],
+                Duration::ZERO,
+            )),
+            None,
+        );
+        assert_eq!(
+            agent_model::collect_model_turn(&model, history_request(), ModelCallContext::default())
+                .await
+                .unwrap_err(),
+            unavailable
+        );
+        let calls = inner.calls.lock().unwrap();
+        assert_eq!(
+            calls
+                .iter()
+                .map(|(_, c)| c.rebuild_server_history)
+                .collect::<Vec<_>>(),
+            [false, false, true, true, true]
+        );
+    }
+    #[tokio::test]
+    async fn history_rebuild_retry_cancellation_prevents_another_request() {
+        struct CancelRetry(tokio_util::sync::CancellationToken);
+        impl ModelAttemptObserver for CancelRetry {
+            fn observe(&self, event: ModelAttemptEvent) {
+                if matches!(
+                    event,
+                    ModelAttemptEvent::RetryScheduled {
+                        next_attempt: 3,
+                        ..
+                    }
+                ) {
+                    self.0.cancel();
+                }
+            }
+        }
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let inner = history_script(
+            vec![
+                Ok(history_interrupted()),
+                Err(ModelError::HistoryUnavailable),
+                Err(ModelError::Unavailable {
+                    message: "temporary proxy failure".into(),
+                    status: Some(503),
+                    retry_after_ms: None,
+                }),
+            ],
+            false,
+        );
+        let model = CallScopedHistoryModelService::new(
+            inner.clone(),
+            Some(agent_model::ModelRetryPolicy::new(
+                [
+                    agent_model::ModelRetryReason::Connection,
+                    agent_model::ModelRetryReason::Unavailable,
+                ]
+                .into_iter()
+                .collect(),
+                vec![Duration::ZERO; 3],
+                Duration::ZERO,
+            )),
+            Some(Arc::new(CancelRetry(cancellation.clone()))),
+        );
+        assert_eq!(
+            agent_model::collect_model_turn(
+                &model,
+                history_request(),
+                ModelCallContext::new(cancellation)
+            )
+            .await
+            .unwrap_err(),
+            ModelError::Cancelled
+        );
+        assert_eq!(inner.calls.lock().unwrap().len(), 3);
+    }
+    #[tokio::test]
+    async fn history_recovery_after_stream_retry_renews_for_each_logical_call() {
+        let inner = history_script(
+            vec![
+                Ok(history_interrupted()),
+                Err(ModelError::HistoryUnavailable),
+                Ok(history_finished()),
+                Ok(history_interrupted()),
+                Err(ModelError::HistoryUnavailable),
+                Ok(history_finished()),
+            ],
+            false,
+        );
+        let model = call_scoped_history(inner.clone());
+        for _ in 0..2 {
+            agent_model::collect_model_turn(&model, history_request(), ModelCallContext::default())
+                .await
+                .unwrap();
+        }
+        let calls = inner.calls.lock().unwrap();
+        assert_eq!(calls.len(), 6);
+        assert_eq!(
+            calls
+                .iter()
+                .map(|(_, c)| c.rebuild_server_history)
+                .collect::<Vec<_>>(),
+            [false, false, true, false, false, true]
+        );
+        assert!(
+            calls
+                .iter()
+                .all(|(request, _)| request == &history_request())
+        );
+    }
+    #[tokio::test]
+    async fn history_recovery_has_one_allowance_across_stream_retry_attempts() {
+        let inner = history_script(
+            vec![
+                Ok(history_interrupted()),
+                Err(ModelError::HistoryUnavailable),
+                Ok(history_interrupted()),
+                Err(ModelError::HistoryUnavailable),
+            ],
+            false,
+        );
+        let model = call_scoped_history(inner.clone());
+        assert_eq!(
+            agent_model::collect_model_turn(&model, history_request(), ModelCallContext::default())
+                .await
+                .unwrap_err(),
+            ModelError::HistoryUnavailable
+        );
+        assert_eq!(inner.calls.lock().unwrap().len(), 4);
+    }
+    #[tokio::test]
+    async fn history_recovery_failed_rebuild_is_not_recursively_rebuilt() {
+        let inner = history_script(
+            vec![
+                Err(ModelError::HistoryUnavailable),
+                Err(ModelError::HistoryUnavailable),
+            ],
+            false,
+        );
+        let model = call_scoped_history(inner.clone());
+        assert!(matches!(
+            model
+                .stream(history_request(), ModelCallContext::default())
+                .await,
+            Err(ModelError::HistoryUnavailable)
+        ));
+        assert_eq!(inner.calls.lock().unwrap().len(), 2);
+    }
+    #[tokio::test]
+    async fn history_recovery_preserves_full_request_and_context_and_one_call_allowance() {
+        let inner = history_script(
+            vec![
+                Err(ModelError::HistoryUnavailable),
+                Ok(vec![]),
+                Err(ModelError::HistoryUnavailable),
+            ],
+            false,
+        );
+        let allowance = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let service = RecoveringHistoryModelService::new(inner.clone(), allowance.clone());
+        let context =
+            ModelCallContext::default().with_trace(agent_model::TraceContext::new("trace-history"));
+        let request = history_request();
+        assert!(
+            service
+                .stream(request.clone(), context.clone())
+                .await
+                .is_ok()
+        );
+        // 同一逻辑调用的重试共享额度，不允许重复重建。
+        let rebound = RecoveringHistoryModelService::new(inner.clone(), allowance);
+        assert!(matches!(
+            rebound.stream(request.clone(), context.clone()).await,
+            Err(ModelError::HistoryUnavailable)
+        ));
+        let calls = inner.calls.lock().unwrap();
+        assert_eq!(
+            calls
+                .iter()
+                .map(|(_, c)| c.rebuild_server_history)
+                .collect::<Vec<_>>(),
+            [false, true, true]
+        );
+        for (actual, actual_context) in calls.iter() {
+            assert_eq!(actual, &request);
+            assert_eq!(actual_context.trace, context.trace);
+            assert_eq!(
+                actual_context.prepared_images.len(),
+                context.prepared_images.len()
+            );
+            assert!(!actual_context.cancellation.is_cancelled());
+        }
+    }
+    #[tokio::test]
+    async fn history_recovery_does_not_retry_ordinary_errors_stream_failures_or_cancellation() {
+        for error in [
+            ModelError::Auth("denied".into()),
+            ModelError::Provider {
+                message: "ordinary invalid request".into(),
+                status: Some(400),
+            },
+            ModelError::Transport {
+                kind: agent_model::ModelTransportErrorKind::Timeout,
+                message: "timeout".into(),
+            },
+        ] {
+            let inner = history_script(vec![Err(error.clone())], false);
+            let service = RecoveringHistoryModelService::new(inner.clone(), Default::default());
+            assert!(
+                matches!(service.stream(history_request(), ModelCallContext::default()).await, Err(actual) if actual == error)
+            );
+            assert_eq!(inner.calls.lock().unwrap().len(), 1);
+        }
+        let error = agent_model::ModelEvent::TurnFailed {
+            error: ModelError::HistoryUnavailable,
+        };
+        let inner = history_script(vec![Ok(vec![error.clone()])], false);
+        let service = RecoveringHistoryModelService::new(inner.clone(), Default::default());
+        let events = futures_util::StreamExt::collect::<Vec<_>>(
+            service
+                .stream(history_request(), ModelCallContext::default())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(events, vec![error]);
+        assert_eq!(inner.calls.lock().unwrap().len(), 1);
+        let inner = history_script(vec![Err(ModelError::HistoryUnavailable)], true);
+        let service = RecoveringHistoryModelService::new(inner.clone(), Default::default());
+        assert!(matches!(
+            service
+                .stream(history_request(), ModelCallContext::default())
+                .await,
+            Err(ModelError::Cancelled)
+        ));
+        assert_eq!(inner.calls.lock().unwrap().len(), 1);
     }
 }

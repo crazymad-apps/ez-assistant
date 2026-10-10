@@ -6,6 +6,7 @@ export class ProviderEntity {
   @PrimaryColumn('uuid') provider_instance_id!: string;
   @Column('jsonb') connection!: ProviderConnection;
   @Column({ type: 'text', select: false }) api_key!: string;
+  @Column({ type: 'text', select: false, nullable: true }) server_history_key!: string | null;
   @Column({ type: 'jsonb', nullable: true }) model_catalog!: CatalogModel[] | null;
   @Column({ type: 'timestamptz', nullable: true }) catalog_refreshed_at!: Date | null;
   @Column('boolean') catalog_connection_changed!: boolean;
@@ -23,4 +24,5 @@ export class ModelSettingsEntity {
   @PrimaryColumn('boolean') singleton!: boolean;
   @Column({ type: 'uuid', nullable: true }) provider_instance_id!: string | null;
   @Column({ type: 'text', nullable: true }) model_id!: string | null;
+  @Column({ type: 'text', nullable: true }) public_origin!: string | null;
 }

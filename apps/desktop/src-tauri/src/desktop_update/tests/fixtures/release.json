@@ -1,0 +1,32 @@
+{
+  "product": "ez-assistant",
+  "version": "0.29.1",
+  "min_supported_version": "0.29.0",
+  "target": "darwin-aarch64",
+  "host": {
+    "version": "0.29.1",
+    "min_supported_version": "0.29.0",
+    "enterprise_protocols": [
+      2
+    ]
+  },
+  "files": [
+    {
+      "name": "desktop.dmg",
+      "purposes": [
+        "installer"
+      ],
+      "size": 1,
+      "sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"
+    },
+    {
+      "name": "desktop.app.tar.gz",
+      "purposes": [
+        "updater"
+      ],
+      "size": 65,
+      "sha256": "f4d049f9cb298e7bdd708a70c5c443ed1d30a24b696e6cc6052a3b9d2ad40220",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSa1VYQUxTcmI3V3Z1QVVxaUk0Vno5OHdONkVITkE5em1iWlBsMHBjaWk4U1RhMGZ1OVF1cVlmbUNENExOYzZMV2R2eXd2Z2RYZmRqcWhsZnE2dVptVW9pZXNuYU56T3dJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwOTI3MTMzCWZpbGU6ZGVza3RvcC5hcHAudGFyLmd6CjRjVlJ0TFJkM1VaZzJNZTJ5RFNRMGtBaEFxNzBKS016TjR1SU5jZmVhR2kvSmMzQnh3a09jMGNJUzhsNWRpdzlKbGdhVkxxTEw5bmxMOW1ZaFk5c0RRPT0K"
+    }
+  ]
+}

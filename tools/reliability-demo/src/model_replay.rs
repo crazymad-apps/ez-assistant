@@ -166,6 +166,7 @@ pub(crate) async fn run_model_replay(trace: &LoadedTrace) -> Result<usize, Repla
             .stream(
                 call.request.clone(),
                 ModelCallContext {
+                    rebuild_server_history: false,
                     cancellation: CancellationToken::new(),
                     trace: Some(agent_model::TraceContext::new(call.correlation_id.clone())),
                     prepared_images: Default::default(),
@@ -304,6 +305,7 @@ mod tests {
             .stream(
                 request(),
                 ModelCallContext {
+                    rebuild_server_history: false,
                     cancellation,
                     trace: None,
                     prepared_images: Default::default(),
@@ -321,6 +323,7 @@ mod tests {
             .stream(
                 request(),
                 ModelCallContext {
+                    rebuild_server_history: false,
                     cancellation: cancellation.clone(),
                     trace: None,
                     prepared_images: Default::default(),

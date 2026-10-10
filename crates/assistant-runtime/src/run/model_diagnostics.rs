@@ -103,7 +103,13 @@ impl ModelAttemptObserver for RunModelDiagnostics {
                     attempt,
                 });
             }
-            ModelAttemptEvent::EstablishmentFailed {
+            ModelAttemptEvent::StreamFailed {
+                attempt,
+                error,
+                will_retry,
+                ..
+            }
+            | ModelAttemptEvent::EstablishmentFailed {
                 attempt,
                 error,
                 will_retry,
@@ -171,7 +177,9 @@ pub(crate) fn model_failure_kind(error: &ModelError) -> ModelFailureKind {
             kind: ModelTransportErrorKind::Interrupted,
             ..
         } => ModelFailureKind::StreamInterrupted,
-        ModelError::Provider { .. } => ModelFailureKind::ProviderRejected,
+        ModelError::HistoryUnavailable | ModelError::Provider { .. } => {
+            ModelFailureKind::ProviderRejected
+        }
         ModelError::RateLimited { .. } => ModelFailureKind::RateLimited,
         ModelError::Unavailable { .. } => ModelFailureKind::ServiceUnavailable,
         ModelError::ContextOverflow { .. } => ModelFailureKind::ContextOverflow,

@@ -142,6 +142,11 @@ export type AuditUserFields = {
 };
 
 export type AuditDetails = {
+    target?: string;
+    release_publication?: 'published' | 'withdrawn';
+    feedback_id?: string;
+    status?: 'pending' | 'processing' | 'resolved' | 'closed';
+    previous_status?: 'pending' | 'processing' | 'resolved' | 'closed';
     name?: string;
     version?: string;
     platforms?: Array<PluginPlatform>;
@@ -161,6 +166,7 @@ export type AuditDetails = {
     model_count?: number;
     count?: number;
     default_model?: ModelSelection | null;
+    public_origin?: string | null;
     before?: AuditUserFields;
     after?: AuditUserFields;
 };
@@ -199,6 +205,9 @@ export type ProviderConnection = {
     protocol_preference: 'auto' | 'responses' | 'chat_completions';
     models_path: string;
     discovery_format: 'openai' | 'vllm' | 'moonshot' | 'dashscope_native';
+    responses_transport?: 'http' | 'websocket';
+    server_history_enabled: boolean;
+    server_history_support_override: 'supported' | 'unsupported' | null;
 };
 
 export type ProviderSummary = {
@@ -308,13 +317,18 @@ export type SaveModelConfiguration = {
 
 export type ModelSettings = {
     default_model: ModelSelection | null;
+    public_origin: string | null;
     state: 'ready' | 'unavailable';
     reason: string | null;
     configuration: ModelConfiguration | null;
 };
 
 export type SaveModelSettings = {
-    default_model: ModelSelection | null;
+    default_model?: ModelSelection | null;
+    /**
+     * 客户端模型访问地址；null 恢复部署地址。与 default_model 分别提交。
+     */
+    public_origin?: string | null;
 };
 
 export type TemplateStatus = {
@@ -334,6 +348,9 @@ export type RuntimeModelConfiguration = {
     protocol?: 'open_ai_responses' | 'open_ai_chat_completions';
     model_id?: string;
     parameters?: ModelParameters;
+    server_history_enabled?: boolean;
+    server_history_support?: 'unknown' | 'supported' | 'unsupported';
+    server_history_binding?: string | null;
 };
 
 export type UsageTotals = {
@@ -653,6 +670,174 @@ export type AgentDetail = {
     diagnostics: Array<AgentDependencyDiagnostic>;
 };
 
+export type FeedbackTarget = {
+    kind: 'platform' | 'plugin' | 'knowledge';
+    reference: string | null;
+    name: string;
+    version: string | null;
+    content_ref: string | null;
+    location: string | null;
+};
+
+export type FeedbackEnvironment = {
+    host_version: string | null;
+    host_os: string | null;
+    host_arch: string | null;
+    client_kind: 'desktop' | 'web' | 'agent';
+    client_version: string | null;
+    client_os: string | null;
+    client_arch: string | null;
+};
+
+export type SubmitFeedbackRequest = {
+    target: FeedbackTarget;
+    title: string;
+    description: string;
+    reproduction: string | null;
+    expected_result: string | null;
+    submission_id: string;
+    source: 'manual' | 'agent';
+    environment: FeedbackEnvironment;
+};
+
+export type FeedbackDetail = {
+    id: string;
+    title: string;
+    target_kind: 'platform' | 'plugin' | 'knowledge';
+    target_name: string;
+    status: 'pending' | 'processing' | 'resolved' | 'closed';
+    source: 'manual' | 'agent';
+    owner_user_id: number;
+    owner_username: string;
+    owner_display_name: string;
+    created_at: string;
+    updated_at: string;
+    submission_id: string;
+    target: FeedbackTarget;
+    description: string;
+    reproduction: string | null;
+    expected_result: string | null;
+    environment: FeedbackEnvironment;
+    handling_note: string | null;
+    handler_user_id: number | null;
+    handler_username: string | null;
+    handler_display_name: string | null;
+};
+
+export type FeedbackSummary = {
+    id: string;
+    title: string;
+    target_kind: 'platform' | 'plugin' | 'knowledge';
+    target_name: string;
+    status: 'pending' | 'processing' | 'resolved' | 'closed';
+    source: 'manual' | 'agent';
+    owner_user_id: number;
+    owner_username: string;
+    owner_display_name: string;
+    created_at: string;
+    updated_at: string;
+};
+
+export type FeedbackPage = {
+    items: Array<FeedbackSummary>;
+    total: number;
+    limit: number;
+    offset: number;
+};
+
+export type HandleFeedbackRequest = {
+    expected_status: 'pending' | 'processing' | 'resolved' | 'closed';
+    expected_handling_note: string | null;
+    status: 'pending' | 'processing' | 'resolved' | 'closed';
+    handling_note: string | null;
+};
+
+export type DesktopTargetSummary = {
+    target: 'windows-x86_64' | 'windows-aarch64' | 'darwin-aarch64';
+    publication: 'draft' | 'published' | 'withdrawn';
+};
+
+export type DesktopReleaseSummary = {
+    version: string;
+    notes: string;
+    targets: Array<DesktopTargetSummary>;
+};
+
+export type DesktopReleaseHost = {
+    version: string;
+    min_supported_version: string;
+    enterprise_protocols: Array<number>;
+};
+
+export type DesktopReleaseFile = {
+    name: string;
+    purposes: Array<'installer' | 'updater'>;
+    size: number;
+    sha256: string;
+    signature?: string;
+};
+
+export type DesktopReleaseManifest = {
+    product: 'ez-assistant';
+    version: string;
+    min_supported_version: string;
+    target: 'windows-x86_64' | 'windows-aarch64' | 'darwin-aarch64';
+    host: DesktopReleaseHost;
+    files: Array<DesktopReleaseFile>;
+};
+
+export type DesktopTargetDetail = {
+    target: 'windows-x86_64' | 'windows-aarch64' | 'darwin-aarch64';
+    publication: 'draft' | 'published' | 'withdrawn';
+    /**
+     * 原始清单，供上传结果核对
+     */
+    manifest_text: string;
+    manifest_sha256: string;
+    first_published_at: string | null;
+    manifest: DesktopReleaseManifest;
+};
+
+export type DesktopReleaseDetail = {
+    version: string;
+    notes: string;
+    created_at: string;
+    updated_at: string;
+    targets: Array<DesktopTargetDetail>;
+};
+
+export type DesktopReleaseUploadResult = {
+    version: string;
+    target: 'windows-x86_64' | 'windows-aarch64' | 'darwin-aarch64';
+    manifest_sha256: string;
+    result: 'created' | 'replaced' | 'unchanged';
+};
+
+export type DesktopReleaseNotesInput = {
+    /**
+     * 更新说明，最多 16 KiB UTF-8
+     */
+    notes: string;
+    expected_notes: string;
+};
+
+export type DesktopReleasePublicationInput = {
+    manifest_sha256: string;
+    expected_publication: 'draft' | 'published' | 'withdrawn';
+    publication: 'published' | 'withdrawn';
+};
+
+export type DesktopUpdate = {
+    version: string;
+    url: string;
+    signature: string;
+    notes: string;
+    pub_date: string;
+    manifest: string;
+    manifest_signature: string;
+    manifest_sha256: string;
+};
+
 export type LoginRequestWritable = {
     /**
      * 3—64 位 ASCII 账号，trim 后转小写
@@ -716,7 +901,7 @@ export type LoginData = {
 
 export type LoginErrors = {
     /**
-     * 400 输入无效；401 身份失败；403 来源/权限拒绝；409 状态变化；429 限流；503 服务不可用
+     * 400 输入无效；401 身份失败；403 权限拒绝；409 状态变化；429 限流；503 服务不可用
      */
     default: CenterErrorResponse;
 };
@@ -738,7 +923,7 @@ export type GetCurrentIdentityData = {
 
 export type GetCurrentIdentityErrors = {
     /**
-     * 400 输入无效；401 身份失败；403 来源/权限拒绝；409 状态变化；429 限流；503 服务不可用
+     * 400 输入无效；401 身份失败；403 权限拒绝；409 状态变化；429 限流；503 服务不可用
      */
     default: CenterErrorResponse;
 };
@@ -762,7 +947,7 @@ export type LogoutData = {
 
 export type LogoutErrors = {
     /**
-     * 400 输入无效；401 身份失败；403 来源/权限拒绝；409 状态变化；429 限流；503 服务不可用
+     * 400 输入无效；401 身份失败；403 权限拒绝；409 状态变化；429 限流；503 服务不可用
      */
     default: CenterErrorResponse;
 };
@@ -784,7 +969,7 @@ export type ChangeOwnPasswordData = {
 
 export type ChangeOwnPasswordErrors = {
     /**
-     * 400 输入无效；401 身份失败；403 来源/权限拒绝；409 状态变化；429 限流；503 服务不可用
+     * 400 输入无效；401 身份失败；403 权限拒绝；409 状态变化；429 限流；503 服务不可用
      */
     default: CenterErrorResponse;
 };
@@ -849,6 +1034,30 @@ export type CreateUserResponses = {
 };
 
 export type CreateUserResponse = CreateUserResponses[keyof CreateUserResponses];
+
+export type DeleteUserData = {
+    body?: never;
+    path: {
+        id: number;
+    };
+    query?: never;
+    url: '/api/users/{id}';
+};
+
+export type DeleteUserErrors = {
+    /**
+     * 400 无效输入；401 登录失效；403 无管理权限；404 用户不存在；409 账号冲突/管理员保护；429 限流；503 服务不可用
+     */
+    default: CenterErrorResponse;
+};
+
+export type DeleteUserError = DeleteUserErrors[keyof DeleteUserErrors];
+
+export type DeleteUserResponses = {
+    204: void;
+};
+
+export type DeleteUserResponse = DeleteUserResponses[keyof DeleteUserResponses];
 
 export type UpdateUserData = {
     body: UpdateUserRequest;
@@ -1944,3 +2153,391 @@ export type ListRuntimeAgentsResponses = {
 };
 
 export type ListRuntimeAgentsResponse = ListRuntimeAgentsResponses[keyof ListRuntimeAgentsResponses];
+
+export type ListOwnFeedbackData = {
+    body?: never;
+    path?: never;
+    query?: {
+        limit?: number;
+        offset?: number;
+        status?: string;
+        target_kind?: string;
+        /**
+         * 须同时指定目标类型，精确匹配稳定引用
+         */
+        target_reference?: string;
+        /**
+         * 仅知识目标；true 筛选无稳定引用，false 筛选有引用
+         */
+        target_unresolved?: boolean;
+        submission_id?: string;
+    };
+    url: '/api/feedback';
+};
+
+export type ListOwnFeedbackErrors = {
+    /**
+     * 输入、身份、提交标识冲突或处理冲突
+     */
+    default: CenterErrorResponse;
+};
+
+export type ListOwnFeedbackError = ListOwnFeedbackErrors[keyof ListOwnFeedbackErrors];
+
+export type ListOwnFeedbackResponses = {
+    200: FeedbackPage;
+};
+
+export type ListOwnFeedbackResponse = ListOwnFeedbackResponses[keyof ListOwnFeedbackResponses];
+
+export type SubmitFeedbackData = {
+    body: SubmitFeedbackRequest;
+    path?: never;
+    query?: never;
+    url: '/api/feedback';
+};
+
+export type SubmitFeedbackErrors = {
+    /**
+     * 输入、身份、提交标识冲突或处理冲突
+     */
+    default: CenterErrorResponse;
+};
+
+export type SubmitFeedbackError = SubmitFeedbackErrors[keyof SubmitFeedbackErrors];
+
+export type SubmitFeedbackResponses = {
+    200: FeedbackDetail;
+};
+
+export type SubmitFeedbackResponse = SubmitFeedbackResponses[keyof SubmitFeedbackResponses];
+
+export type GetOwnFeedbackData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/api/feedback/{id}';
+};
+
+export type GetOwnFeedbackErrors = {
+    /**
+     * 输入、身份、提交标识冲突或处理冲突
+     */
+    default: CenterErrorResponse;
+};
+
+export type GetOwnFeedbackError = GetOwnFeedbackErrors[keyof GetOwnFeedbackErrors];
+
+export type GetOwnFeedbackResponses = {
+    200: FeedbackDetail;
+};
+
+export type GetOwnFeedbackResponse = GetOwnFeedbackResponses[keyof GetOwnFeedbackResponses];
+
+export type ListAdminFeedbackData = {
+    body?: never;
+    path?: never;
+    query?: {
+        limit?: number;
+        offset?: number;
+        status?: string;
+        target_kind?: string;
+        /**
+         * 须同时指定目标类型，精确匹配稳定引用
+         */
+        target_reference?: string;
+        /**
+         * 仅知识目标；true 筛选无稳定引用，false 筛选有引用
+         */
+        target_unresolved?: boolean;
+        source?: string;
+        owner_user_id?: number;
+        /**
+         * 标题字面包含，不解释通配符
+         */
+        title?: string;
+    };
+    url: '/api/admin/feedback';
+};
+
+export type ListAdminFeedbackErrors = {
+    /**
+     * 输入、身份、提交标识冲突或处理冲突
+     */
+    default: CenterErrorResponse;
+};
+
+export type ListAdminFeedbackError = ListAdminFeedbackErrors[keyof ListAdminFeedbackErrors];
+
+export type ListAdminFeedbackResponses = {
+    200: FeedbackPage;
+};
+
+export type ListAdminFeedbackResponse = ListAdminFeedbackResponses[keyof ListAdminFeedbackResponses];
+
+export type GetAdminFeedbackData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/api/admin/feedback/{id}';
+};
+
+export type GetAdminFeedbackErrors = {
+    /**
+     * 输入、身份、提交标识冲突或处理冲突
+     */
+    default: CenterErrorResponse;
+};
+
+export type GetAdminFeedbackError = GetAdminFeedbackErrors[keyof GetAdminFeedbackErrors];
+
+export type GetAdminFeedbackResponses = {
+    200: FeedbackDetail;
+};
+
+export type GetAdminFeedbackResponse = GetAdminFeedbackResponses[keyof GetAdminFeedbackResponses];
+
+export type HandleFeedbackData = {
+    body: HandleFeedbackRequest;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/api/admin/feedback/{id}';
+};
+
+export type HandleFeedbackErrors = {
+    /**
+     * 输入、身份、提交标识冲突或处理冲突
+     */
+    default: CenterErrorResponse;
+};
+
+export type HandleFeedbackError = HandleFeedbackErrors[keyof HandleFeedbackErrors];
+
+export type HandleFeedbackResponses = {
+    200: FeedbackDetail;
+};
+
+export type HandleFeedbackResponse = HandleFeedbackResponses[keyof HandleFeedbackResponses];
+
+export type ListDesktopReleasesData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/desktop-releases';
+};
+
+export type ListDesktopReleasesErrors = {
+    /**
+     * 权限、发布状态或文件校验失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type ListDesktopReleasesError = ListDesktopReleasesErrors[keyof ListDesktopReleasesErrors];
+
+export type ListDesktopReleasesResponses = {
+    200: Array<DesktopReleaseSummary>;
+};
+
+export type ListDesktopReleasesResponse = ListDesktopReleasesResponses[keyof ListDesktopReleasesResponses];
+
+export type GetDesktopReleaseData = {
+    body?: never;
+    path: {
+        version: string;
+    };
+    query?: never;
+    url: '/api/desktop-releases/{version}';
+};
+
+export type GetDesktopReleaseErrors = {
+    /**
+     * 权限、发布状态或文件校验失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type GetDesktopReleaseError = GetDesktopReleaseErrors[keyof GetDesktopReleaseErrors];
+
+export type GetDesktopReleaseResponses = {
+    200: DesktopReleaseDetail;
+};
+
+export type GetDesktopReleaseResponse = GetDesktopReleaseResponses[keyof GetDesktopReleaseResponses];
+
+export type UploadDesktopReleaseData = {
+    body: {
+        /**
+         * 第一个字段：release.json 原始 UTF-8 字节的 base64（最多 64 KiB 解码字节）
+         */
+        manifest: string;
+        /**
+         * 第二个字段：release.json.sig 原文
+         */
+        signature: string;
+        files: Array<Blob | File>;
+    };
+    path?: never;
+    query?: never;
+    url: '/api/desktop-releases/packages';
+};
+
+export type UploadDesktopReleaseErrors = {
+    /**
+     * 权限、发布状态或文件校验失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type UploadDesktopReleaseError = UploadDesktopReleaseErrors[keyof UploadDesktopReleaseErrors];
+
+export type UploadDesktopReleaseResponses = {
+    200: DesktopReleaseUploadResult;
+};
+
+export type UploadDesktopReleaseResponse = UploadDesktopReleaseResponses[keyof UploadDesktopReleaseResponses];
+
+export type UpdateDesktopReleaseNotesData = {
+    body: DesktopReleaseNotesInput;
+    path: {
+        version: string;
+    };
+    query?: never;
+    url: '/api/desktop-releases/{version}/notes';
+};
+
+export type UpdateDesktopReleaseNotesErrors = {
+    /**
+     * 权限、发布状态或文件校验失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type UpdateDesktopReleaseNotesError = UpdateDesktopReleaseNotesErrors[keyof UpdateDesktopReleaseNotesErrors];
+
+export type UpdateDesktopReleaseNotesResponses = {
+    200: DesktopReleaseDetail;
+};
+
+export type UpdateDesktopReleaseNotesResponse = UpdateDesktopReleaseNotesResponses[keyof UpdateDesktopReleaseNotesResponses];
+
+export type SetDesktopReleasePublicationData = {
+    body: DesktopReleasePublicationInput;
+    path: {
+        version: string;
+        target: string;
+    };
+    query?: never;
+    url: '/api/desktop-releases/{version}/targets/{target}/publication';
+};
+
+export type SetDesktopReleasePublicationErrors = {
+    /**
+     * 权限、发布状态或文件校验失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type SetDesktopReleasePublicationError = SetDesktopReleasePublicationErrors[keyof SetDesktopReleasePublicationErrors];
+
+export type SetDesktopReleasePublicationResponses = {
+    200: DesktopReleaseDetail;
+};
+
+export type SetDesktopReleasePublicationResponse = SetDesktopReleasePublicationResponses[keyof SetDesktopReleasePublicationResponses];
+
+export type DiscoverDesktopUpdateData = {
+    body?: never;
+    path: {
+        target: string;
+        current_version: string;
+    };
+    query?: {
+        /**
+         * 仅连接远程 Host 时填写，三个 Host 字段必须同时提供
+         */
+        host_version?: string;
+        host_min_supported_version?: string;
+        /**
+         * 逗号分隔的企业协议集合
+         */
+        host_protocols?: string;
+    };
+    url: '/api/desktop-updates/{target}/{current_version}';
+};
+
+export type DiscoverDesktopUpdateErrors = {
+    /**
+     * 权限、发布状态或文件校验失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type DiscoverDesktopUpdateError = DiscoverDesktopUpdateErrors[keyof DiscoverDesktopUpdateErrors];
+
+export type DiscoverDesktopUpdateResponses = {
+    200: DesktopUpdate;
+    /**
+     * 没有适用的可下载更新
+     */
+    204: void;
+};
+
+export type DiscoverDesktopUpdateResponse = DiscoverDesktopUpdateResponses[keyof DiscoverDesktopUpdateResponses];
+
+export type GetPublishedDesktopReleaseData = {
+    body?: never;
+    path: {
+        target: string;
+        version: string;
+    };
+    query?: never;
+    url: '/api/desktop-updates/{target}/releases/{version}';
+};
+
+export type GetPublishedDesktopReleaseErrors = {
+    /**
+     * 权限、发布状态或文件校验失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type GetPublishedDesktopReleaseError = GetPublishedDesktopReleaseErrors[keyof GetPublishedDesktopReleaseErrors];
+
+export type GetPublishedDesktopReleaseResponses = {
+    200: DesktopUpdate;
+};
+
+export type GetPublishedDesktopReleaseResponse = GetPublishedDesktopReleaseResponses[keyof GetPublishedDesktopReleaseResponses];
+
+export type DownloadDesktopReleaseData = {
+    body?: never;
+    path: {
+        target: string;
+        version: string;
+        purpose: 'installer' | 'updater';
+    };
+    query?: never;
+    url: '/api/desktop-updates/{target}/releases/{version}/files/{purpose}';
+};
+
+export type DownloadDesktopReleaseErrors = {
+    /**
+     * 权限、发布状态或文件校验失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type DownloadDesktopReleaseError = DownloadDesktopReleaseErrors[keyof DownloadDesktopReleaseErrors];
+
+export type DownloadDesktopReleaseResponses = {
+    200: Blob | File;
+};
+
+export type DownloadDesktopReleaseResponse = DownloadDesktopReleaseResponses[keyof DownloadDesktopReleaseResponses];

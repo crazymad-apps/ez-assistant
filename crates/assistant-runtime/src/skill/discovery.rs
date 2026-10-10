@@ -244,6 +244,17 @@ pub struct SkillNameState {
     pub updated_at_ms: u64,
 }
 
+impl SkillNameState {
+    /// 统一解释名称开关：插件由包启停控制，独立技能才受名称开关约束。
+    pub(crate) fn enabled_for(name: &str, plugin: Option<&str>, states: &[Self]) -> bool {
+        plugin.is_some()
+            || states
+                .iter()
+                .find(|state| state.name.as_str() == name)
+                .is_none_or(|state| state.enabled)
+    }
+}
+
 /// 原子修改一个 Skill 名称开关的高层 Store 命令。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SkillNameStateChange {
@@ -300,10 +311,6 @@ pub fn compile_skill_discovery(
         };
     }
 
-    let enabled = states
-        .iter()
-        .map(|state| (state.name.clone(), state.enabled))
-        .collect::<BTreeMap<_, _>>();
     let mut by_name = BTreeMap::<SkillName, Vec<SkillCandidate>>::new();
     for candidate in &scan.candidates {
         by_name
@@ -360,7 +367,11 @@ pub fn compile_skill_discovery(
             continue;
         }
         // 开关绑定逻辑名称而非当前 Winner；禁用后绝不选择低优先级候补。
-        if enabled.get(&name) == Some(&false) {
+        if !SkillNameState::enabled_for(
+            name.as_str(),
+            independent[0].plugin_name.as_deref(),
+            states,
+        ) {
             scan.diagnostics.push(name_diagnostic(
                 SkillDiagnosticSeverity::Warning,
                 SkillDiagnosticCode::DisabledByName,

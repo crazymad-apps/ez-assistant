@@ -238,6 +238,7 @@ impl AssistantRuntime {
             if start == end {
                 return Ok(GetApplicationSnapshotResult {
                     snapshot: ObservedSnapshot {
+                        observed_at_ms: super::now_ms().ok(),
                         observed_sequence: end,
                         value: ApplicationSnapshot {
                             runtime_lifecycle,
@@ -370,6 +371,7 @@ impl AssistantRuntime {
             if start == end {
                 return Ok(GetSessionViewResult {
                     snapshot: ObservedSnapshot {
+                        observed_at_ms: super::now_ms().ok(),
                         observed_sequence: end,
                         value: SessionViewSnapshot {
                             session: summary,
@@ -449,6 +451,7 @@ impl AssistantRuntime {
             if start == end {
                 return Ok(GetChildTaskViewResult {
                     snapshot: ObservedSnapshot {
+                        observed_at_ms: super::now_ms().ok(),
                         observed_sequence: end,
                         value: ChildTaskViewSnapshot {
                             task,
@@ -556,6 +559,7 @@ impl AssistantRuntime {
             }
             return Ok(ListConversationPageResult {
                 snapshot: ObservedSnapshot {
+                    observed_at_ms: super::now_ms().ok(),
                     observed_sequence: start,
                     value: page,
                 },
@@ -689,6 +693,7 @@ impl AssistantRuntime {
             )?;
             return Ok(GetConversationPageAroundRunResult {
                 snapshot: ObservedSnapshot {
+                    observed_at_ms: super::now_ms().ok(),
                     observed_sequence: start,
                     value: page,
                 },
@@ -860,6 +865,7 @@ impl AssistantRuntime {
         )?;
         Ok(GetConversationPageAroundMessageResult {
             snapshot: ObservedSnapshot {
+                observed_at_ms: super::now_ms().ok(),
                 observed_sequence,
                 value: page,
             },
@@ -996,6 +1002,7 @@ impl AssistantRuntime {
             if start == end {
                 return Ok(GetToolDetailResult {
                     snapshot: ObservedSnapshot {
+                        observed_at_ms: super::now_ms().ok(),
                         observed_sequence: end,
                         value: detail,
                     },
@@ -1130,10 +1137,49 @@ impl AssistantRuntime {
                 }
                 _ => None,
             });
-            let Some(result) = result.filter(|result| result.status == ToolResultStatus::Success)
-            else {
+            let Some(result) = result else {
                 continue;
             };
+            if call.name.as_str() == "edit_file"
+                && let Some(entries) = result
+                    .content
+                    .as_single_json()
+                    .and_then(|json| json.get("files"))
+                    .and_then(serde_json::Value::as_array)
+            {
+                for (index, entry) in entries.iter().enumerate() {
+                    if entry.get("status").and_then(serde_json::Value::as_str) != Some("success")
+                        || tool_batch_resource_ref_id(&call.id, index).as_ref()
+                            != Some(resource_ref_id)
+                        || matches!(owner, ConversationOwner::ChildTask { .. })
+                    {
+                        continue;
+                    }
+                    let Some(path) = entry.get("path").and_then(serde_json::Value::as_str) else {
+                        continue;
+                    };
+                    // 入口只从可靠成功位置派生；Error 整批仍可包含已成功文件。
+                    let path = resolve_recorded_path(&environment.working_directory, path);
+                    let path = self
+                        .store
+                        .current_recorded_resource_path(&path, environment);
+                    let display_name = std::path::Path::new(&path)
+                        .file_name()
+                        .and_then(std::ffi::OsStr::to_str)
+                        .unwrap_or("file")
+                        .to_owned();
+                    return Ok(ResolvedToolFileResource {
+                        media_type: preview_media_type(&display_name).map(str::to_owned),
+                        path,
+                        display_name,
+                        origin: ToolFileResourceOrigin::WorkspaceFile,
+                        tool_image: None,
+                    });
+                }
+            }
+            if result.status != ToolResultStatus::Success {
+                continue;
+            }
             if tool_resource_ref_id(&call.id).as_ref() == Some(resource_ref_id) {
                 if call.name.as_str() == "read_image"
                     || matches!(owner, ConversationOwner::ChildTask { .. })
@@ -1520,10 +1566,6 @@ pub(super) fn project_skill_management(
     states: &[crate::SkillNameState],
     include_plugins: bool,
 ) -> SkillManagementSnapshot {
-    let enabled_by_name = states
-        .iter()
-        .map(|state| (state.name.clone(), state.enabled))
-        .collect::<std::collections::BTreeMap<_, _>>();
     let winners_by_name = discovery
         .winners
         .iter()
@@ -1562,8 +1604,11 @@ pub(super) fn project_skill_management(
         .into_iter()
         .map(|(name, candidate)| {
             // 插件整体启用由扫描入口决定，不继承同名独立技能的历史开关。
-            let enabled = candidate.source == crate::SkillSource::Plugin
-                || enabled_by_name.get(&name).copied().unwrap_or(true);
+            let enabled = crate::SkillNameState::enabled_for(
+                name.as_str(),
+                candidate.plugin_name.as_deref(),
+                states,
+            );
             let health = if !enabled {
                 SkillHealthSnapshot::Disabled
             } else if discovery.status == crate::SkillDiscoveryStatus::Unavailable {
@@ -2056,6 +2101,7 @@ pub(super) fn project_conversation(
                         AssistantPart::Reasoning(part) => {
                             flush_tools(&mut segments, &mut pending_tools);
                             segments.push(AssistantSegment::Reasoning {
+                                source: crate::run::project_reasoning_source(part.source),
                                 part_id: protocol_part_id(part.id.as_str())?,
                                 text: part.text.clone(),
                             });
@@ -2093,6 +2139,7 @@ pub(super) fn project_conversation(
                 flush_tools(&mut segments, &mut pending_tools);
                 let run = context.run_by_message.get(assistant.id.as_str());
                 items.push(ConversationItem::Assistant(AssistantMessageSnapshot {
+                    run_created_at_ms: run.and_then(|run| run.snapshot.created_at_ms),
                     message_id: protocol_message_id(assistant.id.as_str())?,
                     run_id: run.map(|run| run.snapshot.run_id.clone()),
                     attempt: run.map(|run| run.snapshot.attempt),
@@ -2254,34 +2301,40 @@ fn project_tool_files(
     let Some(result) = result else {
         return Ok(Vec::new());
     };
-    if result.status != ToolResultStatus::Success {
-        return Ok(Vec::new());
-    }
     let mut files = Vec::new();
-    if let ToolInputSnapshot::File { operation, path } = input
-        && operation != "read_image"
+    // 批量结果逐项取可靠 success；整 Tool Result 的 Error 不抹去部分完成事实。
+    if let Some(entries) = result
+        .content
+        .as_single_json()
+        .and_then(|json| json.get("files"))
+        .and_then(serde_json::Value::as_array)
+        && matches!(input, ToolInputSnapshot::File { operation, .. } | ToolInputSnapshot::Files { operation, .. } if operation == "edit_file")
     {
-        files.push(ToolFileReference {
-            resource_ref_id: tool_resource_ref_id(call_id).ok_or(
-                RuntimeError::InternalStateUnavailable {
-                    component: "tool resource reference",
-                },
-            )?,
-            origin: ToolFileResourceOrigin::WorkspaceFile,
-            display_name: std::path::Path::new(path)
-                .file_name()
-                .and_then(std::ffi::OsStr::to_str)
-                .unwrap_or(path)
-                .to_owned(),
-            display_path: safe_display_path(path),
-            size_bytes: None,
-            media_type: preview_media_type(path).map(str::to_owned),
-            state: if workspace_resources_available {
-                ToolFileResourceState::Available
-            } else {
-                ToolFileResourceState::Unavailable
-            },
-        });
+        for (index, entry) in entries.iter().enumerate() {
+            if entry.get("status").and_then(serde_json::Value::as_str) != Some("success") {
+                continue;
+            }
+            let Some(path) = entry.get("path").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            files.push(workspace_tool_file(
+                tool_batch_resource_ref_id(call_id, index),
+                path,
+                workspace_resources_available,
+            )?);
+        }
+    } else if let ToolInputSnapshot::File { operation, path } = input
+        && operation != "read_image"
+        && result.status == ToolResultStatus::Success
+    {
+        files.push(workspace_tool_file(
+            tool_resource_ref_id(call_id),
+            path,
+            workspace_resources_available,
+        )?);
+    }
+    if result.status != ToolResultStatus::Success {
+        return Ok(files);
     }
     for (part_index, part) in result.content.as_parts().iter().enumerate() {
         let ToolResultPart::Image { image } = part else {
@@ -2302,6 +2355,39 @@ fn project_tool_files(
         });
     }
     Ok(files)
+}
+
+fn workspace_tool_file(
+    resource_ref_id: Option<ResourceRefId>,
+    path: &str,
+    available: bool,
+) -> RuntimeResult<ToolFileReference> {
+    Ok(ToolFileReference {
+        resource_ref_id: resource_ref_id.ok_or(RuntimeError::InternalStateUnavailable {
+            component: "tool resource reference",
+        })?,
+        origin: ToolFileResourceOrigin::WorkspaceFile,
+        display_name: std::path::Path::new(path)
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or(path)
+            .to_owned(),
+        display_path: safe_display_path(path),
+        size_bytes: None,
+        media_type: preview_media_type(path).map(str::to_owned),
+        state: if available {
+            ToolFileResourceState::Available
+        } else {
+            ToolFileResourceState::Unavailable
+        },
+    })
+}
+
+fn tool_batch_resource_ref_id(
+    call_id: &agent_types::ToolCallId,
+    index: usize,
+) -> Option<ResourceRefId> {
+    ResourceRefId::new(format!("tool-file-{}-{index}", call_id.as_str())).ok()
 }
 
 fn tool_resource_ref_id(call_id: &agent_types::ToolCallId) -> Option<ResourceRefId> {
@@ -2823,6 +2909,47 @@ mod tool_image_projection_tests {
                 .get("model_key")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn batch_edit_partial_errors_only_project_successful_positions_and_keep_legacy_refs() {
+        let call_id = agent_types::ToolCallId::new("edit-call").unwrap();
+        let input = ToolInputSnapshot::Files {
+            operation: "edit_file".into(),
+            paths: vec![
+                "/workspace/a".into(),
+                "/workspace/b".into(),
+                "/workspace/c".into(),
+                "/workspace/d".into(),
+            ],
+        };
+        let result = ToolResult {
+            call_id: call_id.clone(),
+            status: ToolResultStatus::Error,
+            metadata: None,
+            content: ToolResultContent::json(json!({"files":[
+                {"path":"/workspace/a","status":"success","replacements":2},
+                {"path":"/workspace/b","status":"failed","reason":"no match"},
+                {"path":"/workspace/c","status":"unknown","reason":"I/O"},
+                {"path":"/workspace/d","status":"not_executed","reason":"previous_failure"}
+            ]})),
+        };
+        let files = project_tool_files(&call_id, &input, Some(&result), true).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].resource_ref_id.as_str(), "tool-file-edit-call-0");
+        assert_eq!(files[0].state, ToolFileResourceState::Available);
+        let old_input = ToolInputSnapshot::File {
+            operation: "edit_file".into(),
+            path: "/workspace/old".into(),
+        };
+        let old_result = ToolResult {
+            status: ToolResultStatus::Success,
+            content: ToolResultContent::json(json!({"path":"/workspace/old","replacements":1})),
+            ..result
+        };
+        let old = project_tool_files(&call_id, &old_input, Some(&old_result), true).unwrap();
+        assert_eq!(old[0].resource_ref_id.as_str(), "tool-edit-call");
+        assert_eq!(old[0].display_name, "old");
     }
 
     fn image_exchange() -> (

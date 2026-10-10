@@ -2,35 +2,23 @@ import { useRootStore as useResourceRoot } from "../../../stores/RootStoreContex
 import {
   useEffect,
   useLayoutEffect,
-  useMemo,
   useRef,
   useState,
   type KeyboardEvent,
   type MouseEvent,
 } from "react";
 import type {
-  AssistantMessageSnapshot,
   AttachmentSummary,
-  ChildTaskTreeItemSnapshot,
-  MessageId,
   SessionSummary,
   QuotedTextSnapshot,
-  ToolCallId,
   UserMessageSnapshot,
 } from "@ez-assistant/protocol";
 import { Icon } from "../../../components/Icon";
 import { PresenceBoundary } from "../../../components/Presence";
-import type { LiveRunProjection, LiveToolSnapshot } from "../../../stores/LiveExecutionStore";
 import {
-  collapsedSummary,
-  formatDateTime,
   formatTime,
   runStatusLabel,
-  liveRunStatusLabel,
-  runFailureMessage,
-  segmentStateKey,
 } from "./conversationRows";
-import { AssistantSegmentView, LiveSteps } from "./ToolSegments";
 import { DeviceMessageSourceDialog } from "./DeviceMessageSourceDialog";
 import { QuoteDetailDialog } from "../QuoteDetailDialog";
 import styles from "./index.module.scss";
@@ -282,132 +270,6 @@ function openAttachmentMenuFromKeyboard(
   open(attachment, { x: bounds.left + 16, y: bounds.bottom });
 }
 
-export function AssistantTurn(props: Readonly<{
-  child_tasks: readonly ChildTaskTreeItemSnapshot[];
-  messages: readonly AssistantMessageSnapshot[];
-  live_run: LiveRunProjection | null;
-  awaiting_feedback?: boolean;
-  on_child_open?: (item: ChildTaskTreeItemSnapshot) => void;
-  onFork: (message_id: MessageId) => void;
-  show_fork: boolean;
-  onLiveToolClick: (tool: LiveToolSnapshot) => void;
-  onToolClick: (message_id: MessageId, call_id: ToolCallId) => void;
-}>) {
-  const last_message = props.messages.at(-1)!;
-  const [collapsed, setCollapsed] = useState(false);
-  const [reasoning_open, setReasoningOpen] = useState<Record<string, boolean>>({});
-  const body_text = useMemo(
-    () => props.messages.flatMap((message) => message.segments)
-      .filter((segment) => segment.type === "text")
-      .map((segment) => segment.text)
-      .join("\n\n"),
-    [props.messages],
-  );
-  const all_segments = useMemo(() => props.messages.flatMap((message) => message.segments), [props.messages]);
-  return (
-    <article className={`${styles.assistant_message}${props.live_run ? ` ${styles.live_message}` : ""}`} data-message-id={last_message.message_id}>
-      {collapsed ? (
-        <button className={styles.collapsed_message} onClick={() => setCollapsed(false)} type="button">
-          <span>消息已收起</span>
-          <span>{collapsedSummary(all_segments)}</span>
-          <Icon name="chevron-down" size={15} />
-        </button>
-      ) : (
-        <div className={styles.assistant_segments}>
-          {props.messages.map((message) => (
-            <div
-              className={styles.assistant_step}
-              data-message-id={message.message_id}
-              data-quote-role="assistant"
-              data-quote-root="true"
-              key={message.message_id}
-            >
-              {message.segments.map((segment, index) => {
-                const state_key = segmentStateKey(message.message_id, segment, index);
-                return (
-                  <AssistantSegmentView
-                    child_tasks={props.child_tasks}
-                    key={state_key}
-                    is_reasoning_open={segment.type === "reasoning" ? (reasoning_open[state_key] ?? false) : false}
-                    message_id={message.message_id}
-                    on_reasoning_toggle={() => segment.type === "reasoning" && setReasoningOpen((current) => ({ ...current, [state_key]: !current[state_key] }))}
-                    on_child_open={props.on_child_open}
-                    on_tool_click={props.onToolClick}
-                    segment={segment}
-                  />
-                );
-              })}
-            </div>
-          ))}
-          {props.live_run && (
-            <LiveSteps child_tasks={props.child_tasks} on_child_open={props.on_child_open} onToolClick={props.onLiveToolClick} run={props.live_run} />
-          )}
-          {props.live_run?.status === "failed" && <RunFailure run={props.live_run} />}
-        </div>
-      )}
-      {props.live_run?.status === "failed" ? null : props.live_run ? (
-        <div className={styles.live_status} role="status"><span className={styles.live_dot} />{props.awaiting_feedback ? "等待回复" : liveRunStatusLabel(props.live_run)}</div>
-      ) : (
-        <MessageActions
-          can_fork={last_message.can_fork}
-          collapsed={collapsed}
-          on_copy={() => void navigator.clipboard?.writeText(body_text)}
-          on_fork={() => props.onFork(last_message.message_id)}
-          on_toggle={() => setCollapsed((current) => !current)}
-          show_fork={props.show_fork}
-          time={formatDateTime(last_message.finished_at_ms)}
-        />
-      )}
-    </article>
-  );
-}
-
-export function LiveAssistantMessage(props: Readonly<{
-  child_tasks?: readonly ChildTaskTreeItemSnapshot[];
-  on_child_open?: (item: ChildTaskTreeItemSnapshot) => void;
-  onToolClick: (tool: LiveToolSnapshot) => void;
-  run: LiveRunProjection;
-  awaiting_feedback?: boolean;
-}>) {
-  return (
-    <article className={`${styles.assistant_message} ${styles.live_message}`}>
-      <div className={styles.assistant_segments}>
-        <LiveSteps child_tasks={props.child_tasks ?? []} on_child_open={props.on_child_open} onToolClick={props.onToolClick} run={props.run} />
-        {props.run.status === "failed" && <RunFailure run={props.run} />}
-      </div>
-      {props.run.status !== "failed" && <div className={styles.live_status} role="status"><span className={styles.live_dot} />{props.awaiting_feedback ? "等待回复" : liveRunStatusLabel(props.run)}</div>}
-    </article>
-  );
-}
-
-function RunFailure(props: Readonly<{ run: LiveRunProjection }>) {
-  return (
-    <p className={styles.run_error} role="alert">
-      <span aria-hidden="true" />
-      {runFailureMessage(props.run.model_failure_kind, props.run.error_code, props.run.error_message)}
-    </p>
-  );
-}
-
 export function EmptyConversation(props: Readonly<{ title: string; detail: string }>) {
   return <div className={styles.empty}><span><Icon name="message" size={21} /></span><strong>{props.title}</strong><p>{props.detail}</p></div>;
-}
-
-function MessageActions(props: Readonly<{
-  can_fork: boolean;
-  collapsed: boolean;
-  on_copy: () => void;
-  on_fork: () => void;
-  on_toggle: () => void;
-  show_fork: boolean;
-  time: string;
-}>) {
-  return <div className={styles.message_actions}>
-    <button aria-label="复制助手正文" onClick={props.on_copy} type="button"><Icon name="copy" size={15} /></button>
-    {props.show_fork && <button aria-label="从此消息分叉" disabled={!props.can_fork} onClick={props.on_fork} type="button"><Icon name="fork" size={15} /></button>}
-    <button aria-label={props.collapsed ? "展开消息" : "收起消息"} onClick={props.on_toggle} type="button">
-      <Icon name={props.collapsed ? "chevron-down" : "chevron-up"} size={15} />
-    </button>
-    <time>{props.time}</time>
-  </div>;
 }

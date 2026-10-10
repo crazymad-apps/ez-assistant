@@ -2,18 +2,28 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
-  min-height: 0;
-  height: 100%;
   min-width: 0;
 }
+
+.digest {
+  overflow-wrap: anywhere;
+}
+
 .content {
   margin: 0;
+  // 正文自身约束高度，不依赖 Tabs 内部节点的百分比高度链；完整文本保留在 DOM。
+  height: clamp(240px, 50dvh, 640px);
   overflow: auto;
-  flex: 1;
-  min-height: 0;
   white-space: pre;
   overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+
+  &:focus-visible {
+    outline: 2px solid var(--ez-primary);
+    outline-offset: 2px;
+  }
 }
+
 .content[data-wrap='true'] {
   white-space: pre-wrap;
   overflow-wrap: anywhere;

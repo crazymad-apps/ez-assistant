@@ -19,6 +19,7 @@ export const RuntimeConnectionForm = observer(function RuntimeConnectionForm({ c
   const current = connection.current?.connection;
   const local_failed = connection.target === "local" && connection.local_state === "failed";
   const local_upgrade = connection.target === "local" && connection.local_state === "upgrade_required";
+  const update_required = connection.update_required;
   const error = connection.error || (local_failed || local_upgrade ? connection.local_error : null);
   let normalized_origin = "";
   try { normalized_origin = new URL(origin.trim()).origin; } catch { /* 表单尚未填完。 */ }
@@ -27,7 +28,7 @@ export const RuntimeConnectionForm = observer(function RuntimeConnectionForm({ c
     && connection.target === connection.connected_target
     && (connection.target === "local" || normalized_origin === current.address);
   const missing_credentials = connection.mode === "enterprise" && (!username.trim() || !password);
-  const submit_disabled = connection.pending || (connection.target === "local" && connection.local_state === "starting")
+  const submit_disabled = update_required || connection.updates.downloading || connection.updates.installing || connection.pending || (connection.target === "local" && connection.local_state === "starting")
     || (!local_upgrade && (already_connected || missing_credentials || (connection.target === "remote" && (!origin.trim() || !password))));
   let submit_label = connection.target === "local" ? "进入项目" : "连接 Runtime";
   if (settings) submit_label = connection.mode === "enterprise" ? "确认切换" : "切换 Runtime";
@@ -39,6 +40,7 @@ export const RuntimeConnectionForm = observer(function RuntimeConnectionForm({ c
   if (connection.local_state === "starting") local_label = "正在启动 Runtime，首次更新可能需要几分钟…";
   if (local_upgrade) local_label = "本机 Runtime 待更新";
   useEffect(() => { let active = true; void getDesktopPlatform().then((platform) => { if (active) setKeychain(platform === "macos"); }); return () => { active = false; read_owner.current += 1; }; }, []);
+  useEffect(() => { setOrigin(connection.address); }, [connection.address]);
   async function readPassword() {
     if (!keychain || password || !origin.trim()) return;
     const owner = ++read_owner.current;
@@ -56,8 +58,8 @@ export const RuntimeConnectionForm = observer(function RuntimeConnectionForm({ c
     void connection.connectDesktop(connection.target === "local" ? null : origin.trim(), password, remember, username);
   }}>
     <div className={styles.selector} role="group" aria-label="Runtime 目标">
-      <button type="button" aria-pressed={connection.target === "local"} onClick={() => connection.chooseTarget("local")}><Icon name="terminal" size={17} />本机 Runtime</button>
-      <button type="button" aria-pressed={connection.target === "remote"} onClick={() => connection.chooseTarget("remote")}><Icon name="globe" size={17} />其他 Runtime</button>
+      <button type="button" disabled={connection.updates.installing} aria-pressed={connection.target === "local"} onClick={() => connection.chooseTarget("local")}><Icon name="terminal" size={17} />本机 Runtime</button>
+      <button type="button" disabled={connection.updates.installing} aria-pressed={connection.target === "remote"} onClick={() => connection.chooseTarget("remote")}><Icon name="globe" size={17} />其他 Runtime</button>
     </div>
     <div className={styles.target}>
       {connection.target === "local" ? <div className={styles.local}>
@@ -66,24 +68,30 @@ export const RuntimeConnectionForm = observer(function RuntimeConnectionForm({ c
         <span className={styles.status} data-ready={connection.local_state === "ready"} />
       </div> : <div className={styles.remote}>
         <label htmlFor="runtime-origin">Host 地址</label>
-        <input id="runtime-origin" autoComplete="url" placeholder="http://192.168.1.20:7240" value={origin} onBlur={() => { void connection.discoverTarget(origin); void readPassword(); }} onChange={(event) => { read_owner.current += 1; setOrigin(event.target.value); setPassword(""); setRemember(false); setNotice(null); }} required />
+        <input disabled={connection.updates.installing} id="runtime-origin" autoComplete="url" placeholder="http://192.168.1.20:7240" value={origin} onBlur={() => { void connection.discoverTarget(origin); void readPassword(); }} onChange={(event) => { read_owner.current += 1; setOrigin(event.target.value); setPassword(""); setRemember(false); setNotice(null); }} required />
       </div>}
-      {!local_upgrade && (connection.target === "remote" || connection.mode === "enterprise") && <div className={styles.remote}>
+      {!update_required && !local_upgrade && (connection.target === "remote" || connection.mode === "enterprise") && <div className={styles.remote}>
         {connection.mode === "enterprise" && <><label htmlFor="runtime-username">企业账号</label><input id="runtime-username" autoComplete="username" placeholder="输入企业账号" value={username} onChange={(event) => setUsername(event.target.value)} required /></>}
         <label htmlFor="runtime-password">{connection.mode === "enterprise" ? "账号密码" : "访问密码"}</label>
         <input placeholder="请输入" id="runtime-password" type="password" autoComplete="off" value={password} onChange={(event) => { read_owner.current += 1; setPassword(event.target.value); }} required />
         {keychain && connection.mode !== "enterprise" && connection.target === "remote" && <label className={styles.remember}><input type="checkbox" checked={remember} onChange={(event) => setRemember(event.target.checked)} />记住密码</label>}
       </div>}
     </div>
-    {connection.can_retry && connection.error && <Button disabled={connection.pending} onClick={() => void connection.retryInitialization()}>重试初始化</Button>}
-    {!settings && connection.session && <AccountMenu connection={connection} />}
+    {update_required && <div className={styles.update} role="status">
+      <strong>需要更新后继续使用</strong>
+      {!connection.updates.visible && <p>暂时无法更新，请稍后重试。</p>}
+      {connection.updates.visible && <Button variant="primary" size="large" onClick={() => connection.updates.show()}>{connection.updates.installing ? "正在更新" : connection.updates.downloading ? "查看更新进度" : connection.updates.snapshot.available ? "更新并重启" : "查看更新状态"}</Button>}
+      {!connection.updates.downloading && !connection.updates.installing && <Button disabled={connection.pending} onClick={() => void connection.retryUpdateConnection()}>重新连接</Button>}
+    </div>}
+    {!update_required && connection.can_retry && connection.error && <Button disabled={connection.pending} onClick={() => void connection.retryInitialization()}>重试初始化</Button>}
+    {!update_required && !settings && connection.session && <AccountMenu connection={connection} />}
     {settings && <p className={styles.hint}>切换将丢弃未发送草稿，并关闭当前客户端的临时资源。</p>}
-    <Button className={styles.submit} size="large" variant="primary" type="submit" disabled={submit_disabled}>{submit_label}<span aria-hidden="true">→</span></Button>
+    {!update_required && <Button className={styles.submit} size="large" variant="primary" type="submit" disabled={submit_disabled}>{submit_label}<span aria-hidden="true">→</span></Button>}
     <div className={styles.feedback} aria-live="polite">
-      {error && <p className={styles.error} role="alert">{error}</p>}
-      {local_failed && <Button size="small" onClick={() => void connection.startLocal().catch(() => undefined)}>重试启动</Button>}
-      {notice && <p>{notice}</p>}
-      {connection.warning && <p>{connection.warning}</p>}
+      {!update_required && error && <p className={styles.error} role="alert">{error}</p>}
+      {!update_required && local_failed && <Button size="small" onClick={() => void connection.startLocal().catch(() => undefined)}>重试启动</Button>}
+      {!update_required && notice && <p>{notice}</p>}
+      {!update_required && connection.warning && <p>{connection.warning}</p>}
     </div>
   </form>;
 });

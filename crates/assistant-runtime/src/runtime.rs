@@ -15,7 +15,7 @@ mod input;
 mod materialization;
 mod mcp;
 mod memory;
-mod model;
+pub(crate) mod model;
 mod model_management;
 pub use model_management::ExternalModelPublication;
 mod permission;
@@ -530,7 +530,43 @@ impl AssistantRuntime {
     ) -> RuntimeResult<ReloadConfigResult> {
         let _binding = self.model_binding_gate.write().await;
         self.ensure_running()?;
-        let snapshot = self.config_registry.reload().await?;
+        let snapshot = self
+            .config_registry
+            .reload(|previous, next| {
+                // 初次装载（包括普通 Host 重启）不换代；其余请求参数变化在发布前可靠失效。
+                let changed = next.active().is_some_and(|next| {
+                    previous
+                        .accepted_generation()
+                        .is_some_and(|previous| previous != next.generation())
+                });
+                async move {
+                    if changed {
+                        let key = crate::id::generate("history").map_err(|_| {
+                            RuntimeError::InternalStateUnavailable {
+                                component: "history binding",
+                            }
+                        })?;
+                        self.store
+                            .invalidate_server_history_bindings(key.clone())
+                            .await
+                            .map_err(|e| {
+                                RuntimeError::from_store("invalidate global model history", e)
+                            })?;
+                        for session in self
+                            .sessions
+                            .read()
+                            .map_err(|_| RuntimeError::InternalStateUnavailable {
+                                component: "sessions",
+                            })?
+                            .values()
+                        {
+                            session.lock_state()?.server_history_key = Some(key.clone());
+                        }
+                    }
+                    Ok(())
+                }
+            })
+            .await?;
         drop(_binding);
         let _ = self.ensure_controller_session().await;
         self.publish(RuntimeEvent::ConfigChanged);

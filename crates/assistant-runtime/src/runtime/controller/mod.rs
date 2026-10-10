@@ -453,6 +453,7 @@ impl ControllerToolCoordinator {
         goal: Option<assistant_protocol::GoalSnapshot>,
     ) -> RuntimeResult<()> {
         let _ = self.events.send(RuntimeEvent::RunAccepted {
+            created_at_ms: projection.run.created_at_ms,
             session_id: target.id().clone(),
             run_id: projection.run.run_id,
         });

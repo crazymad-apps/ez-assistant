@@ -13,6 +13,7 @@ import { DesktopEntryPage } from "../features/runtime-access/DesktopEntryPage";
 import { DesktopLifecycleDialog } from "../features/desktop-lifecycle/DesktopLifecycleDialog";
 import { WebLoginPage } from "../features/runtime-access/WebLoginPage";
 import { WorkspaceTransition } from "../features/runtime-access/WorkspaceTransition";
+import { DesktopUpdatePanel } from "../features/desktop-update";
 
 type AppProps = {
   readonly store: RootStore;
@@ -55,6 +56,7 @@ export const App = observer(function App(props: AppProps) {
       <AppErrorBoundary>
         <ApplicationConnectionContext.Provider value={connection}>
           <AccountDialog connection={connection} />
+          {connection.desktop && <DesktopUpdatePanel store={connection.updates} />}
           <WorkspaceTransition
             ready={connection.phase === "workspace"}
             entry={entry}

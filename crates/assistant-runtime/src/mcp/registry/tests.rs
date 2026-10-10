@@ -19,6 +19,8 @@ struct FixtureConnection {
     calls: StdMutex<VecDeque<Result<McpRawCallResult, McpConnectionError>>>,
     closed: AtomicUsize,
     close_failed: AtomicBool,
+    block_call: AtomicBool,
+    call_started: Notify,
 }
 
 impl FixtureConnection {
@@ -28,6 +30,8 @@ impl FixtureConnection {
             calls: StdMutex::new(VecDeque::new()),
             closed: AtomicUsize::new(0),
             close_failed: AtomicBool::new(false),
+            block_call: AtomicBool::new(false),
+            call_started: Notify::new(),
         })
     }
 
@@ -70,6 +74,10 @@ impl McpConnection for FixtureConnection {
         _cancellation: CancellationToken,
     ) -> McpConnectionFuture<'_, McpRawCallResult> {
         Box::pin(async move {
+            if self.block_call.load(Ordering::SeqCst) {
+                self.call_started.notify_one();
+                std::future::pending::<()>().await;
+            }
             self.calls
                 .lock()
                 .expect("calls")
@@ -945,4 +953,85 @@ async fn unsupported_content_reports_that_remote_may_have_executed() {
         .expect_err("unsupported");
     assert_eq!(failure.kind, McpCallFailureKind::UnsupportedResult);
     assert!(failure.remote_may_have_executed);
+}
+
+#[tokio::test]
+async fn plugin_retirement_cancellation_interrupts_call_without_cancelling_run() {
+    let connection = FixtureConnection::new(vec![tool(json!({"type":"object"}))]);
+    connection.block_call.store(true, Ordering::SeqCst);
+    let registry = Arc::new(McpRegistry::new(FixtureFactory::new(vec![
+        connection.clone(),
+    ])));
+    registry
+        .refresh(
+            candidate(server(1)),
+            None,
+            McpRuntimeConfig::test_default(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .finish()
+        .await;
+    let key = McpServerKey::new("github").unwrap();
+    let invocation = registry
+        .resolve(&key, "create_issue", json!({}))
+        .await
+        .unwrap();
+    let state = registry.current(&key).unwrap().unwrap();
+    let run_cancellation = CancellationToken::new();
+    let run_token = run_cancellation.clone();
+    let executing = registry.clone();
+    let task = tokio::spawn(async move {
+        executing
+            .execute(
+                &invocation,
+                None,
+                &UnavailableMcpImageMaterializer,
+                run_token,
+            )
+            .await
+    });
+    connection.call_started.notified().await;
+    state.call_cancellation.cancel();
+    let removed = registry.remove_current(&key).unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(2), removed.retire())
+        .await
+        .unwrap()
+        .unwrap();
+    let failure = task.await.unwrap().unwrap_err();
+    assert_eq!(failure.kind, McpCallFailureKind::Cancelled);
+    assert!(failure.remote_may_have_executed);
+    assert!(!run_cancellation.is_cancelled());
+    assert_eq!(connection.closed.load(Ordering::SeqCst), 1);
+    assert_eq!(state.active_leases.load(Ordering::Acquire), 0);
+}
+
+#[tokio::test]
+async fn plugin_retirement_reports_close_failure() {
+    let connection = FixtureConnection::new(vec![tool(json!({"type":"object"}))]);
+    connection.close_failed.store(true, Ordering::SeqCst);
+    let registry = McpRegistry::new(FixtureFactory::new(vec![connection.clone()]));
+    let mut configured = server(1);
+    configured.plugin_name = Some("example-tools".into());
+    configured.plugin_sha256 = Some("a".repeat(64));
+    registry
+        .refresh(
+            candidate(configured),
+            None,
+            McpRuntimeConfig::test_default(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .finish()
+        .await;
+    assert!(
+        registry
+            .retire_plugin_package("example-tools", &"a".repeat(64))
+            .await
+            .unwrap()
+            .1
+    );
+    assert_eq!(connection.closed.load(Ordering::SeqCst), 1);
 }

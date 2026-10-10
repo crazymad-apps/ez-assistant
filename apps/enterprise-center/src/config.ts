@@ -1,6 +1,7 @@
 import { isAbsolute, resolve } from 'node:path';
 import { isIP } from 'node:net';
 import { CenterError } from './errors.js';
+import type { WebsocketLimits } from './llm/websocket.js';
 
 export type DatabaseConfig = Readonly<{ url: string }>;
 export type CenterConfig = Readonly<{
@@ -12,8 +13,11 @@ export type CenterConfig = Readonly<{
   templatesFile?: string;
   snapshotRoot?: string;
   pluginRoot?: string;
+  desktopReleaseRoot?: string;
+  desktopUpdateKeyFile?: string;
   llmConnectTimeout?: number;
   llmIdleTimeout?: number;
+  llmWebsocket?: WebsocketLimits;
 }>;
 
 function invalid(): never {
@@ -59,17 +63,26 @@ export function loadConfig(env: NodeJS.ProcessEnv): CenterConfig {
   if (origin.origin !== env.CENTER_PUBLIC_ORIGIN || origin.username || origin.password) return invalid();
   if (!['http:', 'https:'].includes(origin.protocol)) return invalid();
 
-  const timeout = (name: string, fallback: number, max: number) => {
+  const integer = (name: string, fallback: number, min: number, max: number) => {
     const raw = env[name];
     if (raw === undefined) return fallback;
     if (!/^[0-9]+$/.test(raw)) return invalid();
     const value = Number(raw);
-    if (!Number.isSafeInteger(value) || value < 1000 || value > max) return invalid();
+    if (!Number.isSafeInteger(value) || value < min || value > max) return invalid();
     return value;
   };
 
   if (env.CENTER_SNAPSHOT_ROOT !== undefined && !isAbsolute(env.CENTER_SNAPSHOT_ROOT)) invalid();
   if (env.CENTER_PLUGIN_ROOT !== undefined && !isAbsolute(env.CENTER_PLUGIN_ROOT)) invalid();
+  if (env.CENTER_DESKTOP_RELEASE_ROOT !== undefined && !isAbsolute(env.CENTER_DESKTOP_RELEASE_ROOT)) invalid();
+  if (env.CENTER_DESKTOP_UPDATE_PUBLIC_KEY_FILE !== undefined && !isAbsolute(env.CENTER_DESKTOP_UPDATE_PUBLIC_KEY_FILE)) invalid();
+  const llmWebsocket = {
+    idleMs: integer('CENTER_LLM_WS_IDLE_MS', 600000, 1000, 86400000),
+    maxConnections: integer('CENTER_LLM_WS_MAX_CONNECTIONS', 256, 1, 4096),
+    maxPerUser: integer('CENTER_LLM_WS_MAX_PER_USER', 32, 1, 4096),
+    maxBufferBytes: integer('CENTER_LLM_WS_MAX_BUFFER_BYTES', 16 * 1024 * 1024, 1024, 64 * 1024 * 1024),
+  };
+  if (llmWebsocket.maxPerUser > llmWebsocket.maxConnections) invalid();
   return {
     database,
     autoUpgrade: autoUpgrade === 'true',
@@ -78,9 +91,12 @@ export function loadConfig(env: NodeJS.ProcessEnv): CenterConfig {
     origin: origin.origin,
     templatesFile: env.CENTER_MODEL_TEMPLATES_FILE,
     snapshotRoot: env.CENTER_SNAPSHOT_ROOT,
+    desktopReleaseRoot: env.CENTER_DESKTOP_RELEASE_ROOT ?? resolve(process.cwd(), 'data/desktop-releases'),
+    desktopUpdateKeyFile: env.CENTER_DESKTOP_UPDATE_PUBLIC_KEY_FILE,
     pluginRoot: env.CENTER_PLUGIN_ROOT ?? resolve(process.cwd(), 'data/plugins'),
-    llmConnectTimeout: timeout('CENTER_LLM_CONNECT_TIMEOUT_MS', 10000, 120000),
-    llmIdleTimeout: timeout('CENTER_LLM_IDLE_TIMEOUT_MS', 300000, 3600000),
+    llmConnectTimeout: integer('CENTER_LLM_CONNECT_TIMEOUT_MS', 10000, 1000, 120000),
+    llmIdleTimeout: integer('CENTER_LLM_IDLE_TIMEOUT_MS', 300000, 1000, 3600000),
+    llmWebsocket,
   };
 }
 

@@ -93,9 +93,13 @@ Codec、流状态机和 Service，不能通过单次请求失败后互相回退�
   reasoning 历史使用 `Drop`、`ToolCallsOnly`、`PreserveAll` 策略表达，不再使用模糊布尔开关。
 - `OpenAiChatCompletionsService::new_with_capabilities` 接收 Runtime 唯一编译的能力事实；协议 Adapter
   仍独立校验 wire 约束，不能根据一次响应反推或修改模型能力。
-- `OpenAiResponsesService` 首版固定请求 `/responses`、`store: false`、`stream: true`，每次从本地
-  规范 Conversation 编码完整历史；不发送 `previous_response_id`、远端 `conversation`、后台模式
-  或其他服务端会话状态。
+- `OpenAiResponsesService` 默认使用 `/responses`、`store: false`、`stream: true` 和完整本地历史。
+  v0.29.0 F06 M0 的宿主可显式提供可靠 owner/连接绑定启用 `store: true`；Adapter 从已提交
+  Conversation 的 `responses.continuation` 状态校验完整前缀、路由及当前请求参数，再用
+  `previous_response_id` 发送新增消息或成批工具结果。服务实例不持有可变链头，不写存储，
+  SSE 唯一成功终态与尾部验证结束前不发布新续接候选。续接元数据不编码为普通文本或 reasoning。
+  Chat 及关闭续接的完整编码忽略该元数据；其余 ProviderState 保持既有相容性校验。
+  不发送远端 `conversation` 或后台模式。
 - 规范 `ReasoningPart.id` 只用于本地片段聚合，不等同于 Provider 原生 Responses item ID。
   精确原生 item 只能从相容的 `ProviderState` 恢复；DeepSeek 的无状态 Responses 历史使用无
   `id`/`summary` 的明文 `reasoning_text` content，不能把本地 ID 冒充为 Provider item ID。
@@ -105,7 +109,7 @@ Codec、流状态机和 Service，不能通过单次请求失败后互相回退�
   对应 function-call outputs。中间 reasoning/message 不得切断同一批工具调用。
 - Responses 的 `instructions`、用户/助手文本、图片输入、Context Summary、function call/output、
   reasoning、refusal、usage 和终态均由独立 item 状态机映射。并行 function call 按
-  `output_index` 稳定完成；未知 item、缺失终态、坏参数、终态后额外数据和身份冲突均 fail-closed。
+  `output_index` 稳定完成；未知事件类型在有效流期间忽略，不生成正文、usage 或终态，允许上游附加元数据扩展。已知事件格式、未知 item、缺失终态、坏参数、终态后额外数据和身份冲突仍 fail-closed。
 - Responses 原生 `function_call_output` 是否可携带 content parts 由显式 `FunctionOutputShape`
   方言事实决定；String-only 路由使用已验证的批次聚合图片输入，不在运行期试错或切换投影。
 - Responses 精确具名方言包括 DeepSeek Flash/Pro/Vision、DashScope Qwen `qwen3.8-max` 和 Moonshot
@@ -134,3 +138,11 @@ cargo clippy -p agent-openai-compatible --all-targets --all-features -- -D warni
 
 - Chat/Responses 均支持同时注入 Transport 与明确模型能力，保持既有编码、解码及路由规则；普通个人调用继续使用原默认 Transport。
 - `TransportError::Rejected(ModelError)` 传递宿主已判定的请求拒绝，直接交上层，不进入 Adapter 自动重试；Adapter 不识别企业中心错误码或身份。
+
+## v0.29.0 F06 M1 明确历史失效
+
+Responses 仅在本次实际发送 `previous_response_id`、HTTP 400/404 且错误 `code=previous_response_not_found`、`type=invalid_request_error`、`param=previous_response_id` 全部匹配时，返回建流前 `HistoryUnavailable`。普通错误及流内失败不属于该分类。宿主显式设置 `ModelCallContext.rebuild_server_history` 时保持完整本地请求与保存策略、跳过旧 ID；完整成功响应仍产生绑定当前 owner 的候选 ProviderState。Adapter 不拥有恢复额度，不解释 Session/Run，不持有可变内存链头。
+
+## v0.29.0 F03 M1 过程事实
+
+Responses summary/content 在规范 ReasoningPart 和每个 ReasoningDelta 中保留 summary/raw 来源，done 补齐文本沿用同一来源。Qwen 既有 reasoning_text → summary 方言从首个增量即标记 summary；Chat 保持 raw，纯 encrypted item 不生成空 reasoning。原 ProviderState 与请求编码策略不因展示来源而变化。

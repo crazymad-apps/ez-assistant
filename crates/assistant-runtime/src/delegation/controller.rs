@@ -48,6 +48,7 @@ pub(crate) struct ParentDelegationController {
     variant: AgentVariant,
     context_window_tokens: u64,
     child_agent: Arc<Agent>,
+    child_model_binding: Option<Arc<crate::runtime::model::HistoryModelBinding>>,
     child_compactor: Arc<crate::context_compaction::RuntimeContextCompactor>,
     store: Arc<dyn RuntimeStore>,
     registry: Arc<ChildTaskRegistry>,
@@ -73,6 +74,7 @@ pub(crate) struct ParentDelegationResources {
     pub(crate) variant: AgentVariant,
     pub(crate) context_window_tokens: u64,
     pub(crate) child_agent: Arc<Agent>,
+    pub(crate) child_model_binding: Option<Arc<crate::runtime::model::HistoryModelBinding>>,
     pub(crate) child_compactor: Arc<crate::context_compaction::RuntimeContextCompactor>,
     pub(crate) store: Arc<dyn RuntimeStore>,
     pub(crate) registry: Arc<ChildTaskRegistry>,
@@ -90,27 +92,6 @@ pub(crate) struct ParentDelegationResources {
     pub(crate) shell_context: Option<agent_types::UserMessage>,
 }
 
-fn with_disclosure_context(
-    mut conversation: ConversationSnapshot,
-    context: Option<&agent_types::UserMessage>,
-    shell_context: Option<&agent_types::UserMessage>,
-    resources: &crate::runtime::resource_reference::ResourceReferenceProjection,
-) -> ConversationSnapshot {
-    if let Some(shell_context) = shell_context
-        && !crate::shell::context_is_current(&conversation, shell_context)
-    {
-        conversation
-            .messages
-            .push(ConversationMessage::User(shell_context.clone()));
-    }
-    if let Some(context) = context {
-        conversation
-            .messages
-            .push(ConversationMessage::User(context.clone()));
-    }
-    resources.apply(conversation)
-}
-
 impl ParentDelegationController {
     pub(crate) fn new(resources: ParentDelegationResources) -> Self {
         let execution_permits = Arc::new(Semaphore::new(
@@ -123,6 +104,7 @@ impl ParentDelegationController {
             variant: resources.variant,
             context_window_tokens: resources.context_window_tokens,
             child_agent: resources.child_agent,
+            child_model_binding: resources.child_model_binding,
             child_compactor: resources.child_compactor,
             store: resources.store,
             registry: resources.registry,
@@ -235,7 +217,7 @@ impl ParentDelegationController {
                 return Err(child_error(&stored, error));
             }
         };
-        let message = match child_user_message(
+        let mut message = match child_user_message(
             &input,
             self.variant,
             self.session.environment(),
@@ -255,6 +237,56 @@ impl ParentDelegationController {
                 .await?;
                 return Err(child_error(&stored, error));
             }
+        };
+        // child 的初始上下文与首条输入一并提交，后续 Step/压缩续接只读自己的 Journal。
+        for context in [
+            self.shell_context.as_ref(),
+            self.disclosure_context.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            message.parts.extend(context.parts.iter().cloned());
+        }
+        let child_model = if let Some(binding) = &self.child_model_binding {
+            match binding.compile_child(&stored.child_task_id, stored.body_generation) {
+                Ok(model) => Some(model),
+                Err(_) => {
+                    let error = RuntimeErrorInfo::new(
+                        RuntimeErrorCode::Internal,
+                        "child model could not be compiled",
+                    );
+                    self.settle_accepted_and_publish(
+                        &mut stored,
+                        ChildTaskStatus::Failed,
+                        Some(error.clone()),
+                    )
+                    .await?;
+                    return Err(child_error(&stored, error));
+                }
+            }
+        } else {
+            None
+        };
+        let scoped_child_agent = if let Some(model) = child_model {
+            match self.child_agent.try_with_model(model) {
+                Ok(agent) => Arc::new(agent),
+                Err(_) => {
+                    let error = RuntimeErrorInfo::new(
+                        RuntimeErrorCode::Internal,
+                        "child model could not be bound",
+                    );
+                    self.settle_accepted_and_publish(
+                        &mut stored,
+                        ChildTaskStatus::Failed,
+                        Some(error.clone()),
+                    )
+                    .await?;
+                    return Err(child_error(&stored, error));
+                }
+            }
+        } else {
+            self.child_agent.clone()
         };
         let started_at_ms = match crate::runtime::now_ms() {
             Ok(value) => value,
@@ -378,16 +410,10 @@ impl ParentDelegationController {
             .as_ref()
             .ok_or_else(|| ToolError::execution("child task journal is unavailable"))?
             .snapshot();
-        let conversation = with_disclosure_context(
-            conversation,
-            self.disclosure_context.as_ref(),
-            self.shell_context.as_ref(),
-            &self.resource_projection,
-        );
+        let conversation = self.resource_projection.apply(conversation);
         let mut input = ExecutionInput { conversation };
         let mut compaction_count = 0_u32;
-        let child_agent = self
-            .child_agent
+        let mut child_agent = scoped_child_agent
             .try_with_tool(LoadSkillTool::new(
                 self.skill_catalog.clone(),
                 skill_activation_latch,
@@ -462,7 +488,7 @@ impl ParentDelegationController {
                 .expect("a non-zero step plus consumption stays non-zero");
             let Some(reason) = compaction_reason else {
                 input = ExecutionInput {
-                    conversation: with_disclosure_context(
+                    conversation: self.resource_projection.apply(
                         task.lock_state()
                             .map_err(|_| ToolError::execution("child task journal is unavailable"))?
                             .journal
@@ -471,9 +497,6 @@ impl ParentDelegationController {
                                 ToolError::execution("child task journal is unavailable")
                             })?
                             .snapshot(),
-                        self.disclosure_context.as_ref(),
-                        self.shell_context.as_ref(),
-                        &self.resource_projection,
                     ),
                 };
                 continue;
@@ -523,13 +546,31 @@ impl ParentDelegationController {
                         },
                         generation: stored.body_generation,
                     });
+                    if let Some(binding) = &self.child_model_binding {
+                        let rebound = binding
+                            .compile_child(&stored.child_task_id, stored.body_generation)
+                            .and_then(|model| {
+                                child_agent.try_with_model(model).map_err(|_| {
+                                    crate::RuntimeError::InternalStateUnavailable {
+                                        component: "child model",
+                                    }
+                                })
+                            });
+                        match rebound {
+                            Ok(agent) => child_agent = agent,
+                            Err(_) => {
+                                break (
+                                    None,
+                                    Some(RuntimeErrorInfo::new(
+                                        RuntimeErrorCode::Internal,
+                                        "child model could not be rebound",
+                                    )),
+                                );
+                            }
+                        }
+                    }
                     input = ExecutionInput {
-                        conversation: with_disclosure_context(
-                            replacement,
-                            self.disclosure_context.as_ref(),
-                            self.shell_context.as_ref(),
-                            &self.resource_projection,
-                        ),
+                        conversation: self.resource_projection.apply(replacement),
                     };
                 }
                 Err(error) if error.is_cancelled() || child_token.is_cancelled() => {
@@ -612,6 +653,7 @@ impl ParentDelegationController {
             parent_run_id: stored.parent_run_id.clone(),
             child_task_id: stored.child_task_id.clone(),
             event: ChildTaskEvent::Finished {
+                finished_at_ms: stored.finished_at_ms,
                 status: stored.status,
                 error: stored.error.clone(),
             },
@@ -676,6 +718,7 @@ impl ParentDelegationController {
             parent_run_id: stored.parent_run_id.clone(),
             child_task_id: stored.child_task_id.clone(),
             event: ChildTaskEvent::Finished {
+                finished_at_ms: stored.finished_at_ms,
                 status: stored.status,
                 error: stored.error.clone(),
             },

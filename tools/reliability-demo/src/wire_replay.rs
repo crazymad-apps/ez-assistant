@@ -242,6 +242,7 @@ pub(crate) async fn run_wire_replay(trace: &LoadedTrace) -> Result<usize, Replay
             .stream(
                 case.request.clone(),
                 ModelCallContext {
+                    rebuild_server_history: false,
                     cancellation: CancellationToken::new(),
                     trace: Some(trace_context),
                     prepared_images: Default::default(),
@@ -815,6 +816,7 @@ mod tests {
             .stream(
                 request(),
                 ModelCallContext {
+                    rebuild_server_history: false,
                     cancellation,
                     trace: Some(TraceContext::new(CORRELATION)),
                     prepared_images: Default::default(),

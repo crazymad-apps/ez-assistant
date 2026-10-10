@@ -2,17 +2,18 @@
 
 use std::sync::Arc;
 
-use agent_types::ToolName;
+use agent_types::{ToolName, ToolResultStatus};
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     SessionPathResolver, ToolResolution,
     capability::fs::{
-        DeleteFileRequest, DeleteFileResult, EditFileRequest, EditFileResult, FileOperation,
-        FileSystemTool, WriteFileRequest, WriteFileResult,
+        DeleteFileRequest, DeleteFileResult, EditFileEntry, EditFileOutcome, EditFileRequest,
+        EditFileResult, EditReplacement, FileBatchAuthorizationFacts, FileOperation,
+        FileSystemTool, MAX_EDIT_INPUT_BYTES, WriteFileRequest, WriteFileResult,
     },
-    tool::{Tool, ToolContext, ToolError, ToolExecuteFuture, ToolInputDefaults},
+    tool::{Tool, ToolContext, ToolError, ToolExecuteFuture},
 };
 
 use super::{file_context, file_resolution, map_fs_error, resolve_path};
@@ -88,18 +89,84 @@ pub struct FsEditTool {
     resolver: SessionPathResolver,
 }
 
-/// `edit_file` 的模型输入。
-#[derive(Debug, Deserialize, JsonSchema)]
+/// 推荐批量输入与已发布平面输入互斥；两者均进入唯一的冻结请求。
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(untagged, deny_unknown_fields)]
+#[schemars(transform = exclusive_edit_forms)]
+pub enum EditFileInput {
+    Batch {
+        #[schemars(length(min = 1, max = 16))]
+        files: Vec<EditFileInputEntry>,
+    },
+    Legacy {
+        path: String,
+        old_string: String,
+        new_string: String,
+        #[schemars(default = "default_replace_all")]
+        replace_all: Option<bool>,
+    },
+}
+
+/// 模型批量输入中的单文件目标，路径尚未解析。
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct EditFileInput {
-    /// 绝对路径或相对 Session 工作目录的目标路径。
+pub struct EditFileInputEntry {
     pub path: String,
-    /// 需要精确匹配的原文本。
-    pub old_string: String,
-    /// 替换后的新文本。
-    pub new_string: String,
-    /// 是否替换全部匹配；省略时为 `false`。
-    pub replace_all: Option<bool>,
+    #[schemars(length(min = 1, max = 64))]
+    pub edits: Vec<EditReplacement>,
+}
+
+// 两个封闭且互斥的对象分支采用 oneOf，让现有 Provider 子集转换复用对象合并。
+fn exclusive_edit_forms(schema: &mut schemars::Schema) {
+    if let Some(forms) = schema.remove("anyOf") {
+        schema.insert("oneOf".to_owned(), forms);
+    }
+}
+
+fn default_replace_all() -> Option<bool> {
+    Some(false)
+}
+
+impl<'de> Deserialize<'de> for EditFileInput {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // 在默认值和绝对路径展开前核对原始紧凑 JSON 的真实字节预算。
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if serde_json::to_vec(&value)
+            .map_err(serde::de::Error::custom)?
+            .len()
+            > MAX_EDIT_INPUT_BYTES
+        {
+            return Err(serde::de::Error::custom("edit input exceeds 256 KiB"));
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged, deny_unknown_fields)]
+        enum Wire {
+            Batch {
+                files: Vec<EditFileInputEntry>,
+            },
+            Legacy {
+                path: String,
+                old_string: String,
+                new_string: String,
+                #[serde(default = "default_replace_all")]
+                replace_all: Option<bool>,
+            },
+        }
+        match serde_json::from_value::<Wire>(value).map_err(serde::de::Error::custom)? {
+            Wire::Batch { files } => Ok(Self::Batch { files }),
+            Wire::Legacy {
+                path,
+                old_string,
+                new_string,
+                replace_all,
+            } => Ok(Self::Legacy {
+                path,
+                old_string,
+                new_string,
+                replace_all,
+            }),
+        }
+    }
 }
 
 impl FsEditTool {
@@ -119,36 +186,67 @@ impl Tool for FsEditTool {
     }
 
     fn description(&self) -> String {
-        "Replace an exact string; multiple matches require replace_all=true.".to_owned()
-    }
-
-    fn input_defaults(&self) -> ToolInputDefaults {
-        ToolInputDefaults::new().with("replace_all", false)
+        "Edit UTF-8 files with ordered exact replacements: files[{path,edits[{old_string,new_string,replace_all=false}]}]. Legacy path/old_string/new_string is also accepted; never mix forms. Limits: 16 files, 64 edits/file, 128 edits total, 256 KiB JSON; resolved paths at most 1 KiB each and 4 KiB total (8 KiB encoded). Multiple matches require replace_all=true. Each file is validated fully before commit; the batch stops on failure/cancellation and reports success/failed/unknown/not_executed without rollback.".to_owned()
     }
 
     fn resolve(
         &self,
         input: Self::Input,
     ) -> Result<ToolResolution<Self::ResolvedInput>, ToolError> {
-        if input.old_string.is_empty() {
-            return Err(ToolError::invalid_input("old_string must not be empty"));
-        }
-        if input.old_string == input.new_string {
-            return Err(ToolError::invalid_input(
-                "old_string and new_string must differ",
-            ));
-        }
-        let path = resolve_path(&self.resolver, &input.path)?;
-        file_resolution(
-            EditFileRequest {
-                path: path.clone(),
-                old_string: input.old_string,
-                new_string: input.new_string,
-                replace_all: input.replace_all.unwrap_or(false),
+        let files = match input {
+            EditFileInput::Batch { files } => files,
+            EditFileInput::Legacy {
+                path,
+                old_string,
+                new_string,
+                replace_all,
+            } => vec![EditFileInputEntry {
+                path,
+                edits: vec![EditReplacement {
+                    old_string,
+                    new_string,
+                    replace_all: replace_all.unwrap_or(false),
+                }],
+            }],
+        };
+        let request = EditFileRequest {
+            files: files
+                .into_iter()
+                .map(|file| {
+                    Ok(EditFileEntry {
+                        path: resolve_path(&self.resolver, &file.path)?,
+                        edits: file.edits,
+                    })
+                })
+                .collect::<Result<_, ToolError>>()?,
+        };
+        request.validate().map_err(map_fs_error)?;
+        let paths = request.files.iter().map(|file| file.path.clone()).collect();
+        let mut arguments = serde_json::to_value(&request)
+            .map_err(|error| ToolError::invalid_input(error.to_string()))?;
+        arguments["operation"] = serde_json::to_value(FileOperation::Edit)
+            .map_err(|error| ToolError::invalid_input(error.to_string()))?;
+        Ok(ToolResolution::with_facts(
+            request,
+            FileBatchAuthorizationFacts {
+                operation: FileOperation::Edit,
+                paths,
             },
-            FileOperation::Edit,
-            path,
-        )
+            arguments,
+        ))
+    }
+
+    fn output_status(output: &Self::Output) -> ToolResultStatus {
+        if !output.files.is_empty()
+            && output
+                .files
+                .iter()
+                .all(|file| matches!(file.outcome, EditFileOutcome::Success { .. }))
+        {
+            ToolResultStatus::Success
+        } else {
+            ToolResultStatus::Error
+        }
     }
 
     fn execute<'a>(

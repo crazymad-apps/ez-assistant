@@ -18,7 +18,13 @@ pub(super) fn project(
             part_id: PartId::new(id.as_str()).ok()?,
             delta,
         }),
-        AgentEvent::ReasoningDelta { step, id, delta } => Some(ChildTaskEvent::ReasoningDelta {
+        AgentEvent::ReasoningDelta {
+            step,
+            id,
+            delta,
+            source,
+        } => Some(ChildTaskEvent::ReasoningDelta {
+            source: crate::run::project_reasoning_source(source),
             step,
             part_id: PartId::new(id.as_str()).ok()?,
             delta,

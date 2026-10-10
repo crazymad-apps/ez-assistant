@@ -12,6 +12,8 @@ pub(super) fn shell_kind_value(value: assistant_protocol::ShellKind) -> &'static
         Powershell7 => "powershell_7",
         GitBash => "git_bash",
         PosixSh => "posix_sh",
+        Bash => "bash",
+        Zsh => "zsh",
     }
 }
 

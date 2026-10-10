@@ -534,3 +534,44 @@ async fn connected_event_consumer_observes_reliable_terminal_event() {
     ));
     assert!(event_task.await.expect("event task joins").is_some());
 }
+
+#[tokio::test]
+async fn model_rebinding_keeps_frozen_spec_and_revalidates_model_capabilities() {
+    let original_model = Arc::new(ScriptedModelService::completing(
+        capabilities(false, true),
+        CONTEXT_WINDOW_TOKENS,
+        text_message("original-answer", "original"),
+    ));
+    let replacement = Arc::new(ScriptedModelService::completing(
+        capabilities(false, true),
+        CONTEXT_WINDOW_TOKENS,
+        text_message("new-answer", "new"),
+    ));
+    let agent = AgentBuilder::new(original_model.clone(), prompt(), evaluator())
+        .tools(tool_snapshot("fixture_tool", OrderLog::default()))
+        .build()
+        .unwrap();
+    let rebound = agent.try_with_model(replacement.clone()).unwrap();
+    assert_eq!(rebound.execution_budget(), agent.execution_budget());
+    assert_eq!(rebound.system_prompt(), agent.system_prompt());
+    assert!(matches!(
+        complete_ephemeral(&rebound, input("user-rebound", "hello")).await,
+        ExecutionOutcome::Completed { .. }
+    ));
+    assert_eq!(original_model.take_requests().len(), 0);
+    assert_eq!(replacement.take_requests().len(), 1);
+    assert!(matches!(
+        complete_ephemeral(&agent, input("user-original", "hello")).await,
+        ExecutionOutcome::Completed { .. }
+    ));
+    assert_eq!(original_model.take_requests().len(), 1);
+    let unsupported = Arc::new(ScriptedModelService::completing(
+        capabilities(false, false),
+        CONTEXT_WINDOW_TOKENS,
+        text_message("invalid", "invalid"),
+    ));
+    assert!(
+        agent.try_with_model(unsupported).is_err(),
+        "bound tools require model support"
+    );
+}

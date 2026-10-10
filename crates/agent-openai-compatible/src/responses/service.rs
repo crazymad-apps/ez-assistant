@@ -27,6 +27,8 @@ const ERROR_BODY_SAMPLE_LIMIT: usize = 2048;
 
 #[derive(Debug, Error)]
 pub enum OpenAiResponsesServiceError {
+    #[error("server history requires a non-empty bounded binding")]
+    InvalidHistoryBinding,
     /// 独立输入上限必须为正整数，且不能超过同一服务的上下文窗口。
     #[error("model input limit must be positive and within the context window")]
     InvalidInputLimit,
@@ -38,6 +40,7 @@ pub enum OpenAiResponsesServiceError {
 
 /// 一条构造期固定路由的 OpenAI Responses compatible 单 Turn 服务。
 pub struct OpenAiResponsesService {
+    history_binding: Option<String>,
     base_url: String,
     credential: BearerCredential,
     model: String,
@@ -49,6 +52,22 @@ pub struct OpenAiResponsesService {
 }
 
 impl OpenAiResponsesService {
+    /// 宿主显式启用的可靠 owner/连接绑定；不保存内存链头，重启后从 Conversation 恢复。
+    ///
+    /// # Errors
+    /// 空、过长或含控制字符的绑定返回配置错误。
+    pub fn with_server_history(
+        mut self,
+        binding: impl Into<String>,
+    ) -> Result<Self, OpenAiResponsesServiceError> {
+        let binding = binding.into();
+        if binding.is_empty() || binding.len() > 2048 || binding.chars().any(char::is_control) {
+            return Err(OpenAiResponsesServiceError::InvalidHistoryBinding);
+        }
+        self.history_binding = Some(binding);
+        Ok(self)
+    }
+
     /// 在构造期绑定已知输入限制；不向 Provider wire 增加非标准字段。
     ///
     /// # Errors
@@ -185,6 +204,7 @@ impl OpenAiResponsesService {
             streaming: true,
         });
         Self {
+            history_binding: None,
             base_url,
             credential,
             model,
@@ -219,12 +239,34 @@ impl ModelService for OpenAiResponsesService {
             if context.cancellation.is_cancelled() {
                 return Err(ModelError::Cancelled);
             }
-            let encoded = encode_request_with_images(
+            let mut encoded = encode_request_with_images(
                 &request,
                 &context.prepared_images,
                 &self.adapter,
                 &self.model,
             )?;
+            let history = if let Some(binding) = &self.history_binding {
+                let fingerprint = super::continuation::request_hash(&encoded)?;
+                if context.rebuild_server_history {
+                    encoded.store = true;
+                } else {
+                    super::continuation::resume(
+                        binding,
+                        &request,
+                        &context.prepared_images,
+                        &self.adapter,
+                        &self.model,
+                        &mut encoded,
+                    )?;
+                }
+                Some((
+                    binding.clone(),
+                    request.conversation.messages.len(),
+                    fingerprint,
+                ))
+            } else {
+                None
+            };
             let body = serde_json::to_vec(&encoded).map_err(|error| {
                 ModelError::Config(format!(
                     "failed to serialize the encoded Responses request: {error}"
@@ -253,6 +295,18 @@ impl ModelService for OpenAiResponsesService {
                 let status = response.status;
                 let headers = response.headers;
                 let sample = read_error_sample(response.body, &context.cancellation).await?;
+                // 仅已发送 previous_response_id 的建立期精确错误允许宿主重建。
+                // 普通 400/404、鉴权和 SSE 错误不获得该语义；不匹配自然语言。
+                if encoded.previous_response_id.is_some()
+                    && matches!(status, 400 | 404)
+                    && serde_json::from_slice::<ResponsesErrorBody>(&sample).is_ok_and(|body| {
+                        body.error.code.as_deref() == Some("previous_response_not_found")
+                            && body.error.kind.as_deref() == Some("invalid_request_error")
+                            && body.error.param.as_deref() == Some("previous_response_id")
+                    })
+                {
+                    return Err(ModelError::HistoryUnavailable);
+                }
                 return Err(classify_http_error(status, &headers, &sample));
             }
             let events = event_stream(
@@ -260,6 +314,7 @@ impl ModelService for OpenAiResponsesService {
                 self.adapter.clone(),
                 self.model.clone(),
                 context.cancellation,
+                history,
             );
             Ok(Box::pin(LifecycleValidator::new(Box::pin(events))) as ModelEventStream)
         })
@@ -355,11 +410,12 @@ fn event_stream(
     adapter: ResponsesProtocolAdapter,
     model: String,
     cancellation: CancellationToken,
+    history: Option<(String, usize, String)>,
 ) -> impl Stream<Item = ModelEvent> + Send {
     async_stream::stream! {
         let mut body = body;
         let mut parser = SseParser::new();
-        let mut assembler = ResponsesAssembler::new(adapter, model);
+        let mut assembler = ResponsesAssembler::new(adapter.clone(), model);
         let mut pending_terminal: Option<Vec<ModelEvent>> = None;
         let mut saw_done_marker = false;
         while !saw_done_marker {
@@ -439,7 +495,12 @@ fn event_stream(
         }
         match (pending_terminal, assembler.finalize()) {
             (Some(events), Ok(_)) => {
-                for event in events {
+                for mut event in events {
+                    if let (Some((binding, len, fingerprint)), ModelEvent::TurnFinished { message }) = (&history, &mut event)
+                        && let Err(error) = super::continuation::attach(binding, *len, fingerprint, &adapter, message) {
+                        yield ModelEvent::TurnFailed { error };
+                        return;
+                    }
                     yield event;
                 }
             }

@@ -3,6 +3,7 @@ import type { AuditDetails, AuditPage, AuditQuery } from '../contracts/audit.js'
 import { audits } from './repository.js';
 import { IdentityError } from '../identity/errors.js';
 import { invalid, page, queryBoolean, queryFields, recordId } from '../validation.js';
+import { parsePublicOrigin } from '../models/parameters.js';
 
 export function auditQuery(value: unknown): AuditQuery & { limit: number; offset: number } {
   const input = queryFields(value, ['id', 'from', 'to', 'actor_user_id', 'action', 'success', 'limit', 'offset']);
@@ -84,6 +85,10 @@ export function auditDetails(value: unknown): AuditDetails {
   for (const key of ['model_count', 'count'] as const)
     if (typeof source[key] === 'number' && Number.isSafeInteger(source[key]) && source[key] >= 0)
       result[key] = source[key];
+  if (source.public_origin === null) result.public_origin = null;
+  else if (typeof source.public_origin === 'string') {
+    try { result.public_origin = parsePublicOrigin(source.public_origin); } catch { /* 不透出非法或带凭据的人工审计内容。 */ }
+  }
   if (source.default_model === null) result.default_model = null;
   else if (source.default_model && typeof source.default_model === 'object') {
     const selection = source.default_model as Record<string, unknown>;

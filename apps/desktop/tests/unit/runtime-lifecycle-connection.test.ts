@@ -178,3 +178,17 @@ it("ignores late readiness after the user closes a connection", async () => {
   expect(transport.command).not.toHaveBeenCalled();
   expect(projection.application).toBeNull();
 });
+
+it("preserves a required-update rejection and stops automatic business reconnects", async () => {
+  vi.useFakeTimers();
+  try {
+    const { coordinator, connection } = create();
+    transport.ready.mockRejectedValueOnce({ code: "center_protocol_incompatible", message: "需要更新后继续使用。" });
+    await coordinator.connect(bootstrap("http://a"));
+    expect(connection.last_error_code).toBe("center_protocol_incompatible");
+    expect(transport.events).not.toHaveBeenCalled();
+    expect(transport.command).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(transport.refresh).not.toHaveBeenCalled();
+  } finally { vi.useRealTimers(); }
+});

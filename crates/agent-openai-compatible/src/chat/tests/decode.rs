@@ -27,6 +27,7 @@ fn decode_response_maps_message_usage_and_finish_reason() {
         message.parts,
         vec![
             AssistantPart::Reasoning(ReasoningPart {
+                source: Default::default(),
                 id: part_id("part_1"),
                 text: "think".to_owned(),
             }),

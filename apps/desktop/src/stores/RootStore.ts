@@ -68,15 +68,25 @@ import { SettingsStore } from "./SettingsStore";
 import { TransientFocusStore } from "./TransientFocusStore";
 import { ResourceWorkspaceStore } from "../features/resource-workspace/ResourceWorkspaceStore";
 
+import { FeedbackCenterStore } from "../features/feedback-center/FeedbackCenterStore";
 import { FeedbackStore } from "../features/feedback/FeedbackStore";
-import { NotificationStore, type NotificationTarget } from "../features/notifications";
+import { NotificationStore, PendingNotificationStore, resolveNotificationContent, type NotificationTarget } from "../features/notifications";
 
 export class RootStore {
   readonly notifications = new NotificationStore({
     scope: () => this.notificationScope(),
     navigate: (target) => this.openNotificationTarget(target),
+    resolveContent: (notification) => resolveNotificationContent(this.#runtime.client, notification),
   });
+  readonly feedback_center = new FeedbackCenterStore({ client: () => this.#runtime.client, scope: () => this.notificationScope() });
   readonly feedback = new FeedbackStore({ client: () => this.#runtime.client, scope: () => this.notificationScope() });
+  readonly pending_notifications = new PendingNotificationStore({
+    client: () => this.#runtime.client,
+    selectedSession: () => this.navigation.selected_session_id,
+    title: (id) => [...(this.projection.application?.active_sessions ?? []), ...(this.projection.application?.archived_sessions ?? [])]
+      .find((session) => session.session_id === id)?.title,
+    feedback: this.feedback,
+  });
   readonly connection = new ConnectionStore();
   readonly composer_quotes = new ComposerQuoteStore();
   readonly transient_focus = new TransientFocusStore();
@@ -134,6 +144,7 @@ export class RootStore {
   #runtime_state_disposer: IReactionDisposer;
   #resource_scope_disposer: IReactionDisposer;
   #provider_defaults_disposer: IReactionDisposer;
+  #pending_notifications_disposer: IReactionDisposer;
   #feedback_disposer: IReactionDisposer;
   #feedback_navigator_disposer: () => void;
 
@@ -142,6 +153,8 @@ export class RootStore {
       on_event: (event) => {
         this.feedback.setScope(this.notificationScope());
         this.feedback.ingest(event);
+        this.pending_notifications.setConnection(this.notificationScope(), this.connection.state === "connected" && !this.projection.is_stale);
+        this.pending_notifications.ingest(event);
         this.notifications.ingest(event);
       },
       require_selected_target: this.target_options.target_kind !== undefined,
@@ -183,6 +196,15 @@ export class RootStore {
         }
       },
     });
+    this.#pending_notifications_disposer = reaction(
+      () => ({ state: this.connection.state, scope: this.notificationScope(), stale: this.projection.is_stale }),
+      ({ state, scope, stale }) => {
+        this.feedback.setScope(scope);
+        this.feedback_center.setScope(scope);
+        this.pending_notifications.setConnection(scope, state === "connected" && !stale);
+      },
+      { fireImmediately: true },
+    );
     this.#feedback_disposer = reaction(
       () => {
         const session_id = this.navigation.selected_session_id;
@@ -191,6 +213,7 @@ export class RootStore {
       },
       ({ state, scope, session_id }) => {
         this.feedback.setScope(scope);
+        this.feedback_center.setScope(scope);
         if (state === "connected" && session_id) void this.feedback.refresh(session_id);
       },
       { fireImmediately: true },
@@ -198,6 +221,7 @@ export class RootStore {
     this.#feedback_navigator_disposer = this.notifications.registerFeedbackNavigator(async (target) => {
       if (!(await this.openNotificationTarget(target))) return;
       await this.feedback.refresh(target.owner.session_id);
+      if (this.feedback.errors.has(target.owner.session_id)) throw new Error("问题尚未同步，请重试。");
       if (target.scope !== this.notificationScope() || this.navigation.selected_session_id !== target.owner.session_id) return;
       const request = this.feedback.requests.get(target.request_id);
       if (request?.status === "pending") this.feedback.open(request);
@@ -1431,9 +1455,12 @@ export class RootStore {
     if (this.#disposed) return;
     this.#flush_view_state();
     this.#disposed = true;
+    this.#pending_notifications_disposer();
+    this.pending_notifications.dispose();
     this.#feedback_disposer();
     this.#feedback_navigator_disposer();
     this.feedback.dispose();
+    this.feedback_center.dispose();
     this.notifications.dispose();
     this.#resource_snapshot_disposer();
     window.removeEventListener("scroll", this.#save_view_state, true);

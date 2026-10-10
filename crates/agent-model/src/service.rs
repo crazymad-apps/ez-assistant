@@ -13,6 +13,7 @@ pub type ModelStreamFuture<'a> =
 
 /// 成功建立的规范模型事件流。
 ///
+/// 显式重试装配可用 `TurnRestarted` 废弃未提交响应并重新开始；
 /// 契约上恰好产生一个终态事件（`TurnFinished` 或 `TurnFailed`）；调用方可以用
 /// [`crate::LifecycleValidator`] 对不信任的生产方强制执行该契约。
 pub type ModelEventStream = Pin<Box<dyn Stream<Item = ModelEvent> + Send>>;
@@ -173,6 +174,7 @@ mod tests {
             ),
             parts: vec![
                 AssistantPart::Reasoning(ReasoningPart {
+                    source: Default::default(),
                     id: PartId::new("reasoning_1").expect("valid part id"),
                     text: "Need the date first".to_owned(),
                 }),
@@ -207,6 +209,7 @@ mod tests {
                         id: part.id.clone(),
                     });
                     events.push_back(ModelEvent::ReasoningDelta {
+                        source: part.source,
                         id: part.id.clone(),
                         delta: part.text.clone(),
                     });

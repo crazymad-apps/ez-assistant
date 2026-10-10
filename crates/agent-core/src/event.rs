@@ -67,6 +67,9 @@ pub enum AgentEvent {
     },
     /// reasoning 文本增量。
     ReasoningDelta {
+        /// 每个增量自带来源，观察者丢失其他事件时仍可正确解释。
+        #[serde(default, skip_serializing_if = "agent_types::ReasoningSource::is_raw")]
+        source: agent_types::ReasoningSource,
         /// 所属 Runtime Run 的最终模型 Turn 序号。
         step: u32,
         /// 片段 ID。
@@ -344,6 +347,7 @@ mod tests {
                 delta: "hello".to_owned(),
             },
             AgentEvent::ReasoningDelta {
+                source: Default::default(),
                 step: 1,
                 id: part_id(),
                 delta: "thinking".to_owned(),

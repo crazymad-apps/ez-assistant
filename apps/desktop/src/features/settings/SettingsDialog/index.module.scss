@@ -419,6 +419,16 @@
 .empty_models { margin: 50px 0; color: var(--ez-text-muted); text-align: center; }
 .more_button { width: var(--ez-control-height); padding: 0 !important; }
 
+.history_policy {
+  display: grid;
+  gap: 8px;
+  margin: 14px 0;
+
+  > label { width: fit-content; grid-template-columns: 34px auto; padding: 0; }
+  > label b { display: block; color: var(--ez-text-secondary); }
+  > p { margin: 0; color: var(--ez-text-muted); font-size: var(--ez-font-small); }
+}
+
 .model_form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px 15px; }
 .model_form label,
 .form_field { display: grid; min-width: 0; gap: 6px; color: var(--ez-text-secondary); font-size: var(--ez-font-small); line-height: 1.4; }

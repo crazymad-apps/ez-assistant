@@ -417,3 +417,19 @@ fn parent_and_child_activation_latches_do_not_share_active_state() {
             .expect("stage child")
     );
 }
+
+#[test]
+fn skill_name_switch_is_shared_by_plugin_and_independent_consumers() {
+    let states = [SkillNameState {
+        name: SkillName::parse("review").unwrap(),
+        enabled: false,
+        updated_at_ms: 1,
+    }];
+    assert!(!SkillNameState::enabled_for("review", None, &states));
+    assert!(SkillNameState::enabled_for("other", None, &states));
+    assert!(SkillNameState::enabled_for(
+        "review",
+        Some("review-tools"),
+        &states
+    ));
+}

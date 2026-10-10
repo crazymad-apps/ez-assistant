@@ -345,7 +345,6 @@ async fn non_retryable_errors_never_consume_a_second_action() {
     let errors = [
         ModelError::Config("bad config".to_owned()),
         ModelError::Auth("bad key".to_owned()),
-        interrupted_error(),
         ModelError::Provider {
             message: "bad request".to_owned(),
             status: Some(400),
@@ -628,12 +627,10 @@ async fn cancellation_while_attempt_is_establishing_wins_over_late_success() {
 }
 
 #[tokio::test]
-async fn established_stream_failures_are_returned_verbatim_without_retry() {
+async fn permanent_stream_failures_are_returned_without_retry() {
     let errors = [
-        interrupted_error(),
         ModelError::Protocol("bad frame".to_owned()),
         ModelError::Cancelled,
-        rate_limited(Some(0)),
     ];
 
     for expected in errors {
@@ -748,6 +745,7 @@ async fn concurrent_logical_calls_keep_attempts_and_failures_isolated() {
         match event {
             ModelAttemptEvent::Started { trace, attempt }
             | ModelAttemptEvent::StreamEstablished { trace, attempt }
+            | ModelAttemptEvent::StreamFailed { trace, attempt, .. }
             | ModelAttemptEvent::EstablishmentFailed { trace, attempt, .. } => {
                 assert_eq!(
                     trace.and_then(|trace| trace.attempt).map(NonZeroU32::get),
@@ -766,4 +764,73 @@ async fn concurrent_logical_calls_keep_attempts_and_failures_isolated() {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn stream_and_establishment_failures_share_one_finite_budget() {
+    let inner = Arc::new(ScriptedService::new([
+        terminal(interrupted_error()),
+        ScriptAction::Fail(connection_error("reconnect failed")),
+        terminal(interrupted_error()),
+    ]));
+    let observer = Arc::new(AttemptCollector::default());
+    let service = RetryingModelService::with_observer(
+        inner.clone(),
+        policy(vec![Duration::ZERO, Duration::ZERO]),
+        observer.clone(),
+    );
+    let events: Vec<_> = service
+        .stream(request(), ModelCallContext::default())
+        .await
+        .expect("initial stream")
+        .collect()
+        .await;
+    assert_eq!(
+        events,
+        vec![
+            ModelEvent::TurnRestarted,
+            ModelEvent::TurnFailed {
+                error: interrupted_error()
+            }
+        ]
+    );
+    let calls = inner.calls();
+    assert_eq!(calls.len(), 3);
+    assert!(calls.iter().all(|call| call.request == request()));
+    assert!(observer.events().iter().any(|event| matches!(
+        event,
+        ModelAttemptEvent::StreamFailed {
+            attempt: 3,
+            will_retry: false,
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
+async fn cancellation_during_stream_retry_wait_stops_reconnection() {
+    let cancellation = CancellationToken::new();
+    let observer = Arc::new(CancellingObserver {
+        cancellation: cancellation.clone(),
+        events: Mutex::new(Vec::new()),
+    });
+    let inner = Arc::new(ScriptedService::new([terminal(interrupted_error())]));
+    let service = RetryingModelService::with_observer(
+        inner.clone(),
+        policy(vec![Duration::from_secs(60)]),
+        observer,
+    );
+    let events: Vec<_> = service
+        .stream(request(), ModelCallContext::new(cancellation))
+        .await
+        .expect("stream")
+        .collect()
+        .await;
+    assert_eq!(
+        events,
+        vec![ModelEvent::TurnFailed {
+            error: ModelError::Cancelled
+        }]
+    );
+    assert_eq!(inner.calls().len(), 1);
 }

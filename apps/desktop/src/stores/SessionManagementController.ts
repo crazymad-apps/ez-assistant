@@ -542,8 +542,12 @@ export class SessionManagementController {
       type: "archive_session",
       payload: { session_id },
     }));
-    if (archived) {
-      this.dependencies.navigation.setListMode("archived");
+    if (archived && this.dependencies.navigation.selected_session_id === session_id) {
+      // 归档当前会话后回到新建入口；等待期间已切走时不抢占新页面。
+      runInAction(() => {
+        this.dependencies.navigation.setListMode("active");
+        this.dependencies.select_draft(null);
+      });
     }
     return archived;
   }

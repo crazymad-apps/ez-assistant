@@ -1,6 +1,7 @@
 import type { ModelParameters, Protocol, ProviderConnection, Support, TokenLimit } from '../contracts/models.js';
 import { supports, efforts, providerTypes, preferences } from '../contracts/models.js';
 import { fields, invalid } from '../validation.js';
+import { serverHistorySupport } from './history.js';
 
 const limits = [
   'context_window_tokens',
@@ -44,6 +45,23 @@ export function text(value: unknown, max: number, empty = false): string {
 export function enumeration<T extends string>(value: unknown, values: readonly T[]): T {
   if (typeof value !== 'string' || !values.includes(value as T)) invalid();
   return value as T;
+}
+
+/** 公开入口只允许 HTTP(S) origin；模型路径由企业中心统一追加。 */
+export function parsePublicOrigin(value: unknown): string {
+  const input = text(value, 8192).trim();
+  let url: URL;
+  try {
+    url = new URL(input);
+  } catch {
+    return invalid();
+  }
+  if (
+    !['http:', 'https:'].includes(url.protocol) || !url.hostname ||
+    url.username || url.password || url.search || url.hash ||
+    (input !== url.origin && input !== `${url.origin}/`)
+  ) invalid();
+  return url.origin;
 }
 
 export function uuid(value: unknown): string {
@@ -168,7 +186,9 @@ export function parseConnection(value: unknown): ProviderConnection {
     'protocol_preference',
     'models_path',
     'discovery_format',
-  ]);
+    'server_history_enabled',
+    'server_history_support_override',
+  ], ['responses_transport']);
   const provider_type = enumeration(input.provider_type, providerTypes);
   const endpoint = text(input.endpoint, 8192);
   let url: URL;
@@ -198,7 +218,12 @@ export function parseConnection(value: unknown): ProviderConnection {
   if (provider_type === 'dashscope_api') discovery_format = 'dashscope_native';
   else if (provider_type === 'vllm' || provider_type === 'moonshot') discovery_format = provider_type;
   if (input.discovery_format !== discovery_format) invalid();
-  const connection = {
+  if (typeof input.server_history_enabled !== 'boolean') invalid();
+  const connection: ProviderConnection = {
+    responses_transport: enumeration(input.responses_transport === undefined ? 'http' : input.responses_transport, ['http', 'websocket'] as const),
+    server_history_enabled: input.server_history_enabled,
+    server_history_support_override: input.server_history_support_override === null
+      ? null : enumeration(input.server_history_support_override, ['supported', 'unsupported'] as const),
     display_name: text(input.display_name, 256),
     provider_type,
     endpoint,
@@ -206,7 +231,9 @@ export function parseConnection(value: unknown): ProviderConnection {
     discovery_format,
     protocol_preference: enumeration(input.protocol_preference, preferences),
   };
+  if (connection.responses_transport === 'websocket' && resolveProtocol(connection) !== 'open_ai_responses') invalid();
   resolveProtocol(connection);
+  if (connection.server_history_enabled && serverHistorySupport(connection) !== 'supported') invalid();
   return connection;
 }
 

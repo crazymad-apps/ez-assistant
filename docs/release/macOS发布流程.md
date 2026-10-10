@@ -6,8 +6,8 @@
 ## 2026-09-14 v0.25.3 发布记录
 
 - 源码标签 `v0.25.3` 指向提交 `ec834abf69b94745b889a66aca1ab6aaa43f1cf3`。用户使用本手册入口完成 macOS arm64 手工打包；最终本地 DMG 为 `target/aarch64-apple-darwin/release/bundle/dmg/EZ Assistant_0.25.3_aarch64.dmg`，大小 39,575,747 字节，SHA-256 为 `6e4d473fdaf38e53e55e1ab491401fddedd133e1d3d0890e46a3ff953a8cbd92`。
-- Developer ID 为 `Developer ID Application: Jaile Chen (89423ZTFD9)`，Team ID `89423ZTFD9`；证书有效期为 2026-08-19 02:17:53 UTC 至 2031-08-20 02:17:52 UTC，SHA-256 指纹 `03:2F:21:CE:A6:DF:48:71:B3:26:96:D3:DA:72:47:C9:8E:42:A6:08:9B:DE:5A:AE:E0:A1:46:FC:3C:DD:A0:C7`。
-- App 公证 submission `acf4c7c2-f3f1-4744-8d69-b97dfa3602a3`、DMG 公证 submission `22d1abea-32e1-4269-8b16-d40dfb870cda` 均已从 Apple 回读为 `Accepted`。
+- Developer ID 签名检查通过；签名身份、证书元数据及公证任务标识仅保存在本地私有环境记录。
+- App 与 DMG 公证均已从 Apple 回读为 `Accepted`。
 - 独立 `verify:macos-release` 通过：App、Desktop 和内嵌 Runtime 均为 arm64，Developer ID／Hardened Runtime／entitlements／Gatekeeper／stapled ticket 有效；DMG 签名、票据、CRC、只读挂载内容和挂载后 App 验证通过。
 - GitHub Release 公共文件名规范化为 `EZ-Assistant_0.25.3_macos_arm64.dmg`，同时上传同名 `.sha256`。远程资产 digest 与上述 SHA-256 一致；回下载 DMG 与本地产物逐字节一致，校验文件可直接通过 `shasum -a 256 -c`。发布页：[EZ Assistant v0.25.3](https://github.com/crazymad-apps/ez-assistant/releases/tag/v0.25.3)。
 - 本次补发不重新执行 macOS 干净环境安装和交互操作；用户此前已完成人工交互验收，当前记录只把最终签名、公证产物与公开下载闭环对应起来。
@@ -20,7 +20,7 @@
 - 生产 entitlement：`apps/desktop/src-tauri/Entitlements.plist`
 
 总控脚本只支持 Apple Silicon Mac 上的 arm64 Developer ID 发布。Mac App Store、Universal
-Binary、CI/CD、自动更新和其他平台不在当前流程内。
+Binary、CI/CD 和其他平台不在当前流程内。v0.29.0 起同时生成 F01 在线更新制品及签名清单。
 
 ## 2. 首次准备
 
@@ -45,6 +45,14 @@ xcrun notarytool store-credentials "ez-assistant-notary" \
 
 证书私钥、`.p8` 内容、Key ID 和 Issuer ID 不得写入仓库、Markdown、shell 脚本或验收日志。
 
+6. 配置 Tauri 更新签名。可信公钥位于
+   `packages/assistant-protocol/resources/desktop-update.pub`，由 Desktop 构建嵌入并随 Center 装配。
+   私钥只保存在仓库外，使用 `TAURI_SIGNING_PRIVATE_KEY_PATH` 与
+   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 注入；不要上传到中心或随安装包分发。
+   已安装客户端会继续信任内置公钥，后续发布必须沿用对应私钥，不能每次重新生成。
+   私钥文件权限为 `0600`，并独立妥善备份；实际保存位置和注入配置仅在本地私有环境记录中维护。
+   正式签名不得使用历史测试密钥。
+
 ## 3. 每次发布
 
 先确认根 `Cargo.toml` 的 `[workspace.package].version`、`apps/desktop/src-tauri/tauri.conf.json` 与
@@ -59,6 +67,8 @@ export APPLE_TEAM_ID='<TEAM_ID>'
 export APPLE_API_ISSUER='<ISSUER_ID>'
 export APPLE_API_KEY='<KEY_ID>'
 export APPLE_API_KEY_PATH='/absolute/path/to/AuthKey_<KEY_ID>.p8'
+export TAURI_SIGNING_PRIVATE_KEY_PATH='/absolute/path/to/desktop.key'
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD='<PRIVATE_KEY_PASSWORD>'
 
 npm run release:macos
 ```
@@ -73,7 +83,9 @@ npm run release:macos
    DMG ticket。
 6. 运行独立验证，检查 App、所有 Mach-O、DMG、arm64 架构、Developer ID、Team ID、
    Hardened Runtime、entitlements、Gatekeeper、ticket、DMG 完整性和只读挂载内容。
-7. 输出 App/DMG 绝对路径、DMG 大小、最终 SHA-256 和 DMG submission ID。
+7. 从最终 App 生成不携带 AppleDouble/xattrs 的更新压缩包，读取实际随包 Host 构建信息，
+   生成并签名 `release.json` 与在线制品；摘要和签名对应最终公证、装订后的文件。
+8. 输出 App/DMG 绝对路径、DMG 大小、最终 SHA-256 和 DMG submission ID。
 
 终端显示 `macOS release completed.` 且验证脚本显示
 `macOS release verification passed.` 时，本机发布门禁才通过。
@@ -85,6 +97,7 @@ npm run release:macos
 ```text
 target/aarch64-apple-darwin/release/bundle/macos/<PRODUCT_NAME>.app
 target/aarch64-apple-darwin/release/bundle/dmg/<PRODUCT_NAME>_<VERSION>_aarch64.dmg
+target/aarch64-apple-darwin/release/bundle/desktop-release/
 ```
 
 只分发当次脚本最后输出路径与 SHA-256 对应的 stapled DMG。不使用旧 `target`
@@ -120,12 +133,16 @@ xcrun notarytool info <SUBMISSION_ID> --keychain-profile ez-assistant-notary
 - `Accepted`：脚本会继续 staple 和独立验证。
 - `Invalid`：使用 `notarytool log` 查看具体 issue，修复后完整重新构建；不用
   `codesign --deep --force` 覆盖失败。
+- HTTP 403 且提示协议缺失或过期：由 Apple 账号持有人自行确认并签署所需协议，再重新运行完整发布流程。
+  已完成代码签名不能替代公证；仅供内部手动测试的包须明确标注未公证，不视为正式发布门禁通过。
 - 终端中断：Apple 端的已提交任务不会自动取消，但本地自动 staple/验证会停止。优先确认
   submission 状态；若无法明确当前产物是否完整，重新执行总控脚本。
 
 ## 7. 发布证据与最终验收
 
 每次发布至少记录：
+
+签名身份、账号元数据和公证任务标识只写入本地私有记录；公开归档保留验证结论及可公开制品摘要。
 
 - 版本号、DMG 文件名、大小和最终 SHA-256；
 - Developer ID Authority、Team ID 和证书有效期；

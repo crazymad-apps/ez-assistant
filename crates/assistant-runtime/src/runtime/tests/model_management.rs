@@ -15,6 +15,7 @@ struct DiscoveryFactory {
     model: Option<Arc<ScriptedModelService>>,
     fetches: AtomicUsize,
     discovery_timeouts: Mutex<Vec<(Duration, Duration)>>,
+    history_bindings: Mutex<Vec<Option<String>>>,
     compiled_limits: Mutex<Vec<(u64, Option<u64>)>>,
     offline: AtomicBool,
     complete_metadata: AtomicBool,
@@ -27,6 +28,10 @@ impl ModelServiceFactory for DiscoveryFactory {
         &self,
         request: ModelServiceFactoryRequest<'_>,
     ) -> Result<ModelServiceBundle, ModelServiceFactoryError> {
+        self.history_bindings
+            .lock()
+            .unwrap()
+            .push(request.server_history_binding.map(str::to_owned));
         self.compiled_limits
             .lock()
             .unwrap()
@@ -81,6 +86,8 @@ fn connection() -> ProviderConnection {
         protocol_preference: ProviderProtocolPreference::ChatCompletions,
         models_path: "/v1/models".into(),
         discovery_format: ModelDiscoveryFormat::OpenAi,
+        server_history_enabled: false,
+        server_history_support_override: None,
     }
 }
 fn parameters() -> ModelParameters {
@@ -946,4 +953,305 @@ async fn manual_model_is_offline_selectable_and_origin_is_immutable() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn personal_history_policy_is_validated_and_binding_survives_only_unchanged_configuration() {
+    let factory = Arc::new(DiscoveryFactory::default());
+    let runtime = fixture(factory.clone());
+    let mut config = connection();
+    config.server_history_enabled = true;
+    config.server_history_support_override = Some(ModelFeatureSupport::Supported);
+    assert!(
+        runtime
+            .create_provider(CreateProviderRequest {
+                connection: config.clone(),
+                credential: ProviderCredentialChange::Unchanged
+            })
+            .await
+            .is_err(),
+        "Chat cannot be overridden"
+    );
+    config.protocol_preference = ProviderProtocolPreference::Responses;
+    config.server_history_support_override = None;
+    assert!(
+        runtime
+            .create_provider(CreateProviderRequest {
+                connection: config.clone(),
+                credential: ProviderCredentialChange::Unchanged
+            })
+            .await
+            .is_err(),
+        "Unknown custom endpoint cannot enable history"
+    );
+    config.server_history_support_override = Some(ModelFeatureSupport::Supported);
+    let provider = runtime
+        .create_provider(CreateProviderRequest {
+            connection: config.clone(),
+            credential: ProviderCredentialChange::Replace(assistant_protocol::SecretValue::new(
+                "fixture-key".into(),
+            )),
+        })
+        .await
+        .unwrap();
+    let id = provider.provider_instance_id;
+    let original = runtime
+        .provider(&id)
+        .unwrap()
+        .server_history_key
+        .clone()
+        .unwrap();
+    runtime
+        .update_provider(UpdateProviderRequest {
+            provider_instance_id: id.clone(),
+            connection: config.clone(),
+            credential: ProviderCredentialChange::Unchanged,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime.provider(&id).unwrap().server_history_key.as_deref(),
+        Some(original.as_str())
+    );
+    let selection = ModelSelection {
+        provider_instance_id: id.clone(),
+        model_id: "org/model".into(),
+    };
+    runtime
+        .save_model_fixed_config(SaveModelFixedConfigRequest {
+            origin: assistant_protocol::ModelConfigOrigin::Manual,
+            selection: selection.clone(),
+            parameters: parameters(),
+        })
+        .await
+        .unwrap();
+    runtime
+        .set_default_model(assistant_protocol::SetDefaultModelRequest {
+            selection: Some(selection),
+        })
+        .await
+        .unwrap();
+    let session = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session;
+    let input = runtime
+        .submit_input(input_request(&session.session_id, "history scope"))
+        .await
+        .unwrap();
+    wait_for_terminal(&runtime, &session.session_id, &input.run.run_id).await;
+    let bindings = factory.history_bindings.lock().unwrap().clone();
+    assert!(bindings.contains(&Some(format!(
+        "{}:initial:1:{original}",
+        session.session_id.as_str()
+    ))));
+    assert!(
+        bindings.contains(&None),
+        "background services stay stateless"
+    );
+    config.server_history_enabled = false;
+    runtime
+        .update_provider(UpdateProviderRequest {
+            provider_instance_id: id.clone(),
+            connection: config.clone(),
+            credential: ProviderCredentialChange::Unchanged,
+        })
+        .await
+        .unwrap();
+    assert!(runtime.provider(&id).unwrap().server_history_key.is_none());
+    config.server_history_enabled = true;
+    runtime
+        .update_provider(UpdateProviderRequest {
+            provider_instance_id: id.clone(),
+            connection: config.clone(),
+            credential: ProviderCredentialChange::Unchanged,
+        })
+        .await
+        .unwrap();
+    let enabled = runtime
+        .provider(&id)
+        .unwrap()
+        .server_history_key
+        .clone()
+        .unwrap();
+    assert_ne!(enabled, original);
+    runtime
+        .update_provider(UpdateProviderRequest {
+            provider_instance_id: id.clone(),
+            connection: config,
+            credential: ProviderCredentialChange::Replace(assistant_protocol::SecretValue::new(
+                "replacement-fixture-key".into(),
+            )),
+        })
+        .await
+        .unwrap();
+    assert_ne!(
+        runtime.provider(&id).unwrap().server_history_key.as_deref(),
+        Some(enabled.as_str())
+    );
+}
+
+#[tokio::test]
+async fn history_model_switch_epochs_survive_aba_and_default_switches_only_affect_followers() {
+    let factory = Arc::new(DiscoveryFactory::default());
+    let runtime = fixture(factory);
+    let mut config = connection();
+    config.protocol_preference = ProviderProtocolPreference::Responses;
+    config.server_history_enabled = true;
+    config.server_history_support_override = Some(ModelFeatureSupport::Supported);
+    let provider = runtime
+        .create_provider(CreateProviderRequest {
+            connection: config,
+            credential: ProviderCredentialChange::Unchanged,
+        })
+        .await
+        .unwrap();
+    let a = ModelSelection {
+        provider_instance_id: provider.provider_instance_id,
+        model_id: "A".into(),
+    };
+    let b = ModelSelection {
+        model_id: "B".into(),
+        ..a.clone()
+    };
+    for selection in [&a, &b] {
+        runtime
+            .save_model_fixed_config(SaveModelFixedConfigRequest {
+                origin: assistant_protocol::ModelConfigOrigin::Manual,
+                selection: selection.clone(),
+                parameters: parameters(),
+            })
+            .await
+            .unwrap();
+    }
+    runtime
+        .set_default_model(assistant_protocol::SetDefaultModelRequest {
+            selection: Some(a.clone()),
+        })
+        .await
+        .unwrap();
+    let follower = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    let pinned = runtime
+        .create_session(CreateSessionRequest {
+            model_selection: Some(a.clone()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    let key = |id: &assistant_protocol::SessionId| {
+        runtime
+            .sessions
+            .read()
+            .unwrap()
+            .get(id)
+            .unwrap()
+            .lock_state()
+            .unwrap()
+            .server_history_key
+            .clone()
+    };
+    let initial = key(&pinned);
+    for selection in [b.clone(), a.clone()] {
+        runtime
+            .set_session_model(assistant_protocol::SetSessionModelRequest {
+                session_id: pinned.clone(),
+                model_selection: Some(selection),
+            })
+            .await
+            .unwrap();
+    }
+    let changed = key(&pinned);
+    assert_ne!(
+        changed, initial,
+        "ABA without model calls still invalidates the old chain"
+    );
+    runtime
+        .set_session_model(assistant_protocol::SetSessionModelRequest {
+            session_id: pinned.clone(),
+            model_selection: Some(a.clone()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(key(&pinned), changed, "same selection preserves the chain");
+    let follower_before = key(&follower);
+    for selection in [b.clone(), a.clone()] {
+        runtime
+            .set_default_model(assistant_protocol::SetDefaultModelRequest {
+                selection: Some(selection),
+            })
+            .await
+            .unwrap();
+    }
+    assert_ne!(key(&follower), follower_before);
+    assert_eq!(
+        key(&pinned),
+        changed,
+        "default changes leave explicitly pinned sessions alone"
+    );
+    let follower_before_fixed = key(&follower);
+    let pinned_before_fixed = key(&pinned);
+    // Another model's settings leave this binding untouched.
+    runtime
+        .save_model_fixed_config(SaveModelFixedConfigRequest {
+            origin: assistant_protocol::ModelConfigOrigin::Manual,
+            selection: b,
+            parameters: parameters(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(key(&follower), follower_before_fixed);
+    let mut changed_parameters = parameters();
+    changed_parameters.max_output_tokens =
+        assistant_protocol::ModelTokenLimit::Known(std::num::NonZeroU64::new(2048).unwrap());
+    for model_parameters in [changed_parameters, parameters()] {
+        runtime
+            .save_model_fixed_config(SaveModelFixedConfigRequest {
+                origin: assistant_protocol::ModelConfigOrigin::Manual,
+                selection: a.clone(),
+                parameters: model_parameters,
+            })
+            .await
+            .unwrap();
+    }
+    assert_ne!(key(&follower), follower_before_fixed);
+    assert_ne!(key(&pinned), pinned_before_fixed);
+    let stable = key(&pinned);
+    runtime
+        .save_model_fixed_config(SaveModelFixedConfigRequest {
+            origin: assistant_protocol::ModelConfigOrigin::Manual,
+            selection: a,
+            parameters: parameters(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        key(&pinned),
+        stable,
+        "unchanged parameters preserve the chain"
+    );
+    for id in [&follower, &pinned] {
+        assert_eq!(
+            runtime
+                .store
+                .load_session_state(id)
+                .await
+                .unwrap()
+                .state
+                .sessions
+                .into_iter()
+                .find(|session| &session.session_id == id)
+                .unwrap()
+                .server_history_key,
+            key(id),
+            "durable fact equals the live projection"
+        );
+    }
 }

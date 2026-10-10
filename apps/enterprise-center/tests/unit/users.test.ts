@@ -172,7 +172,7 @@ it('OpenAPI 描述真实管理接口、分页字段和只读超级管理员标�
     );
     for (const schema of ['CreateUserRequest', 'UpdateUserRequest'])
       expect(document.components?.schemas?.[schema]).not.toHaveProperty('properties.is_super_admin');
-    expect(document.paths['/api/users/{id}']).not.toHaveProperty('delete');
+    expect(document.paths['/api/users/{id}']!.delete).toMatchObject({ operationId: 'deleteUser' });
     expect(document.components?.schemas?.ResetPasswordRequest).toMatchObject({ required: ['new_password'] });
     expect((await app.inject({ method: 'GET', url: '/api/users' })).statusCode).toBe(503);
   } finally {

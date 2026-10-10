@@ -1,0 +1,13 @@
+if (( __ez_terminal_has_zdotdir )); then
+    ZDOTDIR=$__ez_terminal_user_zdotdir
+else
+    unset ZDOTDIR
+fi
+if [[ -r ${ZDOTDIR-$HOME}/.zprofile ]]; then source "${ZDOTDIR-$HOME}/.zprofile"; fi
+if [[ -o rcs ]]; then
+    __ez_terminal_has_zdotdir=${+ZDOTDIR}
+    __ez_terminal_user_zdotdir=${ZDOTDIR-}
+    ZDOTDIR=$__ez_terminal_startup
+else
+    unset __ez_terminal_startup __ez_terminal_has_zdotdir __ez_terminal_user_zdotdir
+fi

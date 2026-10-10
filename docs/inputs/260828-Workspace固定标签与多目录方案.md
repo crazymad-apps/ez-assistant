@@ -6,7 +6,7 @@
 - 目标版本：`v0.22.0`
 - 目标方向：为 Workspace 增加**固定可读标签（Label）**，并支持**一个 Workspace 下挂多个目录**；同时让 Agent 能感知该关联。
 
-> 正式范围与决策以 [`v0.22.0 功能设计`](../design/v0.22.0-功能设计.md) 为准；本文继续保留现状调研
+> 正式范围与决策以 [`v0.22.0 功能设计`](../versions/v0.22.0/功能设计.md) 为准；本文继续保留现状调研
 > 与早期方案推导，不提前敲定表结构、字段类型或迁移脚本。
 
 ---
@@ -16,8 +16,8 @@
 当前 Runtime 在数据层已经保存了「Session ↔ Workspace」的关联，但该关联对 Agent 而言是**不可读的**，导致实际使用中出错。典型例证：
 
 - 通过 `list_managed_sessions` 能拿到每个会话的 `workspace_id`，但 `workspace_id` 是不透明字符串（如 `w_BrulO6BQ2sGn`）；
-- Agent 无法判断 `w_BrulO6BQ2sGn` 究竟是「宋金战争」还是「EasyAssistant」，于是出现委托到错误会话的问题；
-- `WorkspaceSummary` 没有 name/label 字段，唯一带语义的 `user_directory`（如 `/Users/chenjiale/github/ez-assistant`）没有下发给 Agent，只在存储层可见。
+- Agent 无法判断这个不透明 ID 究竟属于「项目 A」还是「项目 B」，于是出现委托到错误会话的问题；
+- `WorkspaceSummary` 没有 name/label 字段，唯一带语义的 `user_directory`（如 `<本机私有路径>`）没有下发给 Agent，只在存储层可见。
 
 ## 2. 用户明确的业务诉求
 

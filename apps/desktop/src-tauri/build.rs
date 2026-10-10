@@ -1,4 +1,31 @@
 fn main() {
+    // 公钥在构建时嵌入，WebView 和运行时环境不能替换更新信任根。
+    println!("cargo:rerun-if-env-changed=EZ_DESKTOP_UPDATE_PUBLIC_KEY_FILE");
+    let key_path = std::env::var_os("EZ_DESKTOP_UPDATE_PUBLIC_KEY_FILE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            "../../../packages/assistant-protocol/resources/desktop-update.pub".into()
+        });
+    println!("cargo:rerun-if-changed={}", key_path.display());
+    let key = match std::fs::read_to_string(&key_path) {
+        Ok(key) => {
+            assert!(key.len() <= 8192, "update public key is too large");
+            key
+        }
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                && std::env::var_os("EZ_DESKTOP_UPDATE_PUBLIC_KEY_FILE").is_none() =>
+        {
+            String::new()
+        }
+        Err(error) => panic!("cannot read update public key: {error}"),
+    };
+    std::fs::write(
+        std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"))
+            .join("desktop-update.pub"),
+        key,
+    )
+    .expect("embed update public key");
     if std::env::var("CARGO_CFG_TARGET_OS").ok().as_deref() == Some("macos") {
         // The development binary embeds this icon through `generate_context!`.
         // Track it explicitly so icon updates cannot reuse a stale debug binary.

@@ -44,9 +44,6 @@ fn own_data_and_shared_skills_have_distinct_access_from_host_private_files() {
     assert!(p.resolve(dir.path(), true).is_err());
     assert!(p.resolve(&dir.path().join("public/file"), true).is_ok());
     assert!(p.resolve(&dir.path().join("tls.key"), false).is_err());
-    let root = std::fs::canonicalize(dir.path()).unwrap();
-    let excludes = p.search_exclusions(&root).unwrap();
-    assert_eq!(excludes.len(), 3);
 }
 
 #[cfg(unix)]
@@ -113,10 +110,4 @@ fn plugin_packages_are_read_only_and_private_files_are_hidden() {
         assert!(paths.resolve(&path, false).is_err(), "{path:?}");
         assert!(paths.resolve(&path, true).is_err(), "{path:?}");
     }
-    let exclusions = paths
-        .search_exclusions(&std::fs::canonicalize(&paths.user_root).unwrap())
-        .unwrap();
-    assert!(exclusions.contains(
-        &assistant_runtime::resolve_permission_path(&paths.user_root.join("plugins")).unwrap()
-    ));
 }

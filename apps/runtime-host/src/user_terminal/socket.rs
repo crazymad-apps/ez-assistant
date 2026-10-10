@@ -95,11 +95,6 @@ pub(crate) async fn serve(
         }
     };
     let (events, mut output) = mpsc::channel(2);
-    let shell = shell.or(if cfg!(windows) {
-        Some(assistant_protocol::ShellKind::WindowsPowershell51)
-    } else {
-        None
-    });
     // 不可取消 PTY spawn 的 JoinHandle；取得结果并登记后才观察关闭，避免中途丢下子进程。
     let created = async {
         let _gate = tokio::select! { biased;
@@ -117,14 +112,14 @@ pub(crate) async fn serve(
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "/".into());
-        let (id, process, cancelled) = owner
+        let (id, process, cancelled, actual) = owner
             .create(origin, directory, (size, shell), &permit, services.cancellation.clone(), events)
             .await?;
-        Ok::<_, TerminalError>((id, directory_name, process, cancelled))
+        Ok::<_, TerminalError>((id, directory_name, process, cancelled, actual))
     }
     .await;
     drop(slot);
-    let (id, directory_name, process, cancelled) = match created {
+    let (id, directory_name, process, cancelled, actual) = match created {
         Ok(created) => created,
         Err(error) => {
             let _ = notice(
@@ -151,7 +146,7 @@ pub(crate) async fn serve(
         Ok::<_, TerminalError>(())
     });
     let result = async {
-        notice(&mut socket, Notice::Created { terminal_id: id.clone(), directory_name, shell }).await?;
+        notice(&mut socket, Notice::Created { terminal_id: id.clone(), directory_name, shell: actual.shell, shell_name: actual.name }).await?;
         let mut heartbeat = tokio::time::interval_at(Instant::now() + HEARTBEAT, HEARTBEAT);
         let mut last_seen = Instant::now();
         loop {

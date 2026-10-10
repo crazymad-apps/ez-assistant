@@ -15,17 +15,12 @@ export const Access = (mode: Policy['mode'], action?: string) =>
 
 export type AuthenticatedRequest = FastifyRequest & { token?: string; identity?: IdentityResponse };
 
-/** Nest 管理接口和 raw 模型路由共用来源检查；凭据用途仍由各自身份入口校验。 */
-export function requestCredential(request: FastifyRequest, origin?: string, pluginUpload = false): string | undefined {
-  if (
-    (request.headers.origin !== undefined && request.headers.origin !== origin) ||
-    request.headers['sec-fetch-site'] === 'cross-site'
-  )
-    throw new IdentityError(403, 'FORBIDDEN');
+/** Nest 管理接口和 raw 模型路由共用格式与 Bearer 提取；凭据用途由各自身份入口校验。 */
+export function requestCredential(request: FastifyRequest, pluginUpload = false, desktopReleaseUpload = false): string | undefined {
   // 仅带明确上传路由标记的请求可使用归档类型，其余管理写入仍只接受 JSON。
   if (
     ['POST', 'PUT', 'PATCH'].includes(request.method) &&
-    !(pluginUpload ? /^(application\/zip|application\/gzip)$/i : /^application\/json(?:\s*;|$)/i)
+    !(desktopReleaseUpload ? /^multipart\/form-data(?:\s*;|$)/i : (pluginUpload ? /^(application\/zip|application\/gzip)$/i : /^application\/json(?:\s*;|$)/i))
       .test(request.headers['content-type'] ?? '')
   )
     throw new IdentityError(400, 'INVALID_REQUEST');
@@ -36,10 +31,7 @@ export function requestCredential(request: FastifyRequest, origin?: string, plug
 export class HttpSecurity implements CanActivate {
   private readonly reflector = new Reflector();
 
-  constructor(
-    private readonly identity: IdentityService,
-    private readonly origin?: string,
-  ) {}
+  constructor(private readonly identity: IdentityService) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const policy = this.reflector.getAllAndOverride<Policy>(accessPolicy, [context.getHandler(), context.getClass()]);
@@ -47,7 +39,8 @@ export class HttpSecurity implements CanActivate {
 
     const check = async () => {
       const pluginUpload = (request.routeOptions?.config as { pluginUpload?: boolean } | undefined)?.pluginUpload === true;
-      request.token = requestCredential(request, this.origin, pluginUpload);
+      const desktopUpload = (request.routeOptions?.config as { desktopReleaseUpload?: boolean } | undefined)?.desktopReleaseUpload === true;
+      request.token = requestCredential(request, pluginUpload, desktopUpload);
       if (policy?.mode === 'public' || policy?.mode === 'optional') return true;
       request.identity = await this.identity.me(request.token);
       const user = request.identity.user;

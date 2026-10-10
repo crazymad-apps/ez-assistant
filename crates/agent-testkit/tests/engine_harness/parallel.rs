@@ -500,11 +500,11 @@ async fn cancellation_waits_for_every_parallel_tool_cleanup_and_settles_the_grou
             ConversationDelta::Assistant(turn),
             ConversationDelta::Tool(tool_message(
                 "toolmsg_exchange_1_1",
-                error_result("call_1", "interrupted: execution cancelled"),
+                error_result("call_1", "tool execution failed: hung tool interrupted"),
             )),
             ConversationDelta::Tool(tool_message(
                 "toolmsg_exchange_1_2",
-                error_result("call_2", "interrupted: execution cancelled"),
+                error_result("call_2", "tool execution failed: hung tool interrupted"),
             )),
         ]
     );

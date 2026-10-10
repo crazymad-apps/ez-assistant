@@ -64,11 +64,35 @@ impl AssistantRuntime {
             return Ok(settings);
         }
         *target = selection;
+        let server_history_key = if matches!(purpose, SelectionPurpose::Default) {
+            Some(
+                crate::id::generate("history")
+                    .map_err(|_| invalid("默认模型续接绑定无法创建。"))?,
+            )
+        } else {
+            None
+        };
         self.store
-            .save_model_settings(settings.clone())
+            .save_model_settings(settings.clone(), server_history_key.clone())
             .await
             .map_err(|e| RuntimeError::from_store("save model selection", e))?;
         self.managed_models_mut()?.settings = settings.clone();
+        // 写门阻止新 Run 编译；当前 Run 保留冻结配置，后续执行读取已提交的新周期。
+        if let Some(key) = server_history_key {
+            for session in self
+                .sessions
+                .read()
+                .map_err(|_| RuntimeError::InternalStateUnavailable {
+                    component: "sessions",
+                })?
+                .values()
+            {
+                let mut state = session.lock_state()?;
+                if state.model_selection.is_none() {
+                    state.server_history_key = Some(key.clone());
+                }
+            }
+        }
         self.publish(RuntimeEvent::ConfigChanged);
         Ok(settings)
     }

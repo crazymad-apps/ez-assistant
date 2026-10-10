@@ -81,7 +81,7 @@ it('真实数据库与 HTTP 保持目录/固定/模板独立，拒绝迟到覆�
     endpoint: `http://127.0.0.1:${address.port}/v1`,
     protocol_preference: 'auto',
     models_path: '',
-    discovery_format: 'openai',
+    discovery_format: 'openai', server_history_enabled: false, server_history_support_override: null,
   };
   const created = await request(
     'POST',

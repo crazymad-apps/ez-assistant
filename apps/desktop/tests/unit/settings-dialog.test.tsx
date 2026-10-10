@@ -413,6 +413,32 @@ describe('SettingsDialog model management', () => {
     await waitFor(() => expect(screen.getByRole('heading', { name: 'MCP' })).toBeVisible());
     expect(cancel).toHaveBeenCalled();
   });
+  it('allows choosing available Unix Agent shells in Runtime settings', async () => {
+    const store = settingsStore();
+    store.settings.page = 'runtime';
+    store.settings.agent_shell_settings = {
+      default_agent_shell: null,
+      catalog: [
+        { kind: 'posix_sh', available: true, reason: null },
+        { kind: 'bash', available: true, reason: null },
+        { kind: 'zsh', available: true, reason: null },
+        { kind: 'cmd', available: false, reason: '不适用' },
+      ],
+    };
+    vi.spyOn(store.settings, 'loadAgentShellSettings').mockResolvedValue();
+    const select = vi.spyOn(store.settings, 'setDefaultAgentShell').mockResolvedValue(true);
+    renderDialog(store);
+    const trigger = screen.getByRole('button', { name: '默认 Agent Shell' });
+    expect(trigger).toBeEnabled();
+    for (const [kind, label] of [['bash', 'Bash'], ['zsh', 'zsh']]) {
+      fireEvent.click(trigger);
+      expect(screen.getByRole('option', { name: '/bin/sh' })).toBeVisible();
+      expect(screen.queryByRole('option', { name: /CMD/ })).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole('option', { name: label }));
+      await waitFor(() => expect(select).toHaveBeenCalledWith(kind));
+    }
+  });
+
   it('groups Runtime pages under one sidebar entry and separates diagnostics from local controls', () => {
     const store = settingsStore();
     vi.mocked(nativeCore.isTauri).mockReturnValue(true);
@@ -1095,7 +1121,7 @@ function onlineProvider(): import('@ez-assistant/protocol').ProviderSummary {
       endpoint: 'https://example.test/v1',
       protocol_preference: 'chat_completions',
       models_path: '/v1/models',
-      discovery_format: 'openai',
+      discovery_format: 'openai', server_history_enabled: false, server_history_support_override: null,
     },
   };
 }

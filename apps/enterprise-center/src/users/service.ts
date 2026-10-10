@@ -107,6 +107,21 @@ export class UsersService {
     return result.user;
   }
 
+  async remove(token: string | undefined, id: number, requestId: string): Promise<void> {
+    await this.identity.write(async (client) => {
+      const actor = await this.identity.requireAdmin(client, token);
+      const before = await this.target(client, id);
+      if (before.is_super_admin) throw new IdentityError(409, 'SUPER_ADMIN_PROTECTED');
+      if (before.enabled && before.role === 'admin' && !await users.otherAdmins(client, id))
+        throw new IdentityError(409, 'LAST_ADMIN_REQUIRED');
+      await users.remove(client, id);
+      // 原 ID 永久保留在历史引用中；同名重建由 identity sequence 分配新身份。
+      await this.identity.audit(client, 'user_deleted', requestId, actor.id, undefined, id, {
+        before: details(before),
+      });
+    }, () => this.identity.revokeUser(id));
+  }
+
   async resetPassword(token: string | undefined, id: number, password: string, requestId: string): Promise<void> {
     await this.identity.requireAdmin(this.manager, token);
     const hash = await this.identity.passwords.hash(password);

@@ -1,12 +1,13 @@
 // Build local release artifacts only; publishing is an explicit separate action.
 import "./check-version.mjs";
+import { createReleaseManifest, requireUpdateSigning } from "./release-manifest.mjs";
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
 import { copyFile, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 
 if (process.platform !== "win32") throw new Error("Windows MSI builds require Windows and Visual Studio C++ tools.");
+requireUpdateSigning();
 const arguments_ = process.argv.slice(2);
 if (arguments_.length !== 0 && (arguments_.length !== 2 || arguments_[0] !== "--arch" || !["x64", "arm64"].includes(arguments_[1]))) {
   throw new Error("Usage: release-windows.mjs [--arch x64|arm64] (default: both)");
@@ -27,7 +28,12 @@ for (const architecture of architectures) {
   await run("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/verify-windows-release.ps1", "-Msi", source, "-Architecture", architecture, "-Version", version]);
   const filename = `EZ-Assistant_${version}_windows_${architecture}.msi`;
   await copyFile(source, resolve(output, filename));
-  const digest = createHash("sha256").update(await readFile(source)).digest("hex");
+  const manifest = await createReleaseManifest({
+    target: architecture === "x64" ? "windows-x86_64" : "windows-aarch64",
+    host: resolve(desktopRoot, "src-tauri/binaries", `ez-assistant-runtime-${triple}.exe`),
+    installer: resolve(output, filename), updater: resolve(output, filename), output: resolve(output, architecture),
+  });
+  const digest = manifest.files[0].sha256;
   await writeFile(resolve(output, `${filename}.sha256`), `${digest}  ${filename}\n`);
   console.log(`Created ${resolve(output, filename)} (SHA-256: ${digest})`);
 }

@@ -1,5 +1,6 @@
 //! 受信任桌面进程中的 Runtime discovery、启动与 bootstrap。
 
+mod desktop_update;
 pub(crate) mod upgrade;
 #[cfg(windows)]
 mod windows;
@@ -146,6 +147,12 @@ impl Serialize for RuntimeBootstrapError {
 }
 
 impl RuntimeBootstrapCoordinator {
+    pub(crate) fn with_update_home(mut self, home: Option<PathBuf>) -> Self {
+        if let Some(home) = home {
+            self.runtime_home = home;
+        }
+        self
+    }
     pub(crate) fn for_application(development: bool) -> Self {
         let runtime_home = application_runtime_home(
             std::env::var_os("EZ_ASSISTANT_RUNTIME_HOME").map(PathBuf::from),
@@ -750,9 +757,16 @@ fn application_runtime_home(
 
 #[tauri::command]
 pub(crate) async fn bootstrap_runtime(
+    updater: State<'_, crate::desktop_update::DesktopUpdater>,
     coordinator: State<'_, RuntimeBootstrapCoordinator>,
     lifecycle: State<'_, DesktopLifecycleCoordinator>,
 ) -> Result<RuntimeBootstrap, RuntimeBootstrapError> {
+    let _permit = updater.lifecycle_permit().await.map_err(|_| {
+        bootstrap_error(
+            RuntimeBootstrapErrorCode::RuntimeUnavailable,
+            "正在安装更新，请稍候。",
+        )
+    })?;
     lifecycle.update_runtime_state(NativeRuntimeState::Connecting);
     let result = coordinator.bootstrap().await;
     lifecycle.update_runtime_state(if result.is_ok() {
@@ -765,9 +779,16 @@ pub(crate) async fn bootstrap_runtime(
 
 #[tauri::command]
 pub(crate) async fn stop_runtime(
+    updater: State<'_, crate::desktop_update::DesktopUpdater>,
     coordinator: State<'_, RuntimeBootstrapCoordinator>,
     lifecycle: State<'_, DesktopLifecycleCoordinator>,
 ) -> Result<(), RuntimeBootstrapError> {
+    let _permit = updater.lifecycle_permit().await.map_err(|_| {
+        bootstrap_error(
+            RuntimeBootstrapErrorCode::RuntimeUnavailable,
+            "正在安装更新，请稍候。",
+        )
+    })?;
     lifecycle.update_runtime_state(NativeRuntimeState::Stopping);
     let result = coordinator.shutdown().await;
     lifecycle.update_runtime_state(if result.is_ok() {
@@ -780,9 +801,16 @@ pub(crate) async fn stop_runtime(
 
 #[tauri::command]
 pub(crate) async fn restart_runtime(
+    updater: State<'_, crate::desktop_update::DesktopUpdater>,
     coordinator: State<'_, RuntimeBootstrapCoordinator>,
     lifecycle: State<'_, DesktopLifecycleCoordinator>,
 ) -> Result<RuntimeBootstrap, RuntimeBootstrapError> {
+    let _permit = updater.lifecycle_permit().await.map_err(|_| {
+        bootstrap_error(
+            RuntimeBootstrapErrorCode::RuntimeUnavailable,
+            "正在安装更新，请稍候。",
+        )
+    })?;
     lifecycle.update_runtime_state(NativeRuntimeState::Restarting);
     let result = coordinator.restart().await;
     lifecycle.update_runtime_state(if result.is_ok() {
@@ -1249,11 +1277,7 @@ mod tests {
                 Some(assistant_protocol::MIN_COMPATIBLE_VERSION),
                 true,
             ),
-            (
-                "0.28.1",
-                Some(assistant_protocol::MIN_COMPATIBLE_VERSION),
-                true,
-            ),
+            ("0.28.1", Some("0.28.1"), false),
             ("0.25.3", Some("0.25.3"), false),
             ("0.27.1", Some("0.27.1"), false),
             ("0.25.3", None, false),

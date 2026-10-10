@@ -1,0 +1,9 @@
+.detail { display: grid; gap: 20px; overflow-wrap: anywhere; }
+.detail h3, .detail h4, .detail p { margin: 0; }
+.detail h3 { font-size: var(--ez-font-large); }
+.detail h4 { margin-bottom: 8px; }
+.detail p { white-space: pre-wrap; line-height: 1.65; }
+.detail dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 16px; margin: 0; }
+.detail dt { color: var(--ez-text-secondary); }
+.detail dd { margin: 0; }
+.handling { padding: 14px; border: 1px solid var(--ez-border); border-radius: var(--ez-radius-small); }

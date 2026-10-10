@@ -15,15 +15,22 @@ use super::{
 use crate::{RuntimeError, RuntimeResult};
 
 /// 一次原子可见的配置状态。
+#[derive(Clone)]
 pub(crate) struct ConfigSnapshot {
     active: Option<Arc<ResolvedConfig>>,
     projection: Arc<ConfigProjection>,
     revision: Option<String>,
+    // 无效快照仍禁止模型调用；只保留非敏感采样值用于下次接纳比较，不保留旧服务。
+    last_generation: Option<agent_model::GenerationConfig>,
 }
 
 impl ConfigSnapshot {
     fn from_compilation(compilation: ConfigCompilation, revision: Option<String>) -> Self {
         Self {
+            last_generation: compilation
+                .active
+                .as_ref()
+                .map(|active| active.generation().clone()),
             active: compilation.active.map(Arc::new),
             projection: Arc::new(compilation.projection),
             revision,
@@ -32,6 +39,10 @@ impl ConfigSnapshot {
 
     pub(crate) fn active(&self) -> Option<&Arc<ResolvedConfig>> {
         self.active.as_ref()
+    }
+
+    pub(crate) fn accepted_generation(&self) -> Option<&agent_model::GenerationConfig> {
+        self.last_generation.as_ref()
     }
 
     pub(crate) fn projection(&self) -> &ConfigProjection {
@@ -66,12 +77,12 @@ impl ConfigRegistry {
         source: Arc<dyn RuntimeConfigSource>,
         model_source: super::ModelSource,
     ) -> Self {
+        // 启动占位缺省值尚未由配置源接纳；首次加载不得使重启恢复的续接周期换代。
+        let mut initial = ConfigSnapshot::from_compilation(ConfigCompilation::missing(), None);
+        initial.last_generation = None;
         Self {
             source,
-            snapshot: RwLock::new(Arc::new(ConfigSnapshot::from_compilation(
-                ConfigCompilation::missing(),
-                None,
-            ))),
+            snapshot: RwLock::new(Arc::new(initial)),
             reload_gate: Mutex::new(()),
             model_settings: RwLock::new(ManagedModels {
                 source: model_source,
@@ -109,8 +120,15 @@ impl ConfigRegistry {
         self.source.display_path()
     }
 
-    /// 串行读取并原子替换整个快照；失败结果不会回退到旧 credential。
-    pub(crate) async fn reload(&self) -> RuntimeResult<Arc<ConfigSnapshot>> {
+    /// 串行读取，完成宿主接纳动作后才发布快照；不在 Registry 内访问 Store。
+    pub(crate) async fn reload<F, Fut>(
+        &self,
+        before_publish: F,
+    ) -> RuntimeResult<Arc<ConfigSnapshot>>
+    where
+        F: FnOnce(&ConfigSnapshot, &ConfigSnapshot) -> Fut,
+        Fut: std::future::Future<Output = RuntimeResult<()>>,
+    {
         let _gate = self.reload_gate.lock().await;
         let (compilation, revision) = match self.source.load().await {
             ConfigSourceLoad::Missing => (ConfigCompilation::missing(), None),
@@ -123,7 +141,13 @@ impl ConfigRegistry {
                 None,
             ),
         };
-        let next = Arc::new(ConfigSnapshot::from_compilation(compilation, revision));
+        let previous = self.snapshot()?;
+        let mut next = ConfigSnapshot::from_compilation(compilation, revision);
+        if next.last_generation.is_none() {
+            next.last_generation = previous.last_generation.clone();
+        }
+        let next = Arc::new(next);
+        before_publish(&previous, &next).await?;
         *self
             .snapshot
             .write()

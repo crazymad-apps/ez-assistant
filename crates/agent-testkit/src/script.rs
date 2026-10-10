@@ -131,6 +131,7 @@ pub fn message_events(message: &AssistantMessage) -> Vec<ModelEvent> {
                     id: part.id.clone(),
                 });
                 events.push(ModelEvent::ReasoningDelta {
+                    source: part.source,
                     id: part.id.clone(),
                     delta: part.text.clone(),
                 });
@@ -248,6 +249,7 @@ mod tests {
             ),
             parts: vec![
                 AssistantPart::Reasoning(ReasoningPart {
+                    source: Default::default(),
                     id: PartId::new("reasoning_1").expect("valid part id"),
                     text: "Need the date first".to_owned(),
                 }),

@@ -1,0 +1,21 @@
+.page {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+  // 详情页承接主布局的剩余高度，展开制品后由页面滚动，避免内容被外壳裁切。
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+
+  > * {
+    flex-shrink: 0;
+  }
+}
+.details {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-wrap: anywhere;
+}

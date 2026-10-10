@@ -203,3 +203,13 @@ async fn capabilities(
         },
     })
 }
+
+/// 与 capabilities 共用公开网络边界，软件不兼容和未登录时也能读取生效中心。
+async fn desktop_update_context(
+    axum::extract::State(state): axum::extract::State<HttpState>,
+) -> Json<assistant_protocol::DesktopUpdateContext> {
+    Json(assistant_protocol::DesktopUpdateContext {
+        center_url: state.access.center().map(|center| center.url),
+        enterprise_protocols: crate::access::enterprise::SUPPORTED_PROTOCOLS.to_vec(),
+    })
+}

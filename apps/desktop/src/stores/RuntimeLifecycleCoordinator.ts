@@ -323,7 +323,7 @@ export class RuntimeLifecycleCoordinator {
         });
       } catch (error) {
         const failure = normalizeFailure(error);
-        if (["authentication_required", "login_context_changed", "component_mismatch"].includes(failure.code)) throw error;
+        if (["authentication_required", "login_context_changed", "component_mismatch", "center_protocol_incompatible"].includes(failure.code)) throw error;
         // 初始化失败只由用户显式重试，不能让通用断线重连反复执行初始化。
         throw new RuntimeClientError("runtime_startup_failed", failure.message);
       }
@@ -414,13 +414,13 @@ export class RuntimeLifecycleCoordinator {
 
   #applySessionResult(result: GetSessionViewResult): void {
     if (this.dependencies.projection.applySessionSnapshot(result.snapshot)) {
-      this.dependencies.live_execution.reconcileSession(result.snapshot.value);
+      this.dependencies.live_execution.reconcileSession(result.snapshot.value, result.snapshot.observed_at_ms, result.snapshot.observed_sequence);
     }
   }
 
   #applyChildTaskResult(result: GetChildTaskViewResult): void {
     if (this.dependencies.projection.applyChildTaskSnapshot(result.snapshot)) {
-      this.dependencies.live_execution.reconcileChildTask(result.snapshot.value);
+      this.dependencies.live_execution.reconcileChildTask(result.snapshot.value, result.snapshot.observed_at_ms);
     }
   }
 
@@ -524,7 +524,7 @@ export class RuntimeLifecycleCoordinator {
       this.#disposed
       || this.#reconnect_attempt >= MAX_AUTOMATIC_RECONNECTS
       || this.dependencies.connection.state === "component_mismatch"
-      || ["authentication_required", "login_context_changed", "runtime_initialization_failed", "storage_unavailable"].includes(this.dependencies.connection.last_error_code ?? "")
+      || ["authentication_required", "login_context_changed", "runtime_initialization_failed", "storage_unavailable", "center_protocol_incompatible"].includes(this.dependencies.connection.last_error_code ?? "")
       || this.dependencies.connection.last_error_code === "runtime_startup_failed"
     ) {
       return;

@@ -22,7 +22,7 @@ impl ModelService for CallGatedModel {
         8_192
     }
 
-    fn stream(&self, _request: ModelRequest, _context: ModelCallContext) -> ModelStreamFuture<'_> {
+    fn stream(&self, _request: ModelRequest, context: ModelCallContext) -> ModelStreamFuture<'_> {
         let call = self.calls.fetch_add(1, Ordering::Relaxed);
         let events = self
             .scripts
@@ -36,11 +36,189 @@ impl ModelService for CallGatedModel {
         Box::pin(async move {
             if call == gate_call {
                 entered.notify_one();
-                release.notified().await;
+                tokio::select! {
+                    () = release.notified() => {}
+                    () = context.cancellation.cancelled() => return Err(ModelError::Cancelled),
+                }
             }
             Ok(Box::pin(futures_util::stream::iter(events)) as ModelEventStream)
         })
     }
+}
+
+#[tokio::test]
+async fn manual_compaction_does_not_block_global_commands_or_other_sessions() {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let model = Arc::new(CallGatedModel {
+        capabilities: model_capabilities(false),
+        scripts: Mutex::new(VecDeque::from([
+            message_events(&assistant_text("first-1", "first answer")),
+            message_events(&assistant_text("first-2", "second answer")),
+            message_events(&assistant_text("second-1", "first answer")),
+            message_events(&assistant_text("second-2", "second answer")),
+            message_events(&assistant_text("first-summary", "summary")),
+            message_events(&assistant_text("second-summary", "summary")),
+        ])),
+        calls: AtomicUsize::new(0),
+        gate_call: 4,
+        entered: entered.clone(),
+        release: release.clone(),
+    });
+    let runtime = Arc::new(runtime(model));
+    let first = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("first session")
+        .session
+        .session_id;
+    let second = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("second session")
+        .session
+        .session_id;
+    for session_id in [&first, &second] {
+        submit_completed_turn(&runtime, session_id, "first turn").await;
+        submit_completed_turn(&runtime, session_id, "second turn").await;
+    }
+    let compact_runtime = runtime.clone();
+    let compact_session_id = first.clone();
+    let compact = tokio::spawn(async move {
+        compact_runtime
+            .compact_session(assistant_protocol::CompactSessionRequest {
+                session_id: compact_session_id,
+                operation_id: assistant_protocol::IdempotencyKey::new("compact-concurrent-first")
+                    .unwrap(),
+                expected_generation: 1,
+            })
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), entered.notified())
+        .await
+        .expect("first summary is pending");
+
+    // 实际写门入口必须在摘要未返回时完成；否则排队写者还会阻挡后续读者。
+    assert!(
+        !tokio::time::timeout(
+            Duration::from_secs(1),
+            runtime.request_shutdown_if_unused(|| true),
+        )
+        .await
+        .expect("recycling can inspect active compaction without waiting")
+        .expect("recycling check")
+    );
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        runtime.refresh_provider_models(test_model_selection("fixture").provider_instance_id),
+    )
+    .await
+    .expect("model refresh completes while summary is pending")
+    .expect("model refresh");
+    let busy = runtime
+        .submit_session_command(assistant_protocol::SubmitSessionCommandRequest {
+            session_id: first.clone(),
+            command: assistant_protocol::SessionCommand::SkillRefresh,
+            idempotency_key: None,
+        })
+        .await
+        .expect_err("current session still protects its context");
+    assert_eq!(
+        busy.to_protocol_info().code,
+        assistant_protocol::RuntimeErrorCode::SessionCompactionInProgress
+    );
+    let other = tokio::time::timeout(
+        Duration::from_secs(1),
+        runtime.compact_session(assistant_protocol::CompactSessionRequest {
+            session_id: second,
+            operation_id: assistant_protocol::IdempotencyKey::new("compact-concurrent-second")
+                .unwrap(),
+            expected_generation: 1,
+        }),
+    )
+    .await
+    .expect("other session compacts without waiting for first summary")
+    .expect("other compaction");
+    assert!(matches!(
+        other.outcome,
+        assistant_protocol::CompactSessionOutcome::Compacted { .. }
+    ));
+    assert!(!compact.is_finished());
+    release.notify_one();
+    let result = tokio::time::timeout(Duration::from_secs(1), compact)
+        .await
+        .expect("first compaction completes")
+        .expect("compaction task")
+        .expect("frozen compaction still commits after model refresh");
+    assert!(matches!(
+        result.outcome,
+        assistant_protocol::CompactSessionOutcome::Compacted {
+            result_generation: 2,
+            ..
+        }
+    ));
+    assert!(result.session.active_compaction.is_none());
+    runtime
+        .shutdown(ShutdownRuntimeRequest::default())
+        .await
+        .expect("shutdown");
+}
+
+#[tokio::test]
+async fn shutdown_cancels_pending_manual_compaction_without_waiting_for_model() {
+    let entered = Arc::new(Notify::new());
+    let model = Arc::new(CallGatedModel {
+        capabilities: model_capabilities(false),
+        scripts: Mutex::new(VecDeque::from([
+            message_events(&assistant_text("shutdown-1", "first answer")),
+            message_events(&assistant_text("shutdown-2", "second answer")),
+            message_events(&assistant_text("shutdown-summary", "summary")),
+        ])),
+        calls: AtomicUsize::new(0),
+        gate_call: 2,
+        entered: entered.clone(),
+        release: Arc::new(Notify::new()),
+    });
+    let runtime = Arc::new(runtime(model));
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("session")
+        .session
+        .session_id;
+    submit_completed_turn(&runtime, &session_id, "first turn").await;
+    submit_completed_turn(&runtime, &session_id, "second turn").await;
+    let compact_runtime = runtime.clone();
+    let compact = tokio::spawn(async move {
+        compact_runtime
+            .compact_session(assistant_protocol::CompactSessionRequest {
+                session_id,
+                operation_id: assistant_protocol::IdempotencyKey::new("compact-shutdown").unwrap(),
+                expected_generation: 1,
+            })
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), entered.notified())
+        .await
+        .expect("summary is pending");
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        runtime.shutdown(ShutdownRuntimeRequest::default()),
+    )
+    .await
+    .expect("shutdown reaches cancellation without waiting for summary")
+    .expect("shutdown");
+    let result = tokio::time::timeout(Duration::from_secs(1), compact)
+        .await
+        .expect("compaction reply")
+        .expect("compaction task")
+        .expect("cancelled compaction");
+    assert_eq!(
+        result.outcome,
+        assistant_protocol::CompactSessionOutcome::Cancelled
+    );
+    assert!(result.session.active_compaction.is_none());
+    assert_eq!(runtime.lifecycle().unwrap(), RuntimeLifecycle::Stopped);
 }
 
 #[tokio::test]

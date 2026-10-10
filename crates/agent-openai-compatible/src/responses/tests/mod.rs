@@ -192,6 +192,7 @@ fn request_is_stateless_streaming_and_rebuilds_complete_local_history() {
             model: ModelIdentity::new(provider("fixture"), "fixture-model"),
             parts: vec![
                 AssistantPart::Reasoning(ReasoningPart {
+                    source: Default::default(),
                     id: part_id("reasoning_1"),
                     text: "Need a lookup".to_owned(),
                 }),
@@ -526,6 +527,51 @@ fn tool_choice_and_function_schema_are_checked_before_transport() {
 }
 
 #[test]
+fn unknown_stream_events_do_not_change_text_tools_or_usage() {
+    for fixture in [TEXT_SSE, FUNCTION_SSE] {
+        let expected = feed_sse(fixture).expect("baseline");
+        let mut extended = String::new();
+        for line in fixture.lines() {
+            if line.starts_with("data: {") {
+                extended.push_str(concat!(
+                    "data: {\"type\":\"codex.rate_limits\",\"rate_limits\":{\"allowed\":true}}\n\n",
+                    "data: {\"type\":\"codex.response.metadata\",\"headers\":{\"x-codex-turn-state\":\"fixture\"}}\n\n",
+                    "data: {\"type\":\"response.future_extension\",\"payload\":{\"arbitrary\":true}}\n\n",
+                ));
+            }
+            extended.push_str(line);
+            extended.push('\n');
+        }
+        assert_eq!(feed_sse(&extended).expect("extensions ignored"), expected);
+    }
+}
+
+#[test]
+fn unknown_stream_events_do_not_replace_completion_or_hide_invalid_events() {
+    let mut assembler = ResponsesAssembler::new(adapter(), "fixture-model".to_owned());
+    assert!(
+        assembler
+            .push(&json!({"type":"future.event"}))
+            .expect("ignored")
+            .is_empty()
+    );
+    assert!(matches!(assembler.finalize(), Err(ModelError::Protocol(_))));
+    let mut assembler = ResponsesAssembler::new(adapter(), "fixture-model".to_owned());
+    assert!(matches!(
+        assembler.push(&json!({"type":42})),
+        Err(ModelError::Protocol(_))
+    ));
+    assert!(matches!(
+        assembler.push(&json!({"type":"response.created"})),
+        Err(ModelError::Protocol(_))
+    ));
+    let events = assembler
+        .push(&json!({"type":"error","code":"server_error","message":"failed"}))
+        .expect("upstream error event");
+    assert!(matches!(events.as_slice(), [ModelEvent::TurnFailed { .. }]));
+}
+
+#[test]
 fn official_style_text_fixture_maps_usage_and_one_terminal() {
     let events = feed_sse(TEXT_SSE).expect("text fixture");
     assert!(matches!(
@@ -774,6 +820,7 @@ fn deepseek_canonicalizes_interleaved_chat_parts_before_tool_outputs() {
                     arguments: json!({"path":"one.rs"}),
                 }),
                 AssistantPart::Reasoning(ReasoningPart {
+                    source: Default::default(),
                     id: part_id("part_1"),
                     text: "Checked the files".to_owned(),
                 }),
@@ -905,6 +952,7 @@ fn compatible_corrupt_state_fails_while_null_encrypted_content_stays_normalized(
             model: ModelIdentity::new(provider("deepseek"), "deepseek-v4-pro"),
             parts: vec![
                 AssistantPart::Reasoning(ReasoningPart {
+                    source: Default::default(),
                     id: part_id("rs_bad:content:0"),
                     text: "reason".to_owned(),
                 }),
@@ -972,6 +1020,13 @@ fn qwen_reasoning_text_stream_and_final_summary_form_one_part() {
             .count(),
         1
     );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ModelEvent::ReasoningDelta {
+            source: agent_types::ReasoningSource::Summary,
+            ..
+        }
+    )));
     let ModelEvent::TurnFinished { message } = events.last().expect("terminal") else {
         panic!("expected completed turn")
     };
@@ -980,6 +1035,7 @@ fn qwen_reasoning_text_stream_and_final_summary_form_one_part() {
         [AssistantPart::Reasoning(reasoning)]
             if reasoning.id.as_str() == "rs_q_stream:summary:0"
                 && reasoning.text == "Checked"
+                && reasoning.source == agent_types::ReasoningSource::Summary
     ));
 }
 
@@ -1215,4 +1271,58 @@ fn opaque_reasoning_without_summary_survives_tool_round_trip() {
     assert_eq!(wire["input"][2]["type"], "function_call");
     assert_eq!(wire["input"][3]["type"], "function_call_output");
     assert_eq!(wire["input"].as_array().unwrap().len(), 4);
+}
+
+mod continuation;
+
+#[test]
+fn mixed_reasoning_sources_survive_delta_done_and_final_message() {
+    use agent_types::ReasoningSource;
+    let mut assembler = ResponsesAssembler::new(adapter(), "fixture-model".into());
+    let frames = [
+        json!({"type":"response.created","response":{"id":"mixed","model":"fixture-model"}}),
+        json!({"type":"response.output_item.added","output_index":0,"item":{"id":"r","type":"reasoning","summary":[],"content":[]}}),
+        json!({"type":"response.reasoning_summary_text.delta","output_index":0,"item_id":"r","summary_index":0,"delta":"short"}),
+        json!({"type":"response.reasoning_text.delta","output_index":0,"item_id":"r","content_index":0,"delta":"long"}),
+        json!({"type":"response.output_item.done","output_index":0,"item":{"id":"r","type":"reasoning","summary":[{"type":"summary_text","text":"short summary"}],"content":[{"type":"reasoning_text","text":"long reasoning"}]}}),
+        json!({"type":"response.completed","response":{"id":"mixed","model":"fixture-model"}}),
+    ];
+    let events: Vec<_> = frames
+        .iter()
+        .flat_map(|frame| assembler.push(frame).unwrap())
+        .collect();
+    let deltas: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            ModelEvent::ReasoningDelta { source, delta, .. } => Some((*source, delta.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        deltas,
+        vec![
+            (ReasoningSource::Summary, "short"),
+            (ReasoningSource::Raw, "long"),
+            (ReasoningSource::Summary, " summary"),
+            (ReasoningSource::Raw, " reasoning")
+        ]
+    );
+    let ModelEvent::TurnFinished { message } = events.last().unwrap() else {
+        panic!("terminal")
+    };
+    let parts: Vec<_> = message
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            AssistantPart::Reasoning(part) => Some((part.source, part.text.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        parts,
+        vec![
+            (ReasoningSource::Summary, "short summary"),
+            (ReasoningSource::Raw, "long reasoning")
+        ]
+    );
 }

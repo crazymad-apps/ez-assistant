@@ -54,7 +54,7 @@ pub(crate) struct RunRecord {
     active_step: Option<u32>,
     /// 与执行器共享同一诊断 owner；只读快照不另存一份请求状态。
     pub(crate) model_diagnostics: Option<Arc<RunModelDiagnostics>>,
-    reasoning: String,
+    reasoning: Vec<assistant_protocol::ReasoningPartSnapshot>,
     text: String,
     tools: Vec<ToolActivitySnapshot>,
     error: Option<RuntimeErrorInfo>,
@@ -79,7 +79,7 @@ impl RunRecord {
             cancel_requested: false,
             active_step: None,
             model_diagnostics: None,
-            reasoning: String::new(),
+            reasoning: Vec::new(),
             text: String::new(),
             tools: Vec::new(),
             error: None,
@@ -104,7 +104,7 @@ impl RunRecord {
             cancel_requested: run.cancel_requested,
             active_step: None,
             model_diagnostics: None,
-            reasoning: String::new(),
+            reasoning: Vec::new(),
             text: String::new(),
             tools: Vec::new(),
             error: run.error,
@@ -132,7 +132,9 @@ impl RunRecord {
         self.text.clear();
         for part in &message.parts {
             match part {
-                AssistantPart::Reasoning(part) => self.reasoning.push_str(&part.text),
+                AssistantPart::Reasoning(part) => {
+                    self.reasoning.push(project_reasoning_part(part));
+                }
                 AssistantPart::Text(part) => self.text.push_str(&part.text),
                 AssistantPart::ToolCall(_) | AssistantPart::ProviderState(_) => {}
             }
@@ -173,7 +175,7 @@ impl RunRecord {
                     .then(|| diagnostics.request_snapshot())
                     .flatten()
             }),
-            reasoning: self.reasoning.clone(),
+            reasoning_parts: self.reasoning.clone(),
             text: self.text.clone(),
             tools: self.tools.clone(),
             error: self.error.clone(),
@@ -223,9 +225,28 @@ impl RunRecord {
     }
 
     /// 即使 `StepStarted` 被背压丢弃，delta 自身也能建立正确 step 边界。
-    pub(crate) fn append_reasoning(&mut self, step: u32, delta: &str) {
+    pub(crate) fn append_reasoning(
+        &mut self,
+        step: u32,
+        part_id: assistant_protocol::PartId,
+        source: assistant_protocol::ReasoningSource,
+        delta: &str,
+    ) {
         self.start_step(step);
-        self.reasoning.push_str(delta);
+        if let Some(part) = self
+            .reasoning
+            .iter_mut()
+            .find(|part| part.part_id == part_id)
+        {
+            part.text.push_str(delta);
+        } else {
+            self.reasoning
+                .push(assistant_protocol::ReasoningPartSnapshot {
+                    part_id,
+                    source,
+                    text: delta.to_owned(),
+                });
+        }
     }
 
     /// 即使 `StepStarted` 被背压丢弃，delta 自身也能建立正确 step 边界。
@@ -282,6 +303,7 @@ pub(crate) struct ActiveRun {
 /// 从已结算快照投影 Runtime 的唯一 RunFinished 事件。
 pub(crate) fn finished_event(snapshot: RunSnapshot, awaiting_feedback: bool) -> RuntimeEvent {
     RuntimeEvent::RunFinished {
+        finished_at_ms: snapshot.finished_at_ms,
         session_id: snapshot.session_id,
         run_id: snapshot.run_id,
         status: snapshot.status,
@@ -371,4 +393,26 @@ fn is_active_run(state: &SessionState, run_id: &RunId) -> bool {
         .active_run
         .as_ref()
         .is_some_and(|active| &active.run_id == run_id)
+}
+
+/// Agent 与应用协议各自拥有中立枚举；Runtime 是唯一语义映射边界。
+pub(crate) fn project_reasoning_source(
+    source: agent_types::ReasoningSource,
+) -> assistant_protocol::ReasoningSource {
+    match source {
+        agent_types::ReasoningSource::Raw => assistant_protocol::ReasoningSource::Raw,
+        agent_types::ReasoningSource::Summary => assistant_protocol::ReasoningSource::Summary,
+    }
+}
+
+/// 两层 PartId 都由类型保证非空，转换不会扩展或丢失规范片段身份。
+fn project_reasoning_part(
+    part: &agent_types::ReasoningPart,
+) -> assistant_protocol::ReasoningPartSnapshot {
+    assistant_protocol::ReasoningPartSnapshot {
+        part_id: assistant_protocol::PartId::new(part.id.as_str())
+            .expect("validated nonempty part id"),
+        text: part.text.clone(),
+        source: project_reasoning_source(part.source),
+    }
 }

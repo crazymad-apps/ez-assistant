@@ -234,7 +234,7 @@ Runtime Host 进程
 - Plan/Build 使用同一份 Tool Definition；每个 Input 显式携带变体，Runtime 将对应注入作为
   `UserPart::Injected` 持久化。Session 当前变体只服务于客户端重建，不覆盖 Input 实际提交值。
 - 每个 Run 冻结 Input 变体与当时的 Ask/Auto，但每次 Tool Call 都读取 Global、可选 Workspace、
-  Session 三层 Permission Registry 最新快照。显式 Deny 优先于 Ask，Ask 优先于 Allow；未知
+  Session 三层 Permission Registry 最新快照。按 Session → Workspace → Global → 内置规则逐层匹配，首个匹配层决定结果；同层 Deny 优先于 Ask，Ask 优先于 Allow；未知
   typed facts 和无效权限快照一律 fail-closed。
 - Workspace 的产品缺省信任由 Authorizer 根据 Session 冻结的主目录与附加目录派生：Plan/Build
   可执行结构化 Read/List/Find/Search，Build 可执行 Write/Edit/Delete。它只提供最低优先级 Allow，
@@ -289,6 +289,10 @@ Runtime Host 进程
 - 手动压缩复用当前 Session 已解析的 generation、reasoning 与 Provider Options，但没有活动 Run
   的工具快照，因此工具列表为空并固定 `ToolChoice::None`。程序化字段写入后必须重新执行
   replacement 结构、完整历史原样后缀和严格缩小门禁，通过后才允许 Store 切换 generation。
+- 手动压缩的 operation/model binding/Session mutation 门禁仅保护接纳与冻结；登记压缩状态并将
+  任务交给 Runtime 后，必须释放全部门禁再等待模型。模型等待期间只通过当前 Session 的
+  active_compaction 阻止上下文修改和输入消费，不阻塞其他 Session 或全局模型发布；结果提交再
+  获取 Session mutation 并核验 generation、原快照和操作身份。关闭可以立即传播取消。
 - 每个活动 child 拥有派生自父 Run 的取消令牌。父 Run 取消和 Runtime shutdown 级联到全部 child；
   单独取消只影响目标 child。可靠完成与取消竞争时允许已经形成的完整终态获胜，timeout 则稳定结算为
   `failed/timeout`，不能伪装成成功。
@@ -825,9 +829,9 @@ MCP 单次工具请求失败、取消或返回不支持的扩展只结束该次�
 ## v0.27.0 C06 默认文件权限规则
 
 Host 通过 RunToolBundle 注入 PermissionRuleSource，仅提供普通规则数据，不返回授权结果；父子
-Authorizer 在每次调用和审批返回后加载，与用户规则统一匹配并按 Deny > Ask > Allow 合并。
+Authorizer 在每次调用和审批返回后加载；内置规则位于 Session、Workspace、Global 之后，只有前面的用户层均未匹配才生效。同层按 Deny > Ask > Allow 合并，批量文件调用按每条路径独立选择匹配层。
 默认规则不写权限文件、不进入设置列表；文件 matcher 的内存例外子树不能被持久化。逻辑路径
-和物理目标都参与文件规则匹配，路径解析失败关闭授权；Host 文件 I/O 复核复用同一匹配器。
+和物理目标都参与文件规则匹配，路径解析失败关闭授权；Agent 文件 I/O 服从 Runtime 的分层授权，不再次用默认规则覆盖；HTTP 资源入口仍单独使用默认规则核对用户域。
 
 ## v0.28.0 C02 M0 Workspace 可空目录与恢复边界
 
@@ -867,3 +871,46 @@ Authorizer 在每次调用和审批返回后加载，与用户规则统一匹配
 ## v0.28.1 F04 主会话问答
 
 `ask_user` 仅注册到主会话 Agent，整批解析后的授权门禁保证独占工具批次，畸形调用同样阻止相邻副作用。Session 持有反馈状态，RuntimeStore 保存问题/答案；wait 的异步等待不持锁，回答是原工具结果。end_turn 在可靠闭合工具交换后通过类型化控制正常结束，回复由既有 Input 接纳路径原子记录并创建新 Run。pending 反馈阻塞既有队列，取消不伪造答案；Goal 轮后反馈或取消等待均先暂停。
+
+## v0.29.0 F06 M0 个人续接
+
+连接级开关默认关闭，仅在明确支持 Responses 保存与 ID 续接时启用；未知自定义接口须显式覆盖能力。主会话将 Session owner 与连接启用周期绑定传入 ModelServiceFactory，响应 ID 等事实仍由 Adapter 返回的 ProviderState 随既有可靠消息保存，Runtime 不解释其 payload，不新增响应表。关闭清除连接绑定，再开启或变更连接/凭据换新；普通重启保留绑定。后台压缩、标题、识图、连接测试及 M0 子任务装配无状态服务。M0 交付不含模型切换 ABA、压缩换代及子任务续接；当前实现边界见下文 M1。
+
+## v0.29.0 F06 M1 重建与 owner 隔离
+
+主会话以 Session、持久续接周期和正文 generation 绑定服务；显式/默认模型切换、有效固定参数变更/重置及 reasoning effort 变化与受影响会话的周期原子提交，同值设置保留。当前 Run 继续冻结配置，后续 Run 读取新周期，A→B→A 不重新接回旧链。正文压缩提交后派生新 generation 的模型服务，失败压缩与普通重启不换代。
+
+全局生成参数变化在 `reload_config` 发布快照前原子更新全部会话的持久周期；Store 失败不发布新有效配置。同值 reload 与首次装载保留周期。无效快照只保留最后接纳的非敏感生成参数用于下次比较，仍禁止新 Run 的模型装配，不恢复旧执行配置；经过无效配置也不能遗漏参数 ABA。
+
+child 以自身 ID/generation 派生独立服务，不继承父会话或其他 child 的续接事实；Fork 使用新的 Session owner。压缩、标题、识图与连接验证继续无状态。Runtime 只对建流前 `HistoryUnavailable` 允许一次完整请求重建，每次逻辑模型调用独享额度，其建流及流中重试共用额度；有限重试层位于历史重建层之外，流中重连的旧 ID 拒绝也必须进入重建判断。进入完整重建模式后，本次逻辑调用后续的瞬态重试始终使用完整可靠上下文，不能回退失效旧 ID；重建等待与次数仍受同一有限重试预算和取消约束。后续模型调用获得新额度，不重新执行工具，不改变 Core step、工具预算及可靠落账边界。
+
+## v0.29.0 F06 M2 外部续接绑定
+
+`ExternalModelConfiguration` 接纳宿主提供的可选不透明绑定，要求与连接启用策略一致；绑定复用现有 Provider 周期参与服务装配与 owner 隔离。Runtime 不解释企业 HMAC、Token 或中心协议，也不持有企业配置的第二份权威状态。个人与企业仍共用 M1 的重建、child 隔离、消息可靠提交和无状态辅助调用机制。
+
+
+## v0.29.0 F06 MCP 披露与可靠历史修正
+
+- MCP 默认目录首次随领取的 UserMessage 写入；普通后续 Run 不临时追加目录。手选 Server 的有界
+  披露随该输入写入，历史选择保留为事实，不改变后续普通输入的网关范围。child 首条输入同样保存
+  MCP/Shell 上下文；已提交 Input 重试缺少上下文时，复用活动 Run 的可靠追加操作补入，不改写旧输入。
+- `/mcp refresh` 复用控制队列，结果和最新的权限过滤目录同属一条 user-role 消息，不创建 Run 或调用
+  模型。空目录显式落账，幂等重试不重复追加；失败仍保留真实刷新结果与实际可披露目录。
+- 压缩候选可在原样历史尾部之后附加一条新的隐藏 Runtime UserMessage，仅含 MCP 目录/手选披露与
+  Shell 环境。自动和 child 使用执行冻结事实，手动压缩使用当前目录；保留尾部已有相同事实时不重复。
+  新消息与摘要同一次 generation 提交，旧消息及配对保持原样，恢复后仍执行严格缩小校验。
+- 模型执行与 continuation 直接使用上述可靠 Journal，不再临时拼入 MCP/Shell 消息。Responses 的
+  前缀长度、内容哈希与 owner 校验保持不变；真实 Runtime + Adapter 的离线 wire 回归约束后续轮次
+  使用 previous_response_id 且只发送新增输入。历史资源地址适配保持原有独立边界。
+
+## v0.29.0 F03 M1 过程事实
+
+父/子事件及可靠 Conversation 投影明确 reasoning 来源；RunRecord 的单一当前 Step 观察投影保存有序 part，可靠结算和 hydrate 从规范消息校准，不另建持久日志或摘要正文。业务起止时间复用已接受/结算 Run 与 child，事件发送时刻不代替可靠时刻。历史消息仅有真实 Run 归属时投影 run_created_at_ms；child/Fork 继承消息不借用父 Run。
+
+### 2026-10-05 委托总时限修正
+
+`agent.defaults.delegation.task_timeout_ms` 默认 0，表示不限制子任务总耗时；显式正值仍从取得执行 permit 后计时并可靠取消结算。父取消、单次模型和工具超时、步骤/工具预算保持，避免正常长任务在固定 15 分钟时被截断。
+
+## v0.29.0 插件更新占用收窄
+
+插件包租约只保护技能装配与 MCP 调用版本身份校验，不因目录包含插件而持有整个 Run。更新准备及校验通过后，复用原包写门阻止旧包刷新，取消该插件连接的在途调用、关闭连接，再沿用既有提交与清理。取消只作用于连接，保留调用可能已产生副作用的事实，不取消整个 Run、不自动重放；关闭失败停止版本切换。短暂装配占用通过原写门等待，用户取消仍可结束等待。不引入多版本并存、后台回收或新的更新交互；旧任务后续访问已清理资源可以报告原有文件不可用错误。

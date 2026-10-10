@@ -55,8 +55,13 @@ impl RuntimeStore for VolatileRuntimeStore {
     fn save_model_settings(
         &self,
         settings: assistant_protocol::ModelSettings,
+        server_history_key: Option<String>,
     ) -> StoreFuture<'_, ()> {
-        VolatileRuntimeStore::save_model_settings(self, settings)
+        VolatileRuntimeStore::save_model_settings(self, settings, server_history_key)
+    }
+
+    fn invalidate_server_history_bindings(&self, key: String) -> StoreFuture<'_, ()> {
+        VolatileRuntimeStore::invalidate_server_history_bindings(self, key)
     }
 
     fn get_model_fixed_config(
@@ -78,15 +83,17 @@ impl RuntimeStore for VolatileRuntimeStore {
     fn put_model_fixed_config(
         &self,
         config: assistant_protocol::ModelFixedConfig,
+        server_history_key: Option<String>,
     ) -> StoreFuture<'_, ()> {
-        VolatileRuntimeStore::put_model_fixed_config(self, config)
+        VolatileRuntimeStore::put_model_fixed_config(self, config, server_history_key)
     }
 
     fn reset_model_fixed_config(
         &self,
         selection: assistant_protocol::ModelSelection,
+        server_history_key: Option<String>,
     ) -> StoreFuture<'_, ()> {
-        VolatileRuntimeStore::reset_model_fixed_config(self, selection)
+        VolatileRuntimeStore::reset_model_fixed_config(self, selection, server_history_key)
     }
 
     fn search_conversation_titles(

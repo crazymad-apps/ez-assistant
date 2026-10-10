@@ -135,6 +135,7 @@ fn assistant_message(parts: Vec<AssistantPart>) -> ConversationMessage {
 
 fn reasoning_part(text: &str) -> AssistantPart {
     AssistantPart::Reasoning(ReasoningPart {
+        source: Default::default(),
         id: part_id("reasoning_1"),
         text: text.to_owned(),
     })

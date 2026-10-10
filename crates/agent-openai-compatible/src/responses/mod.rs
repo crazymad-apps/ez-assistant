@@ -1,6 +1,7 @@
 //! OpenAI Responses 协议方言、私有 Schema、Codec、流状态机与服务。
 
 mod adapter;
+mod continuation;
 mod decode;
 mod encode;
 mod schema;

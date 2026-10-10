@@ -81,3 +81,7 @@ cargo test -p agent-sdk
 cargo clippy -p agent-sdk --all-targets --all-features -- -D warnings
 cargo fmt --all --check
 ```
+
+## v0.29.0 F06 M1 冻结模型派生
+
+`Agent::try_with_model` 为实际 Runtime owner/generation 变化派生新的冻结规格，保留 Prompt、工具、guardrail、请求配置和预算，并复用 Builder 的跨字段校验。该方法不修改正在执行的 Agent，不保存续接状态或恢复额度；Session、child owner、压缩与重建策略仍归 Runtime。

@@ -442,3 +442,32 @@ GetProviderUsage 返回默认／辅助用途、全库显式引用会话数量、
 ## v0.28.1 F04 问答契约
 
 `FeedbackRequestSnapshot` 是主会话 `ask_user` 的权威问题和答复投影，独立于审批与消息评价。客户端通过 `ListFeedbackRequests`、`AnswerFeedback`、`CancelFeedback` 读取和提交意图；问题内容、模式与请求身份由 Runtime 冻结。`FeedbackPublished` / `FeedbackChanged` 同步状态，恢复查询不重复发通知。`RunFinished.awaiting_feedback` 为兼容缺省 false 的可选字段，避免轮后等待误报完成。本次应用最低兼容版本为 `0.28.1`。
+
+## v0.29.0 F06 M0 连接续接策略
+
+`ProviderConnection` 增加默认 false 的 `server_history_enabled` 与默认 null 的 `server_history_support_override`。能力覆盖只接受 supported/unsupported；Chat 及不适用协议不能因此启用续接。默认能力判断以已核实官方接口身份为准，自定义接口未知，Rust/TS 以共享夹具核对同一投影。Desktop/Client 与 Host 应用最低兼容软件版本为 `0.29.0`；M0 当时未调整企业协议，当前边界见下文 M2。续接 ID 与内部连接绑定不进入客户端 DTO。
+
+## v0.29.0 F06 M2 企业契约边界
+
+企业协议及最低版本独立提升至 2，契约由 Center OpenAPI 与 Host 内部客户端维护；应用软件兼容版本继续为 `0.29.0`。公开 `ProviderConnection` 策略投影保持 M0 字段，响应 ID、内部周期及企业传输绑定不进入客户端 DTO。企业只读投影使用实际上游能力，不依据中心代理 URL 判定。
+
+## v0.29.0 F02 M1 用户交互 Shell
+
+`UserTerminalShell` 独立于 Agent 的 `ShellKind`，补充 bash/zsh 的交互身份。Host 资源目录返回 `UserTerminalShellEntry { shell, name }`，null 标识默认入口；Open 的 null 仍是默认意图。Created 的 shell 返回实际识别类型（未知默认类型保持 null），shell_name 返回同次解析的程序名；不返回可执行路径。TS 投影由现有生成器同步。应用最低兼容版本仍为已确定的 `0.29.0`，无持久化字段、迁移或在途版本双读双写。
+
+
+### F02 M2 补充：统一 Shell 身份
+
+2026-09-30 用户要求三个入口的显式选项一致，最终统一使用 ShellKind，加入 bash/zsh，移除上节 M1 在途的 UserTerminalShell 枚举。Agent 与 PTY 启动模式仍分开，现有 DTO/命令/存储字段不新增；Unix Agent 缺省仍为 sh，PTY null 仍为系统登录 Shell。v0.29.0 迁移扩展已有列的白名单，兼容下限保持 0.29.0；旧在途同版库须一次性对齐，不增加永久别名或双读。
+
+## v0.29.0 F03 M1 过程事实
+
+新增 reasoning source 的轻量应用投影；未发布 v0.29.0 的 RunSnapshot 统一以 reasoning_parts 替换合并字符串，不保留双轨。AssistantMessageSnapshot.run_created_at_ms 与 RunAccepted/RunFinished、child Finished 的可靠时间来自已有记录；ObservedSnapshot.observed_at_ms 仅用于活动显示时钟，不改变事件水位语义。未知时间保持未知。TS 同步生成，兼容下限保持已确定的 0.29.0。
+
+## v0.29.0 F04 反馈中心契约
+
+`feedback_center` 承载结构化目标、正文、最小环境、本人摘要/详情/分页与四个反馈 Command。
+`SubmittedFeedbackStatus` 区分中心处理状态与既有用户问答 `FeedbackStatus`；不复用问答存储或事件。
+Host 手动提交只接受内容、提交 UUID 和客户端环境，身份、来源与 Host 环境由 Host 确定。
+`FeedbackResponse<T>` 的业务失败独立于登录传输错误，`submission_unknown` 不代表写入失败；
+DTO 不包含 Token、数据库类型或工具 trait，TS 继续由 Rust 同源生成。

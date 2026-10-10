@@ -395,6 +395,20 @@ button.tree_entry_control {
   border-bottom: 1px solid var(--ez-border);
 }
 
+// 普通文件只显示名称，收缩文本而不挤出更多操作；工作空间面包屑独立保留。
+.file_name {
+  display: block;
+  overflow: hidden;
+  min-width: 0;
+  flex: 1 1 auto;
+  padding-left: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+
+  > span { min-width: 0; max-width: 100%; }
+  .breadcrumb_node_trigger { max-width: 100%; }
+}
+
 .breadcrumb {
   display: flex;
   overflow-x: auto;

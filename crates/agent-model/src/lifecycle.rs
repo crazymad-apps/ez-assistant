@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     pin::Pin,
     task::{Context, Poll},
 };
@@ -14,6 +14,7 @@ use crate::{ModelError, ModelEvent, ModelEventStream};
 /// 包装任意 [`ModelEventStream`]，把不信任的生产方输出强制约束到规范事件契约：
 ///
 /// - 首个事件必须是 `TurnStarted`；`TurnFailed` 在任何阶段都是合法终态。
+/// - `TurnRestarted` 清除未提交响应的身份与 Part 状态，等待新的 TurnStarted。
 /// - Part 的 `Started`/`Delta`/`Finished` 按 ID 配对；不同 Part 允许交错。
 /// - `TurnFinished` 到达时不允许存在未结束的 Part，且消息 ID 必须与
 ///   `TurnStarted` 声明的一致。
@@ -25,6 +26,7 @@ pub struct LifecycleValidator {
     state: ValidatorState,
     open_parts: HashSet<OpenPart>,
     message_id: Option<MessageId>,
+    reasoning_sources: HashMap<PartId, agent_types::ReasoningSource>,
 }
 
 impl LifecycleValidator {
@@ -35,11 +37,19 @@ impl LifecycleValidator {
             state: ValidatorState::AwaitingStart,
             open_parts: HashSet::new(),
             message_id: None,
+            reasoning_sources: HashMap::new(),
         }
     }
 
     fn validate(&mut self, event: &ModelEvent) -> Result<(), ModelError> {
         match event {
+            ModelEvent::TurnRestarted => {
+                self.state = ValidatorState::AwaitingStart;
+                self.open_parts.clear();
+                self.message_id = None;
+                self.reasoning_sources.clear();
+                Ok(())
+            }
             ModelEvent::TurnStarted { message_id, .. } => {
                 if self.state != ValidatorState::AwaitingStart {
                     return Err(protocol("duplicate turn start"));
@@ -49,8 +59,18 @@ impl LifecycleValidator {
                 Ok(())
             }
             ModelEvent::ReasoningStarted { id } => self.open_part(OpenPart::Reasoning(id.clone())),
-            ModelEvent::ReasoningDelta { id, .. } => {
-                self.part_delta(&OpenPart::Reasoning(id.clone()))
+            ModelEvent::ReasoningDelta { id, source, .. } => {
+                self.part_delta(&OpenPart::Reasoning(id.clone()))?;
+                // 同一片段的来源必须稳定，不能让观察内容与可靠消息含义分叉。
+                if self
+                    .reasoning_sources
+                    .get(id)
+                    .is_some_and(|previous| previous != source)
+                {
+                    return Err(protocol("reasoning source changed during streaming"));
+                }
+                self.reasoning_sources.insert(id.clone(), *source);
+                Ok(())
             }
             ModelEvent::ReasoningFinished { id } => {
                 self.finish_part(&OpenPart::Reasoning(id.clone()))
@@ -80,6 +100,16 @@ impl LifecycleValidator {
                     return Err(protocol(
                         "turn finished with a message id different from turn start",
                     ));
+                }
+                for part in &message.parts {
+                    if let agent_types::AssistantPart::Reasoning(part) = part
+                        && self
+                            .reasoning_sources
+                            .get(&part.id)
+                            .is_some_and(|source| *source != part.source)
+                    {
+                        return Err(protocol("reasoning source differs from streamed part"));
+                    }
                 }
                 Ok(())
             }
@@ -303,6 +333,44 @@ mod tests {
     }
 
     #[test]
+    fn rejects_reasoning_source_changes_and_terminal_mismatch() {
+        use agent_types::{AssistantPart, ReasoningPart, ReasoningSource};
+        let prefix = vec![
+            started(),
+            ModelEvent::ReasoningStarted { id: part_id("r") },
+            ModelEvent::ReasoningDelta {
+                id: part_id("r"),
+                source: ReasoningSource::Summary,
+                delta: "summary".into(),
+            },
+        ];
+        let mut changed = prefix.clone();
+        changed.push(ModelEvent::ReasoningDelta {
+            id: part_id("r"),
+            source: ReasoningSource::Raw,
+            delta: "raw".into(),
+        });
+        assert!(matches!(
+            validate(changed).last(),
+            Some(ModelEvent::TurnFailed { .. })
+        ));
+        for source in [ReasoningSource::Raw, ReasoningSource::Summary] {
+            let mut events = prefix.clone();
+            events.push(ModelEvent::ReasoningFinished { id: part_id("r") });
+            events.push(finished(vec![AssistantPart::Reasoning(ReasoningPart {
+                id: part_id("r"),
+                source,
+                text: "summary".into(),
+            })]));
+            let output = validate(events);
+            assert_eq!(
+                matches!(output.last(), Some(ModelEvent::TurnFinished { .. })),
+                source == ReasoningSource::Summary
+            );
+        }
+    }
+
+    #[test]
     fn accepts_reasoning_and_interleaved_tool_calls() {
         // 两个 Tool Call 的 arguments 分片交错到达，按 ID 各自配对。
         let events = vec![
@@ -311,6 +379,7 @@ mod tests {
                 id: part_id("reasoning_1"),
             },
             ModelEvent::ReasoningDelta {
+                source: Default::default(),
                 id: part_id("reasoning_1"),
                 delta: "thinking".to_owned(),
             },

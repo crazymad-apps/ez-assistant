@@ -6,8 +6,8 @@ use std::{
 };
 
 use agent_tools::{
-    FileAuthorizationFacts, GeneralAuthorizationFacts, ResolvedToolInvocation,
-    ShellAuthorizationFacts, ShellProcessMode,
+    FileAuthorizationFacts, FileBatchAuthorizationFacts, GeneralAuthorizationFacts,
+    ResolvedToolInvocation, ShellAuthorizationFacts, ShellProcessMode,
 };
 use agent_types::{ToolCallId, ToolResult, ToolResultStatus};
 use serde::{Deserialize, Serialize};
@@ -23,6 +23,10 @@ pub(crate) enum AuditFacts {
         operation: String,
         path: String,
     },
+    Files {
+        operation: String,
+        paths: Vec<String>,
+    },
     Shell {
         command: String,
         workdir: String,
@@ -37,6 +41,12 @@ impl AuditFacts {
             return Self::File {
                 operation: format!("{:?}", facts.operation).to_ascii_lowercase(),
                 path: facts.path.to_string(),
+            };
+        }
+        if let Some(facts) = invocation.facts::<FileBatchAuthorizationFacts>() {
+            return Self::Files {
+                operation: format!("{:?}", facts.operation).to_ascii_lowercase(),
+                paths: facts.paths.iter().map(ToString::to_string).collect(),
             };
         }
         if let Some(facts) = invocation.facts::<ShellAuthorizationFacts>() {
@@ -276,7 +286,13 @@ fn classify_error(result: &ToolResult) -> String {
     }
     match result.content.as_single_text() {
         Some(text) if text.starts_with("invalid tool input:") => "invalid_input".to_owned(),
-        Some(text) if text.contains("interrupted") || text.contains("operation cancelled") => {
+        // Core 正常取消现在保留 Shell 已返回的错误，不再统一覆盖成 interrupted。
+        // 只识别标准 Shell 的取消文本，不能把任意含 cancelled 的业务错误当作取消。
+        Some(text)
+            if text.contains("interrupted")
+                || text.contains("operation cancelled")
+                || text == "tool execution failed: shell execution cancelled" =>
+        {
             "cancelled".to_owned()
         }
         Some(text) if text.contains("path not found:") => "file_not_found".to_owned(),

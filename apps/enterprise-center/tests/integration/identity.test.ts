@@ -254,7 +254,7 @@ it('管理员本人改密同样要求原密码', async () => {
   expect((await me(f, result.token)).statusCode).toBe(200);
 });
 
-it('未知字段、错误类型、非 JSON 与来源伪造不签发凭据', async () => {
+it('未知字段、错误类型和非 JSON 不签发凭据，跨域正常登录', async () => {
   const f = await fixture();
   for (const payload of [
     { username: 'admin', password: '123456', is_super_admin: true },
@@ -267,11 +267,11 @@ it('未知字段、错误类型、非 JSON 与来源伪造不签发凭据', asyn
       await f.app.inject({
         method: 'POST',
         url: '/api/auth/login',
-        headers: { origin: 'https://evil.example' },
+        headers: { origin: 'https://client.example', 'sec-fetch-site': 'cross-site' },
         payload: { username: 'admin', password: '123456' },
       })
     ).statusCode,
-  ).toBe(403);
+  ).toBe(200);
   expect(
     (
       await f.app.inject({

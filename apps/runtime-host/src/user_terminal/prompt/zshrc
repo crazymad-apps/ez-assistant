@@ -1,0 +1,8 @@
+if (( __ez_terminal_has_zdotdir )); then
+    ZDOTDIR=$__ez_terminal_user_zdotdir
+else
+    unset ZDOTDIR
+fi
+if [[ -r ${ZDOTDIR-$HOME}/.zshrc ]]; then source "${ZDOTDIR-$HOME}/.zshrc"; fi
+source "$__ez_terminal_startup/prompt.zsh"
+unset __ez_terminal_startup __ez_terminal_has_zdotdir __ez_terminal_user_zdotdir

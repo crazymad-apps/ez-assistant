@@ -20,6 +20,9 @@ pub struct StoredProvider {
     pub provider_instance_id: ProviderInstanceId,
     pub connection: ProviderConnection,
     pub api_key: SecretValue,
+    /// 连接启用周期的不透明绑定。关闭清除，再开启换新；相同配置重启保留。
+    /// 只用于拒绝旧续接状态，不是版本计数或客户端可编辑参数。
+    pub server_history_key: Option<String>,
     pub model_catalog: Option<StoredModelCatalog>,
     /// 只表示持久快照无法解码；正常写入永远清除此诊断。
     pub model_catalog_diagnostic: Option<ModelCatalogDiagnosticCode>,

@@ -69,11 +69,16 @@ Swagger 文档当前随服务可访问，不提供额外鉴权；生产可在反
 
 ## M1 身份接口
 
+Center 允许任意来源跨域访问，不按 `Origin` 或 `Sec-Fetch-Site` 拒绝请求；CORS 预检无需登录，
+支持各业务方法和请求头，管理响应与模型代理流均返回跨域响应头。实际受保护接口仍要求显式 Bearer，
+权限校验照常执行；不使用 Cookie 认证，也不启用 CORS Cookie 凭据。`CENTER_PUBLIC_ORIGIN` 仅用于
+下发 Host 可访问的模型代理地址，不限制浏览器页面的访问地址。
+
 | 接口 | 输入与返回 |
 | --- | --- |
 | POST /api/auth/login | `{username,password}`；200 返回 center_id、user、token 和 llm_key |
 | GET /api/auth/me | 有效身份凭据；200 返回中心与本人身份，不再次返回秘密 |
-| POST /api/auth/logout | JSON `{}`；204，仅删除当前 Token 和关联 key，重复或未知凭据幂等成功；仍检查传输来源 |
+| POST /api/auth/logout | JSON `{}`；204，仅删除当前 Token 和关联 key，重复或未知凭据幂等成功 |
 | POST /api/auth/password | `{old_password,new_password}`；204，验证原密码，更新本人密码，保留已有 Token/key；管理重置任意用户使用下节独立接口 |
 
 账号 trim 后转小写，密码不裁剪；新密码 6—128 个 Unicode 字符，必须包含英文字母和数字，最多 512 UTF-8 字节，不要求大小写并存或特殊符号。历史密码与初始化密码仍可用于登录/原密码验证。拒绝审计只记录固定原因码，不记录账号输入、密码、Token/key 或摘要。HTTP 解析失败、过大请求和底层故障只返回脱敏错误，不承诺故障时审计一定能落库。
@@ -136,7 +141,7 @@ node --env-file=.env dist/main.js --api-only
 | `CENTER_DATABASE_URL` | 必填 PostgreSQL URI；升级和业务共用一个账号，无默认数据库连接 |
 | `CENTER_DATABASE_AUTO_UPGRADE` | `true`；只接受 `true` / `false` |
 | `CENTER_HOST` / `CENTER_PORT` | `127.0.0.1:7320` |
-| `CENTER_PUBLIC_ORIGIN` | 必填精确 origin，无路径/尾斜线 |
+| `CENTER_PUBLIC_ORIGIN` | 必填模型代理公开地址，无路径/尾斜线；用于下发 Host 配置，不是请求来源白名单 |
 
 初始 SQL 内置超级管理员 `admin / 123456`，只保存预生成的带盐 scrypt 摘要，不另设初始化代码、命令或配置。该公开默认密码应在正式使用前修改；它是后续新密码长度规则的初始化例外。
 
@@ -179,6 +184,12 @@ M0—M3 已确认；C01 循环确认、提交和阶段归档仍为独立门禁�
 
 后台“模型管理”维护服务商连接、在线目录、固定参数和唯一企业默认模型。显式刷新完整成功才替换数据库中的在线快照（允许空列表）；失败保留原快照，连接变更后的迟到结果拒绝提交。固定配置独立存储，刷新目录或模板均不覆盖它；删除服务商保留失效默认引用，后台显示原因并要求重新选择。API Key 仅写入，查询返回是否已设置。
 
+列表顶部“公共配置”将企业默认模型和客户端模型访问地址并列。地址仅包含 HTTP(S) 主机与端口，
+例如 `http://localhost:7320`；管理员保存到 `model_settings.public_origin`，客户端下次读取模型配置即生效，
+服务重启后保留。留空恢复 `CENTER_PUBLIC_ORIGIN`。此地址用于下发客户端模型入口，服务商上游连接仍在服务商管理中配置。
+`PUT /api/model-settings` 每次独立提交 `default_model` 或 `public_origin`，后者允许 null 恢复部署值。
+升级到此版本前需按数据库安全流程执行 `008-model-public-origin` 迁移；迁移只新增可空字段，不更新既有数据。
+
 初始模板唯一源文件为 [model-templates.json](../../packages/assistant-protocol/resources/model-templates.json)。构建复制到 `dist/resources/model-templates.json`，个人 Runtime 编译时嵌入同一文件。中心可设置 `CENTER_MODEL_TEMPLATES_FILE` 指向独立部署文件：保持 JSON 数组结构，按 `(provider_type, model_id)` 唯一匹配；`parameters` 为标准参数的部分字段，`protocol_parameters` 可按实际协议覆盖，`document`/`checked_on` 记录来源与核查日期。文件没有可执行表达式或动态版本号。
 
 运维先准备完整文件并原子替换，再由管理员在后台“重新加载模板”。中心校验字段、枚举、数值及组合，全部通过才发布；无效文件保留旧有效模板，初次加载失败显示不可用。限制 8 MiB、10,000 项。模板只补在线未知值，固定配置优先；模板不增加在线目录条目。`xhigh` 是新配置的统一标准档位名，不接受旧 `x_high` 拼写，上游值仍由映射单独指定。文件替换不要求重新构建或更新整个中心。
@@ -193,7 +204,7 @@ Provider/model/协议，不自动重试或跟随跳转。中心自产错误有 `
 被剥除；已建立索引的响应含 `x-ez-call-id`。HTTP 2xx 完整转发不代表模型业务或任务成功。
 
 管理接口保留 16 KiB 限制；模型代理只接受 UTF-8 JSON，单次正文 32 MiB、在途原始正文合计
-128 MiB。请求和响应字节不改写。`CENTER_LLM_CONNECT_TIMEOUT_MS` 默认 10000，范围 1000—120000；
+128 MiB。普通 HTTP 路由的请求和响应字节不改写；显式 WebSocket 桥接按下述规则转换。`CENTER_LLM_CONNECT_TIMEOUT_MS` 默认 10000，范围 1000—120000；
 `CENTER_LLM_IDLE_TIMEOUT_MS` 默认 300000，范围 1000—3600000，同时约束上游空闲和下游背压等待。
 代理正常收完请求正文不会中断响应；取消、超时和关闭均销毁在途网络。
 
@@ -257,3 +268,77 @@ Agent 名称支持 NFC 中文，限制 1—64 个 Unicode 字符且不能有首�
 ## Docker 交付
 
 运行 `npm run package:docker` 在 Docker 外准备完整制品，再按 [部署说明](deploy/README.md) 上传和构建。镜像不安装依赖或编译，前后端共用 7320 端口；默认支持 HTTP，HTTPS 可通过代理扩展。
+
+## F06 企业历史续接
+
+配套 Host 使用企业协议 2（最低 2）；Center/Admin 一起部署，旧 Host/Center 混用拒绝。迁移 `005-server-history.sql` 给旧连接补默认关闭及空能力覆盖，保留原配置、凭据、固定参数和调用记录。已有库升级前仍需停写、独立备份并恢复核验；不提供原地降级，回退须恢复匹配的数据库和文件备份。
+
+管理员在现有服务商表单设置续接能力及开关；只有 Responses 且实际上游明确支持时可启用。旧缓存 Admin 缺少新策略字段会拒绝保存，刷新配套页面后重试。普通企业用户只读。
+
+Responses 代理请求必须显式传入 `store`，无状态/配置测试使用 `store=false`；保存或旧 ID 续接使用 `store=true`，并携带配置下发的 `x-ez-center-history-binding`。该头仅由中心发送前核验，不转发上游。策略/主体/执行配置变更使旧绑定失效，Host 刷新配置并提示重试，不自动重放。绑定不依赖登录 Token，普通重登录及重启可恢复有效续接。
+
+
+### Responses WebSocket 接续
+
+管理员在服务商编辑页选择“Responses 上游传输 → WebSocket”，确认入口支持并启用服务端历史续接。
+Host 仍走 HTTP/SSE；Center 建立独立上游连接，用不透明响应 ID 接续增量。仅业务流式 `store:true`
+请求桥接；标题、摘要、连接测试及无状态调用沿用 HTTP。上游可保持 `store:false`，这不表示永久存储。
+调用快照是 Host ↔ Center 的 HTTP 正文，不是协议转换后的上游原始字节。
+
+| 启动变量 | 默认值 | 允许范围 |
+| --- | --- | --- |
+| `CENTER_LLM_WS_IDLE_MS` | 600000（10 分钟） | 1000—86400000 毫秒 |
+| `CENTER_LLM_WS_MAX_CONNECTIONS` | 256 | 1—4096 |
+| `CENTER_LLM_WS_MAX_PER_USER` | 32 | 1—全局连接上限 |
+| `CENTER_LLM_WS_MAX_BUFFER_BYTES` | 16777216（16 MiB） | 1024—67108864 字节 |
+
+缓冲上限同时约束单帧和每条活跃连接的待交付数据；慢下游受到既有 LLM 空闲超时约束。
+连接达到上限时优先释放空闲链，全部在途则拒绝新建。空闲期限从完整交付后开始计时；最多 20 条空闲链不因超时回收，超过后按最后活跃时间回收已超时链至 20 条。全局及每用户硬上限仍优先约束资源，上游断线及身份/配置失效仍立即清链。
+配置执行属性变化、关闭续接、用户失效时主动关闭相关连接；同值保存及同主体
+更换登录 Token（含退出后重新登录）不主动回收；退出的旧凭据仍立即失效。同一用户的不同会话/子任务各自建链，压缩后全量重建不会关闭其他链。
+配置回滚不发布失效通知；主体事务结果不明时沿用既有全部凭据撤销，同时释放桥接资源。
+
+Center 重启丢失内存连接，旧 ID 由 Host 自动完整重建一次；普通网络或流中错误不重放生成。
+修改这些启动变量需要重启 Center。部署为单实例，不提供跨实例连接共享或永久 response 查询。
+
+## 反馈中心（v0.29.0 F04 M0）
+
+迁移 `006-feedback.sql` 新增反馈单表，维护计数清单同步包含 `feedback`；已有用户库升级仍遵循独立备份、恢复核验和确认规则。
+企业协议保持 2，可选能力新增 `feedback`。普通用户通过 `POST /api/feedback` 提交，`GET /api/feedback` 和 `GET /api/feedback/:id` 只读本人记录；
+管理员通过 `GET /api/admin/feedback`、`GET /api/admin/feedback/:id` 和 `PATCH /api/admin/feedback/:id` 查询处理，正式后台入口为“反馈中心”。
+
+每条反馈保存平台、插件或知识库目标及具体内容位置。同一用户与提交 UUID 重试返回原记录，内容改变返回冲突；
+管理处理须提交原状态和原说明，避免覆盖他人修改。状态为已解决/已关闭时说明必填，提交者可见。
+接口字段及限制见生成的 OpenAPI；列表最多 20 条，不含正文。当前 M0 只交付中心与管理端，用户客户端和 `submit_feedback` 工具待后续接入。
+
+## F01 企业安装包管理
+
+正式后台“安装包”支持上传平台文件、编辑版本说明、按平台发布和撤回。独立迁移
+`007-desktop-releases.sql` 新增版本及平台目标两表，保留既有身份和其他业务数据。
+已发布过的制品不能覆盖，撤回后仍保留原文件，重新发布使用相同文件。
+
+发布机配置 `TAURI_SIGNING_PRIVATE_KEY` 或 `TAURI_SIGNING_PRIVATE_KEY_PATH` 及相应密码后，
+Desktop 的平台发布脚本在平台签名/公证完成后生成 `release.json`、`release.json.sig`
+及安装/更新文件。Windows 使用 MSI；macOS 使用 DMG 与最终 App 的 tar.gz。
+清单必须由实际随包 Host 的 `--build-info-json` 生成，异构 Windows 目标需要在对应运行环境完成该步骤。
+管理员选择同一输出目录中的清单、清单签名及 1—2 个制品即可上传，额外的制品 `.sig` 无需另选。
+
+正式公钥由发布准备提供到 `packages/assistant-protocol/resources/desktop-update.pub`，构建时复制到
+`dist/resources`；部署也可通过 `CENTER_DESKTOP_UPDATE_PUBLIC_KEY_FILE` 指定同一可信公钥的绝对路径。
+当前仓库未内置正式密钥，没有公钥时 Center 其他功能可运行，安装包上传返回明确错误。
+Center 从不接收或持有发布私钥；测试密钥不得用于正式发布。
+
+`CENTER_DESKTOP_RELEASE_ROOT` 默认是工作目录的 `data/desktop-releases`，必须位于公开静态目录之外、
+权限为仅服务账号可访问，且路径不能含符号链接。备份/恢复须将该目录与数据库配套处理。
+中断上传只清理本次临时文件；数据库失败可能留下无引用的内容文件，不自动清理历史文件。
+
+上传先验证小清单签名，再随文件流计算一次大小与 SHA-256，不解包、不运行安装器。
+multipart 的 `manifest` 字段传原始 UTF-8 字节的 base64，避免浏览器改变换行使签名失效；
+签名文本第二个字段，制品为后续重复 `files` 字段。清单最大 64 KiB、签名最大 8 KiB，
+每个制品最大 512 MiB，总制品最大 1 GiB，两个并发上传、八个并发下载；上传总期限 30 分钟、空闲 60 秒。
+发布与发现只读取小元数据和文件属性，不重复扫描大文件。
+
+匿名 `GET /api/desktop-updates/:target/:current_version` 只返回已发布、适用且文件可用的较新版本，
+无候选返回 204；固定版本及下载路径由该结果提供。草稿/撤回不可公开读取，撤回同时取消未完成下载。
+支持 HTTP 和 HTTPS；HTTPS 由反向代理终止 TLS，`CENTER_PUBLIC_ORIGIN` 填实际访问地址，代理需允许上述上传大小及期限。
+当前完成 Center/Admin 分发，Desktop 自动升级及真实平台安装验收在后续里程碑实施。

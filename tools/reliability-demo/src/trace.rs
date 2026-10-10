@@ -330,6 +330,7 @@ fn validate_record_envelope(record: &TraceRecord) -> Result<(), TraceLoadError> 
     if let NativeTracePayload::ModelAttempt(event) = &record.payload {
         let event_attempt = match event {
             ModelAttemptEvent::Started { attempt, .. }
+            | ModelAttemptEvent::StreamFailed { attempt, .. }
             | ModelAttemptEvent::EstablishmentFailed { attempt, .. }
             | ModelAttemptEvent::StreamEstablished { attempt, .. } => *attempt,
             ModelAttemptEvent::RetryScheduled { next_attempt, .. } => *next_attempt,
@@ -496,6 +497,7 @@ fn validate_complete_calls(records: &[TraceRecord]) -> Result<(), TraceLoadError
 fn attempt_event_trace(event: &ModelAttemptEvent) -> Option<&TraceContext> {
     match event {
         ModelAttemptEvent::Started { trace, .. }
+        | ModelAttemptEvent::StreamFailed { trace, .. }
         | ModelAttemptEvent::EstablishmentFailed { trace, .. }
         | ModelAttemptEvent::RetryScheduled { trace, .. }
         | ModelAttemptEvent::StreamEstablished { trace, .. } => trace.as_ref(),

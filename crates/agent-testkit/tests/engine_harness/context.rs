@@ -275,6 +275,7 @@ async fn in_stream_context_overflow_discards_partial_step_and_tool_call() {
                 id: part_id("reasoning_overflow"),
             },
             ModelEvent::ReasoningDelta {
+                source: Default::default(),
                 id: part_id("reasoning_overflow"),
                 delta: "partial reasoning".to_owned(),
             },
@@ -336,6 +337,7 @@ async fn in_stream_context_overflow_discards_partial_step_and_tool_call() {
     );
     assert_eq!(model.take_requests(), vec![handoff]);
     assert!(events.contains(&AgentEvent::ReasoningDelta {
+        source: Default::default(),
         step: 1,
         id: part_id("reasoning_overflow"),
         delta: "partial reasoning".to_owned(),

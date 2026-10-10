@@ -67,6 +67,9 @@ export const modelApi = {
   setDefault: async (token: string, default_model: ModelSelection | null) =>
     (await sdk.saveModelSettings({ ...options(token), body: { default_model } })).data,
 
+  setPublicOrigin: async (token: string, public_origin: string | null) =>
+    (await sdk.saveModelSettings({ ...options(token), body: { public_origin } })).data,
+
   templates: async (token: string, signal?: AbortSignal) =>
     (await sdk.getModelTemplateStatus(options(token, signal))).data,
 

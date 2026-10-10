@@ -21,7 +21,7 @@ const FIXED_COLUMNS: &str = "provider_instance_id, model_id, context_window_toke
 
 impl StorageEngine {
     pub(super) fn load_providers(&self) -> StorageResult<Vec<StoredProvider>> {
-        let mut statement = sql(self.connection.prepare("SELECT provider_instance_id, display_name, provider_type, endpoint, api_key, protocol_preference, models_path, discovery_format, model_catalog_json, model_catalog_refreshed_at_ms, model_catalog_connection_changed FROM providers ORDER BY provider_instance_id"))?;
+        let mut statement = sql(self.connection.prepare("SELECT provider_instance_id, display_name, provider_type, endpoint, api_key, protocol_preference, models_path, discovery_format, model_catalog_json, model_catalog_refreshed_at_ms, model_catalog_connection_changed, server_history_enabled, server_history_support_override, server_history_key FROM providers ORDER BY provider_instance_id"))?;
         let mut rows = sql(statement.query([]))?;
         let mut result = Vec::new();
         while let Some(row) = sql(rows.next())? {
@@ -71,8 +71,13 @@ impl StorageEngine {
                     protocol_preference: enum_read(sql(row.get(5))?)?,
                     models_path: sql(row.get(6))?,
                     discovery_format: enum_read(sql(row.get(7))?)?,
+                    server_history_enabled: sql(row.get(11))?,
+                    server_history_support_override: sql(row.get::<_, Option<String>>(12))?
+                        .map(enum_read)
+                        .transpose()?,
                 },
                 api_key: SecretValue::new(sql(row.get(4))?),
+                server_history_key: sql(row.get(13))?,
                 model_catalog,
                 model_catalog_diagnostic,
             });
@@ -81,7 +86,7 @@ impl StorageEngine {
     }
     pub(super) fn put_provider(&self, provider: StoredProvider) -> StorageResult<()> {
         let connection = provider.connection;
-        sql(self.connection.execute("INSERT INTO providers(provider_instance_id, display_name, provider_type, endpoint, api_key, protocol_preference, models_path, discovery_format) VALUES (?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(provider_instance_id) DO UPDATE SET model_catalog_connection_changed=CASE WHEN providers.model_catalog_json IS NOT NULL AND (providers.provider_type!=excluded.provider_type OR providers.endpoint!=excluded.endpoint OR providers.api_key!=excluded.api_key OR providers.models_path!=excluded.models_path OR providers.discovery_format!=excluded.discovery_format) THEN 1 ELSE providers.model_catalog_connection_changed END, display_name=excluded.display_name, provider_type=excluded.provider_type, endpoint=excluded.endpoint, api_key=excluded.api_key, protocol_preference=excluded.protocol_preference, models_path=excluded.models_path, discovery_format=excluded.discovery_format", params![provider.provider_instance_id.as_str(), connection.display_name, enum_write(&connection.provider_type)?, connection.endpoint, provider.api_key.expose(), enum_write(&connection.protocol_preference)?, connection.models_path, enum_write(&connection.discovery_format)?]))?;
+        sql(self.connection.execute("INSERT INTO providers(provider_instance_id, display_name, provider_type, endpoint, api_key, protocol_preference, models_path, discovery_format, server_history_enabled, server_history_support_override, server_history_key) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(provider_instance_id) DO UPDATE SET model_catalog_connection_changed=CASE WHEN providers.model_catalog_json IS NOT NULL AND (providers.provider_type!=excluded.provider_type OR providers.endpoint!=excluded.endpoint OR providers.api_key!=excluded.api_key OR providers.models_path!=excluded.models_path OR providers.discovery_format!=excluded.discovery_format) THEN 1 ELSE providers.model_catalog_connection_changed END, display_name=excluded.display_name, provider_type=excluded.provider_type, endpoint=excluded.endpoint, api_key=excluded.api_key, protocol_preference=excluded.protocol_preference, models_path=excluded.models_path, discovery_format=excluded.discovery_format, server_history_enabled=excluded.server_history_enabled, server_history_support_override=excluded.server_history_support_override, server_history_key=excluded.server_history_key", params![provider.provider_instance_id.as_str(), connection.display_name, enum_write(&connection.provider_type)?, connection.endpoint, provider.api_key.expose(), enum_write(&connection.protocol_preference)?, connection.models_path, enum_write(&connection.discovery_format)?, connection.server_history_enabled, connection.server_history_support_override.as_ref().map(enum_write).transpose()?, provider.server_history_key]))?;
         Ok(())
     }
     /// 网络结果只在持久连接仍等于捕获值时落库；失败不会清空旧目录。
@@ -99,7 +104,7 @@ impl StorageEngine {
         }
         let expected = replacement.expected_connection;
         let rows = sql(self.connection.execute(
-            "UPDATE providers SET model_catalog_json=?1, model_catalog_refreshed_at_ms=?2, model_catalog_connection_changed=?3 WHERE provider_instance_id=?4 AND display_name=?5 AND provider_type=?6 AND endpoint=?7 AND api_key=?8 AND protocol_preference=?9 AND models_path=?10 AND discovery_format=?11",
+            "UPDATE providers SET model_catalog_json=?1, model_catalog_refreshed_at_ms=?2, model_catalog_connection_changed=?3 WHERE provider_instance_id=?4 AND display_name=?5 AND provider_type=?6 AND endpoint=?7 AND api_key=?8 AND protocol_preference=?9 AND models_path=?10 AND discovery_format=?11 AND server_history_enabled=?12 AND server_history_support_override IS ?13",
             params![
                 raw,
                 replacement.catalog.refreshed_at_ms,
@@ -112,6 +117,8 @@ impl StorageEngine {
                 enum_write(&expected.protocol_preference)?,
                 expected.models_path,
                 enum_write(&expected.discovery_format)?,
+                expected.server_history_enabled,
+                expected.server_history_support_override.as_ref().map(enum_write).transpose()?,
             ],
         ))?;
         if rows != 1 {
@@ -153,13 +160,35 @@ impl StorageEngine {
             vision_model: selection(raw.2, raw.3)?,
         })
     }
-    pub(super) fn save_model_settings(&self, settings: ModelSettings) -> StorageResult<()> {
-        let rows = sql(self.connection.execute("UPDATE model_settings SET default_provider_instance_id=?1, default_model_id=?2, vision_provider_instance_id=?3, vision_model_id=?4 WHERE singleton_key=1", params![settings.default_model.as_ref().map(|s|s.provider_instance_id.as_str()), settings.default_model.as_ref().map(|s|s.model_id.as_str()), settings.vision_model.as_ref().map(|s|s.provider_instance_id.as_str()), settings.vision_model.as_ref().map(|s|s.model_id.as_str())]))?;
+    pub(super) fn save_model_settings(
+        &self,
+        settings: ModelSettings,
+        server_history_key: Option<String>,
+    ) -> StorageResult<()> {
+        let transaction = sql(self.connection.unchecked_transaction())?;
+        if let Some(key) = server_history_key {
+            sql(transaction.execute(
+                "UPDATE sessions SET server_history_key=?1 WHERE model_id IS NULL",
+                [key],
+            ))?;
+        }
+        let rows = sql(transaction.execute("UPDATE model_settings SET default_provider_instance_id=?1, default_model_id=?2, vision_provider_instance_id=?3, vision_model_id=?4 WHERE singleton_key=1", params![settings.default_model.as_ref().map(|s|s.provider_instance_id.as_str()), settings.default_model.as_ref().map(|s|s.model_id.as_str()), settings.vision_model.as_ref().map(|s|s.provider_instance_id.as_str()), settings.vision_model.as_ref().map(|s|s.model_id.as_str())]))?;
         if rows != 1 {
             return Err(invalid_data("model settings singleton is missing"));
         }
+        sql(transaction.commit())?;
         Ok(())
     }
+    pub(super) fn invalidate_server_history_bindings(&self, key: String) -> StorageResult<()> {
+        if key.is_empty() {
+            return Err(invalid_data("history binding must not be empty"));
+        }
+        sql(self
+            .connection
+            .execute("UPDATE sessions SET server_history_key=?1", [key]))?;
+        Ok(())
+    }
+
     pub(super) fn get_model_fixed_config(
         &self,
         selection: ModelSelection,
@@ -184,7 +213,11 @@ impl StorageEngine {
             sql(statement.query_map(params![id.as_str(), limit.min(200), offset], read_fixed))?;
         rows.map(|row| sql(row)?).collect()
     }
-    pub(super) fn put_model_fixed_config(&self, config: ModelFixedConfig) -> StorageResult<()> {
+    pub(super) fn put_model_fixed_config(
+        &self,
+        config: ModelFixedConfig,
+        server_history_key: Option<String>,
+    ) -> StorageResult<()> {
         if self
             .get_model_fixed_config(config.selection.clone())?
             .is_some_and(|existing| existing.origin != config.origin)
@@ -201,14 +234,24 @@ impl StorageEngine {
                     .ok_or_else(|| invalid_data("model mode limit is missing"))?,
             );
         }
-        sql(self.connection.execute("INSERT INTO model_fixed_configs(provider_instance_id,model_id,context_window_tokens,max_output_tokens,max_input_tokens,mode_limits_json,capabilities_json,updated_at_ms,origin) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(provider_instance_id,model_id) DO UPDATE SET context_window_tokens=excluded.context_window_tokens,max_output_tokens=excluded.max_output_tokens,max_input_tokens=excluded.max_input_tokens,mode_limits_json=excluded.mode_limits_json,capabilities_json=excluded.capabilities_json,updated_at_ms=excluded.updated_at_ms", params![config.selection.provider_instance_id.as_str(),config.selection.model_id,context,output,input,Value::Object(modes).to_string(),Value::Object(capabilities).to_string(),config.updated_at_ms,enum_write(&config.origin)?]))?;
+        let transaction = sql(self.connection.unchecked_transaction())?;
+        sql(transaction.execute("INSERT INTO model_fixed_configs(provider_instance_id,model_id,context_window_tokens,max_output_tokens,max_input_tokens,mode_limits_json,capabilities_json,updated_at_ms,origin) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(provider_instance_id,model_id) DO UPDATE SET context_window_tokens=excluded.context_window_tokens,max_output_tokens=excluded.max_output_tokens,max_input_tokens=excluded.max_input_tokens,mode_limits_json=excluded.mode_limits_json,capabilities_json=excluded.capabilities_json,updated_at_ms=excluded.updated_at_ms", params![config.selection.provider_instance_id.as_str(),&config.selection.model_id,context,output,input,Value::Object(modes).to_string(),Value::Object(capabilities).to_string(),config.updated_at_ms,enum_write(&config.origin)?]))?;
+        invalidate_fixed_history(&transaction, &config.selection, server_history_key)?;
+        sql(transaction.commit())?;
         Ok(())
     }
-    pub(super) fn reset_model_fixed_config(&self, selection: ModelSelection) -> StorageResult<()> {
-        sql(self.connection.execute(
+    pub(super) fn reset_model_fixed_config(
+        &self,
+        selection: ModelSelection,
+        server_history_key: Option<String>,
+    ) -> StorageResult<()> {
+        let transaction = sql(self.connection.unchecked_transaction())?;
+        sql(transaction.execute(
             "DELETE FROM model_fixed_configs WHERE provider_instance_id=?1 AND model_id=?2",
-            params![selection.provider_instance_id.as_str(), selection.model_id],
+            params![selection.provider_instance_id.as_str(), &selection.model_id],
         ))?;
+        invalidate_fixed_history(&transaction, &selection, server_history_key)?;
+        sql(transaction.commit())?;
         Ok(())
     }
 }
@@ -376,4 +419,16 @@ fn read_provider_usage(
             .map_err(|_| invalid_data("invalid provider configuration count"))?,
         sessions,
     })
+}
+
+/// 固定参数与受影响 Session 周期在同一事务提交，失败不留下半个绑定。
+fn invalidate_fixed_history(
+    connection: &rusqlite::Connection,
+    selection: &ModelSelection,
+    key: Option<String>,
+) -> StorageResult<()> {
+    if let Some(key) = key {
+        sql(connection.execute("UPDATE sessions SET server_history_key=?1 WHERE (model_provider_instance_id=?2 AND model_id=?3) OR (model_id IS NULL AND EXISTS (SELECT 1 FROM model_settings WHERE singleton_key=1 AND default_provider_instance_id=?2 AND default_model_id=?3))", params![key, selection.provider_instance_id.as_str(), selection.model_id]))?;
+    }
+    Ok(())
 }

@@ -9,9 +9,10 @@ use crate::{
     AbsolutePath, Dispatcher, FileEntry, FileEntryKind, FsFuture, ResolvedBatchItemRef,
     SearchMatch, Tool, ToolRegistry,
     capability::fs::{
-        DeleteFileRequest, DeleteFileResult, EditFileRequest, EditFileResult, FileSystemTool,
-        FileToolContext, FileToolError, ListDirectoryRequest, ListDirectoryResult, ReadFileRequest,
-        ReadFileResult, SearchFilesRequest, SearchFilesResult, WriteFileRequest, WriteFileResult,
+        DeleteFileRequest, DeleteFileResult, EditFileOutcome, EditFileRequest, EditFileResult,
+        EditNotExecutedReason, FileBatchAuthorizationFacts, FileSystemTool, FileToolContext,
+        FileToolError, ListDirectoryRequest, ListDirectoryResult, ReadFileRequest, ReadFileResult,
+        SearchFilesRequest, SearchFilesResult, WriteFileRequest, WriteFileResult,
     },
     testutil::{block_on, tool_call},
 };
@@ -104,10 +105,12 @@ impl FileSystemTool for ProbeFs {
         _context: FileToolContext,
     ) -> FsFuture<'a, EditFileResult> {
         Box::pin(async move {
-            Ok(EditFileResult {
-                path: request.path,
-                replacements: 1,
-            })
+            let mut result =
+                EditFileResult::not_executed(&request, EditNotExecutedReason::PreviousFailure);
+            for file in &mut result.files {
+                file.outcome = EditFileOutcome::Success { replacements: 1 };
+            }
+            Ok(result)
         })
     }
 }
@@ -281,7 +284,7 @@ fn empty_paths_queries_and_invalid_edit_are_rejected_without_execution() {
         Err(ToolError::InvalidInput { .. })
     ));
     assert!(matches!(
-        FsEditTool::new(fs, resolver()).resolve(EditFileInput {
+        FsEditTool::new(fs, resolver()).resolve(EditFileInput::Legacy {
             path: "a.txt".to_owned(),
             old_string: "same".to_owned(),
             new_string: "same".to_owned(),
@@ -368,17 +371,164 @@ fn mutation_tools_resolve_then_execute_through_dispatcher() {
         let Some(ResolvedBatchItemRef::Valid(invocation)) = batch.get(index) else {
             panic!("mutation resolves");
         };
-        assert_eq!(
-            invocation
-                .facts::<FileAuthorizationFacts>()
-                .expect("file facts")
-                .operation,
-            operation
-        );
+        if operation == FileOperation::Edit {
+            assert_eq!(
+                invocation
+                    .facts::<FileBatchAuthorizationFacts>()
+                    .expect("batch facts")
+                    .operation,
+                operation
+            );
+        } else {
+            assert_eq!(
+                invocation
+                    .facts::<FileAuthorizationFacts>()
+                    .expect("file facts")
+                    .operation,
+                operation
+            );
+        }
         let result = block_on(
             Dispatcher::execute(&mut batch, index, ToolContext::default())
                 .expect("valid mutation index"),
         );
         assert_eq!(result.status, agent_types::ToolResultStatus::Success);
     }
+}
+
+#[test]
+fn batch_edit_normalizes_legacy_defaults_and_full_authorization() {
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(FsEditTool::new(Arc::new(ProbeFs::default()), resolver()))
+        .unwrap();
+    let snapshot = registry.snapshot();
+    let schema = &snapshot.definitions()[0].input_schema;
+    assert!(schema["oneOf"].is_array());
+    assert!(schema.get("anyOf").is_none());
+    assert_eq!(
+        schema["$defs"]["EditReplacement"]["properties"]["replace_all"]["default"],
+        false
+    );
+    let calls = [
+        tool_call(
+            "edit_file",
+            serde_json::json!({"path":"a.txt","old_string":"old","new_string":"new"}),
+        ),
+        tool_call(
+            "edit_file",
+            serde_json::json!({"files":[{"path":"a.txt","edits":[{"old_string":"old","new_string":"new"}]}]}),
+        ),
+    ];
+    let batch = Dispatcher::resolve_batch(&snapshot, &calls);
+    let (Some(ResolvedBatchItemRef::Valid(legacy)), Some(ResolvedBatchItemRef::Valid(batch))) =
+        (batch.get(0), batch.get(1))
+    else {
+        panic!("both inputs resolve");
+    };
+    assert_eq!(legacy.fingerprint(), batch.fingerprint());
+    assert_eq!(
+        batch.facts::<FileBatchAuthorizationFacts>().unwrap().paths,
+        vec![resolver().resolve("a.txt").unwrap()]
+    );
+    assert_eq!(
+        batch.resolved_arguments()["files"][0]["edits"][0]["replace_all"],
+        false
+    );
+    for input in [
+        serde_json::json!({"files":[],"path":"a.txt","old_string":"x","new_string":"y"}),
+        serde_json::json!({"files":[{"path":"a","edits":[{"old_string":"x","new_string":"y","extra":1}]}]}),
+        serde_json::json!({"path":"a","old_string":"x","new_string":"y","extra":1}),
+    ] {
+        assert!(serde_json::from_value::<EditFileInput>(input).is_err());
+    }
+}
+
+#[test]
+fn batch_edit_enforces_limits_before_execution_and_bounds_worst_result() {
+    use crate::{EditFileEntry, EditReplacement, MAX_EDIT_INPUT_BYTES};
+    let entry = |path: AbsolutePath, count: usize| EditFileEntry {
+        path,
+        edits: vec![
+            EditReplacement {
+                old_string: "x".into(),
+                new_string: "y".into(),
+                replace_all: false
+            };
+            count
+        ],
+    };
+    assert!(EditFileRequest { files: vec![] }.validate().is_err());
+    assert!(
+        EditFileRequest {
+            files: vec![entry(root(), 1); 17]
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        EditFileRequest {
+            files: vec![entry(root(), 65)]
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        EditFileRequest {
+            files: vec![entry(root(), 43); 3]
+        }
+        .validate()
+        .is_err()
+    );
+    let long = resolver().resolve(&"x".repeat(1025)).unwrap();
+    assert!(
+        EditFileRequest {
+            files: vec![entry(long, 1)]
+        }
+        .validate()
+        .is_err()
+    );
+    let long = resolver().resolve(&"x".repeat(300)).unwrap();
+    assert!(
+        EditFileRequest {
+            files: vec![entry(long, 1); 16]
+        }
+        .validate()
+        .is_err()
+    );
+    let escaped = resolver().resolve(&"\u{1}".repeat(120)).unwrap();
+    assert!(
+        EditFileRequest {
+            files: vec![entry(escaped, 1); 16]
+        }
+        .validate()
+        .is_err()
+    );
+    let mut input = serde_json::json!({"path":"a","old_string":"x","new_string":""});
+    let overhead = serde_json::to_vec(&input).unwrap().len();
+    input["new_string"] = serde_json::Value::String("y".repeat(MAX_EDIT_INPUT_BYTES - overhead));
+    let accepted = serde_json::from_value::<EditFileInput>(input.clone()).unwrap();
+    assert!(
+        FsEditTool::new(Arc::new(ProbeFs::default()), resolver())
+            .resolve(accepted)
+            .is_ok()
+    );
+    input["new_string"].as_str().unwrap();
+    input["new_string"] =
+        serde_json::Value::String("y".repeat(MAX_EDIT_INPUT_BYTES - overhead + 1));
+    assert!(serde_json::from_value::<EditFileInput>(input).is_err());
+    let path = resolver().resolve(&"\u{1}".repeat(230)).unwrap();
+    let request = EditFileRequest {
+        files: vec![entry(path, 1); 16],
+    };
+    let mut result = EditFileResult::not_executed(&request, EditNotExecutedReason::PreviousFailure);
+    for file in &mut result.files {
+        file.outcome =
+            EditFileOutcome::failed(&FileToolError::invalid_input("\u{1}".repeat(300)), Some(63));
+    }
+    assert!(serde_json::to_vec_pretty(&result).unwrap().len() < 64 * 1024);
+    assert_eq!(
+        FsEditTool::output_status(&result),
+        agent_types::ToolResultStatus::Error
+    );
 }

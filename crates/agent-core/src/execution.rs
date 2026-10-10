@@ -116,7 +116,7 @@ pub enum ExecutionOutcome {
         /// 本段 execution 已可靠消费的硬预算。
         consumption: ExecutionConsumption,
     },
-    /// 已取消；收敛前所有未结算 Tool Call 已补记 interrupted 错误 `ToolResult`。
+    /// 已取消；收敛前保留工具已返回的结果，仅为没有结果的调用补记 interrupted。
     Cancelled {
         /// 本段 execution 已可靠消费的硬预算。
         consumption: ExecutionConsumption,

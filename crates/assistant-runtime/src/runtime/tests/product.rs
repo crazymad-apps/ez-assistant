@@ -372,6 +372,8 @@ async fn completed_assistant_turn_exposes_the_reliable_run_finish_time() {
         Some(assistant_protocol::RunStatus::Completed)
     );
     assert!(message.finished_at_ms.is_some());
+    assert_eq!(message.run_created_at_ms, run.created_at_ms);
+    assert!(message.created_at_ms.is_none());
 }
 
 #[tokio::test]
@@ -614,7 +616,7 @@ async fn installed_mcp_management_is_advertised_without_enabling_run_tools() {
 }
 
 #[tokio::test]
-async fn mcp_discovery_is_hierarchical_filtered_and_request_only() {
+async fn mcp_discovery_is_hierarchical_filtered_and_persisted() {
     let model = Arc::new(ScriptedModelService::new(
         model_capabilities(true),
         8_192,
@@ -734,7 +736,7 @@ async fn mcp_discovery_is_hierarchical_filtered_and_request_only() {
         .await
         .expect("persisted conversation");
     assert!(
-        !serde_json::to_string(&persisted)
+        serde_json::to_string(&persisted)
             .expect("persisted JSON")
             .contains("MCP_SERVER_DIRECTORY_V1")
     );
@@ -983,7 +985,17 @@ async fn selected_mcp_is_inherited_by_goal_runs_but_not_the_next_ordinary_input(
     }
     let ordinary = serde_json::to_string(&requests[3].conversation).expect("ordinary JSON");
     assert!(ordinary.contains("MCP_SERVER_DIRECTORY_V1"));
-    assert!(!ordinary.contains("MCP_SERVER_SELECTION_V1"));
+    // 手选事实保留在历史中；本轮输入只新增默认目录，不复制旧手选披露。
+    assert_eq!(ordinary.matches("MCP_SERVER_SELECTION_V1").count(), 1);
+    let ConversationMessage::User(latest) = requests[3].conversation.messages.last().unwrap()
+    else {
+        panic!("ordinary user input");
+    };
+    assert!(
+        !serde_json::to_string(latest)
+            .unwrap()
+            .contains("MCP_SERVER_SELECTION_V1")
+    );
 }
 
 #[tokio::test]
@@ -2050,4 +2062,142 @@ fn child_context_uses_latest_compaction_boundary_and_keeps_cumulative_usage() {
             .context
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn reasoning_sources_and_run_times_recover_from_reliable_conversation() {
+    use agent_types::{ReasoningPart, ReasoningSource};
+    let mut answer = assistant_text("source-answer", "done");
+    answer.parts.insert(
+        0,
+        AssistantPart::Reasoning(ReasoningPart {
+            id: PartId::new("summary-part").unwrap(),
+            source: ReasoningSource::Summary,
+            text: "summary".into(),
+        }),
+    );
+    answer.parts.insert(
+        1,
+        AssistantPart::Reasoning(ReasoningPart {
+            id: PartId::new("raw-part").unwrap(),
+            source: ReasoningSource::Raw,
+            text: "raw".into(),
+        }),
+    );
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(false),
+        8192,
+        [ModelScript::Events(message_events(&answer))],
+    ));
+    let store = Arc::new(crate::storage::VolatileRuntimeStore::default());
+    let first = runtime_with_store(
+        model.clone(),
+        store.clone(),
+        RuntimeConfig::new(NonZeroUsize::new(256).unwrap()),
+    )
+    .await;
+    let session_id = first
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    let mut events = first.subscribe_events();
+    let accepted = first
+        .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            session_id: session_id.clone(),
+            message: "sources".into(),
+            attachment_ids: vec![],
+            quotes: vec![],
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+            variant: assistant_protocol::AgentVariant::Build,
+        })
+        .await
+        .unwrap()
+        .run;
+    let terminal = wait_for_terminal(&first, &session_id, &accepted.run_id).await;
+    assert!(accepted.created_at_ms.is_some());
+    assert!(terminal.finished_at_ms.unwrap() >= accepted.created_at_ms.unwrap());
+    assert_eq!(terminal.reasoning_parts.len(), 2);
+    assert_eq!(
+        terminal.reasoning_parts[0].source,
+        assistant_protocol::ReasoningSource::Summary
+    );
+    assert_eq!(terminal.created_at_ms, accepted.created_at_ms);
+    let mut saw_accept = false;
+    let mut saw_finish = false;
+    // 可靠终态提交先于事件发布；等待发布完成，不能用瞬时空队列判断事件缺失。
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !saw_finish {
+            match events.recv().await.unwrap() {
+                RuntimeEvent::RunAccepted { created_at_ms, .. } => {
+                    assert_eq!(created_at_ms, accepted.created_at_ms);
+                    saw_accept = true;
+                }
+                RuntimeEvent::RunFinished { finished_at_ms, .. } => {
+                    assert_eq!(finished_at_ms, terminal.finished_at_ms);
+                    saw_finish = true;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("terminal event publication");
+    assert!(saw_accept && saw_finish);
+    first.shutdown(ShutdownRuntimeRequest {}).await.unwrap();
+    let recovered = runtime_with_store(
+        model,
+        store,
+        RuntimeConfig::new(NonZeroUsize::new(256).unwrap()),
+    )
+    .await;
+    let result = recovered
+        .get_session_view(GetSessionViewRequest {
+            session_id: session_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(result.snapshot.observed_at_ms.is_some());
+    let message = result
+        .snapshot
+        .value
+        .conversation
+        .items
+        .iter()
+        .find_map(|item| match item {
+            ConversationItem::Assistant(message) => Some(message),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(message.run_created_at_ms, accepted.created_at_ms);
+    assert_eq!(message.finished_at_ms, terminal.finished_at_ms);
+    assert!(matches!(
+        &message.segments[0],
+        assistant_protocol::AssistantSegment::Reasoning {
+            source: assistant_protocol::ReasoningSource::Summary,
+            ..
+        }
+    ));
+    // Child and inherited/Fork messages share this projection but cannot borrow a parent's Run clock.
+    let child = project_conversation(
+        &ConversationSnapshot::new(vec![ConversationMessage::Assistant(answer)]),
+        &empty_child_projection(),
+    )
+    .unwrap();
+    let ConversationItem::Assistant(child) = &child[0] else {
+        panic!("assistant")
+    };
+    assert!(child.run_created_at_ms.is_none());
+    assert!(matches!(
+        &child.segments[0],
+        assistant_protocol::AssistantSegment::Reasoning {
+            source: assistant_protocol::ReasoningSource::Summary,
+            ..
+        }
+    ));
+    recovered.shutdown(ShutdownRuntimeRequest {}).await.unwrap();
 }

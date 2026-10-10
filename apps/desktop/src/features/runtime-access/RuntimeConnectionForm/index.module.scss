@@ -23,4 +23,7 @@
 .feedback { font-size: 12px; color: var(--ez-text-muted); line-height: 1.6; overflow-wrap: anywhere; }
 .feedback p { margin: 0 0 6px; }
 .feedback .error { color: var(--ez-danger); }
+.update { display: grid; gap: 12px; }
+.update strong { font-size: 16px; color: var(--ez-text); }
+.update p { margin: 0; font-size: 13px; color: var(--ez-text-secondary); }
 .hint { color: var(--ez-text-muted); font-size: 12px; margin: 0; line-height: 1.6; }

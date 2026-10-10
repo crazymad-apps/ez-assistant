@@ -13,6 +13,10 @@ import { AuditRoute } from '../features/audit/AuditRoute';
 import { AuditDetailRoute } from '../features/audit/AuditDetailRoute';
 import { AgentsRoute } from '../features/agents/AgentsRoute';
 import { AgentEditor } from '../features/agents/AgentEditor';
+import { FeedbackRoute } from '../features/feedback/FeedbackRoute';
+import { FeedbackDetailRoute } from '../features/feedback/FeedbackDetailRoute';
+import { ReleasesRoute } from '../features/desktop-releases/ReleasesRoute';
+import { ReleaseDetailRoute } from '../features/desktop-releases/ReleaseDetailRoute';
 import { PluginsRoute } from '../features/plugins/PluginsRoute';
 import { PluginDetailRoute } from '../features/plugins/PluginDetailRoute';
 
@@ -74,6 +78,26 @@ export function adminRoutes(): RouteObject[] {
                   ...route,
                   handle: { title, menu: '/plugins' } satisfies RouteHeading,
                 })),
+                {
+                  path: '/desktop-releases',
+                  element: <ReleasesRoute />,
+                  handle: { title: '安装包', menu: '/desktop-releases' } satisfies RouteHeading,
+                },
+                {
+                  path: '/desktop-releases/:version',
+                  element: <ReleaseDetailRoute />,
+                  handle: { title: '安装包详情', menu: '/desktop-releases' } satisfies RouteHeading,
+                },
+                {
+                  path: '/feedback',
+                  element: <FeedbackRoute />,
+                  handle: { title: '反馈中心', menu: '/feedback' } satisfies RouteHeading,
+                },
+                {
+                  path: '/feedback/:id',
+                  element: <FeedbackDetailRoute />,
+                  handle: { title: '反馈详情', menu: '/feedback' } satisfies RouteHeading,
+                },
                 {
                   path: '/calls',
                   element: <CallsRoute />,

@@ -16,6 +16,8 @@ fn provider_and_fixed_configuration_commands_round_trip() {
         protocol_preference: ProviderProtocolPreference::ChatCompletions,
         models_path: "/models".into(),
         discovery_format: ModelDiscoveryFormat::OpenAi,
+        server_history_enabled: false,
+        server_history_support_override: None,
     };
     let provider = ProviderSummary {
         provider_instance_id: provider_instance_id.clone(),
@@ -191,6 +193,32 @@ fn obsolete_model_management_commands_are_rejected() {
                 serde_json::json!({"type": tag, "payload": {}})
             )
             .is_err()
+        );
+    }
+}
+
+#[test]
+fn server_history_capability_matches_shared_contract_and_legacy_defaults() {
+    let cases: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../packages/assistant-protocol/fixtures/server-history.json"
+    ))
+    .unwrap();
+    for case in cases.as_array().unwrap() {
+        let connection: ProviderConnection =
+            serde_json::from_value(case["connection"].clone()).unwrap();
+        assert!(!connection.server_history_enabled);
+        assert_eq!(
+            serde_json::to_value(connection.server_history_support()).unwrap(),
+            case["expected"],
+            "{}",
+            case["name"]
+        );
+        assert_eq!(
+            serde_json::from_value::<ProviderConnection>(
+                serde_json::to_value(&connection).unwrap()
+            )
+            .unwrap(),
+            connection
         );
     }
 }

@@ -321,7 +321,7 @@ export function ToolDetailDialog({
               {(detail.output_truncated || detail.historical_fields_missing) && (
                 <p className={styles.notice}>
                   {detail.output_truncated
-                    ? "输出已按安全上限截断。"
+                    ? "部分记录已按安全上限截断。"
                     : detail.source === "live"
                       ? "当前为实时详情，可靠记录同步后可查看完整内容。"
                       : "较早记录缺少部分详情字段。"}

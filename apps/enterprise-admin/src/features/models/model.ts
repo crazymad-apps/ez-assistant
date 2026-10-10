@@ -1,4 +1,20 @@
 import type { CatalogSnapshot, ModelConfiguration, ModelParameters, ProviderConnection } from '../../request/openapi';
+import { serverHistorySupport as httpHistorySupport } from '../../../../../packages/assistant-protocol/src/server-history';
+
+/** Center 上游传输能力与个人 HTTP 配置分开，不能沿用其他服务商 HTTP store 的默认值。 */
+export function serverHistorySupport(connection: ProviderConnection) {
+  if (connection.responses_transport !== 'websocket' || connection.server_history_support_override != null)
+    return httpHistorySupport(connection);
+  if (
+    connection.protocol_preference === 'chat_completions' ||
+    !['openai', 'deepseek', 'dashscope_api', 'dashscope_plan', 'moonshot'].includes(connection.provider_type)
+  )
+    return 'unsupported';
+  return connection.provider_type === 'openai' &&
+    connection.endpoint.replace(/\/+$/, '') === 'https://api.openai.com/v1'
+    ? 'supported'
+    : 'unknown';
+}
 export const providerLabels: Record<ProviderConnection['provider_type'], string> = {
   openai: 'OpenAI',
   deepseek: 'DeepSeek',

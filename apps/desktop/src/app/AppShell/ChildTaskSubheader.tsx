@@ -25,7 +25,6 @@ export const ChildTaskSubheader = observer(function ChildTaskSubheader() {
   const item = mergeChildTaskItems(
     reliable_items,
     store.live_execution.childTasksForSession(session_id),
-    (task_id) => store.live_execution.runForChildTask(task_id),
   ).find((candidate) => candidate.task.child_task_id === child_task_id);
 
   if (!item) {

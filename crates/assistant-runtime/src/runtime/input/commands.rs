@@ -348,6 +348,7 @@ impl AssistantRuntime {
             snapshot
         };
         self.publish(assistant_protocol::RuntimeEvent::RunAccepted {
+            created_at_ms: snapshot.created_at_ms,
             session_id: session.id().clone(),
             run_id: snapshot.run_id.clone(),
         });

@@ -6,7 +6,7 @@
 
 ## 2026-09-14 官方发布记录
 
-- Registry：`https://registry.npmjs.org/`；发布账号 `crazy_mad`（组织 owner）。
+- Registry：`https://registry.npmjs.org/`；发布账号 `<本机账号>`（组织 owner）。
 - `@ez-assistant/client`、`@ez-assistant/client-darwin-arm64`、`@ez-assistant/client-linux-arm64`、`@ez-assistant/client-linux-x64` 均已发布 `0.25.3`；四包的 `next`、`latest` 回读均为 `0.25.3`。主包精确依赖三个同版本平台附件，Windows 继续通过 Desktop MSI 交付，不存在 Windows npm 附件。
 - 产品源码与标签 `v0.25.3` 对应提交 `ec834abf69b94745b889a66aca1ab6aaa43f1cf3`。装配时工作区在其后的发布文档提交上，产品源码没有变化；装配使用 Node 24.21.0／npm 11.19.0。macOS arm64 Host 为 Release 构建并通过基础代码签名验证；Linux arm64 在原生 arm64、glibc 2.17 环境构建和运行；Linux x64 复用用户实机验收通过且清单摘要已核对的同版本 Host。
 - 四包 dry-run 通过，发布后 `dist.shasum`／`dist.integrity` 与 `pack-report.json` 一致；从官方 registry 回下载的四个 tgz 与发布前原文件 SHA-256 一致：
@@ -31,7 +31,7 @@ ez-assistant start
 
 ## 2026-09-11 官方发布记录
 
-- Registry：`https://registry.npmjs.org/`；发布账号 `crazy_mad`（组织 owner）。
+- Registry：`https://registry.npmjs.org/`；发布账号 `<本机账号>`（组织 owner）。
 - Client 与 macOS arm64、Linux arm64、Linux x64 三个平台附件均为 `0.25.2`；主包精确依赖同版本附件。四包的 `next`、`latest` 回读均为 `0.25.2`。
 - 源码修订 `31546f304c38890d279f78f26d50b97cec052afc`，对应已推送标签 `v0.25.2`。Client 重新编译；Host 从已验收私有附件提取，并逐字节核对二进制及 manifest，未使用来源不确定的 target 产物。
 - 发布前四包 dry-run、SHA512 和 macOS 代码签名检查通过。发布后四包 registry SHA1／SHA512 与本地产物一致。
@@ -292,44 +292,44 @@ npm view @ez-assistant/client dist-tags --json --registry=https://registry.npmjs
 
 2026-09-10 澄清：此前文档把 macOS 公证写成 npm 发包的无条件要求，混淆基础代码签名、实际安装触发的系统检查与发行信任策略。本次据实际渠道修订，仍保留 Release 与目标平台运行验证，不将本机 debug 成功等同于正式发布通过。
 
-2026-09-10 x64 候选：`/tmp/ez-client-npm-m6-x64` 已生成 `@ez-assistant/client-linux-x64@0.25.2`（24,258,199 字节）和增加对应精确可选依赖的主包 `0.25.2-4`（233,332 字节）。两份既有 arm64 附件摘要不变，无需重发。私有仓库 `172.16.20.4:40087` 当前 curl 返回空响应、npm ping 返回 ECONNRESET，尚未上传这两份新包；恢复连接后先发 x64 附件，回读摘要，再发主包 `next`，保留原版本，不主动提升 `latest`。
+2026-09-10 x64 候选：`/tmp/ez-client-npm-m6-x64` 已生成 `@ez-assistant/client-linux-x64@0.25.2`（24,258,199 字节）和增加对应精确可选依赖的主包 `0.25.2-4`（233,332 字节）。两份既有 arm64 附件摘要不变，无需重发。私有仓库 `<私有主机>` 当前 curl 返回空响应、npm ping 返回 ECONNRESET，尚未上传这两份新包；恢复连接后先发 x64 附件，回读摘要，再发主包 `next`，保留原版本，不主动提升 `latest`。
 
 x64 构建使用 macOS arm64、nightly Rust、cargo-zigbuild 0.23.3／Zig 0.16.0，目标 `x86_64-unknown-linux-gnu.2.17`，沿用已构建的 0.25.2 Web。glibc 2.17 验证仅覆盖 Host 动态加载与无副作用命令，不代表旧 Linux 内核、完整 Client 或 systemd 验收；Client 仍要求 Node `>=24.21.0 <25`，而[官方 Node 24 Linux 二进制要求 glibc >=2.28](https://nodejs.org/en/blog/migrations/v22-to-v24)。服务器现有 Node 22.13.0 不满足 Client 要求。
 
-本轮私有发布目标随后由用户切换为家庭仓库 `http://192.168.31.21:4873/`。初次检查三个平台附件 `0.25.2` 与主包 `0.25.2-4` 均不存在，首包发布曾因未登录返回 `ENEEDAUTH`。用户完成登录后，2026-09-11 已按 macOS arm64、Linux arm64、Linux x64、主包的顺序全部发布成功；每包回读 SHA1／SHA512 与候选一致，主包精确依赖三个 `0.25.2` 附件。发布命令均使用 `next`，但 Verdaccio 首次发布自动生成了 `latest`：三个附件的 `next/latest=0.25.2`，主包的 `next/latest=0.25.2-4`，未另外执行标签提升。回读证据为候选目录内 `home-registry-verification.json`。不修改全局 registry，未在用户环境安装或运行 Host，安装验收由用户手动完成。
+本轮私有发布目标随后由用户切换为私有测试源 `<私有服务地址>`。初次检查三个平台附件 `0.25.2` 与主包 `0.25.2-4` 均不存在，首包发布曾因未登录返回 `ENEEDAUTH`。用户完成登录后，2026-09-11 已按 macOS arm64、Linux arm64、Linux x64、主包的顺序全部发布成功；每包回读 SHA1／SHA512 与候选一致，主包精确依赖三个 `0.25.2` 附件。发布命令均使用 `next`，但 Verdaccio 首次发布自动生成了 `latest`：三个附件的 `next/latest=0.25.2`，主包的 `next/latest=0.25.2-4`，未另外执行标签提升。回读证据为候选目录内 `home-registry-verification.json`。不修改全局 registry，未在用户环境安装或运行 Host，安装验收由用户手动完成。
 
-2026-09-11 Node 22 兼容修订：主包 `0.25.2-5` 已发布到上述家庭仓库，`next=0.25.2-5`，`latest` 保留 `0.25.2-4`。`engines` 和入口统一为 `^22.15.0 || ^24.0.0`；Node 22.15／24.21 macOS 定向测试各 21 项、Node 22.15 Linux 成品包定向测试 21 项、Node 22.15 交互菜单／取消检查通过。系统／附加 CA、证书拒绝和原生 shebang 均有实际执行证据。平台附件摘要不变，未重发；候选与 registry 回读证据位于 `/tmp/ez-client-npm-m6-node22`。本次没有真实业务 Host／数据库操作或安装验收，未执行全量回归。使用显式 `0.25.2-5` 或 `next` 获取修订；Node 22.13 仍低于 API 下限。
+2026-09-11 Node 22 兼容修订：主包 `0.25.2-5` 已发布到上述私有测试源，`next=0.25.2-5`，`latest` 保留 `0.25.2-4`。`engines` 和入口统一为 `^22.15.0 || ^24.0.0`；Node 22.15／24.21 macOS 定向测试各 21 项、Node 22.15 Linux 成品包定向测试 21 项、Node 22.15 交互菜单／取消检查通过。系统／附加 CA、证书拒绝和原生 shebang 均有实际执行证据。平台附件摘要不变，未重发；候选与 registry 回读证据位于 `/tmp/ez-client-npm-m6-node22`。本次没有真实业务 Host／数据库操作或安装验收，未执行全量回归。使用显式 `0.25.2-5` 或 `next` 获取修订；Node 22.13 仍低于 API 下限。
 
 ### 2026-09-11 统一访问规则私有修订
 
-主包 `0.25.2-6` 与三个平台附件 `0.25.2-1` 已发布家庭仓库 `http://192.168.31.21:4873/` 的 `next`；主包 `latest=0.25.2-4`、附件 `latest=0.25.2` 均未改变。应用软件版本与最低兼容仍是 `0.25.2`，包修订号不参与应用协议兼容判定。
+主包 `0.25.2-6` 与三个平台附件 `0.25.2-1` 已发布私有测试源 `<私有服务地址>` 的 `next`；主包 `latest=0.25.2-4`、附件 `latest=0.25.2` 均未改变。应用软件版本与最低兼容仍是 `0.25.2`，包修订号不参与应用协议兼容判定。
 
 Host 内容变更时必须同时生成新的平台附件包号：packer 支持 `EZ_ASSISTANT_NPM_HOST_REVISION`，与既有 `EZ_ASSISTANT_NPM_CLIENT_REVISION` 分别控制附件和主包 npm 修订号。此次分别为 1 和 6。主包精确依赖附件包号；安装来源校验按主包声明的精确依赖核对，Host manifest／build-info 则继续核对应用版本和摘要。只更新 Client 时可复用已发布附件，不可把包修订号误当应用版本，也不能只发主包而保留有缺陷的旧 Host。
 
 候选及证据位于 `/tmp/ez-client-npm-m6-unified-access`，包括 pack-report、SHA256、发布前标签及 dry-run、逐包 publish 日志和 registry SHA1/SHA512／依赖回读。更新前使用实际 Runtime Home 停止已有 Host；升级后再启动。Desktop 不发布安装包，用户使用普通 `npm run tauri -- dev` 联调。
 
-2026-09-11 按用户指定同步发布公司仓库 `http://172.16.20.4:40087/`：复用上述相同四个 tgz，不重新构建。主包 `0.25.2-6`、三个附件 `0.25.2-1` 已发布 `next`；逐包 SHA1/SHA512、主包精确依赖和标签回读通过。主包和两个 arm64 附件的 `latest` 保持 `0.25.2`；linux-x64 是该仓库首次发布，Verdaccio 自动生成 `latest=0.25.2-1`，未额外修改标签。公司发布证据独立位于 `/tmp/ez-client-npm-m6-unified-access/company`，家庭仓库证据保留。安装验证由用户执行，Desktop 不发包。
+2026-09-11 按用户指定同步发布私有测试源 `<私有服务地址>`：复用上述相同四个 tgz，不重新构建。主包 `0.25.2-6`、三个附件 `0.25.2-1` 已发布 `next`；逐包 SHA1/SHA512、主包精确依赖和标签回读通过。主包和两个 arm64 附件的 `latest` 保持 `0.25.2`；linux-x64 是该仓库首次发布，Verdaccio 自动生成 `latest=0.25.2-1`，未额外修改标签。私有发布证据独立位于 `/tmp/ez-client-npm-m6-unified-access/company`，私有测试源证据保留。安装验证由用户执行，Desktop 不发包。
 
 
 2026-09-11 Node 下限继续调整（M6）：用户确认后将运行范围改为 `^22.12.0 || ^24.0.0`，Commander 15 为最低版本依据。Node 22.12–22.14 使用默认 CA 与 `NODE_EXTRA_CA_CERTS`，22.15+ 继续自动合并系统 CA；所有版本保持链与主机名校验。
-Client 主包 `0.25.2-7` 已发布公司仓库 `http://172.16.20.4:40087/`，回读确认 `next=0.25.2-7`，`latest=0.25.2` 保持不变，三平台附件仍精确依赖 `0.25.2-1`，归档摘要与之前一致且未重发。应用软件版本仍为 0.25.2。
+Client 主包 `0.25.2-7` 已发布私有测试源 `<私有服务地址>`，回读确认 `next=0.25.2-7`，`latest=0.25.2` 保持不变，三平台附件仍精确依赖 `0.25.2-1`，归档摘要与之前一致且未重发。应用软件版本仍为 0.25.2。
 验证：构建通过；macOS arm64 真实 Node 22.12.0（官方 SHA256 核对）和 Node 24.21.0 的入口／HTTPS 定向测试各 3 项通过；Node 22.12 成品包来源、摘要与启动路径检查通过（拦截 launch，没有启动业务 Host）。未执行 Linux 新轮实机验收、全量回归或 Desktop 发版；安装验证由用户进行。
 候选与发布回读证据：`/tmp/ez-client-npm-m6-node2212`；工具链：`/tmp/ez-client-node2212`。本轮未操作生产环境或数据库，仍处于 M6。
 
 
 2026-09-11 M6 手动启动修复：用户在 root 会话执行 start 遇到用户 systemd 管理器不可用。移除以 /run/systemd/system 存在为依据的手动管理门禁：查询不可用时读取固定名称的 Client unit，确认不存在后允许普通启停；已有、不安全或不可读注册及查询冲突仍拒绝，自启状态保持未知。未设置用户总线、启用 linger 或操作服务器服务。
 构建及 Node 22.12 的 systemd 生命周期／状态定向测试 7 项通过，其中回归用例模拟系统 systemd 存在但用户管理器不可用，并使用真实临时 unit 验证已注册、不安全权限、悬空链接和冲突分支。没有执行全量回归或真实服务器启动验收。
-主包 0.25.2-8 已发布 http://172.16.20.4:40087/，回读确认 next=0.25.2-8，latest=0.25.2 未改变；三个平台附件继续使用 0.25.2-1，发布前核对 registry 摘要一致，未重发附件。证据 /tmp/ez-client-npm-m6-systemd-manual/company。仍处 M6，未操作生产 Host、Desktop 或数据库。
+主包 0.25.2-8 已发布 <私有服务地址>，回读确认 next=0.25.2-8，latest=0.25.2 未改变；三个平台附件继续使用 0.25.2-1，发布前核对 registry 摘要一致，未重发附件。证据 /tmp/ez-client-npm-m6-systemd-manual/company。仍处 M6，未操作生产 Host、Desktop 或数据库。
 
 
 2026-09-11 M6 系统级 systemd：root 自动选 system scope，unit 位于 /etc/systemd/system，Type=simple、User=0、multi-user.target；普通用户保留 user scope、Type=exec 和 linger。scope 贯穿查询、预览、提交及生命周期；系统级不依赖 XDG_RUNTIME_DIR、用户总线和 loginctl，短锁目录 /run/ez-assistant-client 只在保存时创建。固定名称另一范围注册存在时拒绝隐式迁移。默认不开自启，不切换 Home 或运行身份，不替代 Desktop 自启。
-验证：构建通过，Node 22.12 定向状态／生命周期测试 8 项通过。独立 Docker 容器 ez-client-system-service-check（无宿主挂载、systemd 255、Node 22.15、Linux arm64），直接使用成品 tgz：root 预览无写入、注册／enable／start／restart／stop／disable 和跨范围冲突检查通过；普通用户 eztest 注册／enable／disable 通过。root 的全新测试 Home=/var/lib/ez-system-service-check，实际 Host 只在容器中运行；未执行直接 SQL 操作或迁移既有数据。最终所有测试 unit disabled、Host 已停止，容器已停止并保留证据。未在公司生产服务器修改服务，未执行全量回归、整机开机或旧 systemd/cgroup v1 验收。
+验证：构建通过，Node 22.12 定向状态／生命周期测试 8 项通过。独立 Docker 容器 ez-client-system-service-check（无宿主挂载、systemd 255、Node 22.15、Linux arm64），直接使用成品 tgz：root 预览无写入、注册／enable／start／restart／stop／disable 和跨范围冲突检查通过；普通用户 eztest 注册／enable／disable 通过。root 的全新测试 Home=/var/lib/ez-system-service-check，实际 Host 只在容器中运行；未执行直接 SQL 操作或迁移既有数据。最终所有测试 unit disabled、Host 已停止，容器已停止并保留证据。未在现有服务器修改服务，未执行全量回归、整机开机或旧 systemd/cgroup v1 验收。
 候选 /tmp/ez-client-npm-m6-system-service；主包版本 0.25.2-9，Host 附件保持 0.25.2-1。发布回读见 company/private-registry-verification.json。测试脚本 apps/client/tests/linux/system-service-smoke.mjs。仍处 M6。
 
 ### 2026-09-14 v0.25.3 升级停止修订
 
-用户在家庭私库 Linux x64 候选验收中发现：Client 升级为 `0.25.3` 后，旧 `0.25.2` Host 会使 `stop` 在版本门禁处失败。修复保持普通命令的兼容拒绝，仅允许固定 `shutdown_runtime` 使用运行中 Host 自身的有效兼容声明；原实例、凭据、单次写入、回执与停止后核验均不放宽，无效声明在写请求前拒绝。
+用户在私有测试源 Linux x64 候选验收中发现：Client 升级为 `0.25.3` 后，旧 `0.25.2` Host 会使 `stop` 在版本门禁处失败。修复保持普通命令的兼容拒绝，仅允许固定 `shutdown_runtime` 使用运行中 Host 自身的有效兼容声明；原实例、凭据、单次写入、回执与停止后核验均不放宽，无效声明在写请求前拒绝。
 
-用户确认后，主包 `@ez-assistant/client@0.25.3-1` 已发布家庭私库 `http://192.168.31.21:4873/` 的 `next`，精确依赖既有 `@ez-assistant/client-linux-x64@0.25.3`，平台附件内容未变且未重发。主包 SHA256 为 `d96aada2d5558dd54fbbe07adebbc8c84b42fedb4c2354da604f1594bbfcbd69`，registry shasum 为 `da9eed17d3af0c5380c3d29409944aa48d946715`，integrity 为 `sha512-Gaa0aIL5mo2e0BUq4ajJbGaWHii7CzdeNlWXEjNDHUtj3QNFzfzMZsRdL7mLBukIl7oWw4gNwUORD7jgackqRA==`；回下载与原候选逐字节一致。主包标签为 `next=0.25.3-1`、`latest=0.25.2`，附件为 `next=0.25.3`、`latest=0.25.2`，未提升 latest。
+用户确认后，主包 `@ez-assistant/client@0.25.3-1` 已发布私有测试源 `<私有服务地址>` 的 `next`，精确依赖既有 `@ez-assistant/client-linux-x64@0.25.3`，平台附件内容未变且未重发。主包 SHA256 为 `d96aada2d5558dd54fbbe07adebbc8c84b42fedb4c2354da604f1594bbfcbd69`，registry shasum 为 `da9eed17d3af0c5380c3d29409944aa48d946715`，integrity 为 `sha512-Gaa0aIL5mo2e0BUq4ajJbGaWHii7CzdeNlWXEjNDHUtj3QNFzfzMZsRdL7mLBukIl7oWw4gNwUORD7jgackqRA==`；回下载与原候选逐字节一致。主包标签为 `next=0.25.3-1`、`latest=0.25.2`，附件为 `next=0.25.3`、`latest=0.25.2`，未提升 latest。
 
 Client 24 项测试通过。Linux amd64 隔离容器从私库安装 `0.25.2` 并启动旧 Host，再安装 `0.25.3-1` 后执行 stop 成功；旧 PID 与 discovery 均消失。全新容器回读安装版本为主包 `0.25.3-1`、附件 `0.25.3`、软件版本 `0.25.3`。测试只创建全新临时 Runtime Home，未访问用户或生产数据，容器退出后测试数据库一并删除。候选及 pack-report 位于 `/tmp/ez-client-npm-v0253-r1`。

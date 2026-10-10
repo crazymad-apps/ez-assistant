@@ -17,6 +17,8 @@ pub enum ShellKind {
     Powershell7,
     GitBash,
     PosixSh,
+    Bash,
+    Zsh,
 }
 
 /// 当前 Host 探测到的固定 Shell；不可用项保留身份及可解释原因。
@@ -34,6 +36,15 @@ pub struct ShellCatalogEntry {
 pub struct AgentShellSettings {
     pub default_agent_shell: Option<ShellKind>,
     pub catalog: Vec<ShellCatalogEntry>,
+}
+
+/// 当前 Host 可用的交互入口；shell 为 None 的项表示默认入口，name 是解析出的程序名。
+/// 不公开可执行路径，不保存到会话或客户端偏好。
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct UserTerminalShellEntry {
+    pub shell: Option<ShellKind>,
+    pub name: String,
 }
 
 /// 启动目录由 Host 根据已登记来源重新解析，客户端不指定裸目录。
@@ -94,8 +105,10 @@ pub enum UserTerminalNotice {
     Created {
         terminal_id: String,
         directory_name: String,
-        /// 本次启动确认的固定类型；Unix 默认登录 Shell 不伪装成 /bin/sh。
+        /// 本次实际启动的类型；未知默认程序为 None，不能冒充 sh。
         shell: Option<ShellKind>,
+        /// 本次实际启动的程序名，来自 Host 的同一次解析。
+        shell_name: String,
     },
     Exited {
         code: u32,

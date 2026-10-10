@@ -42,10 +42,20 @@ export const SnapshotPanel = observer(function SnapshotPanel(
           自动换行
         </Checkbox>
       </Space>
-      {snapshot.sha256 && <Typography.Text type="secondary">SHA-256：{snapshot.sha256}</Typography.Text>}
+      {snapshot.sha256 && (
+        <Typography.Text className={styles.digest} type="secondary">
+          SHA-256：{snapshot.sha256}
+        </Typography.Text>
+      )}
       {query.error && <Alert type="error" title={query.error} />}
       {query.value?.text !== null && query.value?.text !== undefined && (
-        <pre className={styles.content} data-wrap={wrap}>
+        <pre
+          className={styles.content}
+          data-wrap={wrap}
+          role="region"
+          aria-label={props.side === 'request' ? '请求正文内容' : '响应正文内容'}
+          tabIndex={0}
+        >
           {query.value.text}
         </pre>
       )}

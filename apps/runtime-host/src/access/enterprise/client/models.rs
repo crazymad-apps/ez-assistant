@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use assistant_protocol::{
-    ModelParameters, ProviderConnection, ProviderProtocolPreference, ProviderType, SecretValue,
+    ModelFeatureSupport, ModelParameters, ProviderConnection, ProviderProtocolPreference,
+    ProviderType, SecretValue,
 };
 use assistant_runtime::ExternalModelConfiguration;
 use serde::Deserialize;
@@ -25,7 +26,10 @@ enum ConfigurationResponse {
         provider_display_name: String,
         protocol: Protocol,
         model_id: String,
-        parameters: ModelParameters,
+        parameters: Box<ModelParameters>,
+        server_history_enabled: bool,
+        server_history_support: ModelFeatureSupport,
+        server_history_binding: Option<String>,
     },
     Unavailable {
         center_id: String,
@@ -55,12 +59,7 @@ impl CenterClient {
             capabilities: Vec<String>,
         }
         let info: Info = decode(self.client.get(self.endpoint("info"))).await?;
-        if info.min_protocol_version == 0
-            || info.min_protocol_version > info.protocol_version
-            || !(info.min_protocol_version..=info.protocol_version).contains(&1)
-        {
-            return Err(CenterError::ProtocolIncompatible);
-        }
+        super::check_protocol_range(info.min_protocol_version, info.protocol_version)?;
         if !["managed_models", "llm_proxy"]
             .iter()
             .all(|required| info.capabilities.iter().any(|value| value == required))
@@ -106,6 +105,9 @@ impl CenterClient {
                 protocol,
                 model_id,
                 parameters,
+                server_history_enabled,
+                server_history_support,
+                server_history_binding,
                 ..
             } => {
                 let configured =
@@ -125,7 +127,22 @@ impl CenterClient {
                 {
                     return Err(CenterError::Unavailable);
                 }
+                if server_history_enabled
+                    && (!matches!(protocol, Protocol::Responses)
+                        || server_history_support != ModelFeatureSupport::Supported)
+                    || server_history_binding.as_ref().is_some_and(|binding| {
+                        binding.len() != 64 || !binding.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+                {
+                    return Err(CenterError::Unavailable);
+                }
                 let connection = ProviderConnection {
+                    server_history_enabled,
+                    // 中心已按实际上游判定；代理 URL 不能重新猜测上游能力。
+                    server_history_support_override: match server_history_support {
+                        ModelFeatureSupport::Unknown => None,
+                        support => Some(support),
+                    },
                     display_name: provider_display_name,
                     discovery_format: provider_type.discovery_format(),
                     provider_type,
@@ -141,9 +158,15 @@ impl CenterClient {
                     .ok()
                     .and_then(|value| i64::try_from(value.as_millis()).ok())
                     .ok_or(CenterError::Unavailable)?;
-                ExternalModelConfiguration::new(connection, model_id, parameters, fetched_at_ms)
-                    .map(|value| ModelConfiguration::Ready(Arc::new(value)))
-                    .map_err(|_| CenterError::Unavailable)
+                ExternalModelConfiguration::new(
+                    connection,
+                    model_id,
+                    *parameters,
+                    fetched_at_ms,
+                    server_history_binding,
+                )
+                .map(|value| ModelConfiguration::Ready(Arc::new(value)))
+                .map_err(|_| CenterError::Unavailable)
             }
         }
     }
@@ -152,6 +175,57 @@ impl CenterClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enterprise_history_requires_consistent_policy_capability_and_bounded_binding() {
+        const CENTER: &str = "01234567-89ab-4cde-8f01-23456789abcd";
+        let client = CenterClient::new("https://center.test".to_owned()).unwrap();
+        let parameters = ModelParameters {
+            context_window_tokens: assistant_protocol::ModelTokenLimit::Known(
+                8192.try_into().unwrap(),
+            ),
+            max_output_tokens: assistant_protocol::ModelTokenLimit::Known(1024.try_into().unwrap()),
+            streaming: ModelFeatureSupport::Supported,
+            ..Default::default()
+        };
+        let valid = serde_json::json!({
+            "state":"ready", "center_id":CENTER,
+            "endpoint":format!("https://center.test/api/llm/providers/{CENTER}/v1"),
+            "provider_type":"openai", "provider_display_name":"Fixture",
+            "protocol":"open_ai_responses", "model_id":"model", "parameters":parameters,
+            "server_history_enabled":true, "server_history_support":"supported",
+            "server_history_binding":"a".repeat(64)
+        });
+        let compiled = client
+            .compile_model_configuration(serde_json::from_value(valid.clone()).unwrap(), CENTER)
+            .unwrap();
+        let ModelConfiguration::Ready(compiled) = compiled else {
+            panic!("expected ready")
+        };
+        assert_eq!(
+            compiled.server_history_binding(),
+            Some("a".repeat(64).as_str())
+        );
+        for (field, value) in [
+            ("server_history_enabled", serde_json::json!(false)),
+            ("server_history_support", serde_json::json!("unknown")),
+            ("server_history_support", serde_json::json!("unsupported")),
+            ("protocol", serde_json::json!("open_ai_chat_completions")),
+            ("server_history_binding", serde_json::Value::Null),
+            (
+                "server_history_binding",
+                serde_json::json!("x\r\nmalformed"),
+            ),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            assert!(
+                client
+                    .compile_model_configuration(serde_json::from_value(invalid).unwrap(), CENTER)
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     fn model_configuration_requires_center_identity_and_exact_trusted_proxy_origin() {
@@ -172,7 +246,10 @@ mod tests {
             provider_display_name: "测试服务商".to_owned(),
             protocol: Protocol::Responses,
             model_id: "test-model".to_owned(),
-            parameters: parameters.clone(),
+            parameters: Box::new(parameters.clone()),
+            server_history_enabled: false,
+            server_history_support: ModelFeatureSupport::Unknown,
+            server_history_binding: None,
         };
         let path = format!("/api/llm/providers/{CENTER}/v1");
         assert!(

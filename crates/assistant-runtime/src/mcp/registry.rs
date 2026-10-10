@@ -202,6 +202,8 @@ impl McpRegistry {
         let mut close_failed = false;
         for key in &keys {
             if let Some(state) = self.remove_current(key)? {
+                // 更新/卸载不重放旧调用；取消只属于该连接，不取消整个 Run。
+                state.call_cancellation.cancel();
                 close_failed |= state.retire().await.is_err();
             }
         }
@@ -666,6 +668,8 @@ impl McpRegistry {
         } else {
             None
         };
+        // 包租约只校验版本身份；调用生命周期由连接 lease 保护，更新可取消并关闭它。
+        drop(_plugin_lease);
         let tool = state
             .tools
             .get(&invocation.tool_name)
@@ -682,6 +686,7 @@ impl McpRegistry {
         let lease = state.acquire_lease().ok_or_else(catalog_changed)?;
         let permit = tokio::select! {
             () = cancellation.cancelled() => return Err(cancelled(false)),
+            () = state.call_cancellation.cancelled() => return Err(cancelled(false)),
             permit = state.call_limit.clone().acquire_owned() => {
                 permit.map_err(|_| server_unavailable())?
             }
@@ -691,7 +696,14 @@ impl McpRegistry {
             invocation.arguments.clone(),
             cancellation.clone(),
         );
-        let raw = match tokio::time::timeout(state.request_timeout, call).await {
+        let response = tokio::select! {
+            response = tokio::time::timeout(state.request_timeout, call) => response,
+            () = state.call_cancellation.cancelled() => {
+                cancellation.cancel();
+                return Err(cancelled(true));
+            }
+        };
+        let raw = match response {
             Ok(Ok(raw)) => raw,
             Ok(Err(error)) => {
                 let failure = call_failure(&error);
@@ -846,6 +858,7 @@ impl McpRegistry {
             active_leases: AtomicUsize::new(0),
             retired: AtomicBool::new(false),
             lease_released: Notify::new(),
+            call_cancellation: CancellationToken::new(),
         }))
     }
 
@@ -1025,6 +1038,7 @@ struct McpServerState {
     active_leases: AtomicUsize,
     retired: AtomicBool,
     lease_released: Notify,
+    call_cancellation: CancellationToken,
 }
 
 impl McpServerState {

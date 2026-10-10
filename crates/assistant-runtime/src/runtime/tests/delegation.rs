@@ -236,6 +236,15 @@ async fn wait_for_child_count(
 
 #[tokio::test]
 async fn one_delegate_task_runs_an_isolated_child_and_returns_only_its_final_result() {
+    isolated_child_result(false).await;
+}
+
+#[tokio::test]
+async fn child_stream_retry_preserves_isolation_and_returns_only_its_final_result() {
+    isolated_child_result(true).await;
+}
+
+async fn isolated_child_result(interrupt_child: bool) {
     let delegate_call = AssistantMessage {
         id: MessageId::new("parent-delegate").expect("message id"),
         model: ModelIdentity::new(
@@ -265,25 +274,36 @@ async fn one_delegate_task_runs_an_isolated_child_and_returns_only_its_final_res
     let mut child_final = assistant_text("child-final", "delegated answer");
     child_final.usage = Some(child_usage.clone());
     let parent_final = assistant_text("parent-final", "parent received delegated answer");
+    let mut script = vec![ModelScript::Events(message_events(&delegate_call))];
+    if interrupt_child {
+        script.push(ModelScript::Events(vec![
+            agent_model::ModelEvent::TurnFailed {
+                error: ModelError::Transport {
+                    kind: agent_model::ModelTransportErrorKind::Interrupted,
+                    message: "child connection lost".into(),
+                },
+            },
+        ]));
+    }
+    script.extend([
+        ModelScript::Events(message_events(&child_final)),
+        ModelScript::Events(message_events(&parent_final)),
+    ]);
     let model = Arc::new(ScriptedModelService::new(
         model_capabilities(true),
         8_192,
-        [
-            ModelScript::Events(message_events(&delegate_call)),
-            ModelScript::Events(message_events(&child_final)),
-            ModelScript::Events(message_events(&parent_final)),
-        ],
+        script,
     ));
     let store = Arc::new(crate::storage::VolatileRuntimeStore::default());
     let workspaces = Arc::new(TestChildWorkspaceFactory::default());
     let runtime =
         runtime_with_store_and_child_workspaces(model.clone(), store.clone(), workspaces.clone())
             .await;
-    runtime
-        .config_registry
-        .replace_document_for_test(&config_with_delegation_limits(
-            8, 4, 300_000, 40, 100, 1_024,
-        ));
+    let mut config = config_with_delegation_limits(8, 4, 300_000, 40, 100, 1_024);
+    if interrupt_child {
+        config.push_str("\n[runtime.model_retry]\nretry_on=['connection']\ndelays_ms=[1]\nmax_retry_after_ms=10\n");
+    }
+    runtime.config_registry.replace_document_for_test(&config);
     let session = runtime
         .create_session(CreateSessionRequest::default())
         .await
@@ -309,7 +329,12 @@ async fn one_delegate_task_runs_an_isolated_child_and_returns_only_its_final_res
     assert_eq!(terminal.status, assistant_protocol::RunStatus::Completed);
     assert_eq!(terminal.text, "parent received delegated answer");
 
-    let requests = model.take_requests();
+    let mut requests = model.take_requests();
+    if interrupt_child {
+        assert_eq!(requests.len(), 4);
+        assert_eq!(requests[1], requests[2]);
+        requests.remove(2);
+    }
     assert_eq!(requests.len(), 3);
     assert!(
         requests[0]
@@ -963,6 +988,49 @@ async fn child_timeout_is_failed_and_parent_can_still_summarize() {
         children[0].error.as_ref().map(|error| error.code),
         Some(assistant_protocol::RuntimeErrorCode::Timeout)
     );
+}
+
+#[tokio::test]
+async fn child_timeout_disabled_allows_task_to_finish() {
+    let model = Arc::new(DelegationScenarioModel::delayed(
+        &["slow-task"],
+        Duration::from_millis(40),
+    ));
+    let store = Arc::new(crate::storage::VolatileRuntimeStore::default());
+    let runtime = runtime_with_store(model, store.clone(), delegation_runtime_config()).await;
+    runtime
+        .config_registry
+        .replace_document_for_test(&config_with_delegation(1, 1, 0));
+    let session = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("session");
+    set_auto_approval(&runtime, &session.session.session_id).await;
+    let started = runtime
+        .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            variant: assistant_protocol::AgentVariant::Build,
+            session_id: session.session.session_id.clone(),
+            message: "run one timed task".to_owned(),
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+        })
+        .await
+        .expect("run accepted");
+
+    let terminal =
+        wait_for_terminal(&runtime, &session.session.session_id, &started.run.run_id).await;
+    assert_eq!(terminal.status, assistant_protocol::RunStatus::Completed);
+    let children = store.load_runtime().await.expect("children").child_tasks;
+    assert_eq!(children.len(), 1);
+    assert_eq!(
+        children[0].status,
+        assistant_protocol::ChildTaskStatus::Completed
+    );
+    assert_eq!(children[0].error.as_ref().map(|error| error.code), None);
 }
 
 #[tokio::test]

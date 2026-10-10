@@ -19,8 +19,9 @@ import { ToolDetailDialog, type ToolDetailView } from "../ToolDetailDialog";
 import { SessionActionDialog } from "../../sessions/SessionActionDialog";
 import { AttachmentPreviewDialog } from "../../context-panel/AttachmentPreviewDialog";
 import { mergeChildTaskItems } from "../childTaskPresentation";
-import { groupConversationTurns, type ConversationRow } from "./conversationRows";
-import { AssistantTurn, EmptyConversation, LiveAssistantMessage, UserMessage } from "./MessageViews";
+import { attachLiveTurn, groupConversationTurns, type ConversationRow } from "./conversationRows";
+import { EmptyConversation, UserMessage } from "./MessageViews";
+import { ProcessingTurn } from "./ProcessingTurn";
 import { createQuotedTextSnapshot, quoteSourceRange } from "../quoteSelection";
 import { ConversationMarkdownContent } from "../../resource-workspace/ConversationMarkdownContent";
 import { isPreviewableResource } from "../../resource-workspace/ResourceWorkspaceStore";
@@ -97,13 +98,17 @@ export const ConversationView = observer(function ConversationView() {
   const retained_selection_action_ref = useRef(selection_action);
   if (selection_action) retained_selection_action_ref.current = selection_action;
   const conversation_rows = useMemo(
-    () => groupConversationTurns(history?.items ?? [], child_task_id !== null),
-    [child_task_id, history?.items],
+    () => attachLiveTurn(groupConversationTurns(history?.items ?? [], child_task_id !== null), live_run, child_task_id),
+    [child_task_id, history?.items, live_run],
   );
 
   const owner: ConversationOwner | null = history?.owner ?? (session_id
     ? { type: "main_session", session_id }
     : null);
+  let reveal_message_id = store.navigation.conversation_anchor_message_id;
+  const focus_target = store.transient_focus.target;
+  if (focus_target && owner && sameConversationOwner(focus_target.owner, owner)
+    && focus_target.generation === history?.generation) reveal_message_id = focus_target.message_id;
   const session = store.projection.application?.active_sessions.find((item) => item.session_id === session_id)
     ?? store.projection.application?.archived_sessions.find((item) => item.session_id === session_id);
   const all_sessions = [
@@ -115,7 +120,6 @@ export const ConversationView = observer(function ConversationView() {
     ? mergeChildTaskItems(
         session_view?.child_tasks ?? [],
         store.live_execution.childTasksForSession(session_id),
-        (task_id) => store.live_execution.runForChildTask(task_id),
       )
     : [];
   const attachment_by_id = useMemo(() => new Map(
@@ -228,7 +232,13 @@ export const ConversationView = observer(function ConversationView() {
       setSelectionAction(null);
       return;
     }
-    const article = start.closest<HTMLElement>("[data-message-id]");
+    const boundaryElement = (node: Node) => node instanceof Element ? node : node.parentElement;
+    const article = boundaryElement(range.startContainer)?.closest<HTMLElement>("[data-message-id]");
+    const end_article = boundaryElement(range.endContainer)?.closest<HTMLElement>("[data-message-id]");
+    if (article !== end_article && article?.dataset.messageId !== end_article?.dataset.messageId) {
+      setSelectionAction(null);
+      return;
+    }
     const message_id = article?.dataset.messageId;
     const source_role = start.dataset.quoteRole;
     if (!message_id || (source_role !== "user" && source_role !== "assistant")) {
@@ -333,8 +343,8 @@ export const ConversationView = observer(function ConversationView() {
       `[data-quote-root='true'][data-message-id="${escaped_message_id}"]`,
     ) ?? (message.matches("[data-quote-root='true']")
       ? message
-      : message.querySelector<HTMLElement>("[data-quote-root='true']"));
-    const range = root ? quoteSourceRange(root, target) : null;
+      : message.closest<HTMLElement>("[data-quote-root='true']") ?? message.querySelector<HTMLElement>("[data-quote-root='true']"));
+    const range = root ? quoteSourceRange(root, target, target.message_id) : null;
     if (!root || !range) {
       message.scrollIntoView({ block: "center" });
       store.transient_focus.clear();
@@ -476,12 +486,15 @@ export const ConversationView = observer(function ConversationView() {
           />
         )
       : (
-          <div className={styles.turn_with_tasks} key={row.key}>
-            <AssistantTurn
+          <div className={styles.turn_with_tasks} key={`${history?.generation}:${row.key}`}>
+            <ProcessingTurn
               child_tasks={!child_task_id && row.run_id
                 ? child_task_items.filter((item) => item.task.parent_run_id === row.run_id)
                 : []}
-              live_run={row.run_id === live_run?.run_id ? live_run : null}
+              live_run={row.live_run ?? null}
+              task={child_task_id ? child_view?.task.task : undefined}
+              reveal_message_id={reveal_message_id}
+              awaiting_approval={child_task_id ? Boolean(child_view?.approval_ids.length) : session_view?.approvals?.items.some((approval) => approval.run_id === row.run_id)}
               awaiting_feedback={!child_task_id && !!session_id && store.feedback.waiting(session_id)?.run_id === row.run_id}
               messages={row.messages}
               on_child_open={!child_task_id && session_id
@@ -510,7 +523,7 @@ export const ConversationView = observer(function ConversationView() {
             <div className={styles.scroll}>
               <div className={styles.message_list}>
                 {live_run
-                  ? <LiveAssistantMessage onToolClick={openLiveToolDetail} run={live_run} />
+                  ? <ProcessingTurn messages={[]} live_run={live_run} child_tasks={[]} onFork={setForkPoint} show_fork={false} onLiveToolClick={openLiveToolDetail} onToolClick={openToolDetail} />
                   : <EmptyConversation title="正在读取子任务" detail="正在从运行时获取可靠消息投影。" />}
               </div>
             </div>
@@ -565,20 +578,6 @@ export const ConversationView = observer(function ConversationView() {
           )}
           {history.load_error && <p className={styles.load_error}>{history.load_error}</p>}
           {renderConversationRows(conversation_rows)}
-          {live_run && !conversation_rows.some((row) => row.type === "assistant_turn" && row.run_id === live_run.run_id)
-            && (
-              <LiveAssistantMessage
-                awaiting_feedback={!child_task_id && store.feedback.waiting(session_id)?.run_id === live_run.run_id}
-                child_tasks={!child_task_id
-                  ? child_task_items.filter((item) => item.task.parent_run_id === live_run.run_id)
-                  : []}
-                on_child_open={!child_task_id && session_id
-                  ? (item) => void store.openChildTask(session_id, item.task.child_task_id)
-                  : undefined}
-                onToolClick={openLiveToolDetail}
-                run={live_run}
-              />
-            )}
         </div>
       </div>
       {selection_presence.mounted && retained_selection_action_ref.current && (

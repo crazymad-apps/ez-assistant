@@ -51,6 +51,7 @@ export class FeedbackStore {
   ingest(envelope: RuntimeEventEnvelope): void {
     const event = envelope.event;
     if (event.type === 'session_deleted') {
+      this.#revisions.set(event.session_id, (this.#revisions.get(event.session_id) ?? 0) + 1);
       for (const request of this.forSession(event.session_id)) {
         this.requests.delete(request.request_id); this.drafts.delete(request.request_id); this.errors.delete(request.request_id);
       }

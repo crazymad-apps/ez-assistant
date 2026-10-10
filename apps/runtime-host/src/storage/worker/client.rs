@@ -347,12 +347,24 @@ impl RuntimeStore for LocalRuntimeStore {
     fn save_model_settings(
         &self,
         settings: assistant_protocol::ModelSettings,
+        server_history_key: Option<String>,
     ) -> StoreFuture<'_, ()> {
         Box::pin(async move {
-            self.request(|reply| Command::SaveModelSettings { settings, reply })
+            self.request(|reply| Command::SaveModelSettings {
+                settings,
+                server_history_key,
+                reply,
+            })
+            .await
+        })
+    }
+    fn invalidate_server_history_bindings(&self, key: String) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            self.request(|reply| Command::InvalidateServerHistoryBindings { key, reply })
                 .await
         })
     }
+
     fn get_model_fixed_config(
         &self,
         selection: assistant_protocol::ModelSelection,
@@ -381,19 +393,29 @@ impl RuntimeStore for LocalRuntimeStore {
     fn put_model_fixed_config(
         &self,
         config: assistant_protocol::ModelFixedConfig,
+        server_history_key: Option<String>,
     ) -> StoreFuture<'_, ()> {
         Box::pin(async move {
-            self.request(|reply| Command::PutModelFixedConfig { config, reply })
-                .await
+            self.request(|reply| Command::PutModelFixedConfig {
+                config,
+                server_history_key,
+                reply,
+            })
+            .await
         })
     }
     fn reset_model_fixed_config(
         &self,
         selection: assistant_protocol::ModelSelection,
+        server_history_key: Option<String>,
     ) -> StoreFuture<'_, ()> {
         Box::pin(async move {
-            self.request(|reply| Command::ResetModelFixedConfig { selection, reply })
-                .await
+            self.request(|reply| Command::ResetModelFixedConfig {
+                selection,
+                server_history_key,
+                reply,
+            })
+            .await
         })
     }
 

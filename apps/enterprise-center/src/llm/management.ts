@@ -252,7 +252,7 @@ export class CallManagement {
         const output = Math.min(maximum, reasoningMaximum, 1024);
         const body: Record<string, unknown> =
           protocol === 'open_ai_responses'
-            ? { model: selection.model_id, input: 'Reply with OK.', stream: false, max_output_tokens: output }
+            ? { model: selection.model_id, input: 'Reply with OK.', stream: false, store: false, max_output_tokens: output }
             : {
                 model: selection.model_id,
                 messages: [{ role: 'user', content: 'Reply with OK.' }],

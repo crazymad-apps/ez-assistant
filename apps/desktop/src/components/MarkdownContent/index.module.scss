@@ -24,6 +24,8 @@
 
   li + li { margin-top: 0.2em; }
 
+  :global([data-streamdown="strong"]) { font-weight: 600; }
+
   a {
     color: var(--ez-primary);
     text-decoration: underline;

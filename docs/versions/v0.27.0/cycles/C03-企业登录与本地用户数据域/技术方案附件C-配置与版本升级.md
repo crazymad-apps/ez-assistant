@@ -26,7 +26,7 @@ mode = "enterprise" # 顶层字段，替换上例的 mode
 
 [enterprise]
 center_url = "https://center.example.com"
-# center_id = "01234567-89ab-4cde-8f01-23456789abcd"
+# center_id = "<私有运行标识>"
 # 首次成功认证后由 Host 写入；这里仅展示字段格式。
 ```
 

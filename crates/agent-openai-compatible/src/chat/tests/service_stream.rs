@@ -247,6 +247,7 @@ async fn stream_replays_reasoning_text_and_tool_call_turn_end_to_end() {
         model: ModelIdentity::new(provider_id("deepseek"), "deepseek-reasoner"),
         parts: vec![
             AssistantPart::Reasoning(ReasoningPart {
+                source: Default::default(),
                 id: part_id("part_1"),
                 text: "Need the date.".to_owned(),
             }),
@@ -278,6 +279,7 @@ async fn stream_replays_reasoning_text_and_tool_call_turn_end_to_end() {
             id: part_id("part_1"),
         },
         ModelEvent::ReasoningDelta {
+            source: Default::default(),
             id: part_id("part_1"),
             delta: "Need the date.".to_owned(),
         },

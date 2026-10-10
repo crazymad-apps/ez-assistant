@@ -152,7 +152,7 @@ async fn native_auth_precedes_version_admission_and_all_business_routes_require_
         let body: Value = response.json().await.unwrap();
         assert_eq!(body["error"]["code"], "missing_declaration");
     }
-    for path in ["/health", "/capabilities"] {
+    for path in ["/health", "/capabilities", "/desktop-update-context"] {
         let response = f
             .request(Method::GET, path)
             .bearer_auth("native-fixture")
@@ -371,4 +371,21 @@ async fn cors_allows_version_headers_and_failed_login_does_not_issue_a_session()
         .unwrap();
     assert_eq!(response.status(), StatusCode::CONFLICT);
     assert!(!response.headers().contains_key("set-cookie"));
+}
+
+#[tokio::test]
+async fn update_context_is_anonymous_and_does_not_initialize_runtime() {
+    let f = Fixture::new().await;
+    let response = f
+        .request(Method::GET, "/desktop-update-context")
+        .header(CLIENT_VERSION_HEADER, "invalid")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.json::<Value>().await.unwrap(),
+        json!({"center_url":null,"enterprise_protocols":[2]})
+    );
+    assert!(f._home.path().read_dir().unwrap().next().is_none());
 }

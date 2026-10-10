@@ -11,6 +11,7 @@ use crate::ModelError;
 /// 生命周期契约（由 [`crate::LifecycleValidator`] 强制执行）：
 ///
 /// - 首个事件必须是 `TurnStarted`；`TurnFailed` 允许在任何阶段出现。
+/// - 显式重试装配可发出 `TurnRestarted` 丢弃未提交响应，并重启 Part 生命周期。
 /// - 每个 Part 的 `Started`/`Delta`/`Finished` 按 ID 配对；不同 Part 可以交错。
 /// - Tool arguments 分片到达，但 `ToolCallFinished` 必须携带已拼完并通过
 ///   JSON 解析的完整值；组装失败的生产方必须以 `TurnFailed` 结束流。
@@ -18,6 +19,9 @@ use crate::ModelError;
 ///   终态之后到达的数据一律被拒绝。
 /// - `OpaqueProviderState` 没有独立流事件，只出现在最终 `AssistantMessage` 中。
 pub enum ModelEvent {
+    /// 有限重试废弃当前未提交响应；随后重新声明 TurnStarted。
+    /// 不代表工具或已提交对话回滚。
+    TurnRestarted,
     /// 流建立后的第一个事件，声明本次响应的消息身份。
     TurnStarted {
         /// 本次响应对应的规范消息 ID；`TurnFinished` 中的消息必须与之相同。
@@ -32,6 +36,9 @@ pub enum ModelEvent {
     },
     /// reasoning 文本增量。
     ReasoningDelta {
+        /// 每个增量自带来源，观察者丢失其他事件时仍可正确解释。
+        #[serde(default, skip_serializing_if = "agent_types::ReasoningSource::is_raw")]
+        source: agent_types::ReasoningSource,
         /// 片段 ID。
         id: PartId,
         /// 本次到达的 reasoning 文本片段。

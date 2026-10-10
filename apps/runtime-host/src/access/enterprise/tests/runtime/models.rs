@@ -40,6 +40,10 @@ pub(in crate::access::enterprise::tests) async fn proxy(
         .lock()
         .unwrap()
         .push((token(&headers), body.clone()));
+    let scripted = mock.proxy_script.lock().unwrap().pop_front();
+    if let Some(response) = scripted {
+        return response;
+    }
     let control = mock.proxy_control.lock().unwrap().take();
     let held = mock.proxy_hold.lock().unwrap().take();
     if let Some(held) = held {
@@ -76,6 +80,7 @@ fn set_configuration(f: &Fixture, model: &str, responses: bool, window: u64) {
         "endpoint": format!("{origin}/api/llm/providers/01234567-89ab-4cde-8f01-23456789abcd/v1"),
         "provider_type":"openai", "provider_display_name":"测试服务商", "protocol": if responses { "open_ai_responses" } else { "open_ai_chat_completions" },
         "model_id":model, "parameters": parameters,
+        "server_history_enabled":false,"server_history_support":"unknown","server_history_binding":null,
     });
 }
 
@@ -331,4 +336,211 @@ async fn concurrent_refreshes_share_loading_and_waiter_cancellation_does_not_can
     held.started.notified().await;
     f.stop().await;
     assert!(pending.await.unwrap().is_err());
+}
+
+#[tokio::test]
+async fn managed_proxy_temporary_503_retries_through_real_host_transport() {
+    for code in ["llm_proxy_unavailable", "llm_record_unavailable"] {
+        let mut f = Fixture::with_domains(true, None).await;
+        set_configuration(&f, "model-retry", true, 8192);
+        let alice = f.login("alice").await;
+        refresh(&f, &alice).await;
+        *f.mock.proxy_control.lock().unwrap() = Some((503, code.into()));
+        assert!(
+            matches!(
+                validate(&f, &alice).await.outcome,
+                ConnectionValidationOutcome::Succeeded
+            ),
+            "temporary center error {code} must recover"
+        );
+        assert_eq!(f.mock.proxy_requests.lock().unwrap().len(), 2);
+        f.stop().await;
+    }
+}
+
+async fn submit_recovery_test(runtime: &AssistantRuntime, session_id: &SessionId) -> RunId {
+    runtime
+        .submit_session_input(assistant_runtime::SubmitSessionInputRequest {
+            source: assistant_runtime::InputChannelSource::desktop_text(),
+            input: SubmitInputRequest {
+                session_id: session_id.clone(),
+                message: "continue".into(),
+                mode: SubmitInputMode::Normal,
+                variant: AgentVariant::Build,
+                attachment_ids: vec![],
+                quotes: vec![],
+                skill_name: None,
+                mcp_server_key: None,
+                idempotency_key: None,
+            },
+        })
+        .await
+        .unwrap()
+        .run
+        .run_id
+}
+
+async fn recovery_terminal(
+    runtime: &AssistantRuntime,
+    session_id: &SessionId,
+    run_id: &RunId,
+) -> RunSnapshot {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let run = runtime
+                .get_run(GetRunRequest {
+                    session_id: session_id.clone(),
+                    run_id: run_id.clone(),
+                })
+                .await
+                .unwrap()
+                .run;
+            if run.status.is_terminal() {
+                return run;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("recovery run terminates")
+}
+
+#[tokio::test]
+async fn managed_history_recovers_stream_break_expired_id_and_temporary_503_over_http() {
+    use futures_util::StreamExt as _;
+    let mut f = Fixture::with_domains(true, None).await;
+    set_configuration(&f, "gpt-test", true, 128_000);
+    {
+        let mut config = f.mock.model_configuration.lock().unwrap();
+        config["parameters"]["tool_calls"] = json!("supported");
+        config["parameters"]["tool_choice"] = json!({"auto":"supported","none":"supported","required":"supported","named":"supported"});
+        config["server_history_enabled"] = json!(true);
+        config["server_history_support"] = json!("supported");
+        config["server_history_binding"] = json!("a".repeat(64));
+    }
+    let alice = f.login("alice").await;
+    refresh(&f, &alice).await;
+    let runtime = f.services(&alice).await.runtime.clone();
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    runtime
+        .rename_session(RenameSessionRequest {
+            session_id: session_id.clone(),
+            title: "recovery fixture".into(),
+        })
+        .await
+        .unwrap();
+    let first = submit_recovery_test(&runtime, &session_id).await;
+    let seed = recovery_terminal(&runtime, &session_id, &first).await;
+    assert_eq!(seed.status, RunStatus::Completed, "{:?}", seed.error);
+
+    let break_stream = Arc::new(Notify::new());
+    let release = break_stream.clone();
+    // Headers and a real SSE event arrive first; only then does the test break the HTTP body.
+    let started = futures_util::stream::once(async {
+        Ok::<_, std::io::Error>("data: {\"type\":\"response.created\",\"response\":{\"id\":\"broken-response\",\"model\":\"gpt-test\",\"status\":\"in_progress\"}}\n\n".to_owned())
+    });
+    let interrupted = futures_util::stream::once(async move {
+        release.notified().await;
+        Err::<String, _>(std::io::Error::other("injected upstream interruption"))
+    });
+    let broken = Response::builder()
+        .header("content-type", "text/event-stream")
+        .body(axum::body::Body::from_stream(started.chain(interrupted)))
+        .unwrap();
+    let stale = (StatusCode::BAD_REQUEST, [("x-ez-center-control", "1")], Json(json!({"error":{
+        "code":"previous_response_not_found", "type":"invalid_request_error", "param":"previous_response_id", "message":"expired"
+    }}))).into_response();
+    let unavailable = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [("x-ez-center-control", "1")],
+        Json(json!({"error":{
+            "code":"llm_proxy_unavailable", "message":"temporary upstream connection failure"
+        }})),
+    )
+        .into_response();
+    let completed = include_str!(
+        "../../../../../../../crates/agent-openai-compatible/fixtures/responses/openai/text.sse"
+    )
+    .replace("resp_text_1", "resp_text_2")
+    .replace("msg_text_1", "msg_text_2")
+    .into_response();
+    f.mock
+        .proxy_script
+        .lock()
+        .unwrap()
+        .extend([broken, stale, unavailable, completed]);
+    let mut events = runtime.subscribe_events();
+    let run_id = submit_recovery_test(&runtime, &session_id).await;
+    let established = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(events.recv().await.unwrap(), RuntimeEvent::ModelStreamEstablished { run_id: ref id, .. } if id == &run_id) {
+                break_stream.notify_one();
+                break;
+            }
+        }
+    }).await;
+    if established.is_err() {
+        panic!(
+            "not established: {:?}; requests={}",
+            runtime
+                .get_run(GetRunRequest {
+                    session_id: session_id.clone(),
+                    run_id: run_id.clone()
+                })
+                .await
+                .unwrap()
+                .run,
+            f.mock.proxy_requests.lock().unwrap().len()
+        );
+    }
+    let run = recovery_terminal(&runtime, &session_id, &run_id).await;
+    assert_eq!(run.status, RunStatus::Completed, "{:?}", run.error);
+    {
+        let requests = f.mock.proxy_requests.lock().unwrap();
+        assert_eq!(requests.len(), 5);
+        assert!(requests[1].1.get("previous_response_id").is_some());
+        assert_eq!(requests[1].1, requests[2].1);
+        assert!(requests[3].1.get("previous_response_id").is_none());
+        assert!(
+            requests[4].1.get("previous_response_id").is_none(),
+            "rebuild retry must not reuse the expired ID"
+        );
+        assert!(
+            requests[3].1 == requests[4].1,
+            "rebuild retry must preserve the full request"
+        );
+    }
+    let conversation = runtime.conversation_snapshot(&session_id).await.unwrap();
+    assert_eq!(
+        conversation
+            .messages
+            .iter()
+            .filter(|m| matches!(m, agent_types::ConversationMessage::User(_)))
+            .count(),
+        2
+    );
+    assert!(f.mock.proxy_script.lock().unwrap().is_empty());
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn managed_proxy_invalid_or_oversized_requests_do_not_retry() {
+    for (status, code) in [(400, "llm_request_invalid"), (413, "llm_request_too_large")] {
+        let mut f = Fixture::with_domains(true, None).await;
+        set_configuration(&f, "model-invalid", true, 8192);
+        let alice = f.login("alice").await;
+        refresh(&f, &alice).await;
+        *f.mock.proxy_control.lock().unwrap() = Some((status, code.into()));
+        assert!(matches!(
+            validate(&f, &alice).await.outcome,
+            ConnectionValidationOutcome::Failed(_)
+        ));
+        assert_eq!(f.mock.proxy_requests.lock().unwrap().len(), 1);
+        f.stop().await;
+    }
 }

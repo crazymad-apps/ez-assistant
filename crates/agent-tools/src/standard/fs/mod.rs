@@ -12,7 +12,8 @@ pub use search::{
     FindFilesInput, FsFindTool, FsSearchTool, SearchContentInput, SearchFilesToolConfig,
 };
 pub use write::{
-    DeleteFileInput, EditFileInput, FsDeleteTool, FsEditTool, FsWriteTool, WriteFileInput,
+    DeleteFileInput, EditFileInput, EditFileInputEntry, FsDeleteTool, FsEditTool, FsWriteTool,
+    WriteFileInput,
 };
 
 use serde::Serialize;
@@ -27,8 +28,8 @@ use crate::{
 pub(super) fn map_fs_error(error: FileToolError) -> ToolError {
     match error {
         FileToolError::InvalidInput { message } => ToolError::invalid_input(message),
-        // Engine 在执行取消后会直接收敛到 Cancelled，不会把映射后的文本回喂模型；
-        // Cancelled 落入此分支只为能力错误到通用 ToolError 的类型映射保持完备。
+        // Engine 等待工具清理后保留其返回结果，再收敛到 Cancelled，不继续本次模型调用。
+        // Cancelled 的映射文本会进入可靠历史；它不证明文件副作用已回滚。
         other => ToolError::execution(other.to_string()),
     }
 }

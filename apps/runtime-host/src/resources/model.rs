@@ -120,20 +120,25 @@ impl HostModelServiceFactory {
                 {
                     adapter = adapter.with_function_output_shape(FunctionOutputShape::ContentParts);
                 }
-                Arc::new(
-                    OpenAiResponsesService::with_transport_and_capabilities(
-                        request.endpoint,
-                        BearerCredential::new(request.api_key.to_owned()),
-                        request.model,
-                        request.context_window_tokens,
-                        adapter,
-                        capabilities,
-                        transport,
-                    )
-                    .map_err(model_service_error)?
-                    .with_max_input_tokens(request.max_input_tokens)
-                    .map_err(model_service_error)?,
+                let service = OpenAiResponsesService::with_transport_and_capabilities(
+                    request.endpoint,
+                    BearerCredential::new(request.api_key.to_owned()),
+                    request.model,
+                    request.context_window_tokens,
+                    adapter,
+                    capabilities,
+                    transport,
                 )
+                .map_err(model_service_error)?
+                .with_max_input_tokens(request.max_input_tokens)
+                .map_err(model_service_error)?;
+                let service = match request.server_history_binding {
+                    Some(binding) => service
+                        .with_server_history(binding)
+                        .map_err(model_service_error)?,
+                    None => service,
+                };
+                Arc::new(service)
             }
         };
         if request.capabilities.image_input {
@@ -234,6 +239,7 @@ mod tests {
         ] {
             for limit in [None, Some(64000), Some(0), Some(128001)] {
                 let result = factory.create_model(ModelServiceFactoryRequest {
+                    server_history_binding: None,
                     external_configuration: None,
                     provider: &provider,
                     protocol,

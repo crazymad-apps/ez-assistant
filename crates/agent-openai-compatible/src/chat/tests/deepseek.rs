@@ -206,6 +206,7 @@ async fn turn_1_replays_reasoning_text_tool_call_and_cache_usage() {
         // reasoning、content、tool call 全保留且顺序正确。
         parts: vec![
             AssistantPart::Reasoning(ReasoningPart {
+                source: Default::default(),
                 id: part_id("part_1"),
                 text: "The user asks for the weather in Paris. I should call get_weather first."
                     .to_owned(),
@@ -232,10 +233,12 @@ async fn turn_1_replays_reasoning_text_tool_call_and_cache_usage() {
             id: part_id("part_1"),
         },
         ModelEvent::ReasoningDelta {
+            source: Default::default(),
             id: part_id("part_1"),
             delta: "The user asks for the weather in Paris.".to_owned(),
         },
         ModelEvent::ReasoningDelta {
+            source: Default::default(),
             id: part_id("part_1"),
             delta: " I should call get_weather first.".to_owned(),
         },
@@ -336,6 +339,7 @@ async fn turn_2_request_round_trips_reasoning_tool_calls_and_thinking() {
         message.parts,
         vec![
             AssistantPart::Reasoning(ReasoningPart {
+                source: Default::default(),
                 id: part_id("part_1"),
                 text: "The weather result is in. I can answer now.".to_owned(),
             }),
@@ -422,6 +426,7 @@ async fn encode_rejects_tool_result_with_unknown_call_id() {
         user_message("message_1", "How is the weather in Paris today?"),
         ConversationMessage::Assistant(assistant_message(vec![
             AssistantPart::Reasoning(ReasoningPart {
+                source: Default::default(),
                 id: part_id("reasoning_1"),
                 text: "I should call get_weather first.".to_owned(),
             }),

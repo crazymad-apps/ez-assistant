@@ -77,10 +77,12 @@ fn stream_interleaved_reasoning_and_text_switch_parts() {
                 id: part_id("part_1"),
             },
             ModelEvent::ReasoningDelta {
+                source: Default::default(),
                 id: part_id("part_1"),
                 delta: "A".to_owned(),
             },
             ModelEvent::ReasoningDelta {
+                source: Default::default(),
                 id: part_id("part_1"),
                 delta: "B".to_owned(),
             },
@@ -101,6 +103,7 @@ fn stream_interleaved_reasoning_and_text_switch_parts() {
                 id: part_id("part_3"),
             },
             ModelEvent::ReasoningDelta {
+                source: Default::default(),
                 id: part_id("part_3"),
                 delta: "C".to_owned(),
             },
@@ -114,6 +117,7 @@ fn stream_interleaved_reasoning_and_text_switch_parts() {
                     // reasoning/text 交错按 Provider 输出顺序排列。
                     parts: vec![
                         AssistantPart::Reasoning(ReasoningPart {
+                            source: Default::default(),
                             id: part_id("part_1"),
                             text: "AB".to_owned(),
                         }),
@@ -122,6 +126,7 @@ fn stream_interleaved_reasoning_and_text_switch_parts() {
                             text: "X".to_owned(),
                         }),
                         AssistantPart::Reasoning(ReasoningPart {
+                            source: Default::default(),
                             id: part_id("part_3"),
                             text: "C".to_owned(),
                         }),
@@ -164,6 +169,7 @@ fn stream_and_message_treat_null_reasoning_field_as_absent() {
                 id: part_id("part_1"),
             },
             ModelEvent::ReasoningDelta {
+                source: Default::default(),
                 id: part_id("part_1"),
                 delta: "A".to_owned(),
             },
@@ -186,6 +192,7 @@ fn stream_and_message_treat_null_reasoning_field_as_absent() {
                     model: model_identity(),
                     parts: vec![
                         AssistantPart::Reasoning(ReasoningPart {
+                            source: Default::default(),
                             id: part_id("part_1"),
                             text: "A".to_owned(),
                         }),

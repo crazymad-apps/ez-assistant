@@ -276,13 +276,15 @@ export function ResourcePreview(props: Readonly<{
             roots={props.roots}
           />
         ) : source.type === "local_file" ? (
-          <LocalResourceBreadcrumb
-            handle={resource}
-            on_open_resource={props.on_open_local_resource}
-            roots={props.roots}
-          />
+          <nav aria-label="资源文件" className={styles.file_name}>
+            <LocalSiblingMenu
+              current_name={resource.display_name}
+              on_open_resource={props.on_open_local_resource}
+              resource_key={resource.resource_key}
+            />
+          </nav>
         ) : source.type === "host_file" ? (
-          <nav className={styles.breadcrumb} aria-label="Host 文件路径" title={source.path}>{source.path}</nav>
+          <span className={styles.file_name} title={resource.display_name}>{resource.display_name}</span>
         ) : (
           <OpaqueResourceBreadcrumb
             label={source.type === "attachment" ? "会话附件" : "工具产物"}
@@ -622,47 +624,10 @@ function sessionFileEntry(locator: SessionResourceLocator, reference: string): S
   };
 }
 
-function LocalResourceBreadcrumb(props: Readonly<{
-  handle: ResourceHandle;
-  on_open_resource: (resource: RegisteredLocalResource) => void;
-  roots: readonly Readonly<{ label: string; path?: string }>[];
-}>) {
-  const source = props.handle.source;
-  if (source.type !== "local_file") return null;
-  const path_segments = localBreadcrumbSegments(source.path_segments, props.roots);
-  return (
-    <nav aria-label="资源路径" className={styles.breadcrumb}>
-      {path_segments.map((segment, index) => {
-        const current = index === path_segments.length - 1;
-        if (current) {
-          return (
-            <LocalSiblingMenu
-              current_name={props.handle.display_name}
-              key={`${segment}:${index}`}
-              label={segment}
-              on_open_resource={props.on_open_resource}
-              resource_key={props.handle.resource_key}
-              show_arrow={false}
-            />
-          );
-        }
-        return (
-          <span className={styles.breadcrumb_plain_node} key={`${segment}:${index}`}>
-            <span>{segment}</span>
-            <Icon name="chevron-right" size={13} />
-          </span>
-        );
-      })}
-    </nav>
-  );
-}
-
 function LocalSiblingMenu(props: Readonly<{
   current_name: string;
-  label: string;
   on_open_resource: (resource: RegisteredLocalResource) => void;
   resource_key: string;
-  show_arrow: boolean;
 }>) {
   const [siblings, setSiblings] = useState<Awaited<ReturnType<typeof listLocalResourceSiblings>> | null>(null);
   const [error, setError] = useState(false);
@@ -672,9 +637,8 @@ function LocalSiblingMenu(props: Readonly<{
   }
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger aria-label="查看同级项目" className={styles.breadcrumb_node_trigger} onClick={load}>
-        <span>{props.label}</span>
-        {props.show_arrow && <Icon name="chevron-right" size={13} />}
+      <DropdownMenuTrigger aria-label="查看同级项目" className={styles.breadcrumb_node_trigger} onClick={load} title={props.current_name}>
+        <span>{props.current_name}</span>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className={styles.breadcrumb_menu}>
         {error ? <div className={styles.breadcrumb_menu_state}>无法读取同级项目</div> : siblings === null ? (
@@ -874,28 +838,6 @@ function formatBytes(value: number | null): string {
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function localBreadcrumbSegments(
-  path_segments: readonly string[],
-  roots: readonly Readonly<{ label: string; path?: string }>[],
-): readonly string[] {
-  const normalized_path = displayPathFromSegments(path_segments);
-  const root = roots
-    .filter((candidate): candidate is Readonly<{ label: string; path: string }> => Boolean(candidate.path))
-    .map((candidate) => ({ ...candidate, path: candidate.path.replace(/\/+$/, "") }))
-    .filter((candidate) => normalized_path === candidate.path || normalized_path.startsWith(`${candidate.path}/`))
-    .sort((left, right) => right.path.length - left.path.length)[0];
-  if (root) {
-    const suffix = normalized_path.slice(root.path.length).split("/").filter(Boolean);
-    return [root.label, ...suffix];
-  }
-  return path_segments.filter((segment) => segment !== "/").slice(-2);
-}
-
-function displayPathFromSegments(path_segments: readonly string[]): string {
-  if (path_segments[0] === "/") return `/${path_segments.slice(1).join("/")}`;
-  return path_segments.join("/");
 }
 
 function sourceIsNative(source: ResourceHandle["source"], files: ClientResources): boolean { return files.native_host || (files.desktop && source.type === "local_file"); }

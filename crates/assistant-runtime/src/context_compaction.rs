@@ -42,6 +42,7 @@ pub(crate) struct RuntimeContextCompactor {
     system_prompt: SystemPromptSnapshot,
     strategy: RollingSummarySameModel,
     manual_request: Option<ModelRequestConfig>,
+    restored_context: Vec<agent_types::UserMessage>,
 }
 
 impl RuntimeContextCompactor {
@@ -81,7 +82,72 @@ impl RuntimeContextCompactor {
             system_prompt,
             strategy: RollingSummarySameModel::new(policy),
             manual_request,
+            restored_context: Vec::new(),
         }
+    }
+
+    /// 冻结执行已披露的能力上下文；仅在压缩候选缺失或过期时重新落账。
+    pub(crate) fn with_restored_context(
+        mut self,
+        mcp: Option<agent_types::UserMessage>,
+        shell: Option<agent_types::UserMessage>,
+    ) -> Self {
+        self.restored_context = [mcp, shell].into_iter().flatten().collect();
+        self
+    }
+
+    fn restore_context(
+        &self,
+        replacement: &mut ConversationSnapshot,
+    ) -> Result<(), RuntimeCompactionError> {
+        use crate::internal_boundary::{
+            InternalBoundaryCoordinator, InternalBoundaryRequest, InternalBoundarySource,
+        };
+        use agent_types::UserPart;
+        let mut restored: Option<agent_types::UserMessage> = None;
+        for context in &self.restored_context {
+            for part in &context.parts {
+                let UserPart::InternalContext(expected) = part else {
+                    continue;
+                };
+                let actual = replacement.messages.iter().rev().find_map(|message| {
+                    let ConversationMessage::User(user) = message else {
+                        return None;
+                    };
+                    user.parts.iter().rev().find_map(|part| match part {
+                        UserPart::InternalContext(part) if part.kind == expected.kind => {
+                            Some(&part.text)
+                        }
+                        _ => None,
+                    })
+                });
+                if actual == Some(&expected.text) {
+                    continue;
+                }
+                let source = match expected.kind.as_str() {
+                    "mcp_server_directory" => InternalBoundarySource::McpServerDirectory,
+                    "mcp_server_selection" => InternalBoundarySource::McpServerSelection,
+                    "shell_environment" => InternalBoundarySource::ShellEnvironment,
+                    _ => return Err(RuntimeCompactionError::InvalidConversation),
+                };
+                let request = InternalBoundaryRequest {
+                    source,
+                    text: expected.text.clone(),
+                };
+                if let Some(message) = &mut restored {
+                    InternalBoundaryCoordinator::append(message, request)?;
+                } else {
+                    restored = Some(InternalBoundaryCoordinator::hidden_message(request)?.0);
+                }
+            }
+        }
+        if let Some(message) = restored {
+            // 新身份和原样保留尾部一起原子提交；放到尾端使刷新事实不会被旧目录覆盖。
+            replacement
+                .messages
+                .push(ConversationMessage::User(message));
+        }
+        Ok(())
     }
 
     pub(crate) async fn compact(
@@ -122,15 +188,23 @@ impl RuntimeContextCompactor {
             provider_options: request.provider_options.clone(),
         };
         let outcome = self
-            .compact_once(snapshot, product_history, normal_request, cancellation)
+            .compact_once(
+                snapshot.clone(),
+                product_history,
+                normal_request,
+                cancellation,
+            )
             .await?;
         match outcome {
             StrategyOutcome::NoOp { .. } => Ok(ManualCompactionCandidate::NoOp),
             StrategyOutcome::Candidate(candidate) => {
-                let replacement_message_count = u64::try_from(candidate.replacement.messages.len())
-                    .map_err(|_| RuntimeCompactionError::InvalidConversation)?;
-                // replacement 固定新增一条 Context Summary；其余才是原样保留的源消息。
-                let retained_message_count = replacement_message_count.saturating_sub(1);
+                // 恢复的目录/环境消息是新事实，不计入原样保留的源消息。
+                let retained_message_count = candidate
+                    .replacement
+                    .messages
+                    .iter()
+                    .filter(|message| snapshot.messages.contains(message))
+                    .count() as u64;
                 let compacted_message_count =
                     source_message_count.saturating_sub(retained_message_count);
                 Ok(ManualCompactionCandidate::Replacement {
@@ -174,6 +248,7 @@ impl RuntimeContextCompactor {
             })
             .ok_or(RuntimeCompactionError::InvalidConversation)?;
         summary.programmatic_context = programmatic_context;
+        self.restore_context(&mut candidate.replacement)?;
         validate_replacement(&candidate.replacement)?;
         validate_replacement_effect(&snapshot, &candidate.replacement)?;
         crate::merge_context_replacement_with_product_history(

@@ -4,7 +4,7 @@ use agent_model::{ModelError, ModelEvent};
 use agent_types::{
     AssistantMessage, AssistantPart, FinishReason, MAX_PROVIDER_STATE_ITEM_BYTES,
     MAX_PROVIDER_STATE_TURN_BYTES, MessageId, ModelIdentity, OpaqueProviderState, PartId,
-    ReasoningPart, TextPart, TokenUsage, ToolCall, ToolCallId, ToolName,
+    ReasoningPart, ReasoningSource, TextPart, TokenUsage, ToolCall, ToolCallId, ToolName,
 };
 use serde_json::Value;
 
@@ -54,7 +54,7 @@ enum OutputItemKind {
 enum TextKind {
     Output,
     Refusal,
-    Reasoning,
+    Reasoning(ReasoningSource),
 }
 
 struct TextState {
@@ -130,9 +130,9 @@ impl ResponsesAssembler {
             "response.incomplete" => self.success_terminal(event, true),
             "response.failed" | "response.cancelled" => self.provider_failure(event),
             "error" => self.error_event(event),
-            _ => Err(protocol(format!(
-                "unsupported Responses event type `{event_type}`"
-            ))),
+            // 上游可扩展事件类型（例如连接元数据）；未知事件不参与正文和终态组装。
+            // 已知事件仍严格校验，不能用未知事件替代完成信号或掩盖协议错误。
+            _ => Ok(Vec::new()),
         }
     }
 
@@ -529,6 +529,11 @@ impl ResponsesAssembler {
         }
         state.text.push_str(&delta);
         events.push(ModelEvent::ReasoningDelta {
+            source: if kind == 0 {
+                ReasoningSource::Summary
+            } else {
+                ReasoningSource::Raw
+            },
             id: state.id.clone(),
             delta,
         });
@@ -567,7 +572,13 @@ impl ResponsesAssembler {
             return Err(protocol("reasoning event references a non-reasoning item"));
         };
         if let Some(state) = segments.get(&(kind, segment_index)) {
-            if state.kind != TextKind::Reasoning {
+            if state.kind
+                != TextKind::Reasoning(if kind == 0 {
+                    ReasoningSource::Summary
+                } else {
+                    ReasoningSource::Raw
+                })
+            {
                 return Err(protocol("reasoning segment type changed"));
             }
             return Ok(Vec::new());
@@ -579,7 +590,11 @@ impl ResponsesAssembler {
             (kind, segment_index),
             TextState {
                 id: id.clone(),
-                kind: TextKind::Reasoning,
+                kind: TextKind::Reasoning(if kind == 0 {
+                    ReasoningSource::Summary
+                } else {
+                    ReasoningSource::Raw
+                }),
                 text: String::new(),
                 finished: false,
             },
@@ -861,8 +876,13 @@ impl ResponsesAssembler {
                     segments,
                     opaque_payload,
                 } => {
-                    for state in segments.values() {
+                    for ((kind, _), state) in segments {
                         parts.push(AssistantPart::Reasoning(ReasoningPart {
+                            source: if *kind == 0 {
+                                ReasoningSource::Summary
+                            } else {
+                                ReasoningSource::Raw
+                            },
                             id: state.id.clone(),
                             text: state.text.clone(),
                         }));
@@ -1004,7 +1024,7 @@ fn finish_text_state(
     })?;
     state.finished = true;
     events.push(match state.kind {
-        TextKind::Reasoning => ModelEvent::ReasoningFinished {
+        TextKind::Reasoning(_) => ModelEvent::ReasoningFinished {
             id: state.id.clone(),
         },
         TextKind::Output | TextKind::Refusal => ModelEvent::TextFinished {
@@ -1036,7 +1056,7 @@ fn append_final_text(
 
 fn text_delta_event(kind: TextKind, id: PartId, delta: String) -> ModelEvent {
     match kind {
-        TextKind::Reasoning => ModelEvent::ReasoningDelta { id, delta },
+        TextKind::Reasoning(source) => ModelEvent::ReasoningDelta { source, id, delta },
         TextKind::Output | TextKind::Refusal => ModelEvent::TextDelta { id, delta },
     }
 }

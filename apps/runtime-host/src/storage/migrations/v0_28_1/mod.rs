@@ -24,7 +24,7 @@ fn apply(connection: &Connection) -> Result<()> {
         WHERE json_extract(snapshot_json,'$.status')='pending';")?;
     Ok(())
 }
-fn validate(connection: &Connection) -> Result<()> {
+pub(super) fn validate(connection: &Connection) -> Result<()> {
     v0_28_0::validate(connection)?;
     connection.prepare(
         "SELECT request_id, session_id, run_id, snapshot_json FROM session_feedback LIMIT 0",

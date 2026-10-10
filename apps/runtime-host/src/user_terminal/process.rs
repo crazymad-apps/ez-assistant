@@ -44,17 +44,23 @@ impl TerminalProcess {
         size: PtySize,
         shell: Option<assistant_protocol::ShellKind>,
         send: impl Fn(TerminalEvent) -> Result<(), TerminalError> + Send + Sync + 'static,
-    ) -> Result<Arc<Self>, TerminalError> {
-        let command = tokio::task::spawn_blocking(move || super::shell::interactive(shell))
-            .await
-            .map_err(|_| failure("Shell 探测任务异常。"))??;
-        Self::spawn_command(directory, size, command, send).await
+    ) -> Result<(Arc<Self>, assistant_protocol::UserTerminalShellEntry), TerminalError> {
+        let (command, actual, startup) = tokio::task::spawn_blocking(move || {
+            let (mut command, actual) = super::shell::interactive(shell)?;
+            let startup = super::prompt::configure(&mut command, actual.shell)?;
+            Ok::<_, TerminalError>((command, actual, startup))
+        })
+        .await
+        .map_err(|_| failure("Shell 探测任务异常。"))??;
+        let process = Self::spawn_command(directory, size, command, startup, send).await?;
+        Ok((process, actual))
     }
 
     pub(super) async fn spawn_command(
         directory: PathBuf,
         size: PtySize,
         mut command: CommandBuilder,
+        startup: Option<tempfile::TempDir>,
         send: impl Fn(TerminalEvent) -> Result<(), TerminalError> + Send + Sync + 'static,
     ) -> Result<Arc<Self>, TerminalError> {
         filter_environment(&mut command);
@@ -132,7 +138,18 @@ impl TerminalProcess {
         });
         let owner = process.clone();
         process.task.lock().await.task = Some(tokio::spawn(async move {
-            owner.supervise(reader, child, send).await
+            let result = owner.supervise(reader, child, send).await;
+            // 进程、读写任务与后代均已收齐；关闭回执同时等待私有启动文件清理。
+            let cleanup = tokio::task::spawn_blocking(move || {
+                startup
+                    .map(|directory| directory.close())
+                    .transpose()
+                    .map(|_| ())
+                    .map_err(|_| failure("终端启动文件清理失败。"))
+            })
+            .await
+            .map_err(|_| failure("终端启动文件清理任务异常。"))?;
+            result.and(cleanup)
         }));
         Ok(process)
     }

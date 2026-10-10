@@ -24,7 +24,7 @@
 //!   整批 ToolResult 仍按原顺序原子完成 exchange 后才进入下一轮。
 //! - 取消收敛：模型流内经 `ModelCallContext` 传播并在终态收敛点检查令牌、
 //!   授权等待经 `select!` race、工具执行等待 cancellation-aware dispatch 完成清理；
-//!   收敛前为批次内未结算调用补记 interrupted 错误 `ToolResult` 并落账，
+//!   收敛时保留工具已返回的结果，仅为尚无结果的调用补记 interrupted 并落账，
 //!   journal 中 Tool Call/Result 始终配对。
 //! - 最终消息（无工具调用的完成 Turn）Core **不落账**，经完成事件交 Runtime。
 
@@ -237,6 +237,12 @@ impl Engine {
         let mut latest_usage = None;
         while let Some(event) = stream.next().await {
             match event {
+                ModelEvent::TurnRestarted => {
+                    latest_usage = None;
+                    self.events.send(AgentEvent::StepStarted {
+                        step: self.current_step(),
+                    });
+                }
                 ModelEvent::TextDelta { id, delta } => {
                     self.events.send(AgentEvent::TextDelta {
                         step: self.current_step(),
@@ -244,8 +250,9 @@ impl Engine {
                         delta,
                     });
                 }
-                ModelEvent::ReasoningDelta { id, delta } => {
+                ModelEvent::ReasoningDelta { id, delta, source } => {
                     self.events.send(AgentEvent::ReasoningDelta {
+                        source,
                         step: self.current_step(),
                         id,
                         delta,

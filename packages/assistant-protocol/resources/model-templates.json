@@ -540,6 +540,66 @@
     "provider_type": "openai"
   },
   {
+    "checked_on": "2026-10-04",
+    "document": "https://developers.openai.com/api/docs/models/gpt-6.1-sol",
+    "model_id": "gpt-6.1-sol",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1050000
+      },
+      "default_reasoning_effort": "medium",
+      "image_input": "supported",
+      "max_input_tokens": {
+        "state": "unknown"
+      },
+      "max_output_tokens": {
+        "state": "known",
+        "value": 128000
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "high": "high",
+        "low": "low",
+        "max": "max",
+        "medium": "medium",
+        "xhigh": "xhigh"
+      },
+      "reasoning_max_input_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_max_output_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_mode": "always",
+      "streaming": "supported",
+      "tool_calls": "supported",
+      "tool_choice": {
+        "auto": "supported",
+        "named": "unknown",
+        "none": "supported",
+        "required": "unknown"
+      },
+      "tool_image_projection": "follow_up_user_message"
+    },
+    "protocol_parameters": {
+      "open_ai_chat_completions": {
+        "tool_calls": "unsupported",
+        "tool_choice": {
+          "auto": "unknown",
+          "named": "unknown",
+          "none": "unknown",
+          "required": "unknown"
+        },
+        "tool_image_projection": "unsupported"
+      },
+      "open_ai_responses": {
+        "tool_image_projection": "native_tool_result"
+      }
+    },
+    "provider_type": "openai"
+  },
+  {
     "checked_on": "2026-09-17",
     "document": "https://api-docs.deepseek.com/quick_start/pricing/",
     "model_id": "deepseek-flash",

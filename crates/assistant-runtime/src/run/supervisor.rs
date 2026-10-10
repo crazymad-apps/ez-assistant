@@ -98,7 +98,12 @@ fn project_agent_event(
                 delta,
             }))
         }
-        AgentEvent::ReasoningDelta { step, id, delta } => {
+        AgentEvent::ReasoningDelta {
+            step,
+            id,
+            delta,
+            source,
+        } => {
             model_diagnostics.mark_output_observed();
             let part_id = ProtocolPartId::new(id.as_str()).map_err(|_| {
                 RuntimeError::InternalStateUnavailable {
@@ -106,9 +111,15 @@ fn project_agent_event(
                 }
             })?;
             with_active_record(session, run_id, |record| {
-                record.append_reasoning(step, &delta)
+                record.append_reasoning(
+                    step,
+                    part_id.clone(),
+                    super::project_reasoning_source(source),
+                    &delta,
+                )
             })?;
             Ok(Some(RuntimeEvent::ReasoningDelta {
+                source: super::project_reasoning_source(source),
                 session_id,
                 run_id: run_id.clone(),
                 step,

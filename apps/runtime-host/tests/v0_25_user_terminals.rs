@@ -56,9 +56,18 @@ fn open_with_context(
     source: &Value,
     login_context: Option<&str>,
 ) -> Value {
+    open_with_shell(socket, token, source, login_context, None)
+}
+fn open_with_shell(
+    socket: &mut Socket,
+    token: Option<&str>,
+    source: &Value,
+    login_context: Option<&str>,
+    shell: Option<&str>,
+) -> Value {
     control(
         socket,
-        json!({"type":"open", "login_context":login_context, "client_compatibility":assistant_protocol::ClientCompatibility::current(), "bearer":token, "source":source, "size":{"cols":80,"rows":24}}),
+        json!({"type":"open", "login_context":login_context, "client_compatibility":assistant_protocol::ClientCompatibility::current(), "bearer":token, "source":source, "shell":shell, "size":{"cols":80,"rows":24}}),
     );
     let result = notice(socket);
     if result["type"] == "created" {
@@ -529,4 +538,177 @@ fn incompatible_first_frames_are_rejected_before_resolving_a_directory() {
             .status()
             .is_success()
     );
+}
+
+#[test]
+fn interactive_catalog_and_actual_program_survive_default_round_trip() {
+    // 唯一新建场景：本机文件 SQLite，无数据库监听端口；只通过正式 API 写一个工作空间。
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.runtime-test");
+    fs::create_dir_all(&root).unwrap();
+    let home = tempfile::Builder::new()
+        .prefix("f02-m1-")
+        .tempdir_in(root)
+        .unwrap();
+    let host = HostProcess::start(home.path());
+    let database = home.path().join("users/_personal/data/runtime.sqlite3");
+    let db = rusqlite::Connection::open_with_flags(
+        &database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let counts = || -> Vec<(String, i64)> {
+        let tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").unwrap()
+            .query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+        tables
+            .into_iter()
+            .map(|name| {
+                let count = db
+                    .query_row(
+                        &format!("SELECT COUNT(*) FROM \"{}\"", name.replace('"', "\"\"")),
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                (name, count)
+            })
+            .collect()
+    };
+    let before = counts();
+    assert_eq!(
+        before
+            .iter()
+            .find(|(name, _)| name == "workspaces")
+            .unwrap()
+            .1,
+        0
+    );
+    eprintln!(
+        "F02 disposable database: {}; HTTP {}; tables before: {before:?}",
+        database.display(),
+        host.base_url()
+    );
+    let mut api = host.connect();
+    let workspace = api.runtime(
+        "register_workspace",
+        json!({"label":"F02 shell fixture", "primary_directory":null, "additional_directories":[]}),
+    )["workspace"]
+        .clone();
+    let source = json!({"type":"workspace", "workspace_id":workspace["workspace_id"]});
+    let directory = Path::new(workspace["agent_directory"].as_str().unwrap());
+    let http = reqwest::blocking::Client::new();
+    let url = format!("{}/user-terminals/shells", host.base_url());
+    assert_eq!(
+        http.get(&url)
+            .headers(support::compatibility_headers())
+            .send()
+            .unwrap()
+            .status(),
+        401
+    );
+    assert_eq!(
+        http.get(&url)
+            .bearer_auth(host.access_token())
+            .send()
+            .unwrap()
+            .status(),
+        409
+    );
+    let catalog: Vec<Value> = http
+        .get(&url)
+        .bearer_auth(host.access_token())
+        .headers(support::compatibility_headers())
+        .send()
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert!(catalog.iter().any(|entry| entry["shell"].is_null()));
+    assert!(catalog.iter().any(|entry| entry["shell"] == "posix_sh"));
+    assert!(catalog.iter().all(|entry| matches!(
+        entry["shell"].as_str(),
+        None | Some("bash" | "zsh" | "posix_sh")
+    )));
+    let choices = catalog
+        .iter()
+        .map(|entry| entry["shell"].as_str())
+        .chain([None]);
+    for (index, shell) in choices.enumerate() {
+        let mut peer = socket(&host, None);
+        let created = open_with_shell(&mut peer, Some(host.access_token()), &source, None, shell);
+        assert_eq!(created["type"], "created", "{created}");
+        let entry = catalog
+            .iter()
+            .find(|entry| entry["shell"].as_str() == shell)
+            .unwrap();
+        assert_eq!(created["shell_name"], entry["name"]);
+        if let Some(shell) = shell {
+            assert_eq!(created["shell"], shell);
+        }
+        input(
+            &mut peer,
+            &format!(
+                "echo $$ > shell-{index}.pid; ps -p $$ -o comm= > actual-{index}.txt; pwd > cwd-{index}.txt\n"
+            ),
+        );
+        let process = pid(&directory.join(format!("shell-{index}.pid")));
+        let actual = directory.join(format!("actual-{index}.txt"));
+        let cwd = directory.join(format!("cwd-{index}.txt"));
+        wait_for(|| fs::read_to_string(&cwd).is_ok_and(|text| !text.trim().is_empty()));
+        let program = fs::read_to_string(actual).unwrap();
+        assert_eq!(
+            Path::new(program.trim()).file_name().unwrap(),
+            created["shell_name"].as_str().unwrap()
+        );
+        assert_eq!(
+            fs::read_to_string(cwd).unwrap().trim(),
+            directory.to_str().unwrap()
+        );
+        close(&mut peer);
+        wait_for(|| gone(process));
+        eprintln!(
+            "F02 actual Shell: choice={shell:?}, program={}, process reclaimed",
+            program.trim()
+        );
+    }
+    let mut rejected = socket(&host, None);
+    assert_eq!(
+        open_with_shell(
+            &mut rejected,
+            Some(host.access_token()),
+            &source,
+            None,
+            Some("cmd")
+        )["type"],
+        "error"
+    );
+    let stored: (String, String) = db
+        .query_row(
+            "SELECT label, agent_directory FROM workspaces WHERE workspace_id=?1",
+            [workspace["workspace_id"].as_str().unwrap()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        stored,
+        (
+            "F02 shell fixture".into(),
+            directory.to_string_lossy().into_owned()
+        )
+    );
+    let after = counts();
+    for ((name, previous), (same, current)) in before.iter().zip(&after) {
+        assert_eq!(name, same);
+        assert_eq!(
+            *current,
+            previous + i64::from(name == "workspaces"),
+            "unexpected row change in {name}"
+        );
+    }
+    eprintln!(
+        "F02 audited database after: {after:?}; workspace metadata and actual PTY cwd match API; no backup required for disposable fixture"
+    );
+    drop(db);
+    api.runtime("shutdown_runtime", json!({}));
+    assert!(host.wait().status.success());
 }

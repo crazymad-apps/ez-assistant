@@ -23,7 +23,7 @@ it('最小索引无法建立时不准入或发送上游', async () => {
       user: { id: 1, username: 'test', display_name: 'test', role: 'admin', is_super_admin: false, enabled: true },
       selection: { provider_instance_id: randomUUID(), model_id: 'model' },
       protocol: 'open_ai_responses',
-      body: Buffer.from('{}'),
+      body: Buffer.from('{"model":"m","store":false}'),
       signal: new AbortController().signal,
       kind: 'proxy',
       sink: { headers() {}, async chunk() {} },
@@ -133,8 +133,11 @@ it('服务关闭取消正在转发的上游，并等待唯一一次索引结算�
         protocol_preference: 'responses',
         models_path: '',
         discovery_format: 'openai',
+        server_history_enabled: false,
+        server_history_support_override: null,
       },
       model_catalog: null,
+      server_history_key: null,
       catalog_refreshed_at: null,
       catalog_connection_changed: false,
     },
@@ -163,7 +166,7 @@ it('服务关闭取消正在转发的上游，并等待唯一一次索引结算�
     user: { id: 1, username: 'u', display_name: 'u', role: 'admin', is_super_admin: false, enabled: true },
     selection,
     protocol: 'open_ai_responses',
-    body: Buffer.from('{}'),
+    body: Buffer.from('{"model":"m","store":false}'),
     signal: new AbortController().signal,
     kind: 'proxy',
     sink: { headers: started, async chunk() {} },
@@ -183,6 +186,95 @@ it('服务关闭取消正在转发的上游，并等待唯一一次索引结算�
     await proxy.close();
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
+    vi.restoreAllMocks();
+  }
+});
+
+it('准入等待期间主体撤销不能遗漏，WS 不得在撤销之后建连', async () => {
+  const { CallRecording } = await import('../../dist/llm/records.js');
+  const { emptyParameters } = await import('../../dist/models/parameters.js');
+  const identities = new IdentityService();
+  const models = new ModelsService(identities, undefined, new ModelTemplates());
+  const records = new CallRecords(undefined, new SnapshotFiles());
+  const record = new CallRecording(
+    Object.assign(new CallEntity(), { id: randomUUID() }),
+    records,
+    new SnapshotMemory(),
+    false,
+  );
+  vi.spyOn(records, 'begin').mockResolvedValue(record);
+  const settled = vi.spyOn(record, 'settle').mockResolvedValue();
+  let entered!: () => void, resume!: () => void;
+  const arrived = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
+  const selection = { provider_instance_id: randomUUID(), model_id: 'm' };
+  vi.spyOn(models, 'admit').mockImplementation(async () => {
+    entered();
+    await gate;
+    return {
+      provider: {
+        provider_instance_id: selection.provider_instance_id,
+        api_key: '',
+        server_history_key: 'key',
+        model_catalog: null,
+        catalog_refreshed_at: null,
+        catalog_connection_changed: false,
+        connection: {
+          display_name: 'test',
+          provider_type: 'openai',
+          endpoint: 'http://127.0.0.1:1/v1',
+          protocol_preference: 'responses',
+          models_path: '',
+          discovery_format: 'openai',
+          server_history_enabled: true,
+          server_history_support_override: 'supported',
+          responses_transport: 'websocket',
+        },
+      },
+      configuration: {
+        ...selection,
+        origin: 'manual',
+        source: 'fixed',
+        parameters: emptyParameters(),
+        field_sources: {},
+        updated_at_ms: null,
+        template_document: null,
+        template_checked_on: null,
+        requires_configuration: false,
+      },
+    };
+  });
+  const proxy = new ModelProxy(identities, models, records, {});
+  try {
+    const pending = proxy.execute({
+      key: 'test',
+      user: { id: 1, username: 'u', display_name: 'u', role: 'user', is_super_admin: false, enabled: true },
+      selection,
+      protocol: 'open_ai_responses',
+      body: Buffer.from('{"model":"m","stream":true,"store":true,"input":[]}'),
+      signal: new AbortController().signal,
+      kind: 'proxy',
+      historyBinding: 'binding',
+      sink: {
+        headers() {
+          throw new Error('must not start response');
+        },
+        async chunk() {},
+      },
+    });
+    const failed = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    await arrived;
+    identities.revokeUser(1);
+    resume();
+    await failed;
+    expect(settled).toHaveBeenCalledWith('interrupted', null, 'cancelled');
+  } finally {
+    resume();
+    await proxy.close();
     vi.restoreAllMocks();
   }
 });

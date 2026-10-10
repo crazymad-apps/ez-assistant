@@ -76,7 +76,7 @@ impl Drop for ActiveChildGuard {
     }
 }
 
-/// permit 获取后的工作阶段计时器；Drop 会停止尚未触发的后台计时任务。
+/// permit 获取后的工作阶段取消监听；零时限仅监听父取消，Drop 停止后台任务。
 pub(super) struct ChildTimeoutGuard {
     task: tokio::task::JoinHandle<()>,
 }
@@ -95,7 +95,13 @@ impl ChildTimeoutGuard {
                 let reason = tokio::select! {
                     biased;
                     () = parent_cancellation.cancelled() => ChildCancellationReason::Requested,
-                    () = tokio::time::sleep(duration) => ChildCancellationReason::Timeout,
+                    () = async {
+                        if duration.is_zero() {
+                            std::future::pending::<()>().await;
+                        } else {
+                            tokio::time::sleep(duration).await;
+                        }
+                    } => ChildCancellationReason::Timeout,
                 };
                 let _ = registry.cancel_active(&session_id, &parent_run_id, &child_task_id, reason);
             }),

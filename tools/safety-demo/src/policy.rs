@@ -3,13 +3,12 @@
 use std::sync::Arc;
 
 use agent_core::{
-    AllowAllAuthorizer, ComposedToolAuthorizer, FileToolPolicyAdapter, GeneralToolPolicyAdapter,
-    PolicyEvaluation, ShellToolPolicyAdapter, ToolAuthorization, ToolAuthorizer, ToolPolicy,
-    TypedToolPolicy,
+    AllowAllAuthorizer, ComposedToolAuthorizer, GeneralToolPolicyAdapter, PolicyEvaluation,
+    ShellToolPolicyAdapter, ToolAuthorization, ToolAuthorizer, ToolPolicy, TypedToolPolicy,
 };
 use agent_tools::{
-    AbsolutePath, FileAuthorizationFacts, FileOperation, GeneralAuthorizationFacts,
-    ResolvedToolBatch, ResolvedToolInvocation, ShellAuthorizationFacts,
+    AbsolutePath, FileAuthorizationFacts, FileBatchAuthorizationFacts, FileOperation,
+    GeneralAuthorizationFacts, ResolvedToolBatch, ResolvedToolInvocation, ShellAuthorizationFacts,
 };
 use serde::{Deserialize, Serialize};
 
@@ -260,6 +259,62 @@ impl TypedToolPolicy<FileAuthorizationFacts> for PlanFilePolicy {
     }
 }
 
+// 多路径调用逐目标沿用既有单路径策略；任一 Deny 优先，未完整 Allow 则保留审批 fallback。
+fn evaluate_files<P: TypedToolPolicy<FileAuthorizationFacts>>(
+    policy: &P,
+    invocation: &ResolvedToolInvocation,
+    batch: &ResolvedToolBatch,
+) -> PolicyEvaluation {
+    if let Some(facts) = invocation.facts::<FileAuthorizationFacts>() {
+        return policy.evaluate(facts, invocation, batch);
+    }
+    let Some(facts) = invocation.facts::<FileBatchAuthorizationFacts>() else {
+        return PolicyEvaluation::Continue;
+    };
+    if facts.paths.is_empty() {
+        return RuleEffect::Deny.evaluation("empty file batch");
+    }
+    let mut complete = true;
+    for path in &facts.paths {
+        match policy.evaluate(
+            &FileAuthorizationFacts {
+                operation: facts.operation,
+                path: path.clone(),
+            },
+            invocation,
+            batch,
+        ) {
+            denied @ PolicyEvaluation::Decide(ToolAuthorization::Deny { .. }) => return denied,
+            PolicyEvaluation::Continue => complete = false,
+            PolicyEvaluation::Decide(ToolAuthorization::Allow) => {}
+        }
+    }
+    if complete {
+        RuleEffect::Allow.evaluation("all file targets allowed")
+    } else {
+        PolicyEvaluation::Continue
+    }
+}
+
+impl ToolPolicy for PlanFilePolicy {
+    fn evaluate(
+        &self,
+        invocation: &ResolvedToolInvocation,
+        batch: &ResolvedToolBatch,
+    ) -> PolicyEvaluation {
+        evaluate_files(self, invocation, batch)
+    }
+}
+impl ToolPolicy for FileRuleSet {
+    fn evaluate(
+        &self,
+        invocation: &ResolvedToolInvocation,
+        batch: &ResolvedToolBatch,
+    ) -> PolicyEvaluation {
+        evaluate_files(self, invocation, batch)
+    }
+}
+
 struct DenyAllShell;
 
 impl TypedToolPolicy<ShellAuthorizationFacts> for DenyAllShell {
@@ -346,10 +401,10 @@ pub(crate) fn plan_authorizer(
     audit: DemoAudit,
 ) -> Arc<dyn ToolAuthorizer> {
     let policies: Vec<Arc<dyn ToolPolicy>> = vec![
-        Arc::new(FileToolPolicyAdapter::new(PlanFilePolicy {
+        Arc::new(PlanFilePolicy {
             session_workdir,
             temporary_workspace,
-        })),
+        }),
         Arc::new(ShellToolPolicyAdapter::new(DenyAllShell)),
         Arc::new(GeneralToolPolicyAdapter::new(DenyAllGeneral)),
     ];
@@ -384,7 +439,7 @@ pub(crate) fn build_authorizer(
         FileOperation::Delete,
     ];
     let policies: Vec<Arc<dyn ToolPolicy>> = vec![
-        Arc::new(FileToolPolicyAdapter::new(FileRuleSet {
+        Arc::new(FileRuleSet {
             rules: vec![
                 FileRule {
                     effect: RuleEffect::Allow,
@@ -399,7 +454,7 @@ pub(crate) fn build_authorizer(
                     description: "trusted session workdir read".to_owned(),
                 },
             ],
-        })),
+        }),
         Arc::new(ShellToolPolicyAdapter::new(ShellRuleSet::default())),
         Arc::new(GeneralToolPolicyAdapter::new(GeneralRuleSet::default())),
     ];
@@ -484,6 +539,42 @@ mod tests {
     }
 
     #[test]
+    fn batch_edit_plan_checks_every_path_even_when_first_target_is_allowed() {
+        let root = tempfile::tempdir().unwrap();
+        let session = AbsolutePath::new(root.path().join("project")).unwrap();
+        let temporary = AbsolutePath::new(root.path().join("plans")).unwrap();
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(agent_tools::FsEditTool::new(
+                Arc::new(agent_testkit::FakeFileSystemTool::new(session.clone(), []).unwrap()),
+                agent_tools::SessionPathResolver::new(session.clone()),
+            ))
+            .unwrap();
+        let batch = Dispatcher::resolve_batch(
+            &registry.snapshot(),
+            &[ToolCall {
+                id: ToolCallId::new("batch-edit").unwrap(),
+                name: ToolName::new("edit_file").unwrap(),
+                arguments: serde_json::json!({"files":[
+                    {"path":temporary.as_path().join("allowed"),"edits":[{"old_string":"x","new_string":"y"}]},
+                    {"path":session.as_path().join("denied"),"edits":[{"old_string":"x","new_string":"y"}]}
+                ]}),
+            }],
+        );
+        let Some(agent_tools::ResolvedBatchItemRef::Valid(invocation)) = batch.get(0) else {
+            panic!("resolved batch");
+        };
+        let policy = PlanFilePolicy {
+            session_workdir: session,
+            temporary_workspace: temporary,
+        };
+        assert!(matches!(
+            ToolPolicy::evaluate(&policy, invocation, &batch),
+            PolicyEvaluation::Decide(ToolAuthorization::Deny { .. })
+        ));
+    }
+
+    #[test]
     fn allow_rule_wins_when_allow_and_deny_both_match() {
         let workdir = AbsolutePath::new(std::env::temp_dir()).expect("absolute temp");
         let rules = ShellRuleSet {
@@ -510,7 +601,7 @@ mod tests {
             .facts::<ShellAuthorizationFacts>()
             .expect("shell facts");
         assert_eq!(
-            rules.evaluate(facts, invocation, &batch),
+            TypedToolPolicy::<ShellAuthorizationFacts>::evaluate(&rules, facts, invocation, &batch),
             PolicyEvaluation::Decide(ToolAuthorization::Allow)
         );
     }
@@ -530,7 +621,8 @@ mod tests {
         };
 
         let evaluate = |operation, path| {
-            policy.evaluate(
+            TypedToolPolicy::<FileAuthorizationFacts>::evaluate(
+                &policy,
                 &FileAuthorizationFacts { operation, path },
                 invocation,
                 &batch,

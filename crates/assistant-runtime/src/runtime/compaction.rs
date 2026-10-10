@@ -38,6 +38,8 @@ struct ManualCompactionContext {
 
 impl AssistantRuntime {
     /// 手动 compact 是 Runtime 自持有任务；HTTP future 丢失不会中止已登记的操作。
+    /// 登记期间按 operation → model binding → Session mutation 获取门禁；任务已托管且
+    /// active_compaction 已发布后释放全部门禁再等结果，模型等待只占当前 Session 的消费位。
     pub async fn compact_session(
         &self,
         request: CompactSessionRequest,
@@ -207,6 +209,10 @@ impl AssistantRuntime {
             },
         );
         drop(mutation);
+        // 配置和输入已冻结，Session 压缩状态负责阻止上下文改写，提交时再核验快照。
+        // 不跨模型等待保留全局读门，否则排队写者会连带阻塞其他会话及取消/关闭命令。
+        drop(_binding);
+        drop(_operation);
         result
             .await
             .map_err(|_| RuntimeError::InternalStateUnavailable {

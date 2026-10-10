@@ -48,10 +48,11 @@ export function notificationFromEvent(scope: string, envelope: RuntimeEventEnvel
     const owner: ConversationOwner = approval.child_task_id
       ? { type: 'child_task', session_id: approval.session_id, child_task_id: approval.child_task_id }
       : { type: 'main_session', session_id: approval.session_id };
+    const tool_name = approval.subject.type === 'mcp' ? approval.subject.identity.tool_name : approval.subject.tool_name;
     return {
       target: { scope, owner, run_id: approval.run_id, kind: 'approval', approval_id: approval.approval_id },
-      title: '需要你的审批',
-      body: '点击返回会话查看并处理。',
+      title: '会话通知',
+      body: `需要审批：${tool_name}。点击查看并处理。`,
     };
   }
   if (event.type === 'run_finished' && event.status !== 'cancelled') {
@@ -62,8 +63,8 @@ export function notificationFromEvent(scope: string, envelope: RuntimeEventEnvel
         run_id: event.run_id,
         kind: 'turn',
       },
-      title: event.status === 'completed' ? '本轮任务已结束' : '任务执行遇到问题',
-      body: '点击返回会话查看结果。',
+      title: '会话通知',
+      body: event.status === 'completed' ? '本轮已完成，暂无文字回复。' : '本轮执行未完成，请返回会话查看。',
     };
   }
   return null;

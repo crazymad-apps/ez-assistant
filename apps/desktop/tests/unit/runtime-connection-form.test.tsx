@@ -5,6 +5,11 @@ import { ApplicationConnectionStore } from "../../src/features/runtime-access/Ap
 import { RuntimeConnectionForm } from "../../src/features/runtime-access/RuntimeConnectionForm";
 import { RootStore } from "../../src/stores/RootStore";
 
+vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@tauri-apps/api/core")>(), isTauri: () => true,
+}));
+vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => undefined }));
+
 vi.mock("../../src/native-bridge/desktopLifecycle", async (importOriginal) => ({
   ...await importOriginal<typeof import("../../src/native-bridge/desktopLifecycle")>(),
   getDesktopPlatform: async () => "macos",
@@ -63,4 +68,29 @@ describe("Runtime switch form", () => {
     view.unmount();
     connection.dispose();
   });
+  it.each([false, true])("keeps the update gate simple and shows an action only with an available update (%s)", (available) => {
+    const connection = new ApplicationConnectionStore(new RootStore());
+    runInAction(() => { connection.mode = "enterprise"; connection.local_state = "ready"; connection.host_update_required = true; });
+    connection.updates.receive({ ...connection.updates.snapshot, revision: 1, available, required: true, phase: available ? "available" : "idle" });
+    const connect = vi.spyOn(connection, "connectDesktop").mockResolvedValue();
+    const view = render(<RuntimeConnectionForm connection={connection} />);
+    expect(screen.getByText("需要更新后继续使用")).toBeInTheDocument();
+    expect(screen.queryByLabelText("企业账号")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("账号密码")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /进入项目/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "检查更新" })).not.toBeInTheDocument();
+    if (available) {
+      fireEvent.click(screen.getByRole("button", { name: "更新并重启" }));
+      expect(connection.updates.open).toBe(true);
+      connection.updates.hide();
+      expect(connection.update_required).toBe(true);
+    } else {
+      expect(screen.queryByRole("button", { name: "更新并重启" })).not.toBeInTheDocument();
+      expect(screen.getByText("暂时无法更新，请稍后重试。")).toBeInTheDocument();
+    }
+    fireEvent.submit(view.container.querySelector("form")!);
+    expect(connect).not.toHaveBeenCalled();
+    view.unmount(); connection.dispose();
+  });
+
 });

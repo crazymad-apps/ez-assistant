@@ -56,3 +56,7 @@
 cargo test -p agent-types
 cargo clippy -p agent-types --all-targets --all-features -- -D warnings
 ```
+
+## v0.29.0 F03 M1 过程事实
+
+ReasoningPart.source 表达 raw/summary 的中立来源，缺失读取为 raw，raw 序列化时省略，保持旧规范消息字节与 F06 前缀哈希稳定。summary 仅由 Provider 明确事实产生，不根据 ID 猜测或回填历史。

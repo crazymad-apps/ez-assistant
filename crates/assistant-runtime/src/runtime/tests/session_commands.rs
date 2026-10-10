@@ -1,5 +1,7 @@
 //! M5 控制指令只使用易失 Store 与进程内 MCP fixture，不接触真实配置或服务。
 
+mod mcp_context;
+
 use super::product::{
     StaticMcpTestSource, WorkingMcpTestConnection, WorkingMcpTestFactory, mcp_tool_step,
 };
@@ -101,6 +103,14 @@ async fn mcp_refresh_command_commits_without_run_and_next_model_reads_the_result
         McpRefreshOutcome::Success
     );
     assert!(model.take_requests().is_empty());
+    let refreshed = runtime.store.load_conversation(&session_id).await.unwrap();
+    assert_eq!(refreshed.messages.len(), 1);
+    let ConversationMessage::User(refresh_message) = &refreshed.messages[0] else {
+        panic!("refresh must commit one user message");
+    };
+    assert!(refresh_message.parts.iter().any(|part| matches!(
+        part, UserPart::InternalContext(part) if part.kind == "mcp_server_directory"
+    )));
     assert!(
         runtime
             .session_for_test(&session_id)

@@ -477,6 +477,7 @@ impl AssistantRuntime {
             session: session.clone(),
         });
         self.publish(assistant_protocol::RuntimeEvent::RunAccepted {
+            created_at_ms: projection.run.created_at_ms,
             session_id: session_id.clone(),
             run_id: projection.run.run_id.clone(),
         });
@@ -548,6 +549,7 @@ fn validate_manifest(
 
 fn stored_session_preview(session: &NewStoredSession) -> crate::StoredSession {
     crate::StoredSession {
+        server_history_key: None,
         custom_agent: session.custom_agent.clone(),
         agent_shell_kind: session.agent_shell_kind,
         agent_shell_environment: session.agent_shell_environment.clone(),

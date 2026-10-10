@@ -328,7 +328,7 @@ impl DesktopLifecycleCoordinator {
         self.native_action_pending.store(false, Ordering::SeqCst);
     }
 
-    fn allow_exit(&self) {
+    pub(crate) fn allow_exit(&self) {
         self.allow_exit.store(true, Ordering::SeqCst);
     }
 
@@ -503,10 +503,18 @@ fn request_native_intent<R: Runtime>(app: &AppHandle<R>, intent: DesktopLifecycl
 
 // 原生退出销毁主 WebView，关闭本客户端的 socket；PTY 清理由 Host owner 完成。
 fn spawn_quit<R: Runtime>(app: AppHandle<R>) {
-    let coordinator = app.state::<DesktopLifecycleCoordinator>();
-    coordinator.finish_native_action();
-    coordinator.allow_exit();
-    app.exit(0);
+    tauri::async_runtime::spawn(async move {
+        let result = app
+            .state::<crate::desktop_update::DesktopUpdater>()
+            .shutdown()
+            .await;
+        let coordinator = app.state::<DesktopLifecycleCoordinator>();
+        coordinator.finish_native_action();
+        if result.is_ok() {
+            coordinator.allow_exit();
+            app.exit(0);
+        }
+    });
 }
 
 fn runtime_impact_message(impact: NativeRuntimeImpact, consequence: &str) -> String {
@@ -522,6 +530,12 @@ fn spawn_runtime_action<R: Runtime>(
     quit_after_success: bool,
 ) {
     tauri::async_runtime::spawn(async move {
+        let updater = app.state::<crate::desktop_update::DesktopUpdater>();
+        let Ok(_permit) = updater.lifecycle_permit().await else {
+            app.state::<DesktopLifecycleCoordinator>()
+                .finish_native_action();
+            return;
+        };
         let runtime = app.state::<RuntimeBootstrapCoordinator>().inner().clone();
         let mutation_kind = match intent {
             DesktopLifecycleIntent::StopRuntime => NativeRuntimeMutationKind::Stop,
@@ -566,8 +580,7 @@ fn spawn_runtime_action<R: Runtime>(
             Ok(state) => {
                 coordinator.update_runtime_state(state);
                 if quit_after_success {
-                    coordinator.allow_exit();
-                    app.exit(0);
+                    spawn_quit(app.clone());
                 }
             }
             Err(error) => {
@@ -694,7 +707,11 @@ pub(crate) fn request_desktop_close(app: AppHandle) -> Result<(), DesktopLifecyc
 }
 
 #[tauri::command]
-pub(crate) fn quit_desktop(app: AppHandle) -> Result<(), DesktopLifecycleError> {
+pub(crate) async fn quit_desktop(app: AppHandle) -> Result<(), DesktopLifecycleError> {
+    app.state::<crate::desktop_update::DesktopUpdater>()
+        .shutdown()
+        .await
+        .map_err(|_| DesktopLifecycleError::WindowActionFailed)?;
     app.state::<DesktopLifecycleCoordinator>().allow_exit();
     app.exit(0);
     Ok(())
