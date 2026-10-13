@@ -84,7 +84,7 @@ fn metadata_and_missing_read_do_not_create_home() {
             "min_compatible_version": assistant_protocol::MIN_COMPATIBLE_VERSION,
             "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
-            "enterprise_protocols": [2],
+            "enterprise_protocols": [3],
         })
     );
     let read = success(invoke(&home, "read", b""));

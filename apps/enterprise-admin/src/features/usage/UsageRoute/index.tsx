@@ -21,7 +21,6 @@ type UserMode = 'all' | 'me' | 'custom';
 const initialQuery = (): Query => ({
   ...presetRange('today'),
   group_by: 'model',
-  kind: 'proxy',
   limit: 20,
   offset: 0,
 });
@@ -314,10 +313,12 @@ export function UsageRoute() {
             <label>
               调用类型
               <Select
-                value={query.kind}
-                onChange={(kind) => updateQuery({ kind })}
+                value={query.kind ?? 'business'}
+                onChange={(kind) => updateQuery({ kind: kind === 'business' ? undefined : kind })}
                 options={[
-                  { value: 'proxy', label: '业务调用' },
+                  { value: 'business', label: '业务调用（含压缩）' },
+                  { value: 'proxy', label: '模型生成' },
+                  { value: 'context_compaction', label: '上下文压缩' },
                   { value: 'admin_test', label: '配置测试' },
                 ]}
               />

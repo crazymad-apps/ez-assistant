@@ -13,6 +13,7 @@ import type {
 } from '@ez-assistant/protocol';
 import { useRootStore } from '../../../stores/RootStoreContext';
 import { SessionActionDialog } from '../../sessions/SessionActionDialog';
+import { ModelCompactionFields } from './ModelCompactionFields';
 import { ModelFieldSelector } from './ModelFieldSelector';
 import { SettingsMessages } from './SettingsMessages';
 import { SettingsPageContainer } from './SettingsPageContainer';
@@ -222,6 +223,8 @@ export const ModelFixedConfigPage = observer(function ModelFixedConfigPage(
                 </label>
               ))}
             </div>
+            <ModelCompactionFields parameters={parameters} connection={props.provider.connection}
+              disabled={busy || read_only} read_only={read_only} on_change={change} />
             <h4>模型能力</h4>
             <div className={styles.model_form}>
               {(

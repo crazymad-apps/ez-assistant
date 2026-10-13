@@ -25,8 +25,12 @@ use super::{
 
 const ERROR_BODY_SAMPLE_LIMIT: usize = 2048;
 
+pub(super) mod auxiliary;
+
 #[derive(Debug, Error)]
 pub enum OpenAiResponsesServiceError {
+    #[error("server compaction requires a non-empty bounded trusted scope")]
+    InvalidCompactionScope,
     #[error("server history requires a non-empty bounded binding")]
     InvalidHistoryBinding,
     /// 独立输入上限必须为正整数，且不能超过同一服务的上下文窗口。
@@ -40,6 +44,8 @@ pub enum OpenAiResponsesServiceError {
 
 /// 一条构造期固定路由的 OpenAI Responses compatible 单 Turn 服务。
 pub struct OpenAiResponsesService {
+    context_policy: agent_model::ContextPolicy,
+    input_token_count_supported: bool,
     history_binding: Option<String>,
     base_url: String,
     credential: BearerCredential,
@@ -52,6 +58,39 @@ pub struct OpenAiResponsesService {
 }
 
 impl OpenAiResponsesService {
+    /// 注入当前调用的可信 owner/配置作用域，用于新状态归属及续接校验。
+    /// 已保存完整压缩窗口的回放不以该指纹判断模型或入口地址兼容性。
+    ///
+    /// # Errors
+    /// 作用域为空、过长或含控制字符时拒绝构造。
+    pub fn with_server_compaction(
+        mut self,
+        scope: &str,
+        threshold_tokens: std::num::NonZeroU64,
+    ) -> Result<Self, OpenAiResponsesServiceError> {
+        use sha2::{Digest, Sha256};
+        if scope.is_empty() || scope.len() > 2048 || scope.chars().any(char::is_control) {
+            return Err(OpenAiResponsesServiceError::InvalidCompactionScope);
+        }
+        let route = self
+            .adapter
+            .route_fingerprint
+            .as_deref()
+            .unwrap_or_default();
+        let fingerprint = format!("{:x}", Sha256::digest(format!("{route}\n{scope}")));
+        self.adapter = self.adapter.bind_route(fingerprint.clone());
+        self.context_policy = agent_model::ContextPolicy::ServerCompaction {
+            threshold_tokens,
+            state_scope_fingerprint: fingerprint,
+        };
+        Ok(self)
+    }
+
+    /// 输入计量独立声明；不支持时不访问辅助接口。
+    pub fn with_input_token_count(mut self, supported: bool) -> Self {
+        self.input_token_count_supported = supported;
+        self
+    }
     /// 宿主显式启用的可靠 owner/连接绑定；不保存内存链头，重启后从 Conversation 恢复。
     ///
     /// # Errors
@@ -204,6 +243,8 @@ impl OpenAiResponsesService {
             streaming: true,
         });
         Self {
+            context_policy: agent_model::ContextPolicy::LocalSummary,
+            input_token_count_supported: false,
             history_binding: None,
             base_url,
             credential,
@@ -222,6 +263,25 @@ impl OpenAiResponsesService {
 }
 
 impl ModelService for OpenAiResponsesService {
+    fn context_policy(&self) -> &agent_model::ContextPolicy {
+        &self.context_policy
+    }
+
+    fn count_input_tokens<'a>(
+        &'a self,
+        request: &'a ModelRequest,
+        context: &'a mut ModelCallContext,
+    ) -> agent_model::ModelInputTokenCountFuture<'a> {
+        Box::pin(self.count_tokens(request, context))
+    }
+
+    fn compact(
+        &self,
+        request: ModelRequest,
+        context: ModelCallContext,
+    ) -> agent_model::ModelCompactionFuture<'_> {
+        Box::pin(self.compact_context(request, context))
+    }
     fn capabilities(&self) -> &ModelCapabilities {
         &self.capabilities
     }
@@ -239,6 +299,7 @@ impl ModelService for OpenAiResponsesService {
             if context.cancellation.is_cancelled() {
                 return Err(ModelError::Cancelled);
             }
+            let request = self.prepare_context_request(request)?;
             let mut encoded = encode_request_with_images(
                 &request,
                 &context.prepared_images,
@@ -246,7 +307,6 @@ impl ModelService for OpenAiResponsesService {
                 &self.model,
             )?;
             let history = if let Some(binding) = &self.history_binding {
-                let fingerprint = super::continuation::request_hash(&encoded)?;
                 if context.rebuild_server_history {
                     encoded.store = true;
                 } else {
@@ -261,8 +321,8 @@ impl ModelService for OpenAiResponsesService {
                 }
                 Some((
                     binding.clone(),
-                    request.conversation.messages.len(),
-                    fingerprint,
+                    request.clone(),
+                    context.prepared_images.clone(),
                 ))
             } else {
                 None
@@ -410,12 +470,12 @@ fn event_stream(
     adapter: ResponsesProtocolAdapter,
     model: String,
     cancellation: CancellationToken,
-    history: Option<(String, usize, String)>,
+    history: Option<(String, ModelRequest, agent_model::PreparedModelImages)>,
 ) -> impl Stream<Item = ModelEvent> + Send {
     async_stream::stream! {
         let mut body = body;
         let mut parser = SseParser::new();
-        let mut assembler = ResponsesAssembler::new(adapter.clone(), model);
+        let mut assembler = ResponsesAssembler::new(adapter.clone(), model.clone());
         let mut pending_terminal: Option<Vec<ModelEvent>> = None;
         let mut saw_done_marker = false;
         while !saw_done_marker {
@@ -496,8 +556,8 @@ fn event_stream(
         match (pending_terminal, assembler.finalize()) {
             (Some(events), Ok(_)) => {
                 for mut event in events {
-                    if let (Some((binding, len, fingerprint)), ModelEvent::TurnFinished { message }) = (&history, &mut event)
-                        && let Err(error) = super::continuation::attach(binding, *len, fingerprint, &adapter, message) {
+                    if let (Some((binding, request, images)), ModelEvent::TurnFinished { message }) = (&history, &mut event)
+                        && let Err(error) = super::continuation::attach(binding, request, images, &model, &adapter, message) {
                         yield ModelEvent::TurnFailed { error };
                         return;
                     }

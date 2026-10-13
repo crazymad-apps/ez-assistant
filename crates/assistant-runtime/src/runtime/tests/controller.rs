@@ -62,6 +62,7 @@ impl ModelService for GatedControllerGoalModel {
             0 => assistant_text("controller-goal-source-final", "controller source finished"),
             1 => assistant_text("delegated-goal-first-final", "first delegated run finished"),
             2 => AssistantMessage {
+                purpose: agent_types::AssistantMessagePurpose::ModelResponse,
                 id: MessageId::new("delegated-goal-complete-signal").expect("message id"),
                 model: ModelIdentity::new(
                     ProviderId::new("fixture").expect("provider id"),
@@ -731,6 +732,7 @@ async fn recovery_interrupts_source_without_creating_proxy_report() {
     };
     store
         .commit_user_message(crate::UserMessageCommit {
+            context_management_mode: agent_model::ContextManagementMode::LocalSummary,
             shell: None,
             operation_id: "recovery-start".to_owned(),
             input_id,

@@ -20,6 +20,20 @@ afterEach(() => {
 });
 
 describe("ConversationView scroll anchoring", () => {
+  it("shows history loading failures with a retry instead of an indefinite loading screen", () => {
+    const store = new RootStore();
+    store.navigation.selectSession("session-1");
+    store.interaction_error = "无法读取历史记录";
+    const retry = vi.spyOn(store, "selectSession").mockResolvedValue();
+    render(<RootStoreProvider store={store}><ConversationView /></RootStoreProvider>);
+    expect(screen.getByText("读取会话失败")).toBeVisible();
+    expect(screen.getByText("无法读取历史记录")).toBeVisible();
+    expect(screen.queryByText("正在读取会话")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重新读取" }));
+    expect(retry).toHaveBeenCalledWith("session-1");
+    store.dispose();
+  });
+
   it("renders frozen MCP labels in history and inherited fork messages without parsing text", () => {
     render(<UserMessage
       attachments={[]}
@@ -899,7 +913,7 @@ describe("ConversationView scroll anchoring", () => {
       task: { ...child.task, child_task_id: "child-live", parent_run_id: "run-live-parent", title: "实时检查两个项目" },
       usage: {
         accumulated: { input_tokens: 217_000, output_tokens: 2000, total_tokens: 219_000, cached_input_tokens: null },
-        context: { used_tokens: 120_000, window_tokens: 258_000, usage_basis_points: 4651 },
+        context: { accuracy: "estimated" as const, mode: "local_summary" as const, used_tokens: 120_000, window_tokens: 258_000, usage_basis_points: 4651 },
       },
     };
     store.projection.applySessionSnapshot({

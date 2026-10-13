@@ -23,6 +23,8 @@ pub(super) enum AppendPurpose {
     Messages,
     /// 首次 User Message 已写入，提交 Input 并启动 Run。
     UserMessage {
+        #[serde(default)]
+        context_management_mode: agent_model::ContextManagementMode,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         shell: Option<assistant_runtime::FrozenShellEnvironment>,
         #[serde(default)]
@@ -112,6 +114,7 @@ pub(super) fn apply_purpose(
         (AppendPurpose::Messages, _) => Ok(()),
         (
             AppendPurpose::UserMessage {
+                context_management_mode,
                 reasoning_effort,
                 shell,
             },
@@ -121,6 +124,7 @@ pub(super) fn apply_purpose(
             run_id,
             session_id,
             *reasoning_effort,
+            *context_management_mode,
             shell.as_ref(),
             created_at_ms,
         ),
@@ -296,9 +300,19 @@ pub(super) fn apply_user_message_start(
     run_id: &RunId,
     session_id: &SessionId,
     reasoning_effort: Option<assistant_protocol::ReasoningEffortKey>,
+    context_management_mode: agent_model::ContextManagementMode,
     shell: Option<&assistant_runtime::FrozenShellEnvironment>,
     created_at_ms: i64,
 ) -> StorageResult<()> {
+    // 新 Run 领取时与输入原子接纳当前机制；已运行的 Run 不经过本入口。
+    let changed = transaction.execute(
+        "UPDATE sessions SET context_management_mode=?1 WHERE session_id=?2 AND lifecycle='active'",
+        params![super::mode::context_management_mode_value(context_management_mode), session_id.as_str()],
+    ).map_err(|source| internal_error("session context mode could not be bound", source))?;
+    if changed != 1 {
+        return Err(conflict("session cannot accept context management mode"));
+    }
+
     let target: Option<String> = transaction.query_row(
         "SELECT agent_shell_target FROM inputs WHERE input_id = (SELECT input_id FROM runs WHERE run_id = ?1) AND session_id = ?2",
         params![run_id.as_str(), session_id.as_str()],

@@ -24,7 +24,7 @@ export const models = {
       provider_instance_id: id,
       connection,
       api_key,
-      server_history_key: connection.server_history_enabled ? randomUUID() : null,
+      server_history_key: randomUUID(),
       model_catalog: null,
       catalog_refreshed_at: null,
       catalog_connection_changed: false,
@@ -38,7 +38,7 @@ export const models = {
   renewHistory(manager: EntityManager, provider: ProviderEntity) {
     return manager.getRepository(ProviderEntity).update(
       { provider_instance_id: provider.provider_instance_id },
-      { server_history_key: provider.connection.server_history_enabled ? randomUUID() : null },
+      { server_history_key: randomUUID() },
     );
   },
 

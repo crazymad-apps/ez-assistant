@@ -208,7 +208,11 @@ async fn live_fixed_parameters_complete_one_text_turn() {
     let provider = agent_types::ProviderId::new("dashscope").expect("provider");
     let bundle = factory
         .create_model(ModelServiceFactoryRequest {
+            context_management_mode: agent_model::ContextManagementMode::LocalSummary,
             server_history_binding: None,
+            provider_state_binding: None,
+            input_token_count_supported: false,
+            compaction_threshold_tokens: std::num::NonZeroU64::new(102400).unwrap(),
             external_configuration: None,
             provider: &provider,
             protocol: ModelProtocol::OpenAiChatCompletions,

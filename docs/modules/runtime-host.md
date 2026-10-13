@@ -1007,3 +1007,15 @@ resources::shell 统一维护 ShellKind 的可用程序，Unix 支持 sh/bash/zs
 中心模型控制响应中，503 的 `llm_proxy_unavailable` 与 `llm_record_unavailable`
 映射为模型暂时不可用，交由现有有限重试策略处理；400 格式错误、413 请求过大、
 鉴权和配置失效保持各自的永久错误或显式刷新语义，不能笼统放宽重试。
+
+## v0.30.0 F01 M1 存储与兼容基线
+
+唯一 v0.30.0 迁移入口为 sessions 增加可空冻结机制、child_tasks 增加冻结机制，旧记录统一恢复为 local_summary；新 Session 未执行前允许未绑定。既有 model_request_records 的 CHECK 扩展 context_compaction，保留全部记录、列、主键与索引，不另建费用账本。压缩消息按用途只登记一次调用费用，不重新统计 ProviderState 中的旧窗口项。
+
+迁移与最低 Host 0.30.0 同事务提交，沿既有独立备份、精确内容核验和旧 Host 准入门禁执行。启动与布局迁移共用同一版本清单。User append 的既有可靠效果同时提交机制；旧 pending 效果缺省 local_summary。冲突的机制不能开始 Run，重启继续读取可靠值。M1 不读取或升级用户 Runtime Home，产品原生状态提交编排仍在后续里程碑。
+
+## v0.30.0 F01 当前可靠提交与代理
+
+原生自动压缩复用 JSONL staged append，消息计数仍对应完整历史；中断恢复不重复计费。手动压缩保留原历史并提交新 generation、费用与幂等回执。v0.30.0 同一迁移调整 Provider CHECK，生成并保留独立配置周期，关闭 ID 续接也可绑定原生状态；保留旧 Provider、凭据、关联固定参数和索引，提交前核验外键。
+
+企业传输只允许已可信绑定 origin 上的固定普通、compact 和计量路径，分别检查当前能力；按配置快照注入绑定，不接受任意辅助 URL。本体不建立 WS 客户端。当前企业协议为 3，最低 Host/正文存储为 0.30.0，旧端拒绝进入。

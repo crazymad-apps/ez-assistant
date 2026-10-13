@@ -35,6 +35,8 @@
   TS 绑定是对语言无关契约的投影；Client 更换技术架构时可直接实现同一契约，不要求 Host／Desktop
   跟随变更。应用协议最低兼容软件版本不因 Client 内部实现变化而提高。
 - enum 序列化使用显式 tag，variant 名称视为兼容契约。
+- 已落盘的内测状态也属于真实历史契约。拆分 Feature 不得删除其读取与展示；
+  `McpServerRefreshOutcome::Deferred` 保留旧刷新结果，不因此启用延后连接或 Computer Use。
 - 字段含义不能静默改变；需要改变时新增字段/variant并给出迁移路径。
 - 新事件必须检查 Runtime 生产、Tauri 转发、前端消费、持久化和恢复。
 - 可选字段必须区分“未知/未提供”和真实空值语义。
@@ -471,3 +473,16 @@ GetProviderUsage 返回默认／辅助用途、全库显式引用会话数量、
 Host 手动提交只接受内容、提交 UUID 和客户端环境，身份、来源与 Host 环境由 Host 确定。
 `FeedbackResponse<T>` 的业务失败独立于登录传输错误，`submission_unknown` 不代表写入失败；
 DTO 不包含 Token、数据库类型或工具 trait，TS 继续由 Rust 同源生成。
+
+## v0.30.0 F01 M1 模型与窗口投影
+
+ModelParameters 的原生压缩开关、服务端自动开关及两项能力声明分别缺省 false/false/unknown/unknown；模型配置来源同步四项语义，不自动开启开关。ContextUsageSnapshot 增加 accuracy 与 mode；used_tokens、usage_basis_points 可空，window_tokens 仍为显式窗口。未知必须携带空占用/百分比，不能表示 0 或旧百分比；estimated 在消费者中明确“约”。
+
+Rust 是唯一协议源，TS 通过正式 exporter 生成；本次应用版本及兼容下限统一 0.30.0，旧消费者不能忽略新历史与可空计量继续执行。M1 完成现有 Desktop/Web/Client 的最小安全适配；完整模型压缩设置与状态交互在 M6 完成，企业兼容与 Center DDL 在 M5 完成。
+
+### v0.30.0 人工验收补充：Goal token 仅统计
+
+GoalBudgetSnapshot 删除 `max_total_tokens`，GoalPauseReasonSnapshot 删除 `token_limit_reached`；
+累计 `used_total_tokens` 和 `usage_complete` 保留。Runtime 不再按累计 token 暂停，旧存储
+token 暂停投影为需要显式继续，客户端仅展示累计用量。Rust/TS 同源更新，兼容下限沿用
+本版已确定的 0.30.0；不改已发布数据库 schema 或强制续跑旧暂停目标。

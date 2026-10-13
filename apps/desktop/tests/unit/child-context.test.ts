@@ -6,7 +6,7 @@ function child(id: string, used: number, window: number): ChildTaskTreeItemSnaps
   return { task: { child_task_id: id, session_id: "s", parent_run_id: "r", parent_tool_call_id: id,
     title: id, status: "running", variant: "build", cancel_requested: false, final_text: "", error: null,
     created_at_ms: 0, started_at_ms: 0, finished_at_ms: null }, can_cancel: true, pending_approval_count: 0,
-    usage: { accumulated: null, context: { used_tokens: used, window_tokens: window, usage_basis_points: 1000 } } };
+    usage: { accumulated: null, context: { accuracy: "estimated", mode: "local_summary", used_tokens: used, window_tokens: window, usage_basis_points: 1000 } } };
 }
 
 describe("child context projection", () => {
@@ -27,7 +27,7 @@ describe("child context projection", () => {
     expect(mergeChildTaskItems([item], [running])[0].usage.accumulated?.total_tokens).toBe(100_000);
 
     item.usage.accumulated = { input_tokens: 217_000, output_tokens: 2000, total_tokens: 219_000, cached_input_tokens: null };
-    item.usage.context = { used_tokens: 120_000, window_tokens: 258_000, usage_basis_points: 4651 };
+    item.usage.context = { accuracy: "estimated", mode: "local_summary", used_tokens: 120_000, window_tokens: 258_000, usage_basis_points: 4651 };
     expect(mergeChildTaskItems([item], [running])[0].usage).toEqual(item.usage);
 
     const finished = { ...running, status: "completed" as const };

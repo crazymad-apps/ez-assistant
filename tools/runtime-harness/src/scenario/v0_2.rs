@@ -605,6 +605,7 @@ fn capabilities() -> ModelCapabilities {
 
 fn text_message(id: &str, text: &str) -> Result<AssistantMessage, HarnessError> {
     Ok(AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: message_id(id)?,
         model: model_identity()?,
         parts: vec![AssistantPart::Text(TextPart {
@@ -618,6 +619,7 @@ fn text_message(id: &str, text: &str) -> Result<AssistantMessage, HarnessError> 
 
 fn calls_message(id: &str, calls: Vec<ToolCall>) -> Result<AssistantMessage, HarnessError> {
     Ok(AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: message_id(id)?,
         model: model_identity()?,
         parts: calls.into_iter().map(AssistantPart::ToolCall).collect(),

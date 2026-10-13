@@ -247,6 +247,26 @@ impl ModelService for ObservedModelService {
         self.inner.max_input_tokens()
     }
 
+    fn context_policy(&self) -> &agent_model::ContextPolicy {
+        self.inner.context_policy()
+    }
+
+    fn count_input_tokens<'a>(
+        &'a self,
+        request: &'a agent_model::ModelRequest,
+        context: &'a mut agent_model::ModelCallContext,
+    ) -> agent_model::ModelInputTokenCountFuture<'a> {
+        self.inner.count_input_tokens(request, context)
+    }
+
+    fn compact(
+        &self,
+        request: agent_model::ModelRequest,
+        context: agent_model::ModelCallContext,
+    ) -> agent_model::ModelCompactionFuture<'_> {
+        self.inner.compact(request, context)
+    }
+
     fn stream(&self, request: ModelRequest, context: ModelCallContext) -> ModelStreamFuture<'_> {
         self.observation
             .logical_calls

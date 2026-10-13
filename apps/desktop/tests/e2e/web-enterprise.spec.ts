@@ -36,7 +36,7 @@ const center = createServer(async (request, response) => {
   response.setHeader('Content-Type', 'application/json');
   if (request.url === '/api/info')
     return response.end(
-      JSON.stringify({ protocol_version: 2, min_protocol_version: 2, capabilities: ['managed_models', 'llm_proxy'] }),
+      JSON.stringify({ protocol_version: 3, min_protocol_version: 3, capabilities: ['managed_models', 'llm_proxy'] }),
     );
   if (request.url === '/api/auth/login' && body.password === 'fixture-password') {
     const id = body.username === 'alice' ? 1 : 2;

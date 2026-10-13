@@ -1131,7 +1131,11 @@ function onlineModel(): import('@ez-assistant/protocol').DiscoveredModel {
     model_id: 'online-model',
     display_name: null,
     metadata: {
-      context_window_tokens: { state: 'unknown' },
+      server_compaction_enabled: false,
+    server_auto_compaction_enabled: false,
+    server_compaction_support: "unknown",
+    input_token_count_support: "unknown",
+    context_window_tokens: { state: 'unknown' },
       max_input_tokens: { state: 'unknown' },
       max_output_tokens: { state: 'unknown' },
       reasoning_max_input_tokens: { state: 'unknown' },

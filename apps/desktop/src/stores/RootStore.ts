@@ -531,6 +531,7 @@ export class RootStore {
 
   async selectSession(session_id: SessionId): Promise<void> {
     this.transient_focus.clear();
+    this.interaction_error = null;
     this.navigation.selectSession(session_id);
     await this.#runtime.loadSession(session_id);
   }

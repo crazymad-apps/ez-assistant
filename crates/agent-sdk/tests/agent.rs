@@ -72,6 +72,7 @@ fn identity() -> ModelIdentity {
 
 fn text_message(id: &str, text: &str) -> AssistantMessage {
     AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new(id).expect("valid message id"),
         model: identity(),
         parts: vec![AssistantPart::Text(TextPart {
@@ -85,6 +86,7 @@ fn text_message(id: &str, text: &str) -> AssistantMessage {
 
 fn tool_call_message(id: &str, call_id: &str, tool: &str) -> AssistantMessage {
     AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new(id).expect("valid message id"),
         model: identity(),
         parts: vec![AssistantPart::ToolCall(ToolCall {

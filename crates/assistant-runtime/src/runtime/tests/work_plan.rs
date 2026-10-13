@@ -3,6 +3,7 @@ use super::*;
 #[tokio::test]
 async fn parent_update_plan_is_automatic_durable_and_injected_at_next_claim() {
     let update = AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new("assistant-update-plan").expect("message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("provider id"),
@@ -23,6 +24,7 @@ async fn parent_update_plan_is_automatic_durable_and_injected_at_next_claim() {
         usage: None,
     };
     let tolerant_update = AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new("assistant-update-plan-without-ids").expect("message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("provider id"),
@@ -274,6 +276,7 @@ async fn parent_update_plan_is_automatic_durable_and_injected_at_next_claim() {
 #[tokio::test]
 async fn completing_every_todo_clears_the_current_work_plan_automatically() {
     let completed_update = AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new("assistant-complete-plan").expect("message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("provider id"),

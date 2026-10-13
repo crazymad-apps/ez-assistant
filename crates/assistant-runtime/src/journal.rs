@@ -261,6 +261,7 @@ mod tests {
 
     fn assistant_with_calls(call_ids: &[&str]) -> AssistantMessage {
         AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: MessageId::new("assistant-1").expect("message id"),
             model: ModelIdentity::new(
                 ProviderId::new("fixture").expect("provider id"),

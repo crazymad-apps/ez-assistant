@@ -15,6 +15,8 @@ impl VolatileRuntimeStore {
                         "replacement conversation is invalid",
                     )
                 })?;
+            let native = replacement.conversation.messages.iter().any(|message| matches!(message,
+                ConversationMessage::Assistant(message) if message.purpose == agent_types::AssistantMessagePurpose::ContextCompaction));
             let committed_main = match &replacement.target {
                 ContextReplacementTarget::Run { session_id, .. } => Some((
                     session_id.clone(),
@@ -27,6 +29,23 @@ impl VolatileRuntimeStore {
                 )),
             };
             let mut state = self.lock()?;
+            let frozen_mode = match &replacement.target {
+                ContextReplacementTarget::Run { session_id, .. }
+                | ContextReplacementTarget::IdleSession { session_id, .. } => state
+                    .sessions
+                    .get(session_id)
+                    .and_then(|session| session.context_management_mode),
+                ContextReplacementTarget::ChildTask { child_task_id, .. } => state
+                    .child_tasks
+                    .get(child_task_id)
+                    .map(|task| task.context_management_mode),
+            };
+            if native != (frozen_mode == Some(agent_model::ContextManagementMode::ServerCompaction))
+            {
+                return Err(conflict(
+                    "compaction mechanism does not match frozen owner mode",
+                ));
+            }
             let result = match replacement.target {
                 ContextReplacementTarget::Run { session_id, run_id } => {
                     let run = state
@@ -62,13 +81,14 @@ impl VolatileRuntimeStore {
                         .sessions
                         .get_mut(&session_id)
                         .expect("run session exists");
+                    let source_generation = session.body_generation;
                     session.body_generation = session
                         .body_generation
-                        .checked_add(1)
+                        .checked_add(u64::from(!native))
                         .ok_or_else(|| conflict("conversation generation is exhausted"))?;
                     session.message_count = message_count;
                     ContextReplacementResult {
-                        source_generation: session.body_generation.saturating_sub(1),
+                        source_generation,
                         result_generation: session.body_generation,
                         product_message_count: message_count,
                     }
@@ -108,13 +128,14 @@ impl VolatileRuntimeStore {
                         .child_tasks
                         .get_mut(&child_task_id)
                         .expect("checked child task");
+                    let source_generation = task.body_generation;
                     task.body_generation = task
                         .body_generation
-                        .checked_add(1)
+                        .checked_add(u64::from(!native))
                         .ok_or_else(|| conflict("child conversation generation is exhausted"))?;
                     task.message_count = message_count;
                     ContextReplacementResult {
-                        source_generation: task.body_generation.saturating_sub(1),
+                        source_generation,
                         result_generation: task.body_generation,
                         product_message_count: message_count,
                     }
@@ -241,6 +262,11 @@ impl VolatileRuntimeStore {
             {
                 return Err(conflict("input is not committed"));
             }
+            state
+                .sessions
+                .get_mut(&commit.session_id)
+                .ok_or_else(|| conflict("session does not exist"))?
+                .context_management_mode = Some(commit.context_management_mode);
             let run = state.runs.get_mut(&commit.run_id).expect("checked run");
             run.status = RunStatus::Running;
             run.reasoning_effort = commit.reasoning_effort;

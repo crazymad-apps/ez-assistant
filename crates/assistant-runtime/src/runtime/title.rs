@@ -637,6 +637,7 @@ mod tests {
     #[test]
     fn title_tool_call_removes_markdown_quotes_and_limits_scalars() {
         let message = agent_types::AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: MessageId::new("assistant-title").expect("valid id"),
             model: ModelIdentity::new(
                 ProviderId::new("fixture").expect("valid provider"),
@@ -658,6 +659,7 @@ mod tests {
     #[test]
     fn title_output_rejects_plain_text_and_ambiguous_calls() {
         let plain_text = agent_types::AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: MessageId::new("assistant-continuation").expect("valid id"),
             model: ModelIdentity::new(
                 ProviderId::new("fixture").expect("valid provider"),
@@ -673,6 +675,7 @@ mod tests {
         assert_eq!(title_from_tool_call(&plain_text), None);
 
         let duplicate_calls = agent_types::AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: MessageId::new("assistant-duplicate-title").expect("valid id"),
             model: plain_text.model,
             parts: ["first-title-call", "second-title-call"]

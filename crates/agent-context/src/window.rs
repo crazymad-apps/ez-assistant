@@ -49,8 +49,31 @@ impl ContextWindowEvaluator {
             return Err(ContextWindowError::InvalidInputLimit);
         }
 
-        let Some(used_tokens) = context_token_usage(snapshot).total_tokens() else {
+        self.evaluate_tokens(
+            context_token_usage(snapshot).total_tokens(),
+            ContextUsageAccuracy::Estimated,
+            context_window_tokens,
+            max_input_tokens,
+        )
+    }
+
+    /// 使用当前已准备请求的计量值判断同一窗口；调用方负责计量来源与时效。
+    pub fn evaluate_tokens(
+        &self,
+        used_tokens: Option<u64>,
+        accuracy: ContextUsageAccuracy,
+        context_window_tokens: u64,
+        max_input_tokens: Option<u64>,
+    ) -> Result<ContextWindowEvaluation, ContextWindowError> {
+        if context_window_tokens == 0 {
+            return Err(ContextWindowError::ZeroContextWindow);
+        }
+        if max_input_tokens.is_some_and(|limit| limit == 0 || limit > context_window_tokens) {
+            return Err(ContextWindowError::InvalidInputLimit);
+        }
+        let Some(used_tokens) = used_tokens else {
             return Ok(ContextWindowEvaluation {
+                accuracy: ContextUsageAccuracy::Unknown,
                 used_tokens: None,
                 context_window_tokens,
                 max_input_tokens,
@@ -67,6 +90,7 @@ impl ContextWindowEvaluator {
             ContextWindowDecision::Ready
         };
         Ok(ContextWindowEvaluation {
+            accuracy,
             used_tokens: Some(used_tokens),
             context_window_tokens,
             max_input_tokens,
@@ -79,6 +103,8 @@ impl ContextWindowEvaluator {
 /// 一次窗口判断的可观察结果。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ContextWindowEvaluation {
+    /// usage 与增量估算不能冒充完整输入的精确计量。
+    pub accuracy: ContextUsageAccuracy,
     /// 最近完整 Assistant Result 报告的总 token，加上此后尚未被 Provider 计量的文本增量；usage 不可用时为空。
     pub used_tokens: Option<u64>,
     /// 当前模型服务显式配置的上下文窗口。
@@ -90,6 +116,15 @@ pub struct ContextWindowEvaluation {
     pub used_ratio: Option<f64>,
     /// 本次判断结论。
     pub decision: ContextWindowDecision,
+}
+
+/// 窗口数字的可信度；调用消耗与当前窗口精确计量分别处理。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextUsageAccuracy {
+    Exact,
+    Estimated,
+    Unknown,
 }
 
 /// 上下文占用的终态与临时态；从当前规范快照派生，不保存第二份可变账本。
@@ -121,7 +156,9 @@ pub fn context_token_usage(snapshot: &ConversationSnapshot) -> ContextTokenUsage
         .enumerate()
         .rev()
         .find_map(|(index, message)| match message {
-            ConversationMessage::Assistant(message) => Some((index, message)),
+            ConversationMessage::Assistant(message) if message.purpose.is_model_response() => {
+                Some((index, message))
+            }
             _ => None,
         });
     let adjustment =
@@ -361,6 +398,7 @@ mod tests {
 
     fn assistant(id: &str, total_tokens: Option<u64>) -> ConversationMessage {
         ConversationMessage::Assistant(AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: MessageId::new(id).expect("valid message id"),
             model: ModelIdentity::new(
                 ProviderId::new("test").expect("valid provider id"),
@@ -383,6 +421,7 @@ mod tests {
         payload_bytes: usize,
     ) -> ConversationMessage {
         ConversationMessage::Assistant(AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: MessageId::new("assistant_state").expect("message id"),
             model: ModelIdentity::new(ProviderId::new("test").expect("provider"), "test-model"),
             parts: vec![AssistantPart::ProviderState(
@@ -430,6 +469,7 @@ mod tests {
 
     fn summary(adjustment: ContextUsageAdjustment) -> ConversationMessage {
         ConversationMessage::ContextSummary(ContextSummaryMessage {
+            retained_user_message_id: None,
             id: MessageId::new("summary_1").expect("message id"),
             text: "abcd".to_owned(),
             model: None,
@@ -442,6 +482,7 @@ mod tests {
 
     fn assistant_tool_call(id: &str, total_tokens: u64) -> ConversationMessage {
         ConversationMessage::Assistant(AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: MessageId::new(id).expect("valid message id"),
             model: ModelIdentity::new(
                 ProviderId::new("test").expect("valid provider id"),
@@ -476,6 +517,21 @@ mod tests {
     }
 
     #[test]
+    fn compact_billing_does_not_replace_the_legacy_window_baseline() {
+        let mut compact = assistant("compact", Some(9000));
+        if let ConversationMessage::Assistant(message) = &mut compact {
+            message.purpose = agent_types::AssistantMessagePurpose::ContextCompaction;
+        }
+        let history =
+            ConversationSnapshot::new(vec![assistant("normal", Some(200)), compact.clone()]);
+        assert_eq!(context_token_usage(&history).total_tokens(), Some(200));
+        assert_eq!(
+            context_token_usage(&ConversationSnapshot::new(vec![compact])).total_tokens(),
+            None
+        );
+    }
+
+    #[test]
     fn constructor_rejects_invalid_ratios_and_accepts_upper_bound() {
         for ratio in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.1, 0.0, 1.1] {
             assert_eq!(
@@ -501,6 +557,7 @@ mod tests {
                 .evaluate(&snapshot, &model(100))
                 .expect("evaluation"),
             ContextWindowEvaluation {
+                accuracy: ContextUsageAccuracy::Estimated,
                 used_tokens: Some(80),
                 context_window_tokens: 100,
                 max_input_tokens: None,
@@ -696,6 +753,7 @@ mod tests {
                 .evaluate(&snapshot, &model(100))
                 .expect("evaluation"),
             ContextWindowEvaluation {
+                accuracy: ContextUsageAccuracy::Unknown,
                 used_tokens: None,
                 context_window_tokens: 100,
                 max_input_tokens: None,

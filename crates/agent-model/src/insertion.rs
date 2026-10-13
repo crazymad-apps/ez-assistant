@@ -86,6 +86,7 @@ mod tests {
     #[test]
     fn image_plan_preserves_tool_and_part_order_without_creating_messages() {
         let assistant = AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: MessageId::new("assistant-1").expect("message id"),
             model: ModelIdentity::new(ProviderId::new("test").expect("provider id"), "test-model"),
             parts: Vec::new(),

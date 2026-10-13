@@ -341,11 +341,22 @@ impl AssistantRuntime {
             let (composer_capabilities, context_window) = self
                 .composer_capabilities(summary.model_selection.as_ref())
                 .await?;
-            let usage = project_usage(
+            let mode = session
+                .lock_state()?
+                .context_management_mode
+                .unwrap_or_default();
+            let mut usage = project_usage(
                 &stored_usage,
                 context_window,
-                agent_context::context_token_usage(&conversation_snapshot).total_tokens(),
+                context_usage_from_product_history(&conversation_snapshot, mode),
+                mode,
             );
+            apply_current_context_measurement(
+                &mut usage.context,
+                &session,
+                "",
+                &conversation_snapshot,
+            )?;
             let file_references = project_conversation_file_references(&conversation_snapshot)?;
             let workspace = self.session_workspace_snapshot(&session)?;
             let (work_plan, goal, active_skills, agent_shell_kind) = {
@@ -1131,12 +1142,9 @@ impl AssistantRuntime {
             let AssistantPart::ToolCall(call) = part else {
                 continue;
             };
-            let result = snapshot.messages.iter().find_map(|message| match message {
-                ConversationMessage::Tool(tool) => {
-                    (tool.result.call_id.as_str() == call.id.as_str()).then_some(&tool.result)
-                }
-                _ => None,
-            });
+            let result = scoped_tool_results(&snapshot)
+                .get(&(assistant.id.as_str(), call.id.as_str()))
+                .copied();
             let Some(result) = result else {
                 continue;
             };
@@ -1444,6 +1452,7 @@ impl AssistantRuntime {
             };
             let context_window = current.context_window_tokens;
             let generation = current.body_generation;
+            let context_mode = current.context_management_mode;
             let snapshot = self.child_snapshot(current).await?;
             if self
                 .child_tasks
@@ -1456,10 +1465,18 @@ impl AssistantRuntime {
                 .iter()
                 .filter(|approval| approval.child_task_id.as_ref() == Some(&snapshot.child_task_id))
                 .count();
+            let mut usage = project_child_usage(&window.conversation, context_window, context_mode);
+            let session = self.session(&task.session_id).await?;
+            apply_current_context_measurement(
+                &mut usage.context,
+                &session,
+                task.child_task_id.as_str(),
+                &window.conversation,
+            )?;
             return Ok(ChildTaskTreeItemSnapshot {
                 can_cancel: !snapshot.status.is_terminal(),
                 task: snapshot,
-                usage: project_child_usage(&window.conversation, context_window),
+                usage,
                 pending_approval_count: u64::try_from(pending_approval_count).unwrap_or(u64::MAX),
             });
         }
@@ -1882,9 +1899,6 @@ pub(crate) fn project_goal(goal: &crate::goal::GoalControl) -> RuntimeResult<Goa
                 crate::goal::GoalPauseReason::RunLimitReached => {
                     GoalPauseReasonSnapshot::RunLimitReached
                 }
-                crate::goal::GoalPauseReason::TokenLimitReached => {
-                    GoalPauseReasonSnapshot::TokenLimitReached
-                }
                 crate::goal::GoalPauseReason::ConsecutiveFailures => {
                     GoalPauseReasonSnapshot::ConsecutiveFailures
                 }
@@ -1908,7 +1922,6 @@ pub(crate) fn project_goal(goal: &crate::goal::GoalControl) -> RuntimeResult<Goa
         turn: goal.turn,
         budget: GoalBudgetSnapshot {
             max_runs: goal.budget.max_runs,
-            max_total_tokens: goal.budget.max_total_tokens,
             max_consecutive_failures: goal.budget.max_consecutive_failures,
             used_runs: goal.budget.used_runs,
             used_total_tokens: goal.budget.used_total_tokens,
@@ -1921,20 +1934,34 @@ pub(crate) fn project_goal(goal: &crate::goal::GoalControl) -> RuntimeResult<Goa
     })
 }
 
+/// 工具 ID 只在各压缩边界内唯一；产品详情还必须以原 Assistant 消息定位结果。
+fn scoped_tool_results(
+    snapshot: &ConversationSnapshot,
+) -> HashMap<(&str, &str), &agent_types::ToolResult> {
+    let mut results = HashMap::new();
+    let mut assistant = None;
+    for message in &snapshot.messages {
+        match message {
+            ConversationMessage::Assistant(message) => assistant = Some(message.id.as_str()),
+            ConversationMessage::Tool(message) => {
+                if let Some(assistant) = assistant {
+                    results.insert(
+                        (assistant, message.result.call_id.as_str()),
+                        &message.result,
+                    );
+                }
+            }
+            _ => assistant = None,
+        }
+    }
+    results
+}
+
 pub(super) fn project_conversation(
     snapshot: &ConversationSnapshot,
     context: &ProjectionContext,
 ) -> RuntimeResult<Vec<ConversationItem>> {
-    let tool_results = snapshot
-        .messages
-        .iter()
-        .filter_map(|message| match message {
-            ConversationMessage::Tool(tool) => {
-                Some((tool.result.call_id.as_str().to_owned(), &tool.result))
-            }
-            _ => None,
-        })
-        .collect::<HashMap<_, _>>();
+    let tool_results = scoped_tool_results(snapshot);
     let mut items = Vec::new();
     for message in &snapshot.messages {
         match message {
@@ -2086,7 +2113,7 @@ pub(super) fn project_conversation(
                     created_at_ms: None,
                 }));
             }
-            ConversationMessage::Assistant(assistant) => {
+            ConversationMessage::Assistant(assistant) if assistant.purpose.is_model_response() => {
                 let mut segments = Vec::new();
                 let mut pending_tools = Vec::new();
                 let flush_tools = |segments: &mut Vec<AssistantSegment>, tools: &mut Vec<_>| {
@@ -2114,7 +2141,9 @@ pub(super) fn project_conversation(
                             });
                         }
                         AssistantPart::ToolCall(call) => {
-                            let result = tool_results.get(call.id.as_str()).copied();
+                            let result = tool_results
+                                .get(&(assistant.id.as_str(), call.id.as_str()))
+                                .copied();
                             let mcp_identity = project_mcp_identity(
                                 call.name.as_str(),
                                 &call.arguments,
@@ -2168,6 +2197,7 @@ pub(super) fn project_conversation(
             }
             ConversationMessage::User(_)
             | ConversationMessage::System(_)
+            | ConversationMessage::Assistant(_)
             | ConversationMessage::Tool(_) => {}
         }
     }
@@ -2199,12 +2229,9 @@ fn project_tool_detail(
         .ok_or(RuntimeError::InvalidRequest {
             reason: "tool call was not found in the requested message",
         })?;
-    let result = snapshot.messages.iter().find_map(|message| match message {
-        ConversationMessage::Tool(tool) if tool.result.call_id.as_str() == call_id.as_str() => {
-            Some(&tool.result)
-        }
-        _ => None,
-    });
+    let result = scoped_tool_results(snapshot)
+        .get(&(message_id.as_str(), call_id.as_str()))
+        .copied();
     let summary = result.map(tool_result_summary);
     let mcp_identity = project_mcp_identity(call.name.as_str(), &call.arguments, mcp_identities);
     let mut input = project_tool_input(call.name.as_str(), &call.arguments, mcp_identity.as_ref());
@@ -2251,14 +2278,7 @@ fn project_tool_detail(
 fn project_conversation_file_references(
     snapshot: &ConversationSnapshot,
 ) -> RuntimeResult<Vec<ConversationFileReference>> {
-    let results = snapshot
-        .messages
-        .iter()
-        .filter_map(|message| match message {
-            ConversationMessage::Tool(tool) => Some((tool.result.call_id.as_str(), &tool.result)),
-            _ => None,
-        })
-        .collect::<HashMap<_, _>>();
+    let results = scoped_tool_results(snapshot);
     let mut references = Vec::new();
     for message in &snapshot.messages {
         let ConversationMessage::Assistant(assistant) = message else {
@@ -2273,7 +2293,9 @@ fn project_conversation_file_references(
             let files = project_tool_files(
                 &call.id,
                 &input.value,
-                results.get(call.id.as_str()).copied(),
+                results
+                    .get(&(assistant.id.as_str(), call.id.as_str()))
+                    .copied(),
                 true,
             )?;
             let call_id = protocol_tool_call_id(call.id.as_str())?;
@@ -2497,6 +2519,7 @@ fn project_usage(
     stored: &crate::StoredSessionUsage,
     context_window: Option<u64>,
     projected_context_tokens: Option<u64>,
+    mode: agent_model::ContextManagementMode,
 ) -> SessionUsageSnapshot {
     let previous = stored.latest.as_ref();
     let accumulated = (stored.request_count > 0).then_some(UsageTotals {
@@ -2511,7 +2534,7 @@ fn project_usage(
         && stored.cached_request_count == stored.request_count)
         .then(|| ratio_basis_points(stored.cached_input_tokens, stored.input_tokens))
         .flatten();
-    let context = project_context_usage(projected_context_tokens, context_window);
+    let context = project_context_usage(projected_context_tokens, context_window, mode);
     SessionUsageSnapshot {
         accumulated,
         previous_turn: previous.map(usage_totals),
@@ -2529,37 +2552,107 @@ fn project_usage(
     }
 }
 
+fn context_usage_from_product_history(
+    history: &ConversationSnapshot,
+    mode: agent_model::ContextManagementMode,
+) -> Option<u64> {
+    match mode {
+        agent_model::ContextManagementMode::LocalSummary => agent_context::context_token_usage(
+            &crate::execution_context_from_product_history(history),
+        )
+        .total_tokens(),
+        agent_model::ContextManagementMode::ServerCompaction => {
+            agent_context::context_token_usage(history).total_tokens()
+        }
+    }
+}
+
+fn apply_current_context_measurement(
+    context: &mut Option<assistant_protocol::ContextUsageSnapshot>,
+    session: &crate::session::SessionController,
+    owner: &str,
+    history: &ConversationSnapshot,
+) -> RuntimeResult<()> {
+    let Some(context) = context.as_mut() else {
+        return Ok(());
+    };
+    let boundary = history.messages.iter().rposition(|message| {
+        matches!(
+            message,
+            ConversationMessage::ContextSummary(_)
+                | ConversationMessage::Assistant(agent_types::AssistantMessage {
+                    purpose: agent_types::AssistantMessagePurpose::ContextCompaction,
+                    ..
+                })
+        )
+    });
+    let normal = history.messages.iter().rposition(|message| matches!(message,
+        ConversationMessage::Assistant(assistant) if assistant.purpose == agent_types::AssistantMessagePurpose::ModelResponse && assistant.usage.is_some()
+    ));
+    context.calibration_pending = boundary
+        .filter(|boundary| normal.is_none_or(|normal| normal < *boundary))
+        .map(|_| true);
+    let hash = crate::session::context_history_hash(history);
+    let state = session.lock_state()?;
+    if let Some(measurement) = state.context_measurements.get(owner)
+        && hash == Some(measurement.history_hash)
+        && measurement.session_binding == state.server_history_key
+    {
+        context.accuracy = assistant_protocol::ContextUsageAccuracy::Exact;
+        context.calibration_pending = None;
+        context.used_tokens = Some(measurement.input_tokens);
+        context.usage_basis_points = Some(
+            ((measurement.input_tokens.saturating_mul(10_000) / context.window_tokens).min(10_000))
+                as u16,
+        );
+    }
+    Ok(())
+}
+
 fn project_context_usage(
     used: Option<u64>,
     window: Option<u64>,
+    mode: agent_model::ContextManagementMode,
 ) -> Option<assistant_protocol::ContextUsageSnapshot> {
-    used.zip(window.filter(|value| *value > 0))
-        .map(|(used_tokens, window_tokens)| {
-            let basis_points = used_tokens.saturating_mul(10_000) / window_tokens;
-            assistant_protocol::ContextUsageSnapshot {
-                used_tokens,
-                window_tokens,
-                usage_basis_points: u16::try_from(basis_points.min(10_000)).unwrap_or(10_000),
+    let window_tokens = window.filter(|value| *value > 0)?;
+    Some(assistant_protocol::ContextUsageSnapshot {
+        calibration_pending: None,
+        accuracy: if used.is_some() {
+            assistant_protocol::ContextUsageAccuracy::Estimated
+        } else {
+            assistant_protocol::ContextUsageAccuracy::Unknown
+        },
+        mode: match mode {
+            agent_model::ContextManagementMode::LocalSummary => {
+                assistant_protocol::ContextManagementModeSnapshot::LocalSummary
             }
-        })
+            agent_model::ContextManagementMode::ServerCompaction => {
+                assistant_protocol::ContextManagementModeSnapshot::ServerCompaction
+            }
+        },
+        used_tokens: used,
+        window_tokens,
+        usage_basis_points: used.map(|value| {
+            u16::try_from((value.saturating_mul(10_000) / window_tokens).min(10_000))
+                .unwrap_or(10_000)
+        }),
+    })
 }
 
 pub(super) fn project_child_usage(
     snapshot: &ConversationSnapshot,
     context_window: Option<u64>,
+    mode: agent_model::ContextManagementMode,
 ) -> ChildTaskUsageSnapshot {
     // 累计从完整历史求和，窗口只读取最后摘要之后的有效上下文。
-    let effective = crate::execution_context_from_product_history(snapshot);
+    let used = context_usage_from_product_history(snapshot, mode);
     let usages = snapshot.messages.iter().flat_map(|message| match message {
         ConversationMessage::Assistant(message) => message.usage.iter().collect::<Vec<_>>(),
         ConversationMessage::ContextSummary(message) => message.usage.iter().collect::<Vec<_>>(),
         _ => Vec::new(),
     });
     ChildTaskUsageSnapshot {
-        context: project_context_usage(
-            agent_context::context_token_usage(&effective).total_tokens(),
-            context_window,
-        ),
+        context: project_context_usage(used, context_window, mode),
         accumulated: sum_usage(usages),
     }
 }
@@ -2962,6 +3055,7 @@ mod tool_image_projection_tests {
         let image = ToolImageReference::new(format!("{}.png", "a".repeat(64)), "image/png")
             .expect("image reference");
         let assistant = AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: assistant_id.clone(),
             model: ModelIdentity::new(
                 ProviderId::new("fixture").expect("provider"),
@@ -3036,6 +3130,39 @@ mod tool_image_projection_tests {
             project_conversation_file_references(&snapshot)
                 .expect("conversation file projection")
                 .is_empty()
+        );
+    }
+    #[test]
+    fn reused_tool_ids_resolve_against_their_original_assistant_message() {
+        let (mut snapshot, first_id, call_id) = image_exchange();
+        let mut second = snapshot.clone();
+        let ConversationMessage::Assistant(assistant) = &mut second.messages[0] else {
+            unreachable!()
+        };
+        assistant.id = agent_types::MessageId::new("second-image-exchange").unwrap();
+        let ConversationMessage::Tool(tool) = &mut second.messages[1] else {
+            unreachable!()
+        };
+        tool.id = agent_types::MessageId::new("second-tool-result").unwrap();
+        tool.result.content = agent_types::ToolResultContent::text("second result");
+        snapshot.messages.extend(second.messages);
+        let results = scoped_tool_results(&snapshot);
+        assert!(
+            results
+                .get(&(first_id.as_str(), call_id.as_str()))
+                .unwrap()
+                .content
+                .as_parts()
+                .iter()
+                .any(|part| matches!(part, agent_types::ToolResultPart::Image { .. }))
+        );
+        assert_eq!(
+            results
+                .get(&("second-image-exchange", call_id.as_str()))
+                .unwrap()
+                .content
+                .as_parts(),
+            &[agent_types::ToolResultPart::text("second result")]
         );
     }
 }

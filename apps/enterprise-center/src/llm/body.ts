@@ -7,7 +7,9 @@ const totalLimit = 128 * 1024 * 1024;
 /** 只提取准入字段；原始 Buffer 始终用于出站，避免重编码改变数字和未知字段。 */
 export type RequestModel = { model: string; stream: boolean; store?: boolean; previous_response_id?: string | null };
 
-export function requestModel(body: Buffer): RequestModel {
+export type ModelOperation = 'generation' | 'compact' | 'input_tokens';
+
+export function requestModel(body: Buffer, operation: ModelOperation = 'generation'): RequestModel {
   let text: string;
   let value: unknown;
   try {
@@ -31,6 +33,16 @@ export function requestModel(body: Buffer): RequestModel {
     ))
   )
     throw new ControlError('llm_request_invalid');
+  if (Object.hasOwn(object, 'context_management') || Object.hasOwn(object, 'compaction_trigger') ||
+    (Array.isArray(object.input) && object.input.some(item => item && typeof item === 'object' && item.type === 'compaction_trigger')))
+    throw new ControlError('llm_request_invalid');
+  if (operation !== 'generation') {
+    if (object.stream !== undefined || Object.hasOwn(object, 'store') || Object.hasOwn(object, 'previous_response_id') || !Array.isArray(object.input))
+      throw new ControlError('llm_request_invalid');
+    if (operation === 'compact' && Object.keys(object).some(key => !['model', 'input', 'instructions'].includes(key)))
+      throw new ControlError('llm_request_invalid');
+    if (object.instructions !== undefined && typeof object.instructions !== 'string') throw new ControlError('llm_request_invalid');
+  }
   // JSON.parse 已校验语法；线性扫描层级与字符串，拒绝转义拼写的重复准入键，避免 last-wins 歧义。
   let depth = 0;
   const keys = new Set<string>();
@@ -49,7 +61,7 @@ export function requestModel(body: Buffer): RequestModel {
       while (/\s/.test(text[next] ?? '') && next < text.length) next++;
       if (text[next] !== ':') continue;
       const key: string = JSON.parse(text.slice(start, i + 1));
-      if (!['model', 'stream', 'store', 'previous_response_id'].includes(key)) continue;
+      if (!['model', 'stream', 'store', 'previous_response_id', 'input', 'instructions', 'context_management', 'compaction_trigger'].includes(key)) continue;
       if (keys.has(key)) throw new ControlError('llm_request_invalid');
       keys.add(key);
     }

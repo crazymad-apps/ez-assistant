@@ -173,17 +173,6 @@ pub(crate) fn prepare_goal_run_decision(facts: GoalRunFacts<'_>) -> RuntimeResul
         )
         .map(GoalRunDecision::Settle);
     }
-    if goal.budget.used_total_tokens >= goal.budget.max_total_tokens {
-        return transition(
-            current,
-            goal,
-            GoalState::Paused(GoalPauseReason::TokenLimitReached),
-            state,
-            session_id,
-            finished_at_ms,
-        )
-        .map(GoalRunDecision::Settle);
-    }
     if goal.consecutive_failures >= goal.budget.max_consecutive_failures {
         return transition(
             current,
@@ -254,11 +243,11 @@ fn apply_usage(
         .filter_map(|message| message.usage.as_ref())
         .try_fold(0_u64, |total, usage| total.checked_add(usage.total_tokens))
         .ok_or(RuntimeError::InternalStateUnavailable {
-            component: "Goal token budget",
+            component: "Goal token usage",
         })?;
     goal.budget.used_total_tokens = goal.budget.used_total_tokens.checked_add(reported).ok_or(
         RuntimeError::InternalStateUnavailable {
-            component: "Goal token budget",
+            component: "Goal token usage",
         },
     )?;
     goal.budget.usage_complete &= usage_complete;

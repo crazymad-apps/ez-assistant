@@ -1,3 +1,4 @@
+import { callKindLabel } from '../callKindLabel';
 import { useCallback } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router';
 import { Alert, Button, Card, Descriptions, Tabs, Space } from 'antd';
@@ -43,7 +44,7 @@ export const CallDetailRoute = observer(function CallDetailRoute() {
               {
                 key: 'kind',
                 label: '类型 / 协议',
-                children: `${row.kind === 'admin_test' ? '配置测试' : '模型调用'} / ${row.protocol === 'open_ai_responses' ? 'Responses' : 'Chat Completions'}`,
+                children: `${callKindLabel[row.kind]} / ${row.protocol === 'open_ai_responses' ? 'Responses' : 'Chat Completions'}`,
               },
               { key: 'start', label: '开始时间', children: new Date(row.started_at).toLocaleString() },
               { key: 'end', label: '结束时间', children: row.ended_at ? new Date(row.ended_at).toLocaleString() : '—' },

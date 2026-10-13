@@ -834,3 +834,72 @@ async fn cancellation_during_stream_retry_wait_stops_reconnection() {
     );
     assert_eq!(inner.calls().len(), 1);
 }
+
+#[tokio::test]
+async fn auxiliary_calls_preserve_context_and_never_use_generation_retry() {
+    struct AuxiliaryService {
+        capabilities: ModelCapabilities,
+        policy: crate::ContextPolicy,
+        compact_calls: AtomicUsize,
+    }
+    impl ModelService for AuxiliaryService {
+        fn capabilities(&self) -> &ModelCapabilities {
+            &self.capabilities
+        }
+        fn context_window_tokens(&self) -> u64 {
+            8192
+        }
+        fn context_policy(&self) -> &crate::ContextPolicy {
+            &self.policy
+        }
+        fn count_input_tokens<'a>(
+            &'a self,
+            _: &'a ModelRequest,
+            context: &'a mut ModelCallContext,
+        ) -> crate::ModelInputTokenCountFuture<'a> {
+            Box::pin(async move {
+                context.rebuild_server_history = true;
+                Ok(Some(42))
+            })
+        }
+        fn compact(
+            &self,
+            _: ModelRequest,
+            context: ModelCallContext,
+        ) -> crate::ModelCompactionFuture<'_> {
+            self.compact_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                assert!(context.rebuild_server_history);
+                Err(connection_error("compact unavailable"))
+            })
+        }
+        fn stream(&self, _: ModelRequest, _: ModelCallContext) -> ModelStreamFuture<'_> {
+            panic!("auxiliary calls must not generate a turn")
+        }
+    }
+    let inner = Arc::new(AuxiliaryService {
+        capabilities: capabilities(),
+        policy: crate::ContextPolicy::ServerCompaction {
+            threshold_tokens: std::num::NonZeroU64::new(6000).unwrap(),
+            state_scope_fingerprint: "private-scope".into(),
+        },
+        compact_calls: AtomicUsize::new(0),
+    });
+    let service =
+        RetryingModelService::new(inner.clone(), policy(vec![Duration::ZERO, Duration::ZERO]));
+    assert_eq!(
+        service.context_policy().mode(),
+        crate::ContextManagementMode::ServerCompaction
+    );
+    assert!(!format!("{:?}", service.context_policy()).contains("private-scope"));
+    let mut context = ModelCallContext::default();
+    assert_eq!(
+        service
+            .count_input_tokens(&request(), &mut context)
+            .await
+            .unwrap(),
+        Some(42)
+    );
+    assert!(service.compact(request(), context).await.is_err());
+    assert_eq!(inner.compact_calls.load(Ordering::SeqCst), 1);
+}

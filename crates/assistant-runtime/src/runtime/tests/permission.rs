@@ -208,6 +208,7 @@ fn global_document(rule_id: &str) -> Vec<u8> {
 
 fn file_calls_step(message_id: &str, paths: &[&str]) -> ModelScript {
     ModelScript::Events(message_events(&AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new(message_id).expect("message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("provider id"),

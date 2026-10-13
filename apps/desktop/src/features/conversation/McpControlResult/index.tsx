@@ -5,6 +5,7 @@ import { shellLabels as shell_labels } from "../../../runtime-client/shellPresen
 
 const outcome_labels: Record<McpServerRefreshOutcome, string> = {
   refreshed: "已刷新",
+  deferred: "已延后连接",
   connected_without_tools: "已连接，无工具",
   retained_after_failure: "刷新失败，保留原状态",
   blocked_by_conflict: "名称冲突，已停用",

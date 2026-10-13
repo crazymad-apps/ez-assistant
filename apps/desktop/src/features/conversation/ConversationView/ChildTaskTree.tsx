@@ -20,7 +20,14 @@ export function ChildTaskTree({ embedded = false, items, on_open }: Readonly<{
           <span className={styles.task_tree_line} aria-hidden="true" />
         </div>
       )}
-      {items.map((item) => (
+      {items.map((item) => {
+        const context = item.usage.context;
+        let context_label = "—";
+        if (context && context.usage_basis_points !== null) {
+          const prefix = context.accuracy === "estimated" ? "约 " : "";
+          context_label = `${prefix}${(context.usage_basis_points / 100).toFixed(1)}%`;
+        }
+        return (
         <div className={styles.child_task} data-embedded={embedded} key={item.task.child_task_id}>
           {!embedded && <span className={styles.task_branch} aria-hidden="true" />}
           <button aria-label={`查看子任务：${item.task.title}`} onClick={() => on_open(item)} type="button">
@@ -30,7 +37,7 @@ export function ChildTaskTree({ embedded = false, items, on_open }: Readonly<{
               <small>{childTaskStatusLabel(item.task.status)}{item.pending_approval_count > 0 ? ` · ${item.pending_approval_count} 项待审批` : ""}</small>
             </span>
             <span className={styles.task_usages}>
-              <span className={styles.task_usage} title="当前上下文窗口占用">上下文 {item.usage.context ? `${(item.usage.context.usage_basis_points / 100).toFixed(1)}%` : "—"}</span>
+              <span className={styles.task_usage} title="当前上下文窗口占用">上下文 {context_label}{context?.calibration_pending && " · 待校准"}</span>
               {item.usage.accumulated?.total_tokens !== null && item.usage.accumulated?.total_tokens !== undefined && (
                 <span className={styles.task_usage}>累计 {formatCompactTokens(item.usage.accumulated.total_tokens)}</span>
               )}
@@ -38,7 +45,8 @@ export function ChildTaskTree({ embedded = false, items, on_open }: Readonly<{
             <Icon name="chevron-right" size={14} />
           </button>
         </div>
-      ))}
+      );
+      })}
     </section>
   );
 }

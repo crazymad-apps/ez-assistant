@@ -28,6 +28,8 @@ struct ManualCompactionContext {
     store: Arc<dyn RuntimeStore>,
     events: ObservationCoordinator,
     compactor: RuntimeContextCompactor,
+    prepared_model: Arc<crate::config::PreparedModel>,
+    config_registry: Arc<crate::config::ConfigRegistry>,
     operation_id: assistant_protocol::IdempotencyKey,
     source_generation: u64,
     source: ConversationSnapshot,
@@ -73,6 +75,40 @@ impl AssistantRuntime {
             return Err(RuntimeError::SessionNotIdle {
                 session_id: request.session_id,
             });
+        }
+        let mode = prepared.model.context_management_mode();
+        if let Some(journal) = session
+            .prepare_journal_for_mode(self.store.as_ref(), mode)
+            .await?
+        {
+            let (model_selection, reasoning_effort, server_history_key) = {
+                let state = session.lock_state()?;
+                (
+                    state.model_selection.clone(),
+                    state.reasoning_effort,
+                    state.server_history_key.clone(),
+                )
+            };
+            // 空闲会话接纳已更新参数，复用模型绑定提交；不生成交接摘要或改写历史。
+            self.store
+                .set_session_model(crate::ModelChange {
+                    session_id: request.session_id.clone(),
+                    model_selection,
+                    reasoning_effort,
+                    server_history_key,
+                    context_management_mode: Some(mode),
+                    changed_at_ms: super::now_ms()?,
+                })
+                .await
+                .map_err(|source| {
+                    RuntimeError::from_store("apply compaction parameters", source)
+                })?;
+            let mut state = session.lock_state()?;
+            state.context_management_mode = Some(mode);
+            state.persisted_message_count = journal.message_count();
+            state.journal = Some(journal);
+            state.model_binding = Some(prepared.clone());
+            state.context_measurements.clear();
         }
         let prepared_at_ms = super::now_ms()?;
         match self
@@ -183,6 +219,8 @@ impl AssistantRuntime {
             store: self.store.clone(),
             events: self.event_sender.clone(),
             compactor,
+            prepared_model: prepared,
+            config_registry: self.config_registry.clone(),
             operation_id: request.operation_id.clone(),
             source_generation,
             source,
@@ -365,6 +403,13 @@ async fn commit_manual_replacement(
         {
             return Err(RuntimeError::SnapshotStale);
         }
+    }
+    if context.prepared_model.model.context_management_mode()
+        == agent_model::ContextManagementMode::ServerCompaction
+    {
+        context
+            .prepared_model
+            .ensure_current(&context.config_registry)?;
     }
     let committed = context
         .store

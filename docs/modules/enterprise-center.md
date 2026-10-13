@@ -17,7 +17,7 @@ C01 M0—M3 已完成并获用户确认，包括 Admin 正式实现与同源装�
 - 不记录原始数据库错误、连接串、请求体、Cookie、Authorization 或响应凭据。对外错误使用固定原因码及服务端 request ID。
 - 连接/查询/锁等待有界；升级/准入用维护 Pool 并在业务 DataSource 初始化前关闭，运行期间只保留一个业务池。关闭先停止 HTTP 接纳，再释放 DataSource；不把 Ctrl+C 生命周期绑定到其他产品进程。禁止 synchronize、migrationsRun、dropSchema 与扩展自动安装。
 - Token 直接保存在进程内 Map<token,userId>，关联 LLM key 只映射到本次 Token；无 Session ID/表、Token 哈希、JWT、TTL、刷新令牌或 Redis。多 Token 并存，退出只删当前 Token/key，中心关闭或重启全部失效，限单实例部署。用户密码仍保存 scrypt 摘要。C03 M1 定向调整：本人改密和管理重置成功均保留已有 Token/key；启停/角色变化、显式退出、中心重启和事务结果不明仍按原规则撤销。
-- 全局 src/security.ts 默认要求 Bearer，显式标记公开/可选认证/管理员接口；公开仍检查 JSON 格式。2026-09-29 用户确认允许任意请求来源，不按 Origin/Sec-Fetch-Site 拒绝；统一 CORS 允许任意来源和业务方法/请求头，预检无需身份，实际请求仍检查凭据与权限，raw 模型流同样保留 CORS 头。Cookie 由前端处理，后端不读作身份、不设置、不清除，不启用跨域 Cookie 凭据。CENTER_PUBLIC_ORIGIN 仅用于下发模型代理地址。cl_ key 不能用于身份认证。Swagger 文档为明确公开的 Fastify 路由。
+- 全局 src/security.ts 默认要求 Bearer，显式标记公开/可选认证/管理员接口；公开仍检查 JSON 格式。2026-09-29 用户确认允许任意请求来源，不按 Origin/Sec-Fetch-Site 拒绝；统一 CORS 允许任意来源和业务方法/请求头，预检无需身份，实际请求仍检查凭据与权限，raw 模型流同样保留 CORS 头。Cookie 由前端处理，后端不读作身份、不设置、不清除，不启用跨域 Cookie 凭据。CENTER_PUBLIC_ORIGIN 用于下发模型代理与 Desktop 更新下载地址，必须可从 Host 与 Desktop 访问。cl_ key 不能用于身份认证。Swagger 文档为明确公开的 Fastify 路由。
 - 身份写入通过进程内串行段覆盖 QueryRunner 事务及提交后的内存凭据变更；业务与审计只使用该事务 Manager，密码计算在段外，段内重验。审计提交后才签发/撤销，失败不伪成功；提交结果不明清空凭据并失败，回滚也失败时关闭业务池，须排查后重启。M2 沿用同一串行边界和撤销口径，不增加跨进程锁或同步。
 
 ## 正式静态装配
@@ -100,3 +100,15 @@ HTTP/HTTPS 均支持；撤回与下载准入串行，提交后取消未完成流
 ## v0.29.0 F05 用户删除
 
 DELETE /api/users/:id 复用身份串行事务、管理员重验和提交后 revokeUser。禁止删除超级管理员或最后启用管理员；成功审计与删除同事务，本人删除撤销管理身份。009-user-deletion 解除 management_audit 的 actor/target 外键，保留原 ID，现有 LEFT JOIN 对已删除账号显示原 ID；不新增删除状态或级联清理。反馈/调用快照不重绑，同名重建分配新 ID。Host 本地内容不清理；部署已有库须先备份、核验并确认迁移。
+
+## v0.30.0 F01 原生压缩与计量
+
+企业协议及最低版本为 3。迁移 010 扩展既有 providers 配置周期和 llm_calls.kind，不建立另一份历史或费用账本。原生压缩开启但续接关闭时仍下发主体/配置绑定；实际连接、凭据及有效参数变化沿同一周期失效。
+
+仅开放固定 Responses compact/input_tokens 路由。compact 按连接传输选择 HTTP 原字节转发或独立 Codex V2 WS：输入末尾追加 compaction_trigger，完整终态才生成 response.compaction JSON，保留用户/开发者输入与完整原生项；失败、取消、超限不发布成功窗口、不回退。普通 WS store=false 使用临时链且交付后关闭；压缩不占用或销毁其他业务链。
+
+计量仅转发 HTTP，不能以 WS 生成模拟；不支持沿用本体既有估算。context_compaction 费用进入业务消耗，input_tokens 只保留调用追溯且不计为消耗。普通请求拒绝 context_management/compaction_trigger，server_auto_compaction_enabled 本版必须 false。
+
+WS compact 的完整 JSON 不设专用 2 MiB 门槛：保留用户/开发者消息及图片后返回完整窗口，
+不能把该聚合误当单个密文 item。资源保护仍由通用请求大小、并发和 WS 接收缓冲预算承担；
+快照/计量解析预算仅影响记录完整性，不截断实际转发内容。

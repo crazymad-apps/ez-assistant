@@ -27,6 +27,7 @@ fn identity() -> ModelIdentity {
 
 fn tool_turn() -> AssistantMessage {
     AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new("tool_turn").expect("valid fixture message id"),
         model: identity(),
         parts: vec![AssistantPart::ToolCall(ToolCall {
@@ -41,6 +42,7 @@ fn tool_turn() -> AssistantMessage {
 
 fn final_turn() -> AssistantMessage {
     AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new("answer").expect("valid fixture message id"),
         model: identity(),
         parts: vec![AssistantPart::Text(TextPart {

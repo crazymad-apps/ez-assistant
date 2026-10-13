@@ -34,6 +34,7 @@ async fn start_goal_is_idempotent_freezes_objective_and_clears_after_completion(
                 "first Goal Run finished",
             ))),
             ModelScript::Events(message_events(&AssistantMessage {
+                purpose: agent_types::AssistantMessagePurpose::ModelResponse,
                 id: MessageId::new("goal-complete-signal").expect("message id"),
                 model: ModelIdentity::new(
                     ProviderId::new("fixture").expect("provider id"),
@@ -377,6 +378,7 @@ async fn stop_goal_fences_late_run_settlement_then_clear_removes_only_the_contro
 #[tokio::test]
 async fn blocked_goal_resumes_with_visible_user_guidance_and_a_new_generation() {
     let blocked = AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new("goal-blocked-signal").expect("message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("provider id"),
@@ -391,6 +393,7 @@ async fn blocked_goal_resumes_with_visible_user_guidance_and_a_new_generation() 
         usage: None,
     };
     let complete = AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new("goal-resumed-complete-signal").expect("message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("provider id"),
@@ -518,6 +521,7 @@ async fn blocked_goal_resumes_with_visible_user_guidance_and_a_new_generation() 
 #[tokio::test]
 async fn fork_copies_goal_only_when_the_objective_message_is_in_the_prefix() {
     let blocked = AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new("fork-goal-blocked-signal").expect("message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("provider id"),
@@ -726,6 +730,7 @@ async fn goal_pauses_after_three_consecutive_run_failures_without_retrying_an_at
 #[tokio::test]
 async fn paused_goal_can_resume_with_a_hidden_runtime_continuation() {
     let signal = |status: &str, message_id: &str, call_id: &str| AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new(message_id).expect("message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("provider id"),
@@ -812,6 +817,7 @@ async fn paused_goal_can_resume_with_a_hidden_runtime_continuation() {
 #[tokio::test]
 async fn held_user_input_can_be_bound_to_goal_resume_without_duplication() {
     let signal = |status: &str, message_id: &str, call_id: &str| AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new(message_id).expect("message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("provider id"),
@@ -914,8 +920,9 @@ async fn held_user_input_can_be_bound_to_goal_resume_without_duplication() {
 }
 
 #[tokio::test]
-async fn reported_usage_pauses_goal_at_the_total_token_limit() {
+async fn reported_usage_does_not_pause_goal_before_the_run_limit() {
     let costly = |suffix: &str| AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new(format!("goal-token-limit-answer-{suffix}")).expect("message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("provider id"),
@@ -937,12 +944,10 @@ async fn reported_usage_pauses_goal_at_the_total_token_limit() {
     let model = Arc::new(ScriptedModelService::new(
         model_capabilities(true),
         1_000_000,
-        [
-            ModelScript::Events(message_events(&costly("first"))),
-            ModelScript::Events(message_events(&costly("second"))),
-        ],
+        (0..crate::goal::DEFAULT_MAX_RUNS)
+            .map(|index| ModelScript::Events(message_events(&costly(&index.to_string())))),
     ));
-    let runtime = runtime_with_tools(model, ToolSetSnapshot::default());
+    let runtime = runtime_with_tools(model.clone(), ToolSetSnapshot::default());
     let session_id = runtime
         .create_session(CreateSessionRequest::default())
         .await
@@ -970,14 +975,23 @@ async fn reported_usage_pauses_goal_at_the_total_token_limit() {
     assert!(
         matches!(
             goal.state,
-            GoalState::Paused(crate::goal::GoalPauseReason::TokenLimitReached)
+            GoalState::Paused(crate::goal::GoalPauseReason::RunLimitReached)
         ),
         "unexpected Goal state: {goal:?}"
     );
-    assert_eq!(goal.budget.used_total_tokens, 500_000);
-    assert_eq!(goal.budget.used_runs, 2);
+    assert_eq!(goal.budget.used_total_tokens, 5_000_000);
+    assert_eq!(goal.budget.used_runs, crate::goal::DEFAULT_MAX_RUNS);
     assert!(goal.budget.usage_complete);
     assert_eq!(goal.generation, 2);
     assert_eq!(state.inputs.len(), 1);
     assert_eq!(state.runs.len(), 1);
+    let requests = model.take_requests();
+    assert_eq!(requests.len(), crate::goal::DEFAULT_MAX_RUNS as usize);
+    for request in requests {
+        assert!(
+            !serde_json::to_string(&request.conversation)
+                .unwrap()
+                .contains("remaining_total_tokens")
+        );
+    }
 }

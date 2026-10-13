@@ -148,8 +148,8 @@ it.skipIf(process.env.CENTER_WS_HOST_TEST !== '1')(
     });
     const app = Fastify();
     app.get('/api/info', async () => ({
-      protocol_version: 2,
-      min_protocol_version: 2,
+      protocol_version: 3,
+      min_protocol_version: 3,
       capabilities: ['managed_models', 'llm_proxy'],
     }));
     app.post('/api/auth/login', async () => credentials);

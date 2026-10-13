@@ -222,6 +222,7 @@ async fn unavailable_session_skips_settlement_and_cannot_resume_after_restart() 
         .expect("message");
     store
         .commit_user_message(crate::UserMessageCommit {
+            context_management_mode: agent_model::ContextManagementMode::LocalSummary,
             shell: None,
             operation_id: "startup-fixture".to_owned(),
             input_id: accepted.input_id,

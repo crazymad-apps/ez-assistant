@@ -13,6 +13,49 @@ pub struct ContextLayout {
 }
 
 impl ContextLayout {
+    /// 轮内只回收闭合交换，User 通过摘要引用保留；最后一批及其后内容原样保护。
+    pub(crate) fn intra_turn_partition(
+        &self,
+    ) -> Option<(Vec<ContextBlock>, Vec<ContextBlock>, agent_types::MessageId)> {
+        let messages: Vec<_> = self
+            .blocks
+            .iter()
+            .flat_map(|block| block.messages.iter().cloned())
+            .collect();
+        let anchor = messages.iter().rposition(|message| matches!(message,
+            ConversationMessage::User(user) if user.transcript_visibility == agent_types::TranscriptVisibility::Visible
+        ))?;
+        let ConversationMessage::User(user) = &messages[anchor] else {
+            return None;
+        };
+        let exchanges: Vec<_> = messages
+            .iter()
+            .enumerate()
+            .skip(anchor + 1)
+            .filter_map(|(index, message)| match message {
+                ConversationMessage::Assistant(assistant)
+                    if assistant
+                        .parts
+                        .iter()
+                        .any(|part| matches!(part, AssistantPart::ToolCall(_))) =>
+                {
+                    Some(index)
+                }
+                _ => None,
+            })
+            .collect();
+        if exchanges.len() < 2 {
+            return None;
+        }
+        let split = *exchanges.last()?;
+        let head = vec![ContextBlock::completed_user_turn(
+            messages[..split].to_vec(),
+        )];
+        let mut tail = vec![messages[anchor].clone()];
+        tail.extend_from_slice(&messages[split..]);
+        Some((head, vec![ContextBlock::user_turn(tail)], user.id.clone()))
+    }
+
     /// 校验快照并按 System prefix、Context Summary 和完整 User Turn 分块。
     pub fn build(snapshot: &ConversationSnapshot) -> Result<Self, ContextLayoutError> {
         snapshot
@@ -21,7 +64,7 @@ impl ContextLayout {
 
         let mut protected_prefix = Vec::new();
         let mut blocks = Vec::new();
-        let mut current_turn: Option<Vec<ConversationMessage>> = None;
+        let mut current_turn: Option<(ContextBlockKind, Vec<ConversationMessage>)> = None;
         let mut summary_seen = false;
         let mut conversation_started = false;
 
@@ -44,26 +87,36 @@ impl ContextLayout {
                     blocks.push(ContextBlock::context_summary(message.clone()));
                 }
                 ConversationMessage::User(_) => {
-                    if let Some(turn) = current_turn.take() {
+                    if let Some((kind, turn)) = current_turn.take() {
                         // 下一条 User 已经开始，说明前一轮无论以普通 Assistant 回复还是
                         // 中断后的 Tool Result 结束，都已成为历史轮次。只有快照末尾的
                         // User Turn 才需要根据末条消息判断是否仍在执行。
-                        blocks.push(ContextBlock::completed_user_turn(turn));
+                        let mut block = ContextBlock::completed_user_turn(turn);
+                        block.kind = kind;
+                        blocks.push(block);
                     }
                     conversation_started = true;
-                    current_turn = Some(vec![message.clone()]);
+                    current_turn = Some((ContextBlockKind::UserTurn, vec![message.clone()]));
                 }
                 ConversationMessage::Assistant(_) | ConversationMessage::Tool(_) => {
                     conversation_started = true;
-                    let Some(turn) = &mut current_turn else {
+                    if let Some((_, turn)) = &mut current_turn {
+                        turn.push(message.clone());
+                    } else if matches!(message, ConversationMessage::Assistant(assistant) if assistant.parts.first().is_some_and(|part| matches!(part,
+                        AssistantPart::ProviderState(state) if state.context_effect() == Some(agent_types::ProviderContextEffect::ReplacePriorContext)
+                    ))) {
+                        current_turn =
+                            Some((ContextBlockKind::ProviderContext, vec![message.clone()]));
+                    } else {
                         return Err(ContextLayoutError::MessageOutsideUserTurn);
-                    };
-                    turn.push(message.clone());
+                    }
                 }
             }
         }
-        if let Some(turn) = current_turn {
-            blocks.push(ContextBlock::user_turn(turn));
+        if let Some((kind, turn)) = current_turn {
+            let mut block = ContextBlock::user_turn(turn);
+            block.kind = kind;
+            blocks.push(block);
         }
 
         Ok(Self {
@@ -114,6 +167,8 @@ impl ContextLayout {
 /// 可压缩历史中的原子块类别。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ContextBlockKind {
+    /// 原生完整窗口可直接开始有效上下文，不伪造 User 锚点。
+    ProviderContext,
     /// 先前压缩生成的摘要；再次滚动时进入 head。
     ContextSummary,
     /// 从 UserMessage 开始、覆盖到下一 UserMessage 之前的完整轮次。
@@ -252,6 +307,7 @@ mod tests {
 
     fn assistant(value: &str) -> ConversationMessage {
         ConversationMessage::Assistant(AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: id(value),
             model: ModelIdentity::new(
                 ProviderId::new("test").expect("valid provider id"),
@@ -268,6 +324,7 @@ mod tests {
 
     fn tool_call(value: &str, call_id: &str) -> ConversationMessage {
         ConversationMessage::Assistant(AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: id(value),
             model: ModelIdentity::new(
                 ProviderId::new("test").expect("valid provider id"),
@@ -297,6 +354,7 @@ mod tests {
 
     fn assistant_with_provider_state(value: &str) -> ConversationMessage {
         ConversationMessage::Assistant(AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: id(value),
             model: ModelIdentity::new(
                 ProviderId::new("test").expect("valid provider id"),
@@ -326,6 +384,7 @@ mod tests {
                 text: "system".to_owned(),
             }),
             ConversationMessage::ContextSummary(ContextSummaryMessage {
+                retained_user_message_id: None,
                 id: id("summary_1"),
                 text: "summary".to_owned(),
                 model: None,
@@ -433,6 +492,7 @@ mod tests {
     fn minimum_recent_turns_never_split_a_user_turn() {
         let layout = ContextLayout::build(&ConversationSnapshot::new(vec![
             ConversationMessage::ContextSummary(ContextSummaryMessage {
+                retained_user_message_id: None,
                 id: id("summary_1"),
                 text: "summary".to_owned(),
                 model: None,
@@ -513,6 +573,7 @@ mod tests {
 
         let duplicate_summary = ConversationSnapshot::new(vec![
             ConversationMessage::ContextSummary(ContextSummaryMessage {
+                retained_user_message_id: None,
                 id: id("summary_1"),
                 text: "first".to_owned(),
                 model: None,
@@ -522,6 +583,7 @@ mod tests {
                 programmatic_context: None,
             }),
             ConversationMessage::ContextSummary(ContextSummaryMessage {
+                retained_user_message_id: None,
                 id: id("summary_2"),
                 text: "second".to_owned(),
                 model: None,
@@ -540,6 +602,7 @@ mod tests {
             user("user_1"),
             assistant("assistant_1"),
             ConversationMessage::ContextSummary(ContextSummaryMessage {
+                retained_user_message_id: None,
                 id: id("summary_1"),
                 text: "late".to_owned(),
                 model: None,

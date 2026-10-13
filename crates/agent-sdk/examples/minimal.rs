@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 fn assistant_message() -> AssistantMessage {
     AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new("answer").expect("valid fixture message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("valid fixture provider id"),

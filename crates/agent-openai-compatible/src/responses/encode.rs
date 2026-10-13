@@ -39,6 +39,8 @@ const RESERVED_REQUEST_KEYS: &[&str] = &[
     "previous_response_id",
     "conversation",
     "background",
+    "context_management",
+    "compaction_trigger",
 ];
 
 pub(super) fn encode_request_with_images(
@@ -52,6 +54,16 @@ pub(super) fn encode_request_with_images(
         .validate_tool_exchange_pairs()
         .map_err(|error| ModelError::Config(error.to_string()))?;
 
+    encode_request_unchecked(request, prepared_images, adapter, model)
+}
+
+/// 仅用于已校验历史的机械编码，包括尚未附上工具结果的续接哈希前缀。
+pub(super) fn encode_request_unchecked(
+    request: &ModelRequest,
+    prepared_images: &agent_model::PreparedModelImages,
+    adapter: &ResponsesProtocolAdapter,
+    model: &str,
+) -> Result<ResponsesRequest, ModelError> {
     let input = encode_input_from(request, prepared_images, adapter, 0)?;
 
     let tools = if request.tools.is_empty() {
@@ -340,18 +352,34 @@ fn encode_assistant_message(
         let AssistantPart::ProviderState(state) = part else {
             continue;
         };
-        let Some(route_fingerprint) = adapter.route_fingerprint.as_deref() else {
-            continue;
-        };
-        if state.provider() != &adapter.provider
-            || state.protocol() != &adapter.protocol
-            || state.route_fingerprint() != Some(route_fingerprint)
-        {
+        if state.provider() != &adapter.provider || state.protocol() != &adapter.protocol {
             continue;
         }
         if state.state_type() == super::continuation::STATE_TYPE {
             // 续接元数据不是 reasoning item；关闭或重建时也不能发送给 Provider。
             continue;
+        }
+        // 完整压缩窗口是可靠历史内容，不能与临时响应 ID 共用路由失效条件。
+        // 独立 reasoning item 仍遵循其原有精确回放规则。
+        if state.state_type() != super::service::auxiliary::STATE_TYPE
+            && (adapter.route_fingerprint.is_none()
+                || state.route_fingerprint() != adapter.route_fingerprint.as_deref())
+        {
+            continue;
+        }
+        if state.state_type() == super::service::auxiliary::STATE_TYPE {
+            for item in super::service::auxiliary::window_items(state)? {
+                input.push(ResponsesInputItem::Native(item));
+            }
+            continue;
+        }
+        turn_payload_bytes = turn_payload_bytes
+            .checked_add(state.payload().len())
+            .ok_or_else(|| ModelError::Protocol("provider state byte count overflow".to_owned()))?;
+        if turn_payload_bytes > MAX_PROVIDER_STATE_TURN_BYTES {
+            return Err(ModelError::Protocol(
+                "Responses provider state exceeds the per-turn byte limit".to_owned(),
+            ));
         }
         if adapter.opaque_reasoning != super::adapter::OpaqueReasoningPolicy::PreserveEncryptedItem
             || state.state_type() != "responses.reasoning_item"
@@ -360,14 +388,6 @@ fn encode_assistant_message(
         {
             return Err(ModelError::Config(
                 "compatible Responses provider state uses an unsupported format".to_owned(),
-            ));
-        }
-        turn_payload_bytes = turn_payload_bytes
-            .checked_add(state.payload().len())
-            .ok_or_else(|| ModelError::Protocol("provider state byte count overflow".to_owned()))?;
-        if turn_payload_bytes > MAX_PROVIDER_STATE_TURN_BYTES {
-            return Err(ModelError::Protocol(
-                "Responses provider state exceeds the per-turn byte limit".to_owned(),
             ));
         }
         let (item, raw_parts) = decode_opaque_reasoning_item(state.payload())?;

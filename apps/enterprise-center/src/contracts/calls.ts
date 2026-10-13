@@ -33,7 +33,7 @@ export class CallDetails {
   @ApiProperty({ type: String, nullable: true }) provider_instance_id!: string | null;
   @ApiProperty({ type: String, nullable: true }) provider_name!: string | null;
   @ApiProperty({ type: String, nullable: true }) model_id!: string | null;
-  @ApiProperty({ enum: ['proxy', 'admin_test'] }) kind!: 'proxy' | 'admin_test';
+  @ApiProperty({ enum: ['proxy', 'admin_test', 'context_compaction', 'input_tokens'] }) kind!: 'proxy' | 'admin_test' | 'context_compaction' | 'input_tokens';
   @ApiProperty({ enum: protocols }) protocol!: Protocol;
   @ApiProperty({ format: 'date-time' }) started_at!: string;
   @ApiProperty({ type: String, nullable: true, format: 'date-time' }) ended_at!: string | null;
@@ -57,7 +57,7 @@ export class CallQuery {
   @ApiPropertyOptional({ format: 'uuid' }) provider_instance_id?: string;
   @ApiPropertyOptional() model_id?: string;
   @ApiPropertyOptional({ enum: outcomes }) outcome?: Outcome;
-  @ApiPropertyOptional({ enum: ['proxy', 'admin_test'] }) kind?: 'proxy' | 'admin_test';
+  @ApiPropertyOptional({ enum: ['proxy', 'admin_test', 'context_compaction', 'input_tokens'] }) kind?: 'proxy' | 'admin_test' | 'context_compaction' | 'input_tokens';
   @ApiPropertyOptional({ format: 'date-time' }) from?: string;
   @ApiPropertyOptional({ format: 'date-time' }) to?: string;
   @ApiPropertyOptional({ default: 50, minimum: 1, maximum: 200 }) limit?: number;
@@ -77,7 +77,7 @@ export class UsageQuery {
   @ApiPropertyOptional({ type: Number }) user_id?: number;
   @ApiPropertyOptional({ format: 'uuid' }) provider_instance_id?: string;
   @ApiPropertyOptional() model_id?: string;
-  @ApiPropertyOptional({ enum: ['proxy', 'admin_test'] }) kind?: 'proxy' | 'admin_test';
+  @ApiPropertyOptional({ enum: ['proxy', 'admin_test', 'context_compaction'] }) kind?: 'proxy' | 'admin_test' | 'context_compaction';
   @ApiPropertyOptional({ enum: outcomes }) outcome?: Outcome;
   @ApiPropertyOptional({ enum: ['hour', 'day', 'month'] }) granularity?: 'hour' | 'day' | 'month';
   @ApiPropertyOptional({ enum: ['user', 'model'] }) group_by?: 'user' | 'model';

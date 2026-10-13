@@ -64,6 +64,8 @@ pub(crate) struct Engine {
     dispatched: u32,
     /// 仅在当前 AgentExecution 内保留的重复调用与连续失败状态。
     guardrails: GuardrailState,
+    /// 宿主仅在可靠压缩提交后授权的一次软阈值许可。
+    compaction_grace: bool,
 }
 
 /// 一个模型 Turn 的结局。
@@ -83,6 +85,7 @@ impl Engine {
         cancellation: CancellationToken,
         events: AgentEventSender,
         starting_step: std::num::NonZeroU32,
+        compaction_grace: bool,
     ) -> Self {
         let ExecutionInput { conversation } = input;
         let projection = conversation.messages;
@@ -96,6 +99,7 @@ impl Engine {
             starting_step,
             dispatched: 0,
             guardrails: GuardrailState::default(),
+            compaction_grace,
         }
     }
 
@@ -116,8 +120,15 @@ impl Engine {
             let Some(next_step) = self.starting_step.get().checked_add(self.steps) else {
                 return self.fail(ExecutionError::Internal);
             };
-            let snapshot = ConversationSnapshot::new(self.projection.clone());
-            let evaluation = match self
+            let snapshot = match agent_context::project_effective_context(
+                &ConversationSnapshot::new(self.projection.clone()),
+                self.spec.model.context_policy(),
+            ) {
+                Ok(snapshot) => snapshot,
+                Err(error) => return self.fail(ExecutionError::Model(error)),
+            };
+            self.projection = snapshot.messages.clone();
+            let mut evaluation = match self
                 .spec
                 .context_window
                 .evaluate(&snapshot, self.spec.model.as_ref())
@@ -126,7 +137,42 @@ impl Engine {
                 Err(error) => return self.fail(ExecutionError::ContextWindow(error)),
             };
             let request = self.build_request();
-            if evaluation.decision == ContextWindowDecision::CompactionRequired {
+            let mut call_context = ModelCallContext::new(self.cancellation.clone());
+            // 每段执行仅首次准备时计量；刷新界面和工具循环不额外触发远端请求。
+            if self.steps == 0 && !self.cancellation.is_cancelled() {
+                match self
+                    .spec
+                    .model
+                    .count_input_tokens(&request, &mut call_context)
+                    .await
+                {
+                    Ok(Some(tokens)) => {
+                        evaluation = match self.spec.context_window.evaluate_tokens(
+                            Some(tokens),
+                            agent_context::ContextUsageAccuracy::Exact,
+                            self.spec.model.context_window_tokens(),
+                            self.spec.model.max_input_tokens(),
+                        ) {
+                            Ok(evaluation) => evaluation,
+                            Err(error) => return self.fail(ExecutionError::ContextWindow(error)),
+                        };
+                    }
+                    Err(ModelError::Cancelled) => return self.cancelled(),
+                    Ok(None) | Err(_) => {}
+                }
+            }
+            let grace = std::mem::take(&mut self.compaction_grace);
+            let below_hard_limit = evaluation.used_tokens.is_none_or(|used| {
+                used <= evaluation
+                    .max_input_tokens
+                    .unwrap_or(evaluation.context_window_tokens)
+                    && used.saturating_add(u64::from(
+                        request.generation.max_output_tokens.unwrap_or(0),
+                    )) <= evaluation.context_window_tokens
+            });
+            if evaluation.decision == ContextWindowDecision::CompactionRequired
+                && !(grace && below_hard_limit)
+            {
                 return self.compaction_required(
                     CompactionReason::ThresholdReached,
                     next_step,
@@ -136,10 +182,15 @@ impl Engine {
             self.steps += 1;
             self.events
                 .send(AgentEvent::StepStarted { step: next_step });
-            let message = match self.stream_turn(request).await {
+            let message = match self.stream_turn(request, call_context).await {
                 TurnEnd::Finished(message) => message,
                 TurnEnd::Terminal(outcome) => return outcome,
             };
+            if !message.purpose.is_model_response() {
+                return self.fail(ExecutionError::Model(ModelError::Protocol(
+                    "ordinary generation returned a compaction operation".into(),
+                )));
+            }
 
             // 使用本轮请求的冻结快照；拒绝必须早于 pending、授权和工具副作用。
             if snapshot.validate_response_tool_call_ids(&message).is_err() {
@@ -219,13 +270,13 @@ impl Engine {
     ///
     /// 取消经 `ModelCallContext` 传播给模型服务；本函数不 race，只在终态收敛点
     /// 检查令牌（服务契约保证取消后流以受控终态结束）。
-    async fn stream_turn(&mut self, request: ModelRequest) -> TurnEnd {
+    async fn stream_turn(
+        &mut self,
+        request: ModelRequest,
+        call_context: ModelCallContext,
+    ) -> TurnEnd {
         let handoff_request = request.clone();
-        let established = self
-            .spec
-            .model
-            .stream(request, ModelCallContext::new(self.cancellation.clone()))
-            .await;
+        let established = self.spec.model.stream(request, call_context).await;
         let stream = match established {
             Ok(stream) => stream,
             // 建立前失败；已取消或 Cancelled 错误归取消收敛。

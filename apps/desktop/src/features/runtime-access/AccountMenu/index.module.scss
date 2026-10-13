@@ -71,4 +71,4 @@
   small { color: var(--ez-text-muted); font-size: var(--ez-font-small); }
 }
 .summary_heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.update_button { width: auto; min-height: 26px; padding: 3px 8px; color: var(--ez-primary); }
+.update_button { width: auto; min-height: var(--ez-control-height-small); padding: 3px 8px; color: var(--ez-primary); }

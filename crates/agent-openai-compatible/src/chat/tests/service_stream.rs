@@ -243,6 +243,7 @@ async fn stream_replays_reasoning_text_and_tool_call_turn_end_to_end() {
     let collected = EventCollector::collect_validated(stream).await;
 
     let expected_message = AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: message_id("chatcmpl-1"),
         model: ModelIdentity::new(provider_id("deepseek"), "deepseek-reasoner"),
         parts: vec![

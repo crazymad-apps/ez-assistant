@@ -173,7 +173,8 @@ async fn batch_descendants_are_reaped_on_close_drop_and_cancelled_handshake() {
     fs::write(
         &batch,
         format!(
-            "@echo off\r\n\"{}\" \"{}\"\r\n",
+            // fixture 按 UTF-8 写入；用户目录包含中文时 CMD 不能按系统 ANSI 解码路径。
+            "@chcp 65001 >nul\r\n@echo off\r\n\"{}\" \"{}\"\r\n",
             node.display(),
             parent.display()
         ),
@@ -196,7 +197,10 @@ async fn batch_descendants_are_reaped_on_close_drop_and_cancelled_handshake() {
         .unwrap()
         .unwrap();
         let address = format!("127.0.0.1:{}", ready.trim());
-        assert!(tokio::net::TcpStream::connect(&address).await.is_ok());
+        assert!(
+            tokio::net::TcpStream::connect(&address).await.is_ok(),
+            "synthetic descendant did not open its reported endpoint: {ready:?}"
+        );
         let stdin = child.stdin().take().unwrap();
         let stderr = child.stderr().take().unwrap();
         let cleanup = Arc::new(McpProcessCleanup::default());

@@ -1227,6 +1227,7 @@ mod tests {
                     "barrier-model",
                 );
                 let message = AssistantMessage {
+                    purpose: agent_types::AssistantMessagePurpose::ModelResponse,
                     id: message_id.clone(),
                     model: identity.clone(),
                     parts: vec![AssistantPart::Text(TextPart {

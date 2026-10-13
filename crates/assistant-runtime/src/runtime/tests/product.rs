@@ -67,6 +67,7 @@ pub(super) fn mcp_tool_step(message_id: &str, title: &str) -> ModelScript {
 
 fn mcp_tool_step_with_arguments(message_id: &str, arguments: serde_json::Value) -> ModelScript {
     ModelScript::Events(message_events(&AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new(message_id).expect("message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("provider id"),
@@ -88,6 +89,7 @@ fn mcp_tool_step_with_arguments(message_id: &str, arguments: serde_json::Value) 
 
 fn discover_mcp_step(message_id: &str, arguments: serde_json::Value) -> ModelScript {
     ModelScript::Events(message_events(&AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new(message_id).expect("message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("provider id"),
@@ -869,6 +871,7 @@ async fn selected_mcp_freezes_queue_conversation_fork_and_full_run_disclosure() 
 #[tokio::test]
 async fn selected_mcp_is_inherited_by_goal_runs_but_not_the_next_ordinary_input() {
     let completion_signal = AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new("selected-goal-signal").expect("message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("provider id"),
@@ -1001,6 +1004,7 @@ async fn selected_mcp_is_inherited_by_goal_runs_but_not_the_next_ordinary_input(
 #[tokio::test]
 async fn selected_mcp_disclosure_and_fixed_gateways_are_inherited_by_child_agent() {
     let delegate = AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new("selected-mcp-delegate").expect("message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("provider id"),
@@ -1864,6 +1868,7 @@ async fn tool_detail_is_loaded_by_stable_owner_message_and_call_ids() {
             8_192,
             [
                 ModelScript::Events(message_events(&AssistantMessage {
+                    purpose: agent_types::AssistantMessagePurpose::ModelResponse,
                     id: tool_message_id.clone(),
                     model: ModelIdentity::new(
                         ProviderId::new("fixture").expect("provider id"),
@@ -2010,6 +2015,7 @@ fn child_context_uses_latest_compaction_boundary_and_keeps_cumulative_usage() {
     use agent_types::{ContextSummaryMessage, ContextUsageAdjustment};
     let summary = |id: &str, retained: &str, subtract| {
         ConversationMessage::ContextSummary(ContextSummaryMessage {
+            retained_user_message_id: None,
             id: MessageId::new(id).unwrap(),
             text: "abcd".into(),
             model: None,
@@ -2027,8 +2033,12 @@ fn child_context_uses_latest_compaction_boundary_and_keeps_cumulative_usage() {
         summary("summary-1", "retained-1", 4000),
         ConversationMessage::Assistant(assistant_text_with_usage("retained-1", "kept", 5000)),
     ]);
-    let first = project_child_usage(&history, Some(8192));
-    assert_eq!(first.context.as_ref().unwrap().used_tokens, 1005);
+    let first = project_child_usage(
+        &history,
+        Some(8192),
+        agent_model::ContextManagementMode::LocalSummary,
+    );
+    assert_eq!(first.context.as_ref().unwrap().used_tokens, Some(1005));
     assert_eq!(
         first.accumulated.as_ref().unwrap().total_tokens,
         Some(11000)
@@ -2037,31 +2047,67 @@ fn child_context_uses_latest_compaction_boundary_and_keeps_cumulative_usage() {
         summary("summary-2", "retained-2", 2800),
         ConversationMessage::Assistant(assistant_text_with_usage("retained-2", "second", 3000)),
     ]);
-    let second = project_child_usage(&history, Some(8192));
-    assert_eq!(second.context.as_ref().unwrap().used_tokens, 205);
+    let second = project_child_usage(
+        &history,
+        Some(8192),
+        agent_model::ContextManagementMode::LocalSummary,
+    );
+    assert_eq!(second.context.as_ref().unwrap().used_tokens, Some(205));
     assert_eq!(
         second.accumulated.as_ref().unwrap().total_tokens,
         Some(14000)
     );
-    assert!(project_child_usage(&history, None).context.is_none());
-    assert!(project_child_usage(&history, Some(0)).context.is_none());
+    assert!(
+        project_child_usage(
+            &history,
+            None,
+            agent_model::ContextManagementMode::LocalSummary
+        )
+        .context
+        .is_none()
+    );
+    assert!(
+        project_child_usage(
+            &history,
+            Some(0),
+            agent_model::ContextManagementMode::LocalSummary
+        )
+        .context
+        .is_none()
+    );
     history
         .messages
         .push(ConversationMessage::Assistant(assistant_text_with_usage(
             "fresh", "fresh", 400,
         )));
     assert_eq!(
-        project_child_usage(&history, Some(8192))
-            .context
-            .unwrap()
-            .used_tokens,
-        400
+        project_child_usage(
+            &history,
+            Some(8192),
+            agent_model::ContextManagementMode::LocalSummary
+        )
+        .context
+        .unwrap()
+        .used_tokens,
+        Some(400)
     );
-    assert!(
-        project_child_usage(&ConversationSnapshot::default(), Some(8192))
-            .context
-            .is_none()
+    let unknown = project_child_usage(
+        &ConversationSnapshot::default(),
+        Some(8192),
+        agent_model::ContextManagementMode::ServerCompaction,
+    )
+    .context
+    .unwrap();
+    assert_eq!(
+        unknown.accuracy,
+        assistant_protocol::ContextUsageAccuracy::Unknown
     );
+    assert_eq!(
+        unknown.mode,
+        assistant_protocol::ContextManagementModeSnapshot::ServerCompaction
+    );
+    assert!(unknown.used_tokens.is_none());
+    assert!(unknown.usage_basis_points.is_none());
 }
 
 #[tokio::test]

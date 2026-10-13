@@ -275,3 +275,86 @@ fn restored_history_policy_requires_supported_responses_and_a_durable_binding() 
         "restored Chat cannot use Responses history"
     );
 }
+
+#[test]
+fn server_compaction_switches_are_independent_and_require_verified_responses() {
+    let mut values = parameters();
+    let mut responses = provider(ProviderType::Openai, ProviderProtocolPreference::Responses);
+    responses.server_history_key = Some("compaction-binding".into());
+    for support in [
+        ModelFeatureSupport::Unknown,
+        ModelFeatureSupport::Unsupported,
+    ] {
+        values.server_compaction_enabled = true;
+        values.server_compaction_support = support;
+        assert!(
+            compile_managed_model(
+                &responses,
+                &selection(),
+                &values,
+                &GenerationConfig::default()
+            )
+            .is_err()
+        );
+    }
+    values.server_compaction_support = ModelFeatureSupport::Supported;
+    let compiled = compile_managed_model(
+        &responses,
+        &selection(),
+        &values,
+        &GenerationConfig::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        compiled.context_management_mode(),
+        agent_model::ContextManagementMode::ServerCompaction
+    );
+    assert!(
+        !responses.connection.server_history_enabled,
+        "compact does not require remote history"
+    );
+    assert!(
+        compile_managed_model(
+            &provider(
+                ProviderType::Openai,
+                ProviderProtocolPreference::ChatCompletions
+            ),
+            &selection(),
+            &values,
+            &GenerationConfig::default()
+        )
+        .is_err()
+    );
+    values.server_auto_compaction_enabled = true;
+    assert!(
+        compile_managed_model(
+            &responses,
+            &selection(),
+            &values,
+            &GenerationConfig::default()
+        )
+        .is_err()
+    );
+    values.server_compaction_enabled = false;
+    assert!(
+        compile_managed_model(
+            &responses,
+            &selection(),
+            &values,
+            &GenerationConfig::default()
+        )
+        .is_err()
+    );
+    values.server_auto_compaction_enabled = false;
+    assert_eq!(
+        compile_managed_model(
+            &responses,
+            &selection(),
+            &values,
+            &GenerationConfig::default()
+        )
+        .unwrap()
+        .context_management_mode(),
+        agent_model::ContextManagementMode::LocalSummary
+    );
+}

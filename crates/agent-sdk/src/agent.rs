@@ -76,6 +76,19 @@ impl Agent {
         AgentExecution::start_at_step(spec, input, context, starting_step)
     }
 
+    /// 使用剩余预算续跑已可靠提交的压缩结果，首个调用允许验证软阈值后的进展。
+    pub fn start_after_compaction(
+        &self,
+        input: ExecutionInput,
+        context: ExecutionContext,
+        budget: ExecutionBudget,
+        starting_step: NonZeroU32,
+    ) -> AgentExecution {
+        let mut spec = self.spec.clone();
+        spec.budget = budget;
+        AgentExecution::start_after_compaction(spec, input, context, starting_step)
+    }
+
     /// 使用一次执行独享的不可恢复 Recorder 启动一次执行。
     ///
     /// 临时 Recorder 仍严格执行 tool exchange 的 begin/complete 协议，但完成后立即

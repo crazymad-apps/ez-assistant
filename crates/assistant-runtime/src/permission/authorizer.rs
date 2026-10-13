@@ -840,6 +840,7 @@ mod tests {
         RuntimeToolAuthorizer::new(
             RunAuthorizationScope { variant },
             Arc::new(SessionController::new(crate::StoredSession {
+                context_management_mode: None,
                 server_history_key: None,
                 custom_agent: None,
                 agent_shell_environment: None,

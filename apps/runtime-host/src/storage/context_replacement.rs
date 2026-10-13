@@ -17,6 +17,16 @@ impl StorageEngine {
         &mut self,
         replacement: ContextReplacement,
     ) -> StorageResult<ContextReplacementResult> {
+        let native = native_boundary(&replacement.conversation).is_some();
+        let mode: Option<String> = match &replacement.target {
+            ContextReplacementTarget::Run { session_id, .. } | ContextReplacementTarget::IdleSession { session_id, .. } => self.connection.query_row("SELECT context_management_mode FROM sessions WHERE session_id = ?1", [session_id.as_str()], |row| row.get(0)),
+            ContextReplacementTarget::ChildTask { child_task_id, session_id } => self.connection.query_row("SELECT context_management_mode FROM child_tasks WHERE child_task_id = ?1 AND session_id = ?2", params![child_task_id.as_str(), session_id.as_str()], |row| row.get(0)),
+        }.map_err(|source| internal_error("compaction owner mode could not be checked", source))?;
+        if native != (mode.as_deref() == Some("server_compaction")) {
+            return Err(conflict(
+                "compaction mechanism does not match frozen owner mode",
+            ));
+        }
         match replacement.target {
             ContextReplacementTarget::Run { session_id, run_id } => {
                 let active = self
@@ -42,6 +52,42 @@ impl StorageEngine {
                     &product_history,
                     &replacement.conversation,
                 )?;
+                if let Some(boundary) = native_boundary(&replacement.conversation) {
+                    let mode: Option<String> = self
+                        .connection
+                        .query_row(
+                            "SELECT context_management_mode FROM sessions WHERE session_id = ?1",
+                            [session_id.as_str()],
+                            |row| row.get(0),
+                        )
+                        .map_err(|e| {
+                            internal_error("session compaction mode could not be checked", e)
+                        })?;
+                    if mode.as_deref() != Some("server_compaction") {
+                        return Err(conflict("native compaction mode mismatch"));
+                    }
+                    let generation = self.session_generation(&session_id)?;
+                    let operation_id = format!(
+                        "native-compact:{}:{}",
+                        run_id.as_str(),
+                        boundary.id.as_str()
+                    );
+                    self.append_messages(super::recovery::AppendRequest {
+                        operation_id,
+                        session_id,
+                        run_id,
+                        messages: vec![agent_types::ConversationMessage::Assistant(
+                            boundary.clone(),
+                        )],
+                        message_step: None,
+                        created_at_ms: replacement.changed_at_ms,
+                    })?;
+                    return Ok(ContextReplacementResult {
+                        source_generation: generation,
+                        result_generation: generation,
+                        product_message_count: merged.messages.len() as u64,
+                    });
+                }
                 let plan = self.begin_replacement(session_id, merged, replacement.changed_at_ms)?;
                 if let Err(error) = self.commit_replacement(&plan) {
                     if let Ok(directory) = self.session_directory(&plan.session_id) {
@@ -94,6 +140,38 @@ impl StorageEngine {
             &product_history,
             &snapshot,
         )?;
+        if let Some(boundary) = native_boundary(&snapshot) {
+            let active: i64 = self.connection.query_row(
+                "SELECT COUNT(*) FROM child_tasks WHERE child_task_id = ?1 AND session_id = ?2
+                 AND context_management_mode = 'server_compaction' AND status = 'running'
+                 AND NOT EXISTS (SELECT 1 FROM child_pending_tool_exchanges WHERE child_task_id = ?1)",
+                params![child_task_id.as_str(), session_id.as_str()], |row| row.get(0),
+            ).map_err(|e| internal_error("native child boundary could not be checked", e))?;
+            if active != 1 {
+                return Err(conflict("native child context is not appendable"));
+            }
+            let generation = self.child_generation(&session_id, &child_task_id)?;
+            self.append_child_messages(super::recovery::ChildAppendRequest {
+                operation_id: format!(
+                    "native-compact:{}:{}",
+                    child_task_id.as_str(),
+                    boundary.id.as_str()
+                ),
+                child_task_id,
+                session_id,
+                messages: vec![agent_types::ConversationMessage::Assistant(
+                    boundary.clone(),
+                )],
+                message_step: None,
+                created_at_ms: changed_at_ms,
+                purpose: super::append_effect::AppendPurpose::Messages,
+            })?;
+            return Ok(ContextReplacementResult {
+                source_generation: generation,
+                result_generation: generation,
+                product_message_count: merged.messages.len() as u64,
+            });
+        }
         let payload = conversation::encode_messages(&merged.messages)?;
         conversation::decode(std::io::BufReader::new(payload.as_slice()))?;
         let previous_generation = self.child_generation(&session_id, &child_task_id)?;
@@ -318,4 +396,17 @@ impl StorageEngine {
         }
         Ok(())
     }
+}
+
+fn native_boundary(
+    snapshot: &agent_types::ConversationSnapshot,
+) -> Option<&agent_types::AssistantMessage> {
+    snapshot.messages.iter().find_map(|message| match message {
+        agent_types::ConversationMessage::Assistant(message)
+            if message.purpose == agent_types::AssistantMessagePurpose::ContextCompaction =>
+        {
+            Some(message)
+        }
+        _ => None,
+    })
 }

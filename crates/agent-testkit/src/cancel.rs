@@ -141,6 +141,7 @@ mod tests {
 
     fn service() -> ScriptedModelService {
         let message = AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: MessageId::new("message_1").expect("valid message id"),
             model: ModelIdentity::new(
                 ProviderId::new("deepseek").expect("valid provider id"),

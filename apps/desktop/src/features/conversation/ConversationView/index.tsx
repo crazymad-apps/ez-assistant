@@ -546,7 +546,11 @@ export const ConversationView = observer(function ConversationView() {
         </>
       );
     }
-    return <EmptyConversation title="正在读取会话" detail="正在从运行时获取可靠消息投影。" />;
+    return <EmptyConversation
+      title={store.interaction_error ? "读取会话失败" : "正在读取会话"}
+      detail={store.interaction_error ?? "正在从运行时获取可靠消息投影。"}
+      on_retry={store.interaction_error && session_id ? () => { void store.selectSession(session_id); } : undefined}
+    />;
   }
   if (history.items.length === 0 && !live_run) {
     if (!child_view) {

@@ -10,10 +10,14 @@ const limits = [
   'reasoning_max_input_tokens',
   'reasoning_max_output_tokens',
 ] as const;
-const features = ['streaming', 'image_input', 'tool_calls', 'reasoning'] as const;
+const features = ['streaming', 'image_input', 'tool_calls', 'reasoning', 'server_compaction_support', 'input_token_count_support'] as const;
 
 export function emptyParameters(): ModelParameters {
   return {
+    server_compaction_enabled: false,
+    server_auto_compaction_enabled: false,
+    server_compaction_support: 'unknown',
+    input_token_count_support: 'unknown',
     context_window_tokens: { state: 'unknown' },
     max_input_tokens: { state: 'unknown' },
     max_output_tokens: { state: 'unknown' },
@@ -73,6 +77,12 @@ export function uuid(value: unknown): string {
 export function parseParameters(value: unknown, partial = false, base = emptyParameters()): ModelParameters {
   const input = fields(value, partial ? [] : Object.keys(base), partial ? Object.keys(base) : []);
   const result = structuredClone(base);
+  for (const key of ['server_compaction_enabled', 'server_auto_compaction_enabled'] as const) {
+    if (Object.hasOwn(input, key)) {
+      if (typeof input[key] !== 'boolean') invalid();
+      result[key] = input[key];
+    }
+  }
   for (const key of limits)
     if (Object.hasOwn(input, key)) {
       const limit = fields(input[key], ['state'], ['value']);
@@ -120,6 +130,7 @@ export function parseParameters(value: unknown, partial = false, base = emptyPar
 
 /** 与 Rust 固定参数校验同义；模板允许未知必需值，但不能带矛盾配置。 */
 export function validParameters(p: ModelParameters, complete: boolean): boolean {
+  if (p.server_auto_compaction_enabled || (p.server_compaction_enabled && p.server_compaction_support !== 'supported')) return false;
   const context = p.context_window_tokens.value;
   if (complete && (p.context_window_tokens.state !== 'known' || p.max_output_tokens.state !== 'known')) return false;
   for (const key of limits) {
@@ -170,6 +181,7 @@ export function resolveProtocol(connection: ProviderConnection): Protocol {
 export function executable(connection: ProviderConnection, parameters: ModelParameters): boolean {
   return (
     validParameters(parameters, true) &&
+    !(parameters.server_compaction_enabled && resolveProtocol(connection) !== 'open_ai_responses') &&
     parameters.streaming === 'supported' &&
     !(
       resolveProtocol(connection) === 'open_ai_chat_completions' &&
@@ -251,7 +263,7 @@ export function mergeParameters(online: ModelParameters, template: ModelParamete
   }
 
   function fill(
-    key: 'streaming' | 'image_input' | 'tool_calls' | 'reasoning' | 'reasoning_mode' | 'tool_image_projection',
+    key: 'streaming' | 'image_input' | 'tool_calls' | 'reasoning' | 'reasoning_mode' | 'tool_image_projection' | 'server_compaction_support' | 'input_token_count_support',
   ) {
     if (parameters[key] !== 'unknown') sources[key] = 'online';
     else {
@@ -260,7 +272,7 @@ export function mergeParameters(online: ModelParameters, template: ModelParamete
     }
   }
 
-  for (const key of ['streaming', 'image_input', 'tool_calls', 'tool_image_projection'] as const) fill(key);
+  for (const key of ['streaming', 'image_input', 'tool_calls', 'tool_image_projection', 'server_compaction_support', 'input_token_count_support'] as const) fill(key);
   for (const key of ['auto', 'none'] as const) {
     const value: Support = parameters.tool_choice[key];
     let source = 'online';

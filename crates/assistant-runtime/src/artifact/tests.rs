@@ -16,6 +16,7 @@ fn exchange(
     let call_id = ToolCallId::new(id).unwrap();
     vec![
         ConversationMessage::Assistant(AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: MessageId::new(format!("assistant-{id}")).unwrap(),
             model: ModelIdentity::new(ProviderId::new("fixture").unwrap(), "fixture"),
             parts: vec![AssistantPart::ToolCall(ToolCall {
@@ -69,6 +70,7 @@ fn only_paired_successes_change_delivery_identity_and_compaction_preserves_it() 
     assert_eq!(artifacts[0].title, "final");
     let replacement = ConversationSnapshot::new(vec![ConversationMessage::ContextSummary(
         ContextSummaryMessage {
+            retained_user_message_id: None,
             id: MessageId::new("summary").unwrap(),
             text: "compacted".into(),
             model: None,

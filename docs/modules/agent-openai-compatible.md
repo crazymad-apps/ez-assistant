@@ -146,3 +146,16 @@ Responses 仅在本次实际发送 `previous_response_id`、HTTP 400/404 且错�
 ## v0.29.0 F03 M1 过程事实
 
 Responses summary/content 在规范 ReasoningPart 和每个 ReasoningDelta 中保留 summary/raw 来源，done 补齐文本沿用同一来源。Qwen 既有 reasoning_text → summary 方言从首个增量即标记 summary；Chat 保持 raw，纯 encrypted item 不生成空 reasoning。原 ProviderState 与请求编码策略不因展示来源而变化。
+
+## v0.30.0 F01 压缩窗口与临时续接分离
+
+完整 `responses.compacted_window` 属于宿主交来的可靠对话；回放保留 Provider/Protocol、
+完整格式、大小与工具配对检查，不按 endpoint、model 或 owner/配置周期指纹过滤。
+模型、企业入口地址及续接绑定改变时，正常生成、compact 与输入计量均使用最近窗口及后缀；
+`responses.continuation` 仍按精确路由、绑定和请求哈希判断 ID 增量资格，失配只重建链。
+独立 encrypted reasoning item 保持其既有精确回放约束。既有压缩 payload/JSONL 无需迁移，
+格式不兼容或损坏明确报错，不静默丢掉窗口重发压缩前原文。
+
+完整窗口不计入普通 reasoning 的单项 2 MiB/单轮 8 MiB 预算，生成、计量和再次 compact
+一致回放保留消息与图片。JSON 辅助响应沿用有界聚合，整体传输预算为 32 MiB，超过时
+明确报告传输预算错误；该预算不是模型窗口或 OpenAI 压缩协议限制。

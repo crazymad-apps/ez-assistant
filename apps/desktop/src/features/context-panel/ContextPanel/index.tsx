@@ -62,6 +62,7 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
   const session_view = session_id ? store.projection.session_views.get(session_id) : undefined;
   // 窗口占用由 Runtime 根据当前有效上下文计算，不能用旧 step 或累计用量取最大值。
   const context_usage = session_view?.usage.context ?? null;
+  const context_prefix = context_usage?.accuracy === "estimated" ? "约 " : "";
   const [skill_list] = useState(() => new SkillListStore());
   const skills = sessionSkillRows(session_view, skill_list.snapshot);
   const session_workspace = session_view?.workspace;
@@ -272,10 +273,10 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
             <div className={styles.context_usage}>
               <ContextRing basis_points={context_usage.usage_basis_points} />
               <div>
-                <strong>上下文窗口</strong>
-                <span>{formatTokens(context_usage.used_tokens)} / {formatTokens(context_usage.window_tokens)}</span>
+                <strong>上下文窗口 · {context_usage.mode === "server_compaction" ? "服务端压缩" : "本地摘要"}</strong>
+                <span>{context_usage.used_tokens === null ? "占用未知" : `${context_prefix}${formatTokens(context_usage.used_tokens)}`} / {formatTokens(context_usage.window_tokens)}{context_usage.calibration_pending && " · 待校准"}</span>
               </div>
-              <b>{(context_usage.usage_basis_points / 100).toFixed(1)}%</b>
+              <b>{context_usage.usage_basis_points === null ? "—" : `${context_prefix}${(context_usage.usage_basis_points / 100).toFixed(1)}%`}</b>
             </div>
           )}
           {session_view?.usage.previous_turn && (

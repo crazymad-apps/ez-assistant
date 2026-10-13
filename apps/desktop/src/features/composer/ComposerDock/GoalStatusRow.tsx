@@ -83,7 +83,7 @@ export function GoalStatusRow(props: GoalStatusRowProps) {
           <dl>
             <div><dt>当前轮次</dt><dd>{props.goal.turn}</dd></div>
             <div><dt>运行次数预算</dt><dd>{props.goal.budget.used_runs} / {props.goal.budget.max_runs}</dd></div>
-            <div><dt>令牌预算</dt><dd>{formatCompact(props.goal.budget.used_total_tokens)} / {formatCompact(props.goal.budget.max_total_tokens)}</dd></div>
+            <div><dt>累计令牌</dt><dd>{formatCompact(props.goal.budget.used_total_tokens)}</dd></div>
             <div><dt>连续失败</dt><dd>{props.goal.budget.consecutive_failures} / {props.goal.budget.max_consecutive_failures}</dd></div>
             <div><dt>附件</dt><dd>{props.goal.attachment_count}</dd></div>
             {props.goal.mcp_server_key && <div><dt>MCP 服务</dt><dd>{props.goal.mcp_server_key}</dd></div>}
@@ -145,12 +145,10 @@ function pauseReasonLabel(reason: GoalPauseReasonSnapshot): string {
       return "已由用户停止，可显式继续。";
     case "run_limit_reached":
       return "已达到运行次数预算上限。";
-    case "token_limit_reached":
-      return "已达到令牌预算上限。";
     case "consecutive_failures":
       return "连续执行失败达到保护上限。";
     case "recovery_required":
-      return "运行时重启后需要显式恢复。";
+      return "目标已暂停，需要显式继续。";
     case "forked":
       return "这是分叉后的独立目标，需要显式恢复。";
   }

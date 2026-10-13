@@ -81,7 +81,6 @@ pub(crate) fn create_continuation_message(
         generation: u64,
         turn: u32,
         remaining_runs: u32,
-        remaining_total_tokens: u64,
         usage_complete: bool,
         previous_run_status: &'a str,
         objective: Vec<crate::StoredGoalObjectivePart>,
@@ -91,10 +90,6 @@ pub(crate) fn create_continuation_message(
         generation: goal.generation,
         turn: goal.turn,
         remaining_runs: goal.budget.max_runs.saturating_sub(goal.budget.used_runs),
-        remaining_total_tokens: goal
-            .budget
-            .max_total_tokens
-            .saturating_sub(goal.budget.used_total_tokens),
         usage_complete: goal.budget.usage_complete,
         previous_run_status,
         objective: goal.stored_objective_parts(),

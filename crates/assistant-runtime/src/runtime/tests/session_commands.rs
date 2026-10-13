@@ -997,6 +997,7 @@ async fn model_loads_current_definition_without_refresh_or_rewriting_prompt() {
     let mut scripts = Vec::new();
     for index in 0..3 {
         let turn = AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: MessageId::new(format!("load-skill-{index}")).expect("message"),
             model: ModelIdentity::new(
                 ProviderId::new("fixture").expect("provider"),

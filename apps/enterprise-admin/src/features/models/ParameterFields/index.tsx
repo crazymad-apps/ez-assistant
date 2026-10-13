@@ -1,4 +1,4 @@
-import { Card, Form, Input, InputNumber, Select, Space } from 'antd';
+import { Card, Form, Input, InputNumber, Select, Space, Switch, Typography } from 'antd';
 import type { ModelParameters, TokenLimit } from '../../../request/openapi';
 import { effortKeys, supports, tokenFields } from '../model';
 import styles from './index.module.scss';
@@ -7,6 +7,7 @@ type Props = {
   readonly value: ModelParameters;
   readonly sources: Record<string, string>;
   readonly disabled: boolean;
+  readonly responses: boolean;
   readonly onChange: (parameters: ModelParameters) => void;
 };
 const sourceLabels: Record<string, string> = {
@@ -61,6 +62,61 @@ export function ParameterFields(props: Props) {
             </Form.Item>
           ))}
         </div>
+      </Card>
+      <Card title="上下文压缩" size="small" type="inner">
+        <div className={styles.fields}>
+          <Form.Item label={label('服务端压缩能力', 'server_compaction_support')}>
+            <Select
+              aria-label="服务端压缩能力"
+              disabled={props.disabled}
+              value={props.value.server_compaction_support}
+              options={supports}
+              onChange={(value) =>
+                props.onChange({
+                  ...props.value,
+                  server_compaction_support: value,
+                  ...(value !== 'supported' ? { server_compaction_enabled: false } : {}),
+                })
+              }
+            />
+          </Form.Item>
+          <Form.Item label={label('启用服务端压缩', 'server_compaction_enabled')}>
+            <Switch
+              aria-label="启用服务端压缩"
+              checked={props.value.server_compaction_enabled}
+              disabled={
+                props.disabled ||
+                (!props.value.server_compaction_enabled &&
+                  (!props.responses || props.value.server_compaction_support !== 'supported'))
+              }
+              onChange={(value) =>
+                props.onChange({
+                  ...props.value,
+                  server_compaction_enabled: value,
+                  server_auto_compaction_enabled: false,
+                })
+              }
+            />
+          </Form.Item>
+          <Form.Item label="服务端自行触发压缩（本版本暂不开放）">
+            <Switch aria-label="服务端自行触发压缩" checked={props.value.server_auto_compaction_enabled} disabled />
+          </Form.Item>
+          <Form.Item label={label('输入计量能力', 'input_token_count_support')}>
+            <Select
+              aria-label="输入计量能力"
+              disabled={props.disabled}
+              value={props.value.input_token_count_support}
+              options={supports}
+              onChange={(value) => set('input_token_count_support', value)}
+            />
+          </Form.Item>
+        </div>
+        <Typography.Paragraph type="secondary">
+          {props.value.server_compaction_enabled
+            ? 'Agent 按窗口阈值或模型超限触发服务端压缩，手动压缩使用相同机制。'
+            : '自动和手动压缩均使用本地摘要。'}
+          计量不可用时沿用现有估算，等待正常响应校准。{!props.responses && '服务端压缩需要 Responses 协议。'}
+        </Typography.Paragraph>
       </Card>
       <Card title="模型能力" size="small" type="inner">
         <div className={styles.fields}>

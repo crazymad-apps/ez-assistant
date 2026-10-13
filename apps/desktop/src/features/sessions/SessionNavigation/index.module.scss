@@ -27,7 +27,7 @@
   font-size: var(--ez-font-small);
 }
 
-// 使用原生客户端平台标记；连接的 Host 平台不决定窗口装饰。
+// Web 的客户端平台标记为 unsupported；连接的 Host 平台不决定窗口装饰。
 .app_logo {
   display: none;
   width: 24px;
@@ -38,9 +38,5 @@
   user-select: none;
 }
 
-:global(html[data-platform="windows"]) .app_logo { display: block; }
-
-:global(html[data-platform="windows"]) .navigation[data-sidebar-open="true"] {
-  flex: 1 1 auto;
-  .app_logo { margin-right: auto; }
-}
+:global(html[data-platform="windows"]) .app_logo,
+:global(html[data-platform="unsupported"]) .app_logo { display: block; }

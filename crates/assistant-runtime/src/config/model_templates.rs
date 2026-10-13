@@ -48,6 +48,17 @@ pub(crate) fn configuration_detail(
     fill!(reasoning_max_input_tokens, ModelTokenLimit::Unknown);
     fill!(reasoning_max_output_tokens, ModelTokenLimit::Unknown);
     fill!(streaming, ModelFeatureSupport::Unknown);
+    fill!(server_compaction_support, ModelFeatureSupport::Unknown);
+    fill!(input_token_count_support, ModelFeatureSupport::Unknown);
+    // 模板只补能力，不替用户开启机制或未来的服务端自动触发。
+    sources.insert(
+        "server_compaction_enabled".into(),
+        ModelConfigurationSource::Online,
+    );
+    sources.insert(
+        "server_auto_compaction_enabled".into(),
+        ModelConfigurationSource::Online,
+    );
     fill!(image_input, ModelFeatureSupport::Unknown);
     fill!(tool_calls, ModelFeatureSupport::Unknown);
     fill!(tool_image_projection, ModelToolImageProjection::Unknown);

@@ -10,6 +10,8 @@ use super::StoredConversationState;
 /// 创建 accepted 子任务关系及空独立正文所需的冻结事实。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NewStoredChildTask {
+    /// accepted 时冻结，不从父会话或未来默认模型推断。
+    pub context_management_mode: agent_model::ContextManagementMode,
     /// 与子 Agent 使用同一模型实例冻结的窗口上限。
     pub context_window_tokens: u64,
     pub child_task_id: ChildTaskId,
@@ -25,6 +27,7 @@ pub struct NewStoredChildTask {
 /// Runtime 从 Store 恢复或创建完成的子任务结构化投影。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredChildTask {
+    pub context_management_mode: agent_model::ContextManagementMode,
     /// 创建时冻结；旧任务没有该事实时不可从当前默认模型猜测。
     pub context_window_tokens: Option<u64>,
     pub child_task_id: ChildTaskId,

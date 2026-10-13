@@ -86,7 +86,6 @@ pub enum GoalPauseReasonSnapshot {
     Blocked { summary: String },
     UserStopped,
     RunLimitReached,
-    TokenLimitReached,
     ConsecutiveFailures,
     RecoveryRequired,
     Forked,
@@ -96,9 +95,9 @@ pub enum GoalPauseReasonSnapshot {
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct GoalBudgetSnapshot {
     pub max_runs: u32,
-    pub max_total_tokens: u64,
     pub max_consecutive_failures: u32,
     pub used_runs: u32,
+    /// Goal 累计用量，仅用于统计，不构成执行上限。
     pub used_total_tokens: u64,
     pub consecutive_failures: u32,
     /// false 表示至少一次 Provider 未报告完整 usage；Runtime 不对缺失 token 做猜测。
@@ -643,10 +642,37 @@ pub struct UsageTotals {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ContextUsageSnapshot {
-    pub used_tokens: u64,
+    /// 压缩后尚未获得匹配当前窗口的计量或正常响应；旧客户端可忽略此提示。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub calibration_pending: Option<bool>,
+    /// 计量来源可信度；estimated 包含 usage 基线与增量估算。
+    pub accuracy: ContextUsageAccuracy,
+    /// 当前 owner 冻结的唯一机制，不包含 Provider 状态或作用域。
+    pub mode: ContextManagementModeSnapshot,
+    pub used_tokens: Option<u64>,
     pub window_tokens: u64,
     /// 0..=10000 表示 0.00%..=100.00%，避免 wire 浮点误差。
-    pub usage_basis_points: u16,
+    pub usage_basis_points: Option<u16>,
+}
+
+/// 当前窗口计量的可信度；未知时数值为空，不等于零占用。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "assistant-protocol.ts")]
+pub enum ContextUsageAccuracy {
+    Exact,
+    Estimated,
+    Unknown,
+}
+
+/// 会话或子任务的压缩机制投影，不承载模型/Runtime 实现。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "assistant-protocol.ts")]
+pub enum ContextManagementModeSnapshot {
+    LocalSummary,
+    ServerCompaction,
 }
 
 /// 只属于主会话、不聚合子任务的用量投影。
@@ -1072,9 +1098,12 @@ mod tests {
         let measured = ChildTaskUsageSnapshot {
             accumulated: None,
             context: Some(ContextUsageSnapshot {
-                used_tokens: 123,
+                calibration_pending: None,
+                accuracy: ContextUsageAccuracy::Estimated,
+                mode: ContextManagementModeSnapshot::LocalSummary,
+                used_tokens: Some(123),
                 window_tokens: 8192,
-                usage_basis_points: 150,
+                usage_basis_points: Some(150),
             }),
         };
         assert_eq!(

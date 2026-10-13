@@ -923,9 +923,9 @@ async fn verify_shell_after_automatic_compaction(provider_overflow: bool) {
     let mut first = assistant_text("shell-before-automatic", "prior answer");
     if !provider_overflow {
         first.usage = Some(agent_types::TokenUsage {
-            input_tokens: 6_500,
+            input_tokens: 7_000,
             output_tokens: 500,
-            total_tokens: 7_000,
+            total_tokens: 7_500,
             cached_input_tokens: Some(6_000),
             reasoning_tokens: None,
         });

@@ -18,6 +18,8 @@ use crate::{InputChannelSource, ReplyRoute};
 /// 队列执行器领取一次 Run 时提交的 User Message 与结构化关联。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UserMessageCommit {
+    /// 与首次输入及 Run 启动同一可靠点冻结机制。
+    pub context_management_mode: agent_model::ContextManagementMode,
     /// 与领取状态同一可靠点保存，执行器只使用这份已准备的快照。
     pub shell: Option<crate::FrozenShellEnvironment>,
     pub operation_id: String,
@@ -559,6 +561,20 @@ pub struct StoredRun {
 mod tests {
     use super::*;
     use assistant_protocol::{McpRefreshOutcome, McpServerRefreshOutcome};
+
+    #[test]
+    fn historical_deferred_refresh_result_remains_readable() {
+        let json = r#"{"outcome":"success","servers":[{"server_key":"computer-use","outcome":"deferred","tool_count":0}]}"#;
+        let result: StoredSessionCommandResult = serde_json::from_str(json).unwrap();
+        let StoredSessionCommandResult::Mcp(refresh) = &result else {
+            panic!("MCP result");
+        };
+        assert_eq!(
+            refresh.servers[0].outcome,
+            McpServerRefreshOutcome::Deferred
+        );
+        assert_eq!(serde_json::to_string(&result).unwrap(), json);
+    }
 
     #[test]
     fn stored_session_command_round_trips_without_a_run_identity() {

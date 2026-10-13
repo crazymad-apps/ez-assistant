@@ -176,14 +176,16 @@ export class ResponsesWebsocket {
     const body = object(JSON.parse(input.body.toString('utf8')));
     if (
       !body ||
+      (body.previous_response_id != null && body.store !== true) ||
       body.stream !== true ||
-      body.store !== true ||
+      typeof body.store !== 'boolean' ||
       !Array.isArray(body.input) ||
       Object.hasOwn(body, 'type') ||
       Object.hasOwn(body, 'generate') ||
       Object.hasOwn(body, 'conversation')
     )
       throw new ControlError('llm_request_invalid');
+    const retain = body.store === true;
     const previous = typeof body.previous_response_id === 'string' ? body.previous_response_id : undefined;
     let chain: Chain;
     if (previous) {
@@ -222,6 +224,7 @@ export class ResponsesWebsocket {
       if (chain.id) this.responses.delete(chain.id);
       chain.id = result.id;
       chain.upstreamId = result.upstreamId;
+      if (!retain) { this.discard(chain); return 200; }
       this.responses.set(result.id, chain);
       chain.busy = false;
       chain.idleSince = Date.now();
@@ -233,12 +236,53 @@ export class ResponsesWebsocket {
     }
   }
 
+  /** 显式压缩独占新连接；完整终态转换成功后才向 HTTP 调用者发布窗口。 */
+  async compact(input: Input): Promise<number> {
+    input.signal.throwIfAborted();
+    if (this.closed) throw new ControlError('llm_proxy_unavailable');
+    const body = object(JSON.parse(input.body.toString('utf8')));
+    if (!body || !Array.isArray(body.input) || typeof body.model !== 'string' ||
+      Object.keys(body).some(key => !['model', 'input', 'instructions'].includes(key)))
+      throw new ControlError('llm_request_invalid');
+    const retained = body.input.filter(item => {
+      const message = object(item);
+      return message && ['user', 'developer', 'system'].includes(String(message.role));
+    });
+    const wire = Buffer.from(JSON.stringify({
+      type: 'response.create', model: body.model, store: false,
+      ...(body.instructions !== undefined ? { instructions: body.instructions } : {}),
+      tools: [], include: ['reasoning.encrypted_content'],
+      input: [...body.input, { type: 'compaction_trigger' }],
+    }));
+    const chain = await this.open(input);
+    try {
+      await this.exchange(chain, input, wire, undefined, response => {
+        const output = response.output;
+        if (!Array.isArray(output) || output.length !== 1 ||
+          object(output[0])?.type !== 'compaction' ||
+          typeof object(output[0])?.encrypted_content !== 'string' || !object(output[0])?.encrypted_content ||
+          !Number.isSafeInteger(response.created_at)) throw new TransferError('upstream_connection');
+        const result = Buffer.from(JSON.stringify({
+          id: response.id, object: 'response.compaction', created_at: response.created_at,
+          output: [...retained, ...output], ...(response.usage !== undefined ? { usage: response.usage } : {}),
+        }));
+        return result;
+      });
+      await input.finish?.(input.signal);
+      input.signal.throwIfAborted();
+      return 200;
+    } finally {
+      this.discard(chain);
+    }
+  }
+
   /** 单请求串行排空帧；缓冲与背压有界，取消/超时可打断正在等待的下游写入。 */
   private exchange(
     chain: Chain,
     input: Input,
     wire: Buffer,
     previous?: string,
+    compact?: (response: Record<string, unknown>) => Buffer,
   ): Promise<{ id: string; upstreamId: string }> {
     return new Promise((resolve, reject) => {
       const id = `resp_ez_${randomUUID().replaceAll('-', '')}`;
@@ -307,24 +351,36 @@ export class ResponsesWebsocket {
               if (typeof response.id !== 'string' || (upstreamId && response.id !== upstreamId))
                 throw new TransferError('upstream_connection');
               upstreamId = response.id;
-              response.id = id;
+              if (!compact) response.id = id;
               if (Object.hasOwn(response, 'previous_response_id')) response.previous_response_id = previous ?? null;
             }
             if (Object.hasOwn(event, 'response_id')) {
               if (typeof event.response_id !== 'string' || (upstreamId && event.response_id !== upstreamId))
                 throw new TransferError('upstream_connection');
               upstreamId ??= event.response_id;
-              event.response_id = id;
+              if (!compact) event.response_id = id;
             }
-            if (!headersSent) {
-              input.sink.headers(200, { 'content-type': 'text/event-stream' });
-              headersSent = true;
+            if (compact) {
+              if (event.type === 'response.completed') {
+                if (response?.status !== 'completed' || !upstreamId || queue.length)
+                  throw new TransferError('upstream_connection');
+                const result = compact(response);
+                input.sink.headers(200, { 'content-type': 'application/json' });
+                headersSent = true;
+                arm('downstream_idle');
+                await input.sink.chunk(result, abort.signal);
+              }
+            } else {
+              if (!headersSent) {
+                input.sink.headers(200, { 'content-type': 'text/event-stream' });
+                headersSent = true;
+              }
+              arm('downstream_idle');
+              await input.sink.chunk(
+                Buffer.from(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`),
+                abort.signal,
+              );
             }
-            arm('downstream_idle');
-            await input.sink.chunk(
-              Buffer.from(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`),
-              abort.signal,
-            );
             if (done) return;
             queued -= chunk.length;
             if (event.type === 'response.completed') {

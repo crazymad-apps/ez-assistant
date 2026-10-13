@@ -185,6 +185,7 @@ impl ChunkAssembler {
         self.close_open_part(&mut events);
         self.complete_tool_calls(.., &mut events)?;
         let message = AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: message_id,
             model,
             parts: std::mem::take(&mut self.parts),

@@ -270,6 +270,6 @@ function openAttachmentMenuFromKeyboard(
   open(attachment, { x: bounds.left + 16, y: bounds.bottom });
 }
 
-export function EmptyConversation(props: Readonly<{ title: string; detail: string }>) {
-  return <div className={styles.empty}><span><Icon name="message" size={21} /></span><strong>{props.title}</strong><p>{props.detail}</p></div>;
+export function EmptyConversation(props: Readonly<{ title: string; detail: string; on_retry?: () => void }>) {
+  return <div className={styles.empty}><span><Icon name="message" size={21} /></span><strong>{props.title}</strong><p>{props.detail}</p>{props.on_retry && <button onClick={props.on_retry} type="button">重新读取</button>}</div>;
 }

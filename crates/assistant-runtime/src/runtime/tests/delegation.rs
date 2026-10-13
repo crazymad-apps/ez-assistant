@@ -131,6 +131,7 @@ impl ModelService for DelegationScenarioModel {
             }
             if needs_approval {
                 let message = AssistantMessage {
+                    purpose: agent_types::AssistantMessagePurpose::ModelResponse,
                     id: MessageId::new(format!("child-approval-{sequence}")).expect("message id"),
                     model: ModelIdentity::new(
                         ProviderId::new("fixture").expect("provider id"),
@@ -168,6 +169,7 @@ impl ModelService for DelegationScenarioModel {
 
 fn delegate_batch_message(tasks: &[String]) -> AssistantMessage {
     AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new("parent-delegate-batch").expect("message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("provider id"),
@@ -246,6 +248,7 @@ async fn child_stream_retry_preserves_isolation_and_returns_only_its_final_resul
 
 async fn isolated_child_result(interrupt_child: bool) {
     let delegate_call = AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new("parent-delegate").expect("message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("provider id"),
@@ -546,6 +549,7 @@ async fn isolated_child_result(interrupt_child: bool) {
 async fn child_compaction_preserves_dynamic_load_skill_request_and_continues() {
     let child_task = "Continue after a provider overflow with all prior details. ".repeat(80);
     let delegate_call = AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new("parent-delegate-compact").expect("message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("provider id"),
@@ -563,6 +567,7 @@ async fn child_compaction_preserves_dynamic_load_skill_request_and_continues() {
         usage: None,
     };
     let child_tool_call = AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new("child-before-compact").expect("message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("provider id"),
@@ -685,6 +690,7 @@ async fn child_compaction_preserves_dynamic_load_skill_request_and_continues() {
 #[tokio::test]
 async fn child_model_failure_is_persisted_before_the_parent_receives_an_error_result() {
     let delegate_call = AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new("parent-delegate-failure").expect("message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("provider id"),
@@ -1167,6 +1173,7 @@ async fn cancelling_parent_cascades_to_children_and_skips_parent_summary() {
 async fn child_tool_approval_carries_child_identity_and_resolves_independently() {
     let parent_delegate = delegate_batch_message(&["child-needs-approval".to_owned()]);
     let child_tool_call = AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new("child-tool-proposal").expect("message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("provider id"),
@@ -1278,6 +1285,7 @@ async fn child_tool_approval_carries_child_identity_and_resolves_independently()
 async fn child_tool_reads_the_parent_sessions_new_approval_mode() {
     let parent_delegate = delegate_batch_message(&["child-uses-current-mode".to_owned()]);
     let child_tool_call = AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new("child-current-mode-tool").expect("message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("provider id"),
@@ -1566,6 +1574,7 @@ async fn child_waiting_for_approval_does_not_block_its_sibling() {
 async fn cancelling_child_removes_its_pending_approval_without_running_the_tool() {
     let parent_delegate = delegate_batch_message(&["child-awaits-cancel".to_owned()]);
     let child_tool_call = AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new("child-cancel-proposal").expect("message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("provider id"),

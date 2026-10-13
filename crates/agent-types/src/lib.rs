@@ -15,12 +15,13 @@ mod tool;
 // `pub use` 把子模块中的公共类型重新导出到 crate 根部。
 // 调用方因此可以写 `agent_types::AssistantMessage`，不用关心它位于哪个源码文件。
 pub use conversation::{
-    AssistantMessage, AssistantPart, ContextSummaryMessage, ContextUsageAdjustment,
-    ConversationMessage, ConversationSnapshot, ConversationValidationError, FileReference,
-    FileReferencesPart, MAX_PROVIDER_STATE_ITEM_BYTES, MAX_PROVIDER_STATE_TURN_BYTES,
-    OpaqueProviderState, ProviderStateError, QuotedTextPart, QuotedTextSourceOwner,
-    QuotedTextSourceRole, ReasoningPart, ReasoningSource, SystemMessage, TextPart, ToolCall,
-    ToolMessage, TranscriptVisibility, UserMessage, UserMessageOrigin, UserPart,
+    AssistantMessage, AssistantMessagePurpose, AssistantPart, ContextSummaryMessage,
+    ContextUsageAdjustment, ConversationMessage, ConversationSnapshot, ConversationValidationError,
+    FileReference, FileReferencesPart, MAX_PROVIDER_STATE_ITEM_BYTES,
+    MAX_PROVIDER_STATE_TURN_BYTES, OpaqueProviderState, ProviderContextEffect, ProviderStateError,
+    QuotedTextPart, QuotedTextSourceOwner, QuotedTextSourceRole, ReasoningPart, ReasoningSource,
+    SystemMessage, TextPart, ToolCall, ToolMessage, TranscriptVisibility, UserMessage,
+    UserMessageOrigin, UserPart,
 };
 pub use id::{IdentifierError, MessageId, PartId, ProtocolId, ProviderId, ToolCallId};
 pub use insertion::{

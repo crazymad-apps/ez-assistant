@@ -153,6 +153,7 @@ impl ModelService for RepeatingModel {
         let model = model_identity();
         let text = "x".repeat(self.text_deltas);
         let message = AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: message_id.clone(),
             model: model.clone(),
             parts: vec![AssistantPart::Text(TextPart {
@@ -236,6 +237,7 @@ fn context_fixture(turns: usize) -> ConversationSnapshot {
             let call_id =
                 ToolCallId::new(format!("context_call_{index}")).expect("valid tool call id");
             messages.push(ConversationMessage::Assistant(AssistantMessage {
+                purpose: agent_types::AssistantMessagePurpose::ModelResponse,
                 id: MessageId::new(format!("context_assistant_{index}"))
                     .expect("valid assistant id"),
                 model: model_identity(),
@@ -257,6 +259,7 @@ fn context_fixture(turns: usize) -> ConversationSnapshot {
                 },
             }));
             messages.push(ConversationMessage::Assistant(AssistantMessage {
+                purpose: agent_types::AssistantMessagePurpose::ModelResponse,
                 id: MessageId::new(format!("context_final_{index}"))
                     .expect("valid final assistant id"),
                 model: model_identity(),
@@ -270,6 +273,7 @@ fn context_fixture(turns: usize) -> ConversationSnapshot {
             }));
         } else {
             messages.push(ConversationMessage::Assistant(AssistantMessage {
+                purpose: agent_types::AssistantMessagePurpose::ModelResponse,
                 id: MessageId::new(format!("context_assistant_{index}"))
                     .expect("valid assistant id"),
                 model: model_identity(),

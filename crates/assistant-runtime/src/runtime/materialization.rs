@@ -549,6 +549,7 @@ fn validate_manifest(
 
 fn stored_session_preview(session: &NewStoredSession) -> crate::StoredSession {
     crate::StoredSession {
+        context_management_mode: None,
         server_history_key: None,
         custom_agent: session.custom_agent.clone(),
         agent_shell_kind: session.agent_shell_kind,

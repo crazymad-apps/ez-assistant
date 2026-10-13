@@ -12,8 +12,11 @@
 - Provider 原生 schema 不得进入本 crate；不透明 Provider 状态必须有 Provider、Protocol、类型和格式版本边界。
 - `OpaqueProviderState` 必须绑定由 Adapter 计算的精确路由指纹；有可见文本时关联规范
   `related_part_id`，纯加密状态允许不关联文本，禁止伪造 ReasoningPart。旧数据
-  可读取为无路由绑定状态，但不得在新请求中作为相容状态回放。payload 单 item 上限为 2 MiB，
-  单 Assistant Turn 的 8 MiB 上限由消费方执行；`Debug` 只能展示类型、边界和字节数，不能展示
+  可读取为无路由绑定状态。独立 reasoning/续接按精确路由校验；完整压缩窗口按当前对话
+  归属、Provider/Protocol 与格式回放，模型、入口地址及续接周期不作为其失效条件。普通 payload 单 item 上限为 2 MiB，
+  普通 Assistant Turn 的 8 MiB 上限由消费方执行；完整替代窗口通过受控构造和反序列化保留
+  `replace_prior_context`，不套用普通 item/turn 上限，整体输入输出由宿主/Adapter 传输预算约束。
+  `Debug` 只能展示类型、边界和字节数，不能展示
   payload 或路由指纹。
 - 公共不变量使用受控构造并覆盖序列化 round-trip 测试。
 - `ConversationSnapshot` 是 ToolCallId 唯一性、Tool Call/Result 双向一一配对和结果
@@ -60,3 +63,14 @@ cargo clippy -p agent-types --all-targets --all-features -- -D warnings
 ## v0.29.0 F03 M1 过程事实
 
 ReasoningPart.source 表达 raw/summary 的中立来源，缺失读取为 raw，raw 序列化时省略，保持旧规范消息字节与 F06 前缀哈希稳定。summary 仅由 Provider 明确事实产生，不根据 ID 猜测或回填历史。
+
+## v0.30.0 F01 M1 压缩状态契约
+
+- `AssistantMessage.purpose` 区分普通响应与 `context_compaction`；缺失读取为普通响应，普通值序列化省略，保持旧 JSONL 与前缀哈希字节。压缩状态消息不进入产品转录。
+- `OpaqueProviderState.context_effect` 只承载 `replace_prior_context` 中立边界语义；旧值为空且省略序列化。只有绑定精确路由的状态可声明该语义；反序列化同样校验，Debug 不展示 payload 或指纹。
+- 完整交换校验在显式替代边界后重置调用 ID 作用域；边界不能掩盖未闭合工具交换。Provider payload 的完整窗口校验与相容回放归 Adapter，后续里程碑接入。
+- `ContextSummaryMessage.retained_user_message_id` 是可选原始 User 引用，缺省为空并省略序列化；M1 只建立契约，轮内切分与引用展开在 M2 实现。
+
+## v0.30.0 F01 当前有效投影
+
+完整历史先校验工具交换，再从后向前选取最新文本摘要或已可靠提交的原生替代边界及后续内容，保留受保护 System 前缀。压缩窗口不按模型、入口地址或临时续接指纹过滤；Provider/Protocol 与完整窗口格式归 Adapter 校验。Agent 文本摘要直接保留 ContextSummary，由既有 Adapter 编码为 system message item，不转换原生状态。后续重复压缩记录不再次装配；无可用边界时从原始事实重建。产品消息身份保持原样，轮内摘要引用原始 User，由共享投影展开且仅一次，重复投影必须幂等。

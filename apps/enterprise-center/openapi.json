@@ -4305,6 +4305,31 @@
       "ModelParameters": {
         "type": "object",
         "properties": {
+          "server_compaction_enabled": {
+            "type": "boolean",
+            "default": false
+          },
+          "server_auto_compaction_enabled": {
+            "type": "boolean",
+            "default": false,
+            "description": "本版本必须为 false；由 Agent 判断压缩时机。"
+          },
+          "server_compaction_support": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "supported",
+              "unsupported"
+            ]
+          },
+          "input_token_count_support": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "supported",
+              "unsupported"
+            ]
+          },
           "context_window_tokens": {
             "$ref": "#/components/schemas/TokenLimit"
           },
@@ -4394,6 +4419,10 @@
           }
         },
         "required": [
+          "server_compaction_enabled",
+          "server_auto_compaction_enabled",
+          "server_compaction_support",
+          "input_token_count_support",
           "context_window_tokens",
           "max_input_tokens",
           "max_output_tokens",
@@ -5261,7 +5290,9 @@
             "type": "string",
             "enum": [
               "proxy",
-              "admin_test"
+              "admin_test",
+              "context_compaction",
+              "input_tokens"
             ]
           },
           "protocol": {

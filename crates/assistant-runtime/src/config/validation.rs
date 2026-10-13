@@ -74,6 +74,12 @@ pub(crate) fn validate_provider_parameters(
     parameters: &ModelParameters,
 ) -> RuntimeResult<()> {
     validate_connection(connection)?;
+    if parameters.server_compaction_enabled
+        && crate::config::resolve_provider_protocol(connection)?
+            != crate::ModelProtocol::OpenAiResponses
+    {
+        return Err(invalid("服务端压缩要求 Responses 协议。"));
+    }
     use assistant_protocol::ModelToolImageProjection::*;
     if parameters.tool_image_projection == NativeToolResult
         && crate::config::resolve_provider_protocol(connection)?

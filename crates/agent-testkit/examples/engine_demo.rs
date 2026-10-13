@@ -40,6 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         arguments: json!({"city": "杭州"}),
     };
     let tool_turn = AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new("assistant_tool_turn")?,
         model: demo_model(),
         parts: vec![
@@ -54,6 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         usage: None,
     };
     let final_turn = AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new("assistant_final_turn")?,
         model: demo_model(),
         parts: vec![AssistantPart::Text(TextPart {

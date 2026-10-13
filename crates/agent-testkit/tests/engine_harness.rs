@@ -102,6 +102,7 @@ fn call(id: &str, name: &str, arguments: Value) -> ToolCall {
 /// 纯文本 Turn（finish_reason: Stop）。
 fn text_message(id: &str, text: &str) -> AssistantMessage {
     AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: msg_id(id),
         model: model_identity(),
         parts: vec![AssistantPart::Text(TextPart {
@@ -116,6 +117,7 @@ fn text_message(id: &str, text: &str) -> AssistantMessage {
 /// 只含 Tool Call 的 Turn（finish_reason: ToolCalls）。
 fn calls_message(id: &str, calls: Vec<ToolCall>) -> AssistantMessage {
     AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: msg_id(id),
         model: model_identity(),
         parts: calls.into_iter().map(AssistantPart::ToolCall).collect(),

@@ -339,6 +339,26 @@ impl ModelService for ObservedModelService {
         self.inner.max_input_tokens()
     }
 
+    fn context_policy(&self) -> &agent_model::ContextPolicy {
+        self.inner.context_policy()
+    }
+
+    fn count_input_tokens<'a>(
+        &'a self,
+        request: &'a agent_model::ModelRequest,
+        context: &'a mut agent_model::ModelCallContext,
+    ) -> agent_model::ModelInputTokenCountFuture<'a> {
+        self.inner.count_input_tokens(request, context)
+    }
+
+    fn compact(
+        &self,
+        request: agent_model::ModelRequest,
+        context: agent_model::ModelCallContext,
+    ) -> agent_model::ModelCompactionFuture<'_> {
+        self.inner.compact(request, context)
+    }
+
     fn stream(&self, request: ModelRequest, context: ModelCallContext) -> ModelStreamFuture<'_> {
         let debug = Arc::clone(&self.debug);
         let endpoint = self.endpoint.clone();
@@ -486,6 +506,7 @@ mod tests {
 
     fn assistant() -> AssistantMessage {
         AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: MessageId::new("assistant_debug").expect("message id"),
             model: ModelIdentity::new(
                 ProviderId::new("scripted").expect("provider id"),
@@ -827,6 +848,7 @@ mod tests {
             run_debug(Some(&viewer_url), DebugLayerSelection::Agent, &mut runtime);
         let debug = debug.expect("debug enabled");
         let evaluation = ContextWindowEvaluation {
+            accuracy: agent_context::ContextUsageAccuracy::Estimated,
             used_tokens: Some(90),
             context_window_tokens: 100,
             max_input_tokens: None,

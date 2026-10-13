@@ -8,19 +8,6 @@ use rusqlite::{
 };
 use std::path::Path;
 
-fn manifest() -> [Migration; 8] {
-    [
-        v0_25_1::entry(),
-        v0_25_2::entry(),
-        v0_25_3::entry(),
-        v0_26_0::entry(),
-        v0_27_0::entry(),
-        v0_28_0::entry(),
-        super::v0_28_1::entry(),
-        super::v0_29_0::entry(),
-    ]
-}
-
 /// 只读核对真实源库；无文件不是创建空库的许可，由布局层检查配套数据是否存在。
 pub(crate) fn admit(path: &Path) -> Result<Option<Connection>> {
     let Some(existing) = admission::ExistingDatabase::inspect(path)? else {

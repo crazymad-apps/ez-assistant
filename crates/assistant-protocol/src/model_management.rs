@@ -64,6 +64,18 @@ pub enum ModelFeatureSupport {
 #[serde(deny_unknown_fields)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ModelParameters {
+    /// 选择原生压缩机制；关闭时仍使用本地摘要。
+    #[serde(default)]
+    pub server_compaction_enabled: bool,
+    /// 选择服务端判断触发时机；本版暂不允许开启。
+    #[serde(default)]
+    pub server_auto_compaction_enabled: bool,
+    /// 当前路由的完整 compact 窗口能力，独立于用户开关。
+    #[serde(default)]
+    pub server_compaction_support: ModelFeatureSupport,
+    /// 输入计量是可选增强，不决定压缩机制。
+    #[serde(default)]
+    pub input_token_count_support: ModelFeatureSupport,
     pub context_window_tokens: ModelTokenLimit,
     pub max_input_tokens: ModelTokenLimit,
     pub max_output_tokens: ModelTokenLimit,

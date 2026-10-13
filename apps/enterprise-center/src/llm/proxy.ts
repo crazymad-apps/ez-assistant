@@ -8,6 +8,7 @@ import type { ModelsService } from '../models/service.js';
 import type { ModelSelection, Protocol } from '../contracts/models.js';
 import type { IdentityUser } from '../contracts/identity.js';
 import { uuid } from '../models/parameters.js';
+import type { ModelOperation } from './body.js';
 import { RequestBodies, requestModel } from './body.js';
 import { CallRecords } from './records.js';
 import type { CallRecording } from './records.js';
@@ -110,6 +111,7 @@ export class ModelProxy {
     signal: AbortSignal;
     sink: TransferSink;
     kind: 'proxy' | 'admin_test';
+    operation?: ModelOperation;
     historyBinding?: string;
     finish?: (signal: AbortSignal) => Promise<void>;
     admitted?: (record: CallRecording) => void;
@@ -123,7 +125,7 @@ export class ModelProxy {
         username: input.user.username,
         provider_instance_id: input.selection.provider_instance_id,
         model_id: input.selection.model_id,
-        kind: input.kind,
+        kind: input.operation === 'compact' ? 'context_compaction' : input.operation === 'input_tokens' ? 'input_tokens' : input.kind,
         protocol: input.protocol,
       });
       input.admitted?.(recording);
@@ -137,7 +139,7 @@ export class ModelProxy {
         abort: new AbortController(),
       };
       try {
-        const parsed = requestModel(input.body);
+        const parsed = requestModel(input.body, input.operation);
         if (parsed.model !== input.selection.model_id) throw new ControlError('llm_request_invalid');
         // 先登记准入等待期，覆盖异步准入结束到实际建连间的配置/主体撤销。
         // 只有最终走 WS 的请求使用此取消信号，不改变普通 HTTP 的生命周期。
@@ -145,15 +147,16 @@ export class ModelProxy {
         const route = await this.models.admit(input.key, input.selection, input.protocol, input.kind === 'admin_test', {
           request: parsed,
           binding: input.historyBinding,
+          operation: input.operation,
         });
         signal.throwIfAborted();
         recording.row.provider_name = route.provider.connection.display_name;
-        recording.usage = new UsageObserver(input.protocol, route.provider.connection.provider_type);
+        if (input.operation !== 'input_tokens') recording.usage = new UsageObserver(input.protocol, route.provider.connection.provider_type);
         signal.throwIfAborted();
         const bridge =
           route.provider.connection.responses_transport === 'websocket' &&
           input.protocol === 'open_ai_responses' &&
-          parsed.store === true &&
+          input.operation !== 'input_tokens' &&
           input.kind === 'proxy';
         if (!bridge) this.bridgeRequests.delete(bridgeRequest);
         transferSignal = bridge ? AbortSignal.any([signal, bridgeRequest.abort.signal]) : signal;
@@ -163,6 +166,7 @@ export class ModelProxy {
         const transferInput = {
           endpoint: route.provider.connection.endpoint,
           protocol: input.protocol,
+          operation: input.operation,
           apiKey: route.provider.api_key,
           body: input.body,
           signal: transferSignal,
@@ -191,11 +195,11 @@ export class ModelProxy {
           },
         };
         const result = bridge
-          ? await this.websocket.transfer({
+          ? await this.websocket[input.operation === 'compact' ? 'compact' : 'transfer']({
               ...transferInput,
               user: input.user.id,
               provider: input.selection.provider_instance_id,
-              binding: input.historyBinding!,
+              binding: input.historyBinding ?? '',
               finish: input.finish,
               started: () => {
                 upstream = true;
@@ -268,14 +272,16 @@ export class ModelProxy {
           );
         }
       });
-      for (const [suffix, protocol] of [
-        ['responses', 'open_ai_responses'],
-        ['chat/completions', 'open_ai_chat_completions'],
+      for (const [suffix, protocol, operation] of [
+        ['responses', 'open_ai_responses', 'generation'],
+        ['responses/compact', 'open_ai_responses', 'compact'],
+        ['responses/input_tokens', 'open_ai_responses', 'input_tokens'],
+        ['chat/completions', 'open_ai_chat_completions', 'generation'],
       ] as const) {
         scope.post<{ Params: { id: string } }>(`/api/llm/providers/:id/v1/${suffix}`, async (request, reply) => {
           let body = request.body;
           if (!Buffer.isBuffer(body)) throw new ControlError('llm_request_invalid');
-          const parsed = requestModel(body);
+          const parsed = requestModel(body, operation);
           let providerId: string;
           try {
             providerId = uuid(request.params.id);
@@ -301,6 +307,7 @@ export class ModelProxy {
               body,
               signal: cancelled.signal,
               kind: 'proxy',
+              operation,
               historyBinding:
                 typeof request.headers['x-ez-center-history-binding'] === 'string'
                   ? request.headers['x-ez-center-history-binding']

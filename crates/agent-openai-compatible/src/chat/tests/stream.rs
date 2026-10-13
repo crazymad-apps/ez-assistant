@@ -42,6 +42,7 @@ fn stream_plain_text_turn_produces_full_event_sequence() {
             },
             ModelEvent::TurnFinished {
                 message: AssistantMessage {
+                    purpose: agent_types::AssistantMessagePurpose::ModelResponse,
                     id: message_id("chatcmpl_1"),
                     model: model_identity(),
                     parts: vec![AssistantPart::Text(TextPart {
@@ -112,6 +113,7 @@ fn stream_interleaved_reasoning_and_text_switch_parts() {
             },
             ModelEvent::TurnFinished {
                 message: AssistantMessage {
+                    purpose: agent_types::AssistantMessagePurpose::ModelResponse,
                     id: message_id("chatcmpl_1"),
                     model: model_identity(),
                     // reasoning/text 交错按 Provider 输出顺序排列。
@@ -188,6 +190,7 @@ fn stream_and_message_treat_null_reasoning_field_as_absent() {
             },
             ModelEvent::TurnFinished {
                 message: AssistantMessage {
+                    purpose: agent_types::AssistantMessagePurpose::ModelResponse,
                     id: message_id("chatcmpl_1"),
                     model: model_identity(),
                     parts: vec![
@@ -260,6 +263,7 @@ fn stream_single_tool_call_assembles_arguments_across_chunks() {
             },
             ModelEvent::TurnFinished {
                 message: AssistantMessage {
+                    purpose: agent_types::AssistantMessagePurpose::ModelResponse,
                     id: message_id("chatcmpl_1"),
                     model: model_identity(),
                     parts: vec![AssistantPart::ToolCall(ToolCall {
@@ -311,6 +315,7 @@ fn stream_buffers_arguments_until_call_id_and_name_arrive() {
             },
             ModelEvent::TurnFinished {
                 message: AssistantMessage {
+                    purpose: agent_types::AssistantMessagePurpose::ModelResponse,
                     id: message_id("chatcmpl_1"),
                     model: model_identity(),
                     parts: vec![AssistantPart::ToolCall(ToolCall {
@@ -368,6 +373,7 @@ fn stream_parallel_tool_calls_complete_in_index_order() {
             },
             ModelEvent::TurnFinished {
                 message: AssistantMessage {
+                    purpose: agent_types::AssistantMessagePurpose::ModelResponse,
                     id: message_id("chatcmpl_1"),
                     model: model_identity(),
                     // tool calls 按 index 序进入最终消息。

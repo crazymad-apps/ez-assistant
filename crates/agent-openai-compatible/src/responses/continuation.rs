@@ -9,26 +9,21 @@ use sha2::{Digest, Sha256};
 
 use super::{
     ResponsesProtocolAdapter,
-    encode::{encode_input_from, encode_request_with_images},
+    encode::{encode_input_from, encode_request_unchecked},
     schema::ResponsesRequest,
 };
 
 pub(super) const STATE_TYPE: &str = "responses.continuation";
 
-/// 只随完整 AssistantMessage 保存；request_hash 覆盖实际全量 wire 前缀与参数，
-/// assistant_hash 覆盖远端新增输出的本地事实。重启后的比较不依赖内存指针。
+/// 只随完整 AssistantMessage 保存；context_hash 覆盖当前有效 wire 前缀、响应和语义参数。
+/// 重启后的比较不依赖内存指针；旧 v1 不再写入或恢复 ID。
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Continuation {
     binding: String,
-    request_len: usize,
-    request_hash: String,
-    assistant_hash: String,
+    context_len: usize,
+    context_hash: String,
     response_id: String,
-}
-
-pub(super) fn request_hash(encoded: &ResponsesRequest) -> Result<String, ModelError> {
-    hash(encoded)
 }
 
 pub(super) fn resume(
@@ -57,7 +52,11 @@ pub(super) fn resume(
         {
             return Ok(());
         }
-        if state.format_version() != 1 || state.media_type() != "application/json" {
+        // 已发布 v1 仅保留为历史，不再取得增量资格。
+        if state.format_version() == 1 {
+            return Ok(());
+        }
+        if state.format_version() != 2 || state.media_type() != "application/json" {
             return Err(ModelError::Protocol(
                 "Responses continuation format is invalid".into(),
             ));
@@ -65,15 +64,12 @@ pub(super) fn resume(
         let saved: Continuation = serde_json::from_slice(state.payload()).map_err(|_| {
             ModelError::Protocol("Responses continuation payload is invalid".into())
         })?;
-        if saved.binding != binding || saved.request_len != index {
+        if saved.binding != binding || saved.context_len != index + 1 {
             return Ok(());
         }
         let mut prefix = request.clone();
-        prefix.conversation.messages.truncate(index);
-        let previous = encode_request_with_images(&prefix, images, adapter, model)?;
-        if saved.request_hash != hash(&previous)?
-            || saved.assistant_hash != assistant_hash(assistant)?
-        {
+        prefix.conversation.messages.truncate(index + 1);
+        if saved.context_hash != context_hash(&prefix, images, adapter, model)? {
             return Ok(());
         }
         if saved.response_id.is_empty()
@@ -95,8 +91,9 @@ pub(super) fn resume(
 /// Core/Runtime 既有 Recorder 确认仍是工具副作用及下一次请求的可靠门禁。
 pub(super) fn attach(
     binding: &str,
-    request_len: usize,
-    request_hash: &str,
+    request: &ModelRequest,
+    images: &PreparedModelImages,
+    model: &str,
     adapter: &ResponsesProtocolAdapter,
     message: &mut AssistantMessage,
 ) -> Result<(), ModelError> {
@@ -106,11 +103,15 @@ pub(super) fn attach(
     ) {
         return Ok(());
     }
+    let mut prefix = request.clone();
+    prefix
+        .conversation
+        .messages
+        .push(ConversationMessage::Assistant(message.clone()));
     let saved = Continuation {
         binding: binding.to_owned(),
-        request_len,
-        request_hash: request_hash.to_owned(),
-        assistant_hash: assistant_hash(message)?,
+        context_len: prefix.conversation.messages.len(),
+        context_hash: context_hash(&prefix, images, adapter, model)?,
         response_id: message.id.as_str().to_owned(),
     };
     let payload = serde_json::to_vec(&saved)
@@ -124,7 +125,7 @@ pub(super) fn attach(
         adapter.protocol.clone(),
         STATE_TYPE,
         "application/json",
-        1,
+        2,
         None,
         fingerprint,
         payload,
@@ -147,9 +148,20 @@ pub(super) fn attach(
     Ok(())
 }
 
-fn assistant_hash(message: &AssistantMessage) -> Result<String, ModelError> {
-    let mut canonical = message.clone();
-    canonical.parts.retain(|part| !matches!(part, AssistantPart::ProviderState(state) if state.state_type() == STATE_TYPE));
+fn context_hash(
+    request: &ModelRequest,
+    images: &PreparedModelImages,
+    adapter: &ResponsesProtocolAdapter,
+    model: &str,
+) -> Result<String, ModelError> {
+    let encoded = encode_request_unchecked(request, images, adapter, model)?;
+    let mut canonical = serde_json::to_value(encoded)
+        .map_err(|_| ModelError::Protocol("Responses continuation encoding failed".into()))?;
+    if let Some(object) = canonical.as_object_mut() {
+        for key in ["store", "stream", "previous_response_id"] {
+            object.remove(key);
+        }
+    }
     hash(&canonical)
 }
 

@@ -222,7 +222,10 @@ impl fmt::Debug for ModelSecret {
 /// 模型静态硬上限和已计算的 generation，使后续 Run 不必重新解释配置覆盖规则。
 #[derive(Clone)]
 pub struct ResolvedModelConfig {
+    pub(super) context_management_mode: agent_model::ContextManagementMode,
     pub(crate) server_history_key: Option<String>,
+    pub(crate) server_history_enabled: bool,
+    pub(crate) input_token_count_supported: bool,
     pub(crate) external_configuration: Option<std::sync::Arc<super::ExternalModelConfiguration>>,
     pub(super) display_name: String,
     pub(super) protocol: ModelProtocol,
@@ -238,6 +241,10 @@ pub struct ResolvedModelConfig {
 }
 
 impl ResolvedModelConfig {
+    /// 已校验配置选择的唯一机制，执行时须与冻结 Session 一致。
+    pub fn context_management_mode(&self) -> agent_model::ContextManagementMode {
+        self.context_management_mode
+    }
     /// 用户可见名称。
     pub fn display_name(&self) -> &str {
         &self.display_name

@@ -71,8 +71,8 @@ Swagger 文档当前随服务可访问，不提供额外鉴权；生产可在反
 
 Center 允许任意来源跨域访问，不按 `Origin` 或 `Sec-Fetch-Site` 拒绝请求；CORS 预检无需登录，
 支持各业务方法和请求头，管理响应与模型代理流均返回跨域响应头。实际受保护接口仍要求显式 Bearer，
-权限校验照常执行；不使用 Cookie 认证，也不启用 CORS Cookie 凭据。`CENTER_PUBLIC_ORIGIN` 仅用于
-下发 Host 可访问的模型代理地址，不限制浏览器页面的访问地址。
+权限校验照常执行；不使用 Cookie 认证，也不启用 CORS Cookie 凭据。`CENTER_PUBLIC_ORIGIN` 用于
+下发模型代理和 Desktop 更新下载地址，必须可从 Host 与 Desktop 访问，不限制浏览器页面的访问地址。
 
 | 接口 | 输入与返回 |
 | --- | --- |
@@ -141,7 +141,7 @@ node --env-file=.env dist/main.js --api-only
 | `CENTER_DATABASE_URL` | 必填 PostgreSQL URI；升级和业务共用一个账号，无默认数据库连接 |
 | `CENTER_DATABASE_AUTO_UPGRADE` | `true`；只接受 `true` / `false` |
 | `CENTER_HOST` / `CENTER_PORT` | `127.0.0.1:7320` |
-| `CENTER_PUBLIC_ORIGIN` | 必填模型代理公开地址，无路径/尾斜线；用于下发 Host 配置，不是请求来源白名单 |
+| `CENTER_PUBLIC_ORIGIN` | 必填中心公开地址，无路径/尾斜线；用于下发模型代理与 Desktop 更新下载地址，须可从 Host 与 Desktop 访问，不是请求来源白名单 |
 
 初始 SQL 内置超级管理员 `admin / 123456`，只保存预生成的带盐 scrypt 摘要，不另设初始化代码、命令或配置。该公开默认密码应在正式使用前修改；它是后续新密码长度规则的初始化例外。
 
@@ -271,7 +271,7 @@ Agent 名称支持 NFC 中文，限制 1—64 个 Unicode 字符且不能有首�
 
 ## F06 企业历史续接
 
-配套 Host 使用企业协议 2（最低 2）；Center/Admin 一起部署，旧 Host/Center 混用拒绝。迁移 `005-server-history.sql` 给旧连接补默认关闭及空能力覆盖，保留原配置、凭据、固定参数和调用记录。已有库升级前仍需停写、独立备份并恢复核验；不提供原地降级，回退须恢复匹配的数据库和文件备份。
+v0.29.0 此能力使用企业协议 2；v0.30.0 F01 当前协议为 3（最低 3），Center/Admin/Host 须配套升级，旧端混用拒绝。迁移 `005-server-history.sql` 给旧连接补默认关闭及空能力覆盖，保留原配置、凭据、固定参数和调用记录。已有库升级前仍需停写、独立备份并恢复核验；不提供原地降级，回退须恢复匹配的数据库和文件备份。
 
 管理员在现有服务商表单设置续接能力及开关；只有 Responses 且实际上游明确支持时可启用。旧缓存 Admin 缺少新策略字段会拒绝保存，刷新配套页面后重试。普通企业用户只读。
 
@@ -281,8 +281,7 @@ Responses 代理请求必须显式传入 `store`，无状态/配置测试使用 
 ### Responses WebSocket 接续
 
 管理员在服务商编辑页选择“Responses 上游传输 → WebSocket”，确认入口支持并启用服务端历史续接。
-Host 仍走 HTTP/SSE；Center 建立独立上游连接，用不透明响应 ID 接续增量。仅业务流式 `store:true`
-请求桥接；标题、摘要、连接测试及无状态调用沿用 HTTP。上游可保持 `store:false`，这不表示永久存储。
+Host 仍走 HTTP/SSE；Center 建立独立上游连接，用不透明响应 ID 接续增量。业务流式 `store:true` 请求桥接并保留续接；v0.30.0 F01 同时支持普通 `store:false` 流式请求，响应结束后释放连接。非流式辅助生成沿用 HTTP。上游可保持 `store:false`，这不表示永久存储。
 调用快照是 Host ↔ Center 的 HTTP 正文，不是协议转换后的上游原始字节。
 
 | 启动变量 | 默认值 | 允许范围 |
@@ -342,3 +341,12 @@ multipart 的 `manifest` 字段传原始 UTF-8 字节的 base64，避免浏览�
 无候选返回 204；固定版本及下载路径由该结果提供。草稿/撤回不可公开读取，撤回同时取消未完成下载。
 支持 HTTP 和 HTTPS；HTTPS 由反向代理终止 TLS，`CENTER_PUBLIC_ORIGIN` 填实际访问地址，代理需允许上述上传大小及期限。
 当前完成 Center/Admin 分发，Desktop 自动升级及真实平台安装验收在后续里程碑实施。
+
+
+### v0.30.0 F01 上下文压缩
+
+固定参数分别声明服务端压缩开关、服务端自行触发开关、compact 能力与输入计量能力。服务端自行触发本版不可开启；启用原生压缩要求 Responses 和明确 supported，自动与手动由 Agent 统一调用 HTTP compact。未启用时使用本地摘要，失败不跨机制回退。
+
+中心固定代理 `/responses/compact` 和 `/responses/input_tokens`。HTTP 上游直接转发；WS 上游的 compact 使用独立连接发送有效输入及 `compaction_trigger`，完整终态校验成功后才返回整个规范窗口，不影响其他续接连接。计量始终使用 HTTP；不支持时保留既有 usage 与增量估算。配置绑定同时保护原生压缩，关闭响应 ID 续接仍保留配置周期。
+
+迁移 `010-context-compaction.sql` 扩展既有 Provider 周期、固定参数与调用类型，不另建费用账本。消费聚合包括普通生成及压缩，计量请求不计消费。当前企业协议及最低协议均为 3；正式升级仍须按数据库安全规则备份、验证及确认。已核实的真实上游为订阅 WS V2；其他 HTTP compact 和计量组合须分别验证后声明 supported。

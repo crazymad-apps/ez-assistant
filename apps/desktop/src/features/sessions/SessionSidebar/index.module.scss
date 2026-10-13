@@ -25,6 +25,11 @@
   padding: 0 12px;
 }
 
+:global(html[data-platform="windows"]) .native_control_region,
+:global(html[data-platform="unsupported"]) .native_control_region {
+  justify-content: flex-start;
+}
+
 :global(html[data-platform="macos"]) .native_control_region {
   // 原生交通灯的命中区由系统控制，导航组从其右侧开始。
   padding-left: 72px;

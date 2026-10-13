@@ -70,6 +70,16 @@ pub struct ContextReplacementResult {
 pub fn execution_context_from_product_history(
     history: &ConversationSnapshot,
 ) -> ConversationSnapshot {
+    // 原生窗口不能解密成文本摘要；本地机制仍可使用完整历史中的原始事实。
+    let local = ConversationSnapshot::new(
+        history
+            .messages
+            .iter()
+            .filter(|message| !is_native_compaction(message))
+            .cloned()
+            .collect(),
+    );
+    let history = &local;
     let prefix_end = history
         .messages
         .iter()
@@ -81,7 +91,39 @@ pub fn execution_context_from_product_history(
         .rposition(|message| matches!(message, ConversationMessage::ContextSummary(_)))
         .unwrap_or(prefix_end);
     let mut messages = history.messages[..prefix_end].to_vec();
-    messages.extend_from_slice(&history.messages[summary_index..]);
+    if let Some(ConversationMessage::ContextSummary(summary)) = history.messages.get(summary_index)
+        && let Some(reference) = &summary.retained_user_message_id
+    {
+        let matches: Vec<_> = history.messages[..summary_index]
+            .iter()
+            .filter(|message| {
+                matches!(message,
+                    ConversationMessage::User(user) if &user.id == reference
+                )
+            })
+            .collect();
+        let duplicated = history.messages[summary_index + 1..].iter().any(|message| {
+            matches!(message,
+                ConversationMessage::User(user) if &user.id == reference
+            )
+        });
+        if matches.len() != 1 || duplicated {
+            // 损坏引用不能激活；完整原文仍在，移除摘要边界后按原文重建。
+            return ConversationSnapshot::new(
+                history
+                    .messages
+                    .iter()
+                    .filter(|message| !matches!(message, ConversationMessage::ContextSummary(_)))
+                    .cloned()
+                    .collect(),
+            );
+        }
+        messages.push(history.messages[summary_index].clone());
+        messages.push(matches[0].clone());
+        messages.extend_from_slice(&history.messages[summary_index + 1..]);
+    } else {
+        messages.extend_from_slice(&history.messages[summary_index..]);
+    }
     ConversationSnapshot::new(messages)
 }
 
@@ -135,6 +177,50 @@ pub fn merge_context_replacement_with_product_history(
         .iter()
         .take_while(|message| matches!(message, ConversationMessage::System(_)))
         .count();
+    if let Some(ConversationMessage::Assistant(boundary)) =
+        replacement.messages.get(replacement_prefix_end)
+        && boundary.purpose == agent_types::AssistantMessagePurpose::ContextCompaction
+    {
+        let history_prefix = history
+            .messages
+            .iter()
+            .take_while(|m| matches!(m, ConversationMessage::System(_)))
+            .count();
+        let valid_state = matches!(boundary.parts.as_slice(), [agent_types::AssistantPart::ProviderState(state)]
+            if state.context_effect() == Some(agent_types::ProviderContextEffect::ReplacePriorContext));
+        if !valid_state
+            || replacement.messages.len() != replacement_prefix_end + 1
+            || replacement.messages[..replacement_prefix_end] != history.messages[..history_prefix]
+            || history
+                .messages
+                .iter()
+                .any(|message| message_id_for_replacement(message) == &boundary.id)
+        {
+            return Err(super::StoreError::new(
+                super::StoreErrorKind::InvalidInput,
+                "invalid native context replacement",
+            ));
+        }
+        history.validate_tool_exchange_pairs().map_err(|source| {
+            super::StoreError::with_source(
+                super::StoreErrorKind::InvalidInput,
+                "native replacement source has pending tools",
+                source,
+            )
+        })?;
+        let mut merged = history.clone();
+        merged
+            .messages
+            .push(ConversationMessage::Assistant(boundary.clone()));
+        merged.validate_tool_exchange_pairs().map_err(|source| {
+            super::StoreError::with_source(
+                super::StoreErrorKind::InvalidInput,
+                "native replacement boundary is invalid",
+                source,
+            )
+        })?;
+        return Ok(merged);
+    }
     if !matches!(
         replacement.messages.get(replacement_prefix_end),
         Some(ConversationMessage::ContextSummary(_))
@@ -156,6 +242,31 @@ pub fn merge_context_replacement_with_product_history(
         ));
     }
     let mut retained = &replacement.messages[replacement_prefix_end + 1..];
+    let Some(ConversationMessage::ContextSummary(summary)) =
+        replacement.messages.get(replacement_prefix_end)
+    else {
+        unreachable!();
+    };
+    let expanded_user = if let Some(reference) = &summary.retained_user_message_id {
+        let matching: Vec<_> = history
+            .messages
+            .iter()
+            .filter(|message| {
+                matches!(message,
+                    ConversationMessage::User(user) if &user.id == reference
+                )
+            })
+            .collect();
+        if matching.len() != 1 || retained.first() != Some(matching[0])
+            || retained[1..].iter().any(|message| matches!(message, ConversationMessage::User(user) if &user.id == reference))
+        {
+            return Err(super::StoreError::new(super::StoreErrorKind::InvalidInput, "context replacement contains an invalid original user reference"));
+        }
+        retained = &retained[1..];
+        true
+    } else {
+        false
+    };
     // 只允许一条新建的隐藏能力上下文；不允许普通正文借压缩被修改或追加。
     if let Some(ConversationMessage::User(user)) = retained.last()
         && !history.messages.iter().any(|message| match message {
@@ -177,19 +288,34 @@ pub fn merge_context_replacement_with_product_history(
     {
         retained = &retained[..retained.len() - 1];
     }
-    if history.messages.len() < retained.len()
-        || history.messages[history.messages.len() - retained.len()..] != *retained
+    let effective: Vec<_> = history
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| !is_native_compaction(message))
+        .collect();
+    if effective.len() < retained.len()
+        || !effective[effective.len() - retained.len()..]
+            .iter()
+            .map(|(_, message)| *message)
+            .eq(retained.iter())
     {
         return Err(super::StoreError::new(
             super::StoreErrorKind::InvalidInput,
             "context replacement does not retain an exact conversation suffix",
         ));
     }
-    let prefix_len = history.messages.len() - retained.len();
+    let prefix_len = effective
+        .get(effective.len() - retained.len())
+        .map_or(history.messages.len(), |(index, _)| *index);
     let replacement_body = &replacement.messages[replacement_prefix_end..];
     let mut messages = Vec::with_capacity(prefix_len + replacement_body.len());
     messages.extend_from_slice(&history.messages[..prefix_len]);
-    messages.extend_from_slice(replacement_body);
+    messages.push(replacement_body[0].clone());
+    // 原始尾部（含旧原生记录）保持一次且顺序不变；replacement 只增加摘要及可选恢复消息。
+    messages.extend_from_slice(&history.messages[prefix_len..]);
+    let restored_start = 1 + usize::from(expanded_user) + retained.len();
+    messages.extend_from_slice(&replacement_body[restored_start..]);
     let merged = ConversationSnapshot::new(messages);
     merged.validate_tool_exchange_pairs().map_err(|source| {
         super::StoreError::with_source(
@@ -199,6 +325,21 @@ pub fn merge_context_replacement_with_product_history(
         )
     })?;
     Ok(merged)
+}
+
+fn is_native_compaction(message: &ConversationMessage) -> bool {
+    matches!(message, ConversationMessage::Assistant(message)
+        if message.purpose == agent_types::AssistantMessagePurpose::ContextCompaction)
+}
+
+fn message_id_for_replacement(message: &ConversationMessage) -> &MessageId {
+    match message {
+        ConversationMessage::System(m) => &m.id,
+        ConversationMessage::User(m) => &m.id,
+        ConversationMessage::Assistant(m) => &m.id,
+        ConversationMessage::Tool(m) => &m.id,
+        ConversationMessage::ContextSummary(m) => &m.id,
+    }
 }
 
 /// generation 切换成功后创建的新 Input 与首次 Run。
@@ -299,6 +440,7 @@ mod tests {
 
     fn summary(value: &str) -> ConversationMessage {
         ConversationMessage::ContextSummary(ContextSummaryMessage {
+            retained_user_message_id: None,
             id: message_id(value),
             text: value.to_owned(),
             model: None,
@@ -311,6 +453,7 @@ mod tests {
 
     fn assistant_with_usage(value: &str) -> ConversationMessage {
         ConversationMessage::Assistant(AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: message_id(value),
             model: ModelIdentity::new(ProviderId::new("test").unwrap(), "model"),
             parts: Vec::new(),
@@ -417,6 +560,38 @@ mod tests {
     }
 
     #[test]
+    fn local_summary_after_native_mode_preserves_original_history_and_retained_tail() {
+        let mut native = assistant_with_usage("old-native");
+        let ConversationMessage::Assistant(message) = &mut native else {
+            unreachable!()
+        };
+        message.purpose = agent_types::AssistantMessagePurpose::ContextCompaction;
+        let mut second_native = native.clone();
+        let ConversationMessage::Assistant(message) = &mut second_native else {
+            unreachable!()
+        };
+        message.id = message_id("second-native");
+        let history =
+            ConversationSnapshot::new(vec![user("first"), native, user("retained"), second_native]);
+        assert_eq!(
+            execution_context_from_product_history(&history).messages,
+            vec![user("first"), user("retained")]
+        );
+        let replacement =
+            ConversationSnapshot::new(vec![summary("new-local-summary"), user("retained")]);
+        let merged =
+            merge_context_replacement_with_product_history(&history, &replacement).unwrap();
+        assert_eq!(execution_context_from_product_history(&merged), replacement);
+        let originals: Vec<_> = merged
+            .messages
+            .iter()
+            .filter(|message| !matches!(message, ConversationMessage::ContextSummary(_)))
+            .cloned()
+            .collect();
+        assert_eq!(originals, history.messages);
+    }
+
+    #[test]
     fn truncation_marks_a_dangling_usage_adjustment_unavailable() {
         let retained = assistant_with_usage("retained");
         let mut context_summary = summary("summary");
@@ -447,6 +622,59 @@ mod tests {
             summary.usage_adjustment,
             Some(ContextUsageAdjustment::Unavailable)
         );
+    }
+
+    #[test]
+    fn intra_turn_references_restore_without_duplicate_product_users_and_reject_tampering() {
+        let original_user = user("task");
+        let first = assistant_with_usage("first");
+        let last = assistant_with_usage("last");
+        let history =
+            ConversationSnapshot::new(vec![original_user.clone(), first.clone(), last.clone()]);
+        let mut boundary = summary("summary-one");
+        let ConversationMessage::ContextSummary(value) = &mut boundary else {
+            unreachable!();
+        };
+        value.retained_user_message_id = Some(message_id("task"));
+        let replacement =
+            ConversationSnapshot::new(vec![boundary.clone(), original_user.clone(), last.clone()]);
+        let merged =
+            merge_context_replacement_with_product_history(&history, &replacement).unwrap();
+        assert_eq!(
+            merged.messages,
+            vec![original_user.clone(), first, boundary.clone(), last.clone()]
+        );
+        assert_eq!(execution_context_from_product_history(&merged), replacement);
+        let mut tampered = replacement.clone();
+        let ConversationMessage::User(value) = &mut tampered.messages[1] else {
+            unreachable!();
+        };
+        value.origin = agent_types::UserMessageOrigin::Runtime;
+        assert!(merge_context_replacement_with_product_history(&history, &tampered).is_err());
+        let mut duplicated = replacement.clone();
+        duplicated.messages.push(original_user.clone());
+        assert!(merge_context_replacement_with_product_history(&history, &duplicated).is_err());
+        let mut missing = merged.clone();
+        missing.messages.remove(0);
+        assert_eq!(
+            execution_context_from_product_history(&missing).messages,
+            vec![assistant_with_usage("first"), last]
+        );
+        let mut second = replacement;
+        let ConversationMessage::ContextSummary(value) = &mut second.messages[0] else {
+            unreachable!();
+        };
+        value.id = message_id("summary-two");
+        let twice = merge_context_replacement_with_product_history(&merged, &second).unwrap();
+        assert_eq!(
+            twice
+                .messages
+                .iter()
+                .filter(|message| matches!(message, ConversationMessage::User(_)))
+                .count(),
+            1
+        );
+        assert_eq!(execution_context_from_product_history(&twice), second);
     }
 }
 

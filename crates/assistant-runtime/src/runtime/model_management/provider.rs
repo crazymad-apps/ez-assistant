@@ -66,11 +66,8 @@ impl AssistantRuntime {
             crate::id::generate("provider").map_err(|_| invalid("服务商标识无法创建。"))?,
         )
         .map_err(|_| invalid("服务商标识无法创建。"))?;
-        let server_history_key = if request.connection.server_history_enabled {
-            Some(crate::id::generate("history").map_err(|_| invalid("续接绑定无法创建。"))?)
-        } else {
-            None
-        };
+        let server_history_key =
+            Some(crate::id::generate("history").map_err(|_| invalid("续接绑定无法创建。"))?);
         let provider = Arc::new(StoredProvider {
             server_history_key,
             provider_instance_id: id.clone(),
@@ -132,9 +129,7 @@ impl AssistantRuntime {
         }
         // model_binding_gate 将配置提交和投影替换串行化；绑定随同连接可靠落库。
         // 关闭后再开启必须换新，不能从历史消息捡回关闭前的 response ID。
-        let server_history_key = if !request.connection.server_history_enabled {
-            None
-        } else if old.connection == request.connection && old.api_key == api_key {
+        let server_history_key = if old.connection == request.connection && old.api_key == api_key {
             old.server_history_key.clone()
         } else {
             Some(crate::id::generate("history").map_err(|_| invalid("续接绑定无法创建。"))?)

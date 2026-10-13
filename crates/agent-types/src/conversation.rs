@@ -19,6 +19,97 @@ pub struct ConversationSnapshot {
 }
 
 impl ConversationSnapshot {
+    /// 从后向前选取最新文本摘要或原生边界，保留系统前缀和边界后的规范事实。
+    ///
+    /// 压缩窗口属于调用方提供的可靠对话，不因模型、入口地址或临时续接绑定变化而失效。
+    /// Provider/Protocol 与窗口格式由 Adapter 校验；响应 ID 的续接资格另行判断。
+    ///
+    /// # Errors
+    /// 完整输入或裁剪结果破坏工具配对时返回结构错误。
+    pub fn project_provider_context(&self) -> Result<Self, ConversationValidationError> {
+        self.validate_tool_exchange_pairs()?;
+        let prefix = self
+            .messages
+            .iter()
+            .take_while(|message| matches!(message, ConversationMessage::System(_)))
+            .count();
+        let boundary = self.messages.iter().enumerate().rev().find_map(|(index, message)| {
+            if matches!(message, ConversationMessage::ContextSummary(_)) {
+                return Some((index, None));
+            }
+            let ConversationMessage::Assistant(assistant) = message else { return None; };
+            assistant.parts.iter().rposition(|part| matches!(part, AssistantPart::ProviderState(state)
+                if state.context_effect() == Some(ProviderContextEffect::ReplacePriorContext)
+            )).map(|part| (index, Some(part)))
+        });
+        let mut messages = self.messages[..prefix].to_vec();
+        if let Some((index, part)) = boundary {
+            match (&self.messages[index], part) {
+                (ConversationMessage::Assistant(assistant), Some(part)) => {
+                    let mut assistant = assistant.clone();
+                    assistant.parts.drain(..part);
+                    messages.push(ConversationMessage::Assistant(assistant));
+                }
+                (ConversationMessage::ContextSummary(summary), None) => {
+                    messages.push(self.messages[index].clone());
+                    if let Some(reference) = &summary.retained_user_message_id {
+                        let users: Vec<_> = self.messages.iter().enumerate().filter(|(_, message)| {
+                            matches!(message, ConversationMessage::User(user) if &user.id == reference)
+                        }).collect();
+                        match users.as_slice() {
+                            [(user_index, user)] if *user_index < index => {
+                                messages.push((*user).clone())
+                            }
+                            // 已投影快照直接复用紧随摘要的原始 User，保持多层投影幂等。
+                            [(user_index, _)] if *user_index == index + 1 => {}
+                            _ => {
+                                return Err(
+                                    ConversationValidationError::InvalidProviderContextBoundary,
+                                );
+                            }
+                        }
+                    }
+                }
+                _ => unreachable!(),
+            }
+            // 最近边界替代之前的窗口；后续旧压缩记录不重复装配。
+            messages.extend(
+                self.messages[index + 1..]
+                    .iter()
+                    .filter(|message| {
+                        !matches!(
+                            message,
+                            ConversationMessage::ContextSummary(_)
+                                | ConversationMessage::Assistant(AssistantMessage {
+                                    purpose: AssistantMessagePurpose::ContextCompaction,
+                                    ..
+                                })
+                        )
+                    })
+                    .cloned(),
+            );
+        } else {
+            messages.extend(
+                self.messages[prefix..]
+                    .iter()
+                    .filter(|message| {
+                        !matches!(
+                            message,
+                            ConversationMessage::ContextSummary(_)
+                                | ConversationMessage::Assistant(AssistantMessage {
+                                    purpose: AssistantMessagePurpose::ContextCompaction,
+                                    ..
+                                })
+                        )
+                    })
+                    .cloned(),
+            );
+        }
+        let projected = Self::new(messages);
+        projected.validate_tool_exchange_pairs()?;
+        Ok(projected)
+    }
+
     /// 从有序对话消息创建快照。
     pub fn new(messages: Vec<ConversationMessage>) -> Self {
         Self { messages }
@@ -91,6 +182,19 @@ impl ConversationSnapshot {
 
                     if let ConversationMessage::Assistant(message) = non_tool {
                         for part in &message.parts {
+                            if let AssistantPart::ProviderState(state) = part
+                                && state.context_effect()
+                                    == Some(ProviderContextEffect::ReplacePriorContext)
+                            {
+                                // 原生边界只能重置完整交换；不能抹掉同一响应前面的待执行调用。
+                                if !pending_calls.is_empty() {
+                                    return Err(
+                                        ConversationValidationError::InvalidProviderContextBoundary,
+                                    );
+                                }
+                                seen_calls.clear();
+                                completed_calls.clear();
+                            }
                             if let AssistantPart::ToolCall(call) = part {
                                 if !seen_calls.insert(call.id.clone()) {
                                     return Err(ConversationValidationError::DuplicateToolCallId {
@@ -123,20 +227,36 @@ impl ConversationSnapshot {
         &self,
         response: &AssistantMessage,
     ) -> Result<(), ConversationValidationError> {
-        let mut seen = self
-            .messages
-            .iter()
-            .filter_map(|message| match message {
-                ConversationMessage::Assistant(message) => Some(message),
-                _ => None,
-            })
-            .flat_map(|message| &message.parts)
-            .filter_map(|part| match part {
-                AssistantPart::ToolCall(call) => Some(&call.id),
-                _ => None,
-            })
-            .collect::<HashSet<_>>();
+        self.validate_tool_exchange_pairs()?;
+        let mut seen = HashSet::new();
+        for message in &self.messages {
+            if matches!(message, ConversationMessage::ContextSummary(_)) {
+                seen.clear();
+            }
+            if let ConversationMessage::Assistant(assistant) = message {
+                for part in &assistant.parts {
+                    if matches!(part, AssistantPart::ProviderState(state) if state.context_effect() == Some(ProviderContextEffect::ReplacePriorContext))
+                    {
+                        seen.clear();
+                    }
+                    if let AssistantPart::ToolCall(call) = part {
+                        seen.insert(&call.id);
+                    }
+                }
+            }
+        }
+        let mut response_calls_seen = false;
         for part in &response.parts {
+            if matches!(part, AssistantPart::ProviderState(state) if state.context_effect() == Some(ProviderContextEffect::ReplacePriorContext))
+            {
+                if response_calls_seen {
+                    return Err(ConversationValidationError::InvalidProviderContextBoundary);
+                }
+                seen.clear();
+            }
+            if matches!(part, AssistantPart::ToolCall(_)) {
+                response_calls_seen = true;
+            }
             if let AssistantPart::ToolCall(call) = part
                 && !seen.insert(&call.id)
             {
@@ -152,6 +272,8 @@ impl ConversationSnapshot {
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 /// 规范对话中的 Tool Call/Result 结构不满足双向配对约束。
 pub enum ConversationValidationError {
+    #[error("provider context boundary interrupts a tool exchange")]
+    InvalidProviderContextBoundary,
     /// 同一个 ToolCallId 被声明多次。
     #[error("tool call id `{call_id}` is declared more than once")]
     DuplicateToolCallId {
@@ -213,7 +335,7 @@ impl ConversationMessage {
     pub fn is_transcript_visible(&self) -> bool {
         match self {
             Self::User(message) => message.transcript_visibility.is_visible(),
-            Self::Assistant(_) => true,
+            Self::Assistant(message) => message.purpose.is_model_response(),
             Self::System(_) | Self::ContextSummary(_) | Self::Tool(_) => false,
         }
     }
@@ -231,6 +353,9 @@ pub struct SystemMessage {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 /// 由较早规范对话派生、供后续模型请求使用的上下文摘要。
 pub struct ContextSummaryMessage {
+    /// 轮内回收时保留的原始用户消息；引用由宿主从完整历史解析，不复制写入正文。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_user_message_id: Option<MessageId>,
     /// 规范消息 ID。
     pub id: MessageId,
     /// 摘要正文。
@@ -411,6 +536,12 @@ pub struct FileReference {
 /// reasoning、正文和 Tool Call 都保存在同一个有序 `parts` 列表中，
 /// 这样 DeepSeek 等 Provider 的下一轮请求可以恢复原始消息结构。
 pub struct AssistantMessage {
+    /// 状态压缩与普通回复分开记账和展示；缺省省略以保持旧消息哈希。
+    #[serde(
+        default,
+        skip_serializing_if = "AssistantMessagePurpose::is_model_response"
+    )]
+    pub purpose: AssistantMessagePurpose,
     /// 规范消息 ID。
     pub id: MessageId,
     /// 生成该响应的模型身份。
@@ -421,6 +552,22 @@ pub struct AssistantMessage {
     pub finish_reason: FinishReason,
     /// Provider 返回的 token 用量；未提供时为 `None`。
     pub usage: Option<TokenUsage>,
+}
+
+/// 完整 Assistant 消息的来源用途；压缩状态不构成面向用户的普通回复。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantMessagePurpose {
+    #[default]
+    ModelResponse,
+    ContextCompaction,
+}
+
+impl AssistantMessagePurpose {
+    /// 缺省用途不写入旧规范消息，避免改变续接前缀。
+    pub fn is_model_response(&self) -> bool {
+        *self == Self::ModelResponse
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -499,6 +646,8 @@ pub struct ToolMessage {
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 /// OpaqueProviderState 不满足边界约束时返回的错误。
 pub enum ProviderStateError {
+    #[error("provider context effect requires an exact route binding")]
+    UnboundContextEffect,
     #[error("provider state type must not be empty")]
     EmptyStateType,
     #[error("provider state media type must not be empty")]
@@ -513,9 +662,9 @@ pub enum ProviderStateError {
     PayloadTooLarge,
 }
 
-/// 单个不透明 Provider 状态允许持久化的最大原始 payload。
+/// 单个普通不透明 Provider item 的最大原始 payload；完整替代窗口由传输预算约束。
 pub const MAX_PROVIDER_STATE_ITEM_BYTES: usize = 2 * 1024 * 1024;
-/// 一次 Assistant Turn 允许持久化的不透明 Provider 状态总量。
+/// 一次普通 Assistant Turn 的不透明 Provider item 总量；不包含完整替代窗口。
 pub const MAX_PROVIDER_STATE_TURN_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Eq, PartialEq, Serialize)]
@@ -524,6 +673,8 @@ pub const MAX_PROVIDER_STATE_TURN_BYTES: usize = 8 * 1024 * 1024;
 /// 普通 reasoning 文本不能放在这里；只有确实无法规范化、但下一次请求必须回传的
 /// Provider 私有数据才使用这个类型。
 pub struct OpaqueProviderState {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_effect: Option<ProviderContextEffect>,
     provider: ProviderId,
     protocol: ProtocolId,
     state_type: String,
@@ -536,6 +687,13 @@ pub struct OpaqueProviderState {
     payload: Vec<u8>,
 }
 
+/// 原生状态对其前文的中立语义；只描述可靠边界，不解释 Provider payload。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderContextEffect {
+    ReplacePriorContext,
+}
+
 impl std::fmt::Debug for OpaqueProviderState {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -545,6 +703,7 @@ impl std::fmt::Debug for OpaqueProviderState {
             .field("state_type", &self.state_type)
             .field("media_type", &self.media_type)
             .field("format_version", &self.format_version)
+            .field("context_effect", &self.context_effect)
             .field("route_bound", &self.route_fingerprint.is_some())
             .field("payload_bytes", &self.payload.len())
             .finish()
@@ -555,6 +714,8 @@ impl std::fmt::Debug for OpaqueProviderState {
 // `OpaqueProviderState::new` 做业务校验，防止外部 JSON 直接构造非法状态。
 #[derive(Deserialize)]
 struct OpaqueProviderStateWire {
+    #[serde(default)]
+    context_effect: Option<ProviderContextEffect>,
     provider: ProviderId,
     protocol: ProtocolId,
     state_type: String,
@@ -582,6 +743,7 @@ impl<'de> Deserialize<'de> for OpaqueProviderState {
             wire.related_part_id,
             wire.route_fingerprint,
             wire.payload,
+            wire.context_effect,
         )
         .map_err(de::Error::custom)
     }
@@ -606,6 +768,7 @@ impl OpaqueProviderState {
             None,
             None,
             payload,
+            None,
         )
     }
 
@@ -630,6 +793,32 @@ impl OpaqueProviderState {
             related_part_id,
             Some(route_fingerprint.into()),
             payload,
+            None,
+        )
+    }
+
+    /// 创建已经由 Adapter 校验的完整上下文替代窗口。
+    ///
+    /// 窗口可包含保留消息和图片，不使用普通原生 item 的字节上限；调用方负责传输预算。
+    pub fn new_context_replacement(
+        provider: ProviderId,
+        protocol: ProtocolId,
+        state_type: impl Into<String>,
+        media_type: impl Into<String>,
+        format_version: u32,
+        route_fingerprint: impl Into<String>,
+        payload: Vec<u8>,
+    ) -> Result<Self, ProviderStateError> {
+        Self::build(
+            provider,
+            protocol,
+            state_type,
+            media_type,
+            format_version,
+            None,
+            Some(route_fingerprint.into()),
+            payload,
+            Some(ProviderContextEffect::ReplacePriorContext),
         )
     }
 
@@ -643,6 +832,7 @@ impl OpaqueProviderState {
         related_part_id: Option<PartId>,
         route_fingerprint: Option<String>,
         payload: Vec<u8>,
+        context_effect: Option<ProviderContextEffect>,
     ) -> Result<Self, ProviderStateError> {
         let state_type = state_type.into();
         if state_type.trim().is_empty() {
@@ -664,10 +854,14 @@ impl OpaqueProviderState {
         {
             return Err(ProviderStateError::InvalidRouteFingerprint);
         }
-        if payload.len() > MAX_PROVIDER_STATE_ITEM_BYTES {
+        if context_effect.is_some() && route_fingerprint.is_none() {
+            return Err(ProviderStateError::UnboundContextEffect);
+        }
+        if context_effect.is_none() && payload.len() > MAX_PROVIDER_STATE_ITEM_BYTES {
             return Err(ProviderStateError::PayloadTooLarge);
         }
         Ok(Self {
+            context_effect,
             provider,
             protocol,
             state_type,
@@ -718,6 +912,26 @@ impl OpaqueProviderState {
     pub fn payload(&self) -> &[u8] {
         &self.payload
     }
+
+    /// 返回显式声明的替代语义；旧状态始终为空。
+    pub fn context_effect(&self) -> Option<ProviderContextEffect> {
+        self.context_effect
+    }
+
+    /// 在 Adapter 校验完整原生窗口后标记边界；此方法不裁剪或解密 payload。
+    ///
+    /// # Errors
+    /// 未绑定精确路由的旧状态不能声明替代前文。
+    pub fn with_context_effect(
+        mut self,
+        effect: ProviderContextEffect,
+    ) -> Result<Self, ProviderStateError> {
+        if self.route_fingerprint.is_none() {
+            return Err(ProviderStateError::UnboundContextEffect);
+        }
+        self.context_effect = Some(effect);
+        Ok(self)
+    }
 }
 
 fn valid_route_fingerprint(value: &str) -> bool {
@@ -738,6 +952,135 @@ mod tests {
         T::Error: std::fmt::Debug,
     {
         value.to_owned().try_into().expect("valid id")
+    }
+
+    #[test]
+    fn legacy_assistant_wire_stays_stable_and_compaction_purpose_is_hidden() {
+        let legacy = r#"{"id":"legacy","model":{"provider":"deepseek","model":"deepseek-reasoner"},"parts":[],"finish_reason":{"type":"stop"},"usage":null}"#;
+        let mut message: AssistantMessage = serde_json::from_str(legacy).expect("old message");
+        assert!(message.purpose.is_model_response());
+        assert_eq!(serde_json::to_string(&message).unwrap(), legacy);
+        message.purpose = AssistantMessagePurpose::ContextCompaction;
+        let wire = serde_json::to_string(&message).unwrap();
+        let decoded: AssistantMessage = serde_json::from_str(&wire).unwrap();
+        assert_eq!(decoded.purpose, AssistantMessagePurpose::ContextCompaction);
+        assert!(!ConversationMessage::Assistant(decoded).is_transcript_visible());
+    }
+
+    #[test]
+    fn routed_replacement_boundary_resets_only_closed_tool_exchanges() {
+        let state = OpaqueProviderState::new_routed(
+            id("deepseek"),
+            id("openai.responses"),
+            "responses.compacted_window",
+            "application/json",
+            1,
+            None,
+            "a".repeat(64),
+            b"secret-window".to_vec(),
+        )
+        .unwrap()
+        .with_context_effect(ProviderContextEffect::ReplacePriorContext)
+        .unwrap();
+        let mut boundary = tool_call_message("compact", &[]);
+        if let ConversationMessage::Assistant(message) = &mut boundary {
+            message.purpose = AssistantMessagePurpose::ContextCompaction;
+            message
+                .parts
+                .push(AssistantPart::ProviderState(state.clone()));
+        }
+        let complete = ConversationSnapshot::new(vec![
+            tool_call_message("before", &["call"]),
+            tool_result_message("result-before", "call"),
+            boundary.clone(),
+            tool_call_message("after", &["call"]),
+            tool_result_message("result-after", "call"),
+        ]);
+        complete
+            .validate_tool_exchange_pairs()
+            .expect("new scope after a closed boundary");
+        let pending =
+            ConversationSnapshot::new(vec![tool_call_message("before", &["call"]), boundary]);
+        assert!(pending.validate_tool_exchange_pairs().is_err());
+        let wire = serde_json::to_value(&state).unwrap();
+        assert_eq!(
+            serde_json::from_value::<OpaqueProviderState>(wire.clone()).unwrap(),
+            state
+        );
+        let mut unbound = wire;
+        unbound.as_object_mut().unwrap().remove("route_fingerprint");
+        assert!(serde_json::from_value::<OpaqueProviderState>(unbound).is_err());
+        let debug = format!("{state:?}");
+        assert!(!debug.contains("secret-window"));
+        assert!(!debug.contains(&"a".repeat(64)));
+    }
+
+    #[test]
+    fn native_projection_uses_latest_text_or_native_boundary_and_expands_user_once() {
+        let summary = |name: &str, reference| {
+            ConversationMessage::ContextSummary(ContextSummaryMessage {
+                retained_user_message_id: reference,
+                id: id(name),
+                text: name.into(),
+                model: None,
+                usage: None,
+                compacted_usage: None,
+                usage_adjustment: None,
+                programmatic_context: None,
+            })
+        };
+        let user = ConversationMessage::User(UserMessage {
+            id: id("task"),
+            origin: Default::default(),
+            transcript_visibility: Default::default(),
+            parts: vec![],
+        });
+        let state = OpaqueProviderState::new_routed(
+            id("openai"),
+            id("responses"),
+            "responses.compacted_window",
+            "application/json",
+            1,
+            None,
+            "a".repeat(64),
+            b"{}".to_vec(),
+        )
+        .unwrap()
+        .with_context_effect(ProviderContextEffect::ReplacePriorContext)
+        .unwrap();
+        let mut native = tool_call_message("native-boundary", &[]);
+        if let ConversationMessage::Assistant(assistant) = &mut native {
+            assistant.purpose = AssistantMessagePurpose::ContextCompaction;
+            assistant.parts.push(AssistantPart::ProviderState(state));
+        }
+        let text = summary("latest-text", Some(id("task")));
+        let tail = tool_call_message("tail", &[]);
+        let history = ConversationSnapshot::new(vec![
+            user.clone(),
+            native.clone(),
+            text.clone(),
+            tail.clone(),
+        ]);
+        let projected = history.project_provider_context().unwrap();
+        assert_eq!(
+            projected.messages,
+            vec![text.clone(), user.clone(), tail.clone()]
+        );
+        assert_eq!(
+            projected.project_provider_context().unwrap(),
+            projected,
+            "Core and Adapter projection must be idempotent"
+        );
+        let history = ConversationSnapshot::new(vec![
+            user.clone(),
+            text.clone(),
+            tail.clone(),
+            native.clone(),
+        ]);
+        assert_eq!(
+            history.project_provider_context().unwrap().messages,
+            vec![native]
+        );
     }
 
     #[test]
@@ -769,6 +1112,7 @@ mod tests {
 
     fn tool_call_message(message_id: &str, call_ids: &[&str]) -> ConversationMessage {
         ConversationMessage::Assistant(AssistantMessage {
+            purpose: crate::AssistantMessagePurpose::ModelResponse,
             id: id(message_id),
             model: ModelIdentity::new(id("deepseek"), "deepseek-reasoner"),
             parts: call_ids
@@ -801,6 +1145,7 @@ mod tests {
     #[test]
     fn mixed_assistant_parts_preserve_order() {
         let turn = AssistantMessage {
+            purpose: crate::AssistantMessagePurpose::ModelResponse,
             id: id("turn_1"),
             model: ModelIdentity::new(id("deepseek"), "deepseek-reasoner"),
             parts: vec![
@@ -843,6 +1188,7 @@ mod tests {
                 })],
             }),
             ConversationMessage::Assistant(AssistantMessage {
+                purpose: crate::AssistantMessagePurpose::ModelResponse,
                 id: id("turn_1"),
                 model: ModelIdentity::new(id("deepseek"), "deepseek-reasoner"),
                 parts: vec![AssistantPart::ToolCall(ToolCall {
@@ -873,6 +1219,7 @@ mod tests {
     #[test]
     fn context_summary_round_trips_with_an_explicit_role() {
         let message = ConversationMessage::ContextSummary(ContextSummaryMessage {
+            retained_user_message_id: Some(id("original_user")),
             id: id("summary_1"),
             text: "The user selected the local-first architecture.".to_owned(),
             model: None,
@@ -922,6 +1269,7 @@ mod tests {
     #[test]
     fn tool_call_scope_resets_at_summary_without_hiding_incomplete_exchanges() {
         let summary = ConversationMessage::ContextSummary(ContextSummaryMessage {
+            retained_user_message_id: None,
             id: id("summary"),
             text: "compacted history".to_owned(),
             model: None,
@@ -975,6 +1323,7 @@ mod tests {
     #[test]
     fn context_summary_renders_programmatic_context_after_prose() {
         let summary = ContextSummaryMessage {
+            retained_user_message_id: None,
             id: id("summary_1"),
             text: "prose".to_owned(),
             model: None,
@@ -1203,6 +1552,7 @@ mod tests {
         assert!(visible.is_transcript_visible());
         assert!(
             ConversationMessage::Assistant(AssistantMessage {
+                purpose: crate::AssistantMessagePurpose::ModelResponse,
                 id: id("message_assistant"),
                 model: ModelIdentity::new(id("deepseek"), "deepseek-chat"),
                 parts: Vec::new(),

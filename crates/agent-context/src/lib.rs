@@ -23,6 +23,36 @@ pub use validate::{
     validate_replacement_effect,
 };
 pub use window::{
-    ContextTokenUsage, ContextWindowDecision, ContextWindowError, ContextWindowEvaluation,
-    ContextWindowEvaluator, context_token_usage,
+    ContextTokenUsage, ContextUsageAccuracy, ContextWindowDecision, ContextWindowError,
+    ContextWindowEvaluation, ContextWindowEvaluator, context_token_usage,
 };
+
+/// 根据冻结机制选择有效上下文；原生切取与工具配对复用 Types 的共同操作。
+///
+/// # Errors
+/// 输入结构无效，或本地机制混入原生替代状态时返回稳定模型错误。
+pub fn project_effective_context(
+    snapshot: &agent_types::ConversationSnapshot,
+    policy: &agent_model::ContextPolicy,
+) -> Result<agent_types::ConversationSnapshot, agent_model::ModelError> {
+    match policy {
+        agent_model::ContextPolicy::LocalSummary => {
+            if snapshot.messages.iter().any(|message| matches!(message,
+                agent_types::ConversationMessage::Assistant(assistant) if assistant.parts.iter().any(|part| matches!(part,
+                    agent_types::AssistantPart::ProviderState(state) if state.context_effect().is_some()
+                ))
+            )) {
+                return Err(agent_model::ModelError::Config("native context is incompatible with local summary mode".into()));
+            }
+            snapshot.validate_tool_exchange_pairs().map_err(|_| {
+                agent_model::ModelError::Protocol("invalid effective context".into())
+            })?;
+            Ok(snapshot.clone())
+        }
+        agent_model::ContextPolicy::ServerCompaction { .. } => {
+            snapshot.project_provider_context().map_err(|_| {
+                agent_model::ModelError::Protocol("invalid native effective context".into())
+            })
+        }
+    }
+}

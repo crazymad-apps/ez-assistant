@@ -248,6 +248,13 @@ export type ToolChoice = {
 };
 
 export type ModelParameters = {
+    server_compaction_enabled: boolean;
+    /**
+     * 本版本必须为 false；由 Agent 判断压缩时机。
+     */
+    server_auto_compaction_enabled: boolean;
+    server_compaction_support: 'unknown' | 'supported' | 'unsupported';
+    input_token_count_support: 'unknown' | 'supported' | 'unsupported';
     context_window_tokens: TokenLimit;
     max_input_tokens: TokenLimit;
     max_output_tokens: TokenLimit;
@@ -470,7 +477,7 @@ export type CallDetails = {
     provider_instance_id: string | null;
     provider_name: string | null;
     model_id: string | null;
-    kind: 'proxy' | 'admin_test';
+    kind: 'proxy' | 'admin_test' | 'context_compaction' | 'input_tokens';
     protocol: 'open_ai_responses' | 'open_ai_chat_completions';
     started_at: string;
     ended_at: string | null;

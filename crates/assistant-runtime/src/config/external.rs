@@ -40,7 +40,8 @@ impl ExternalModelConfiguration {
     ) -> RuntimeResult<Self> {
         super::validation::validate_provider_parameters(&connection, &parameters)?;
         // 宿主核验来源与主体，Runtime 只接纳与启用策略一致的、不含传输控制字符的绑定。
-        if connection.server_history_enabled != server_history_binding.is_some()
+        if (connection.server_history_enabled || parameters.server_compaction_enabled)
+            != server_history_binding.is_some()
             || server_history_binding.as_ref().is_some_and(|binding| {
                 binding.is_empty() || binding.len() > 1024 || binding.chars().any(char::is_control)
             })

@@ -4,6 +4,52 @@ use futures_core::Stream;
 
 use crate::{ModelCallContext, ModelCapabilities, ModelError, ModelEvent, ModelRequest};
 
+/// 会话/子任务冻结的唯一压缩机制；不表达是否启用服务端历史续接。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextManagementMode {
+    #[default]
+    LocalSummary,
+    ServerCompaction,
+}
+
+/// 模型实例冻结的上下文策略；原生作用域指纹不得写入普通诊断。
+#[derive(Clone, Default, Eq, PartialEq)]
+pub enum ContextPolicy {
+    #[default]
+    LocalSummary,
+    ServerCompaction {
+        threshold_tokens: std::num::NonZeroU64,
+        state_scope_fingerprint: String,
+    },
+}
+
+impl ContextPolicy {
+    /// 只投影机制；宿主不解释或展示原生作用域指纹。
+    pub fn mode(&self) -> ContextManagementMode {
+        match self {
+            Self::LocalSummary => ContextManagementMode::LocalSummary,
+            Self::ServerCompaction { .. } => ContextManagementMode::ServerCompaction,
+        }
+    }
+}
+
+impl std::fmt::Debug for ContextPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ContextPolicy")
+            .field("mode", &self.mode())
+            .finish_non_exhaustive()
+    }
+}
+
+/// 可选输入计量；None 表示该路由不提供计量，调用方继续使用既有 usage 估算。
+pub type ModelInputTokenCountFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Option<u64>, ModelError>> + Send + 'a>>;
+
+/// 一次完整原生压缩结果；不执行工具，不产生普通生成事件或自动重试。
+pub type ModelCompactionFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<agent_types::AssistantMessage, ModelError>> + Send + 'a>>;
+
 /// 建立一次模型流的 Future。
 ///
 /// `Err` 表示流建立前失败（配置、认证、连接等），调用方不会得到任何事件；
@@ -25,6 +71,48 @@ pub type ModelEventStream = Pin<Box<dyn Stream<Item = ModelEvent> + Send>>;
 ///
 /// credential 在实现构造时注入，不得出现在请求、上下文、事件和 Debug 输出中。
 pub trait ModelService: Send + Sync {
+    /// 构造时冻结的唯一压缩策略；旧模型继续使用本地摘要。
+    fn context_policy(&self) -> &ContextPolicy {
+        &ContextPolicy::LocalSummary
+    }
+
+    /// 测量实际准备的请求；共享可变 context 保留图片准备结果供随后正常调用复用。
+    ///
+    /// # Errors
+    /// 返回取消、准备失败或 Provider 错误；宿主对可降级的计量失败沿用既有占用估算。
+    fn count_input_tokens<'a>(
+        &'a self,
+        _request: &'a ModelRequest,
+        context: &'a mut ModelCallContext,
+    ) -> ModelInputTokenCountFuture<'a> {
+        Box::pin(async move {
+            if context.cancellation.is_cancelled() {
+                Err(ModelError::Cancelled)
+            } else {
+                Ok(None)
+            }
+        })
+    }
+
+    /// 显式执行一次原生 compact；默认拒绝，绝不偷偷调用本地摘要。
+    ///
+    /// # Errors
+    /// 返回取消、配置、准备或 Provider 错误；调用方不得改用另一压缩机制重试。
+    fn compact(
+        &self,
+        _request: ModelRequest,
+        context: ModelCallContext,
+    ) -> ModelCompactionFuture<'_> {
+        Box::pin(async move {
+            if context.cancellation.is_cancelled() {
+                Err(ModelError::Cancelled)
+            } else {
+                Err(ModelError::Config(
+                    "server compaction is not supported by this model service".into(),
+                ))
+            }
+        })
+    }
     /// 该服务对单次 Turn 的能力声明。
     fn capabilities(&self) -> &ModelCapabilities;
 
@@ -167,6 +255,7 @@ mod tests {
 
     fn sample_message() -> AssistantMessage {
         AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: MessageId::new("message_1").expect("valid message id"),
             model: ModelIdentity::new(
                 ProviderId::new("deepseek").expect("valid provider id"),

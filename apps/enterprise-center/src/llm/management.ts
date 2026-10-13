@@ -95,7 +95,7 @@ export class CallManagement {
     if (input.outcome !== undefined)
       query.andWhere('c.outcome = :outcome', { outcome: enumeration(input.outcome, outcomes) });
     if (input.kind !== undefined)
-      query.andWhere('c.kind = :kind', { kind: enumeration(input.kind, ['proxy', 'admin_test']) });
+      query.andWhere('c.kind = :kind', { kind: enumeration(input.kind, ['proxy', 'admin_test', 'context_compaction', 'input_tokens']) });
     for (const name of ['from', 'to'])
       if (input[name] !== undefined) {
         const value = input[name]!;

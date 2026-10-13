@@ -638,10 +638,11 @@ async function selectMcpFixture(page: Page): Promise<void> {
 async function expectResponsiveLayouts(page: Page): Promise<void> {
   const layouts = [
     { width: 1440, height: 900, left_sidebar: true, right_sidebar: true },
-    // 既有布局以 286 + 380 + 500 为双栏阈值；1152 下保留左栏。
-    { width: 1152, height: 720, left_sidebar: true, right_sidebar: false },
+    // 右栏可缩到 320；1152 仍可同时保留左右栏。
+    { width: 1152, height: 720, left_sidebar: true, right_sidebar: true },
     { width: 960, height: 640, left_sidebar: true, right_sidebar: false },
-    { width: 720, height: 720, left_sidebar: false, right_sidebar: false },
+    // 左栏沿用用户展开偏好，窄窗口只自动收起右栏。
+    { width: 720, height: 720, left_sidebar: true, right_sidebar: false },
   ] as const;
 
   for (const layout of layouts) {
@@ -653,12 +654,11 @@ async function expectResponsiveLayouts(page: Page): Promise<void> {
       await expect(left_sidebar.getByRole("button", { name: "收起会话栏" })).toBeVisible();
       await expect(left_sidebar.getByRole("button", { name: "收起会话栏" }).locator("svg"))
         .toHaveAttribute("data-icon", "sidebar-left");
-      const right_gap = await left_sidebar.locator('[data-tauri-drag-region="deep"]').evaluate((region) => {
+      const left_gap = await left_sidebar.locator('[data-tauri-drag-region="deep"]').evaluate((region) => {
         const navigation = region.querySelector<HTMLElement>('nav[aria-label="会话导航操作"]');
-        return navigation ? region.getBoundingClientRect().right - navigation.getBoundingClientRect().right : -1;
+        return navigation ? navigation.getBoundingClientRect().left - region.getBoundingClientRect().left : -1;
       });
-      expect(right_gap).toBeGreaterThanOrEqual(0);
-      expect(right_gap).toBeLessThanOrEqual(12);
+      expect(left_gap).toBe(12);
     } else {
       await expect(left_sidebar).toBeHidden();
       await expect(page.locator('header[aria-label="会话标题栏"]').getByRole("button", { name: "展开会话栏" })).toBeVisible();
@@ -670,6 +670,7 @@ async function expectResponsiveLayouts(page: Page): Promise<void> {
     await expect(page.locator('header[aria-label="会话标题栏"]')).toHaveAttribute("data-tauri-drag-region", "deep");
     await expect(page.locator('aside[aria-label="资源栏"] header')).toHaveAttribute("data-tauri-drag-region", "deep");
     const nav_buttons = page.getByRole("navigation", { name: "会话导航操作" }).getByRole("button");
+    await expect(page.getByRole("navigation", { name: "会话导航操作" }).locator("img")).toBeVisible();
     expect(await nav_buttons.evaluateAll((buttons) => buttons.map((button) => ({
       height: button.getBoundingClientRect().height,
       background: getComputedStyle(button).backgroundColor,

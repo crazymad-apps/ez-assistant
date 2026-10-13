@@ -781,6 +781,7 @@ fn model_capabilities(has_tools: bool) -> ModelCapabilities {
 
 fn assistant_text(message_id: &str, text: &str) -> AssistantMessage {
     AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new(message_id).expect("message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("provider id"),
@@ -839,6 +840,7 @@ async fn submit_completed_turn(
 
 fn assistant_title_tool_call(message_id: &str, call_id: &str, title: &str) -> AssistantMessage {
     AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new(message_id).expect("message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("provider id"),
@@ -856,6 +858,7 @@ fn assistant_title_tool_call(message_id: &str, call_id: &str, title: &str) -> As
 
 fn assistant_tool_call(message_id: &str, tool_name: &str) -> AssistantMessage {
     AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new(message_id).expect("message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("provider id"),
@@ -976,6 +979,7 @@ mod input;
 mod materialization;
 mod memory;
 mod model_retry;
+mod native_compaction;
 mod permission;
 mod product;
 mod runs;

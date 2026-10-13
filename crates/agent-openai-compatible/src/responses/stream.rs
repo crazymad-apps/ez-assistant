@@ -804,6 +804,7 @@ impl ResponsesAssembler {
             .unwrap_or_else(|| self.configured_model.clone());
         events.push(ModelEvent::TurnFinished {
             message: AssistantMessage {
+                purpose: agent_types::AssistantMessagePurpose::ModelResponse,
                 id,
                 model: ModelIdentity::new(self.adapter.provider.clone(), model),
                 parts,
@@ -1061,7 +1062,7 @@ fn text_delta_event(kind: TextKind, id: PartId, delta: String) -> ModelEvent {
     }
 }
 
-fn map_usage(usage: &ResponsesUsage) -> TokenUsage {
+pub(super) fn map_usage(usage: &ResponsesUsage) -> TokenUsage {
     TokenUsage {
         input_tokens: usage.input_tokens,
         output_tokens: usage.output_tokens,

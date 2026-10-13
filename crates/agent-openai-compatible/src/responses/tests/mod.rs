@@ -23,6 +23,8 @@ use super::{
     stream::ResponsesAssembler,
 };
 
+mod compaction;
+
 const TEXT_SSE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/fixtures/responses/openai/text.sse"
@@ -103,6 +105,7 @@ fn tool_image_request() -> (
     let request = request(vec![
         user("user_1", "inspect"),
         ConversationMessage::Assistant(AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: message_id("assistant_image"),
             model: ModelIdentity::new(provider("openai"), "gpt-test"),
             parts: vec![AssistantPart::ToolCall(ToolCall {
@@ -188,6 +191,7 @@ fn request_is_stateless_streaming_and_rebuilds_complete_local_history() {
     let mut request = request(vec![
         user("user_1", "look up Tokyo"),
         ConversationMessage::Assistant(AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: message_id("assistant_1"),
             model: ModelIdentity::new(provider("fixture"), "fixture-model"),
             parts: vec![
@@ -251,6 +255,7 @@ fn request_is_stateless_streaming_and_rebuilds_complete_local_history() {
 fn context_summary_uses_the_unified_model_visible_renderer() {
     let request = request(vec![ConversationMessage::ContextSummary(
         ContextSummaryMessage {
+            retained_user_message_id: None,
             id: message_id("summary_1"),
             text: "prose".to_owned(),
             model: None,
@@ -401,6 +406,7 @@ fn qwen_batches_all_function_outputs_before_one_ordered_image_envelope() {
     let request = request(vec![
         user("user_batch", "inspect both"),
         ConversationMessage::Assistant(AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: message_id("assistant_batch"),
             model: ModelIdentity::new(provider("dashscope"), "qwen3.8-max"),
             parts: vec![
@@ -811,6 +817,7 @@ fn deepseek_canonicalizes_interleaved_chat_parts_before_tool_outputs() {
     let history = request(vec![
         user("user_chat_1", "review"),
         ConversationMessage::Assistant(AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: message_id("assistant_chat_1"),
             model: ModelIdentity::new(provider("deepseek"), "deepseek-v4-flash"),
             parts: vec![
@@ -948,6 +955,7 @@ fn compatible_corrupt_state_fails_while_null_encrypted_content_stays_normalized(
     let history = request(vec![
         user("user_bad", "continue"),
         ConversationMessage::Assistant(AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: message_id("assistant_bad"),
             model: ModelIdentity::new(provider("deepseek"), "deepseek-v4-pro"),
             parts: vec![

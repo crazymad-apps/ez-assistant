@@ -204,3 +204,32 @@ it('原始正文逐块限额拒绝 32 MiB 以上请求，释放后仍能接收�
     await app.close();
   }
 });
+
+it('压缩与计量固定路由独立于生成，拒绝辅助请求混入续接或自动压缩参数', async () => {
+  for (const operation of ['compact', 'input_tokens'] as const) {
+    expect(requestModel(Buffer.from('{"model":"m","input":[]}'), operation)).toEqual({ model: 'm', stream: false });
+    for (const patch of [{ store: false }, { stream: false }, { previous_response_id: null }, { context_management: [] }, { input: [{ type: 'compaction_trigger' }] }])
+      expect(() => requestModel(Buffer.from(JSON.stringify({ model: 'm', input: [], ...patch })), operation)).toThrow();
+  }
+  const paths: string[] = [];
+  const server = createServer(async (request, response) => {
+    paths.push(request.url!);
+    const parts: Buffer[] = [];
+    for await (const part of request) parts.push(part);
+    expect(Buffer.concat(parts).toString()).toBe('{"model":"m","input":[]}');
+    response.writeHead(200, { 'content-type': 'application/json' }).end('{"input_tokens":42}');
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  try {
+    for (const operation of ['compact', 'input_tokens'] as const) await transfer({
+      endpoint: `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`, protocol: 'open_ai_responses', operation,
+      apiKey: '', body: Buffer.from('{"model":"m","input":[]}'), signal: new AbortController().signal,
+      connectTimeout: 1000, idleTimeout: 1000, sink: { headers() {}, async chunk() {} },
+    });
+    expect(paths).toEqual(['/v1/responses/compact', '/v1/responses/input_tokens']);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});

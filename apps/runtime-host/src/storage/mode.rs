@@ -105,3 +105,25 @@ pub(super) fn parse_child_task_status(value: &str) -> StorageResult<ChildTaskSta
         _ => Err(invalid_data("stored child task status is invalid")),
     }
 }
+
+/// 持久机制的唯一编码，与模型选择同一事务提交。
+pub(super) fn context_management_mode_value(
+    mode: agent_model::ContextManagementMode,
+) -> &'static str {
+    match mode {
+        agent_model::ContextManagementMode::LocalSummary => "local_summary",
+        agent_model::ContextManagementMode::ServerCompaction => "server_compaction",
+    }
+}
+
+pub(super) fn parse_context_management_mode(
+    value: &str,
+) -> super::StorageResult<agent_model::ContextManagementMode> {
+    match value {
+        "local_summary" => Ok(agent_model::ContextManagementMode::LocalSummary),
+        "server_compaction" => Ok(agent_model::ContextManagementMode::ServerCompaction),
+        _ => Err(super::invalid_data(
+            "stored context management mode is invalid",
+        )),
+    }
+}

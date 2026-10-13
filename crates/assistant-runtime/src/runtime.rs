@@ -76,7 +76,7 @@ use crate::{
     session::{SessionController, allocate_session_id},
 };
 
-const CONTEXT_WINDOW_THRESHOLD: f64 = 0.8;
+const CONTEXT_WINDOW_THRESHOLD: f64 = 0.9;
 
 /// 单元测试中的脚本模型默认只描述主 Agent 调用；标题链路由专门测试显式开启。
 /// 正式库与 Runtime Host 构建始终启用自动标题资格。

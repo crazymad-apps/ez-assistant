@@ -89,10 +89,28 @@ impl StorageEngine {
                 .map(serde_json::to_string)
                 .transpose()
                 .map_err(|source| internal_error("shell snapshot could not be encoded", source))?;
-            let changed = self.connection.execute("UPDATE runs SET status = 'running', started_at_ms = ?1, reasoning_effort = ?2, shell_snapshot_json = ?6 WHERE run_id = ?3 AND session_id = ?4 AND input_id = ?5 AND status = 'accepted' AND EXISTS (SELECT 1 FROM inputs WHERE input_id = ?5 AND state = 'committed')", params![commit.created_at_ms, commit.reasoning_effort.map(super::mode::reasoning_effort_value), commit.run_id.as_str(), commit.session_id.as_str(), commit.input_id.as_str(), shell]).map_err(|source| database_write_error("run could not be started", source))?;
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|source| internal_error("run start could not begin", source))?;
+            let changed = transaction.execute("UPDATE runs SET status = 'running', started_at_ms = ?1, reasoning_effort = ?2, shell_snapshot_json = ?6 WHERE run_id = ?3 AND session_id = ?4 AND input_id = ?5 AND status = 'accepted' AND EXISTS (SELECT 1 FROM inputs WHERE input_id = ?5 AND state = 'committed') AND EXISTS(SELECT 1 FROM sessions WHERE session_id=?4 AND lifecycle='active')", params![commit.created_at_ms, commit.reasoning_effort.map(super::mode::reasoning_effort_value), commit.run_id.as_str(), commit.session_id.as_str(), commit.input_id.as_str(), shell]).map_err(|source| database_write_error("run could not be started", source))?;
             if changed != 1 {
                 return Err(conflict("run cannot be started"));
             }
+            transaction
+                .execute(
+                    "UPDATE sessions SET context_management_mode=?1 WHERE session_id=?2",
+                    params![
+                        super::mode::context_management_mode_value(commit.context_management_mode),
+                        commit.session_id.as_str()
+                    ],
+                )
+                .map_err(|source| {
+                    database_write_error("run context mode could not be saved", source)
+                })?;
+            transaction
+                .commit()
+                .map_err(|source| database_write_error("run start could not commit", source))?;
             return Ok(());
         }
         let message = commit.message.expect("checked message");
@@ -107,6 +125,7 @@ impl StorageEngine {
             &commit.run_id,
             &commit.session_id,
             commit.reasoning_effort,
+            commit.context_management_mode,
             commit.shell.as_ref(),
             commit.created_at_ms,
         )?;
@@ -125,6 +144,7 @@ impl StorageEngine {
                 created_at_ms: commit.created_at_ms,
             },
             AppendPurpose::UserMessage {
+                context_management_mode: commit.context_management_mode,
                 shell: commit.shell,
                 reasoning_effort: commit.reasoning_effort,
             },

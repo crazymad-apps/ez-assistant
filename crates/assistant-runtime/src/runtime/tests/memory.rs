@@ -161,6 +161,7 @@ async fn system_context_query_returns_the_frozen_session_prompt_verbatim() {
 #[tokio::test]
 async fn agent_pinned_memory_tool_uses_approval_reliable_exchange_and_runtime_store() {
     let tool_message = AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new("assistant-pin-memory").expect("message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("provider id"),

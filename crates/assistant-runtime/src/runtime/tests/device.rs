@@ -141,6 +141,7 @@ fn device_session_input(
 
 fn speak_call(message_id: &str, call_id: &str, text: &str) -> AssistantMessage {
     AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new(message_id).expect("message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("provider id"),

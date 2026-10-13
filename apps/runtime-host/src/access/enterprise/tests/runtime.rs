@@ -417,6 +417,7 @@ struct HeldModel {
 impl HeldModel {
     fn new() -> Arc<Self> {
         let message = agent_types::AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: agent_types::MessageId::new("answer").unwrap(),
             model: agent_types::ModelIdentity::new(
                 agent_types::ProviderId::new("local").unwrap(),

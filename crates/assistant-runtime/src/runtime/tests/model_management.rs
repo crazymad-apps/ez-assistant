@@ -1059,7 +1059,10 @@ async fn personal_history_policy_is_validated_and_binding_survives_only_unchange
         })
         .await
         .unwrap();
-    assert!(runtime.provider(&id).unwrap().server_history_key.is_none());
+    assert_ne!(
+        runtime.provider(&id).unwrap().server_history_key.as_deref(),
+        Some(original.as_str())
+    );
     config.server_history_enabled = true;
     runtime
         .update_provider(UpdateProviderRequest {
@@ -1254,4 +1257,145 @@ async fn history_model_switch_epochs_survive_aba_and_default_switches_only_affec
             "durable fact equals the live projection"
         );
     }
+}
+
+#[tokio::test]
+async fn first_run_records_mode_and_recovery_reads_current_parameters() {
+    let (runtime, _, _, session_id) = online_execution_fixture().await;
+    let submitted = runtime
+        .submit_input(input_request(&session_id, "freeze context mechanism"))
+        .await
+        .unwrap();
+    wait_for_terminal(&runtime, &session_id, &submitted.run.run_id).await;
+    let loaded = runtime.store.load_session_state(&session_id).await.unwrap();
+    assert_eq!(
+        loaded.state.sessions[0].context_management_mode,
+        Some(agent_model::ContextManagementMode::LocalSummary)
+    );
+    let recovered = super::super::recovery::recover_session_registries(loaded).unwrap();
+    let session = recovered.sessions.get(&session_id).unwrap();
+    assert_eq!(
+        session.lock_state().unwrap().context_management_mode,
+        Some(agent_model::ContextManagementMode::LocalSummary)
+    );
+    // 恢复后读取已保存的当前参数，不要求重新选择模型，也不受旧机制阻挡。
+    runtime
+        .store
+        .put_model_fixed_config(
+            assistant_protocol::ModelFixedConfig {
+                origin: assistant_protocol::ModelConfigOrigin::Online,
+                selection: runtime
+                    .config_registry
+                    .effective_model_selection(None)
+                    .unwrap()
+                    .unwrap(),
+                parameters: model_fixture::parameters(),
+                updated_at_ms: 1,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    session.lock_state().unwrap().context_management_mode =
+        Some(agent_model::ContextManagementMode::ServerCompaction);
+    assert!(
+        super::super::model::resolve_session_model(
+            &runtime.config_registry,
+            session,
+            None,
+            runtime.store.as_ref()
+        )
+        .await
+        .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn same_model_reapplication_changes_frozen_mode_and_invalidates_history() {
+    let runtime = fixture(Arc::new(DiscoveryFactory::default()));
+    let mut config = connection();
+    config.protocol_preference = ProviderProtocolPreference::Responses;
+    let provider = runtime
+        .create_provider(CreateProviderRequest {
+            connection: config,
+            credential: ProviderCredentialChange::Unchanged,
+        })
+        .await
+        .unwrap();
+    let selection = ModelSelection {
+        provider_instance_id: provider.provider_instance_id,
+        model_id: "native-model".into(),
+    };
+    runtime
+        .save_model_fixed_config(SaveModelFixedConfigRequest {
+            origin: assistant_protocol::ModelConfigOrigin::Manual,
+            selection: selection.clone(),
+            parameters: parameters(),
+        })
+        .await
+        .unwrap();
+    let session_id = runtime
+        .create_session(CreateSessionRequest {
+            model_selection: Some(selection.clone()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    let request = assistant_protocol::SetSessionModelRequest {
+        session_id: session_id.clone(),
+        model_selection: Some(selection.clone()),
+    };
+    runtime.set_session_model(request.clone()).await.unwrap();
+    let mut native = parameters();
+    native.server_compaction_enabled = true;
+    native.server_compaction_support = ModelFeatureSupport::Supported;
+    runtime
+        .save_model_fixed_config(SaveModelFixedConfigRequest {
+            origin: assistant_protocol::ModelConfigOrigin::Manual,
+            selection: selection.clone(),
+            parameters: native,
+        })
+        .await
+        .unwrap();
+    let controller = runtime.session(&session_id).await.unwrap();
+    let before = controller.lock_state().unwrap().server_history_key.clone();
+    assert!(
+        super::super::model::resolve_session_model(
+            &runtime.config_registry,
+            &controller,
+            Some(&selection),
+            runtime.store.as_ref()
+        )
+        .await
+        .is_ok()
+    );
+    runtime.set_session_model(request).await.unwrap();
+    {
+        let state = controller.lock_state().unwrap();
+        assert_eq!(
+            state.context_management_mode,
+            Some(agent_model::ContextManagementMode::ServerCompaction)
+        );
+        assert_ne!(state.server_history_key, before);
+    }
+    let stored = runtime.store.load_session_state(&session_id).await.unwrap();
+    assert_eq!(
+        stored
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.session_id == session_id)
+            .unwrap()
+            .context_management_mode,
+        Some(agent_model::ContextManagementMode::ServerCompaction)
+    );
+    // M1 仅建立准入与契约，尚未接入原生 Adapter 时不能落回本地摘要。
+    assert!(
+        runtime
+            .compile_session_compactor(&controller, Some(&selection))
+            .await
+            .is_err()
+    );
 }

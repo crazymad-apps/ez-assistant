@@ -760,6 +760,7 @@ mod tests {
 
     fn tool_turn(call_id: &str, tool_name: &str, arguments: serde_json::Value) -> AssistantMessage {
         AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: MessageId::new(format!("assistant-{call_id}")).expect("message id"),
             model: ModelIdentity::new(
                 ProviderId::new("scripted").expect("provider"),
@@ -781,6 +782,7 @@ mod tests {
         calls: impl IntoIterator<Item = (&'static str, &'static str, serde_json::Value)>,
     ) -> AssistantMessage {
         AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: MessageId::new(message_id).expect("message id"),
             model: ModelIdentity::new(
                 ProviderId::new("scripted").expect("provider"),
@@ -803,6 +805,7 @@ mod tests {
 
     fn final_turn(id: &str) -> AssistantMessage {
         AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: MessageId::new(id).expect("message id"),
             model: ModelIdentity::new(
                 ProviderId::new("scripted").expect("provider"),

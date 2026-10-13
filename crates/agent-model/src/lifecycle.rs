@@ -259,6 +259,7 @@ mod tests {
     fn finished(parts: Vec<agent_types::AssistantPart>) -> ModelEvent {
         ModelEvent::TurnFinished {
             message: AssistantMessage {
+                purpose: agent_types::AssistantMessagePurpose::ModelResponse,
                 id: MessageId::new("message_1").expect("valid message id"),
                 model: ModelIdentity::new(
                     ProviderId::new("deepseek").expect("valid provider id"),
@@ -532,6 +533,7 @@ mod tests {
     fn rejects_turn_finish_with_mismatched_message_id() {
         let mismatched = ModelEvent::TurnFinished {
             message: AssistantMessage {
+                purpose: agent_types::AssistantMessagePurpose::ModelResponse,
                 id: MessageId::new("message_2").expect("valid message id"),
                 model: ModelIdentity::new(
                     ProviderId::new("deepseek").expect("valid provider id"),

@@ -205,6 +205,9 @@ pub(crate) fn compile_managed_model(
     let validated = crate::validate_fixed_model_parameters(parameters)
         .map_err(|_| invalid("模型参数不完整或数值、能力组合无效，请编辑固定配置。"))?;
     let protocol = resolve_provider_protocol(&provider.connection)?;
+    if parameters.server_compaction_enabled && protocol != ModelProtocol::OpenAiResponses {
+        return Err(invalid("服务端压缩要求 Responses 协议。"));
+    }
     let image_input = parameters.image_input == ModelFeatureSupport::Supported;
     let tool_calls = parameters.tool_calls == ModelFeatureSupport::Supported
         && parameters.tool_choice.auto == ModelFeatureSupport::Supported;
@@ -295,7 +298,17 @@ pub(crate) fn compile_managed_model(
             .map_or(output, |budget| budget.min(output)),
     );
     Ok(ResolvedModelConfig {
-        server_history_key: if provider.connection.server_history_enabled {
+        context_management_mode: if parameters.server_compaction_enabled {
+            agent_model::ContextManagementMode::ServerCompaction
+        } else {
+            agent_model::ContextManagementMode::LocalSummary
+        },
+        server_history_enabled: provider.connection.server_history_enabled,
+        input_token_count_supported: parameters.input_token_count_support
+            == assistant_protocol::ModelFeatureSupport::Supported,
+        server_history_key: if provider.connection.server_history_enabled
+            || parameters.server_compaction_enabled
+        {
             Some(
                 provider
                     .server_history_key

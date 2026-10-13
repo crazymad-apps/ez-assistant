@@ -178,16 +178,9 @@ export class ModelsService {
         else {
           const changed =
             discoveryIdentity(previous.connection, previous.api_key) !== discoveryIdentity(input.connection, key);
-          let server_history_key = null;
-          if (input.connection.server_history_enabled) {
-            server_history_key = previous.server_history_key;
-            if (
-              !server_history_key ||
-              historyConnectionIdentity(previous.connection, previous.api_key) !==
-                historyConnectionIdentity(input.connection, key)
-            )
-              server_history_key = randomUUID();
-          }
+          let server_history_key = previous.server_history_key;
+          if (!server_history_key || historyConnectionIdentity(previous.connection, previous.api_key) !== historyConnectionIdentity(input.connection, key))
+            server_history_key = randomUUID();
           if (server_history_key !== previous.server_history_key) invalidate(providerId);
           await models.update(manager, {
             ...previous,
@@ -383,7 +376,8 @@ export class ModelsService {
         if (
           !validParameters(parameters, true) ||
           (resolveProtocol(provider.connection) === 'open_ai_chat_completions' &&
-            parameters.tool_image_projection === 'native_tool_result')
+            parameters.tool_image_projection === 'native_tool_result') ||
+          (parameters.server_compaction_enabled && resolveProtocol(provider.connection) !== 'open_ai_responses')
         )
           throw new IdentityError(400, 'MODEL_CONFIGURATION_INVALID');
         const before = await this.settingsIn(manager);
@@ -541,7 +535,7 @@ export class ModelsService {
     selected: ModelSelection,
     protocol: Protocol,
     adminTest = false,
-    history?: { request: RequestModel; binding?: string },
+    history?: { request: RequestModel; binding?: string; operation?: 'generation' | 'compact' | 'input_tokens' },
   ) {
     return this.identity.write(async (manager) => {
       let subject: Awaited<ReturnType<IdentityService['llmIdentity']>> | undefined;
@@ -579,15 +573,26 @@ export class ModelsService {
         throw new ControlError('llm_request_invalid');
       if (history && protocol === 'open_ai_responses') {
         const { request, binding } = history;
+        const operation = history.operation ?? 'generation';
         const expected = subject ? historyBinding(provider, configuration, subject.center_id, subject.user.id) : null;
-        if (request.store === undefined || (request.previous_response_id != null && request.store !== true))
+        if (operation === 'generation' && (request.store === undefined || (request.previous_response_id != null && request.store !== true)))
           throw new ControlError('llm_request_invalid');
+        if (operation !== 'generation') {
+          if (adminTest || request.store !== undefined || request.previous_response_id !== undefined || request.stream)
+            throw new ControlError('llm_request_invalid');
+          const parameters = configuration.parameters;
+          if (operation === 'compact' && (!parameters.server_compaction_enabled || parameters.server_compaction_support !== 'supported'))
+            throw new ControlError('managed_model_configuration_stale');
+          if (operation === 'input_tokens' && parameters.input_token_count_support !== 'supported')
+            throw new ControlError('managed_model_configuration_stale');
+          if (expected && binding !== expected) throw new ControlError('managed_model_configuration_stale');
+        }
         if (adminTest && (request.store !== false || binding !== undefined))
           throw new ControlError('llm_request_invalid');
         if (
           (binding !== undefined && (!expected || binding !== expected)) ||
           (request.store &&
-            (!expected || binding !== expected || serverHistorySupport(provider.connection) !== 'supported'))
+            (!provider.connection.server_history_enabled || !expected || binding !== expected || serverHistorySupport(provider.connection) !== 'supported'))
         )
           throw new ControlError('managed_model_configuration_stale');
       }

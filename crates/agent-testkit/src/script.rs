@@ -31,6 +31,7 @@ pub enum ModelScript {
 /// 每次 `stream` 调用按顺序弹出一条脚本；调用次数超过脚本数时以
 /// 建立前 `ModelError::Config` 失败，提醒测试补脚本。
 pub struct ScriptedModelService {
+    context_policy: agent_model::ContextPolicy,
     capabilities: ModelCapabilities,
     context_window_tokens: u64,
     scripts: Mutex<VecDeque<ModelScript>>,
@@ -45,11 +46,18 @@ impl ScriptedModelService {
         scripts: impl IntoIterator<Item = ModelScript>,
     ) -> Self {
         Self {
+            context_policy: agent_model::ContextPolicy::LocalSummary,
             capabilities,
             context_window_tokens,
             scripts: Mutex::new(scripts.into_iter().collect()),
             requests: Mutex::new(Vec::new()),
         }
+    }
+
+    /// 为机制守卫测试冻结策略；不因此伪造原生协议支持。
+    pub fn with_context_policy(mut self, policy: agent_model::ContextPolicy) -> Self {
+        self.context_policy = policy;
+        self
     }
 
     /// 便捷构造：单脚本，正常完成一个由完整消息描述的 Turn。
@@ -77,6 +85,9 @@ impl ScriptedModelService {
 }
 
 impl ModelService for ScriptedModelService {
+    fn context_policy(&self) -> &agent_model::ContextPolicy {
+        &self.context_policy
+    }
     fn capabilities(&self) -> &ModelCapabilities {
         &self.capabilities
     }
@@ -242,6 +253,7 @@ mod tests {
 
     fn sample_message() -> AssistantMessage {
         AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: MessageId::new("message_1").expect("valid message id"),
             model: ModelIdentity::new(
                 ProviderId::new("deepseek").expect("valid provider id"),
@@ -284,6 +296,33 @@ mod tests {
             reasoning: None,
             provider_options: agent_model::ProviderOptions::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn frozen_native_policy_does_not_forge_auxiliary_support_or_generate() {
+        let service = ScriptedModelService::new(capabilities(), 8192, []).with_context_policy(
+            agent_model::ContextPolicy::ServerCompaction {
+                threshold_tokens: std::num::NonZeroU64::new(6000).unwrap(),
+                state_scope_fingerprint: "a".repeat(64),
+            },
+        );
+        assert_eq!(
+            service.context_policy().mode(),
+            agent_model::ContextManagementMode::ServerCompaction
+        );
+        let mut context = ModelCallContext::default();
+        assert_eq!(
+            service
+                .count_input_tokens(&sample_request(), &mut context)
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(matches!(
+            service.compact(sample_request(), context).await,
+            Err(ModelError::Config(_))
+        ));
+        assert!(service.take_requests().is_empty());
     }
 
     #[tokio::test]

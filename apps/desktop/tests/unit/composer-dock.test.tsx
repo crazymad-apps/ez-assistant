@@ -1206,21 +1206,30 @@ describe("ComposerDock", () => {
   it("shows the context percentage and token usage in a positioned tooltip", async () => {
     renderComposer({
       context_usage: {
-        used_tokens: 52_000,
+        accuracy: "estimated", mode: "local_summary", used_tokens: 52_000,
         window_tokens: 1_000_000,
         usage_basis_points: 520,
       },
     });
 
-    const ring = screen.getByRole("img", { name: "上下文用量：52K / 1000K · 5.2%" });
+    const ring = screen.getByRole("img", { name: "上下文用量：约 52K / 1000K · 5.2%" });
     fireEvent.focus(ring);
     const tooltip = await screen.findByRole("tooltip");
-    expect(tooltip).toHaveTextContent("52K / 1000K · 5.2%");
+    expect(tooltip).toHaveTextContent("约 52K / 1000K · 5.2%");
     await waitFor(() => expect(tooltip).toHaveAttribute("data-position-ready", "true"));
   });
 
+  it("shows unknown context without a fabricated zero percentage", async () => {
+    renderComposer({ context_usage: { accuracy: "unknown", mode: "server_compaction", used_tokens: null, window_tokens: 1_000_000, usage_basis_points: null } });
+    const ring = screen.getByRole("img", { name: "上下文用量：上下文占用未知" });
+    fireEvent.focus(ring);
+    const tooltip = await screen.findByRole("tooltip");
+    expect(tooltip).toHaveTextContent("占用未知");
+    expect(tooltip).not.toHaveTextContent("0%");
+  });
+
   it("keeps the reliable smaller context after compaction instead of taking an old step maximum", () => {
-    const store = renderComposer({ context_usage: { used_tokens: 52_000, window_tokens: 1_000_000, usage_basis_points: 520 } });
+    const store = renderComposer({ context_usage: { accuracy: "estimated", mode: "local_summary", used_tokens: 52_000, window_tokens: 1_000_000, usage_basis_points: 520 } });
     act(() => {
       const view = store.projection.session_views.get("session-1")!;
       store.projection.applySessionSnapshot({ observed_sequence: 2, value: {
@@ -1233,7 +1242,7 @@ describe("ComposerDock", () => {
       } });
       store.live_execution.flush();
     });
-    expect(screen.getByRole("img", { name: "上下文用量：52K / 1000K · 5.2%" })).toBeVisible();
+    expect(screen.getByRole("img", { name: "上下文用量：约 52K / 1000K · 5.2%" })).toBeVisible();
   });
 
   it("loads a missing historical model as unselected and blocks messages until reselection", async () => {
@@ -1360,6 +1369,8 @@ describe("ComposerDock", () => {
     await user.click(goal_trigger);
     const goal_detail = screen.getByRole("region", { name: "目标详情" });
     expect(goal_detail).toBeVisible();
+    expect(within(goal_detail).getByText("累计令牌")).toBeVisible();
+    expect(within(goal_detail).queryByText("令牌预算")).not.toBeInTheDocument();
     expect(goal_trigger).toHaveAttribute("aria-expanded", "true");
     expect(goal_trigger.closest("section")).toContainElement(goal_detail);
     expect(screen.queryByRole("dialog", { name: "Goal 详情" })).not.toBeInTheDocument();
@@ -1735,7 +1746,6 @@ function goalSnapshot(state: GoalSnapshot["state"]): GoalSnapshot {
     turn: 4,
     budget: {
       max_runs: 20,
-      max_total_tokens: 200_000,
       max_consecutive_failures: 3,
       used_runs: 4,
       used_total_tokens: 42_000,

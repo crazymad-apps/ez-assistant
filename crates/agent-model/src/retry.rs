@@ -168,6 +168,26 @@ impl ModelService for RetryingModelService {
         self.inner.max_input_tokens()
     }
 
+    fn context_policy(&self) -> &crate::ContextPolicy {
+        self.inner.context_policy()
+    }
+
+    fn count_input_tokens<'a>(
+        &'a self,
+        request: &'a crate::ModelRequest,
+        context: &'a mut crate::ModelCallContext,
+    ) -> crate::ModelInputTokenCountFuture<'a> {
+        self.inner.count_input_tokens(request, context)
+    }
+
+    fn compact(
+        &self,
+        request: crate::ModelRequest,
+        context: crate::ModelCallContext,
+    ) -> crate::ModelCompactionFuture<'_> {
+        self.inner.compact(request, context)
+    }
+
     fn stream(&self, request: ModelRequest, context: ModelCallContext) -> ModelStreamFuture<'_> {
         let service = self.clone();
         Box::pin(async move {

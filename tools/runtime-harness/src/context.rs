@@ -505,6 +505,7 @@ mod tests {
 
     fn assistant(value: &str, total_tokens: u64) -> AssistantMessage {
         AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: id(value),
             model: ModelIdentity::new(
                 ProviderId::new("test").expect("valid provider id"),
@@ -541,6 +542,7 @@ mod tests {
     fn replacement(latest_user: &str) -> ConversationSnapshot {
         ConversationSnapshot::new(vec![
             ConversationMessage::ContextSummary(ContextSummaryMessage {
+                retained_user_message_id: None,
                 id: id("summary_1"),
                 text: "earlier conversation summary".to_owned(),
                 model: None,
@@ -586,6 +588,7 @@ mod tests {
         let first_checkpoint = HarnessContextCheckpoint {
             replacement: ConversationSnapshot::new(vec![ConversationMessage::ContextSummary(
                 ContextSummaryMessage {
+                    retained_user_message_id: None,
                     id: id("summary_old"),
                     text: "old summary".to_owned(),
                     model: None,
@@ -599,6 +602,7 @@ mod tests {
         let latest_checkpoint = HarnessContextCheckpoint {
             replacement: ConversationSnapshot::new(vec![ConversationMessage::ContextSummary(
                 ContextSummaryMessage {
+                    retained_user_message_id: None,
                     id: id("summary_new"),
                     text: "new summary".to_owned(),
                     model: None,

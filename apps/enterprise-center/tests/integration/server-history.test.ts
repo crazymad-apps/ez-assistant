@@ -164,7 +164,7 @@ it('配置到代理与正式 Host 闭环：主体/策略/ABA 拒绝旧绑定，�
     return text ? JSON.parse(text) : undefined;
   }
   const info = await api('info');
-  expect([info.protocol_version, info.min_protocol_version]).toEqual([2, 2]);
+  expect([info.protocol_version, info.min_protocol_version]).toEqual([3, 3]);
   for (const username of ['alice', 'bob']) await api('users', 'POST', { username, display_name: username, role: 'user', enabled: true, password: 'fixture-password1' }, 201);
   const connection = { display_name: 'F06 M2', provider_type: 'openai', endpoint, protocol_preference: 'responses',
     models_path: '', discovery_format: 'openai', server_history_enabled: true, server_history_support_override: 'supported' };

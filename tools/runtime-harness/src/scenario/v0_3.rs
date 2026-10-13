@@ -929,6 +929,7 @@ fn message_with_reason(
     total_tokens: u64,
 ) -> Result<AssistantMessage, HarnessError> {
     Ok(AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: message_id(id)?,
         model: identity()?,
         parts: vec![AssistantPart::Text(TextPart {
@@ -946,6 +947,7 @@ fn tool_message(
     total_tokens: u64,
 ) -> Result<AssistantMessage, HarnessError> {
     Ok(AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: message_id(id)?,
         model: identity()?,
         parts: vec![AssistantPart::ToolCall(ToolCall {

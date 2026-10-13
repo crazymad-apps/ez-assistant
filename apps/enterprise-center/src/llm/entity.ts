@@ -22,7 +22,7 @@ export class CallEntity {
   @Column({ type: 'uuid', nullable: true }) provider_instance_id!: string | null;
   @Column({ type: 'text', nullable: true }) provider_name!: string | null;
   @Column({ type: 'text', nullable: true }) model_id!: string | null;
-  @Column('text') kind!: 'proxy' | 'admin_test';
+  @Column('text') kind!: 'proxy' | 'admin_test' | 'context_compaction' | 'input_tokens';
   @Column('text') protocol!: Protocol;
   @Column('timestamptz') started_at!: Date;
   @Column({ type: 'timestamptz', nullable: true }) ended_at!: Date | null;

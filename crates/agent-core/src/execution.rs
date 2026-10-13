@@ -206,6 +206,26 @@ impl AgentExecution {
         context: ExecutionContext,
         starting_step: NonZeroU32,
     ) -> AgentExecution {
+        Self::start_continuation(spec, input, context, starting_step, false)
+    }
+
+    /// 可靠压缩后的续跑只放行首个软阈值判断；硬预算与 Provider 输入限制仍有效。
+    pub fn start_after_compaction(
+        spec: ExecutionSpec,
+        input: ExecutionInput,
+        context: ExecutionContext,
+        starting_step: NonZeroU32,
+    ) -> AgentExecution {
+        Self::start_continuation(spec, input, context, starting_step, true)
+    }
+
+    fn start_continuation(
+        spec: ExecutionSpec,
+        input: ExecutionInput,
+        context: ExecutionContext,
+        starting_step: NonZeroU32,
+        compaction_grace: bool,
+    ) -> AgentExecution {
         let (sender, events) = agent_event_channel();
         // 子令牌：父级取消自动传播；ExecutionControl 只取消本执行。
         let cancellation = context.cancellation.child_token();
@@ -216,7 +236,16 @@ impl AgentExecution {
         // completion，engine panic 仍会产生终态事件，且 engine JoinHandle 始终被观察。
         let failure_events = sender.clone();
         let engine_task = tokio::spawn(
-            Engine::new(spec, input, context, cancellation, sender, starting_step).run(),
+            Engine::new(
+                spec,
+                input,
+                context,
+                cancellation,
+                sender,
+                starting_step,
+                compaction_grace,
+            )
+            .run(),
         );
         let (completion_tx, completion_rx) = oneshot::channel();
         tokio::spawn(async move {
@@ -463,6 +492,7 @@ mod tests {
 
     fn text_message(text: &str) -> AssistantMessage {
         AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: MessageId::new("message_1").expect("valid message id"),
             model: ModelIdentity::new(
                 ProviderId::new("deepseek").expect("valid provider id"),
@@ -502,6 +532,144 @@ mod tests {
                     text: "Hello.".to_owned(),
                 })],
             })]),
+        }
+    }
+
+    #[tokio::test]
+    async fn compaction_grace_allows_one_soft_threshold_probe_but_respects_hard_limits() {
+        for (used, allowed) in [(110_000, true), (128_001, false)] {
+            let mut input = input();
+            let mut baseline = text_message("previous response");
+            baseline.usage = Some(agent_types::TokenUsage {
+                input_tokens: used,
+                output_tokens: 0,
+                total_tokens: used,
+                cached_input_tokens: None,
+                reasoning_tokens: None,
+            });
+            input
+                .conversation
+                .messages
+                .push(ConversationMessage::Assistant(baseline));
+            let make_spec = || {
+                spec(StubModel {
+                    capabilities: ModelCapabilities::default(),
+                    behavior: StubBehavior::Complete(text_message("next response")),
+                })
+            };
+            let (control, _) = context(CancellationToken::new());
+            let regular = AgentExecution::start(make_spec(), input.clone(), control)
+                .completion
+                .await;
+            assert!(matches!(
+                regular,
+                ExecutionOutcome::CompactionRequired { .. }
+            ));
+            let (control, _) = context(CancellationToken::new());
+            let resumed = AgentExecution::start_after_compaction(
+                make_spec(),
+                input,
+                control,
+                NonZeroU32::new(7).unwrap(),
+            )
+            .completion
+            .await;
+            if allowed {
+                assert!(matches!(
+                    resumed,
+                    ExecutionOutcome::Completed { step: 7, .. }
+                ));
+            } else {
+                assert!(matches!(
+                    resumed,
+                    ExecutionOutcome::CompactionRequired { .. }
+                ));
+            }
+        }
+    }
+
+    struct CountedModel {
+        inner: StubModel,
+        measured: Result<Option<u64>, ModelError>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl ModelService for CountedModel {
+        fn capabilities(&self) -> &ModelCapabilities {
+            self.inner.capabilities()
+        }
+        fn context_window_tokens(&self) -> u64 {
+            128000
+        }
+        fn count_input_tokens<'a>(
+            &'a self,
+            _: &'a ModelRequest,
+            _: &'a mut ModelCallContext,
+        ) -> agent_model::ModelInputTokenCountFuture<'a> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.measured.clone()
+            })
+        }
+        fn stream(
+            &self,
+            request: ModelRequest,
+            context: ModelCallContext,
+        ) -> ModelStreamFuture<'_> {
+            self.inner.stream(request, context)
+        }
+    }
+
+    #[tokio::test]
+    async fn current_input_measurement_overrides_stale_usage_and_failure_uses_existing_baseline() {
+        for (measured, requires_compaction) in [
+            (Ok(Some(100)), false),
+            (Ok(Some(110000)), true),
+            (
+                Err(ModelError::Unavailable {
+                    message: "count unavailable".into(),
+                    status: Some(503),
+                    retry_after_ms: None,
+                }),
+                true,
+            ),
+        ] {
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let model = CountedModel {
+                inner: StubModel {
+                    capabilities: ModelCapabilities::default(),
+                    behavior: StubBehavior::Complete(text_message("normal")),
+                },
+                measured,
+                calls: calls.clone(),
+            };
+            let mut input = input();
+            let mut previous = text_message("previous");
+            previous.usage = Some(agent_types::TokenUsage {
+                input_tokens: 110000,
+                output_tokens: 0,
+                total_tokens: 110000,
+                cached_input_tokens: None,
+                reasoning_tokens: None,
+            });
+            input
+                .conversation
+                .messages
+                .push(ConversationMessage::Assistant(previous));
+            let (control, _) = context(CancellationToken::new());
+            let outcome = AgentExecution::start(spec(model), input, control)
+                .completion
+                .await;
+            assert_eq!(
+                matches!(outcome, ExecutionOutcome::CompactionRequired { .. }),
+                requires_compaction
+            );
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            if requires_compaction {
+                let ExecutionOutcome::CompactionRequired { consumption, .. } = outcome else {
+                    unreachable!()
+                };
+                assert_eq!(consumption.steps, 0);
+            }
         }
     }
 

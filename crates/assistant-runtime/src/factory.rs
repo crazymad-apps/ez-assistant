@@ -78,8 +78,14 @@ pub trait ChildTaskWorkspaceFactory: Send + Sync {
 ///
 /// 本类型不实现 `Debug`，因为它短暂借用 API Key。工厂不得保存借用或输出 credential。
 pub struct ModelServiceFactoryRequest<'a> {
+    /// 配置已解析的唯一机制；具体工厂不得从模型名或续接开关猜测。
+    pub context_management_mode: agent_model::ContextManagementMode,
     /// 已解析续接策略与 owner 的不透明绑定；None 用于所有旁路调用。
     pub server_history_binding: Option<&'a str>,
+    /// 原生状态绑定不含正文 generation，与 ID 续接独立。
+    pub provider_state_binding: Option<&'a str>,
+    pub input_token_count_supported: bool,
+    pub compaction_threshold_tokens: std::num::NonZeroU64,
     /// 外部来源的冻结身份，仅供受信宿主处理当前请求拒绝；不含凭据。
     pub external_configuration: Option<&'a Arc<crate::ExternalModelConfiguration>>,
     pub provider: &'a ProviderId,

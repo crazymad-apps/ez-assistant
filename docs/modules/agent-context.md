@@ -71,9 +71,7 @@
   Message 使用同一 user role 和 Turn 结构进入模型上下文，产品转录过滤属于 Runtime/Host 投影职责。
 - 每条规范 `UserMessage` 都开始一个 User Turn；可见用户输入、隐藏 Runtime continuation 与内部
   插入消息遵循同一分块规则，不按来源、可见性或内部类别额外保留。
-- 当前 Runtime 统一要求 replacement 只原样保留最近一个 User Turn，之前的摘要和所有更早
-  Turn 都进入可压缩 head。单一 User Turn 自身撑满上下文时不拆分该 Turn，也不合成 continuation
-  锚点；轮内压缩作为后续版本的独立设计事项处理。
+- 完整轮次分区优先；没有完整旧轮次可回收时，允许在当前可见任务 User 后的闭合工具交换之间切分。至少保留最新完整交换及后续内容，原始 User 通过 retained_user_message_id 引用保留；不得截断 pending 批次、生成别名或重复产品消息。隐藏 Runtime User 不替代任务锚点。
 - Tool Call/Result、reasoning、ProviderState 和消息顺序是不可破坏的协议正确性边界；但历史中
   出现 ProviderState 本身不构成永久 protected tail，完整旧 User Turn 可进入压缩 head，摘要替代后
   其 opaque state 自然离开活动上下文。
@@ -89,3 +87,13 @@ cargo test -p agent-context
 cargo clippy -p agent-context --all-targets --all-features -- -D warnings
 cargo fmt --all --check
 ```
+
+## v0.30.0 F01 M1 计量与机制守卫
+
+现有 usage 基线加增量估算保留，Evaluator 明确标为 estimated；无基线为 unknown。`context_compaction` 消息的 usage 是压缩调用费用，不能替换正常响应的窗口基线，也不按 ProviderState 密文字节估算。可选远端计量由模型/宿主调用，Evaluator 仍不联网。
+
+RollingSummarySameModel 在发起模型调用前核对冻结策略，仅允许本地机制；原生策略不落回摘要。M2 已补齐轮内安全回收、User 引用式候选和压缩范围指令；扣除 head、补入摘要的既有估算保持。原生策略的真实执行继续按后续里程碑落实。
+
+## v0.30.0 F01 当前执行边界
+
+Core 按冻结机制构造有效输入：原生使用最新已提交完整窗口及后缀，不以模型、入口地址或临时续接周期丢弃窗口，本地使用摘要投影；两者均先通过共享完整交换校验。压缩后的一次软阈值续跑许可不绕过已知硬限制、不重置 Run 预算；无正常模型进展时不无限压缩。精确计量只由当前有效请求的可靠样本提供，输入变化立即失效；失败沿用旧方案并等待正常响应校准。

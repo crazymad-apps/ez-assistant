@@ -120,9 +120,9 @@ async fn failed_run_history_is_compacted_before_overflow_failure_settles() {
 async fn threshold_compaction_replaces_history_and_continues_the_same_run() {
     let mut first = assistant_text("assistant-before-compaction", "long prior answer");
     first.usage = Some(agent_types::TokenUsage {
-        input_tokens: 6_500,
+        input_tokens: 7_000,
         output_tokens: 500,
-        total_tokens: 7_000,
+        total_tokens: 7_500,
         cached_input_tokens: Some(6_000),
         reasoning_tokens: None,
     });
@@ -243,10 +243,104 @@ async fn threshold_compaction_replaces_history_and_continues_the_same_run() {
 }
 
 #[tokio::test]
+async fn one_user_long_run_can_compact_three_times_without_replaying_tools_or_resetting_steps() {
+    let call = |number: u32| {
+        let mut message = assistant_tool_call(&format!("long-call-{number}"), "large_result_tool");
+        let AssistantPart::ToolCall(call) = &mut message.parts[0] else {
+            unreachable!();
+        };
+        call.id = ToolCallId::new(format!("unique-call-{number}")).unwrap();
+        call.arguments = json!({"value": number});
+        message
+    };
+    let mut scripts = vec![
+        ModelScript::Events(message_events(&call(1))),
+        ModelScript::Events(message_events(&call(2))),
+    ];
+    for number in 1..=3 {
+        scripts.push(ModelScript::FailEstablishment(
+            ModelError::ContextOverflow {
+                message: "synthetic window overflow".into(),
+            },
+        ));
+        scripts.push(ModelScript::Events(message_events(&assistant_text(
+            &format!("long-summary-{number}"),
+            "Keep the original task constraints and completed results.",
+        ))));
+        if number < 3 {
+            scripts.push(ModelScript::Events(message_events(&call(number + 2))));
+        }
+    }
+    scripts.push(ModelScript::Events(message_events(&assistant_text(
+        "long-finished",
+        "done",
+    ))));
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(true),
+        8_192,
+        scripts,
+    ));
+    let tool = ScriptedTool::succeed(
+        "large_result_tool",
+        json!({"payload": "large result ".repeat(300)}),
+        OrderLog::new(),
+    );
+    let mut tools = ToolRegistry::new();
+    tools.register(tool.clone()).unwrap();
+    let runtime = runtime_with_tools(model.clone(), tools.snapshot());
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    set_auto_approval(&runtime, &session_id).await;
+    let accepted = runtime
+        .submit_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            variant: assistant_protocol::AgentVariant::Build,
+            session_id: session_id.clone(),
+            message: "Do all four batches and preserve my constraints".into(),
+            attachment_ids: vec![],
+            quotes: vec![],
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+        })
+        .await
+        .unwrap();
+    let terminal = wait_for_terminal(&runtime, &session_id, &accepted.run.run_id).await;
+    assert_eq!(
+        terminal.status,
+        assistant_protocol::RunStatus::Completed,
+        "{:?}",
+        terminal.error
+    );
+    assert_eq!(tool.executed_inputs().len(), 4);
+    let history = runtime.store.load_conversation(&session_id).await.unwrap();
+    assert_eq!(
+        history
+            .messages
+            .iter()
+            .filter(|message| matches!(message, ConversationMessage::ContextSummary(_)))
+            .count(),
+        3
+    );
+    assert_eq!(history.messages.iter().filter(|message| matches!(message, ConversationMessage::User(user) if user.transcript_visibility == agent_types::TranscriptVisibility::Visible)).count(), 1);
+    let effective = crate::execution_context_from_product_history(&history);
+    effective.validate_tool_exchange_pairs().unwrap();
+    assert!(matches!(
+        &effective.messages[1],
+        ConversationMessage::User(_)
+    ));
+    assert_eq!(model.take_requests().len(), 11);
+}
+
+#[tokio::test]
 async fn fault_isomorphic_usage_is_subtracted_before_the_next_model_request() {
     const CONTEXT_WINDOW: u64 = 256_000;
     const HEAD_USAGE: u64 = 150_000;
-    const RETAINED_USAGE: u64 = 205_421;
+    const RETAINED_USAGE: u64 = 230_821;
 
     let mut first = assistant_text_with_usage(
         "fault-old-assistant",
@@ -264,9 +358,9 @@ async fn fault_isomorphic_usage_is_subtracted_before_the_next_model_request() {
     });
     let mut summary = assistant_text("fault-summary", "old turn summarized");
     summary.usage = Some(agent_types::TokenUsage {
-        input_tokens: 206_000,
+        input_tokens: 231_000,
         output_tokens: 200,
-        total_tokens: 206_200,
+        total_tokens: 231_200,
         cached_input_tokens: Some(160_000),
         reasoning_tokens: None,
     });
@@ -429,7 +523,7 @@ async fn fault_isomorphic_usage_is_subtracted_before_the_next_model_request() {
 }
 
 #[tokio::test]
-async fn oversized_protected_tool_tail_stops_after_two_automatic_compactions() {
+async fn oversized_protected_tool_tail_stops_without_summarizing_the_same_input_again() {
     let first = assistant_text_with_usage(
         "bounded-old-assistant",
         &"compressible old answer ".repeat(500),
@@ -444,7 +538,6 @@ async fn oversized_protected_tool_tail_stops_after_two_automatic_compactions() {
         reasoning_tokens: None,
     });
     let first_summary = assistant_text("bounded-summary-one", &"summary ".repeat(50));
-    let second_summary = assistant_text("bounded-summary-two", "short summary");
     let model = Arc::new(ScriptedModelService::new(
         model_capabilities(true),
         8_192,
@@ -452,7 +545,6 @@ async fn oversized_protected_tool_tail_stops_after_two_automatic_compactions() {
             ModelScript::Events(message_events(&first)),
             ModelScript::Events(message_events(&tool_call)),
             ModelScript::Events(message_events(&first_summary)),
-            ModelScript::Events(message_events(&second_summary)),
         ],
     ));
     let tool = ScriptedTool::succeed(
@@ -496,7 +588,7 @@ async fn oversized_protected_tool_tail_stops_after_two_automatic_compactions() {
     );
     assert!(error.message.contains("recovery limit reached"));
     assert_eq!(tool.executed_inputs().len(), 1, "tool must not be replayed");
-    assert_eq!(model.take_requests().len(), 4);
+    assert_eq!(model.take_requests().len(), 3);
 
     let history = runtime.store.load_conversation(&session_id).await.unwrap();
     assert_eq!(
@@ -505,8 +597,8 @@ async fn oversized_protected_tool_tail_stops_after_two_automatic_compactions() {
             .iter()
             .filter(|message| matches!(message, ConversationMessage::ContextSummary(_)))
             .count(),
-        2,
-        "both successful recovery generations remain in product history"
+        1,
+        "the reliable recovery generation remains in product history"
     );
     assert!(history.messages.iter().any(|message| matches!(
         message,
@@ -537,7 +629,7 @@ async fn oversized_protected_tool_tail_stops_after_two_automatic_compactions() {
         .unwrap()
         .snapshot
         .value;
-    assert_eq!(view.conversation_generation, 3);
+    assert_eq!(view.conversation_generation, 2);
     let mut completed_compactions = 0;
     while let Ok(event) = events.try_recv() {
         if matches!(
@@ -550,7 +642,7 @@ async fn oversized_protected_tool_tail_stops_after_two_automatic_compactions() {
             completed_compactions += 1;
         }
     }
-    assert_eq!(completed_compactions, 2);
+    assert_eq!(completed_compactions, 1);
 }
 
 #[tokio::test]
@@ -777,8 +869,9 @@ async fn in_stream_failure_reports_establishment_and_partial_output_without_retr
         ])],
     ));
     let runtime = runtime(model.clone());
+    // 此用例验证不重试的断流诊断；重试行为由 model_retry 模块独立覆盖。
     runtime.config_registry.replace_document_for_test(&format!(
-        "{TEST_CONFIG}\n[runtime.model_retry]\nretry_on = [\"connection\", \"timeout\", \"rate_limited\", \"unavailable\"]\ndelays_ms = [1, 1, 1]\nmax_retry_after_ms = 10\n"
+        "{TEST_CONFIG}\n[runtime.model_retry]\nenabled=false\n"
     ));
     let session = runtime
         .create_session(CreateSessionRequest::default())

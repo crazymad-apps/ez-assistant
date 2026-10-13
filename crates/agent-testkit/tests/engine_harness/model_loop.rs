@@ -467,6 +467,7 @@ async fn multi_turn_loop_backfills_projection_with_part_fidelity() {
     )
     .expect("valid provider state");
     let turn1 = AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: msg_id("message_1"),
         model: model_identity(),
         parts: vec![

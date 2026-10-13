@@ -45,7 +45,10 @@ pub(crate) struct SessionController {
 ///
 /// 字段同时包含可恢复业务事实和明确标注的进程内状态，恢复时由 Store 重新构建而非序列化本结构。
 pub(crate) struct SessionState {
+    pub(crate) context_management_mode: Option<agent_model::ContextManagementMode>,
     pub(crate) server_history_key: Option<String>,
+    /// 每个正文 owner 仅保留一个当前进程的计量快照，不持久化或在刷新时联网。
+    pub(crate) context_measurements: BTreeMap<String, ContextMeasurement>,
     pub(crate) feedback: BTreeMap<String, assistant_protocol::FeedbackRequestSnapshot>,
     pub(crate) agent_shell_kind: Option<assistant_protocol::ShellKind>,
     pub(crate) agent_shell_environment: Option<crate::FrozenShellEnvironment>,
@@ -100,6 +103,21 @@ pub(crate) struct SessionState {
     pub(crate) goal: Option<GoalControl>,
     /// 规范 Conversation 的结构化 Skill Activation 账本。
     pub(crate) skill_activations: Vec<crate::StoredSkillActivation>,
+}
+
+pub(crate) struct ContextMeasurement {
+    pub(crate) history_hash: [u8; 32],
+    pub(crate) session_binding: Option<String>,
+    pub(crate) input_tokens: u64,
+}
+
+pub(crate) fn context_history_hash(
+    history: &agent_types::ConversationSnapshot,
+) -> Option<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+    serde_json::to_vec(history)
+        .ok()
+        .map(|bytes| Sha256::digest(bytes).into())
 }
 
 /// 当前正在执行的手动或自动压缩及其可选取消句柄。
@@ -208,6 +226,7 @@ impl SessionController {
             environment: stored.environment,
             mutation_gate: AsyncMutex::new(()),
             state: Mutex::new(SessionState {
+                context_measurements: BTreeMap::new(),
                 feedback: BTreeMap::new(),
                 agent_shell_kind: stored.agent_shell_kind,
                 agent_shell_environment: stored.agent_shell_environment,
@@ -216,6 +235,7 @@ impl SessionController {
                 is_pinned: stored.is_pinned,
                 title_origin: stored.title_origin,
                 server_history_key: stored.server_history_key,
+                context_management_mode: stored.context_management_mode,
                 model_selection: stored.model_selection,
                 model_binding: None,
                 reasoning_effort: stored.reasoning_effort,
@@ -345,6 +365,7 @@ impl SessionController {
             environment: stored.environment,
             mutation_gate: AsyncMutex::new(()),
             state: Mutex::new(SessionState {
+                context_measurements: BTreeMap::new(),
                 feedback: BTreeMap::new(),
                 agent_shell_kind: stored.agent_shell_kind,
                 agent_shell_environment: stored.agent_shell_environment,
@@ -353,6 +374,7 @@ impl SessionController {
                 is_pinned: stored.is_pinned,
                 title_origin: stored.title_origin,
                 server_history_key: stored.server_history_key,
+                context_management_mode: stored.context_management_mode,
                 model_selection: stored.model_selection,
                 model_binding: None,
                 reasoning_effort: stored.reasoning_effort,
@@ -715,7 +737,8 @@ impl SessionController {
                 return Err(RuntimeError::from_store("load session conversation", error));
             }
         };
-        let snapshot = crate::execution_context_from_product_history(&product_history);
+        let snapshot =
+            context_for_mode(&product_history, self.lock_state()?.context_management_mode);
         let persisted_message_count = snapshot.messages.len();
         let journal = InMemoryJournal::from_snapshot(snapshot).map_err(|_| {
             RuntimeError::StorageUnavailable {
@@ -732,12 +755,47 @@ impl SessionController {
         Ok(())
     }
 
+    /// 调用方持有 Session mutation gate，且尚未领取 Run/启动手动压缩。
+    /// 仅准备新机制的 Journal；Store 接纳机制后才安装，不改写原始历史或执行工具。
+    pub(crate) async fn prepare_journal_for_mode(
+        &self,
+        store: &dyn RuntimeStore,
+        mode: agent_model::ContextManagementMode,
+    ) -> RuntimeResult<Option<InMemoryJournal>> {
+        if self.lock_state()?.context_management_mode == Some(mode) {
+            return Ok(None);
+        }
+        let history = store
+            .load_conversation(&self.id)
+            .await
+            .map_err(|source| RuntimeError::from_store("prepare context mode", source))?;
+        let snapshot = context_for_mode(&history, Some(mode));
+        InMemoryJournal::from_snapshot(snapshot)
+            .map(Some)
+            .map_err(|_| RuntimeError::StorageUnavailable {
+                operation: "prepare context mode",
+                source: None,
+            })
+    }
+
     pub(crate) fn lock_state(&self) -> RuntimeResult<MutexGuard<'_, SessionState>> {
         self.state
             .lock()
             .map_err(|_| RuntimeError::InternalStateUnavailable {
                 component: "session state",
             })
+    }
+}
+
+fn context_for_mode(
+    history: &ConversationSnapshot,
+    mode: Option<agent_model::ContextManagementMode>,
+) -> ConversationSnapshot {
+    if mode == Some(agent_model::ContextManagementMode::ServerCompaction) {
+        // 精确路由稍后由共享原生投影选择；文本摘要同样是合法压缩点。
+        history.clone()
+    } else {
+        crate::execution_context_from_product_history(history)
     }
 }
 

@@ -50,16 +50,26 @@ impl CenterModelTransport {
             .map_err(|_| reject(ModelError::Config("中心地址无效。".to_owned())))?;
         let target = url::Url::parse(&request.url)
             .map_err(|_| reject(ModelError::Config("模型请求地址无效。".to_owned())))?;
+        let base = self.endpoint.path().trim_end_matches('/');
+        let mut paths = vec![
+            format!("{base}/responses"),
+            format!("{base}/chat/completions"),
+        ];
+        if self.configuration.parameters().server_compaction_enabled {
+            paths.push(format!("{base}/responses/compact"));
+        }
+        if self.configuration.parameters().input_token_count_support
+            == assistant_protocol::ModelFeatureSupport::Supported
+        {
+            paths.push(format!("{base}/responses/input_tokens"));
+        }
         if target.origin() != trusted.origin()
             || target.origin() != self.endpoint.origin()
-            || ![
-                format!("{}/responses", self.endpoint.path().trim_end_matches('/')),
-                format!(
-                    "{}/chat/completions",
-                    self.endpoint.path().trim_end_matches('/')
-                ),
-            ]
-            .contains(&target.path().to_owned())
+            || target.username() != ""
+            || target.password().is_some()
+            || target.query().is_some()
+            || target.fragment().is_some()
+            || !paths.iter().any(|path| path == target.path())
         {
             return Err(reject(ModelError::Config(
                 "模型请求不属于受信中心。".to_owned(),

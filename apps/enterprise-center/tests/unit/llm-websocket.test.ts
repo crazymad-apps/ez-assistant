@@ -354,3 +354,66 @@ it('软上限内不因空闲过期回收，溢出后只回收到保留数量', a
   await expect(call(bridge, up.endpoint, { previous_response_id: continued.id })).rejects.toMatchObject({ code: 'previous_response_not_found' });
   await call(bridge, up.endpoint, { previous_response_id: second.id });
 });
+
+async function compact(bridge: ResponsesWebsocket, endpoint: string, input: unknown[], options: object = {}) {
+  const chunks: Buffer[] = [];
+  const headers: unknown[] = [];
+  const status = await bridge.compact({
+    user: 1, provider: 'provider-a', binding: 'binding-a', endpoint, apiKey: 'fixture-key',
+    body: Buffer.from(JSON.stringify({ model: 'm', instructions: 'unchanged', input })),
+    signal: new AbortController().signal, connectTimeout: 1000, idleTimeout: 1000,
+    sink: { headers: (code, values) => { headers.push([code, values]); }, chunk: async chunk => { chunks.push(chunk); } },
+    ...options,
+  });
+  return { status, headers, result: JSON.parse(Buffer.concat(chunks).toString()) };
+}
+
+it('显式压缩使用独立连接，保留原始用户/图片与完整原生项，旧业务链仍可继续', async () => {
+  const native = { type: 'compaction', id: 'cmp_fixture', encrypted_content: 'opaque', extension: { keep: true } };
+  const usage = { input_tokens: 100, output_tokens: 10, total_tokens: 110 };
+  const up = await upstream((socket, request, index) => {
+    if ((request.input as { type?: string }[]).at(-1)?.type !== 'compaction_trigger') return complete(socket, index);
+    socket.send(JSON.stringify({ type: 'response.created', response: { id: `cmp_${index}`, status: 'in_progress' } }));
+    socket.send(JSON.stringify({ type: 'response.completed', response: { id: `cmp_${index}`, status: 'completed', created_at: 42, output: [native], usage } }));
+  });
+  const bridge = owner();
+  const normal = await call(bridge, up.endpoint);
+  // 完整窗口保留用户图片；其大小不能套用单个密文 item 的 2 MiB 上限。
+  const user = { role: 'user', content: [{ type: 'input_text', text: 'original' }, { type: 'input_image', image_url: `data:image/png;base64,${'AAAA'.repeat(800_000)}` }] };
+  const first = await compact(bridge, up.endpoint, [user, { type: 'function_call', call_id: 'a', name: 'read', arguments: '{}' }, { type: 'function_call_output', call_id: 'a', output: 'large' }]);
+  expect(first.result).toEqual({ id: 'cmp_2', object: 'response.compaction', created_at: 42, output: [user, native], usage });
+  expect(first.headers).toEqual([[200, { 'content-type': 'application/json' }]]);
+  expect(up.requests[1]?.body).toMatchObject({ type: 'response.create', store: false, tools: [], include: ['reasoning.encrypted_content'] });
+  expect(up.requests[1]?.body).not.toHaveProperty('previous_response_id');
+  await compact(bridge, up.endpoint, first.result.output);
+  await call(bridge, up.endpoint, { previous_response_id: normal.id });
+  expect(up.requests.map(request => request.connection)).toEqual([1, 2, 3, 1]);
+  await expect.poll(() => up.server.clients.size).toBe(1);
+});
+
+it('未完成、损坏和取消的压缩不发布成功 JSON、不保留链、不重试', async () => {
+  for (const response of [
+    { status: 'incomplete', output: [{ type: 'compaction', encrypted_content: 'opaque' }] },
+    { status: 'completed', output: [{ type: 'compaction', encrypted_content: '' }] },
+    { status: 'completed', output: [{ type: 'function_call', call_id: 'unexpected' }] },
+  ]) {
+    let published = false;
+    const up = await upstream(socket => socket.send(JSON.stringify({ type: 'response.completed', response: { id: 'cmp_bad', created_at: 42, ...response } })));
+    await expect(compact(owner(), up.endpoint, [], { sink: { headers() { published = true; }, async chunk() { published = true; } } })).rejects.toMatchObject({ reason: 'upstream_connection' });
+    expect(published).toBe(false);
+    expect(up.requests).toHaveLength(1);
+    await expect.poll(() => up.server.clients.size).toBe(0);
+  }
+  const stalled = await upstream(() => {});
+  await expect(compact(owner(), stalled.endpoint, [], { signal: AbortSignal.timeout(20) })).rejects.toMatchObject({ reason: 'cancelled' });
+  expect(stalled.requests).toHaveLength(1);
+  await expect.poll(() => stalled.server.clients.size).toBe(0);
+});
+
+it('关闭响应续接的普通 WS 请求也可执行，但不会发布可复用链', async () => {
+  const up = await upstream((socket, _request, index) => complete(socket, index));
+  const bridge = owner();
+  const first = await call(bridge, up.endpoint, { store: false });
+  await expect.poll(() => up.server.clients.size).toBe(0);
+  await expect(call(bridge, up.endpoint, { previous_response_id: first.id })).rejects.toMatchObject({ code: 'previous_response_not_found' });
+});

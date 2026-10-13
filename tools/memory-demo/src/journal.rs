@@ -293,6 +293,7 @@ mod tests {
 
     fn assistant(call_ids: &[&str]) -> AssistantMessage {
         AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: MessageId::new("assistant_1").expect("valid message id"),
             model: ModelIdentity::new(
                 ProviderId::new("test").expect("valid provider id"),
@@ -417,6 +418,7 @@ mod tests {
         let journal = DemoJournal::new(path, initial).expect("create journal");
         journal
             .append_message(ConversationMessage::Assistant(AssistantMessage {
+                purpose: agent_types::AssistantMessagePurpose::ModelResponse,
                 id: MessageId::new("assistant_text").expect("valid message id"),
                 model: ModelIdentity::new(
                     ProviderId::new("test").expect("valid provider id"),

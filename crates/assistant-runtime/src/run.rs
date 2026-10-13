@@ -120,6 +120,9 @@ impl RunRecord {
             let ConversationMessage::Assistant(message) = message else {
                 return None;
             };
+            if !message.purpose.is_model_response() {
+                return None;
+            }
             self.message_ids
                 .iter()
                 .any(|message_id| message_id == &message.id)

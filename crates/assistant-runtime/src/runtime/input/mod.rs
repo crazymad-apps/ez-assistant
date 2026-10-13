@@ -526,6 +526,23 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     disclosure_context,
                     resource_projection,
                 } = compiled.into_parts();
+                let context_management_mode = model_binding.model.context_management_mode();
+                let replacement_journal = match session
+                    .prepare_journal_for_mode(context.store.as_ref(), context_management_mode)
+                    .await
+                {
+                    Ok(journal) => journal,
+                    Err(error) => {
+                        fail_before_start(
+                            &context,
+                            &session,
+                            &next.2.run_id,
+                            error.to_protocol_info(),
+                        )
+                        .await;
+                        continue;
+                    }
+                };
                 let shell_context = match shell
                     .as_ref()
                     .map(|shell| shell.context_message(&session.environment().working_directory))
@@ -614,6 +631,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                 if context
                     .store
                     .commit_user_message(UserMessageCommit {
+                        context_management_mode,
                         shell: shell.clone(),
                         operation_id,
                         input_id: next.0.clone(),
@@ -634,6 +652,12 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                         Ok(state) => state,
                         Err(_) => return,
                     };
+                    state.context_management_mode = Some(context_management_mode);
+                    if let Some(journal) = replacement_journal {
+                        state.persisted_message_count = journal.message_count();
+                        state.journal = Some(journal);
+                        state.context_measurements.clear();
+                    }
                     state.agent_shell_environment = shell.clone();
                     if next.1.stored.state == StoredInputState::Queued
                         && let Some(target) = next.1.stored.agent_shell_target
@@ -780,12 +804,19 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     skill_activation_latch,
                 ));
                 let mut compaction_count = 0_u32;
+                let mut after_compaction = false;
                 let mut remaining_budget = agent.execution_budget().clone();
                 let mut next_step = std::num::NonZeroU32::MIN;
                 let mut final_execution_steps = None;
                 let (outcome, forced_error) = loop {
                     let execution = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                        agent.start_with_budget_at_step(
+                        let start = if std::mem::take(&mut after_compaction) {
+                            agent_sdk::Agent::start_after_compaction
+                        } else {
+                            agent_sdk::Agent::start_with_budget_at_step
+                        };
+                        start(
+                            &agent,
                             input.clone(),
                             ExecutionContext {
                                 cancellation: cancellation.clone(),
@@ -911,6 +942,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                                         );
                                     };
                                     input = continued_input;
+                                    compaction_count = 0;
                                     next_step = std::num::NonZeroU32::new(advanced_step)
                                         .expect("a non-zero step plus consumption stays non-zero");
                                     publish_continuation_events(
@@ -946,6 +978,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     next_step = std::num::NonZeroU32::new(advanced_step)
                         .expect("a non-zero step plus consumption stays non-zero");
                     let Some(reason) = compaction_reason else {
+                        compaction_count = 0;
                         input = match session.lock_state().ok().and_then(|state| {
                             state.journal.as_ref().map(|journal| ExecutionInput {
                                 conversation: resource_projection.apply(journal.snapshot()),
@@ -973,7 +1006,17 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                             )),
                         );
                     };
-                    if compaction_count >= MAX_AUTOMATIC_COMPACTIONS {
+                    let made_progress =
+                        crate::context_compaction::latest_model_result_id(&input.conversation)
+                            != crate::context_compaction::latest_model_result_id(
+                                &normal_request.conversation,
+                            );
+                    if made_progress {
+                        compaction_count = 0;
+                    }
+                    if compaction_count >= MAX_AUTOMATIC_COMPACTIONS
+                        || (compaction_count > 0 && !made_progress)
+                    {
                         break (
                             None,
                             Some(RuntimeErrorInfo::new(
@@ -1001,6 +1044,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     .await
                     {
                         Ok(replacement) => {
+                            after_compaction = true;
                             // Store 换代可靠完成后才为同一 Run 派生新绑定；沿用一次恢复额度与预算。
                             if let Some(binding) = &history_model_binding {
                                 let generation = match session.lock_state() {

@@ -23,6 +23,8 @@ export function tokenDraft(parameters: ModelParameters): TokenDraft {
   return Object.fromEntries(token_fields.map(({ key }) => [key, parameters[key].state === "known" ? String(parameters[key].value) : ""])) as TokenDraft;
 }
 export function compileTokenDraft(parameters: ModelParameters, draft: TokenDraft): ModelParameters {
+  if (parameters.server_auto_compaction_enabled) throw new Error("本版本暂不支持服务端自行触发压缩。");
+  if (parameters.server_compaction_enabled && parameters.server_compaction_support !== "supported") throw new Error("请先确认服务端压缩能力为支持。");
   const result = { ...parameters };
   for (const field of token_fields) {
     const value = draft[field.key].trim();
@@ -58,6 +60,10 @@ export const provider_documents: Partial<Record<ProviderType, string>> = {
 export function parameterRows(parameters: ModelParameters, draft?: TokenDraft): readonly { label: string; value: string }[] {
   const support = (value: ModelFeatureSupport) => support_options.find((option) => option.value === value)?.label ?? "未知";
   return [
+    { label: "压缩方式", value: parameters.server_compaction_enabled ? "服务端原生压缩" : "本地摘要" },
+    { label: "服务端自行触发压缩", value: parameters.server_auto_compaction_enabled ? "开启" : "关闭（由 Agent 触发）" },
+    { label: "服务端压缩能力", value: support(parameters.server_compaction_support) },
+    { label: "输入计量能力", value: support(parameters.input_token_count_support) },
     ...token_fields.map(({ key, label }) => ({ label, value: draft ? draft[key] || "未知" : tokenLabel(parameters[key]) })),
     ...([['streaming', '流式输出'], ['image_input', '图片输入'], ['tool_calls', '工具调用'], ['reasoning', '思考能力']] as const).map(([key, label]) => ({ label, value: support(parameters[key]) })),
     ...(["auto", "none", "required", "named"] as const).map((key) => ({ label: `工具选择 ${key}`, value: support(parameters.tool_choice[key]) })),

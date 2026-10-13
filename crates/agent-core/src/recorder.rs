@@ -128,6 +128,7 @@ mod tests {
 
     fn sample_assistant_message() -> AssistantMessage {
         AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: MessageId::new("message_1").expect("valid message id"),
             model: ModelIdentity::new(
                 ProviderId::new("deepseek").expect("valid provider id"),

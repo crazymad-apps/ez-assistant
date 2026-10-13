@@ -190,6 +190,7 @@ mod tests {
 
     fn assistant() -> AssistantMessage {
         AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: MessageId::new("assistant-1").expect("id"),
             model: ModelIdentity::new(ProviderId::new("test").expect("provider"), "model"),
             parts: vec![],

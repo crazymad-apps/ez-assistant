@@ -1,7 +1,7 @@
 //! 每用户一份当前中心凭据；与客户端登录共享同一提交锁，不把凭据绑定到任务。
 
 /// 实际准入和随包构建声明使用同一协议集合，避免发布脚本维护另一份兼容表。
-pub(crate) const SUPPORTED_PROTOCOLS: &[u32] = &[2];
+pub(crate) const SUPPORTED_PROTOCOLS: &[u32] = &[3];
 
 mod agents;
 pub(crate) mod client;

@@ -27,6 +27,7 @@ impl VolatileRuntimeStore {
                 return Err(conflict("child task already exists"));
             }
             let stored = StoredChildTask {
+                context_management_mode: task.context_management_mode,
                 context_window_tokens: Some(task.context_window_tokens),
                 child_task_id: task.child_task_id.clone(),
                 session_id: task.session_id,

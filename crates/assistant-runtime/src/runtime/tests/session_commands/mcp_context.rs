@@ -219,9 +219,9 @@ async fn mcp_directory_survives_automatic_compaction_and_overflow_without_new_ru
         let mut first = assistant_text("mcp-auto-first", &"history ".repeat(500));
         if !overflow {
             first.usage = Some(agent_types::TokenUsage {
-                input_tokens: 6500,
+                input_tokens: 7000,
                 output_tokens: 500,
-                total_tokens: 7000,
+                total_tokens: 7500,
                 cached_input_tokens: None,
                 reasoning_tokens: None,
             });

@@ -23,6 +23,7 @@ fn approval_runtime(
 
 fn tool_step(message_id: &str) -> ModelScript {
     ModelScript::Events(message_events(&AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new(message_id).expect("message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("provider id"),

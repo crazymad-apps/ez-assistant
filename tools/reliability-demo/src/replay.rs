@@ -284,6 +284,7 @@ pub(crate) mod test_support {
             },
             ModelEvent::TurnFinished {
                 message: AssistantMessage {
+                    purpose: agent_types::AssistantMessagePurpose::ModelResponse,
                     id: message_id,
                     model,
                     parts: vec![AssistantPart::Text(TextPart {

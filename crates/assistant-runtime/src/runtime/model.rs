@@ -45,6 +45,7 @@ use crate::{
 /// Run 和连接验证共用这条构造链，避免两者对 endpoint、credential、协议 Adapter、
 /// timeout 和 retry 产生不同解释；两者的请求内容仍分别构造。
 pub(super) struct CompiledModelService {
+    input_token_count_supported: bool,
     pub(super) model: Arc<dyn ModelService>,
     /// 压缩与无状态子任务模板使用无父观察器的服务；续接 child 派生独立服务。
     background_model: Arc<dyn ModelService>,
@@ -64,6 +65,7 @@ pub(crate) struct HistoryModelBinding {
     factory: Arc<dyn crate::ModelServiceFactory>,
     environment: crate::SessionExecutionEnvironment,
     owner: String,
+    store: Arc<dyn RuntimeStore>,
     session: Arc<SessionController>,
     observer: Option<Arc<dyn ModelAttemptObserver>>,
 }
@@ -76,18 +78,26 @@ impl HistoryModelBinding {
         self.compile(
             &format!("{}:child:{}:{generation}", self.owner, child.as_str()),
             None,
+            assistant_protocol::ConversationOwner::ChildTask {
+                session_id: self.session.id().clone(),
+                child_task_id: child.clone(),
+            },
         )
     }
     pub(super) fn compile_main(&self, generation: u64) -> RuntimeResult<Arc<dyn ModelService>> {
         self.compile(
             &format!("{}:{generation}", self.owner),
             self.observer.clone(),
+            assistant_protocol::ConversationOwner::MainSession {
+                session_id: self.session.id().clone(),
+            },
         )
     }
     fn compile(
         &self,
         owner: &str,
         observer: Option<Arc<dyn ModelAttemptObserver>>,
+        conversation_owner: assistant_protocol::ConversationOwner,
     ) -> RuntimeResult<Arc<dyn ModelService>> {
         let mut compiled = compile_resolved_model_service_with_history(
             &self.snapshot,
@@ -95,8 +105,14 @@ impl HistoryModelBinding {
             self.factory.as_ref(),
             observer,
             Some(owner),
+            Some(owner.rsplit_once(':').map_or(owner, |(base, _)| base)),
         )?;
-        bind_image_preparation(&mut compiled, &self.environment);
+        bind_image_preparation(
+            &mut compiled,
+            &self.environment,
+            Some((self.store.clone(), conversation_owner)),
+            Some(self.session.clone()),
+        );
         Ok(compiled.model)
     }
 }
@@ -113,10 +129,14 @@ struct ObservedModelService {
 }
 
 /// 在协议服务与有限重试之外一次性准备本次调用需要的全部图片。
-struct ImagePreparingModelService {
+struct RequestPreparingModelService {
     inner: Arc<dyn ModelService>,
-    preprocessor: Arc<dyn ModelImagePreprocessor>,
+    preprocessor: Option<Arc<dyn ModelImagePreprocessor>>,
     tool_image_directory: String,
+    native_history: Option<(Arc<dyn RuntimeStore>, assistant_protocol::ConversationOwner)>,
+    measurement_session: Option<Arc<SessionController>>,
+    session_binding: Option<String>,
+    input_token_count_supported: bool,
 }
 
 struct AuxiliaryVisionInspector {
@@ -283,7 +303,159 @@ fn map_inspector_error(error: ModelError) -> ImageInspectorError {
     }
 }
 
-impl ModelService for ImagePreparingModelService {
+impl RequestPreparingModelService {
+    async fn measurement_history(&self) -> Option<[u8; 32]> {
+        let (store, owner) = self.native_history.as_ref()?;
+        let history = match owner {
+            assistant_protocol::ConversationOwner::MainSession { session_id } => {
+                store.load_conversation(session_id).await
+            }
+            assistant_protocol::ConversationOwner::ChildTask {
+                session_id,
+                child_task_id,
+            } => {
+                store
+                    .load_child_conversation(session_id, child_task_id)
+                    .await
+            }
+        }
+        .ok()?;
+        crate::session::context_history_hash(&history)
+    }
+
+    async fn prepare_request(
+        &self,
+        request: &agent_model::ModelRequest,
+    ) -> Result<agent_model::ModelRequest, ModelError> {
+        if self.inner.context_policy().mode()
+            != agent_model::ContextManagementMode::ServerCompaction
+        {
+            return Ok(request.clone());
+        }
+        let Some((store, owner)) = &self.native_history else {
+            return Ok(request.clone());
+        };
+        let history = match owner {
+            assistant_protocol::ConversationOwner::MainSession { session_id } => {
+                store.load_conversation(session_id).await
+            }
+            assistant_protocol::ConversationOwner::ChildTask {
+                session_id,
+                child_task_id,
+            } => {
+                store
+                    .load_child_conversation(session_id, child_task_id)
+                    .await
+            }
+        }
+        .map_err(|_| ModelError::Protocol("native request history is unavailable".into()))?;
+        let mut prepared = request.clone();
+        let mut instructions = request.system.parts().to_vec();
+        if let Some(memory) = crate::context_compaction::memory::derive_pinned_memory_context(
+            &history,
+        )
+        .map_err(|_| ModelError::Protocol("native request memory facts are invalid".into()))?
+        {
+            instructions.push(memory);
+        }
+        let mut capabilities = std::collections::BTreeMap::new();
+        for message in &history.messages {
+            if let agent_types::ConversationMessage::User(message) = message {
+                for part in &message.parts {
+                    if let agent_types::UserPart::InternalContext(part) = part
+                        && matches!(
+                            part.kind.as_str(),
+                            "mcp_server_directory" | "mcp_server_selection" | "shell_environment"
+                        )
+                    {
+                        capabilities.insert(part.kind.clone(), part.text.clone());
+                    }
+                }
+            }
+        }
+        instructions.extend(capabilities.into_values());
+        prepared.system = SystemPromptSnapshot::new(instructions);
+        Ok(prepared)
+    }
+
+    async fn prepare_context_images(
+        &self,
+        request: &agent_model::ModelRequest,
+        context: &mut agent_model::ModelCallContext,
+    ) -> Result<(), ModelError> {
+        if context.cancellation.is_cancelled() {
+            return Err(ModelError::Cancelled);
+        }
+        let Some(preprocessor) = &self.preprocessor else {
+            return Ok(());
+        };
+        if context.prepared_images.is_empty() {
+            let mut resources = Vec::new();
+            for message in &request.conversation.messages {
+                match message {
+                    agent_types::ConversationMessage::User(message) => {
+                        for part in &message.parts {
+                            if let agent_types::UserPart::FileReferences(part) = part {
+                                resources.extend(
+                                    part.files
+                                        .iter()
+                                        .cloned()
+                                        .map(ModelImageResource::FileReference),
+                                );
+                            }
+                        }
+                    }
+                    agent_types::ConversationMessage::Tool(message) => {
+                        for part in message.result.content.as_parts() {
+                            if let agent_types::ToolResultPart::Image { image } = part {
+                                resources.push(ModelImageResource::ToolImage {
+                                    directory: self.tool_image_directory.clone(),
+                                    reference: image.clone(),
+                                });
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            for resource in resources {
+                let key = match &resource {
+                    ModelImageResource::FileReference(reference) => {
+                        (0_u8, reference.readable_path.clone())
+                    }
+                    ModelImageResource::LocalFile { path } => (2_u8, path.clone()),
+                    ModelImageResource::ToolImage { reference, .. } => {
+                        (1_u8, reference.relative_path().to_owned())
+                    }
+                };
+                if !seen.insert(key) {
+                    continue;
+                }
+                match preprocessor
+                    .prepare(&resource, &context.cancellation)
+                    .await?
+                {
+                    ModelImagePreparation::Image(image) => match resource {
+                        ModelImageResource::FileReference(reference) => context
+                            .prepared_images
+                            .insert_file_reference(reference.readable_path, image),
+                        ModelImageResource::LocalFile { path } => {
+                            context.prepared_images.insert_file_reference(path, image)
+                        }
+                        ModelImageResource::ToolImage { reference, .. } => context
+                            .prepared_images
+                            .insert_tool_image(reference.relative_path().to_owned(), image),
+                    },
+                    ModelImagePreparation::NotImage => {}
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl ModelService for RequestPreparingModelService {
     fn capabilities(&self) -> &agent_model::ModelCapabilities {
         self.inner.capabilities()
     }
@@ -296,78 +468,76 @@ impl ModelService for ImagePreparingModelService {
         self.inner.max_input_tokens()
     }
 
+    fn context_policy(&self) -> &agent_model::ContextPolicy {
+        self.inner.context_policy()
+    }
+
+    fn count_input_tokens<'a>(
+        &'a self,
+        request: &'a agent_model::ModelRequest,
+        context: &'a mut agent_model::ModelCallContext,
+    ) -> agent_model::ModelInputTokenCountFuture<'a> {
+        Box::pin(async move {
+            if !self.input_token_count_supported {
+                return if context.cancellation.is_cancelled() {
+                    Err(ModelError::Cancelled)
+                } else {
+                    Ok(None)
+                };
+            }
+            let history_before = self.measurement_history().await;
+            let request = self.prepare_request(request).await?;
+            self.prepare_context_images(&request, context).await?;
+            let counted = self.inner.count_input_tokens(&request, context).await?;
+            if let (Some(tokens), Some(before), Some(session), Some((_, owner))) = (
+                counted,
+                history_before,
+                &self.measurement_session,
+                &self.native_history,
+            ) && !context.cancellation.is_cancelled()
+                && self.measurement_history().await == Some(before)
+                && let Ok(mut state) = session.lock_state()
+                && state.server_history_key == self.session_binding
+            {
+                let key = match owner {
+                    assistant_protocol::ConversationOwner::MainSession { .. } => String::new(),
+                    assistant_protocol::ConversationOwner::ChildTask { child_task_id, .. } => {
+                        child_task_id.as_str().to_owned()
+                    }
+                };
+                state.context_measurements.insert(
+                    key,
+                    crate::session::ContextMeasurement {
+                        history_hash: before,
+                        session_binding: self.session_binding.clone(),
+                        input_tokens: tokens,
+                    },
+                );
+            }
+            Ok(counted)
+        })
+    }
+
+    fn compact(
+        &self,
+        request: agent_model::ModelRequest,
+        mut context: agent_model::ModelCallContext,
+    ) -> agent_model::ModelCompactionFuture<'_> {
+        Box::pin(async move {
+            let request = self.prepare_request(&request).await?;
+            self.prepare_context_images(&request, &mut context).await?;
+            self.inner.compact(request, context).await
+        })
+    }
+
     fn stream(
         &self,
         request: agent_model::ModelRequest,
         mut context: agent_model::ModelCallContext,
     ) -> ModelStreamFuture<'_> {
         Box::pin(async move {
-            if context.cancellation.is_cancelled() {
-                return Err(ModelError::Cancelled);
-            }
-            if context.prepared_images.is_empty() {
-                let mut resources = Vec::new();
-                for message in &request.conversation.messages {
-                    match message {
-                        agent_types::ConversationMessage::User(message) => {
-                            for part in &message.parts {
-                                if let agent_types::UserPart::FileReferences(part) = part {
-                                    resources.extend(
-                                        part.files
-                                            .iter()
-                                            .cloned()
-                                            .map(ModelImageResource::FileReference),
-                                    );
-                                }
-                            }
-                        }
-                        agent_types::ConversationMessage::Tool(message) => {
-                            for part in message.result.content.as_parts() {
-                                if let agent_types::ToolResultPart::Image { image } = part {
-                                    resources.push(ModelImageResource::ToolImage {
-                                        directory: self.tool_image_directory.clone(),
-                                        reference: image.clone(),
-                                    });
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                let mut seen = std::collections::BTreeSet::new();
-                for resource in resources {
-                    let key = match &resource {
-                        ModelImageResource::FileReference(reference) => {
-                            (0_u8, reference.readable_path.clone())
-                        }
-                        ModelImageResource::LocalFile { path } => (2_u8, path.clone()),
-                        ModelImageResource::ToolImage { reference, .. } => {
-                            (1_u8, reference.relative_path().to_owned())
-                        }
-                    };
-                    if !seen.insert(key) {
-                        continue;
-                    }
-                    match self
-                        .preprocessor
-                        .prepare(&resource, &context.cancellation)
-                        .await?
-                    {
-                        ModelImagePreparation::Image(image) => match resource {
-                            ModelImageResource::FileReference(reference) => context
-                                .prepared_images
-                                .insert_file_reference(reference.readable_path, image),
-                            ModelImageResource::LocalFile { path } => {
-                                context.prepared_images.insert_file_reference(path, image)
-                            }
-                            ModelImageResource::ToolImage { reference, .. } => context
-                                .prepared_images
-                                .insert_tool_image(reference.relative_path().to_owned(), image),
-                        },
-                        ModelImagePreparation::NotImage => {}
-                    }
-                }
-            }
+            let request = self.prepare_request(&request).await?;
+            self.prepare_context_images(&request, &mut context).await?;
             self.inner.stream(request, context).await
         })
     }
@@ -384,6 +554,26 @@ impl ModelService for ObservedModelService {
 
     fn max_input_tokens(&self) -> Option<u64> {
         self.inner.max_input_tokens()
+    }
+
+    fn context_policy(&self) -> &agent_model::ContextPolicy {
+        self.inner.context_policy()
+    }
+
+    fn count_input_tokens<'a>(
+        &'a self,
+        request: &'a agent_model::ModelRequest,
+        context: &'a mut agent_model::ModelCallContext,
+    ) -> agent_model::ModelInputTokenCountFuture<'a> {
+        self.inner.count_input_tokens(request, context)
+    }
+
+    fn compact(
+        &self,
+        request: agent_model::ModelRequest,
+        context: agent_model::ModelCallContext,
+    ) -> agent_model::ModelCompactionFuture<'_> {
+        self.inner.compact(request, context)
     }
 
     fn stream(
@@ -532,7 +722,7 @@ pub(super) struct RunCompilationResources<'a> {
     pub(super) mcp_image_materializer: Arc<dyn McpImageMaterializer>,
 }
 
-/// 复用 Session 已接纳的模型参数；配置改变或进程重启后只读固定配置，不隐式联网。
+/// 为新操作读取最新固定模型参数，不隐式联网；活动 Run 继续持有自身冻结绑定。
 /// 调用方负责在既有 Session／配置门禁内接纳结果；本函数不修改 Session 或 Store。
 pub(super) async fn resolve_session_model(
     registry: &crate::config::ConfigRegistry,
@@ -540,29 +730,33 @@ pub(super) async fn resolve_session_model(
     selection: Option<&assistant_protocol::ModelSelection>,
     store: &dyn RuntimeStore,
 ) -> RuntimeResult<Arc<crate::config::PreparedModel>> {
-    let binding = session.lock_state()?.model_binding.clone();
-    let effective =
-        selection
-            .cloned()
-            .or(registry.managed_models()?.settings.default_model.clone());
-    if let Some(binding) = binding
-        && Some(&binding.selection) == effective.as_ref()
-        && binding.ensure_current(registry).is_ok()
+    // 固定配置更新优先；没有固定记录的在线模型仍可复用本进程已接纳的参数。
+    let cached = session.lock_state()?.model_binding.clone();
+    let effective = registry.effective_model_selection(selection)?;
+    if let Some(cached) = cached
+        && effective.as_ref() == Some(&cached.selection)
+        && cached.ensure_current(registry).is_ok()
+        && registry
+            .fixed_model(cached.selection.clone(), store)
+            .await?
+            .is_none()
     {
-        return Ok(binding);
+        return Ok(cached);
     }
     let snapshot = registry.snapshot()?;
-    registry
-        .configured_model(&snapshot, selection, store)
-        .await
-        .map(Arc::new)
+    let prepared = Arc::new(
+        registry
+            .configured_model(&snapshot, selection, store)
+            .await?,
+    );
+    Ok(prepared)
 }
 
 impl AssistantRuntime {
     /// 为独立手动压缩冻结当前 Session 的模型服务；不装配 Agent 或工具。
     pub(super) async fn compile_session_compactor(
         &self,
-        session: &SessionController,
+        session: &Arc<SessionController>,
         selection: Option<&assistant_protocol::ModelSelection>,
     ) -> RuntimeResult<(RuntimeContextCompactor, Arc<crate::config::PreparedModel>)> {
         self.model_factory.ensure_available()?;
@@ -574,13 +768,36 @@ impl AssistantRuntime {
             self.store.as_ref(),
         )
         .await?;
-        let mut compiled = compile_resolved_model_service(
+        let (state_owner, generation) = {
+            let state = session.lock_state()?;
+            (
+                format!(
+                    "{}:{}",
+                    session.id().as_str(),
+                    state.server_history_key.as_deref().unwrap_or("initial")
+                ),
+                state.body_generation,
+            )
+        };
+        let mut compiled = compile_resolved_model_service_with_history(
             &snapshot,
             &prepared.model,
             self.model_factory.as_ref(),
             None,
+            Some(&format!("{state_owner}:{generation}")),
+            Some(&state_owner),
         )?;
-        bind_image_preparation(&mut compiled, session.environment());
+        bind_image_preparation(
+            &mut compiled,
+            session.environment(),
+            Some((
+                self.store.clone(),
+                assistant_protocol::ConversationOwner::MainSession {
+                    session_id: session.id().clone(),
+                },
+            )),
+            Some(session.clone()),
+        );
         let (reasoning, provider_options) = protocol_request_options(
             &compiled.provider,
             compiled.protocol,
@@ -663,6 +880,7 @@ pub(super) async fn compile_run_agent(
             environment: session.environment().clone(),
             session: session.clone(),
             owner: history_owner.clone(),
+            store: resources.store.clone(),
             observer: model_attempt_observer.clone(),
         })
     });
@@ -675,6 +893,7 @@ pub(super) async fn compile_run_agent(
             "{history_owner}:{}",
             session.lock_state()?.body_generation
         )),
+        Some(&history_owner),
     )?;
     let auxiliary_selection = registry.managed_models()?.settings.vision_model.clone();
     let mut auxiliary_prepared = None;
@@ -702,7 +921,7 @@ pub(super) async fn compile_run_agent(
                         .ok_or(RuntimeError::InvalidRequest {
                             reason: "辅助模型缺少图片预处理能力。",
                         })?;
-                bind_image_preparation(&mut auxiliary, session.environment());
+                bind_image_preparation(&mut auxiliary, session.environment(), None, None);
                 let (reasoning, provider_options) = protocol_request_options(
                     &auxiliary.provider,
                     auxiliary.protocol,
@@ -752,7 +971,17 @@ pub(super) async fn compile_run_agent(
                 &current_prompt,
             )?
         };
-    bind_image_preparation(&mut compiled, session.environment());
+    bind_image_preparation(
+        &mut compiled,
+        session.environment(),
+        Some((
+            resources.store.clone(),
+            assistant_protocol::ConversationOwner::MainSession {
+                session_id: session.id().clone(),
+            },
+        )),
+        Some(session.clone()),
+    );
     let requested_effort = session.reasoning_effort()?;
     let frozen_reasoning_effort = requested_effort.or_else(|| {
         compiled
@@ -1153,6 +1382,7 @@ pub(super) async fn compile_run_agent(
         );
         let delegation_controller =
             Arc::new(ParentDelegationController::new(ParentDelegationResources {
+                context_management_mode: model_config.context_management_mode(),
                 context_window_tokens: compiled.model.context_window_tokens(),
                 session: session.clone(),
                 parent_run_id: authorization.run_id,
@@ -1241,6 +1471,7 @@ pub(super) fn compile_resolved_model_service(
         model_factory,
         model_attempt_observer,
         None,
+        None,
     )
 }
 
@@ -1252,19 +1483,33 @@ fn compile_resolved_model_service_with_history(
     model_factory: &dyn crate::ModelServiceFactory,
     model_attempt_observer: Option<Arc<dyn ModelAttemptObserver>>,
     history_owner: Option<&str>,
+    state_owner: Option<&str>,
 ) -> RuntimeResult<CompiledModelService> {
     model_factory.ensure_available()?;
     let active = snapshot
         .active()
         .ok_or(RuntimeError::ConfigurationUnavailable)?;
     let transport = active.transport();
+    let state_binding = state_owner
+        .or(Some("unbound"))
+        .zip(model_config.server_history_key.as_deref())
+        .map(|(owner, key)| format!("{owner}:{key}"));
     let history_binding = history_owner
+        .filter(|_| model_config.server_history_enabled)
         .zip(model_config.server_history_key.as_deref())
         .map(|(owner, key)| format!("{owner}:{key}"));
     let create_bundle = |binding: Option<&str>| {
         model_factory
             .create_model(ModelServiceFactoryRequest {
+                context_management_mode: model_config.context_management_mode(),
                 server_history_binding: binding,
+                provider_state_binding: state_binding.as_deref(),
+                input_token_count_supported: model_config.input_token_count_supported,
+                compaction_threshold_tokens: std::num::NonZeroU64::new(
+                    (model_config.context_window_tokens() as f64 * super::CONTEXT_WINDOW_THRESHOLD)
+                        .floor() as u64,
+                )
+                .unwrap_or(std::num::NonZeroU64::MIN),
                 external_configuration: model_config.external_configuration.as_ref(),
                 provider: model_config.provider(),
                 protocol: model_config.protocol(),
@@ -1285,6 +1530,14 @@ fn compile_resolved_model_service_with_history(
     } else {
         bundle.model.clone()
     };
+    // 配置选择机制与真实装配必须一致；未接入原生 compact 的 Adapter 不得静默走本地。
+    if bundle.model.context_policy().mode() != model_config.context_management_mode()
+        || background_base.context_policy().mode() != model_config.context_management_mode()
+    {
+        return Err(RuntimeError::InvalidRequest {
+            reason: "当前模型装配尚不支持所选压缩机制。",
+        });
+    }
     let base_model = bundle.model;
     let image_preprocessor = bundle.image_preprocessor;
     let background_model: Arc<dyn ModelService> = match active.retry_policy() {
@@ -1317,6 +1570,7 @@ fn compile_resolved_model_service_with_history(
         }
     };
     Ok(CompiledModelService {
+        input_token_count_supported: model_config.input_token_count_supported,
         model,
         background_model,
         provider: model_config.provider().clone(),
@@ -1331,22 +1585,39 @@ fn compile_resolved_model_service_with_history(
 fn bind_image_preparation(
     compiled: &mut CompiledModelService,
     environment: &crate::SessionExecutionEnvironment,
+    native_history: Option<(Arc<dyn RuntimeStore>, assistant_protocol::ConversationOwner)>,
+    measurement_session: Option<Arc<SessionController>>,
 ) {
-    let Some(preprocessor) = compiled.image_preprocessor.take() else {
-        return;
-    };
-    if !compiled.capabilities.image_input {
+    let preprocessor = compiled
+        .image_preprocessor
+        .take()
+        .filter(|_| compiled.capabilities.image_input);
+    let session_binding = measurement_session.as_ref().and_then(|session| {
+        session
+            .lock_state()
+            .ok()
+            .and_then(|state| state.server_history_key.clone())
+    });
+    if preprocessor.is_none() && native_history.is_none() {
         return;
     }
-    compiled.model = Arc::new(ImagePreparingModelService {
+    compiled.model = Arc::new(RequestPreparingModelService {
         inner: compiled.model.clone(),
         preprocessor: preprocessor.clone(),
         tool_image_directory: environment.session_tool_image_directory.clone(),
+        native_history: native_history.clone(),
+        measurement_session: measurement_session.clone(),
+        session_binding: session_binding.clone(),
+        input_token_count_supported: compiled.input_token_count_supported,
     });
-    compiled.background_model = Arc::new(ImagePreparingModelService {
+    compiled.background_model = Arc::new(RequestPreparingModelService {
         inner: compiled.background_model.clone(),
         preprocessor,
         tool_image_directory: environment.session_tool_image_directory.clone(),
+        native_history,
+        measurement_session,
+        session_binding,
+        input_token_count_supported: compiled.input_token_count_supported,
     });
 }
 
@@ -1457,6 +1728,17 @@ mod tests {
             8_192
         }
 
+        fn count_input_tokens<'a>(
+            &'a self,
+            _: &'a ModelRequest,
+            context: &'a mut ModelCallContext,
+        ) -> agent_model::ModelInputTokenCountFuture<'a> {
+            Box::pin(async move {
+                assert_eq!(context.prepared_images.len(), 11);
+                Ok(Some(11))
+            })
+        }
+
         fn stream(
             &self,
             _request: ModelRequest,
@@ -1497,13 +1779,26 @@ mod tests {
             reasoning: None,
             provider_options: ProviderOptions::new(),
         };
-        let service = ImagePreparingModelService {
+        let service = RequestPreparingModelService {
             inner: Arc::new(ProviderReachedModel::default()),
-            preprocessor: Arc::new(AlwaysImagePreprocessor),
+            preprocessor: Some(Arc::new(AlwaysImagePreprocessor)),
+            native_history: None,
+            measurement_session: None,
+            session_binding: None,
+            input_token_count_supported: true,
             tool_image_directory: String::new(),
         };
 
-        let result = service.stream(request, ModelCallContext::default()).await;
+        let mut context = ModelCallContext::default();
+        assert_eq!(
+            service
+                .count_input_tokens(&request, &mut context)
+                .await
+                .unwrap(),
+            Some(11)
+        );
+        assert_eq!(context.prepared_images.len(), 11);
+        let result = service.stream(request, context).await;
 
         assert!(matches!(
             result,
@@ -1574,6 +1869,7 @@ mod tests {
     }
     fn history_finished() -> Vec<agent_model::ModelEvent> {
         let message = agent_types::AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: MessageId::new("history-final").unwrap(),
             model: agent_types::ModelIdentity::new(
                 agent_types::ProviderId::new("fixture").unwrap(),

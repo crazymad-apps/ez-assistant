@@ -72,6 +72,7 @@ fn input(id: &str) -> ExecutionInput {
 
 fn answer() -> AssistantMessage {
     AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new("answer").expect("valid message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("valid provider id"),

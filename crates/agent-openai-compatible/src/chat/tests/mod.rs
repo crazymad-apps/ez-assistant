@@ -125,6 +125,7 @@ fn user_message(id: &str, texts: &[&str]) -> ConversationMessage {
 
 fn assistant_message(parts: Vec<AssistantPart>) -> ConversationMessage {
     ConversationMessage::Assistant(AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: message_id("turn_1"),
         model: ModelIdentity::new(provider_id("deepseek"), "deepseek-reasoner"),
         parts,

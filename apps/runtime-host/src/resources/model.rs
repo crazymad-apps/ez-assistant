@@ -53,6 +53,14 @@ impl HostModelServiceFactory {
         request: ModelServiceFactoryRequest<'_>,
         transport: Option<Arc<dyn agent_openai_compatible::Transport>>,
     ) -> Result<ModelServiceBundle, ModelServiceFactoryError> {
+        if request.context_management_mode == agent_model::ContextManagementMode::ServerCompaction
+            && (request.protocol != ModelProtocol::OpenAiResponses
+                || request.provider_state_binding.is_none())
+        {
+            return Err(ModelServiceFactoryError::new(
+                "native compaction requires a scoped Responses route",
+            ));
+        }
         let capabilities = ModelCapabilities {
             reasoning: request.capabilities.reasoning_enabled(),
             image_input: request.capabilities.image_input,
@@ -132,6 +140,19 @@ impl HostModelServiceFactory {
                 .map_err(model_service_error)?
                 .with_max_input_tokens(request.max_input_tokens)
                 .map_err(model_service_error)?;
+                let service = if request.context_management_mode
+                    == agent_model::ContextManagementMode::ServerCompaction
+                {
+                    service
+                        .with_server_compaction(
+                            request.provider_state_binding.expect("scope checked"),
+                            request.compaction_threshold_tokens,
+                        )
+                        .map_err(model_service_error)?
+                } else {
+                    service
+                };
+                let service = service.with_input_token_count(request.input_token_count_supported);
                 let service = match request.server_history_binding {
                     Some(binding) => service
                         .with_server_history(binding)
@@ -233,25 +254,44 @@ mod tests {
             tool_choice: agent_model::ToolChoiceCapabilities::default(),
             streaming: true,
         };
+        let build = |protocol, limit, context_management_mode| {
+            factory.create_model(ModelServiceFactoryRequest {
+                context_management_mode,
+                server_history_binding: None,
+                provider_state_binding: None,
+                input_token_count_supported: false,
+                compaction_threshold_tokens: std::num::NonZeroU64::new(102400).unwrap(),
+                external_configuration: None,
+                provider: &provider,
+                protocol,
+                capabilities: &capabilities,
+                endpoint: "https://example.test/v1",
+                model: "org/model",
+                api_key: "artificial-key",
+                context_window_tokens: 128000,
+                max_input_tokens: limit,
+                connect_timeout: std::time::Duration::from_secs(1),
+                request_timeout: std::time::Duration::from_secs(1),
+            })
+        };
+        assert!(
+            build(
+                ModelProtocol::OpenAiResponses,
+                None,
+                agent_model::ContextManagementMode::ServerCompaction
+            )
+            .is_err()
+        );
         for protocol in [
             ModelProtocol::OpenAiChatCompletions,
             ModelProtocol::OpenAiResponses,
         ] {
             for limit in [None, Some(64000), Some(0), Some(128001)] {
-                let result = factory.create_model(ModelServiceFactoryRequest {
-                    server_history_binding: None,
-                    external_configuration: None,
-                    provider: &provider,
+                let result = build(
                     protocol,
-                    capabilities: &capabilities,
-                    endpoint: "https://example.test/v1",
-                    model: "org/model",
-                    api_key: "artificial-key",
-                    context_window_tokens: 128000,
-                    max_input_tokens: limit,
-                    connect_timeout: std::time::Duration::from_secs(1),
-                    request_timeout: std::time::Duration::from_secs(1),
-                });
+                    limit,
+                    agent_model::ContextManagementMode::LocalSummary,
+                );
                 if matches!(limit, Some(0 | 128001)) {
                     assert!(result.is_err());
                     continue;

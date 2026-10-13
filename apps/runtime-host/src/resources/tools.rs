@@ -969,6 +969,7 @@ mod tests {
             8_192,
             [
                 ModelScript::Events(message_events(&AssistantMessage {
+                    purpose: agent_types::AssistantMessagePurpose::ModelResponse,
                     id: MessageId::new("assistant-read").expect("message id"),
                     model: model_identity(),
                     parts: vec![AssistantPart::ToolCall(ToolCall {
@@ -980,6 +981,7 @@ mod tests {
                     usage: None,
                 })),
                 ModelScript::Events(message_events(&AssistantMessage {
+                    purpose: agent_types::AssistantMessagePurpose::ModelResponse,
                     id: MessageId::new("assistant-final").expect("message id"),
                     model: model_identity(),
                     parts: vec![AssistantPart::Text(TextPart {

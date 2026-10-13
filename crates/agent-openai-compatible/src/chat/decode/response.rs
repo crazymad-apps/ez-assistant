@@ -103,6 +103,7 @@ pub fn decode_response(
         ModelError::Protocol(format!("response id is not a valid message id: {error}"))
     })?;
     Ok(AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id,
         model: ModelIdentity::new(adapter.provider.clone(), response.model.clone()),
         parts: decode_assistant_message(&choice.message, adapter)?,

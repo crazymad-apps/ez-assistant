@@ -53,7 +53,7 @@ struct PinnedMemoryToolResultV1 {
 }
 
 /// 从完整产品历史重算当前 Session 相对冻结 Pinned Memory 快照的净变化。
-pub(super) fn derive_pinned_memory_context(
+pub(crate) fn derive_pinned_memory_context(
     history: &ConversationSnapshot,
 ) -> Result<Option<String>, PinnedMemoryContextError> {
     history
@@ -293,6 +293,7 @@ mod tests {
         let call_id = ToolCallId::new(format!("call_{sequence}")).unwrap();
         [
             ConversationMessage::Assistant(AssistantMessage {
+                purpose: agent_types::AssistantMessagePurpose::ModelResponse,
                 id: id(&format!("assistant_{sequence}")),
                 model: ModelIdentity::new(ProviderId::new("test").unwrap(), "model"),
                 parts: vec![AssistantPart::ToolCall(ToolCall {
@@ -399,6 +400,7 @@ mod tests {
     fn existing_context_is_strictly_validated_before_recomputation() {
         let history = ConversationSnapshot::new(vec![ConversationMessage::ContextSummary(
             agent_types::ContextSummaryMessage {
+                retained_user_message_id: None,
                 id: id("summary"),
                 text: "summary".to_owned(),
                 model: None,
@@ -425,6 +427,7 @@ mod tests {
         ] {
             let history = ConversationSnapshot::new(vec![ConversationMessage::ContextSummary(
                 agent_types::ContextSummaryMessage {
+                    retained_user_message_id: None,
                     id: id("summary"),
                     text: "summary".to_owned(),
                     model: None,
@@ -470,6 +473,7 @@ mod tests {
         .to_vec();
         messages.push(ConversationMessage::ContextSummary(
             agent_types::ContextSummaryMessage {
+                retained_user_message_id: None,
                 id: id("old-summary"),
                 text: "old summary".to_owned(),
                 model: None,

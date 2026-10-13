@@ -743,6 +743,7 @@ fn accepted_input(input: assistant_runtime::NewStoredInput) -> AcceptedInput {
 
 fn stored_session(session: NewStoredSession) -> StoredSession {
     StoredSession {
+        context_management_mode: None,
         server_history_key: None,
         custom_agent: session.custom_agent,
         agent_shell_kind: session.agent_shell_kind,

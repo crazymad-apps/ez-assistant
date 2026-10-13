@@ -18,6 +18,7 @@ mod v0_27_0;
 mod v0_28_0;
 mod v0_28_1;
 mod v0_29_0;
+mod v0_30_0;
 
 #[cfg(test)]
 use std::fs;
@@ -111,27 +112,27 @@ struct MigrationReport {
     new_database: bool,
 }
 
+// 启动与布局迁移共用版本链，避免新入口遗漏于只读准入/目标投影。
+fn manifest() -> [Migration; 9] {
+    [
+        v0_25_1::entry(),
+        v0_25_2::entry(),
+        v0_25_3::entry(),
+        v0_26_0::entry(),
+        v0_27_0::entry(),
+        v0_28_0::entry(),
+        v0_28_1::entry(),
+        v0_29_0::entry(),
+        v0_30_0::entry(),
+    ]
+}
+
 /// 唯一生产 manifest；软件发版必须同时声明该版本入口，包括没有 DDL 的版本。
 pub(super) fn align(
     home: &Path,
     progress: impl FnMut(super::DatabaseStartupProgress),
 ) -> Result<()> {
-    migrate_with_progress(
-        home,
-        env!("CARGO_PKG_VERSION"),
-        &[
-            v0_25_1::entry(),
-            v0_25_2::entry(),
-            v0_25_3::entry(),
-            v0_26_0::entry(),
-            v0_27_0::entry(),
-            v0_28_0::entry(),
-            v0_28_1::entry(),
-            v0_29_0::entry(),
-        ],
-        progress,
-    )
-    .map(|_| ())
+    migrate_with_progress(home, env!("CARGO_PKG_VERSION"), &manifest(), progress).map(|_| ())
 }
 
 /// 只映射脱敏诊断；底层 SQLite、路径和 SQL 不进入协议。

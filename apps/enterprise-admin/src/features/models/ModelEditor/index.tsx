@@ -40,6 +40,14 @@ const ModelEditorForm = observer(function ModelEditorForm() {
         : null,
     [id, chosen, existingId],
   );
+  const providerRead = useCallback((token: string, signal: AbortSignal) => modelApi.provider(token, id, signal), [id]);
+  const providerQuery = useResourceQuery(providerRead);
+  const connection = providerQuery.value?.connection;
+  const responses = Boolean(
+    connection &&
+    connection.protocol_preference !== 'chat_completions' &&
+    ['openai', 'deepseek', 'dashscope_api', 'dashscope_plan', 'moonshot'].includes(connection.provider_type),
+  );
   const query = useResourceQuery(read),
     detail = query.value;
   useEffect(() => {
@@ -166,6 +174,7 @@ const ModelEditorForm = observer(function ModelEditorForm() {
           <Form layout="vertical" className={styles.form} onFinish={save}>
             <ParameterFields
               value={draft}
+              responses={responses}
               sources={
                 detail.source === 'fixed'
                   ? Object.fromEntries(Object.keys(draft).map((key) => [key, 'fixed']))

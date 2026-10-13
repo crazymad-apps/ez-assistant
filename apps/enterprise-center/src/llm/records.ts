@@ -40,7 +40,7 @@ export class CallRecording {
     try {
       const measured = this.usage?.result(outcome) ?? {
         state: 'unavailable' as const,
-        reason: outcome === 'rejected' ? 'not_forwarded' : 'not_reported',
+        reason: this.row.kind === 'input_tokens' ? 'input_measurement' : outcome === 'rejected' ? 'not_forwarded' : 'not_reported',
         input_tokens: null,
         output_tokens: null,
         total_tokens: null,

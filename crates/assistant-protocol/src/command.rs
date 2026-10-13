@@ -1623,7 +1623,6 @@ mod tests {
             turn: 1,
             budget: crate::GoalBudgetSnapshot {
                 max_runs: 20,
-                max_total_tokens: 500_000,
                 max_consecutive_failures: 3,
                 used_runs: 1,
                 used_total_tokens: 100,

@@ -39,8 +39,8 @@ export function ContextSection({ action, children, is_open, on_toggle, title }: 
   );
 }
 
-export function ContextRing({ basis_points }: Readonly<{ basis_points: number }>) {
-  const degrees = Math.min(360, Math.max(0, basis_points * 0.036));
+export function ContextRing({ basis_points }: Readonly<{ basis_points: number | null }>) {
+  const degrees = Math.min(360, Math.max(0, (basis_points ?? 0) * 0.036));
   return (
     <span
       aria-hidden="true"

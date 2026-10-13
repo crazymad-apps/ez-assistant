@@ -444,8 +444,10 @@ Runtime Host 进程
   Store 操作原子提交候选消息、隐藏推进消息和 Goal 进度，保持原 Input/Run 为 running。
 - 没有 complete/blocked signal 且预算未触发时，Goal 门禁在同一 Run 内追加只含版本化内部 Part 的
   隐藏推进消息；complete 在最终结算事务中形成 Completed 回执并立即删除 Goal，blocked 转
-  Paused(Blocked)，Run/token/连续失败预算统一转为 Paused(BudgetExceeded)。usage 不完整时
-  不猜测 token，但仍记录该 Run 并保持 usage incomplete 事实。
+  Paused(Blocked)，Run/连续失败预算触发时暂停；累计 token 限制已于 v0.30.0 取消。usage 不完整时
+  不猜测 token，但仍记录该 Run 并保持 usage incomplete 事实。Goal token 仅作累计统计，
+  不向模型或客户端投影 token 上限；已发布存储列及旧暂停原因只为原数据读取保留，
+  旧 token 暂停恢复后不再触发该限制。
 - Stop 是 Goal 级操作：先持久暂停为 UserStopped、递增 generation，并为活动 Run 记录取消意图；
   成功后才发布取消 token。当前 Goal Run 不允许走普通单 Run cancel。
   Clear 主要删除已暂停且无活动 Run 的控制器；完成 Goal 已在结算事务中自动删除。两者都不删除
@@ -914,3 +916,21 @@ child 以自身 ID/generation 派生独立服务，不继承父会话或其他 c
 ## v0.29.0 插件更新占用收窄
 
 插件包租约只保护技能装配与 MCP 调用版本身份校验，不因目录包含插件而持有整个 Run。更新准备及校验通过后，复用原包写门阻止旧包刷新，取消该插件连接的在途调用、关闭连接，再沿用既有提交与清理。取消只作用于连接，保留调用可能已产生副作用的事实，不取消整个 Run、不自动重放；关闭失败停止版本切换。短暂装配占用通过原写门等待，用户取消仍可结束等待。不引入多版本并存、后台回收或新的更新交互；旧任务后续访问已清理资源可以报告原有文件不可用错误。
+
+## v0.30.0 F01 M1 机制冻结与计量契约
+
+模型固定配置独立保存 `server_compaction_enabled` 与 `server_auto_compaction_enabled`，缺省均 false；原生压缩及输入计量能力分别缺省 unknown，不从能力自动启用。开启原生压缩要求已核实 supported 及 Responses；本版服务端自动子项不可开启。启用原生压缩与启用服务端历史续接互不等同。
+
+新 Run 的 User 提交或重试领取与当前机制绑定复用既有可靠提交点，内存只在成功后更新；Store 保存当前采用的机制。新操作读取最新固定参数，未保存固定参数的在线模型可复用仍有效的已接纳绑定；活动 Run 保持冻结。模式变化前从完整历史准备目标 Journal，原生模式可直接复用 Agent 文本摘要，不生成转换摘要或额外 compact。本地模式不解密原生状态，从文本摘要及原始事实重建。空闲手动同样接纳最新参数；显式换模继续旋转历史身份。child 在 accepted 时从自身实际装配模型冻结机制并持久化，不读取之后变化的默认配置。
+
+ModelServiceFactoryRequest 显式传入已解析机制，装配结果必须与所选模式一致；M1 中原生 Adapter 尚未接入时明确拒绝，不落回本地摘要。所有模型装饰器透明传递策略/计量/compact；图片包装层复用准备入口，计量后的上下文可交给正常请求使用。用量投影携带 owner 机制与 estimated/unknown，已知窗口但无基线仍保留 unknown 状态；完整原生执行与精确计量接入归后续里程碑。
+
+## v0.30.0 F01 当前原生编排
+
+父/子自动与主会话手动复用当前模型的 compact；成功候选只含受保护前缀与唯一替代状态，Store 校验源快照后提交。自动追加保留 generation 及全部原始事实；手动沿用既有互斥、回执和 generation 切换。网络调用不持配置锁，取消或配置失效不得激活候选。
+
+新原生结果的归属校验包含 owner、持久 Session 周期和 Provider 配置周期，与是否启用响应 ID 独立；不使用临时默认周期。已提交完整窗口的回放不以模型、入口地址或续接周期判断资格，换模和重建仍从最近可靠压缩点继续；临时响应 ID 继续严格校验绑定。手动换代使旧响应 ID 不可续接，不丢弃完整窗口。请求准备从完整历史复用图片并重申当前 Pinned Memory、最新 MCP/Shell 事实；计量仅保存当前 owner 的一个内存样本，不新增持久流水。工具详情按 Assistant 消息 ID 与 call ID 联合匹配，避免压缩边界后重复 call ID 串值。
+
+## v0.30.1 Goal 预算读取
+
+Goal 累计执行次数属于已发生事实，允许超过执行上限并完整恢复、投影和往返保存；执行门禁继续按 `used_runs >= max_runs` 暂停自动续跑，剩余次数按饱和减法展示。不因预算已耗尽将整个会话判为存储不可用，不重置统计或改写历史。

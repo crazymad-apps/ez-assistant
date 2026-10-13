@@ -22,7 +22,8 @@ pub(crate) use signal::{
 };
 
 pub(crate) const DEFAULT_MAX_RUNS: u32 = 20;
-pub(crate) const DEFAULT_MAX_TOTAL_TOKENS: u64 = 500_000;
+// 已发布存储列的正整数占位值，仅用于旧 schema 往返，不再构成执行预算。
+const LEGACY_STORED_MAX_TOTAL_TOKENS: u64 = 500_000;
 pub(crate) const DEFAULT_MAX_CONSECUTIVE_FAILURES: u32 = 3;
 const OBJECTIVE_HASH_PREFIX: &str = "sha256-v1:";
 const MAX_BLOCKED_SUMMARY_BYTES: usize = 8 * 1024;
@@ -62,7 +63,6 @@ pub(crate) enum GoalPauseReason {
     Blocked { summary: String },
     UserStopped,
     RunLimitReached,
-    TokenLimitReached,
     ConsecutiveFailures,
     RecoveryRequired,
     Forked,
@@ -71,7 +71,6 @@ pub(crate) enum GoalPauseReason {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct GoalBudget {
     pub(crate) max_runs: u32,
-    pub(crate) max_total_tokens: u64,
     pub(crate) max_consecutive_failures: u32,
     pub(crate) used_runs: u32,
     pub(crate) used_total_tokens: u64,
@@ -122,7 +121,6 @@ impl GoalControl {
             turn: 1,
             budget: GoalBudget {
                 max_runs: DEFAULT_MAX_RUNS,
-                max_total_tokens: DEFAULT_MAX_TOTAL_TOKENS,
                 max_consecutive_failures: DEFAULT_MAX_CONSECUTIVE_FAILURES,
                 used_runs: 0,
                 used_total_tokens: 0,
@@ -171,7 +169,7 @@ impl GoalControl {
             turn: self.turn,
             budget: StoredGoalBudget {
                 max_runs: self.budget.max_runs,
-                max_total_tokens: self.budget.max_total_tokens,
+                max_total_tokens: LEGACY_STORED_MAX_TOTAL_TOKENS,
                 max_consecutive_failures: self.budget.max_consecutive_failures,
                 used_runs: self.budget.used_runs,
                 used_total_tokens: self.budget.used_total_tokens,
@@ -254,7 +252,6 @@ impl From<&GoalPauseReason> for StoredGoalPauseReason {
             },
             GoalPauseReason::UserStopped => Self::UserStopped,
             GoalPauseReason::RunLimitReached => Self::RunLimitReached,
-            GoalPauseReason::TokenLimitReached => Self::TokenLimitReached,
             GoalPauseReason::ConsecutiveFailures => Self::ConsecutiveFailures,
             GoalPauseReason::RecoveryRequired => Self::RecoveryRequired,
             GoalPauseReason::Forked => Self::Forked,
@@ -317,19 +314,18 @@ impl TryFrom<StoredGoalBudget> for GoalBudget {
     type Error = ();
 
     fn try_from(value: StoredGoalBudget) -> Result<Self, Self::Error> {
+        // 累计次数是已发生事实，超出执行预算仍须可恢复。是否允许继续自动运行
+        // 由运行时的 >= 门禁决定，不能因此拒绝读取整个会话。
         if value.max_runs == 0
-            || value.max_total_tokens == 0
             || value.max_consecutive_failures == 0
             || value.max_runs != DEFAULT_MAX_RUNS
-            || value.max_total_tokens != DEFAULT_MAX_TOTAL_TOKENS
+            || value.max_total_tokens != LEGACY_STORED_MAX_TOTAL_TOKENS
             || value.max_consecutive_failures != DEFAULT_MAX_CONSECUTIVE_FAILURES
-            || value.used_runs > value.max_runs
         {
             return Err(());
         }
         Ok(Self {
             max_runs: value.max_runs,
-            max_total_tokens: value.max_total_tokens,
             max_consecutive_failures: value.max_consecutive_failures,
             used_runs: value.used_runs,
             used_total_tokens: value.used_total_tokens,
@@ -351,7 +347,8 @@ impl TryFrom<StoredGoalPauseReason> for GoalPauseReason {
             }
             StoredGoalPauseReason::UserStopped => Self::UserStopped,
             StoredGoalPauseReason::RunLimitReached => Self::RunLimitReached,
-            StoredGoalPauseReason::TokenLimitReached => Self::TokenLimitReached,
+            // 保留旧目标的暂停事实，显式恢复后不再受累计 token 上限约束。
+            StoredGoalPauseReason::TokenLimitReached => Self::RecoveryRequired,
             StoredGoalPauseReason::ConsecutiveFailures => Self::ConsecutiveFailures,
             StoredGoalPauseReason::RecoveryRequired => Self::RecoveryRequired,
             StoredGoalPauseReason::Forked => Self::Forked,
@@ -433,7 +430,7 @@ mod tests {
             turn: 1,
             budget: StoredGoalBudget {
                 max_runs: DEFAULT_MAX_RUNS,
-                max_total_tokens: DEFAULT_MAX_TOTAL_TOKENS,
+                max_total_tokens: LEGACY_STORED_MAX_TOTAL_TOKENS,
                 max_consecutive_failures: DEFAULT_MAX_CONSECUTIVE_FAILURES,
                 used_runs: 0,
                 used_total_tokens: 0,
@@ -476,6 +473,54 @@ mod tests {
         let recovered = serde_json::from_value::<StoredGoal>(value).expect("deserialize goal");
         assert_eq!(recovered, goal);
         assert!(recovered.mcp_server_key.is_none());
+    }
+
+    #[test]
+    fn legacy_token_paused_goal_can_resume_with_usage_above_the_removed_limit() {
+        let mut stored = stored_goal(
+            StoredGoalState::Paused,
+            Some(StoredGoalPauseReason::TokenLimitReached),
+        );
+        stored.budget.used_total_tokens = 750_000;
+        stored.budget.used_runs = 2;
+        let goal = GoalControl::try_from(stored).expect("recover legacy token pause");
+        assert_eq!(
+            goal.state,
+            GoalState::Paused(GoalPauseReason::RecoveryRequired)
+        );
+        let snapshot = crate::runtime::product::project_goal(&goal).expect("snapshot");
+        let projected = serde_json::to_value(snapshot).expect("serialize snapshot");
+        assert!(projected["budget"].get("max_total_tokens").is_none());
+        assert_eq!(projected["budget"]["used_total_tokens"], 750_000);
+
+        let resumed = goal.resume(2).expect("explicitly resume legacy Goal");
+        assert_eq!(resumed.state, GoalState::Running);
+        assert_eq!(resumed.budget.used_total_tokens, 750_000);
+        assert_eq!(resumed.generation, 2);
+        let stored = resumed.to_stored(SessionId::new("session-1").expect("session id"));
+        assert_eq!(GoalControl::try_from(stored).expect("round trip"), resumed);
+    }
+
+    #[test]
+    fn goal_over_run_limit_remains_readable_with_original_usage() {
+        let mut stored = stored_goal(
+            StoredGoalState::Paused,
+            Some(StoredGoalPauseReason::RunLimitReached),
+        );
+        stored.budget.used_runs = DEFAULT_MAX_RUNS + 1;
+        let expected = stored.clone();
+        let recovered = GoalControl::try_from(stored).expect("spent run budget remains readable");
+        assert_eq!(
+            recovered.to_stored(SessionId::new("session-1").unwrap()),
+            expected
+        );
+        let snapshot = crate::runtime::product::project_goal(&recovered).expect("goal projection");
+        assert_eq!(snapshot.budget.used_runs, DEFAULT_MAX_RUNS + 1);
+        assert_eq!(snapshot.budget.max_runs, DEFAULT_MAX_RUNS);
+        assert!(matches!(
+            recovered.state,
+            GoalState::Paused(GoalPauseReason::RunLimitReached)
+        ));
     }
 
     #[test]

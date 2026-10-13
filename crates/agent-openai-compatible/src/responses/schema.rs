@@ -59,6 +59,9 @@ pub(super) enum ResponsesInputItem {
         #[serde(flatten)]
         extra: BTreeMap<String, Value>,
     },
+    /// 已完整校验的 compact 窗口项保持其原生 JSON，不二次裁剪保留内容。
+    #[serde(untagged)]
+    Native(Value),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]

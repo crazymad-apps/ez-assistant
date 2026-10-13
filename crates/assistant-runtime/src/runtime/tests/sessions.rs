@@ -787,6 +787,7 @@ async fn user_skill_activation_is_frozen_with_queue_and_conversation_projections
 #[tokio::test]
 async fn model_load_skill_commits_hidden_activation_and_continues_at_the_next_run_step() {
     let tool_turn = AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new("model-skill-tool-turn").expect("message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("provider id"),

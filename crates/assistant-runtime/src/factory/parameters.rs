@@ -97,6 +97,16 @@ fn validate(
     parameters: ModelParameters,
     source: ModelParameterSource,
 ) -> Result<ResolvedModelParameters, ModelParameterError> {
+    if parameters.server_auto_compaction_enabled {
+        return Err(ModelParameterError::Invalid(
+            "server_auto_compaction_enabled",
+        ));
+    }
+    if parameters.server_compaction_enabled
+        && parameters.server_compaction_support != ModelFeatureSupport::Supported
+    {
+        return Err(ModelParameterError::Invalid("server_compaction_support"));
+    }
     let context = required(parameters.context_window_tokens, "context_window_tokens")?;
     let output = required(parameters.max_output_tokens, "max_output_tokens")?;
     // GenerationConfig 使用 u32；不能等构造请求时才截断已保存的输出限制。

@@ -1,6 +1,6 @@
 //! Runtime 对共享压缩策略的薄编排：生成 replacement、可靠切换正文并继续同一业务执行。
 
-mod memory;
+pub(crate) mod memory;
 
 use std::sync::Arc;
 
@@ -28,6 +28,21 @@ use crate::{
 
 /// 防止 Provider 持续报告 overflow 时形成无界“压缩—重试”循环。
 pub(crate) const MAX_AUTOMATIC_COMPACTIONS: u32 = 2;
+
+pub(crate) fn latest_model_result_id(
+    snapshot: &ConversationSnapshot,
+) -> Option<&agent_types::MessageId> {
+    snapshot
+        .messages
+        .iter()
+        .rev()
+        .find_map(|message| match message {
+            ConversationMessage::Assistant(message) if message.purpose.is_model_response() => {
+                Some(&message.id)
+            }
+            _ => None,
+        })
+}
 const SUMMARY_OUTPUT_TOKENS: u32 = 4_096;
 const MINIMUM_RECENT_USER_TURNS: u32 = 1;
 
@@ -62,7 +77,7 @@ impl RuntimeContextCompactor {
         Self::new(model, system_prompt, Some(request))
     }
 
-    /// child 与 parent 使用相同的最近一轮规则；单轮自身溢出的压缩留待后续版本完善。
+    /// child 与 parent 共用完整轮次与轮内闭合交换的回收规则。
     pub(crate) fn for_child(
         model: Arc<dyn ModelService>,
         system_prompt: SystemPromptSnapshot,
@@ -157,6 +172,13 @@ impl RuntimeContextCompactor {
         normal_request: ModelRequest,
         cancellation: CancellationToken,
     ) -> Result<ConversationSnapshot, RuntimeCompactionError> {
+        if self.model.context_policy().mode()
+            == agent_model::ContextManagementMode::ServerCompaction
+        {
+            return self
+                .compact_native(snapshot, product_history, normal_request, cancellation)
+                .await;
+        }
         let outcome = self
             .compact_once(snapshot, product_history, normal_request, cancellation)
             .await?;
@@ -187,6 +209,18 @@ impl RuntimeContextCompactor {
             reasoning: request.reasoning.clone(),
             provider_options: request.provider_options.clone(),
         };
+        if self.model.context_policy().mode()
+            == agent_model::ContextManagementMode::ServerCompaction
+        {
+            let conversation = self
+                .compact_native(snapshot, product_history, normal_request, cancellation)
+                .await?;
+            return Ok(ManualCompactionCandidate::Replacement {
+                conversation,
+                compacted_message_count: source_message_count,
+                retained_message_count: 0,
+            });
+        }
         let outcome = self
             .compact_once(
                 snapshot.clone(),
@@ -214,6 +248,73 @@ impl RuntimeContextCompactor {
                 })
             }
         }
+    }
+
+    pub(crate) fn with_model(&self, model: Arc<dyn ModelService>) -> Self {
+        Self {
+            model,
+            system_prompt: self.system_prompt.clone(),
+            strategy: self.strategy.clone(),
+            manual_request: self.manual_request.clone(),
+            restored_context: self.restored_context.clone(),
+        }
+    }
+
+    async fn compact_native(
+        &self,
+        snapshot: ConversationSnapshot,
+        product_history: ConversationSnapshot,
+        mut normal_request: ModelRequest,
+        cancellation: CancellationToken,
+    ) -> Result<ConversationSnapshot, RuntimeCompactionError> {
+        let policy = self.model.context_policy();
+        let source = agent_context::project_effective_context(&product_history, policy)
+            .map_err(CompactionError::Model)?;
+        let effective_snapshot = agent_context::project_effective_context(&snapshot, policy)
+            .map_err(CompactionError::Model)?;
+        if source != effective_snapshot {
+            return Err(RuntimeCompactionError::ProductHistoryMismatch);
+        }
+        normal_request.conversation =
+            agent_context::project_effective_context(&normal_request.conversation, policy)
+                .map_err(CompactionError::Model)?;
+        validate_live_request(&effective_snapshot, &normal_request)?;
+        let message = self
+            .model
+            .compact(
+                normal_request,
+                agent_model::ModelCallContext::new(cancellation.clone()),
+            )
+            .await
+            .map_err(CompactionError::Model)?;
+        if cancellation.is_cancelled() {
+            return Err(CompactionError::Cancelled.into());
+        }
+        let agent_model::ContextPolicy::ServerCompaction {
+            state_scope_fingerprint,
+            ..
+        } = policy
+        else {
+            unreachable!();
+        };
+        if message.purpose != agent_types::AssistantMessagePurpose::ContextCompaction
+            || !matches!(message.parts.as_slice(), [agent_types::AssistantPart::ProviderState(state)]
+                if state.context_effect() == Some(agent_types::ProviderContextEffect::ReplacePriorContext)
+                    && state.route_fingerprint() == Some(state_scope_fingerprint.as_str()))
+        {
+            return Err(RuntimeCompactionError::InvalidConversation);
+        }
+        let mut messages: Vec<_> = snapshot
+            .messages
+            .iter()
+            .take_while(|m| matches!(m, ConversationMessage::System(_)))
+            .cloned()
+            .collect();
+        messages.push(ConversationMessage::Assistant(message));
+        let replacement = ConversationSnapshot::new(messages);
+        crate::merge_context_replacement_with_product_history(&product_history, &replacement)
+            .map_err(|_| RuntimeCompactionError::ProductHistoryMismatch)?;
+        Ok(replacement)
     }
 
     /// 自动与手动压缩共用的单次 rolling-summary 调用；各入口只解释不同的 NoOp 后续语义。
@@ -411,7 +512,13 @@ impl Drop for SessionCompactionGuard {
 
 impl RuntimeCompactionError {
     pub(crate) fn is_cancelled(&self) -> bool {
-        matches!(self, Self::Strategy(CompactionError::Cancelled))
+        matches!(
+            self,
+            Self::Strategy(
+                CompactionError::Cancelled
+                    | CompactionError::Model(agent_model::ModelError::Cancelled)
+            )
+        )
     }
 
     /// 与标准 Model Request 保持同一错误边界：模型错误保留原始
@@ -486,7 +593,7 @@ pub(crate) async fn compact_parent_context(
             snapshot.clone(),
             product_history,
             normal_request,
-            cancellation,
+            cancellation.clone(),
         )
         .await
     {
@@ -504,6 +611,10 @@ pub(crate) async fn compact_parent_context(
         }
     };
     let _mutation = session.mutation().await;
+    if cancellation.is_cancelled() {
+        guard.finish(SessionCompactionFinishedOutcome::Cancelled);
+        return Err(CompactionError::Cancelled.into());
+    }
     {
         let state = session
             .lock_state()
@@ -577,7 +688,7 @@ pub(crate) async fn compact_child_context(
     store: &dyn RuntimeStore,
     normal_request: ModelRequest,
     cancellation: CancellationToken,
-) -> Result<(ConversationSnapshot, u64), RuntimeCompactionError> {
+) -> Result<(ConversationSnapshot, crate::ContextReplacementResult), RuntimeCompactionError> {
     let snapshot = {
         let state = task
             .lock_state()
@@ -600,10 +711,13 @@ pub(crate) async fn compact_child_context(
             snapshot.clone(),
             product_history,
             normal_request,
-            cancellation,
+            cancellation.clone(),
         )
         .await?;
     let _mutation = task.mutation().await;
+    if cancellation.is_cancelled() {
+        return Err(CompactionError::Cancelled.into());
+    }
     {
         let state = task
             .lock_state()
@@ -628,8 +742,8 @@ pub(crate) async fn compact_child_context(
         })
         .await
         .map_err(|_| RuntimeCompactionError::Persistence)?;
-    task.replace_conversation(replacement.clone())?;
-    Ok((replacement, committed.product_message_count))
+    task.replace_conversation(replacement.clone(), committed.result_generation)?;
+    Ok((replacement, committed))
 }
 
 pub(crate) fn compaction_reason_label(reason: CompactionReason) -> &'static str {

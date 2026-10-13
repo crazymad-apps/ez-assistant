@@ -367,6 +367,7 @@ mod tests {
 
     fn assistant(id: &str) -> AssistantMessage {
         AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: MessageId::new(id).expect("valid message id"),
             model: ModelIdentity::new(
                 ProviderId::new("scripted").expect("valid provider id"),

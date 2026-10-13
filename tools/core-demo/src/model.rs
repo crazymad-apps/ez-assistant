@@ -178,6 +178,7 @@ fn tool_response(
         arguments,
     };
     let message = AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: valid_message_id(&format!("demo-message-{sequence}")),
         model: demo_model_identity(),
         parts: vec![AssistantPart::ToolCall(call.clone())],
@@ -194,6 +195,7 @@ fn text_response(sequence: u64, user_text: &str, text: String) -> DemoResponse {
     let reasoning =
         "Reading the frozen conversation with the deterministic tool-capable model.".to_owned();
     let message = AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: valid_message_id(&format!("demo-message-{sequence}")),
         model: demo_model_identity(),
         parts: vec![

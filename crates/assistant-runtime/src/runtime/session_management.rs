@@ -975,9 +975,14 @@ impl AssistantRuntime {
             .as_ref()
             .and_then(|model| downgrade_effort(current_effort, model.model.capabilities()));
         let model_selection = request.model_selection;
+        let context_management_mode = prepared
+            .as_ref()
+            .map(|prepared| prepared.model.context_management_mode());
         let server_history_key = {
             let state = session.lock_state()?;
-            if state.model_selection == model_selection {
+            if state.model_selection == model_selection
+                && state.context_management_mode == context_management_mode
+            {
                 state.server_history_key.clone()
             } else {
                 Some(crate::id::generate("history").map_err(|_| {
@@ -990,6 +995,7 @@ impl AssistantRuntime {
         let changed_at_ms = now_ms()?;
         self.store
             .set_session_model(ModelChange {
+                context_management_mode,
                 server_history_key: server_history_key.clone(),
                 session_id: request.session_id.clone(),
                 model_selection: model_selection.clone(),
@@ -1000,10 +1006,14 @@ impl AssistantRuntime {
             .map_err(|source| RuntimeError::from_store("change session model", source))?;
         {
             let mut state = session.lock_state()?;
+            state.context_management_mode = context_management_mode;
             state.server_history_key = server_history_key;
             state.model_selection = model_selection;
             state.model_binding = prepared.map(Arc::new);
             state.reasoning_effort = reasoning_effort;
+            // 显式应用后从完整产品历史重新装载，由当前机制切取有效窗口。
+            state.journal = None;
+            state.persisted_message_count = 0;
         }
         self.publish(assistant_protocol::RuntimeEvent::SessionChanged {
             session_id: request.session_id,

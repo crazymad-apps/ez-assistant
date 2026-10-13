@@ -43,6 +43,7 @@ use crate::{
 
 /// 父 Run 冻结的一组子执行资源与委派配额。
 pub(crate) struct ParentDelegationController {
+    context_management_mode: agent_model::ContextManagementMode,
     session: Arc<SessionController>,
     parent_run_id: assistant_protocol::RunId,
     variant: AgentVariant,
@@ -69,6 +70,7 @@ pub(crate) struct ParentDelegationController {
 }
 
 pub(crate) struct ParentDelegationResources {
+    pub(crate) context_management_mode: agent_model::ContextManagementMode,
     pub(crate) session: Arc<SessionController>,
     pub(crate) parent_run_id: assistant_protocol::RunId,
     pub(crate) variant: AgentVariant,
@@ -99,6 +101,7 @@ impl ParentDelegationController {
                 .expect("u32 concurrency limit fits usize"),
         ));
         Self {
+            context_management_mode: resources.context_management_mode,
             session: resources.session,
             parent_run_id: resources.parent_run_id,
             variant: resources.variant,
@@ -140,6 +143,7 @@ impl ParentDelegationController {
         let mut stored = self
             .store
             .create_child_task(NewStoredChildTask {
+                context_management_mode: self.context_management_mode,
                 context_window_tokens: self.context_window_tokens,
                 child_task_id: child_task_id.clone(),
                 session_id: self.session.id().clone(),
@@ -268,6 +272,9 @@ impl ParentDelegationController {
         } else {
             None
         };
+        let child_compactor = child_model
+            .as_ref()
+            .map(|model| self.child_compactor.with_model(model.clone()));
         let scoped_child_agent = if let Some(model) = child_model {
             match self.child_agent.try_with_model(model) {
                 Ok(agent) => Arc::new(agent),
@@ -413,6 +420,7 @@ impl ParentDelegationController {
         let conversation = self.resource_projection.apply(conversation);
         let mut input = ExecutionInput { conversation };
         let mut compaction_count = 0_u32;
+        let mut after_compaction = false;
         let mut child_agent = scoped_child_agent
             .try_with_tool(LoadSkillTool::new(
                 self.skill_catalog.clone(),
@@ -422,16 +430,24 @@ impl ParentDelegationController {
         let mut remaining_budget = child_agent.execution_budget().clone();
         let mut next_step = std::num::NonZeroU32::MIN;
         let (outcome, forced_error) = loop {
-            let execution = child_agent.start_with_budget_at_step(
-                input.clone(),
-                ExecutionContext {
-                    cancellation: child_token.clone(),
-                    recorder: recorder.clone(),
-                    authorizer: authorizer.clone(),
-                },
-                remaining_budget.clone(),
-                next_step,
-            );
+            let execution = {
+                let start = if std::mem::take(&mut after_compaction) {
+                    agent_sdk::Agent::start_after_compaction
+                } else {
+                    agent_sdk::Agent::start_with_budget_at_step
+                };
+                start(
+                    &child_agent,
+                    input.clone(),
+                    ExecutionContext {
+                        cancellation: child_token.clone(),
+                        recorder: recorder.clone(),
+                        authorizer: authorizer.clone(),
+                    },
+                    remaining_budget.clone(),
+                    next_step,
+                )
+            };
             let mut events = execution.events;
             let event_sender = self.events.clone();
             let event_session_id = stored.session_id.clone();
@@ -487,6 +503,7 @@ impl ParentDelegationController {
             next_step = std::num::NonZeroU32::new(advanced_step)
                 .expect("a non-zero step plus consumption stays non-zero");
             let Some(reason) = compaction_reason else {
+                compaction_count = 0;
                 input = ExecutionInput {
                     conversation: self.resource_projection.apply(
                         task.lock_state()
@@ -510,7 +527,17 @@ impl ParentDelegationController {
                     )),
                 );
             };
-            if compaction_count >= MAX_AUTOMATIC_COMPACTIONS {
+            let made_progress =
+                crate::context_compaction::latest_model_result_id(&input.conversation)
+                    != crate::context_compaction::latest_model_result_id(
+                        &normal_request.conversation,
+                    );
+            if made_progress {
+                compaction_count = 0;
+            }
+            if compaction_count >= MAX_AUTOMATIC_COMPACTIONS
+                || (compaction_count > 0 && !made_progress)
+            {
                 break (
                     None,
                     Some(RuntimeErrorInfo::new(
@@ -524,7 +551,9 @@ impl ParentDelegationController {
             }
             compaction_count += 1;
             match compact_child_context(
-                self.child_compactor.as_ref(),
+                child_compactor
+                    .as_ref()
+                    .unwrap_or(self.child_compactor.as_ref()),
                 task.as_ref(),
                 self.store.as_ref(),
                 normal_request,
@@ -532,9 +561,10 @@ impl ParentDelegationController {
             )
             .await
             {
-                Ok((replacement, product_message_count)) => {
-                    stored.body_generation = stored.body_generation.saturating_add(1);
-                    stored.message_count = product_message_count;
+                Ok((replacement, committed)) => {
+                    after_compaction = true;
+                    stored.body_generation = committed.result_generation;
+                    stored.message_count = committed.product_message_count;
                     self.registry
                         .upsert(stored.clone())
                         .map_err(internal_tool_error)?;

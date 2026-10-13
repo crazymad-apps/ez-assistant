@@ -113,7 +113,8 @@ export async function queryUsage(manager: EntityManager, value: unknown): Promis
     add('provider_instance_id =', uuid(input.provider_instance_id));
     add('model_id =', text(input.model_id, 1024));
   }
-  add('kind =', enumeration(input.kind ?? 'proxy', ['proxy', 'admin_test']));
+  if (input.kind === undefined) conditions.push("kind IN ('proxy', 'context_compaction')");
+  else add('kind =', enumeration(input.kind, ['proxy', 'admin_test', 'context_compaction']));
   if (input.outcome !== undefined) add('outcome =', enumeration(input.outcome, outcomes));
   const filtered = `FROM public.llm_calls WHERE ${conditions.join(' AND ')}`;
   const expression = `date_trunc('${granularity}', started_at AT TIME ZONE '${zone}') AT TIME ZONE '${zone}'`;

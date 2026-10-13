@@ -369,6 +369,7 @@ impl ChildTaskRecord {
     pub(crate) fn replace_conversation(
         &self,
         replacement: ConversationSnapshot,
+        generation: u64,
     ) -> Result<(), crate::context_compaction::RuntimeCompactionError> {
         let mut state = self
             .lock_state()
@@ -381,7 +382,7 @@ impl ChildTaskRecord {
             .replace_completed(replacement)
             .map_err(|_| crate::context_compaction::RuntimeCompactionError::Projection)?;
         state.persisted_message_count = journal.message_count();
-        state.body_generation = state.body_generation.saturating_add(1);
+        state.body_generation = generation;
         Ok(())
     }
 }
@@ -421,6 +422,7 @@ mod tests {
 
     fn stored_task(child_task_id: ChildTaskId, status: ChildTaskStatus) -> StoredChildTask {
         StoredChildTask {
+            context_management_mode: agent_model::ContextManagementMode::LocalSummary,
             context_window_tokens: Some(8192),
             child_task_id,
             session_id: SessionId::new("s-registry").expect("session id"),

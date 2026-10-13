@@ -61,26 +61,12 @@ enum AppendTable {
 }
 
 impl StorageEngine {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "generic staged append is exercised by recovery tests"
-        )
-    )]
     pub(super) fn append_messages(&mut self, request: AppendRequest) -> StorageResult<()> {
         let operation_id = request.operation_id.clone();
         self.stage_append(request)?;
         self.complete_staged_append(&operation_id)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "interruption tests stop after the staging boundary"
-        )
-    )]
     pub(super) fn stage_append(&mut self, request: AppendRequest) -> StorageResult<()> {
         self.stage_append_for(request, AppendPurpose::Messages)
     }

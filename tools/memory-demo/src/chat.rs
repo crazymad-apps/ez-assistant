@@ -627,6 +627,7 @@ mod tests {
         arguments: serde_json::Value,
     ) -> agent_types::AssistantMessage {
         agent_types::AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: MessageId::new(message_id).expect("valid message id"),
             model: model_identity(),
             parts: vec![agent_types::AssistantPart::ToolCall(ToolCall {
@@ -641,6 +642,7 @@ mod tests {
 
     fn text_turn(message_id: &str, text: &str) -> agent_types::AssistantMessage {
         agent_types::AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: MessageId::new(message_id).expect("valid message id"),
             model: model_identity(),
             parts: vec![agent_types::AssistantPart::Text(TextPart {

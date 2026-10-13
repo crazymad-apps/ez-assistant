@@ -392,6 +392,7 @@ mod tests {
         let child_task_id = ChildTaskId::new("ct-recorder-child").expect("child id");
         store
             .create_child_task(NewStoredChildTask {
+                context_management_mode: agent_model::ContextManagementMode::LocalSummary,
                 context_window_tokens: 8192,
                 child_task_id: child_task_id.clone(),
                 session_id: session_id.clone(),
@@ -447,6 +448,7 @@ mod tests {
             .begin_tool_exchange(
                 1,
                 AssistantMessage {
+                    purpose: agent_types::AssistantMessagePurpose::ModelResponse,
                     id: MessageId::new("child-assistant-tool").expect("message id"),
                     model: ModelIdentity::new(
                         ProviderId::new("fixture").expect("provider id"),

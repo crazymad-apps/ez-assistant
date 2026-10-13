@@ -132,7 +132,11 @@ pub(super) fn record_usage_messages(
                         run_id,
                         UsageRecord {
                             request_id: message.id.as_str().to_owned(),
-                            request_kind: "agent_turn",
+                            request_kind: if message.purpose.is_model_response() {
+                                "agent_turn"
+                            } else {
+                                "context_compaction"
+                            },
                             model: Some(&message.model),
                             usage,
                         },

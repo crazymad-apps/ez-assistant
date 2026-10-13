@@ -1470,10 +1470,14 @@ function ContextUsageRing({
 }: Readonly<{
   context: SessionViewSnapshot['usage']['context'];
 }>) {
-  const degrees = context ? Math.min(360, Math.max(0, context.usage_basis_points * 0.036)) : 0;
-  const label = context
-    ? `${formatCompact(context.used_tokens)} / ${formatCompact(context.window_tokens)} · ${(context.usage_basis_points / 100).toFixed(1)}%`
-    : '暂无用量数据';
+  let degrees = 0;
+  let label = '上下文占用未知';
+  if (context && context.used_tokens !== null && context.usage_basis_points !== null) {
+    const prefix = context.accuracy === 'estimated' ? '约 ' : '';
+    degrees = Math.min(360, Math.max(0, context.usage_basis_points * 0.036));
+    label = `${prefix}${formatCompact(context.used_tokens)} / ${formatCompact(context.window_tokens)} · ${(context.usage_basis_points / 100).toFixed(1)}%`;
+  }
+  if (context?.calibration_pending) label += " · 待校准";
   return (
     <Tooltip content={label}>
       <span

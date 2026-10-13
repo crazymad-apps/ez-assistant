@@ -632,6 +632,7 @@ fn controller_delivery_binding_persists_and_user_takeover_is_atomic() {
         .expect("accept controller input");
     engine
         .commit_user_message(UserMessageCommit {
+            context_management_mode: agent_model::ContextManagementMode::LocalSummary,
             shell: None,
             operation_id: "commit-delivery-controller".to_owned(),
             input_id: controller_input_id,
@@ -798,6 +799,7 @@ fn controller_delivery_can_atomically_start_a_goal_with_its_reply_route() {
         .expect("accept controller input");
     engine
         .commit_user_message(UserMessageCommit {
+            context_management_mode: agent_model::ContextManagementMode::LocalSummary,
             shell: None,
             operation_id: "commit-goal-delivery-controller".to_owned(),
             input_id: controller_input_id,
@@ -982,6 +984,7 @@ fn proxy_report_is_accepted_atomically_with_source_run_settlement() {
         .expect("accept source input");
     engine
         .commit_user_message(UserMessageCommit {
+            context_management_mode: agent_model::ContextManagementMode::LocalSummary,
             shell: None,
             operation_id: "commit-report-source".to_owned(),
             input_id: source_input_id,
@@ -1310,6 +1313,7 @@ fn user_skill_activation_is_atomic_recoverable_and_forked_as_ledger_fact() {
         .expect("accept skill input");
     engine
         .commit_user_message(UserMessageCommit {
+            context_management_mode: agent_model::ContextManagementMode::LocalSummary,
             shell: None,
             operation_id: "commit-skill-activation".to_owned(),
             input_id,
@@ -1431,6 +1435,7 @@ fn user_message(value: &str, text: &str) -> ConversationMessage {
 
 fn assistant_message(value: &str, text: &str) -> ConversationMessage {
     ConversationMessage::Assistant(AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: MessageId::new(value).expect("message id"),
         model: ModelIdentity::new(
             ProviderId::new("fixture").expect("provider id"),
@@ -1454,6 +1459,7 @@ fn assistant_message(value: &str, text: &str) -> ConversationMessage {
 
 fn context_summary(value: &str, text: &str) -> ConversationMessage {
     ConversationMessage::ContextSummary(ContextSummaryMessage {
+        retained_user_message_id: None,
         id: MessageId::new(value).expect("message id"),
         text: text.to_owned(),
         model: None,
@@ -1621,6 +1627,7 @@ fn tool_exchange_with_ids(
     let call_id = ToolCallId::new(call_id).expect("tool call id");
     vec![
         ConversationMessage::Assistant(AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: MessageId::new(assistant_id).expect("message id"),
             model: ModelIdentity::new(
                 ProviderId::new("fixture").expect("provider id"),
@@ -1664,6 +1671,7 @@ fn tool_image_exchange(reference: ToolImageReference) -> ConversationSnapshot {
     ConversationSnapshot::new(vec![
         user_message("user-image", "inspect the image"),
         ConversationMessage::Assistant(AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: MessageId::new("assistant-image").expect("message id"),
             model: ModelIdentity::new(
                 ProviderId::new("fixture").expect("provider id"),
@@ -2353,6 +2361,7 @@ fn pending_delegate_exchange(session: &str, run: &str, receipt: &str) -> Pending
         session_id: session_id(session),
         run_id: run_id(run),
         assistant: AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: MessageId::new(format!("assistant-{receipt}")).expect("message id"),
             model: ModelIdentity::new(
                 ProviderId::new("fixture").expect("provider id"),
@@ -2740,6 +2749,7 @@ fn commit_completed_turn(
         .expect("accept fixture input");
     engine
         .commit_user_message(UserMessageCommit {
+            context_management_mode: agent_model::ContextManagementMode::LocalSummary,
             shell: None,
             operation_id: format!("commit-{suffix}"),
             input_id,
@@ -3117,6 +3127,7 @@ fn queued_shell_intent_survives_reopen_without_changing_session_binding() {
         dialect: "PowerShell 7".to_owned(),
     };
     let commit = |snapshot| UserMessageCommit {
+        context_management_mode: agent_model::ContextManagementMode::LocalSummary,
         shell: Some(snapshot),
         operation_id: "shell-intent-claim".to_owned(),
         input_id: accepted.input.input_id.clone(),
@@ -3947,6 +3958,7 @@ fn goal_run_continuation_updates_budget_without_creating_input_or_run() {
         .expect("accept first Goal input");
     engine
         .commit_user_message(UserMessageCommit {
+            context_management_mode: agent_model::ContextManagementMode::LocalSummary,
             shell: None,
             operation_id: "start-goal-settlement".to_owned(),
             input_id: first.input.input_id,
@@ -4120,6 +4132,7 @@ fn goal_run_continuation_updates_budget_without_creating_input_or_run() {
         .expect("resume Goal with held input");
     engine
         .commit_user_message(UserMessageCommit {
+            context_management_mode: agent_model::ContextManagementMode::LocalSummary,
             shell: None,
             operation_id: "start-goal-resume".to_owned(),
             input_id: resumed.input.input_id,
@@ -4440,6 +4453,7 @@ fn known_unversioned_storage_migrates_without_losing_existing_business_data() {
     seed_session_and_run(&mut engine, child_session_id.as_str(), "r-v0142-child");
     engine
         .create_child_task(NewStoredChildTask {
+            context_management_mode: agent_model::ContextManagementMode::LocalSummary,
             context_window_tokens: 8192,
             child_task_id: child_id.clone(),
             session_id: child_session_id.clone(),
@@ -4488,6 +4502,22 @@ fn known_unversioned_storage_migrates_without_losing_existing_business_data() {
         );
     }
     drop(saved);
+    let ledger_sql: String = engine
+        .connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name='model_request_records'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let ledger_indexes: Vec<String> = engine.connection.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='model_request_records' AND sql IS NOT NULL").unwrap().query_map([], |row| row.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+    let legacy_ledger_sql = ledger_sql
+        .replacen("model_request_records", "legacy_request_records", 1)
+        .replace("'context_compaction', ", "");
+    engine.connection.execute_batch(&format!("BEGIN IMMEDIATE; {legacy_ledger_sql}; INSERT INTO legacy_request_records SELECT * FROM model_request_records; DROP TABLE model_request_records; ALTER TABLE legacy_request_records RENAME TO model_request_records; COMMIT;")).unwrap();
+    for index in ledger_indexes {
+        engine.connection.execute_batch(&index).unwrap();
+    }
     engine
         .connection
         .execute_batch(
@@ -4503,6 +4533,8 @@ fn known_unversioned_storage_migrates_without_losing_existing_business_data() {
              DROP TABLE custom_agents;
              DROP TABLE agent_shell_settings;
              ALTER TABLE child_tasks DROP COLUMN context_window_tokens;
+             ALTER TABLE child_tasks DROP COLUMN context_management_mode;
+             ALTER TABLE sessions DROP COLUMN context_management_mode;
              ALTER TABLE sessions DROP COLUMN agent_shell_kind;
              ALTER TABLE sessions DROP COLUMN agent_shell_environment_json;
              ALTER TABLE sessions DROP COLUMN custom_agent_json;
@@ -4594,6 +4626,7 @@ fn child_task_body_is_independent_and_round_trips_all_reliable_steps() {
     let child_id = child_task_id("ct-child");
     let created = engine
         .create_child_task(NewStoredChildTask {
+            context_management_mode: agent_model::ContextManagementMode::LocalSummary,
             context_window_tokens: 8192,
             child_task_id: child_id.clone(),
             session_id: session_id("s-child"),
@@ -4718,6 +4751,7 @@ fn accepted_child_can_fail_before_its_initial_message_is_started() {
     let child_id = child_task_id("ct-child-prestart");
     engine
         .create_child_task(NewStoredChildTask {
+            context_management_mode: agent_model::ContextManagementMode::LocalSummary,
             context_window_tokens: 8192,
             child_task_id: child_id.clone(),
             session_id: session_id("s-child-prestart"),
@@ -4774,6 +4808,7 @@ fn child_task_parent_and_read_ownership_reject_cross_session_access() {
 
     let error = engine
         .create_child_task(NewStoredChildTask {
+            context_management_mode: agent_model::ContextManagementMode::LocalSummary,
             context_window_tokens: 8192,
             child_task_id: child_task_id("ct-wrong-owner"),
             session_id: session_id("s-other"),
@@ -4791,6 +4826,7 @@ fn child_task_parent_and_read_ownership_reject_cross_session_access() {
     let child_id = child_task_id("ct-owner");
     engine
         .create_child_task(NewStoredChildTask {
+            context_management_mode: agent_model::ContextManagementMode::LocalSummary,
             context_window_tokens: 8192,
             child_task_id: child_id.clone(),
             session_id: session_id("s-owner"),
@@ -4820,6 +4856,7 @@ fn startup_repairs_started_child_tool_exchange_inside_the_child_body_only() {
     let child_id = child_task_id("ct-child-recovery");
     engine
         .create_child_task(NewStoredChildTask {
+            context_management_mode: agent_model::ContextManagementMode::LocalSummary,
             context_window_tokens: 8192,
             child_task_id: child_id.clone(),
             session_id: session_id("s-child-recovery"),
@@ -5879,6 +5916,7 @@ fn file_references_survive_queued_json_and_conversation_restart_round_trip() {
     );
     engine
         .commit_user_message(UserMessageCommit {
+            context_management_mode: agent_model::ContextManagementMode::LocalSummary,
             shell: None,
             operation_id: "commit-files".to_owned(),
             input_id: InputId::new("input-files").expect("input id"),
@@ -6362,6 +6400,7 @@ fn startup_rebuilds_parent_delegate_result_from_completed_child() {
     let child_id = child_task_id("ct-delegate-complete");
     engine
         .create_child_task(NewStoredChildTask {
+            context_management_mode: agent_model::ContextManagementMode::LocalSummary,
             context_window_tokens: 8192,
             child_task_id: child_id.clone(),
             session_id: session_id("s-delegate-complete"),
@@ -6447,6 +6486,7 @@ fn startup_interrupts_running_child_before_rebuilding_parent_result() {
     let child_id = child_task_id("ct-delegate-running");
     engine
         .create_child_task(NewStoredChildTask {
+            context_management_mode: agent_model::ContextManagementMode::LocalSummary,
             context_window_tokens: 8192,
             child_task_id: child_id.clone(),
             session_id: session_id("s-delegate-running"),
@@ -6683,6 +6723,7 @@ fn startup_finishes_staged_run_start_before_runtime_settlement() {
                 created_at_ms: 2_000,
             },
             AppendPurpose::UserMessage {
+                context_management_mode: agent_model::ContextManagementMode::LocalSummary,
                 shell: Some(shell.clone()),
                 reasoning_effort: None,
             },
@@ -7801,6 +7842,7 @@ fn running_child_context_replacement_switches_only_child_generation() {
     let child_id = child_task_id("ct-compact-child");
     engine
         .create_child_task(NewStoredChildTask {
+            context_management_mode: agent_model::ContextManagementMode::LocalSummary,
             context_window_tokens: 8192,
             child_task_id: child_id.clone(),
             session_id: session_id("s-compact-child"),
@@ -7961,6 +8003,7 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
             .expect("accept input");
         engine
             .commit_user_message(UserMessageCommit {
+                context_management_mode: agent_model::ContextManagementMode::LocalSummary,
                 shell: None,
                 operation_id: format!("start-{run}"),
                 input_id: InputId::new(input).expect("input id"),
@@ -7992,6 +8035,7 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
     let removed_child_id = child_task_id("ct-rewrite-tail");
     engine
         .create_child_task(NewStoredChildTask {
+            context_management_mode: agent_model::ContextManagementMode::LocalSummary,
             context_window_tokens: 8192,
             child_task_id: removed_child_id.clone(),
             session_id: session.clone(),
@@ -8090,6 +8134,7 @@ fn archive_and_model_changes_are_persisted_and_recheck_idle_state() {
         .expect("archive");
     assert!(matches!(
         engine.set_session_model(ModelChange {
+            context_management_mode: None,
             server_history_key: None,
             session_id: session.clone(),
             model_selection: Some(model_selection("other-model")),
@@ -8107,6 +8152,7 @@ fn archive_and_model_changes_are_persisted_and_recheck_idle_state() {
         .expect("restore");
     engine
         .set_session_model(ModelChange {
+            context_management_mode: None,
             server_history_key: None,
             session_id: session.clone(),
             model_selection: Some(model_selection("other-model")),
@@ -8471,6 +8517,7 @@ fn session_materialization_is_atomic_and_response_loss_retry_is_idempotent() {
     assert_eq!(engine.load_runs().expect("runs").len(), 1);
     engine
         .commit_user_message(UserMessageCommit {
+            context_management_mode: agent_model::ContextManagementMode::LocalSummary,
             shell: None,
             operation_id: "commit-materialized-first".to_owned(),
             input_id: first.accepted.input.input_id.clone(),
@@ -8698,6 +8745,7 @@ fn recall_index_normalizes_queries_and_only_indexes_visible_message_content() {
             ],
         }),
         ConversationMessage::Assistant(AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: MessageId::new("recall-assistant").expect("message id"),
             model: ModelIdentity::new(
                 ProviderId::new("fixture").expect("provider id"),
@@ -8732,6 +8780,7 @@ fn recall_index_normalizes_queries_and_only_indexes_visible_message_content() {
             },
         }),
         ConversationMessage::Assistant(AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: MessageId::new("recall-assistant-final").expect("message id"),
             model: ModelIdentity::new(
                 ProviderId::new("fixture").expect("provider id"),
@@ -8870,6 +8919,7 @@ fn recall_index_applies_session_workspace_and_global_scopes_to_main_and_child_co
     let child_id = child_task_id("ct-recall-child");
     engine
         .create_child_task(NewStoredChildTask {
+            context_management_mode: agent_model::ContextManagementMode::LocalSummary,
             context_window_tokens: 8192,
             child_task_id: child_id.clone(),
             session_id: session_id("s-recall-child"),
@@ -9616,6 +9666,7 @@ fn clear_session_atomically_replaces_history_and_preserves_stable_resources() {
         .expect("accept clear source input");
     engine
         .commit_user_message(UserMessageCommit {
+            context_management_mode: agent_model::ContextManagementMode::LocalSummary,
             shell: None,
             operation_id: "commit-clear-target".to_owned(),
             input_id: source_input_id,
@@ -10271,7 +10322,12 @@ fn controller_refresh_leaves_prompt_unchanged_and_survives_reopen() {
         let result = if index == 0 {
             StoredSessionCommandResult::Mcp(McpRefreshControlResultSnapshot {
                 outcome: McpRefreshOutcome::Success,
-                servers: Vec::new(),
+                servers: vec![assistant_protocol::McpServerRefreshResultSnapshot {
+                    server_key: McpServerKey::new("legacy-lazy-server").unwrap(),
+                    outcome: assistant_protocol::McpServerRefreshOutcome::Deferred,
+                    tool_count: 0,
+                    diagnostic: None,
+                }],
             })
         } else if index == 1 {
             StoredSessionCommandResult::SkillRefresh {
@@ -10506,4 +10562,230 @@ fn lazy_startup_and_summary_pages_ignore_unrelated_corrupt_details() {
     );
     assert_eq!(fs::read(&body).unwrap(), b"invalid historical body\n");
     assert!(orphan.exists());
+}
+
+#[test]
+fn native_compaction_appends_in_place_and_recovers_ready_state_without_duplicate_usage() {
+    let root = tempfile::tempdir().unwrap();
+    let mut engine = open_engine(&root);
+    seed_session_and_run(&mut engine, "s-native-state", "r-native-state");
+    engine.connection.execute("UPDATE sessions SET context_management_mode = 'server_compaction' WHERE session_id = 's-native-state'", []).unwrap();
+    engine
+        .connection
+        .execute(
+            "UPDATE runs SET status = 'running' WHERE run_id = 'r-native-state'",
+            [],
+        )
+        .unwrap();
+    engine
+        .append_messages(append_request(
+            "native-original",
+            "s-native-state",
+            "r-native-state",
+        ))
+        .unwrap();
+    let original = engine
+        .load_conversation(&session_id("s-native-state"))
+        .unwrap();
+    let native_message = |id: &str| {
+        let mut message = match assistant_message(id, "") {
+            ConversationMessage::Assistant(message) => message,
+            _ => unreachable!(),
+        };
+        message.purpose = agent_types::AssistantMessagePurpose::ContextCompaction;
+        message.usage = Some(TokenUsage {
+            input_tokens: 20,
+            output_tokens: 10,
+            total_tokens: 30,
+            cached_input_tokens: None,
+            reasoning_tokens: None,
+        });
+        message.parts = vec![AssistantPart::ProviderState(
+            OpaqueProviderState::new_routed(
+                ProviderId::new("synthetic").unwrap(),
+                ProtocolId::new("responses").unwrap(),
+                "responses.compacted_window",
+                "application/json",
+                1,
+                None,
+                "a".repeat(64),
+                b"{}".to_vec(),
+            )
+            .unwrap()
+            .with_context_effect(agent_types::ProviderContextEffect::ReplacePriorContext)
+            .unwrap(),
+        )];
+        ConversationMessage::Assistant(message)
+    };
+    let first = native_message("compact-first");
+    let committed = engine
+        .replace_context(ContextReplacement {
+            target: ContextReplacementTarget::Run {
+                session_id: session_id("s-native-state"),
+                run_id: run_id("r-native-state"),
+            },
+            conversation: ConversationSnapshot::new(vec![first.clone()]),
+            changed_at_ms: 2001,
+        })
+        .unwrap();
+    assert_eq!(committed.source_generation, committed.result_generation);
+    assert_eq!(
+        committed.product_message_count,
+        original.messages.len() as u64 + 1
+    );
+    let mut expected = original.messages;
+    expected.push(first);
+    assert_eq!(
+        engine
+            .load_conversation(&session_id("s-native-state"))
+            .unwrap()
+            .messages,
+        expected
+    );
+    // 模拟完整写入但 SQLite 业务提交前退出；现有 staged append 负责唯一收口。
+    let second = native_message("compact-second");
+    engine
+        .stage_append(AppendRequest {
+            operation_id: "native-ready".into(),
+            session_id: session_id("s-native-state"),
+            run_id: run_id("r-native-state"),
+            messages: vec![second.clone()],
+            message_step: None,
+            created_at_ms: 2002,
+        })
+        .unwrap();
+    engine.write_staged_append("native-ready").unwrap();
+    drop(engine);
+    let mut reopened = open_engine(&root);
+    reopened.load_runtime().unwrap();
+    expected.push(second);
+    assert_eq!(
+        reopened
+            .load_conversation(&session_id("s-native-state"))
+            .unwrap()
+            .messages,
+        expected
+    );
+    assert_eq!(
+        reopened
+            .session_generation(&session_id("s-native-state"))
+            .unwrap(),
+        committed.result_generation
+    );
+    for _ in 0..2 {
+        reopened.load_runtime().unwrap();
+        let count: i64 = reopened.connection.query_row("SELECT COUNT(*) FROM model_request_records WHERE session_id = 's-native-state' AND request_kind = 'context_compaction'", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 2);
+        let total: i64 = reopened.connection.query_row("SELECT SUM(total_tokens) FROM model_request_records WHERE session_id = 's-native-state' AND request_kind = 'context_compaction'", [], |row| row.get(0)).unwrap();
+        assert_eq!(total, 60);
+    }
+    let page = reopened
+        .load_conversation_window(ConversationWindowRequest {
+            owner: ConversationOwner::MainSession {
+                session_id: session_id("s-native-state"),
+            },
+            generation: committed.result_generation,
+            end: None,
+            limit: 10,
+        })
+        .unwrap();
+    assert_eq!(
+        page.total, 2,
+        "native states remain outside transcript pagination"
+    );
+}
+
+#[test]
+fn accepted_run_adopts_refreshed_context_mode_atomically_for_new_and_committed_inputs() {
+    use agent_model::ContextManagementMode::{LocalSummary, ServerCompaction};
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.runtime-test");
+    fs::create_dir_all(&base).unwrap();
+    // 新建一次性 SQLite：仅 sessions、inputs、runs 与正文追加流水，由本测试独占。
+    let root = tempfile::Builder::new()
+        .prefix("f01-mode-refresh-")
+        .tempdir_in(base)
+        .unwrap();
+    let mut engine = open_engine(&root);
+    for (name, has_message) in [("queued", true), ("committed", false)] {
+        seed_session_and_run(&mut engine, name, name);
+        engine
+            .connection
+            .execute(
+                "UPDATE sessions SET context_management_mode='local_summary' WHERE session_id=?1",
+                [name],
+            )
+            .unwrap();
+        let message = raw_user_message(&format!("user-{name}"), "continue history");
+        if has_message {
+            engine
+                .connection
+                .execute(
+                    "UPDATE inputs SET state='queued', queued_message_json=?1 WHERE input_id=?2",
+                    params![
+                        serde_json::to_string(&message).unwrap(),
+                        format!("input-{name}")
+                    ],
+                )
+                .unwrap();
+        }
+        let commit = |mode| UserMessageCommit {
+            context_management_mode: mode,
+            shell: None,
+            operation_id: format!("claim-{name}"),
+            input_id: InputId::new(format!("input-{name}")).unwrap(),
+            run_id: run_id(name),
+            session_id: session_id(name),
+            message: has_message.then(|| message.clone()),
+            reasoning_effort: None,
+            created_at_ms: 2000,
+        };
+        engine
+            .commit_user_message(commit(ServerCompaction))
+            .unwrap();
+        let started = engine.load_session_state(&session_id(name)).unwrap();
+        assert_eq!(
+            started.state.sessions[0].context_management_mode,
+            Some(ServerCompaction)
+        );
+        assert_eq!(
+            started.state.inputs[0].state,
+            assistant_runtime::StoredInputState::Committed
+        );
+        assert_eq!(started.state.runs[0].status, RunStatus::Running);
+        assert_eq!(
+            started.state.sessions[0].message_count,
+            u64::from(has_message)
+        );
+        // 活动 Run 不可重新领取或换机制；失败的准入事务不能留下模式改动。
+        assert!(engine.commit_user_message(commit(LocalSummary)).is_err());
+        assert_eq!(
+            engine
+                .load_session_state(&session_id(name))
+                .unwrap()
+                .state
+                .sessions[0]
+                .context_management_mode,
+            Some(ServerCompaction)
+        );
+        assert_eq!(engine.staged_append_count().unwrap(), 0);
+    }
+    drop(engine);
+    let engine = open_engine(&root);
+    for name in ["queued", "committed"] {
+        let restored = engine.load_session_state(&session_id(name)).unwrap();
+        assert_eq!(
+            restored.state.sessions[0].context_management_mode,
+            Some(ServerCompaction)
+        );
+        assert_eq!(restored.state.runs[0].status, RunStatus::Running);
+    }
+    for table in ["sessions", "inputs", "runs"] {
+        let count: i64 = engine
+            .connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 2);
+    }
 }

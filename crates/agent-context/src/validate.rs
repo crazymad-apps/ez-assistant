@@ -70,6 +70,14 @@ pub fn validate_replacement(
     if summary.text.trim().is_empty() {
         return Err(ReplacementValidationError::EmptyContextSummary);
     }
+    if let Some(reference) = &summary.retained_user_message_id {
+        let following = &replacement.messages[layout.protected_prefix().len() + 1..];
+        if !matches!(following.first(), Some(ConversationMessage::User(user)) if &user.id == reference)
+            || following.iter().filter(|message| matches!(message, ConversationMessage::User(user) if &user.id == reference)).count() != 1
+        {
+            return Err(ReplacementValidationError::InvalidRetainedUserReference);
+        }
+    }
     if let Some(ContextUsageAdjustment::Subtract {
         retained_assistant_id,
         ..
@@ -102,6 +110,9 @@ pub fn validate_replacement(
 /// 压缩候选 replacement 不满足提交前约束。
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum ReplacementValidationError {
+    /// 展开的原始 User 必须唯一且紧跟摘要；源内容仍由 Store 核验。
+    #[error("context summary has an invalid retained user reference")]
+    InvalidRetainedUserReference,
     /// replacement 不是合法的规范历史布局。
     #[error("invalid replacement layout: {0}")]
     InvalidLayout(ContextLayoutError),
@@ -136,6 +147,7 @@ mod tests {
 
     fn assistant(usage: Option<TokenUsage>) -> ConversationMessage {
         ConversationMessage::Assistant(AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: id("assistant_1"),
             model: ModelIdentity::new(
                 ProviderId::new("test").expect("valid provider id"),
@@ -150,6 +162,7 @@ mod tests {
     fn replacement(summary: &str, usage: Option<TokenUsage>) -> ConversationSnapshot {
         ConversationSnapshot::new(vec![
             ConversationMessage::ContextSummary(ContextSummaryMessage {
+                retained_user_message_id: None,
                 id: id("summary_1"),
                 text: summary.to_owned(),
                 model: None,
@@ -261,6 +274,7 @@ mod tests {
         let call_id = ToolCallId::new("call_1").expect("valid call id");
         let invalid = ConversationSnapshot::new(vec![
             ConversationMessage::ContextSummary(ContextSummaryMessage {
+                retained_user_message_id: None,
                 id: id("summary_1"),
                 text: "summary".to_owned(),
                 model: None,
@@ -276,6 +290,7 @@ mod tests {
                 parts: vec![],
             }),
             ConversationMessage::Assistant(AssistantMessage {
+                purpose: agent_types::AssistantMessagePurpose::ModelResponse,
                 id: id("assistant_1"),
                 model: ModelIdentity::new(
                     ProviderId::new("test").expect("valid provider id"),

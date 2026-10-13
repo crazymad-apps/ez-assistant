@@ -44,7 +44,11 @@ fn remote_source(center: &str) -> UpdateSource {
     UpdateSource {
         binding: "selected".into(),
         center: Url::parse(center).unwrap(),
-        host: ClientCompatibility::current(),
+        // The signed fixture describes a 0.29.x release and its retained remote Host.
+        host: ClientCompatibility {
+            version: "0.29.0".into(),
+            min_compatible_version: "0.29.0".into(),
+        },
         protocols: vec![2],
         local: None,
         remote_origin: Some("http://127.0.0.1:7240".into()),
@@ -112,7 +116,7 @@ fn retained_remote_host_cannot_borrow_bundled_host_compatibility() {
         )
         .is_err()
     );
-    source.host = ClientCompatibility::current();
+    source.host = remote_source("http://127.0.0.1:7320").host;
     source.protocols = vec![1];
     assert!(
         manifest::VerifiedManifest::read(

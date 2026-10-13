@@ -9,6 +9,10 @@ export const modelProvider: ProviderSummary = {
 };
 export function modelParameters(): ModelParameters {
   return {
+    server_compaction_enabled: false,
+    server_auto_compaction_enabled: false,
+    server_compaction_support: "unknown",
+    input_token_count_support: "unknown",
     context_window_tokens: { state: "known", value: 128000 }, max_output_tokens: { state: "known", value: 4096 },
     max_input_tokens: { state: "unknown" }, reasoning_max_input_tokens: { state: "unknown" }, reasoning_max_output_tokens: { state: "unknown" },
     streaming: "supported", image_input: "unsupported", tool_calls: "unsupported", reasoning: "unsupported",

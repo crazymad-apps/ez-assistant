@@ -63,3 +63,10 @@ cargo clippy -p agent-model --all-targets --all-features -- -D warnings
 ## v0.29.0 F03 M1 过程事实
 
 ReasoningDelta 每个增量携带中立 source；缺失按 raw 读取并省略 raw 序列化。LifecycleValidator 拒绝同一 part 来源变化或最终消息与已观察来源不一致，完整 ReasoningPart 仍随 TurnFinished 可靠交付。
+
+## v0.30.0 F01 M1 唯一机制与辅助调用
+
+- `ContextManagementMode` 是 owner 冻结的本地摘要/服务端压缩机制；`ContextPolicy` 是服务实例的冻结策略，原生阈值与状态作用域归实例，不能在请求里重新选择。普通 Debug 不展示作用域指纹。
+- `ModelService.context_policy` 缺省本地摘要。可选 `count_input_tokens` 缺省返回 None，由宿主沿用既有 usage 与增量估算；可变调用上下文允许图片准备结果供后续调用复用。计量错误的降级编排在后续调用方接入。
+- `compact` 是显式、单次、完整结果调用，缺省返回不支持或取消；不通过普通 stream 生成摘要、不执行工具。所有装饰器透明委托三项方法，RetryingModelService 不将辅助调用纳入普通生成重试或 attempt 观察。
+- M1 不代表任何 Adapter 已实现原生 HTTP compact 或计量；实际协议接入归后续里程碑。

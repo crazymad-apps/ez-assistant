@@ -754,11 +754,10 @@ fn goal_effect_summary(effect: &StoredGoalSettlementEffect) -> String {
         })
         .unwrap_or_else(|| "none".to_owned());
     format!(
-        "state={state}, pause_reason={pause_reason}, runs={}/{}, tokens={}/{}, usage_complete={}",
+        "state={state}, pause_reason={pause_reason}, runs={}/{}, tokens={}, usage_complete={}",
         goal.budget.used_runs,
         goal.budget.max_runs,
         goal.budget.used_total_tokens,
-        goal.budget.max_total_tokens,
         goal.budget.usage_complete,
     )
 }

@@ -1,3 +1,4 @@
+import { callKindLabel } from '../callKindLabel';
 import { useCallback, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
 import dayjs from 'dayjs';
@@ -54,7 +55,7 @@ export const CallsRoute = observer(function CallsRoute() {
       key: 'kind',
       width: 100,
 
-      render: (_: unknown, row: CallDetails) => (row.kind === 'admin_test' ? '配置测试' : '模型调用'),
+      render: (_: unknown, row: CallDetails) => callKindLabel[row.kind],
     },
     {
       title: '转发结果',
@@ -195,6 +196,8 @@ export const CallsRoute = observer(function CallsRoute() {
               options={[
                 { value: 'proxy', label: '模型调用' },
                 { value: 'admin_test', label: '配置测试' },
+                { value: 'context_compaction', label: '上下文压缩' },
+                { value: 'input_tokens', label: '输入计量' },
               ]}
             />
           </Form.Item>

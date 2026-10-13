@@ -444,6 +444,7 @@ fn aggregated_projection_keeps_error_results_before_the_single_image_envelope() 
 fn encode_context_summary_uses_a_derived_system_message() {
     let adapter = base_adapter();
     let message = ConversationMessage::ContextSummary(ContextSummaryMessage {
+        retained_user_message_id: None,
         id: message_id("summary_1"),
         text: "The user selected a local-first architecture.".to_owned(),
         model: None,

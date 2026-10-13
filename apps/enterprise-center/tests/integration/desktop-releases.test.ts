@@ -33,7 +33,7 @@ async function sign(path: string) {
   return readFile(`${path}.sig`, 'utf8');
 }
 
-async function fixture(version: string, content: string, protocols = [2]) {
+async function fixture(version: string, content: string, protocols = [3]) {
   const directory = join(root, 'fixtures', `${version}-${randomUUID()}`); await mkdir(directory, { recursive: true });
   const name = `EZ_${version}.msi`, bytes = Buffer.from(content);
   await writeFile(join(directory, name), bytes);
@@ -155,7 +155,7 @@ it('签名、真实上传发布下载、权限、不可变制品、事务失败�
   expect(raced.map(value => value.statusCode).sort()).toEqual([200, 409]);
   expect((await app!.inject(check)).json().notes).toMatch(/^更新内容 /);
   expect((await app!.inject(`${check}?host_version=0.28.0&host_min_supported_version=0.28.0&host_protocols=2`)).statusCode).toBe(204);
-  expect((await app!.inject(`${check}?host_version=0.29.0&host_min_supported_version=0.29.0&host_protocols=2`)).statusCode).toBe(200);
+  expect((await app!.inject(`${check}?host_version=0.29.0&host_min_supported_version=0.29.0&host_protocols=3`)).statusCode).toBe(200);
   const newer = await fixture('0.29.10', 'newer installer');
   expect((await upload(newer)).statusCode).toBe(200);
   expect((await app!.inject({ method: 'PUT', url: '/api/desktop-releases/0.29.10/targets/windows-x86_64/publication', headers: headers(admin), payload: { manifest_sha256: sha(Buffer.from(newer.text)), expected_publication: 'draft', publication: 'published' } })).statusCode).toBe(200);

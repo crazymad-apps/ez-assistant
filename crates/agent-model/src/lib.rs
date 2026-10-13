@@ -59,7 +59,10 @@ pub use retry::{
     ModelAttemptEvent, ModelAttemptObserver, ModelRetryPolicy, ModelRetryReason,
     RetryingModelService,
 };
-pub use service::{ModelEventStream, ModelService, ModelStreamFuture};
+pub use service::{
+    ContextManagementMode, ContextPolicy, ModelCompactionFuture, ModelEventStream,
+    ModelInputTokenCountFuture, ModelService, ModelStreamFuture,
+};
 
 #[cfg(test)]
 pub(crate) mod testutil {

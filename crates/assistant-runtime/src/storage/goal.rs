@@ -29,9 +29,12 @@ pub enum StoredGoalState {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StoredGoalPauseReason {
-    Blocked { summary: String },
+    Blocked {
+        summary: String,
+    },
     UserStopped,
     RunLimitReached,
+    /// 仅用于读取已发布版本的暂停原因；当前执行不再产生该原因。
     TokenLimitReached,
     ConsecutiveFailures,
     RecoveryRequired,
@@ -41,6 +44,7 @@ pub enum StoredGoalPauseReason {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StoredGoalBudget {
     pub max_runs: u32,
+    /// 已发布 schema 的遗留列，仅作存储往返；不进入执行限制或公开投影。
     pub max_total_tokens: u64,
     pub max_consecutive_failures: u32,
     pub used_runs: u32,

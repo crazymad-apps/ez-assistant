@@ -121,6 +121,7 @@ fn tool_result_message(id: &str, call: &str, content: &str) -> ConversationMessa
 
 fn assistant_message(parts: Vec<AssistantPart>) -> AssistantMessage {
     AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: message_id("turn_1"),
         model: ModelIdentity::new(provider_id("deepseek"), "deepseek-v4-pro"),
         parts,
@@ -201,6 +202,7 @@ async fn turn_1_replays_reasoning_text_tool_call_and_cache_usage() {
         reasoning_tokens: Some(20),
     };
     let expected_message = AssistantMessage {
+        purpose: agent_types::AssistantMessagePurpose::ModelResponse,
         id: message_id("chatcmpl-contract-1"),
         model: ModelIdentity::new(provider_id("deepseek"), "deepseek-v4-pro"),
         // reasoning、content、tool call 全保留且顺序正确。

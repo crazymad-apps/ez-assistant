@@ -75,7 +75,7 @@ async fn real_process_has_no_personal_fallback_and_routes_events_to_its_user() {
     let center_router = Router::new()
         .route(
             "/api/info",
-            get(|| async { Json(json!({"protocol_version":2,"min_protocol_version":2})) }),
+            get(|| async { Json(json!({"protocol_version":3,"min_protocol_version":3})) }),
         )
         .route(
             "/api/auth/login",

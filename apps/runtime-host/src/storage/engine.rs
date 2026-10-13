@@ -285,6 +285,7 @@ super::agent_shell::encode_environment(session.agent_shell_environment.as_ref())
         let _ = self.initialize_recall_owner(&recall_owner, 1, session.created_at_ms);
 
         Ok(StoredSession {
+            context_management_mode: None,
             server_history_key: None,
             custom_agent: session.custom_agent,
             agent_shell_kind: session.agent_shell_kind,
@@ -488,7 +489,7 @@ super::agent_shell::encode_environment(session.agent_shell_environment.as_ref())
                                   WHERE runs.session_id = sessions.session_id), created_at_ms),
                         archived_at_ms, is_pinned, title_origin,
                         sessions.pc_output_device_id, devices.display_name,
-                        sessions.materialization_key, sessions.automatic_title_pending, sessions.agent_shell_kind, sessions.agent_shell_environment_json, sessions.custom_agent_json, sessions.server_history_key
+                        sessions.materialization_key, sessions.automatic_title_pending, sessions.agent_shell_kind, sessions.agent_shell_environment_json, sessions.custom_agent_json, sessions.server_history_key, sessions.context_management_mode
                  FROM sessions
                  LEFT JOIN devices ON devices.device_id = sessions.pc_output_device_id
                  WHERE {predicate} ORDER BY created_at_ms, session_id"))
@@ -525,6 +526,7 @@ super::agent_shell::encode_environment(session.agent_shell_environment.as_ref())
                         row.get::<_, Option<String>>(24)?,
                         row.get::<_, Option<String>>(25)?,
                         row.get::<_, Option<String>>(26)?,
+                        row.get::<_, Option<String>>(27)?,
                     ))
                 },
             )
@@ -560,6 +562,7 @@ super::agent_shell::encode_environment(session.agent_shell_environment.as_ref())
                 agent_shell_environment,
                 custom_agent_json,
                 server_history_key,
+                context_management_mode,
             ) = row.map_err(|source| {
                 internal_error("runtime session row could not be read", source)
             })?;
@@ -582,6 +585,10 @@ super::agent_shell::encode_environment(session.agent_shell_environment.as_ref())
                 _ => return Err(invalid_data("stored session lifecycle is invalid")),
             };
             sessions.push(StoredSession {
+                context_management_mode: context_management_mode
+                    .as_deref()
+                    .map(super::mode::parse_context_management_mode)
+                    .transpose()?,
                 server_history_key,
                 custom_agent: custom_agent_json
                     .map(|value| serde_json::from_str(&value))

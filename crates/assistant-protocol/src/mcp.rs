@@ -426,6 +426,8 @@ pub enum McpRefreshOutcome {
 #[serde(rename_all = "snake_case")]
 pub enum McpServerRefreshOutcome {
     Refreshed,
+    /// 已落盘刷新记录中的延后连接结果；保留事实读取，不启用延后连接能力。
+    Deferred,
     ConnectedWithoutTools,
     RetainedAfterFailure,
     BlockedByConflict,

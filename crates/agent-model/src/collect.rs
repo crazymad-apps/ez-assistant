@@ -79,6 +79,7 @@ mod tests {
 
     fn message() -> AssistantMessage {
         AssistantMessage {
+            purpose: agent_types::AssistantMessagePurpose::ModelResponse,
             id: MessageId::new("assistant-1").expect("valid message id"),
             model: ModelIdentity::new(
                 ProviderId::new("fixture").expect("valid provider id"),

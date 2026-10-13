@@ -30,6 +30,10 @@ export class ToolChoice {
   @ApiProperty({ enum: supports }) named!: Support;
 }
 export class ModelParameters {
+  @ApiProperty({ default: false }) server_compaction_enabled!: boolean;
+  @ApiProperty({ default: false, description: '本版本必须为 false；由 Agent 判断压缩时机。' }) server_auto_compaction_enabled!: boolean;
+  @ApiProperty({ enum: supports }) server_compaction_support!: Support;
+  @ApiProperty({ enum: supports }) input_token_count_support!: Support;
   @ApiProperty({ type: TokenLimit }) context_window_tokens!: TokenLimit;
   @ApiProperty({ type: TokenLimit }) max_input_tokens!: TokenLimit;
   @ApiProperty({ type: TokenLimit }) max_output_tokens!: TokenLimit;

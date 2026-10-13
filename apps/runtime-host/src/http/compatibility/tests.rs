@@ -385,7 +385,7 @@ async fn update_context_is_anonymous_and_does_not_initialize_runtime() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.json::<Value>().await.unwrap(),
-        json!({"center_url":null,"enterprise_protocols":[2]})
+        json!({"center_url":null,"enterprise_protocols":[3]})
     );
     assert!(f._home.path().read_dir().unwrap().next().is_none());
 }

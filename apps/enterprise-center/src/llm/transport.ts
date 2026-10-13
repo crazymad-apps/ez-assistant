@@ -1,6 +1,7 @@
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import type { IncomingHttpHeaders, IncomingMessage } from 'node:http';
+import type { ModelOperation } from './body.js';
 import type { Protocol } from '../contracts/models.js';
 
 export type TransferSink = {
@@ -16,12 +17,13 @@ export class TransferError extends Error {
   }
 }
 
-export function upstreamUrl(endpoint: string, protocol: Protocol): URL {
+export function upstreamUrl(endpoint: string, protocol: Protocol, operation: ModelOperation = 'generation'): URL {
   const url = new URL(endpoint);
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
     throw new TransferError('upstream_connection');
   }
-  url.pathname = `${url.pathname.replace(/\/$/, '')}/${protocol === 'open_ai_responses' ? 'responses' : 'chat/completions'}`;
+  if (operation !== 'generation' && protocol !== 'open_ai_responses') throw new TransferError('upstream_connection');
+  url.pathname = `${url.pathname.replace(/\/$/, '')}/${protocol === 'open_ai_responses' ? `responses${operation === 'generation' ? '' : `/${operation}`}` : 'chat/completions'}`;
   return url;
 }
 
@@ -39,6 +41,7 @@ export function responseHeaders(headers: IncomingHttpHeaders): Record<string, st
 export async function transfer(input: {
   endpoint: string;
   protocol: Protocol;
+  operation?: ModelOperation;
   apiKey: string;
   body: Buffer;
   signal: AbortSignal;
@@ -48,7 +51,7 @@ export async function transfer(input: {
   sent?: () => void;
 }): Promise<number> {
   input.signal.throwIfAborted();
-  const url = upstreamUrl(input.endpoint, input.protocol);
+  const url = upstreamUrl(input.endpoint, input.protocol, input.operation);
   const abort = new AbortController();
   let failure: TransferError | undefined;
   let response: IncomingMessage | undefined;
