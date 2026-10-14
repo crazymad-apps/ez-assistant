@@ -1,5 +1,6 @@
 import { Outlet } from 'react-router';
-import { Layout } from 'antd';
+import { Button, Layout } from 'antd';
+import { HomeOutlined } from '@ant-design/icons';
 import { NavigationMenu } from './NavigationMenu';
 import { PageBreadcrumb } from './PageBreadcrumb';
 import { UserMenu } from './UserMenu';
@@ -15,6 +16,17 @@ export function PageLayout() {
           <strong>ez-assistant 企业中心</strong>
         </div>
         <div className={styles.header_actions}>
+          <Button
+            type="text"
+            className={styles.header_button}
+            icon={<HomeOutlined />}
+            href="/"
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="首页（在新标签页打开）"
+          >
+            首页
+          </Button>
           <UserMenu />
         </div>
       </Layout.Header>

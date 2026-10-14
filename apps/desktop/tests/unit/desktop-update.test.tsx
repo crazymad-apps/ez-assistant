@@ -1,4 +1,5 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { render } from "../support/renderWithAppearance";
+import { fireEvent, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DesktopUpdatePanel, DesktopUpdateStore } from "../../src/features/desktop-update";
 import type { DesktopUpdateSnapshot } from "../../src/native-bridge/desktopUpdate";

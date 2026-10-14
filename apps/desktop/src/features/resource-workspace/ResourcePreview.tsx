@@ -1,3 +1,6 @@
+import type { ThemePreset } from "../../styles/themePresets";
+import { observer } from "mobx-react-lite";
+import { useAppearance } from "../../stores/AppearanceContext";
 import { revealFileLabel } from "../../platform/fileManager";
 import { useRootStore } from "../../stores/RootStoreContext";
 import type { ClientResources } from "../../runtime-client/ClientResources";
@@ -49,7 +52,7 @@ import {
 } from "./ResourceWorkspaceStore";
 import { createResourceObjectUrl } from "../../native-bridge/resourceObjectUrl";
 import { MonacoTextViewer, type MonacoTextViewerHandle } from "./MonacoTextViewer";
-import { resolveMaterialFileIcon, resolveMaterialFolderIcon } from "./materialResourceIcon";
+import { ResourceMaterialIcon } from "./ResourceMaterialIcon";
 import {
   ResourceContextMenu,
   type ResourceMenuItem,
@@ -58,7 +61,7 @@ import {
 import type { ResourceViewState } from "./resourceViewState";
 import styles from "./ResourceWorkspace/index.module.scss";
 
-export function ResourcePreview(props: Readonly<{
+export const ResourcePreview = observer(function ResourcePreview(props: Readonly<{
   active?: boolean;
   view_state?: ResourceViewState;
   roots: readonly Readonly<{ label: string; locator: SessionResourceLocator | null; path?: string }>[];
@@ -74,6 +77,7 @@ export function ResourcePreview(props: Readonly<{
     siblings: readonly ToolFileReference[],
   ) => void;
 }>) {
+  const theme = useAppearance().preset;
   const root = useRootStore();
   const files = root.files;
   const { resource } = props.tab;
@@ -350,7 +354,7 @@ export function ResourcePreview(props: Readonly<{
           props.on_open_file,
           props.on_open_local_resource,
           (message) => setActionError(message),
-          showLinkedResourceMenu, files, openHost,
+          showLinkedResourceMenu, files, openHost, theme,
         ) : null}
       </div>
       {props.active !== false && context_menu && (
@@ -362,7 +366,7 @@ export function ResourcePreview(props: Readonly<{
       )}
     </div>
   );
-}
+});
 
 function loadPreview(resource: ResourceHandle, files: ClientResources): Promise<PreviewSessionResourceFileResult | LocalResourcePreview | AttachmentPreview> {
   const source = resource.source;
@@ -418,10 +422,10 @@ function ResourceActionsMenu(props: Readonly<{
         )}
         {props.image_available && (
           <>
-            <ResourceActionMenuItem icon="zoom-in" label="放大" on_select={() => { void props.image_ref.current?.zoomIn(); }} />
-            <ResourceActionMenuItem icon="zoom-out" label="缩小" on_select={() => { void props.image_ref.current?.zoomOut(); }} />
-            <ResourceActionMenuItem icon="image" label="适应窗口" on_select={() => { void props.image_ref.current?.fitToView(); }} />
-            <ResourceActionMenuItem icon="image" label="原始尺寸（100%）" on_select={() => { void props.image_ref.current?.centerView(1); }} />
+            <ResourceActionMenuItem icon="zoom-in" label="放大" on_select={() => { const viewer = props.image_ref.current; void viewer?.zoomIn(viewer.state.scale * 0.1, 0); }} />
+            <ResourceActionMenuItem icon="zoom-out" label="缩小" on_select={() => { const viewer = props.image_ref.current; void viewer?.zoomOut(viewer.state.scale * 0.1, 0); }} />
+            <ResourceActionMenuItem icon="image" label="适应窗口" on_select={() => { void props.image_ref.current?.fitToView({ maxScale: 1, animationTime: 0 }); }} />
+            <ResourceActionMenuItem icon="image" label="原始尺寸（100%）" on_select={() => { void props.image_ref.current?.centerView(1, 0); }} />
           </>
         )}
         <ResourceActionMenuItem icon="refresh" label="重新加载" on_select={props.on_refresh} />
@@ -473,7 +477,7 @@ function OpaqueResourceBreadcrumb(props: Readonly<{
         <DropdownMenuContent align="start" className={styles.breadcrumb_menu}>
           {props.siblings.map((item) => (
             <DropdownMenuItem disabled={item.disabled} key={item.key} onSelect={() => props.on_select(item)}>
-              <MaterialIcon url={resolveMaterialFileIcon(item.name)} fallback="file" />
+              <ResourceMaterialIcon name={item.name} kind="file" className={styles.breadcrumb_file_icon} />
               <span>{item.name}</span>
               {item.name === props.name && <Icon name="check" size={14} />}
             </DropdownMenuItem>
@@ -499,6 +503,7 @@ function renderPreview(
   on_local_resource_menu: (reference: string, location: ResourceMenuLocation) => void,
   files: ClientResources,
   open_host: (path: string) => void,
+  theme: ThemePreset,
 ) {
   if (preview.kind === "pdf" && "data_base64" in preview && preview.data_base64) {
     return <PdfViewer base64={preview.data_base64} title={`${tab.resource.display_name} PDF 预览`} />;
@@ -528,7 +533,7 @@ function renderPreview(
     const supports_relative_resources = source.type === "host_file" || source.type === "session_file" || source.type === "local_file";
     return (
       <div className={styles.markdown_viewer}>
-        <MarkdownContent
+        <MarkdownContent theme={theme}
           allow_relative_local_resources={supports_relative_resources}
           load_local_image={supports_relative_resources ? async (reference) => {
             let image: PreviewSessionResourceFileResult | LocalResourcePreview;
@@ -654,8 +659,8 @@ function LocalSiblingMenu(props: Readonly<{
             }}
           >
             {entry.kind === "directory"
-              ? <MaterialIcon url={resolveMaterialFolderIcon(entry.display_name, false, false)} fallback="folder" />
-              : <MaterialIcon url={resolveMaterialFileIcon(entry.display_name)} fallback="file" />}
+              ? <ResourceMaterialIcon name={entry.display_name} kind="folder" root={false} className={styles.breadcrumb_file_icon} />
+              : <ResourceMaterialIcon name={entry.display_name} kind="file" className={styles.breadcrumb_file_icon} />}
             <span>{entry.display_name}</span>
             {(entry.current || entry.display_name === props.current_name) && <Icon name="check" size={14} />}
           </DropdownMenuItem>
@@ -726,7 +731,7 @@ function RootBreadcrumbSiblings(props: Readonly<{
       <DropdownMenuContent align="start" className={styles.breadcrumb_menu}>
         {available_roots.map((root) => (
           <DropdownMenuItem key={root.label} onSelect={() => props.on_focus_workspace(root.locator)}>
-            <MaterialIcon url={resolveMaterialFolderIcon(root.label, false, true)} fallback="folder" />
+            <ResourceMaterialIcon name={root.label} kind="folder" root={true} className={styles.breadcrumb_file_icon} />
             <span>{root.label}</span>
             {root.label === props.current_name && <Icon name="check" size={14} />}
           </DropdownMenuItem>
@@ -779,8 +784,8 @@ function BreadcrumbSiblings(props: Readonly<{
             onSelect={() => entry.kind === "directory" ? props.on_focus_workspace(entry.locator) : props.on_open_file(entry)}
           >
             {entry.kind === "directory"
-              ? <MaterialIcon url={resolveMaterialFolderIcon(entry.display_name, false, false)} fallback="folder" />
-              : <MaterialIcon url={resolveMaterialFileIcon(entry.display_name)} fallback="file" />}
+              ? <ResourceMaterialIcon name={entry.display_name} kind="folder" root={false} className={styles.breadcrumb_file_icon} />
+              : <ResourceMaterialIcon name={entry.display_name} kind="file" className={styles.breadcrumb_file_icon} />}
             <span>{entry.display_name}</span>
             {entry.display_name === props.current_name && <Icon name="check" size={14} />}
           </DropdownMenuItem>
@@ -790,9 +795,6 @@ function BreadcrumbSiblings(props: Readonly<{
   );
 }
 
-function MaterialIcon(props: Readonly<{ fallback: "file" | "folder"; url: string | null }>) {
-  return props.url ? <img alt="" aria-hidden="true" className={styles.breadcrumb_file_icon} src={props.url} /> : <Icon name={props.fallback} size={16} />;
-}
 
 function resolveRelativeResource(base: SessionResourceLocator, reference: string): SessionResourceLocator | null {
   let value = reference;

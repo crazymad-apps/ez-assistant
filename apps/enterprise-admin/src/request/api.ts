@@ -66,6 +66,8 @@ const errors: Record<string, string> = {
   FEEDBACK_SUBMISSION_CONFLICT: '该提交标识已用于不同内容，请核对原反馈。',
   FEEDBACK_TOO_LARGE: '反馈内容超过大小限制，请缩短后提交。',
   CALL_NOT_FOUND: '调用记录不存在或已到期清理。',
+  RECORDING_SETTINGS_OUTDATED: '记录策略格式已更新，请刷新页面后重试。',
+  SNAPSHOT_READ_BUSY: '正文读取繁忙，请稍后重试。',
   SNAPSHOT_ROOT_UNAVAILABLE: '快照目录未配置或不可用，请检查中心配置。',
   MODEL_NOT_FOUND: '模型或服务商不存在，请刷新目录或保存固定配置。',
   MODEL_CONFIGURATION_CHANGED: '服务商连接已变化，请重新刷新。',

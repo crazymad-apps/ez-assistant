@@ -82,7 +82,7 @@ fn apply(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn validate(connection: &Connection) -> Result<()> {
+pub(super) fn validate(connection: &Connection) -> Result<()> {
     v0_29_0::validate_layout(connection)?;
     connection.prepare("SELECT context_management_mode FROM sessions LIMIT 0")?;
     connection.prepare("SELECT context_management_mode FROM child_tasks LIMIT 0")?;

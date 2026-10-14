@@ -112,3 +112,42 @@ DELETE /api/users/:id 复用身份串行事务、管理员重验和提交后 rev
 WS compact 的完整 JSON 不设专用 2 MiB 门槛：保留用户/开发者消息及图片后返回完整窗口，
 不能把该聚合误当单个密文 item。资源保护仍由通用请求大小、并发和 WS 接收缓冲预算承担；
 快照/计量解析预算仅影响记录完整性，不截断实际转发内容。
+
+## v0.31.0 F03 M0 异常调用证据
+
+迁移 011 将正文策略改为 off/anomalies/all；begin 冻结模式，正常确认后 anomalies 才释放正文。
+response-frames 为 usage 和响应观察共用的有界分帧器，response-observer 不改变转发或执行模型。
+HTTP 结果、响应观察、usage 和文件完整性分别结算；历史观察为空，不能用 HTTP 2xx 补成正常。
+WS 上游结构化错误归为 response_error，并保留上游状态码与独立失败帧，不误归为中心内部失败。
+
+快照保存原始字节，非文本或压缩正文通过 Base64 读取；两侧各 8 MiB，首个未交付 WS 失败帧最多 1 MiB，
+共用 64 MiB 采集预算。失败帧使用独立小型 JSONB 元数据及固定文件，随既有恢复／清理任务处理；
+不建立事件表。正文管理接口限两个并发读取槽，完成读后重验身份且审计成功才返回，不把正文写进日志或审计。
+
+Center/Admin 管理协议配套升级，缺 mode 的旧页面明确拒绝；Host 企业协议不变。
+正常观察不承诺覆盖 Runtime 独有失败；该类故障使用 all 定向录制，不能事后补录。
+部署及回退须核实数据库与快照目录，匹配恢复程序／数据库／文件；不从开发计划确认推导生产迁移授权。
+
+## v0.31.0 F01 M0 官网内容维护
+
+2026-10-13 用户修订维护边界：日志复用 `desktop_releases.notes` 与既有保存／审计，官网和客户端
+共用说明；公开日志由曾发布事实派生。首页与手册从独立固定静态目录读取，不关联安装版本。
+已移除旧中间设计的版本摘要、内容 ZIP 上传和专属迁移，不保留兼容路径，不擅自修改真实／共享数据库。
+
+静态目录仅放经校验的可公开内容，不能挂仓库或私有存储；受限 Markdown 与图片安全约束保留。
+数据部署不要求重建应用或重启，安装包发布／撤回不切换手册。详情见
+[F01 技术方案](../versions/v0.31.0/features/F01-企业中心官网与公开页面/技术方案.md)与[内容维护](../site/README.md)。
+M0／M1 已确认，M2 Docker 同端口分流已实现并在隔离环境验证；按用户授权完成 M3 正式内容与端到端核对，待人工验收。
+`CENTER_SITE_CONTENT_ROOT` 指定独立公开目录，固定 `/site-content/` 只读提供 content.json 和哈希图片；
+`site:build`／`site:publish` 使用同一安全编译规则，更新不连接数据库。日志公开查询为 `/api/site/changelog`，
+只读预览为管理员 `/api/desktop-releases/notes-preview`，保存继续使用原 notes 接口。
+
+M1 `GET /api/site/downloads` 按平台自动选取最高 SemVer 的已发布、文件可用且协议兼容 installer；
+指定 version 时不回退版本，空结果不推断撤回原因。复用原文件准入，查询不打开下载流或重算大文件哈希。
+Node 完整启动在数据库操作前校验 `public/admin` 和 `public/site` 的 Vite 清单及所有资源；
+仅匹配 `/`、`/download`、`/changelog`、`/manual`、合法单段文章路径和 `/site-assets/`。
+API、后台和缺资源没有首页兜底；API-only 仍是显式开发模式，不能掩盖完整制品缺失。
+
+Docker 交付由同批装配的 Center／Nginx 两镜像组成，只有入口映射宿主端口；Center 保留完整资源检查。
+入口仅挂载独立公开内容目录，安装包／插件／调用快照作为 Center 私有持久卷。API 不缓冲、不改写、不重试；
+具体页面与资源白名单、缓存、超时、成套升级和恢复约束见[部署说明](../../apps/enterprise-center/deploy/README.md)。

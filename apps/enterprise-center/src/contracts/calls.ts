@@ -1,16 +1,27 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { ModelSelection, protocols } from './models.js';
 import type { Protocol } from './models.js';
-import type { Outcome } from '../llm/entity.js';
+import type { Outcome, RecordingMode, ResponseSource } from '../llm/entity.js';
 import type { SnapshotState } from '../llm/snapshots.js';
 import type { UsageState } from '../llm/entity.js';
 
 export const outcomes = ['in_progress', 'forwarded', 'rejected', 'upstream_error', 'interrupted', 'unknown'] as const;
-export const snapshotStates = ['disabled', 'pending', 'complete', 'partial', 'failed', 'expired', 'missing'] as const;
+export const snapshotStates = [
+  'disabled',
+  'pending',
+  'complete',
+  'partial',
+  'failed',
+  'expired',
+  'missing',
+  'not_received',
+] as const;
+export const recordingModes = ['off', 'anomalies', 'all'] as const;
+export const observations = ['pending', 'normal', 'anomalous', 'unconfirmed'] as const;
 export const usageStates = ['pending', 'available', 'partial', 'unavailable'] as const;
 
 export class RecordingSettings {
-  @ApiProperty() enabled!: boolean;
+  @ApiProperty({ enum: recordingModes }) mode!: RecordingMode;
   @ApiProperty({ minimum: 1, maximum: 3650 }) content_retention_days!: number;
   @ApiProperty({ minimum: 1, maximum: 3650 }) index_retention_days!: number;
 }
@@ -24,6 +35,7 @@ export class CallSnapshot {
 
 export class SnapshotContent extends CallSnapshot {
   @ApiProperty({ type: String, nullable: true }) text!: string | null;
+  @ApiProperty({ type: String, nullable: true }) body_base64!: string | null;
 }
 
 export class CallDetails {
@@ -33,13 +45,22 @@ export class CallDetails {
   @ApiProperty({ type: String, nullable: true }) provider_instance_id!: string | null;
   @ApiProperty({ type: String, nullable: true }) provider_name!: string | null;
   @ApiProperty({ type: String, nullable: true }) model_id!: string | null;
-  @ApiProperty({ enum: ['proxy', 'admin_test', 'context_compaction', 'input_tokens'] }) kind!: 'proxy' | 'admin_test' | 'context_compaction' | 'input_tokens';
+  @ApiProperty({ enum: ['proxy', 'admin_test', 'context_compaction', 'input_tokens'] }) kind!:
+    'proxy' | 'admin_test' | 'context_compaction' | 'input_tokens';
   @ApiProperty({ enum: protocols }) protocol!: Protocol;
   @ApiProperty({ format: 'date-time' }) started_at!: string;
   @ApiProperty({ type: String, nullable: true, format: 'date-time' }) ended_at!: string | null;
   @ApiProperty({ type: Number, nullable: true }) http_status!: number | null;
   @ApiProperty({ type: String, nullable: true }) reason!: string | null;
   @ApiProperty({ enum: outcomes }) outcome!: Outcome;
+  @ApiProperty({ enum: observations, nullable: true }) response_observation!:
+    import('../llm/response-observer.js').Observation | null;
+  @ApiProperty({ type: String, nullable: true }) response_observation_reason!: string | null;
+  @ApiProperty({ enum: ['upstream_http', 'websocket_bridge', 'websocket_compact'], nullable: true })
+  response_source!: ResponseSource | null;
+  @ApiProperty({ type: String, nullable: true }) response_content_type!: string | null;
+  @ApiProperty({ type: String, nullable: true }) response_content_encoding!: string | null;
+  @ApiProperty({ type: CallSnapshot, nullable: true }) upstream_failure!: CallSnapshot | null;
   @ApiProperty({ enum: usageStates }) usage_state!: UsageState;
   @ApiProperty({ type: String, nullable: true }) usage_reason!: string | null;
   @ApiProperty({ type: String, nullable: true }) input_tokens!: string | null;
@@ -57,7 +78,9 @@ export class CallQuery {
   @ApiPropertyOptional({ format: 'uuid' }) provider_instance_id?: string;
   @ApiPropertyOptional() model_id?: string;
   @ApiPropertyOptional({ enum: outcomes }) outcome?: Outcome;
-  @ApiPropertyOptional({ enum: ['proxy', 'admin_test', 'context_compaction', 'input_tokens'] }) kind?: 'proxy' | 'admin_test' | 'context_compaction' | 'input_tokens';
+  @ApiPropertyOptional({ enum: observations }) response_observation?: import('../llm/response-observer.js').Observation;
+  @ApiPropertyOptional({ enum: ['proxy', 'admin_test', 'context_compaction', 'input_tokens'] }) kind?:
+    'proxy' | 'admin_test' | 'context_compaction' | 'input_tokens';
   @ApiPropertyOptional({ format: 'date-time' }) from?: string;
   @ApiPropertyOptional({ format: 'date-time' }) to?: string;
   @ApiPropertyOptional({ default: 50, minimum: 1, maximum: 200 }) limit?: number;
@@ -77,7 +100,8 @@ export class UsageQuery {
   @ApiPropertyOptional({ type: Number }) user_id?: number;
   @ApiPropertyOptional({ format: 'uuid' }) provider_instance_id?: string;
   @ApiPropertyOptional() model_id?: string;
-  @ApiPropertyOptional({ enum: ['proxy', 'admin_test', 'context_compaction'] }) kind?: 'proxy' | 'admin_test' | 'context_compaction';
+  @ApiPropertyOptional({ enum: ['proxy', 'admin_test', 'context_compaction'] }) kind?:
+    'proxy' | 'admin_test' | 'context_compaction';
   @ApiPropertyOptional({ enum: outcomes }) outcome?: Outcome;
   @ApiPropertyOptional({ enum: ['hour', 'day', 'month'] }) granularity?: 'hour' | 'day' | 'month';
   @ApiPropertyOptional({ enum: ['user', 'model'] }) group_by?: 'user' | 'model';

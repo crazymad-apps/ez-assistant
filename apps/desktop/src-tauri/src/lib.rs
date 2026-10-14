@@ -25,7 +25,8 @@ fn health() -> &'static str {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let context = tauri::generate_context!();
+    let mut context = tauri::generate_context!();
+    desktop_preferences::appearance::defer_main_window(context.config_mut());
     let development = context.config().identifier == "com.ez-assistant.desktop.dev";
     let native_resources = native_resource::NativeResourceBridge::new();
     let desktop_lifecycle = desktop_lifecycle::DesktopLifecycleCoordinator::new();
@@ -66,6 +67,7 @@ pub fn run() {
                 runtime_bootstrap::RuntimeBootstrapCoordinator::for_application(development)
                     .with_update_home(desktop_update::DesktopUpdater::startup_home(&app_handle));
             app.manage(runtime_bootstrap);
+            desktop_preferences::appearance::create_main_window(&app_handle)?;
             let coordinator = app.state::<desktop_lifecycle::DesktopLifecycleCoordinator>();
             coordinator.install(&app_handle)?;
             app.state::<desktop_update::DesktopUpdater>()
@@ -131,6 +133,9 @@ pub fn run() {
                 desktop_lifecycle::update_native_runtime_state,
                 desktop_preferences::load_desktop_preferences,
                 desktop_preferences::save_desktop_preferences,
+                desktop_preferences::load_desktop_theme,
+                desktop_preferences::save_desktop_theme,
+                desktop_preferences::appearance::apply_desktop_theme,
                 external_link::open_external_http_url,
                 external_link::open_session_workspace_directory,
                 external_link::open_skill_directory,

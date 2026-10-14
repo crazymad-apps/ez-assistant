@@ -320,6 +320,7 @@ impl DeviceGatewayService {
             .local_addr()
             .map_err(DeviceGatewayError::Bind)?
             .port();
+        crate::server::initialize_tls_provider();
         let tls = RustlsConfig::from_pem(
             identity.certificate_pem.clone(),
             identity.private_key_pem.clone(),

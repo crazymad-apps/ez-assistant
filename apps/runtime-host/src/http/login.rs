@@ -111,6 +111,11 @@ pub(super) async fn login(
         previous.logout();
     }
     let permit = AccessPermit::new(false, Some(session.clone()), state.connections.clone());
+    if permit.user_key().is_some()
+        && let Some(domains) = &state.domains
+    {
+        domains.warm_up(&permit);
+    }
     let mut projection = project_session(&state, &permit);
     projection.token = native.then(|| token.clone());
     let mut response = Json(projection).into_response();

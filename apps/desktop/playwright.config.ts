@@ -4,6 +4,7 @@ export default defineConfig({
   testDir: "./tests/e2e",
   testMatch: [
     "control-sizing.spec.ts",
+    "appearance-renderers.spec.ts",
     "model-management.spec.ts",
     "shell.spec.ts",
     "startup.spec.ts",

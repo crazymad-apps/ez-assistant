@@ -1,0 +1,10 @@
+FROM nginx:1.28-alpine
+# 与 Center 使用同一已校验装配目录；镜像不包含内容源、私有文件或构建工具。
+COPY public /srv/public
+COPY nginx.conf /etc/nginx/nginx.conf
+COPY center-proxy.conf /etc/nginx/center-proxy.conf
+USER nginx
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD wget -q -O /dev/null http://127.0.0.1:8080/ || exit 1
+ENTRYPOINT ["nginx"]
+CMD ["-g", "daemon off;"]

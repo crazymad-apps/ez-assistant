@@ -1,11 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import type { DataSource } from 'typeorm';
 import { CallEntity, RecordingEntity } from './entity.js';
-import type { Outcome } from './entity.js';
+import type { Outcome, RecordingMode } from './entity.js';
 import { Capture, SnapshotFiles, SnapshotMemory, noSnapshot } from './snapshots.js';
 import type { Side, SnapshotResult } from './snapshots.js';
 import { ControlError } from './errors.js';
-import { UsageObserver } from './usage.js';
+import type { UsageObserver } from './usage.js';
+import type { ResponseObserver } from './response-observer.js';
+import type { IncomingHttpHeaders } from 'node:http';
 
 const sides = ['request', 'response'] as const;
 
@@ -16,19 +18,52 @@ export class CallRecording {
   readonly request?: Capture;
   readonly response?: Capture;
   private settled?: Promise<void>;
-  responseUnsupported = false;
   usage?: UsageObserver;
+  observation?: ResponseObserver;
+  private received = false;
+  private responseBytes = 0;
+  private upstreamFailure?: Capture;
 
   constructor(
     readonly row: CallEntity,
     private readonly records: CallRecords,
-    memory: SnapshotMemory,
-    enabled: boolean,
+    private readonly memory: SnapshotMemory,
+    private readonly mode: RecordingMode,
   ) {
-    if (enabled) {
+    if (mode !== 'off') {
       this.request = new Capture(memory);
       this.response = new Capture(memory);
     }
+  }
+
+  headers(headers: IncomingHttpHeaders): void {
+    this.received = true;
+    // 媒体信息只保存规范化的小值，任意供应商头不进入列表/审计。
+    const type = String(headers['content-type'] ?? '')
+      .split(';')[0]!
+      .trim()
+      .toLowerCase();
+    const encoding = String(headers['content-encoding'] ?? 'identity')
+      .trim()
+      .toLowerCase();
+    this.row.response_content_type = /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(type) && type.length <= 128 ? type : 'unknown';
+    this.row.response_content_encoding = ['identity', 'gzip', 'deflate', 'br', 'zstd'].includes(encoding)
+      ? encoding
+      : 'unknown';
+    this.observation?.headers(headers);
+  }
+
+  chunk(chunk: Buffer): void {
+    this.responseBytes += chunk.length;
+    this.response?.append(chunk);
+    this.observation?.chunk(chunk);
+  }
+
+  /** 只保留首个未交付失败帧，使用采集共用预算；不混入下游响应正文。 */
+  failureFrame(chunk: Buffer): void {
+    if (this.settled || this.mode === 'off' || this.upstreamFailure) return;
+    this.upstreamFailure = new Capture(this.memory, 1024 * 1024);
+    this.upstreamFailure.append(chunk);
   }
 
   settle(outcome: Outcome, status: number | null, reason: string | null): Promise<void> {
@@ -38,9 +73,19 @@ export class CallRecording {
 
   private async finish(outcome: Outcome, status: number | null, reason: string | null): Promise<void> {
     try {
-      const measured = this.usage?.result(outcome) ?? {
+      const observed = this.observation?.result(outcome, reason) ?? {
+        state: 'anomalous' as const,
+        reason: reason ?? 'not_forwarded',
+      };
+      const retain = this.mode === 'all' || (this.mode === 'anomalies' && observed.state !== 'normal');
+      const measured = this.usage?.result(outcome, this.observation?.frames.reason) ?? {
         state: 'unavailable' as const,
-        reason: this.row.kind === 'input_tokens' ? 'input_measurement' : outcome === 'rejected' ? 'not_forwarded' : 'not_reported',
+        reason:
+          this.row.kind === 'input_tokens'
+            ? 'input_measurement'
+            : outcome === 'rejected'
+              ? 'not_forwarded'
+              : 'not_reported',
         input_tokens: null,
         output_tokens: null,
         total_tokens: null,
@@ -50,6 +95,12 @@ export class CallRecording {
       try {
         await this.records.repository.update(this.row.id, {
           outcome,
+          response_observation: observed.state,
+          response_observation_reason: observed.reason,
+          response_source: this.row.response_source ?? null,
+          response_content_type: this.row.response_content_type ?? null,
+          response_content_encoding: this.row.response_content_encoding ?? null,
+          upstream_failure_snapshot: retain && this.upstreamFailure ? noSnapshot('pending') : null,
           http_status: status,
           reason,
           ended_at: new Date(),
@@ -66,14 +117,19 @@ export class CallRecording {
         diagnostic();
       }
       if (outcome === 'interrupted' || outcome === 'unknown') this.response?.interrupt();
-      for (const side of sides) {
-        const capture = this[side];
+      for (const side of [...sides, 'upstream_failure'] as const) {
+        const capture = side === 'upstream_failure' ? this.upstreamFailure : this[side];
         if (!capture) continue;
         let result: SnapshotResult;
         try {
-          if (side === 'response' && outcome === 'rejected') result = noSnapshot('failed', 'not_forwarded');
-          else if (side === 'response' && this.responseUnsupported)
-            result = noSnapshot('failed', 'unsupported_encoding');
+          if (!retain) result = noSnapshot('disabled', 'normal_not_retained');
+          else if (
+            side === 'response' &&
+            !this.responseBytes &&
+            (!this.received || outcome === 'interrupted' || outcome === 'rejected')
+          )
+            result = noSnapshot('not_received', reason ?? 'not_forwarded');
+          else if (!capture.bytes && capture.reason) result = noSnapshot('failed', capture.reason);
           else result = await this.records.files.publish(this.row.id, this.row.started_at, side, capture);
         } catch {
           result = noSnapshot('failed', 'snapshot_write_failed');
@@ -89,6 +145,8 @@ export class CallRecording {
       this.request?.release();
       this.response?.release();
       this.usage?.release();
+      this.observation?.release();
+      this.upstreamFailure?.release();
       this.records.active.delete(this.row.id);
     }
   }
@@ -132,20 +190,24 @@ export class CallRecords {
         outcome: 'in_progress',
         http_status: null,
         reason: null,
-        request_snapshot_state: settings.enabled ? 'pending' : 'disabled',
-        response_snapshot_state: settings.enabled ? 'pending' : 'disabled',
+        request_snapshot_state: settings.mode !== 'off' ? 'pending' : 'disabled',
+        request_snapshot_reason: settings.mode === 'off' ? 'policy_off' : null,
+        response_snapshot_state: settings.mode !== 'off' ? 'pending' : 'disabled',
+        response_snapshot_reason: settings.mode === 'off' ? 'policy_off' : null,
+        response_observation: 'pending',
         usage_state: 'pending',
         usage_reason: null,
       });
       await this.repository.insert(row);
       this.active.add(row.id);
-      return new CallRecording(row, this, this.memory, settings.enabled);
+      return new CallRecording(row, this, this.memory, settings.mode);
     } catch {
       throw new ControlError('llm_record_unavailable');
     }
   }
 
   snapshot(id: string, side: Side, value: SnapshotResult) {
+    if (side === 'upstream_failure') return this.repository.update(id, { upstream_failure_snapshot: value });
     return this.repository.update(id, {
       [`${side}_snapshot_state`]: value.state,
       [`${side}_path`]: value.path,
@@ -157,7 +219,7 @@ export class CallRecords {
 
   async initialize(): Promise<void> {
     if (!this.source) return;
-    if ((await this.settings()).enabled) await this.files.validate();
+    if ((await this.settings()).mode !== 'off') await this.files.validate();
     // 启动时没有活动请求，逐页恢复；任何存储异常直接停止启动，不连续扩张修复范围。
     let after = '';
     for (;;) {
@@ -166,32 +228,33 @@ export class CallRecords {
       const rows = await query.getMany();
       if (!rows.length) break;
       for (const row of rows) {
-        if (row.outcome === 'in_progress' || row.usage_state === 'pending')
+        if (row.outcome === 'in_progress' || row.usage_state === 'pending' || row.response_observation === 'pending')
           await this.repository.update(row.id, {
             ...(row.outcome === 'in_progress' ? { outcome: 'unknown' as const, reason: 'process_restarted' } : {}),
-            ...(row.usage_state === 'pending' ? { usage_state: 'unavailable' as const, usage_reason: 'process_restarted' } : {}),
+            ...(row.response_observation === 'pending'
+              ? { response_observation: 'unconfirmed' as const, response_observation_reason: 'process_restarted' }
+              : {}),
+            ...(row.usage_state === 'pending'
+              ? { usage_state: 'unavailable' as const, usage_reason: 'process_restarted' }
+              : {}),
           });
-        for (const side of sides) {
-          const state = row[`${side}_snapshot_state`];
-          if (!['pending', 'complete', 'partial'].includes(state)) continue;
+        for (const side of [...sides, 'upstream_failure'] as const) {
+          let meta = snapshotMetadata(row, side);
+          if (!meta && side === 'upstream_failure' && row.outcome === 'in_progress') {
+            const orphan = await this.files.read(row.id, row.started_at, side);
+            if (orphan) {
+              await this.snapshot(row.id, side, orphan.result);
+              meta = orphan.result;
+            }
+          }
+          if (!meta || !['pending', 'complete', 'partial'].includes(meta.state)) continue;
           const found = await this.files.read(row.id, row.started_at, side);
           if (!found) await this.snapshot(row.id, side, noSnapshot('missing', 'file_missing'));
-          else if (state === 'pending') {
-            let recovered = found.result;
-            try {
-              new TextDecoder('utf-8', { fatal: true }).decode(found.body);
-            } catch {
-              recovered = noSnapshot('failed', 'invalid_utf8');
-            }
-            await this.snapshot(row.id, side, recovered);
-          } else if (
-            found.result.sha256 !== row[`${side}_sha256`] ||
-            String(found.result.bytes) !== row[`${side}_bytes`]
-          ) {
+          else if (meta.state === 'pending') await this.snapshot(row.id, side, found.result);
+          else if (found.result.sha256 !== meta.sha256 || found.result.bytes !== meta.bytes)
             await this.snapshot(row.id, side, noSnapshot('failed', 'integrity_mismatch'));
-          }
         }
-        if (sides.some((side) => row[`${side}_snapshot_state`] !== 'disabled'))
+        if (sides.some((side) => row[`${side}_snapshot_state`] !== 'disabled') || row.upstream_failure_snapshot)
           await this.files.clean(row.id, row.started_at, true);
       }
       after = rows.at(-1)!.id;
@@ -225,7 +288,7 @@ export class CallRecords {
         before: contentBefore,
       })
       .andWhere(
-        "(c.request_snapshot_state NOT IN ('disabled','expired') OR c.response_snapshot_state NOT IN ('disabled','expired') OR (CASE WHEN c.outcome = 'unknown' THEN c.started_at ELSE c.ended_at END) < :indexBefore)",
+        "(c.request_snapshot_state NOT IN ('disabled','expired','not_received') OR c.response_snapshot_state NOT IN ('disabled','expired','not_received') OR c.upstream_failure_snapshot->>'state' NOT IN ('disabled','expired','not_received') OR (CASE WHEN c.outcome = 'unknown' THEN c.started_at ELSE c.ended_at END) < :indexBefore)",
         { indexBefore },
       )
       .orderBy('c.started_at', 'ASC')
@@ -233,13 +296,16 @@ export class CallRecords {
       .getMany();
     for (const row of rows) {
       if (this.active.has(row.id)) continue;
-      if (sides.some((side) => row[`${side}_snapshot_state`] !== 'disabled'))
+      if (sides.some((side) => row[`${side}_snapshot_state`] !== 'disabled') || row.upstream_failure_snapshot)
         await this.files.clean(row.id, row.started_at);
       const ended = row.outcome === 'unknown' ? row.started_at : row.ended_at!;
       if (ended < indexBefore) await this.repository.delete(row.id);
       else
-        for (const side of sides)
-          if (row[`${side}_snapshot_state`] !== 'disabled') await this.snapshot(row.id, side, noSnapshot('expired'));
+        for (const side of [...sides, 'upstream_failure'] as const) {
+          const state = snapshotMetadata(row, side)?.state;
+          if (state && !['disabled', 'not_received'].includes(state))
+            await this.snapshot(row.id, side, noSnapshot('expired'));
+        }
     }
   }
 
@@ -248,4 +314,16 @@ export class CallRecords {
     clearInterval(this.timer);
     await this.cleaning;
   }
+}
+
+/** 数据库小元数据与文件寻址分离；失败帧缺失不伪造两侧正文。 */
+export function snapshotMetadata(row: CallEntity, side: Side): SnapshotResult | null {
+  if (side === 'upstream_failure') return row.upstream_failure_snapshot ?? null;
+  return {
+    state: row[`${side}_snapshot_state`],
+    path: row[`${side}_path`],
+    bytes: row[`${side}_bytes`] == null ? null : Number(row[`${side}_bytes`]),
+    sha256: row[`${side}_sha256`],
+    reason: row[`${side}_snapshot_reason`],
+  };
 }

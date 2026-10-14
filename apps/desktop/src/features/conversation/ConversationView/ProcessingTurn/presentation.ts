@@ -16,7 +16,7 @@ export function presentTurn(
   live: LiveRunProjection | null,
   status: RunStatus | null = live?.status ?? messages.at(-1)?.status ?? null,
 ) {
-  const entries: TurnEntry[] = messages.flatMap((message, message_index) =>
+  let entries: TurnEntry[] = messages.flatMap((message, message_index) =>
     message.segments.map((segment) => ({
       key: `${message.step ?? message.message_id}:${segment.type}:${segment.type === 'tool_group' ? segment.tools[0]?.call_id : segment.part_id}`,
       step: message.step ?? message_index + 1,
@@ -36,6 +36,8 @@ export function presentTurn(
       });
     }
   }
+  // 空正文和思考片段不参与布局，也不隔断相邻工具分组。
+  entries = entries.filter(({ segment }) => segment.type === 'tool_group' || segment.text.trim().length > 0);
   // 活动轮次仍按最新 Step 判断，不能提前把中间说明当作最终回复。
   // 终态可能由问答/交付等工具结束，没有后继纯文本消息；保留最后一个有正文的消息，
   // 即使它自身带工具，或后续消息只有工具/reasoning，也不能把已交付正文全部折掉。

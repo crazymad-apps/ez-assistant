@@ -7,19 +7,24 @@ import type { ModelsService } from '../models/service.js';
 import { CallEntity, RecordingEntity } from './entity.js';
 import { noSnapshot } from './snapshots.js';
 import type { Side } from './snapshots.js';
-import { outcomes } from '../contracts/calls.js';
-import type { CallDetails, CallPage, RecordingSettings, SnapshotContent, ModelTestResult, UsagePage, UsageModelOption } from '../contracts/calls.js';
+import { snapshotMetadata } from './records.js';
+import { outcomes, observations, recordingModes } from '../contracts/calls.js';
+import type {
+  CallDetails,
+  CallPage,
+  RecordingSettings,
+  SnapshotContent,
+  ModelTestResult,
+  UsagePage,
+  UsageModelOption,
+} from '../contracts/calls.js';
 import type { ModelProxy } from './proxy.js';
 import type { CallRecording } from './records.js';
 import { queryUsage, usageModels } from './usage-query.js';
 
 function snapshotView(row: CallEntity, side: Side) {
-  return {
-    state: row[`${side}_snapshot_state`],
-    bytes: row[`${side}_bytes`] === null ? null : Number(row[`${side}_bytes`]),
-    sha256: row[`${side}_sha256`],
-    reason: row[`${side}_snapshot_reason`],
-  };
+  const result = snapshotMetadata(row, side) ?? noSnapshot('not_received', 'no_failure_frame');
+  return { state: result.state, bytes: result.bytes, sha256: result.sha256, reason: result.reason };
 }
 
 function view(row: CallEntity): CallDetails {
@@ -37,6 +42,12 @@ function view(row: CallEntity): CallDetails {
     http_status: row.http_status,
     reason: row.reason,
     outcome: row.outcome,
+    response_observation: row.response_observation,
+    response_observation_reason: row.response_observation_reason,
+    response_source: row.response_source,
+    response_content_type: row.response_content_type,
+    response_content_encoding: row.response_content_encoding,
+    upstream_failure: row.upstream_failure_snapshot ? snapshotView(row, 'upstream_failure') : null,
     usage_state: row.usage_state,
     usage_reason: row.usage_reason,
     input_tokens: row.input_tokens,
@@ -50,6 +61,7 @@ function view(row: CallEntity): CallDetails {
 }
 
 export class CallManagement {
+  private reading = 0;
   constructor(
     private readonly identities: IdentityService,
     private readonly source: DataSource | undefined,
@@ -70,6 +82,7 @@ export class CallManagement {
       'provider_instance_id',
       'model_id',
       'outcome',
+      'response_observation',
       'kind',
       'from',
       'to',
@@ -94,8 +107,14 @@ export class CallManagement {
     if (input.model_id !== undefined) query.andWhere('c.model_id = :model', { model: text(input.model_id, 1024) });
     if (input.outcome !== undefined)
       query.andWhere('c.outcome = :outcome', { outcome: enumeration(input.outcome, outcomes) });
+    if (input.response_observation !== undefined)
+      query.andWhere('c.response_observation = :observation', {
+        observation: enumeration(input.response_observation, observations),
+      });
     if (input.kind !== undefined)
-      query.andWhere('c.kind = :kind', { kind: enumeration(input.kind, ['proxy', 'admin_test', 'context_compaction', 'input_tokens']) });
+      query.andWhere('c.kind = :kind', {
+        kind: enumeration(input.kind, ['proxy', 'admin_test', 'context_compaction', 'input_tokens']),
+      });
     for (const name of ['from', 'to'])
       if (input[name] !== undefined) {
         const value = input[name]!;
@@ -126,7 +145,9 @@ export class CallManagement {
 
   async get(token: string | undefined, id: string): Promise<CallDetails> {
     await this.identities.requireAdmin(this.manager, token);
-    return view(await this.row(id));
+    const row = await this.row(id);
+    await this.identities.requireAdmin(this.manager, token);
+    return view(row);
   }
 
   async usage(token: string | undefined, value: unknown): Promise<UsagePage> {
@@ -145,15 +166,17 @@ export class CallManagement {
 
   async settings(token?: string): Promise<RecordingSettings> {
     await this.identities.requireAdmin(this.manager, token);
-    const { enabled, content_retention_days, index_retention_days } = await this.proxy.records.settings();
-    return { enabled, content_retention_days, index_retention_days };
+    const { mode, content_retention_days, index_retention_days } = await this.proxy.records.settings();
+    await this.identities.requireAdmin(this.manager, token);
+    return { mode, content_retention_days, index_retention_days };
   }
 
   async saveSettings(token: string | undefined, value: unknown, requestId: string): Promise<RecordingSettings> {
-    const input = fields(value, ['enabled', 'content_retention_days', 'index_retention_days']);
-    const { enabled, content_retention_days, index_retention_days } = input;
+    if (value && typeof value === 'object' && (!Object.hasOwn(value, 'mode') || Object.hasOwn(value, 'enabled')))
+      throw new IdentityError(400, 'RECORDING_SETTINGS_OUTDATED');
+    const input = fields(value, ['mode', 'content_retention_days', 'index_retention_days']);
+    const { mode, content_retention_days, index_retention_days } = input;
     if (
-      typeof enabled !== 'boolean' ||
       typeof content_retention_days !== 'number' ||
       typeof index_retention_days !== 'number' ||
       !Number.isInteger(content_retention_days) ||
@@ -164,21 +187,25 @@ export class CallManagement {
     )
       invalid();
     await this.identities.requireAdmin(this.manager, token);
-    if (enabled) {
+    const selectedMode = enumeration(mode, recordingModes);
+    if (selectedMode !== 'off') {
       try {
         await this.proxy.records.files.validate();
       } catch {
         throw new IdentityError(400, 'SNAPSHOT_ROOT_UNAVAILABLE');
       }
     }
-    const settings = { enabled, content_retention_days, index_retention_days };
+    const settings = { mode: selectedMode, content_retention_days, index_retention_days };
     await this.identities.write(async (manager) => {
       const user = await this.identities.requireAdmin(manager, token);
       const previous = await manager.getRepository(RecordingEntity).findOneByOrFail({ singleton: true });
-      const boundary = index_retention_days < previous.index_retention_days
-        ? new Date(Math.max(previous.usage_available_from.getTime(), Date.now() - index_retention_days * 86400000))
-        : previous.usage_available_from;
-      await manager.getRepository(RecordingEntity).update({ singleton: true }, { ...settings, usage_available_from: boundary });
+      const boundary =
+        index_retention_days < previous.index_retention_days
+          ? new Date(Math.max(previous.usage_available_from.getTime(), Date.now() - index_retention_days * 86400000))
+          : previous.usage_available_from;
+      await manager
+        .getRepository(RecordingEntity)
+        .update({ singleton: true }, { ...settings, usage_available_from: boundary });
       await this.identities.audit(
         manager,
         'llm_recording_settings_changed',
@@ -194,42 +221,56 @@ export class CallManagement {
 
   async snapshot(token: string | undefined, id: string, side: Side, requestId: string): Promise<SnapshotContent> {
     await this.identities.requireAdmin(this.manager, token);
-    const row = await this.row(id);
-    let result: SnapshotContent = { ...snapshotView(row, side), text: null };
-    if (result.state === 'complete' || result.state === 'partial') {
-      const found = await this.proxy.records.files.read(row.id, row.started_at, side);
-      if (
-        !found ||
-        found.result.sha256 !== row[`${side}_sha256`] ||
-        String(found.result.bytes) !== row[`${side}_bytes`]
-      ) {
-        const broken = noSnapshot(found ? 'failed' : 'missing', found ? 'integrity_mismatch' : 'file_missing');
-        await this.proxy.records.snapshot(row.id, side, broken);
-        result = { state: broken.state, bytes: null, sha256: null, reason: broken.reason, text: null };
-      } else {
-        try {
-          result.text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(found.body);
-        } catch {
-          const broken = noSnapshot('failed', 'invalid_utf8');
+    // 大正文读、Base64 和审计等待共用两个槽；忙时立即拒绝，不建立无界任务队列。
+    if (this.reading >= 2) throw new IdentityError(503, 'SNAPSHOT_READ_BUSY');
+    this.reading++;
+    try {
+      const row = await this.row(id);
+      let result: SnapshotContent = { ...snapshotView(row, side), text: null, body_base64: null };
+      if (result.state === 'complete' || result.state === 'partial') {
+        const found = await this.proxy.records.files.read(row.id, row.started_at, side);
+        if (!found || found.result.sha256 !== result.sha256 || found.result.bytes !== result.bytes) {
+          const broken = noSnapshot(found ? 'failed' : 'missing', found ? 'integrity_mismatch' : 'file_missing');
           await this.proxy.records.snapshot(row.id, side, broken);
-          result = { state: broken.state, bytes: null, sha256: null, reason: broken.reason, text: null };
+          result = {
+            state: broken.state,
+            bytes: null,
+            sha256: null,
+            reason: broken.reason,
+            text: null,
+            body_base64: null,
+          };
+        } else {
+          const encoded =
+            side === 'response' &&
+            row.response_content_encoding != null &&
+            row.response_content_encoding !== 'identity';
+          try {
+            if (encoded) throw new Error('encoded');
+            result.text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(found.body);
+          } catch {
+            // 解码失败不改变已校验的文件事实；两种正文表示互斥，不返回替换字符。
+            result.body_base64 = found.body.toString('base64');
+          }
         }
       }
-    }
-    await this.identities.write(async (manager) => {
-      const user = await this.identities.requireAdmin(manager, token);
-      await this.identities.audit(manager, 'llm_snapshot_viewed', requestId, user.id, undefined, null, {
-        call_id: row.id,
-        side,
+      await this.identities.write(async (manager) => {
+        const user = await this.identities.requireAdmin(manager, token);
+        await this.identities.audit(manager, 'llm_snapshot_viewed', requestId, user.id, undefined, null, {
+          call_id: row.id,
+          side,
+        });
       });
-    });
-    return result;
+      return result;
+    } finally {
+      this.reading--;
+    }
   }
 
   async test(token: string | undefined, value: unknown, signal: AbortSignal): Promise<ModelTestResult> {
     return this.proxy.run(async () => {
       const cancelled = new AbortController();
-      const timer = setTimeout(() => cancelled.abort(), 30000);
+      const timer = setTimeout(() => cancelled.abort(new DOMException('test_timeout', 'AbortError')), 30000);
       try {
         const input = fields(value, ['provider_instance_id', 'model_id']);
         const selection = {
@@ -252,7 +293,13 @@ export class CallManagement {
         const output = Math.min(maximum, reasoningMaximum, 1024);
         const body: Record<string, unknown> =
           protocol === 'open_ai_responses'
-            ? { model: selection.model_id, input: 'Reply with OK.', stream: false, store: false, max_output_tokens: output }
+            ? {
+                model: selection.model_id,
+                input: 'Reply with OK.',
+                stream: false,
+                store: false,
+                max_output_tokens: output,
+              }
             : {
                 model: selection.model_id,
                 messages: [{ role: 'user', content: 'Reply with OK.' }],
@@ -305,7 +352,7 @@ export class CallManagement {
               chunk: async (chunk) => {
                 bytes += chunk.length;
                 if (bytes > 1024 * 1024) {
-                  cancelled.abort();
+                  cancelled.abort(new DOMException('test_response_limit', 'AbortError'));
                   throw new Error('response_limit');
                 }
                 chunks.push(chunk);

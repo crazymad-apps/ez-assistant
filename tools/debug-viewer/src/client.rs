@@ -41,6 +41,8 @@ impl DebugClient {
     pub fn new(base_url: impl AsRef<str>) -> Self {
         let ingest_url = format!("{}/ingest", base_url.as_ref().trim_end_matches('/'));
         let http = reqwest::Client::builder()
+            // 本地调试推送直连 viewer，避免系统代理介入本机请求与故障静音。
+            .no_proxy()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
             .build()

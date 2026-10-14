@@ -15,9 +15,9 @@ describe("Desktop control height contract", () => {
     expect(overview).not.toMatch(/\.shell_setting small/);
   });
 
-  it("keeps the Composer primary action blue on hover", () => {
+  it("keeps the Composer primary action readable on hover", () => {
     const composer = compile("src/features/composer/ComposerDock/index.module.scss", { logger: Logger.silent }).css;
-    expect(composer).toMatch(/\.send_button:hover:not\(:disabled\)\s*\{[^}]*color: #fff;[^}]*background: var\(--ez-primary-hover\)/s);
+    expect(composer).toMatch(/\.send_button:hover:not\(:disabled\)\s*\{[^}]*color: var\(--ez-on-primary\);[^}]*background: var\(--ez-primary-hover\)/s);
     expect(composer).not.toMatch(/\.send_button:hover[^{}]*\{[^}]*background: var\(--ez-surface-muted\)/s);
   });
 

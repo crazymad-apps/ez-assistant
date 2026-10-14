@@ -60,9 +60,13 @@ export async function stopNativeRuntime(): Promise<void> {
   await invoke("stop_runtime");
 }
 
-export async function restartNativeRuntime(): Promise<RuntimeBootstrap | null> {
+/** 已确认的 Host 保存事实；普通生命周期重启省略此项。 */
+export type ExpectedHostConfiguration = { instance_id: string; revision: string | null };
+export async function restartNativeRuntime(expected?: ExpectedHostConfiguration): Promise<RuntimeBootstrap | null> {
   if (!isTauri()) return null;
-  return invoke<RuntimeBootstrap>("restart_runtime");
+  return expected
+    ? invoke<RuntimeBootstrap>("restart_runtime", { expected })
+    : invoke<RuntimeBootstrap>("restart_runtime");
 }
 
 export async function quitDesktopClient(): Promise<void> {

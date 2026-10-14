@@ -1,0 +1,250 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1640" height="1250" viewBox="0 0 1640 1250" role="img" aria-labelledby="title desc"><title id="title">F04 四套配色视觉方向</title><desc id="desc">同一工作台、代码、终端和登录页面的四套配色设计示意；非应用截图。</desc><style>text{font-family:Inter,-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}.mono{font-family:Menlo,Consolas,monospace}</style>
+<rect x="0" y="0" width="1640" height="1250" rx="0" fill="#eef0f3" stroke="none"/>
+<text x="32" y="42" fill="#252932" font-size="26" font-weight="650" class="">F04 · 整套配色</text>
+<text x="32" y="69" fill="#5f6673" font-size="15" font-weight="400" class="">统一切换工作台、代码、终端与登录页。以下为设计示意，不是运行截图。</text>
+<rect x="32" y="96" width="772" height="540" rx="12" fill="#ffffff" stroke="#d3d8e1"/>
+<text x="52" y="127" fill="#252932" font-size="20" font-weight="650" class="">默认浅色</text>
+<text x="702" y="126" fill="#5f6673" font-size="13" font-weight="400" class="">浅色</text>
+<rect x="50" y="146" width="736" height="290" rx="6" fill="#ffffff" stroke="#d3d8e1"/>
+<rect x="51" y="147" width="145" height="288" rx="0" fill="#f7f8fa" stroke="none"/>
+<text x="62" y="171" fill="#252932" font-size="14" font-weight="650" class="">ez-assistant</text>
+<text x="62" y="201" fill="#3551b7" font-size="13" font-weight="400" class="">＋ 新建会话</text>
+<text x="62" y="236" fill="#5f6673" font-size="12" font-weight="400" class="">工作区</text>
+<rect x="57" y="250" width="132" height="33" rx="5" fill="#f1f3f6" stroke="none"/>
+<text x="64" y="271" fill="#252932" font-size="13" font-weight="600" class="">分析项目结构</text>
+<text x="64" y="304" fill="#5f6673" font-size="12" font-weight="400" class="">整理任务清单</text>
+<text x="64" y="408" fill="#5f6673" font-size="12" font-weight="400" class="">设置</text>
+<path d="M196 146 L196 436" stroke="#d3d8e1"/>
+<path d="M530 146 L530 436" stroke="#d3d8e1"/>
+<text x="210" y="171" fill="#252932" font-size="14" font-weight="600" class="">分析项目结构</text>
+<text x="210" y="206" fill="#252932" font-size="13" font-weight="400" class="">请概括当前项目的组成。</text>
+<text x="210" y="236" fill="#5f6673" font-size="12" font-weight="400" class="">已读取目录，主要包含以下模块。</text>
+<rect x="210" y="253" width="305" height="75" rx="5" fill="#f6f7f9" stroke="#d3d8e1"/>
+<text x="220" y="276" fill="#a626a4" font-size="12" font-weight="400" class="mono">const</text>
+<text x="263" y="276" fill="#252932" font-size="12" font-weight="400" class="mono">app =</text>
+<text x="310" y="276" fill="#216b35" font-size="12" font-weight="400" class="mono">&quot;ez-assistant&quot;;</text>
+<text x="220" y="303" fill="#5f6673" font-size="11" font-weight="400" class="mono">// 工作台与 Runtime 分离</text>
+<text x="210" y="351" fill="#267351" font-size="12" font-weight="400" class="">✓ 目录读取完成</text>
+<rect x="210" y="373" width="305" height="47" rx="7" fill="#f7f8fa" stroke="#d3d8e1"/>
+<text x="222" y="401" fill="#687180" font-size="12" font-weight="400" class="">继续询问…</text>
+<rect x="472" y="383" width="32" height="27" rx="5" fill="#486af0" stroke="none"/>
+<text x="482" y="402" fill="#ffffff" font-size="17" font-weight="600" class="">↑</text>
+<text x="542" y="171" fill="#252932" font-size="13" font-weight="600" class="">main.ts</text>
+<text x="542" y="203" fill="#687180" font-size="11" font-weight="400" class="mono">1</text>
+<text x="562" y="203" fill="#a626a4" font-size="12" font-weight="400" class="mono">const</text>
+<text x="605" y="203" fill="#252932" font-size="12" font-weight="400" class="mono">ready = true;</text>
+<text x="542" y="227" fill="#687180" font-size="11" font-weight="400" class="mono">2</text>
+<text x="562" y="227" fill="#5f6673" font-size="11" font-weight="400" class="mono">// 初始化客户端</text>
+<path d="M530 292 H786" stroke="#d3d8e1"/>
+<rect x="531" y="293" width="254" height="142" rx="0" fill="#f7f8fa" stroke="none"/>
+<text x="542" y="315" fill="#252932" font-size="12" font-weight="600" class="">终端</text>
+<text x="542" y="344" fill="#252932" font-size="12" font-weight="400" class="mono">$ npm run build</text>
+<text x="542" y="368" fill="#267351" font-size="12" font-weight="400" class="mono">✓ build complete</text>
+<text x="542" y="394" fill="#3551b7" font-size="12" font-weight="400" class="mono">$ ▌</text>
+<rect x="50" y="458" width="335" height="158" rx="6" fill="#f7f8fa" stroke="#d3d8e1"/>
+<text x="64" y="480" fill="#5f6673" font-size="11" font-weight="400" class="">登录页</text>
+<text x="128" y="507" fill="#252932" font-size="17" font-weight="600" class="">◆  ez-assistant</text>
+<rect x="94" y="522" width="247" height="34" rx="5" fill="#ffffff" stroke="#d3d8e1"/>
+<text x="106" y="544" fill="#252932" font-size="12" font-weight="400" class="">这台电脑</text>
+<text x="264" y="544" fill="#3551b7" font-size="11" font-weight="400" class="">登录选项</text>
+<rect x="94" y="567" width="247" height="32" rx="5" fill="#486af0" stroke="none"/>
+<text x="183" y="588" fill="#ffffff" font-size="12" font-weight="600" class="">进入项目</text>
+<text x="409" y="482" fill="#252932" font-size="13" font-weight="600" class="">同一套文字层级与状态语义</text>
+<text x="409" y="508" fill="#252932" font-size="12" font-weight="400" class="">正文</text>
+<text x="467" y="508" fill="#5f6673" font-size="12" font-weight="400" class="">次级文字</text>
+<text x="558" y="508" fill="#687180" font-size="12" font-weight="400" class="">辅助信息</text>
+<text x="409" y="537" fill="#267351" font-size="12" font-weight="400" class="">✓ 成功</text>
+<text x="503" y="537" fill="#895c00" font-size="12" font-weight="400" class="">△ 警告</text>
+<text x="597" y="537" fill="#b42336" font-size="12" font-weight="400" class="">× 错误</text>
+<rect x="409" y="554" width="37" height="20" rx="3" fill="#ffffff" stroke="#d3d8e1"/>
+<rect x="458" y="554" width="37" height="20" rx="3" fill="#f7f8fa" stroke="#d3d8e1"/>
+<rect x="507" y="554" width="37" height="20" rx="3" fill="#252932" stroke="#d3d8e1"/>
+<rect x="556" y="554" width="37" height="20" rx="3" fill="#5f6673" stroke="#d3d8e1"/>
+<rect x="605" y="554" width="37" height="20" rx="3" fill="#486af0" stroke="#d3d8e1"/>
+<rect x="654" y="554" width="37" height="20" rx="3" fill="#ffffff" stroke="#d3d8e1"/>
+<text x="409" y="601" fill="#5f6673" font-size="12" font-weight="400" class="">左侧栏继承全局文字色</text>
+<rect x="836" y="96" width="772" height="540" rx="12" fill="#272822" stroke="#57584f"/>
+<text x="856" y="127" fill="#f8f8f2" font-size="20" font-weight="650" class="">Monokai</text>
+<text x="1506" y="126" fill="#c5c3b4" font-size="13" font-weight="400" class="">深色</text>
+<rect x="854" y="146" width="736" height="290" rx="6" fill="#272822" stroke="#57584f"/>
+<rect x="855" y="147" width="145" height="288" rx="0" fill="#1e1f1c" stroke="none"/>
+<text x="866" y="171" fill="#f8f8f2" font-size="14" font-weight="650" class="">ez-assistant</text>
+<text x="866" y="201" fill="#a6e22e" font-size="13" font-weight="400" class="">＋ 新建会话</text>
+<text x="866" y="236" fill="#c5c3b4" font-size="12" font-weight="400" class="">工作区</text>
+<rect x="861" y="250" width="132" height="33" rx="5" fill="#3e3d32" stroke="none"/>
+<text x="868" y="271" fill="#f8f8f2" font-size="13" font-weight="600" class="">分析项目结构</text>
+<text x="868" y="304" fill="#c5c3b4" font-size="12" font-weight="400" class="">整理任务清单</text>
+<text x="868" y="408" fill="#c5c3b4" font-size="12" font-weight="400" class="">设置</text>
+<path d="M1000 146 L1000 436" stroke="#57584f"/>
+<path d="M1334 146 L1334 436" stroke="#57584f"/>
+<text x="1014" y="171" fill="#f8f8f2" font-size="14" font-weight="600" class="">分析项目结构</text>
+<text x="1014" y="206" fill="#f8f8f2" font-size="13" font-weight="400" class="">请概括当前项目的组成。</text>
+<text x="1014" y="236" fill="#c5c3b4" font-size="12" font-weight="400" class="">已读取目录，主要包含以下模块。</text>
+<rect x="1014" y="253" width="305" height="75" rx="5" fill="#272822" stroke="#57584f"/>
+<text x="1024" y="276" fill="#ff7096" font-size="12" font-weight="400" class="mono">const</text>
+<text x="1067" y="276" fill="#f8f8f2" font-size="12" font-weight="400" class="mono">app =</text>
+<text x="1114" y="276" fill="#e6db74" font-size="12" font-weight="400" class="mono">&quot;ez-assistant&quot;;</text>
+<text x="1024" y="303" fill="#c5c3b4" font-size="11" font-weight="400" class="mono">// 工作台与 Runtime 分离</text>
+<text x="1014" y="351" fill="#a6e22e" font-size="12" font-weight="400" class="">✓ 目录读取完成</text>
+<rect x="1014" y="373" width="305" height="47" rx="7" fill="#1e1f1c" stroke="#57584f"/>
+<text x="1026" y="401" fill="#aaa89a" font-size="12" font-weight="400" class="">继续询问…</text>
+<rect x="1276" y="383" width="32" height="27" rx="5" fill="#a6e22e" stroke="none"/>
+<text x="1286" y="402" fill="#272822" font-size="17" font-weight="600" class="">↑</text>
+<text x="1346" y="171" fill="#f8f8f2" font-size="13" font-weight="600" class="">main.ts</text>
+<text x="1346" y="203" fill="#aaa89a" font-size="11" font-weight="400" class="mono">1</text>
+<text x="1366" y="203" fill="#ff7096" font-size="12" font-weight="400" class="mono">const</text>
+<text x="1409" y="203" fill="#f8f8f2" font-size="12" font-weight="400" class="mono">ready = true;</text>
+<text x="1346" y="227" fill="#aaa89a" font-size="11" font-weight="400" class="mono">2</text>
+<text x="1366" y="227" fill="#c5c3b4" font-size="11" font-weight="400" class="mono">// 初始化客户端</text>
+<path d="M1334 292 H1590" stroke="#57584f"/>
+<rect x="1335" y="293" width="254" height="142" rx="0" fill="#1e1f1c" stroke="none"/>
+<text x="1346" y="315" fill="#f8f8f2" font-size="12" font-weight="600" class="">终端</text>
+<text x="1346" y="344" fill="#f8f8f2" font-size="12" font-weight="400" class="mono">$ npm run build</text>
+<text x="1346" y="368" fill="#a6e22e" font-size="12" font-weight="400" class="mono">✓ build complete</text>
+<text x="1346" y="394" fill="#a6e22e" font-size="12" font-weight="400" class="mono">$ ▌</text>
+<rect x="854" y="458" width="335" height="158" rx="6" fill="#1e1f1c" stroke="#57584f"/>
+<text x="868" y="480" fill="#c5c3b4" font-size="11" font-weight="400" class="">登录页</text>
+<text x="932" y="507" fill="#f8f8f2" font-size="17" font-weight="600" class="">◆  ez-assistant</text>
+<rect x="898" y="522" width="247" height="34" rx="5" fill="#272822" stroke="#57584f"/>
+<text x="910" y="544" fill="#f8f8f2" font-size="12" font-weight="400" class="">这台电脑</text>
+<text x="1068" y="544" fill="#a6e22e" font-size="11" font-weight="400" class="">登录选项</text>
+<rect x="898" y="567" width="247" height="32" rx="5" fill="#a6e22e" stroke="none"/>
+<text x="987" y="588" fill="#272822" font-size="12" font-weight="600" class="">进入项目</text>
+<text x="1213" y="482" fill="#f8f8f2" font-size="13" font-weight="600" class="">同一套文字层级与状态语义</text>
+<text x="1213" y="508" fill="#f8f8f2" font-size="12" font-weight="400" class="">正文</text>
+<text x="1271" y="508" fill="#c5c3b4" font-size="12" font-weight="400" class="">次级文字</text>
+<text x="1362" y="508" fill="#aaa89a" font-size="12" font-weight="400" class="">辅助信息</text>
+<text x="1213" y="537" fill="#a6e22e" font-size="12" font-weight="400" class="">✓ 成功</text>
+<text x="1307" y="537" fill="#e6db74" font-size="12" font-weight="400" class="">△ 警告</text>
+<text x="1401" y="537" fill="#ff7096" font-size="12" font-weight="400" class="">× 错误</text>
+<rect x="1213" y="554" width="37" height="20" rx="3" fill="#272822" stroke="#57584f"/>
+<rect x="1262" y="554" width="37" height="20" rx="3" fill="#1e1f1c" stroke="#57584f"/>
+<rect x="1311" y="554" width="37" height="20" rx="3" fill="#f8f8f2" stroke="#57584f"/>
+<rect x="1360" y="554" width="37" height="20" rx="3" fill="#c5c3b4" stroke="#57584f"/>
+<rect x="1409" y="554" width="37" height="20" rx="3" fill="#a6e22e" stroke="#57584f"/>
+<rect x="1458" y="554" width="37" height="20" rx="3" fill="#272822" stroke="#57584f"/>
+<text x="1213" y="601" fill="#c5c3b4" font-size="12" font-weight="400" class="">左侧栏继承全局文字色</text>
+<rect x="32" y="660" width="772" height="540" rx="12" fill="#fdf6e3" stroke="#b8b19e"/>
+<text x="52" y="691" fill="#52686f" font-size="20" font-weight="650" class="">Solarized Light</text>
+<text x="702" y="690" fill="#52686f" font-size="13" font-weight="400" class="">浅色</text>
+<rect x="50" y="710" width="736" height="290" rx="6" fill="#fdf6e3" stroke="#b8b19e"/>
+<rect x="51" y="711" width="145" height="288" rx="0" fill="#eee8d5" stroke="none"/>
+<text x="62" y="735" fill="#52686f" font-size="14" font-weight="650" class="">ez-assistant</text>
+<text x="62" y="765" fill="#006d82" font-size="13" font-weight="400" class="">＋ 新建会话</text>
+<text x="62" y="800" fill="#52686f" font-size="12" font-weight="400" class="">工作区</text>
+<rect x="57" y="814" width="132" height="33" rx="5" fill="#e4ddc8" stroke="none"/>
+<text x="64" y="835" fill="#52686f" font-size="13" font-weight="600" class="">分析项目结构</text>
+<text x="64" y="868" fill="#52686f" font-size="12" font-weight="400" class="">整理任务清单</text>
+<text x="64" y="972" fill="#52686f" font-size="12" font-weight="400" class="">设置</text>
+<path d="M196 710 L196 1000" stroke="#b8b19e"/>
+<path d="M530 710 L530 1000" stroke="#b8b19e"/>
+<text x="210" y="735" fill="#52686f" font-size="14" font-weight="600" class="">分析项目结构</text>
+<text x="210" y="770" fill="#52686f" font-size="13" font-weight="400" class="">请概括当前项目的组成。</text>
+<text x="210" y="800" fill="#52686f" font-size="12" font-weight="400" class="">已读取目录，主要包含以下模块。</text>
+<rect x="210" y="817" width="305" height="75" rx="5" fill="#fdf6e3" stroke="#b8b19e"/>
+<text x="220" y="840" fill="#805b00" font-size="12" font-weight="400" class="mono">const</text>
+<text x="263" y="840" fill="#52686f" font-size="12" font-weight="400" class="mono">app =</text>
+<text x="310" y="840" fill="#006d82" font-size="12" font-weight="400" class="mono">&quot;ez-assistant&quot;;</text>
+<text x="220" y="867" fill="#52686f" font-size="11" font-weight="400" class="mono">// 工作台与 Runtime 分离</text>
+<text x="210" y="915" fill="#4c6800" font-size="12" font-weight="400" class="">✓ 目录读取完成</text>
+<rect x="210" y="937" width="305" height="47" rx="7" fill="#eee8d5" stroke="#b8b19e"/>
+<text x="222" y="965" fill="#52686f" font-size="12" font-weight="400" class="">继续询问…</text>
+<rect x="472" y="947" width="32" height="27" rx="5" fill="#006d82" stroke="none"/>
+<text x="482" y="966" fill="#ffffff" font-size="17" font-weight="600" class="">↑</text>
+<text x="542" y="735" fill="#52686f" font-size="13" font-weight="600" class="">main.ts</text>
+<text x="542" y="767" fill="#52686f" font-size="11" font-weight="400" class="mono">1</text>
+<text x="562" y="767" fill="#805b00" font-size="12" font-weight="400" class="mono">const</text>
+<text x="605" y="767" fill="#52686f" font-size="12" font-weight="400" class="mono">ready = true;</text>
+<text x="542" y="791" fill="#52686f" font-size="11" font-weight="400" class="mono">2</text>
+<text x="562" y="791" fill="#52686f" font-size="11" font-weight="400" class="mono">// 初始化客户端</text>
+<path d="M530 856 H786" stroke="#b8b19e"/>
+<rect x="531" y="857" width="254" height="142" rx="0" fill="#eee8d5" stroke="none"/>
+<text x="542" y="879" fill="#52686f" font-size="12" font-weight="600" class="">终端</text>
+<text x="542" y="908" fill="#52686f" font-size="12" font-weight="400" class="mono">$ npm run build</text>
+<text x="542" y="932" fill="#4c6800" font-size="12" font-weight="400" class="mono">✓ build complete</text>
+<text x="542" y="958" fill="#006d82" font-size="12" font-weight="400" class="mono">$ ▌</text>
+<rect x="50" y="1022" width="335" height="158" rx="6" fill="#eee8d5" stroke="#b8b19e"/>
+<text x="64" y="1044" fill="#52686f" font-size="11" font-weight="400" class="">登录页</text>
+<text x="128" y="1071" fill="#52686f" font-size="17" font-weight="600" class="">◆  ez-assistant</text>
+<rect x="94" y="1086" width="247" height="34" rx="5" fill="#fdf6e3" stroke="#b8b19e"/>
+<text x="106" y="1108" fill="#52686f" font-size="12" font-weight="400" class="">这台电脑</text>
+<text x="264" y="1108" fill="#006d82" font-size="11" font-weight="400" class="">登录选项</text>
+<rect x="94" y="1131" width="247" height="32" rx="5" fill="#006d82" stroke="none"/>
+<text x="183" y="1152" fill="#ffffff" font-size="12" font-weight="600" class="">进入项目</text>
+<text x="409" y="1046" fill="#52686f" font-size="13" font-weight="600" class="">同一套文字层级与状态语义</text>
+<text x="409" y="1072" fill="#52686f" font-size="12" font-weight="400" class="">正文</text>
+<text x="467" y="1072" fill="#52686f" font-size="12" font-weight="400" class="">次级文字</text>
+<text x="558" y="1072" fill="#52686f" font-size="12" font-weight="400" class="">辅助信息</text>
+<text x="409" y="1101" fill="#4c6800" font-size="12" font-weight="400" class="">✓ 成功</text>
+<text x="503" y="1101" fill="#805b00" font-size="12" font-weight="400" class="">△ 警告</text>
+<text x="597" y="1101" fill="#b3312d" font-size="12" font-weight="400" class="">× 错误</text>
+<rect x="409" y="1118" width="37" height="20" rx="3" fill="#fdf6e3" stroke="#b8b19e"/>
+<rect x="458" y="1118" width="37" height="20" rx="3" fill="#eee8d5" stroke="#b8b19e"/>
+<rect x="507" y="1118" width="37" height="20" rx="3" fill="#52686f" stroke="#b8b19e"/>
+<rect x="556" y="1118" width="37" height="20" rx="3" fill="#52686f" stroke="#b8b19e"/>
+<rect x="605" y="1118" width="37" height="20" rx="3" fill="#006d82" stroke="#b8b19e"/>
+<rect x="654" y="1118" width="37" height="20" rx="3" fill="#ffffff" stroke="#b8b19e"/>
+<text x="409" y="1165" fill="#52686f" font-size="12" font-weight="400" class="">左侧栏继承全局文字色</text>
+<rect x="836" y="660" width="772" height="540" rx="12" fill="#002b36" stroke="#37616a"/>
+<text x="856" y="691" fill="#b2c2c3" font-size="20" font-weight="650" class="">Solarized Dark</text>
+<text x="1506" y="690" fill="#9db3b7" font-size="13" font-weight="400" class="">深色</text>
+<rect x="854" y="710" width="736" height="290" rx="6" fill="#002b36" stroke="#37616a"/>
+<rect x="855" y="711" width="145" height="288" rx="0" fill="#073642" stroke="none"/>
+<text x="866" y="735" fill="#b2c2c3" font-size="14" font-weight="650" class="">ez-assistant</text>
+<text x="866" y="765" fill="#67b7e6" font-size="13" font-weight="400" class="">＋ 新建会话</text>
+<text x="866" y="800" fill="#9db3b7" font-size="12" font-weight="400" class="">工作区</text>
+<rect x="861" y="814" width="132" height="33" rx="5" fill="#0b4250" stroke="none"/>
+<text x="868" y="835" fill="#b2c2c3" font-size="13" font-weight="600" class="">分析项目结构</text>
+<text x="868" y="868" fill="#9db3b7" font-size="12" font-weight="400" class="">整理任务清单</text>
+<text x="868" y="972" fill="#9db3b7" font-size="12" font-weight="400" class="">设置</text>
+<path d="M1000 710 L1000 1000" stroke="#37616a"/>
+<path d="M1334 710 L1334 1000" stroke="#37616a"/>
+<text x="1014" y="735" fill="#b2c2c3" font-size="14" font-weight="600" class="">分析项目结构</text>
+<text x="1014" y="770" fill="#b2c2c3" font-size="13" font-weight="400" class="">请概括当前项目的组成。</text>
+<text x="1014" y="800" fill="#9db3b7" font-size="12" font-weight="400" class="">已读取目录，主要包含以下模块。</text>
+<rect x="1014" y="817" width="305" height="75" rx="5" fill="#002b36" stroke="#37616a"/>
+<text x="1024" y="840" fill="#d9ad4a" font-size="12" font-weight="400" class="mono">const</text>
+<text x="1067" y="840" fill="#b2c2c3" font-size="12" font-weight="400" class="mono">app =</text>
+<text x="1114" y="840" fill="#6fc4b7" font-size="12" font-weight="400" class="mono">&quot;ez-assistant&quot;;</text>
+<text x="1024" y="867" fill="#9db3b7" font-size="11" font-weight="400" class="mono">// 工作台与 Runtime 分离</text>
+<text x="1014" y="915" fill="#a3b83c" font-size="12" font-weight="400" class="">✓ 目录读取完成</text>
+<rect x="1014" y="937" width="305" height="47" rx="7" fill="#073642" stroke="#37616a"/>
+<text x="1026" y="965" fill="#94adb1" font-size="12" font-weight="400" class="">继续询问…</text>
+<rect x="1276" y="947" width="32" height="27" rx="5" fill="#67b7e6" stroke="none"/>
+<text x="1286" y="966" fill="#002b36" font-size="17" font-weight="600" class="">↑</text>
+<text x="1346" y="735" fill="#b2c2c3" font-size="13" font-weight="600" class="">main.ts</text>
+<text x="1346" y="767" fill="#94adb1" font-size="11" font-weight="400" class="mono">1</text>
+<text x="1366" y="767" fill="#d9ad4a" font-size="12" font-weight="400" class="mono">const</text>
+<text x="1409" y="767" fill="#b2c2c3" font-size="12" font-weight="400" class="mono">ready = true;</text>
+<text x="1346" y="791" fill="#94adb1" font-size="11" font-weight="400" class="mono">2</text>
+<text x="1366" y="791" fill="#9db3b7" font-size="11" font-weight="400" class="mono">// 初始化客户端</text>
+<path d="M1334 856 H1590" stroke="#37616a"/>
+<rect x="1335" y="857" width="254" height="142" rx="0" fill="#073642" stroke="none"/>
+<text x="1346" y="879" fill="#b2c2c3" font-size="12" font-weight="600" class="">终端</text>
+<text x="1346" y="908" fill="#b2c2c3" font-size="12" font-weight="400" class="mono">$ npm run build</text>
+<text x="1346" y="932" fill="#a3b83c" font-size="12" font-weight="400" class="mono">✓ build complete</text>
+<text x="1346" y="958" fill="#67b7e6" font-size="12" font-weight="400" class="mono">$ ▌</text>
+<rect x="854" y="1022" width="335" height="158" rx="6" fill="#073642" stroke="#37616a"/>
+<text x="868" y="1044" fill="#9db3b7" font-size="11" font-weight="400" class="">登录页</text>
+<text x="932" y="1071" fill="#b2c2c3" font-size="17" font-weight="600" class="">◆  ez-assistant</text>
+<rect x="898" y="1086" width="247" height="34" rx="5" fill="#002b36" stroke="#37616a"/>
+<text x="910" y="1108" fill="#b2c2c3" font-size="12" font-weight="400" class="">这台电脑</text>
+<text x="1068" y="1108" fill="#67b7e6" font-size="11" font-weight="400" class="">登录选项</text>
+<rect x="898" y="1131" width="247" height="32" rx="5" fill="#67b7e6" stroke="none"/>
+<text x="987" y="1152" fill="#002b36" font-size="12" font-weight="600" class="">进入项目</text>
+<text x="1213" y="1046" fill="#b2c2c3" font-size="13" font-weight="600" class="">同一套文字层级与状态语义</text>
+<text x="1213" y="1072" fill="#b2c2c3" font-size="12" font-weight="400" class="">正文</text>
+<text x="1271" y="1072" fill="#9db3b7" font-size="12" font-weight="400" class="">次级文字</text>
+<text x="1362" y="1072" fill="#94adb1" font-size="12" font-weight="400" class="">辅助信息</text>
+<text x="1213" y="1101" fill="#a3b83c" font-size="12" font-weight="400" class="">✓ 成功</text>
+<text x="1307" y="1101" fill="#d9ad4a" font-size="12" font-weight="400" class="">△ 警告</text>
+<text x="1401" y="1101" fill="#f08075" font-size="12" font-weight="400" class="">× 错误</text>
+<rect x="1213" y="1118" width="37" height="20" rx="3" fill="#002b36" stroke="#37616a"/>
+<rect x="1262" y="1118" width="37" height="20" rx="3" fill="#073642" stroke="#37616a"/>
+<rect x="1311" y="1118" width="37" height="20" rx="3" fill="#b2c2c3" stroke="#37616a"/>
+<rect x="1360" y="1118" width="37" height="20" rx="3" fill="#9db3b7" stroke="#37616a"/>
+<rect x="1409" y="1118" width="37" height="20" rx="3" fill="#67b7e6" stroke="#37616a"/>
+<rect x="1458" y="1118" width="37" height="20" rx="3" fill="#002b36" stroke="#37616a"/>
+<text x="1213" y="1165" fill="#9db3b7" font-size="12" font-weight="400" class="">左侧栏继承全局文字色</text>
+<text x="32" y="1230" fill="#5f6673" font-size="13" font-weight="400" class="">示意图仅用于评审配色关系；布局、字体和控件沿用客户端，最终以实际页面与原生平台验收为准。</text>
+</svg>

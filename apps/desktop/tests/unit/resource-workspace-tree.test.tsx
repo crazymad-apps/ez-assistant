@@ -1,5 +1,8 @@
+import type { ReactElement } from "react";
+import { AppearanceProvider } from "../../src/stores/AppearanceContext";
+import { AppearanceStore } from "../../src/stores/AppearanceStore";
 import type { ResourceViewState } from "../../src/features/resource-workspace/resourceViewState";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render as renderTree, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionResourceTree } from "../../src/features/resource-workspace/SessionResourceTree";
 import { listSessionResourceFiles } from "../../src/native-bridge/nativeResource";
@@ -260,3 +263,7 @@ vi.mock("../../src/runtime-client/ClientResources", async (original) => {
   const actual = await original<typeof import("../../src/runtime-client/ClientResources")>();
   return {...actual, ClientResources: class extends actual.ClientResources { override readonly desktop = true; }};
 });
+
+function render(element: ReactElement) {
+  return renderTree(<AppearanceProvider store={new AppearanceStore()}>{element}</AppearanceProvider>);
+}

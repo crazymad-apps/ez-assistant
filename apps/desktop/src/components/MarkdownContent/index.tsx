@@ -1,3 +1,6 @@
+import type { ThemePreset } from "../../styles/themePresets";
+import { useMarkdownPlugins } from "./codeTheme";
+import { MarkdownCode, MarkdownThemeContext } from "./MarkdownCode";
 import {
   Children,
   Component,
@@ -16,7 +19,6 @@ import {
   Streamdown,
   defaultRehypePlugins,
   type Components,
-  type PluginConfig,
   type UrlTransform,
 } from "streamdown";
 import "streamdown/styles.css";
@@ -25,6 +27,7 @@ import { Button } from "../Button";
 import styles from "./index.module.scss";
 
 type MarkdownContentProps = Readonly<{
+  theme: ThemePreset;
   text: string;
   is_streaming?: boolean;
   allow_relative_local_resources?: boolean;
@@ -44,7 +47,7 @@ type LocalResourceContextValue = Readonly<{
 
 const LOCAL_RESOURCE_PREFIX = "https://local-resource.invalid/";
 const LocalResourceContext = createContext<LocalResourceContextValue>({});
-const markdownComponents = { a: SafeLink, img: SafeImage, ol: OrderedList } as Components;
+const markdownComponents = { a: SafeLink, img: SafeImage, ol: OrderedList, code: MarkdownCode } as Components;
 
 function OrderedList({ children, node, start, reversed, style, ...props }: ComponentProps<"ol"> & { node?: MarkdownNode }) {
   const count = node?.children?.filter((child) => child.tagName === "li").length ?? Children.count(children);
@@ -57,6 +60,7 @@ function OrderedList({ children, node, start, reversed, style, ...props }: Compo
 }
 
 export function MarkdownContent({
+  theme,
   text,
   is_streaming = false,
   allow_relative_local_resources = false,
@@ -64,7 +68,7 @@ export function MarkdownContent({
   on_local_resource_context_menu,
   on_local_resource_open,
 }: MarkdownContentProps) {
-  const plugins = useMarkdownPlugins(text);
+  const plugins = useMarkdownPlugins(text, theme);
   const local_resources = useMemo<LocalResourceContextValue>(() => ({
     load_image: load_local_image,
     menu: on_local_resource_context_menu,
@@ -85,6 +89,7 @@ export function MarkdownContent({
   }, [allow_relative_local_resources]);
   return (
     <MarkdownBoundary fallback={text}>
+      <MarkdownThemeContext.Provider value={theme}>
       <LocalResourceContext.Provider value={local_resources}>
         <Streamdown
           key={allow_relative_local_resources ? "local-relative" : "local-explicit"}
@@ -104,6 +109,7 @@ export function MarkdownContent({
           {text}
         </Streamdown>
       </LocalResourceContext.Provider>
+    </MarkdownThemeContext.Provider>
     </MarkdownBoundary>
   );
 }
@@ -218,64 +224,6 @@ function openLocalMenuFromKeyboard(
   event.stopPropagation();
   const bounds = event.currentTarget.getBoundingClientRect();
   local.menu(reference, { x: bounds.left + 12, y: bounds.bottom });
-}
-
-function useMarkdownPlugins(text: string): PluginConfig {
-  const [plugins, setPlugins] = useState<PluginConfig>({});
-  const needs_code = /```[a-zA-Z0-9_-]*\n/.test(text);
-  const needs_math = /(^|[^\\])\$\$?[\s\S]*?\$\$?/.test(text);
-  const needs_mermaid = /```mermaid\b/.test(text);
-
-  useEffect(() => {
-    let active = true;
-    const tasks: Promise<void>[] = [];
-    if (needs_code) {
-      tasks.push(loadCodePlugin().then((code) => {
-        if (active) {
-          setPlugins((current) => ({ ...current, code }));
-        }
-      }).catch(() => undefined));
-    }
-    if (needs_math) {
-      tasks.push(loadMathPlugin().then((math) => {
-        if (active) {
-          setPlugins((current) => ({ ...current, math }));
-        }
-      }).catch(() => undefined));
-    }
-    if (needs_mermaid) {
-      tasks.push(loadMermaidPlugin().then((mermaid) => {
-        if (active) {
-          setPlugins((current) => ({ ...current, mermaid }));
-        }
-      }).catch(() => undefined));
-    }
-    void Promise.all(tasks);
-    return () => {
-      active = false;
-    };
-  }, [needs_code, needs_math, needs_mermaid]);
-
-  return plugins;
-}
-
-let code_plugin_promise: Promise<NonNullable<PluginConfig["code"]>> | null = null;
-let math_plugin_promise: Promise<NonNullable<PluginConfig["math"]>> | null = null;
-let mermaid_plugin_promise: Promise<NonNullable<PluginConfig["mermaid"]>> | null = null;
-
-function loadCodePlugin(): Promise<NonNullable<PluginConfig["code"]>> {
-  code_plugin_promise ??= import("@streamdown/code").then(({ code }) => code);
-  return code_plugin_promise;
-}
-
-function loadMathPlugin(): Promise<NonNullable<PluginConfig["math"]>> {
-  math_plugin_promise ??= import("@streamdown/math").then(({ math }) => math);
-  return math_plugin_promise;
-}
-
-function loadMermaidPlugin(): Promise<NonNullable<PluginConfig["mermaid"]>> {
-  mermaid_plugin_promise ??= import("@streamdown/mermaid").then(({ mermaid }) => mermaid);
-  return mermaid_plugin_promise;
 }
 
 function isSafeHttpUrl(url: string): boolean {

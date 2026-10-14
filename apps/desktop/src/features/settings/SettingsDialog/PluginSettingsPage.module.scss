@@ -30,9 +30,9 @@
 .menu_icon svg { flex-shrink: 0; }
 .menu_danger.menu_danger { color: var(--ez-danger); }
 .plugin_glyph { display: grid; flex: 0 0 38px; width: 38px; height: 38px; place-items: center; border: 1px solid var(--ez-primary-border); border-radius: 10px; color: var(--ez-primary-text); background: var(--ez-primary-soft); font-size: 17px; font-weight: 650; line-height: 1; }
-.plugin_glyph[data-tone="1"] { border-color: #d7ecdf; color: var(--ez-success-text); background: var(--ez-success-soft); }
-.plugin_glyph[data-tone="2"] { border-color: #f3e2c4; color: var(--ez-warning-text); background: var(--ez-warning-soft); }
-.plugin_glyph[data-tone="3"] { border-color: #e8dff5; color: #7955a3; background: #f5f0fb; }
+.plugin_glyph[data-tone="1"] { border-color: color-mix(in srgb, var(--ez-success) 35%, var(--ez-surface)); color: var(--ez-success-text); background: var(--ez-success-soft); }
+.plugin_glyph[data-tone="2"] { border-color: color-mix(in srgb, var(--ez-warning) 35%, var(--ez-surface)); color: var(--ez-warning-text); background: var(--ez-warning-soft); }
+.plugin_glyph[data-tone="3"] { border-color: var(--ez-primary-border); color: var(--ez-primary-text); background: var(--ez-primary-soft); }
 .plugin_copy { display: grid; gap: 3px; min-width: 0; color: var(--ez-text); text-align: left; }
 .plugin_copy strong { overflow: hidden; font-size: var(--ez-font-base); line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
 .plugin_copy small { overflow: hidden; color: var(--ez-text-muted); font-size: var(--ez-font-small); line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
@@ -60,7 +60,7 @@
 .danger > button { justify-self: start; }
 .page > button { justify-self: start; }
 
-.backdrop { position: fixed; inset: 0; z-index: calc(var(--ez-z-modal) + 3); display: grid; place-items: center; padding: 14px; background: rgb(24 30 43 / 42%); }
+.backdrop { position: fixed; inset: 0; z-index: calc(var(--ez-z-modal) + 3); display: grid; place-items: center; padding: 14px; background: var(--ez-overlay); }
 .operation_dialog { display: grid; gap: 12px; width: min(520px, calc(100vw - 28px)); max-height: min(80vh, 720px); overflow: auto; padding: 20px; border: 1px solid var(--ez-border-strong); border-radius: var(--ez-radius-medium); color: var(--ez-text); background: var(--ez-surface); box-shadow: var(--ez-shadow-shell); }
 .operation_dialog h3, .operation_dialog p { margin: 0; }
 .package_list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }

@@ -1,0 +1,229 @@
+.section {
+  max-width: 1128px;
+  padding: 0 24px;
+  margin: 0 auto 88px;
+  scroll-margin-top: 24px;
+}
+.overview {
+  display: grid;
+  grid-template-columns: 0.8fr 1.2fr;
+  align-items: center;
+  gap: 52px;
+  margin-bottom: 54px;
+}
+.heading {
+  margin-bottom: 0;
+  > span {
+    color: var(--site-blue);
+    font-size: 12px;
+  }
+  h2 {
+    span {
+      display: inline-block;
+    }
+    font-size: 34px;
+    font-weight: 600;
+    letter-spacing: -1.3px;
+    line-height: 1.45;
+    margin: 16px 0 20px;
+  }
+  p {
+    color: var(--site-muted);
+    font-size: 14px;
+    line-height: 1.9;
+    margin: 0;
+  }
+}
+.distribution {
+  background: #f2f6fc;
+  border: 1px solid #dfe8f3;
+  border-radius: 20px;
+  padding: 28px;
+}
+.center {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  > :first-child {
+    color: var(--site-blue);
+    font-size: 36px;
+  }
+  h3 {
+    margin: 0 0 6px;
+    font-size: 21px;
+    font-weight: 600;
+  }
+  p {
+    margin: 0;
+    color: var(--site-muted);
+    font-size: 12px;
+  }
+  ul {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 0;
+    margin: 8px 0 0;
+    width: 100%;
+    list-style: none;
+  }
+  li {
+    background: white;
+    border: 1px solid var(--site-line);
+    padding: 8px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+  }
+}
+.connection {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin: 22px 0;
+  color: var(--site-muted);
+  font-size: 12px;
+  line-height: 1.8;
+  > :first-child {
+    color: var(--site-blue);
+    font-size: 20px;
+  }
+}
+.members {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  > div {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    flex-direction: column;
+    padding: 18px 8px;
+    background: white;
+    border: 1px solid var(--site-line);
+    border-radius: 8px;
+    font-size: 13px;
+  }
+  > div > :first-child {
+    color: var(--site-blue);
+    font-size: 25px;
+  }
+}
+.comparison {
+  margin-top: 0;
+  table {
+    width: 100%;
+    table-layout: fixed;
+    border-collapse: separate;
+    border-spacing: 0;
+    text-align: left;
+  }
+  caption {
+    caption-side: top;
+    text-align: left;
+    font-size: 19px;
+    font-weight: 600;
+    margin-bottom: 24px;
+    color: var(--site-ink);
+  }
+  th,
+  td {
+    padding: 20px 24px;
+    border-bottom: 1px solid var(--site-line);
+    vertical-align: top;
+    font-size: 13px;
+    line-height: 1.8;
+    overflow-wrap: anywhere;
+  }
+  th:first-child {
+    width: 18%;
+    padding-left: 0;
+  }
+  th {
+    font-weight: 500;
+  }
+  thead th {
+    font-size: 18px;
+  }
+  thead th:first-child {
+    font-size: 12px;
+    color: var(--site-muted);
+  }
+  small {
+    display: block;
+    font-size: 12px;
+    color: var(--site-muted);
+    font-weight: 400;
+    margin-top: 6px;
+  }
+  td {
+    color: var(--site-muted);
+  }
+  th:last-child,
+  td:last-child {
+    background: #f1f6fd;
+  }
+}
+.comparison thead th:last-child {
+  border-radius: 14px 14px 0 0;
+  border-top: 3px solid var(--site-blue);
+  color: #285a91;
+}
+.comparison tbody tr:last-child td:last-child {
+  border-radius: 0 0 14px 14px;
+}
+.note {
+  margin-top: 20px;
+  color: var(--site-muted);
+  font-size: 12px;
+  line-height: 1.9;
+}
+@media (max-width: 900px) {
+  .overview {
+    grid-template-columns: 1fr;
+    gap: 26px;
+    margin-bottom: 36px;
+  }
+  .center {
+    flex-wrap: wrap;
+  }
+  .center ul {
+    width: 100%;
+    margin: 0;
+  }
+}
+@media (max-width: 600px) {
+  .section {
+    margin-bottom: 55px;
+  }
+  .heading h2 {
+    font-size: 28px;
+  }
+  .distribution {
+    padding: 22px 16px;
+  }
+  .members {
+    gap: 8px;
+  }
+  .members > div {
+    flex-direction: column;
+    font-size: 12px;
+    gap: 8px;
+  }
+  .connection {
+    align-items: flex-start;
+  }
+  .comparison th,
+  .comparison td {
+    padding: 14px 9px;
+    font-size: 12px;
+  }
+  .comparison thead th {
+    font-size: 16px;
+  }
+  .comparison th:first-child {
+    width: 20%;
+  }
+}

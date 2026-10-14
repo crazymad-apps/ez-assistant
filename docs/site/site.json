@@ -1,0 +1,207 @@
+{
+  "format": 1,
+  "home": [
+    {
+      "kind": "hero",
+      "title": "让专业方案，更快成形。",
+      "description": "画出布局，看懂空间，理清报价。让 AI 助手分担繁琐，把更多精力留给方案本身。",
+      "file": "home/hero.md"
+    },
+    {
+      "kind": "workspace",
+      "title": "看看助手如何参与工作",
+      "description": "能力演示 · 内容与文件为示意",
+      "file": "home/workspace.md",
+      "scenarios": [
+        {
+          "id": "cad",
+          "label": "库房 CAD 绘图",
+          "plugin": "库房 CAD 绘图资料",
+          "prompt": "这是库房的尺寸和布置要求，帮我画一份密集架布局图。",
+          "intro": "我来核对空间和通道，把你的要求整理成布局图。",
+          "title": "库房平面布局",
+          "body": "打开 DXF 查看方案，让接下来的讨论有图可依。",
+          "file": "库房布局.dxf",
+          "reply": "布局图准备好了。架体怎么排、通道留多宽，我们可以继续调整。",
+          "steps": [
+            "核对尺寸与布置条件",
+            "生成密集架平面布局",
+            "回读检查 DXF"
+          ],
+          "kind": "drawing"
+        },
+        {
+          "id": "scene",
+          "label": "CAD 图纸转三维",
+          "plugin": "CAD 图纸转三维",
+          "prompt": "把这份 DXF 变成三维预览，我想看看设备放进去的效果。",
+          "intro": "我来还原架体与设备的位置，把平面方案放进三维空间。",
+          "title": "库房三维预览",
+          "body": "预览文件可离线打开，方便带到方案沟通现场。",
+          "file": "库房三维预览.html",
+          "reply": "三维预览准备好了。换个角度看看，让空间关系更直观。",
+          "steps": [
+            "检查图纸与设备映射",
+            "匹配架体和设备模型",
+            "生成离线三维预览"
+          ],
+          "kind": "scene"
+        },
+        {
+          "id": "quote",
+          "label": "生成 Excel 报价",
+          "plugin": "通用报价",
+          "prompt": "根据这些项目资料，帮我整理一份 Excel 报价单。",
+          "intro": "我来梳理选型、用量和配套，核对产品价格。",
+          "title": "项目报价单",
+          "body": "缺失价格和待确认项已标出，方便你把注意力放在关键细节上。",
+          "file": "报价单.xlsx",
+          "reply": "报价单整理好了。产品、数量和金额一目了然，可以继续核对和完善。",
+          "steps": [
+            "阅读需求与方案资料",
+            "核对选型、数量和计价",
+            "导出 Excel 报价单"
+          ],
+          "kind": "quote"
+        },
+        {
+          "id": "knowledge",
+          "label": "企业知识库",
+          "plugin": "企业知识库 · GoRAG",
+          "prompt": "这台设备怎么维护？帮我找一下企业资料里的说明。",
+          "intro": "我来查找相关资料，把维护要点和出处一起整理给你。",
+          "title": "设备维护问答",
+          "body": "少翻几份文档，更快找到有依据的答案。",
+          "file": "知识库回答",
+          "reply": "维护要点已整理，并附上文档来源。想了解哪一项，可以继续问。",
+          "steps": [
+            "检索相关企业文档",
+            "读取匹配的正文片段",
+            "整理回答与引用"
+          ],
+          "kind": "notes"
+        },
+        {
+          "id": "skill",
+          "label": "沉淀可复用技能",
+          "plugin": "通用辅助",
+          "prompt": "这次周报整理得不错，把这个方法留下来，下次继续用。",
+          "intro": "我来把资料要求和整理方法保存成可复用的技能。",
+          "title": "项目周报技能",
+          "body": "让好用的工作方法留下来，少从头交代，多积累经验。",
+          "file": "SKILL.md",
+          "reply": "这个方法已经保存好了。下次新建会话，就能接着用。",
+          "steps": [
+            "梳理流程与输入输出",
+            "编写技能说明",
+            "保存到授权的技能目录"
+          ],
+          "kind": "notes"
+        }
+      ]
+    },
+    {
+      "kind": "capabilities",
+      "title": "从图纸到报价，都有好帮手。",
+      "description": "把零散的项目资料，变成看得见、讲得清、可继续完善的方案。",
+      "file": "home/capabilities.md"
+    },
+    {
+      "kind": "modes",
+      "title": "个人自由搭配，企业统一分发。",
+      "description": "选你顺手的模型和插件，也让整个团队用上成熟的专业能力。企业中心统一准备，成员少做重复配置，多专注手头的项目。",
+      "file": "home/modes.md"
+    },
+    {
+      "kind": "resources",
+      "title": "每一次上手，都更顺手。",
+      "description": "发现新能力，也找到适合自己的工作方式。",
+      "file": "home/resources.md"
+    },
+    {
+      "kind": "closing",
+      "title": "下一个好方案，从这里开始。",
+      "description": "带上你的图纸、资料和想法，让 EZ Assistant 帮你向前一步。",
+      "file": "home/closing.md"
+    }
+  ],
+  "manual": [
+    {
+      "title": "开始使用",
+      "articles": [
+        {
+          "id": "getting-started",
+          "file": "manual/getting-started.md"
+        },
+        {
+          "id": "installation",
+          "file": "manual/installation.md"
+        },
+        {
+          "id": "modes",
+          "file": "manual/modes.md"
+        },
+        {
+          "id": "login-options",
+          "file": "manual/login-options.md"
+        }
+      ]
+    },
+    {
+      "title": "日常工作",
+      "articles": [
+        {
+          "id": "projects",
+          "file": "manual/projects.md"
+        },
+        {
+          "id": "appearance",
+          "file": "manual/appearance.md"
+        }
+      ]
+    },
+    {
+      "title": "专业插件",
+      "articles": [
+        {
+          "id": "plugins",
+          "file": "manual/plugins.md"
+        },
+        {
+          "id": "warehouse-cad",
+          "file": "manual/warehouse-cad.md"
+        },
+        {
+          "id": "cad-scene",
+          "file": "manual/cad-scene.md"
+        },
+        {
+          "id": "quotation",
+          "file": "manual/quotation.md"
+        },
+        {
+          "id": "gorag-knowledge",
+          "file": "manual/gorag-knowledge.md"
+        },
+        {
+          "id": "general-assistant",
+          "file": "manual/general-assistant.md"
+        }
+      ]
+    },
+    {
+      "title": "管理与帮助",
+      "articles": [
+        {
+          "id": "call-evidence",
+          "file": "manual/call-evidence.md"
+        },
+        {
+          "id": "faq",
+          "file": "manual/faq.md"
+        }
+      ]
+    }
+  ],
+  "assets": []
+}

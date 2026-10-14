@@ -47,7 +47,7 @@ it('代理用量与正文策略独立，联合模型维度和调用明细一致'
     expect(await source.getRepository(CallEntity).count()).toBe(0);
     expect((await source.query('SELECT COUNT(*)::integer AS n FROM public.providers'))[0].n).toBe(0);
     const settings = await source.getRepository(RecordingEntity).findOneByOrFail({ singleton: true });
-    expect(settings.enabled).toBe(false);
+    expect(settings.mode).toBe('off');
     app = await createHttpApp({ source, origin: 'http://127.0.0.1:17330', snapshotRoot });
     await app.listen(0, '127.0.0.1');
     const endpoint = await app.getUrl();

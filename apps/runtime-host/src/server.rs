@@ -93,10 +93,18 @@ pub(crate) async fn tls_configuration(
         .tls_private_key
         .as_ref()
         .ok_or(AccessError::Unavailable)?;
+    initialize_tls_provider();
     RustlsConfig::from_pem_file(certificate, key)
         .await
         .map(Some)
         .map_err(|_| AccessError::Invalid("无法加载 HTTPS 证书或私钥。"))
+}
+
+/// Host HTTPS 和设备网关共用进程级默认提供者。工作区 feature 合并可能同时启用
+/// ring 与 aws-lc-rs，不能交给 Rustls 自动猜测。Err 仅表示已有提供者（含并发安装），
+/// 此时沿用既有进程选择；不覆盖它，也不改变证书与私钥校验。
+pub(crate) fn initialize_tls_provider() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 }
 
 // 唯一监听的任务由 RuntimeServer 持有；正常关闭限时等待，Supervisor abort 时 Drop 也会回收。

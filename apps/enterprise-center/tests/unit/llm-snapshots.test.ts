@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { expect, it } from 'vitest';
 import { SnapshotFiles, SnapshotMemory, Capture, snapshotLimit } from '../../dist/llm/snapshots.js';
 
-it('UTF-8 截断只裁尾字节，完整或中间损坏不替换为伪完整文本，采集预算可释放', () => {
+it('原始字节保留 UTF-8 截断和无效编码，采集预算可释放', () => {
   const memory = new SnapshotMemory();
   const captures = Array.from({ length: 8 }, () => new Capture(memory));
   for (const capture of captures) capture.append(Buffer.alloc(snapshotLimit, 65));
@@ -14,14 +14,14 @@ it('UTF-8 截断只裁尾字节，完整或中间损坏不替换为伪完整文�
   for (const capture of captures) capture.release();
   const partial = new Capture(memory);
   partial.append(Buffer.from([0x61, 0xe4, 0xb8]));
-  expect(() => partial.content()).toThrow();
+  expect(Buffer.concat(partial.content())).toEqual(Buffer.from([0x61, 0xe4, 0xb8]));
   partial.interrupt();
-  expect(Buffer.concat(partial.content()).toString()).toBe('a');
+  expect(Buffer.concat(partial.content())).toEqual(Buffer.from([0x61, 0xe4, 0xb8]));
   partial.release();
   const invalid = new Capture(memory);
   invalid.append(Buffer.from([0xff, 0x61]));
   invalid.interrupt();
-  expect(() => invalid.content()).toThrow();
+  expect(Buffer.concat(invalid.content())).toEqual(Buffer.from([0xff, 0x61]));
   invalid.release();
 });
 

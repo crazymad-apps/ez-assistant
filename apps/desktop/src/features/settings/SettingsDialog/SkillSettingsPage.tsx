@@ -1,3 +1,4 @@
+import { useAppearance } from "../../../stores/AppearanceContext";
 import { observer } from "mobx-react-lite";
 import { useMemo, useState } from "react";
 import type {
@@ -164,13 +165,14 @@ export const SkillSettingsPage = observer(function SkillSettingsPage() {
   );
 });
 
-function SkillDetail(props: Readonly<{
+const SkillDetail = observer(function SkillDetail(props: Readonly<{
   detail: SkillDetailSnapshot | null;
   diagnostics: readonly SkillDiagnosticSnapshot[];
   loading: boolean;
   skill: SkillSummarySnapshot;
   on_back: () => void;
 }>) {
+  const theme = useAppearance().preset;
   const skill = props.detail?.skill ?? props.skill;
   return (
     <SettingsPageContainer
@@ -189,7 +191,7 @@ function SkillDetail(props: Readonly<{
         <h4>技能正文</h4>
         {props.loading ? <p className={styles.body_placeholder}>正在读取技能正文…</p> : null}
         {!props.loading && props.detail?.body ? (
-          <div className={styles.body_content}><MarkdownContent text={props.detail.body} /></div>
+          <div className={styles.body_content}><MarkdownContent theme={theme} text={props.detail.body} /></div>
         ) : null}
         {!props.loading && !props.detail?.body ? (
           <p className={styles.body_placeholder}>当前没有可确定展示的技能正文。</p>
@@ -203,7 +205,7 @@ function SkillDetail(props: Readonly<{
       <SettingsMessages />
     </SettingsPageContainer>
   );
-}
+});
 
 function SkillDiagnostics({ diagnostics }: Readonly<{ diagnostics: readonly SkillDiagnosticSnapshot[] }>) {
   if (diagnostics.length === 0) return <p className={styles.empty}>没有技能诊断。</p>;

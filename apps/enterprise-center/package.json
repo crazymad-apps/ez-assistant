@@ -22,7 +22,9 @@
     "db:check": "node dist/database/cli.js check",
     "db:upgrade": "node dist/database/cli.js upgrade",
     "openapi:export": "npm run build && node scripts/openapi.mjs export",
-    "openapi:check": "npm run build && node scripts/openapi.mjs check"
+    "openapi:check": "npm run build && node scripts/openapi.mjs check",
+    "site:build": "node scripts/site-content.mjs build",
+    "site:publish": "node scripts/site-content.mjs publish"
   },
   "dependencies": {
     "@fastify/multipart": "10.1.2",
@@ -32,6 +34,8 @@
     "@nestjs/platform-fastify": "12.0.3",
     "@nestjs/swagger": "12.0.1",
     "fastify": "5.12.4",
+    "image-size": "2.0.4",
+    "markdown-it": "14.3.2",
     "node-pg-migrate": "9.0.0",
     "pg": "8.23.0",
     "reflect-metadata": "0.2.2",
@@ -43,6 +47,7 @@
     "yauzl": "3.4.0"
   },
   "devDependencies": {
+    "@types/markdown-it": "14.1.2",
     "@types/node": "24.0.0",
     "@types/pg": "8.15.5",
     "@types/ws": "8.18.2",

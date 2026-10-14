@@ -1,0 +1,44 @@
+.options {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  container-type: inline-size;
+  legend { margin-bottom: 14px; padding: 0; color: var(--ez-text-secondary); font-size: var(--ez-font-base); }
+}
+.cards { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+@container (min-width: 440px) { .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.card {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--ez-border-strong);
+  border-radius: var(--ez-radius-medium);
+  color: var(--ez-text);
+  background: var(--ez-surface);
+  cursor: pointer;
+  &:hover { border-color: var(--ez-primary-text); }
+  &:has(input[type="radio"]:checked) { border-color: var(--ez-primary-text); box-shadow: 0 0 0 1px var(--ez-primary-text); }
+  &:has(input[type="radio"]:focus-visible) { outline: 2px solid var(--ez-focus); outline-offset: 4px; }
+}
+.preview { display: grid; height: 132px; grid-template-columns: 26% minmax(0, 1fr); overflow: hidden; color: var(--preview-text); background: var(--preview-background); }
+.sidebar {
+  display: flex; flex-direction: column; gap: 10px; padding: 18px 9px; background: var(--preview-panel);
+  i { display: block; height: 5px; border-radius: 2px; background: var(--preview-secondary); opacity: .5; }
+  i:first-child { width: 70%; background: var(--preview-accent); opacity: 1; }
+  i:last-child { width: 55%; }
+}
+.workspace {
+  display: flex; min-width: 0; flex-direction: column; gap: 7px; padding: 14px 12px;
+  b { font-size: var(--ez-font-small); font-weight: 600; }
+  > span { font-size: var(--ez-font-small); color: var(--preview-secondary); }
+  code { margin-top: 3px; padding: 7px; overflow: hidden; border-radius: 4px; background: var(--preview-muted); font: var(--ez-font-small)/1.6 monospace; white-space: nowrap; }
+  em { color: var(--preview-keyword); font-style: normal; }
+  strong { color: var(--preview-string); font-weight: 400; }
+}
+.caption {
+  display: flex; align-items: center; gap: 8px; padding: 12px; font-size: var(--ez-font-base); line-height: 1.5;
+  small { margin-left: auto; color: var(--ez-text-secondary); font-size: var(--ez-font-small); white-space: nowrap; }
+  input[type="radio"] { flex: 0 0 auto; width: 16px; height: 16px; margin: 0; accent-color: var(--ez-primary-text); outline: none; }
+}
+.scope { margin: 16px 0 0; color: var(--ez-text-secondary); font-size: var(--ez-font-small); }
+.feedback { display: flex; min-height: 32px; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 8px; color: var(--ez-warning-text); font-size: var(--ez-font-small); }

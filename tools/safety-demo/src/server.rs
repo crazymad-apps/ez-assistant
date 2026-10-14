@@ -435,7 +435,10 @@ mod tests {
     #[tokio::test]
     async fn server_rejects_bad_host_origin_and_options() {
         let server = TestServer::start().await;
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build direct loopback client");
         let snapshot_url = format!("{}/api/snapshot", server.base_url);
         let snapshot = client
             .get(&snapshot_url)

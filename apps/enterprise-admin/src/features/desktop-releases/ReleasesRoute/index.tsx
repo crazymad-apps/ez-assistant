@@ -44,7 +44,7 @@ export const ReleasesRoute = observer(function ReleasesRoute() {
         locale={{ emptyText: '暂无安装包' }}
         columns={[
           { title: '版本', dataIndex: 'version', width: 120 },
-          { title: '更新说明', dataIndex: 'notes', ellipsis: true, render: (value) => value || '尚未填写' },
+          { title: '更新日志', dataIndex: 'notes', ellipsis: true, render: (value) => value || '尚未填写' },
           {
             title: '平台发布情况',
             width: 380,

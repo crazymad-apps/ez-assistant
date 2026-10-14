@@ -47,7 +47,7 @@
 
   code {
     border-radius: 4px;
-    color: #38404d;
+    color: var(--ez-text-secondary);
     background: var(--ez-surface-muted);
     font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
     font-size: var(--ez-font-small);
@@ -65,7 +65,7 @@
     overflow: auto;
     border: 1px solid var(--ez-border);
     border-radius: var(--ez-radius-small);
-    background: #f6f7f9;
+    background: var(--ez-surface-muted);
   }
 
   :global([data-streamdown="code-block"]) {
@@ -77,7 +77,7 @@
     overflow: hidden;
     border: 1px solid var(--ez-border);
     border-radius: var(--ez-radius-small);
-    background: #f6f7f9;
+    background: var(--ez-surface-muted);
   }
 
   :global([data-streamdown="code-block-header"]) {
@@ -137,8 +137,17 @@
       padding: 0;
       border-radius: 0;
       background: transparent;
+      color: var(--sdm-fg, var(--ez-text));
       line-height: 1.55;
       white-space: pre;
+
+      // Streamdown 输出 Shiki CSS 变量；本应用不使用 Tailwind，显式消费 token 样式。
+      span[style] {
+        color: var(--sdm-c, inherit);
+        font-style: var(--shiki-light-font-style, normal);
+        font-weight: var(--shiki-light-font-weight, normal);
+        text-decoration: var(--shiki-light-text-decoration, none);
+      }
 
       > span {
         display: block;
@@ -235,4 +244,15 @@
   color: var(--ez-text-muted);
   background: var(--ez-surface-subtle);
   font-size: 12px;
+}
+
+// Mermaid 在 strict 模式下生成并清洗 SVG；仅限制容器尺寸，不覆盖作者显式配色。
+.diagram {
+  max-width: 100%;
+  overflow: auto;
+  margin: .75em 0;
+  color: var(--ez-text);
+  background: var(--ez-surface);
+  svg { max-width: 100%; height: auto; }
+  pre { margin: 0; padding: 12px; white-space: pre-wrap; }
 }

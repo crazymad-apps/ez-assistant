@@ -9,6 +9,7 @@ const empty: DesktopUpdateSnapshot = { revision: -1, phase: "idle", available: f
 export class DesktopUpdateStore {
   snapshot = empty;
   open = false;
+  operation_blocked = false;
   command_error: string | null = null;
   #initializing: Promise<void> | null = null;
   #unlisten: UnlistenFn | null = null;
@@ -16,7 +17,7 @@ export class DesktopUpdateStore {
 
   constructor(readonly desktop: boolean) {
     makeObservable(this, {
-      snapshot: observableRef, open: observable, command_error: observable,
+      snapshot: observableRef, open: observable, operation_blocked: observable, command_error: observable,
       visible: computed, installing: computed, downloading: computed,
       show: action, hide: action, receive: action,
     });
@@ -47,7 +48,7 @@ export class DesktopUpdateStore {
     } catch { /* 未配置更新或原生连接失败不影响既有登录。 */ }
   }
 
-  async start(): Promise<void> { await this.#command(startDesktopUpdate); }
+  async start(): Promise<void> { if (this.operation_blocked) return; await this.#command(startDesktopUpdate); }
   async cancel(): Promise<void> { await this.#command(cancelDesktopUpdate); }
 
   async #command(command: () => Promise<void>): Promise<void> {

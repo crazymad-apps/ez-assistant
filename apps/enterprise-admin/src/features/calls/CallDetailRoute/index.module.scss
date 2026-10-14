@@ -14,6 +14,15 @@
   }
 }
 
-.body_section {
-  min-width: 0;
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-block: 8px;
+  white-space: normal;
+}
+.page {
+  overflow-wrap: anywhere;
 }

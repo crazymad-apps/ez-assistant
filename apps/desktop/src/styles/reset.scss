@@ -26,11 +26,16 @@ body {
   text-rendering: optimizeLegibility;
 }
 
+// 首次读取配色前不绘制默认白底；原生窗口先用保存主题的背景承接空 WebView。
+html:not([data-theme]) body { background: transparent; }
+
 // 仅原生 macOS 工作区透出窗口材质；登录页、启动页和普通浏览器仍保留实色背景。
 // AppShell 的平台值来自原生桥接，不能用浏览器的 navigator.platform 代替。
-html:has(main[data-left-sidebar][data-platform="macos"]) body {
+html:not([data-native-theme-failed="true"]):has(main[data-left-sidebar][data-platform="macos"]) body {
   background: transparent;
 }
+
+html[data-native-theme-failed="true"] body { background: var(--ez-surface); }
 
 button,
 input,
@@ -57,7 +62,7 @@ button { cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: 0.55; }
 
 :focus-visible {
-  outline: 2px solid rgb(73 108 242 / 38%);
+  outline: 2px solid var(--ez-focus);
   outline-offset: 2px;
 }
 

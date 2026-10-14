@@ -1,3 +1,5 @@
+import { observer } from "mobx-react-lite";
+import { useAppearance } from "../../../stores/AppearanceContext";
 import { useRef, useState } from "react";
 import type { SystemContextSnapshot } from "@ez-assistant/protocol";
 import { Dialog } from "../../../components/Dialog";
@@ -7,10 +9,11 @@ import styles from "./index.module.scss";
 
 type ViewMode = "preview" | "source";
 
-export function SystemContextDialog(props: Readonly<{
+export const SystemContextDialog = observer(function SystemContextDialog(props: Readonly<{
   snapshot: SystemContextSnapshot;
   on_close: () => void;
 }>) {
+  const theme = useAppearance().preset;
   const close_button_ref = useRef<HTMLButtonElement>(null);
   const [view_mode, setViewMode] = useState<ViewMode>("preview");
   return (
@@ -59,13 +62,13 @@ export function SystemContextDialog(props: Readonly<{
       <div className={styles.body}>
         {props.snapshot.parts.length > 0 ? props.snapshot.parts.map((part, index) => (
           view_mode === "preview"
-            ? <div className={styles.preview_part} key={index}><MarkdownContent text={markdownPreviewText(part)} /></div>
+            ? <div className={styles.preview_part} key={index}><MarkdownContent theme={theme} text={markdownPreviewText(part)} /></div>
             : <pre className={styles.source_part} key={index}>{part}</pre>
         )) : <p className={styles.empty}>当前会话没有持久化的系统上下文内容。</p>}
       </div>
     </Dialog>
   );
-}
+});
 
 function markdownPreviewText(source: string): string {
   return source

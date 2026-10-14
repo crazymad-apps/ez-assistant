@@ -13,9 +13,9 @@
   background: var(--ez-surface);
   font-size: var(--ez-font-base);
 
-  &[data-tone="error"] { border-color: #f2caca; color: var(--ez-danger); }
-  &[data-tone="success"] { border-color: #bcdcc5; color: var(--ez-success); }
-  &[data-tone="warning"] { border-color: #ead6a7; }
+  &[data-tone="error"] { border-color: color-mix(in srgb, var(--ez-danger) 35%, var(--ez-surface)); color: var(--ez-danger); }
+  &[data-tone="success"] { border-color: color-mix(in srgb, var(--ez-success) 35%, var(--ez-surface)); color: var(--ez-success); }
+  &[data-tone="warning"] { border-color: color-mix(in srgb, var(--ez-warning) 35%, var(--ez-surface)); }
 }
 
 .message {

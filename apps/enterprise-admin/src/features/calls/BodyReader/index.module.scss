@@ -1,0 +1,40 @@
+.container {
+  container-type: inline-size;
+  min-width: 0;
+}
+.columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 24px;
+}
+.side {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+.failure {
+  padding-top: 20px;
+  margin-top: 20px;
+  border-top: 1px solid var(--ez-border);
+}
+// 依据正文容器而非屏幕宽度，避免侧栏和缩放挤压阅读区域。
+@container (min-width: 900px) {
+  .columns {
+    grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+  }
+  .side + .side {
+    padding-left: 24px;
+    border-left: 1px solid var(--ez-border);
+  }
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-block: 8px;
+  white-space: normal;
+}

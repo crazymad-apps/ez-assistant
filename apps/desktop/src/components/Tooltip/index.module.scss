@@ -9,8 +9,8 @@
   padding: 5px 8px;
   border-radius: 6px;
   opacity: 0;
-  color: #fff;
-  background: #30343d;
+  color: var(--ez-tooltip-text);
+  background: var(--ez-tooltip-background);
   box-shadow: var(--ez-shadow-small);
   font-size: var(--ez-font-small);
   line-height: 1.35;

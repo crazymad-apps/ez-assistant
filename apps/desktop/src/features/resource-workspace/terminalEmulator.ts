@@ -15,18 +15,15 @@ export async function createTerminalEmulator(): Promise<TerminalEmulator> {
     theme: readTerminalTheme(),
   });
   // xterm 不直接消费 CSS 变量；更新现有实例，保留 PTY、缓冲和选区。
-  // 跟随根主题属性及系统外观变化，监听由 xterm 的 addon 生命周期统一回收。
+  // 跟随根主题提交，监听由 xterm 的 addon 生命周期统一回收。
   const updateTheme = () => { terminal.options.theme = readTerminalTheme(); };
   const themeObserver = new MutationObserver(updateTheme);
-  const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
   terminal.loadAddon({
     activate: () => {
-      themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["class", "style", "data-theme"] });
-      systemTheme.addEventListener("change", updateTheme);
+      themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
     },
     dispose: () => {
       themeObserver.disconnect();
-      systemTheme.removeEventListener("change", updateTheme);
     },
   });
   const fit = new FitAddon();

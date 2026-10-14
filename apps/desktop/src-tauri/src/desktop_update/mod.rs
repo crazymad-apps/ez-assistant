@@ -144,6 +144,17 @@ impl DesktopUpdater {
         }
         Ok(LifecyclePermit { _guard: guard })
     }
+    /// 登录配置保存／应用不能与下载或安装交错。持有原 jobs 锁，直到 Host 操作返回；
+    /// 不取消下载，不创建另一套生命周期锁。只读管理仍使用普通 permit。
+    pub(crate) async fn configuration_permit(&self) -> Result<LifecyclePermit, UpdateError> {
+        let guard = self.jobs.clone().lock_owned().await;
+        let inner = self.inner.lock().map_err(|_| UpdateError::Installing)?;
+        if matches!(inner.snapshot.phase, Phase::Downloading | Phase::Installing) {
+            return Err(UpdateError::Installing);
+        }
+        drop(inner);
+        Ok(LifecyclePermit { _guard: guard })
+    }
     pub(crate) fn initialize(&self, app: &AppHandle) {
         let Ok(mut jobs) = self.jobs.try_lock() else {
             return;

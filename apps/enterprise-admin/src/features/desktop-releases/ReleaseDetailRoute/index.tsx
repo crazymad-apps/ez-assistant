@@ -26,7 +26,9 @@ export const ReleaseDetailRoute = observer(function ReleaseDetailRoute() {
     const published = row.publication !== 'published';
     modal.confirm({
       title: `${published ? '发布' : '撤回'} ${version} / ${platformLabels[row.target]}？`,
-      content: published ? '发布后用户可发现并下载安装。' : '撤回后不再提供此平台更新，已安装的应用不受影响。',
+      content: published
+        ? '发布后用户可发现并下载安装，该版本已保存的更新日志也将公开。'
+        : '撤回后不再提供此平台更新，已发布的更新日志继续保留。',
       okText: published ? '发布' : '撤回',
       cancelText: '取消',
       okButtonProps: { danger: !published },
@@ -68,7 +70,7 @@ export const ReleaseDetailRoute = observer(function ReleaseDetailRoute() {
       {(query.error || error) && <Alert type="error" title={query.error || error} />}
       {query.value && (
         <>
-          <Card title="更新说明">
+          <Card title="更新日志">
             <ReleaseNotesForm key={version} record={query.value} loading={query.loading} reload={query.reload} />
           </Card>
           <Card title="平台制品">

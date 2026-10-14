@@ -1,3 +1,5 @@
+import { registerSitePages } from './site-pages.js';
+import { registerSiteContent } from './site-content/static.js';
 import { enterpriseProtocol } from './protocol.js';
 import 'reflect-metadata';
 import { readFileSync } from 'node:fs';
@@ -115,9 +117,10 @@ class SafeHttpErrors implements ExceptionFilter {
 export async function createHttpApp(
   identity?: { source: DataSource; origin: string } & Pick<
     CenterConfig,
-    'desktopReleaseRoot' | 'desktopUpdateKeyFile' | 'templatesFile' | 'snapshotRoot' | 'pluginRoot' | 'llmConnectTimeout' | 'llmIdleTimeout' | 'llmWebsocket'
+    'siteContentRoot' | 'desktopReleaseRoot' | 'desktopUpdateKeyFile' | 'templatesFile' | 'snapshotRoot' | 'pluginRoot' | 'llmConnectTimeout' | 'llmIdleTimeout' | 'llmWebsocket'
   >,
   adminRoot?: string,
+  siteRoot?: string,
 ): Promise<NestFastifyApplication> {
   const adapter = new FastifyAdapter({
     logger: false,
@@ -177,7 +180,8 @@ export async function createHttpApp(
   app.useGlobalFilters(new SafeHttpErrors());
   app.useGlobalGuards(new HttpSecurity(app.get(IdentityService)));
   adapter.getInstance().addHook('onSend', async (request, reply, payload) => {
-    reply.header('Cache-Control', 'no-store');
+    if (!request.url.startsWith('/site-content/') || !reply.hasHeader('Cache-Control'))
+      reply.header('Cache-Control', 'no-store');
     reply.header('X-Content-Type-Options', 'nosniff');
     reply.header('Referrer-Policy', 'no-referrer');
     if (request.url.split('?')[0]?.startsWith('/admin')) {
@@ -249,6 +253,8 @@ export async function createHttpApp(
         || (request.routeOptions.config as { desktopReleaseUpload?: boolean } | undefined)?.desktopReleaseUpload)
         request.raw.socket.setTimeout(10000);
     });
+    registerSiteContent(fastify, identity?.siteContentRoot);
+    if (siteRoot) registerSitePages(fastify, siteRoot);
     if (adminRoot) {
       adapter.getInstance().register(fastifyStatic, {
         root: adminRoot,

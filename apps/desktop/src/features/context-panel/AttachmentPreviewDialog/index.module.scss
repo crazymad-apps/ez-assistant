@@ -5,7 +5,7 @@
   display: grid;
   place-items: center;
   padding: 24px;
-  background: rgb(36 42 54 / 28%);
+  background: var(--ez-overlay);
   backdrop-filter: blur(2px);
 }
 

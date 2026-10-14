@@ -1479,6 +1479,14 @@
           },
           {
             "required": false,
+            "name": "response_observation",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "required": false,
             "name": "kind",
             "in": "query",
             "schema": {
@@ -1616,7 +1624,8 @@
             "schema": {
               "enum": [
                 "request",
-                "response"
+                "response",
+                "upstream_failure"
               ],
               "type": "string"
             }
@@ -2973,6 +2982,132 @@
         ]
       }
     },
+    "/api/site/downloads": {
+      "get": {
+        "operationId": "getSiteDownloads",
+        "parameters": [
+          {
+            "name": "version",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SiteDownload"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "权限、发布状态或文件校验失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [],
+        "summary": "各平台最新可用安装包，或指定版本",
+        "tags": [
+          "desktop-releases"
+        ]
+      }
+    },
+    "/api/site/changelog": {
+      "get": {
+        "operationId": "getSiteChangelog",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SiteChangelogEntry"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "权限、发布状态或文件校验失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [],
+        "summary": "读取曾发布版本的更新日志",
+        "tags": [
+          "desktop-releases"
+        ]
+      }
+    },
+    "/api/desktop-releases/notes-preview": {
+      "post": {
+        "operationId": "previewDesktopReleaseNotes",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SiteNotesPreviewInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SiteNode"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "权限、发布状态或文件校验失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "预览未保存的 Markdown 更新日志",
+        "tags": [
+          "desktop-releases"
+        ]
+      }
+    },
     "/api/desktop-releases": {
       "get": {
         "operationId": "listDesktopReleases",
@@ -3934,7 +4069,16 @@
             "type": "string",
             "enum": [
               "request",
-              "response"
+              "response",
+              "upstream_failure"
+            ]
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "off",
+              "anomalies",
+              "all"
             ]
           },
           "enabled": {
@@ -5236,7 +5380,8 @@
               "partial",
               "failed",
               "expired",
-              "missing"
+              "missing",
+              "not_received"
             ]
           },
           "bytes": {
@@ -5330,6 +5475,46 @@
               "unknown"
             ]
           },
+          "response_observation": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "normal",
+              "anomalous",
+              "unconfirmed"
+            ],
+            "nullable": true
+          },
+          "response_observation_reason": {
+            "type": "string",
+            "nullable": true
+          },
+          "response_source": {
+            "type": "string",
+            "enum": [
+              "upstream_http",
+              "websocket_bridge",
+              "websocket_compact"
+            ],
+            "nullable": true
+          },
+          "response_content_type": {
+            "type": "string",
+            "nullable": true
+          },
+          "response_content_encoding": {
+            "type": "string",
+            "nullable": true
+          },
+          "upstream_failure": {
+            "nullable": true,
+            "type": "object",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CallSnapshot"
+              }
+            ]
+          },
           "usage_state": {
             "type": "string",
             "enum": [
@@ -5384,6 +5569,12 @@
           "http_status",
           "reason",
           "outcome",
+          "response_observation",
+          "response_observation_reason",
+          "response_source",
+          "response_content_type",
+          "response_content_encoding",
+          "upstream_failure",
           "usage_state",
           "usage_reason",
           "input_tokens",
@@ -5433,7 +5624,8 @@
               "partial",
               "failed",
               "expired",
-              "missing"
+              "missing",
+              "not_received"
             ]
           },
           "bytes": {
@@ -5451,6 +5643,10 @@
           "text": {
             "type": "string",
             "nullable": true
+          },
+          "body_base64": {
+            "type": "string",
+            "nullable": true
           }
         },
         "required": [
@@ -5458,14 +5654,20 @@
           "bytes",
           "sha256",
           "reason",
-          "text"
+          "text",
+          "body_base64"
         ]
       },
       "RecordingSettings": {
         "type": "object",
         "properties": {
-          "enabled": {
-            "type": "boolean"
+          "mode": {
+            "type": "string",
+            "enum": [
+              "off",
+              "anomalies",
+              "all"
+            ]
           },
           "content_retention_days": {
             "type": "number",
@@ -5479,7 +5681,7 @@
           }
         },
         "required": [
-          "enabled",
+          "mode",
           "content_retention_days",
           "index_retention_days"
         ]
@@ -6556,6 +6758,347 @@
           "expected_handling_note",
           "status",
           "handling_note"
+        ]
+      },
+      "SiteScenario": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "plugin": {
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "intro": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          },
+          "file": {
+            "type": "string"
+          },
+          "reply": {
+            "type": "string"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "drawing",
+              "scene",
+              "quote",
+              "notes"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "plugin",
+          "prompt",
+          "intro",
+          "title",
+          "body",
+          "file",
+          "reply",
+          "steps",
+          "kind"
+        ]
+      },
+      "SiteNode": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "text",
+              "paragraph",
+              "heading",
+              "strong",
+              "em",
+              "s",
+              "blockquote",
+              "bullet_list",
+              "ordered_list",
+              "list_item",
+              "code",
+              "code_inline",
+              "link",
+              "image",
+              "break",
+              "hr",
+              "table",
+              "thead",
+              "tbody",
+              "tr",
+              "th",
+              "td"
+            ]
+          },
+          "text": {
+            "type": "string"
+          },
+          "href": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "level": {
+            "type": "number"
+          },
+          "start": {
+            "type": "number"
+          },
+          "children": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SiteNode"
+            }
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "SiteHomeSection": {
+        "type": "object",
+        "properties": {
+          "scenarios": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SiteScenario"
+            }
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "hero",
+              "workspace",
+              "capabilities",
+              "modes",
+              "resources",
+              "closing"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "body": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SiteNode"
+            }
+          }
+        },
+        "required": [
+          "kind",
+          "title",
+          "description",
+          "body"
+        ]
+      },
+      "SiteArticle": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "date": {
+            "type": "string"
+          },
+          "applies_to": {
+            "type": "string"
+          },
+          "body": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SiteNode"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "date",
+          "applies_to",
+          "body"
+        ]
+      },
+      "SiteChapter": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "articles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SiteArticle"
+            }
+          }
+        },
+        "required": [
+          "title",
+          "articles"
+        ]
+      },
+      "SiteAsset": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "image/png",
+              "image/jpeg",
+              "image/webp"
+            ]
+          },
+          "size": {
+            "type": "number"
+          },
+          "sha256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "type",
+          "size",
+          "sha256"
+        ]
+      },
+      "SiteContent": {
+        "type": "object",
+        "properties": {
+          "format": {
+            "type": "number",
+            "enum": [
+              1
+            ]
+          },
+          "home": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SiteHomeSection"
+            }
+          },
+          "manual": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SiteChapter"
+            }
+          },
+          "assets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SiteAsset"
+            }
+          }
+        },
+        "required": [
+          "format",
+          "home",
+          "manual",
+          "assets"
+        ]
+      },
+      "SiteDownload": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "enum": [
+              "darwin-aarch64",
+              "windows-x86_64",
+              "windows-aarch64"
+            ]
+          },
+          "version": {
+            "type": "string"
+          },
+          "published_at": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "size": {
+            "type": "number"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "target",
+          "version",
+          "published_at",
+          "name",
+          "size",
+          "sha256",
+          "url"
+        ]
+      },
+      "SiteChangelogEntry": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string"
+          },
+          "published_at": {
+            "type": "string"
+          },
+          "body": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SiteNode"
+            }
+          }
+        },
+        "required": [
+          "version",
+          "published_at",
+          "body"
+        ]
+      },
+      "SiteNotesPreviewInput": {
+        "type": "object",
+        "properties": {
+          "notes": {
+            "type": "string",
+            "description": "Markdown 正文，最多 16 KiB UTF-8"
+          }
+        },
+        "required": [
+          "notes"
         ]
       },
       "DesktopTargetSummary": {

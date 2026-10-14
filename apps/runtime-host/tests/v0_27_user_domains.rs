@@ -148,12 +148,12 @@ async fn real_process_has_no_personal_fallback_and_routes_events_to_its_user() {
     })
     .await
     .unwrap();
-    let alice = login(&client, &url, "alice").await;
-    let bob = login(&client, &url, "bob").await;
     assert!(
         !home.path().join("users").exists(),
-        "login must not open any user database"
+        "unauthenticated enterprise Host must not open any user database"
     );
+    let alice = login(&client, &url, "alice").await;
+    let bob = login(&client, &url, "bob").await;
     let (a, b) = tokio::join!(
         request(&client, &url, "/runtime/ensure-ready", &alice).send(),
         request(&client, &url, "/runtime/ensure-ready", &bob).send()

@@ -13,6 +13,7 @@ export type CenterConfig = Readonly<{
   templatesFile?: string;
   snapshotRoot?: string;
   pluginRoot?: string;
+  siteContentRoot?: string;
   desktopReleaseRoot?: string;
   desktopUpdateKeyFile?: string;
   llmConnectTimeout?: number;
@@ -76,6 +77,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): CenterConfig {
   if (env.CENTER_PLUGIN_ROOT !== undefined && !isAbsolute(env.CENTER_PLUGIN_ROOT)) invalid();
   if (env.CENTER_DESKTOP_RELEASE_ROOT !== undefined && !isAbsolute(env.CENTER_DESKTOP_RELEASE_ROOT)) invalid();
   if (env.CENTER_DESKTOP_UPDATE_PUBLIC_KEY_FILE !== undefined && !isAbsolute(env.CENTER_DESKTOP_UPDATE_PUBLIC_KEY_FILE)) invalid();
+  if (env.CENTER_SITE_CONTENT_ROOT !== undefined && !isAbsolute(env.CENTER_SITE_CONTENT_ROOT)) invalid();
   const llmWebsocket = {
     idleMs: integer('CENTER_LLM_WS_IDLE_MS', 600000, 1000, 86400000),
     maxConnections: integer('CENTER_LLM_WS_MAX_CONNECTIONS', 256, 1, 4096),
@@ -90,6 +92,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): CenterConfig {
     port,
     origin: origin.origin,
     templatesFile: env.CENTER_MODEL_TEMPLATES_FILE,
+    siteContentRoot: env.CENTER_SITE_CONTENT_ROOT,
     snapshotRoot: env.CENTER_SNAPSHOT_ROOT,
     desktopReleaseRoot: env.CENTER_DESKTOP_RELEASE_ROOT ?? resolve(process.cwd(), 'data/desktop-releases'),
     desktopUpdateKeyFile: env.CENTER_DESKTOP_UPDATE_PUBLIC_KEY_FILE,

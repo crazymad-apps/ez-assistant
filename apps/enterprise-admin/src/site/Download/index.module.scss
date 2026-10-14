@@ -1,0 +1,13 @@
+.page {
+  max-width: 608px;
+  padding: 160px 24px 80px;
+  margin: auto;
+  min-height: 80vh;
+  h1 {
+    font-size: 32px;
+  }
+  > p {
+    color: var(--site-muted);
+    margin-bottom: 32px;
+  }
+}

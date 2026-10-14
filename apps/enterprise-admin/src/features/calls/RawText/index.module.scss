@@ -1,0 +1,27 @@
+.container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.raw,
+.preview {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  line-height: 1.7;
+  min-width: 0;
+  &:focus-visible {
+    outline: 2px solid var(--ez-primary);
+    outline-offset: 2px;
+  }
+}
+.raw {
+  max-height: 420px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.raw[data-wrap='false'] {
+  white-space: pre;
+}

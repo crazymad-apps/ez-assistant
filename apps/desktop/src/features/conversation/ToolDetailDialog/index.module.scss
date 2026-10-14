@@ -5,7 +5,7 @@
   display: grid;
   place-items: center;
   padding: 24px;
-  background: rgb(36 42 54 / 28%);
+  background: var(--ez-overlay);
   backdrop-filter: blur(2px);
 }
 
@@ -68,8 +68,8 @@
   flex: 0 0 auto;
   place-items: center;
   border-radius: var(--ez-radius-small);
-  color: #b66a0a !important;
-  background: #fff5e5;
+  color: var(--ez-warning-text) !important;
+  background: var(--ez-warning-soft);
 }
 
 .body {
@@ -94,8 +94,8 @@
   overflow: auto;
   padding: 10px 12px;
   border-radius: var(--ez-radius-small);
-  color: #eef1f7;
-  background: #272b34;
+  color: var(--ez-terminal-foreground);
+  background: var(--ez-terminal-background);
   font-family: "SFMono-Regular", Consolas, monospace;
   font-size: var(--ez-font-base);
   white-space: pre-wrap;

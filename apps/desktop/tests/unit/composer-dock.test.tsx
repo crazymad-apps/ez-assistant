@@ -1541,7 +1541,7 @@ describe("ComposerDock", () => {
     expect(desktop.querySelector("svg")).toHaveAttribute("data-icon", "desktop");
     expect(device.querySelector("svg")).toHaveAttribute("data-icon", "device");
     expect(within(menu).queryByRole("menuitem", { name: "离线终端" })).not.toBeInTheDocument();
-    expect(within(menu).getByRole("menuitem", { name: "管理智能终端" })).toBeVisible();
+    expect(within(menu).queryByRole("menuitem", { name: "管理智能终端" })).not.toBeInTheDocument();
     expect(menu.querySelector("small")).not.toBeInTheDocument();
 
     await user.click(device);

@@ -4,7 +4,7 @@
   z-index: calc(var(--ez-z-modal) + 10);
   display: grid;
   place-items: center;
-  background: var(--ez-overlay, rgb(24 30 43 / 28%));
+  background: var(--ez-overlay);
 }
 
 .panel {
@@ -18,7 +18,7 @@
   border-radius: 16px;
   background: var(--ez-surface);
   color: var(--ez-text);
-  box-shadow: 0 16px 64px rgb(0 0 0 / 20%);
+  box-shadow: var(--ez-shadow-shell);
 
   h2 { margin: 0; font-size: 16px; font-weight: 600; }
   footer { display: flex; justify-content: flex-end; gap: 8px; }

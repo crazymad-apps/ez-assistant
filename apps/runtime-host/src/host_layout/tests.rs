@@ -109,7 +109,7 @@ fn database_upgrade_preserves_external_paths_and_verified_backup() {
                 |r| r.get::<_, String>(0)
             )
             .unwrap(),
-        env!("CARGO_PKG_VERSION")
+        "0.30.0" // v0.31.0 保留存储兼容下限，不随软件版本递增。
     );
     assert_eq!(
         fs::read_to_string(target.join("data/workspaces/w/agent/notes.txt")).unwrap(),

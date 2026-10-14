@@ -13,10 +13,10 @@
   // 冷色从顶部轻轻淡出，保留系统材质的通透感和正文对比度。
   --ez-left-sidebar-background: linear-gradient(
     180deg,
-    rgb(143 163 226 / 10%) 0%,
-    rgb(179 189 225 / 4%) 48%,
-    rgb(247 248 250 / 0%) 100%
-  ), rgb(247 248 250 / 18%);
+    color-mix(in srgb, var(--ez-primary) 10%, transparent) 0%,
+    color-mix(in srgb, var(--ez-primary) 4%, transparent) 48%,
+    transparent 100%
+  ), color-mix(in srgb, var(--ez-sidebar) 45%, transparent);
   --ez-left-account-background: transparent;
   background: transparent;
 
@@ -187,7 +187,7 @@
   padding: 5px 18px 5px 26px;
   border-bottom: 1px solid var(--ez-border);
   background: var(--ez-surface-subtle);
-  box-shadow: inset 0 1px rgb(255 255 255 / 55%);
+  box-shadow: inset 0 1px color-mix(in srgb, var(--ez-highlight) 25%, transparent);
 }
 
 .child_back {
@@ -312,7 +312,7 @@
   flex: 0 0 auto;
   padding: 3px 7px;
   border-radius: 999px;
-  color: #3157d7;
+  color: var(--ez-primary-text);
   background: var(--ez-primary-soft);
   font-size: var(--ez-font-small);
   font-weight: 650;
@@ -335,7 +335,7 @@
     padding: 0;
     border: 0;
     border-radius: 999px;
-    background: var(--ez-border-strong, #a8afba);
+    background: var(--ez-border-strong);
 
     i {
       position: absolute;
@@ -344,7 +344,7 @@
       width: 13px;
       height: 13px;
       border-radius: 50%;
-      background: white;
+      background: var(--ez-switch-thumb);
       transition: transform var(--ez-motion-fast) var(--ez-ease-standard);
     }
 

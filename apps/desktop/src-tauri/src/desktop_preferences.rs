@@ -7,10 +7,15 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager as _};
 use thiserror::Error;
 
+#[path = "desktop_preferences/appearance.rs"]
+pub(crate) mod appearance;
+
 static PREFERENCES_WRITE: Mutex<()> = Mutex::new(());
 
 const PREFERENCES_FILE: &str = "desktop-preferences.json";
 const PREFERENCES_STAGING_FILE: &str = ".desktop-preferences.tmp";
+const THEME_PRESETS: &str = include_str!("../../theme-presets.json");
+const DEFAULT_THEME_ID: &str = "default_light";
 const MAX_EXPANDED_WORKSPACES: usize = 256;
 const MAX_PREFERENCES_BYTES: u64 = 4 * 1024 * 1024;
 const LEFT_SIDEBAR_DEFAULT_WIDTH: i32 = 286;
@@ -50,6 +55,27 @@ struct PreferencesDocument {
     local: DesktopPreferences,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     hosts: BTreeMap<String, DesktopPreferences>,
+    // 保留未知值直到用户明确选色；布局保存不能顺便规范化或丢弃该字段。
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_theme",
+        skip_serializing_if = "Option::is_none"
+    )]
+    theme_id: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct DesktopThemePreference {
+    pub(crate) theme_id: String,
+    recovered_unknown: bool,
+}
+
+fn deserialize_present_theme<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // 缺字段是旧版正常默认，显式 null 则是未知值，两者不能被 Option 反序列化合并。
+    serde_json::Value::deserialize(deserializer).map(Some)
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -134,6 +160,75 @@ pub(crate) fn save_desktop_preferences(
     save_namespace(&directory, preferences, namespace.as_deref())
 }
 
+#[tauri::command]
+pub(crate) fn load_desktop_theme(
+    app: AppHandle,
+) -> Result<DesktopThemePreference, DesktopPreferencesError> {
+    if appearance::take_startup_read_failure(&app) {
+        return Err(DesktopPreferencesError::Invalid);
+    }
+    let directory = app
+        .path()
+        .app_config_dir()
+        .map_err(|_| DesktopPreferencesError::PathUnavailable)?;
+    load_theme_from_directory(&directory)
+}
+
+#[tauri::command]
+pub(crate) fn save_desktop_theme(
+    app: AppHandle,
+    theme_id: String,
+) -> Result<(), DesktopPreferencesError> {
+    let directory = app
+        .path()
+        .app_config_dir()
+        .map_err(|_| DesktopPreferencesError::PathUnavailable)?;
+    save_theme_to_directory(&directory, &theme_id)
+}
+
+fn is_theme_id(value: &str) -> Result<bool, DesktopPreferencesError> {
+    let presets: BTreeMap<String, serde_json::Value> =
+        serde_json::from_str(THEME_PRESETS).map_err(|_| DesktopPreferencesError::Invalid)?;
+    Ok(presets.contains_key(value))
+}
+
+pub(crate) fn load_theme_from_directory(
+    directory: &Path,
+) -> Result<DesktopThemePreference, DesktopPreferencesError> {
+    let document = load_document(directory)?;
+    if let Some(value) = document
+        .theme_id
+        .as_ref()
+        .and_then(serde_json::Value::as_str)
+        && is_theme_id(value)?
+    {
+        return Ok(DesktopThemePreference {
+            theme_id: value.to_owned(),
+            recovered_unknown: false,
+        });
+    }
+    Ok(DesktopThemePreference {
+        theme_id: DEFAULT_THEME_ID.to_owned(),
+        recovered_unknown: document.theme_id.is_some(),
+    })
+}
+
+pub(crate) fn save_theme_to_directory(
+    directory: &Path,
+    theme_id: &str,
+) -> Result<(), DesktopPreferencesError> {
+    if !is_theme_id(theme_id)? {
+        return Err(DesktopPreferencesError::Invalid);
+    }
+    // 与布局共用锁：锁内重读、只改主题、沿用同一暂存替换，防止两类保存互相覆盖。
+    let _guard = PREFERENCES_WRITE
+        .lock()
+        .map_err(|_| DesktopPreferencesError::SaveFailed)?;
+    let mut document = load_document(directory)?;
+    document.theme_id = Some(serde_json::Value::String(theme_id.to_owned()));
+    write_document(directory, &document)
+}
+
 fn load_from_directory(directory: &Path) -> Result<DesktopPreferences, DesktopPreferencesError> {
     Ok(load_document(directory)?.local)
 }
@@ -212,11 +307,19 @@ fn save_namespace(
     } else {
         document.local = preferences;
     }
+    write_document(directory, &document)
+}
+
+/// 调用方须持有 PREFERENCES_WRITE，并在该锁内读取及合并文档；主题和布局共用唯一写入路径。
+fn write_document(
+    directory: &Path,
+    document: &PreferencesDocument,
+) -> Result<(), DesktopPreferencesError> {
     fs::create_dir_all(directory).map_err(|_| DesktopPreferencesError::SaveFailed)?;
     let staging = directory.join(PREFERENCES_STAGING_FILE);
     let destination = directory.join(PREFERENCES_FILE);
     let bytes =
-        serde_json::to_vec_pretty(&document).map_err(|_| DesktopPreferencesError::SaveFailed)?;
+        serde_json::to_vec_pretty(document).map_err(|_| DesktopPreferencesError::SaveFailed)?;
     if bytes.len() as u64 > MAX_PREFERENCES_BYTES {
         return Err(DesktopPreferencesError::Invalid);
     }
@@ -291,186 +394,9 @@ const fn default_right_sidebar_width() -> i32 {
 }
 
 #[cfg(test)]
-mod tests {
-    use tempfile::tempdir;
+#[path = "desktop_preferences/tests.rs"]
+mod tests;
 
-    use super::*;
-
-    #[test]
-    fn host_namespaces_preserve_local_preferences_and_do_not_accept_credential_urls() {
-        let directory = tempdir().unwrap();
-        let local = DesktopPreferences {
-            left_sidebar_width: 300,
-            last_model_selection: Some(ModelSelection {
-                provider_instance_id: assistant_protocol::ProviderInstanceId::new("local-provider")
-                    .expect("provider id"),
-                model_id: "local-model".to_owned(),
-            }),
-            ..DesktopPreferences::default()
-        };
-        save_to_directory(directory.path(), local.clone()).unwrap();
-        let remote = DesktopPreferences {
-            left_sidebar_width: 400,
-            default_approval_mode: ApprovalMode::Auto,
-            last_model_selection: Some(ModelSelection {
-                provider_instance_id: assistant_protocol::ProviderInstanceId::new(
-                    "remote-provider",
-                )
-                .expect("provider id"),
-                model_id: "remote-model".to_owned(),
-            }),
-            resource_workspace: Some(
-                serde_json::json!({"current_scope_key":"session:remote","groups":[]}),
-            ),
-            ..DesktopPreferences::default()
-        };
-        save_namespace(
-            directory.path(),
-            remote.clone(),
-            Some("http://host.test:7240"),
-        )
-        .unwrap();
-        let document = load_document(directory.path()).unwrap();
-        assert_eq!(document.local, local);
-        assert_eq!(document.hosts.get("http://host.test:7240"), Some(&remote));
-        save_to_directory(directory.path(), DesktopPreferences::default()).unwrap();
-        assert_eq!(
-            load_document(directory.path())
-                .unwrap()
-                .hosts
-                .get("http://host.test:7240"),
-            Some(&remote)
-        );
-        assert!(validate_namespace("http://user:password@host.test:7240").is_err());
-        assert!(validate_namespace("http://host.test:7240/#token=x").is_err());
-        assert!(validate_namespace("file:///tmp").is_err());
-    }
-
-    #[test]
-    fn preferences_round_trip_without_runtime_state() {
-        let directory = tempdir().expect("tempdir");
-        let preferences = DesktopPreferences {
-            left_sidebar_open: false,
-            right_sidebar_open: true,
-            left_sidebar_width: 312,
-            right_sidebar_width: 374,
-            expanded_workspace_ids: Some(vec!["workspace-b".to_owned(), "workspace-a".to_owned()]),
-            close_behavior: DesktopCloseBehavior::QuitDesktop,
-            default_approval_mode: ApprovalMode::Auto,
-            last_model_selection: Some(ModelSelection {
-                provider_instance_id: assistant_protocol::ProviderInstanceId::new("provider-a")
-                    .expect("provider id"),
-                model_id: "model-a".to_owned(),
-            }),
-            resource_workspace: Some(
-                serde_json::json!({"current_scope_key":"session:a","groups":[]}),
-            ),
-        };
-        save_to_directory(directory.path(), preferences).expect("save");
-        let loaded = load_from_directory(directory.path()).expect("load");
-
-        assert!(!loaded.left_sidebar_open);
-        assert!(loaded.right_sidebar_open);
-        assert_eq!(loaded.left_sidebar_width, 312);
-        assert_eq!(loaded.right_sidebar_width, 374);
-        assert_eq!(loaded.close_behavior, DesktopCloseBehavior::QuitDesktop);
-        assert_eq!(loaded.default_approval_mode, ApprovalMode::Auto);
-        assert_eq!(
-            loaded.last_model_selection.expect("model").model_id,
-            "model-a"
-        );
-        assert_eq!(
-            loaded.resource_workspace.unwrap()["current_scope_key"],
-            "session:a"
-        );
-        assert_eq!(
-            loaded
-                .expanded_workspace_ids
-                .expect("explicit expansion state"),
-            ["workspace-a", "workspace-b"]
-        );
-    }
-
-    #[test]
-    fn oversize_snapshot_does_not_replace_last_successful_save() {
-        let directory = tempdir().expect("tempdir");
-        save_to_directory(directory.path(), DesktopPreferences::default()).expect("initial save");
-        let oversized = DesktopPreferences {
-            resource_workspace: Some(
-                serde_json::json!({"data": "x".repeat(MAX_PREFERENCES_BYTES as usize)}),
-            ),
-            ..DesktopPreferences::default()
-        };
-        assert!(matches!(
-            save_to_directory(directory.path(), oversized),
-            Err(DesktopPreferencesError::Invalid)
-        ));
-        assert_eq!(
-            load_from_directory(directory.path()).expect("previous snapshot"),
-            DesktopPreferences::default()
-        );
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                fs::metadata(directory.path().join(PREFERENCES_FILE))
-                    .expect("private file")
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o600
-            );
-        }
-    }
-
-    #[test]
-    fn missing_widths_use_defaults_and_only_minimum_widths_are_clamped() {
-        let legacy: DesktopPreferences =
-            serde_json::from_str(r#"{"left_sidebar_open":true,"right_sidebar_open":false}"#)
-                .expect("legacy preferences");
-        assert_eq!(legacy.left_sidebar_width, LEFT_SIDEBAR_DEFAULT_WIDTH);
-        assert_eq!(legacy.right_sidebar_width, RIGHT_SIDEBAR_DEFAULT_WIDTH);
-        assert_eq!(legacy.default_approval_mode, ApprovalMode::Auto);
-        assert!(legacy.last_model_selection.is_none());
-        let explicit: DesktopPreferences = serde_json::from_str(
-            r#"{"left_sidebar_open":true,"right_sidebar_open":false,"default_approval_mode":"ask"}"#,
-        )
-        .expect("explicit approval preference");
-        assert_eq!(explicit.default_approval_mode, ApprovalMode::Ask);
-
-        let clamped = validate(DesktopPreferences {
-            left_sidebar_width: -10,
-            right_sidebar_width: 9_999,
-            ..DesktopPreferences::default()
-        })
-        .expect("clamped preferences");
-        assert_eq!(clamped.left_sidebar_width, LEFT_SIDEBAR_MIN_WIDTH);
-        assert_eq!(clamped.right_sidebar_width, 9_999);
-
-        let proportional = validate(DesktopPreferences {
-            right_sidebar_width: 150,
-            ..DesktopPreferences::default()
-        })
-        .expect("proportional preference");
-        assert_eq!(proportional.right_sidebar_width, 150);
-    }
-
-    #[test]
-    fn invalid_device_defaults_are_rejected_instead_of_becoming_runtime_state() {
-        assert!(serde_json::from_str::<DesktopPreferences>(
-            r#"{"left_sidebar_open":true,"right_sidebar_open":true,"default_approval_mode":"unknown"}"#,
-        )
-        .is_err());
-        assert!(
-            validate(DesktopPreferences {
-                last_model_selection: Some(ModelSelection {
-                    provider_instance_id: assistant_protocol::ProviderInstanceId::new("provider-a")
-                        .expect("provider id"),
-                    model_id: "   ".to_owned(),
-                }),
-                ..DesktopPreferences::default()
-            })
-            .is_err()
-        );
-    }
-}
+#[cfg(test)]
+#[path = "desktop_preferences/theme_tests.rs"]
+mod theme_tests;

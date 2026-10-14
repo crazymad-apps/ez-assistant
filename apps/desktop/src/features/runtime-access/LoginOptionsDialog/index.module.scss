@@ -1,0 +1,113 @@
+@use '../../../styles/fields';
+
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--ez-z-modal);
+  display: grid;
+  // 以遮罩实际可用高度约束滚动区，避免 WebKit 缩放时 dvh 把操作区推出窗口。
+  grid-template-rows: minmax(0, 1fr);
+  place-items: center;
+  padding: 16px;
+  background: var(--ez-overlay);
+}
+.dialog {
+  width: min(480px, 100%);
+  max-height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--ez-border-strong);
+  border-radius: var(--ez-radius-large);
+  background: var(--ez-surface);
+  color: var(--ez-text);
+  box-shadow: var(--ez-shadow-shell);
+  font-size: var(--ez-font-base);
+}
+.dialog header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 20px;
+}
+.dialog h2 {
+  margin: 0;
+  font-size: var(--ez-font-large);
+}
+.dialog footer {
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 16px 20px;
+}
+.body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 20px;
+  overflow-wrap: anywhere;
+  line-height: 1.65;
+}
+.body p {
+  margin: 0 0 12px;
+}
+.fields {
+  display: grid;
+  gap: 8px;
+}
+.fields label:not(:first-child) {
+  margin-top: 8px;
+}
+.fields input {
+  width: 100%;
+  min-width: 0;
+  height: var(--ez-control-height-default);
+  padding: 0 10px;
+  border: 1px solid var(--ez-border-strong);
+  border-radius: var(--ez-radius-small);
+  background: var(--ez-surface);
+  color: var(--ez-text);
+  font: inherit;
+}
+.fields input:focus {
+  @include fields.focus-border;
+}
+.fields input[aria-invalid='true'] {
+  border-color: var(--ez-danger);
+}
+.error {
+  color: var(--ez-danger);
+}
+.notice {
+  background: var(--ez-surface-subtle);
+  padding: 12px;
+  border-radius: var(--ez-radius-small);
+  margin-bottom: 16px;
+}
+.comparison {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 8px 0 0;
+}
+.comparison dt,
+.changes dt {
+  color: var(--ez-text-secondary);
+}
+.comparison dd,
+.changes dd {
+  margin: 0;
+}
+.changes {
+  margin: 0 0 16px;
+}
+.confirmation {
+  color: var(--ez-text-secondary);
+}
+.confirmation dd {
+  color: var(--ez-text);
+}

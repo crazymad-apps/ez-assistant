@@ -1,5 +1,6 @@
+import { ReleaseNotesPreview } from '../ReleaseNotesPreview';
 import { useCallback, useState } from 'react';
-import { Alert, Button, Form, Input, Space } from 'antd';
+import { Alert, Button, Form, Input, Space, Segmented, Typography } from 'antd';
 import { observer } from 'mobx-react-lite';
 import type { DesktopReleaseDetail } from '../../../request/openapi';
 import { desktopReleaseApi } from '../../../request/desktop-releases';
@@ -15,6 +16,8 @@ export const ReleaseNotesForm = observer(function ReleaseNotesForm(props: {
   const [base, setBase] = useState(props.record.notes);
   const [notes, setNotes] = useState(base);
   const [error, setError] = useState('');
+  const [view, setView] = useState<'edit' | 'preview'>('edit');
+  const published = props.record.targets.some((target) => target.first_published_at !== null);
   const [failed, setFailed] = useState<DesktopReleaseDetail>();
   const [savedSnapshot, setSavedSnapshot] = useState<DesktopReleaseDetail>();
   const discard = useCallback(() => setNotes(base), [base]);
@@ -68,15 +71,32 @@ export const ReleaseNotesForm = observer(function ReleaseNotesForm(props: {
           }
         />
       )}
+      <Typography.Paragraph type="secondary">
+        {published ? '保存后更新官网与客户端的版本说明。' : '发布后在官网与客户端展示。'} 支持
+        Markdown，修改后请同步仓库日志。
+      </Typography.Paragraph>
+      <Form.Item>
+        <Segmented
+          value={view}
+          options={[
+            { label: '编辑', value: 'edit' },
+            { label: '预览', value: 'preview' },
+          ]}
+          onChange={setView}
+          disabled={invalid}
+        />
+      </Form.Item>
+      {view === 'preview' && <ReleaseNotesPreview notes={notes} />}
       <Form.Item
-        label="更新说明"
+        hidden={view === 'preview'}
+        label="Markdown 正文"
         htmlFor="release-notes"
         validateStatus={invalid ? 'error' : undefined}
-        help={invalid ? '更新说明过长，请缩短后保存。' : undefined}
+        help={invalid ? '更新日志过长，请缩短后保存。' : undefined}
       >
         <Input.TextArea
           id="release-notes"
-          placeholder="填写本次更新内容"
+          placeholder="用几条简明说明，介绍本次新增、改进和修复。"
           rows={6}
           value={notes}
           disabled={adminStore.busy}
@@ -88,7 +108,7 @@ export const ReleaseNotesForm = observer(function ReleaseNotesForm(props: {
         htmlType="submit"
         disabled={!dirty || review || invalid || adminStore.busy || props.loading}
       >
-        保存说明
+        保存更新日志
       </Button>
     </Form>
   );

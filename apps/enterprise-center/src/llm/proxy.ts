@@ -12,6 +12,7 @@ import type { ModelOperation } from './body.js';
 import { RequestBodies, requestModel } from './body.js';
 import { CallRecords } from './records.js';
 import type { CallRecording } from './records.js';
+import { ResponseObserver } from './response-observer.js';
 import { UsageObserver } from './usage.js';
 import { ControlError } from './errors.js';
 import { transfer, responseHeaders, TransferError } from './transport.js';
@@ -61,11 +62,15 @@ export class ModelProxy {
     this.websocket = new ResponsesWebsocket(options.websocket);
     this.unsubscribe = [
       identities.onRevoked((user) => {
-        for (const request of this.bridgeRequests) if (user === null || request.user === user) request.abort.abort();
+        for (const request of this.bridgeRequests)
+          if (user === null || request.user === user)
+            request.abort.abort(new DOMException('identity_revoked', 'AbortError'));
         this.websocket.revokeUser(user);
       }),
       models.onHistoryInvalidated((provider) => {
-        for (const request of this.bridgeRequests) if (request.provider === provider) request.abort.abort();
+        for (const request of this.bridgeRequests)
+          if (request.provider === provider)
+            request.abort.abort(new DOMException('bridge_configuration_changed', 'AbortError'));
         this.websocket.revokeProvider(provider);
       }),
     ];
@@ -87,7 +92,7 @@ export class ModelProxy {
   }
 
   async close(): Promise<void> {
-    this.shutdown.abort();
+    this.shutdown.abort(new DOMException('center_shutdown', 'AbortError'));
     for (const unsubscribe of this.unsubscribe.splice(0)) unsubscribe();
     this.websocket.close();
     let timer: NodeJS.Timeout | undefined;
@@ -125,7 +130,12 @@ export class ModelProxy {
         username: input.user.username,
         provider_instance_id: input.selection.provider_instance_id,
         model_id: input.selection.model_id,
-        kind: input.operation === 'compact' ? 'context_compaction' : input.operation === 'input_tokens' ? 'input_tokens' : input.kind,
+        kind:
+          input.operation === 'compact'
+            ? 'context_compaction'
+            : input.operation === 'input_tokens'
+              ? 'input_tokens'
+              : input.kind,
         protocol: input.protocol,
       });
       input.admitted?.(recording);
@@ -151,13 +161,20 @@ export class ModelProxy {
         });
         signal.throwIfAborted();
         recording.row.provider_name = route.provider.connection.display_name;
-        if (input.operation !== 'input_tokens') recording.usage = new UsageObserver(input.protocol, route.provider.connection.provider_type);
+        if (input.operation !== 'input_tokens')
+          recording.usage = new UsageObserver(input.protocol, route.provider.connection.provider_type);
+        recording.observation = new ResponseObserver(recording.row, recording.usage);
         signal.throwIfAborted();
         const bridge =
           route.provider.connection.responses_transport === 'websocket' &&
           input.protocol === 'open_ai_responses' &&
           input.operation !== 'input_tokens' &&
           input.kind === 'proxy';
+        recording.row.response_source = bridge
+          ? input.operation === 'compact'
+            ? 'websocket_compact'
+            : 'websocket_bridge'
+          : 'upstream_http';
         if (!bridge) this.bridgeRequests.delete(bridgeRequest);
         transferSignal = bridge ? AbortSignal.any([signal, bridgeRequest.abort.signal]) : signal;
         transferSignal.throwIfAborted();
@@ -181,15 +198,12 @@ export class ModelProxy {
           sink: {
             headers: (code: number, headers: IncomingHttpHeaders) => {
               status = code;
-              recording.responseUnsupported =
-                !!headers['content-encoding'] && headers['content-encoding'] !== 'identity';
-              recording.usage?.headers(headers);
+              recording.headers(headers);
               input.sink.headers(code, headers);
             },
 
             chunk: async (chunk: Buffer, signal: AbortSignal) => {
-              if (!recording.responseUnsupported) recording.response?.append(chunk);
-              recording.usage?.chunk(chunk);
+              recording.chunk(chunk);
               await input.sink.chunk(chunk, signal);
             },
           },
@@ -201,6 +215,7 @@ export class ModelProxy {
               provider: input.selection.provider_instance_id,
               binding: input.historyBinding ?? '',
               finish: input.finish,
+              failureFrame: (chunk: Buffer) => recording.failureFrame(chunk),
               started: () => {
                 upstream = true;
               },
@@ -210,21 +225,35 @@ export class ModelProxy {
         await recording.settle(result >= 200 && result < 300 ? 'forwarded' : 'upstream_error', result, null);
         return { call_id: recording.row.id, http_status: result };
       } catch (error) {
-        const reason =
-          error instanceof ControlError
+        const abortReason = transferSignal.reason instanceof DOMException ? transferSignal.reason.message : '';
+        const cancellation = [
+          'center_shutdown',
+          'identity_revoked',
+          'bridge_configuration_changed',
+          'downstream_closed',
+          'test_timeout',
+          'test_response_limit',
+        ].includes(abortReason)
+          ? abortReason
+          : 'cancelled';
+        const reason = transferSignal.aborted
+          ? cancellation
+          : error instanceof ControlError
             ? error.code
-            : error instanceof TransferError
-              ? error.reason
-              : transferSignal.aborted
-                ? 'cancelled'
-                : 'center_failure';
+            : error instanceof WebsocketResponseError
+              ? 'response_error'
+              : error instanceof TransferError
+                ? error.reason
+                : transferSignal.aborted
+                  ? 'cancelled'
+                  : 'center_failure';
         const recordedStatus =
           status ?? (error instanceof ControlError || error instanceof WebsocketResponseError ? error.status : null);
         let outcome: 'upstream_error' | 'interrupted' | 'rejected' =
           upstream || transferSignal.aborted ? 'interrupted' : 'rejected';
         if (error instanceof WebsocketResponseError) {
           outcome = 'upstream_error';
-          recording.response?.append(Buffer.from(JSON.stringify(error.body)));
+          // 此错误是桥接控制响应；实际失败证据由 failureFrame 独立保存。
         }
         await recording.settle(outcome, recordedStatus, reason);
         throw error;
@@ -293,7 +322,7 @@ export class ModelProxy {
           const cancelled = new AbortController();
 
           const closed = () => {
-            if (!reply.raw.writableFinished) cancelled.abort();
+            if (!reply.raw.writableFinished) cancelled.abort(new DOMException('downstream_closed', 'AbortError'));
           };
 
           reply.raw.once('close', closed);

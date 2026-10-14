@@ -45,7 +45,9 @@ export class AuditDetails {
   @ApiPropertyOptional({ type: Number, minimum: 0, maximum: 256 }) skill_count?: number;
   @ApiPropertyOptional({ type: Number, minimum: 0, maximum: 256 }) mcp_count?: number;
   @ApiPropertyOptional({ type: String, format: 'uuid' }) call_id?: string;
-  @ApiPropertyOptional({ enum: ['request', 'response'] }) side?: 'request' | 'response';
+  @ApiPropertyOptional({ enum: ['request', 'response', 'upstream_failure'] }) side?:
+    'request' | 'response' | 'upstream_failure';
+  @ApiPropertyOptional({ enum: ['off', 'anomalies', 'all'] }) mode?: 'off' | 'anomalies' | 'all';
   @ApiPropertyOptional({ type: Boolean }) enabled?: boolean;
   @ApiPropertyOptional({ type: Number }) content_retention_days?: number;
   @ApiPropertyOptional({ type: Number }) index_retention_days?: number;

@@ -1,3 +1,4 @@
+import { useAppearance } from "../../../stores/AppearanceContext";
 import { observer } from "mobx-react-lite";
 import { useRef } from "react";
 import { Dialog } from "../../../components/Dialog";
@@ -69,7 +70,8 @@ export const ConversationSearchDialog = observer(function ConversationSearchDial
   );
 });
 
-function RecallMessage(props: Readonly<{ item: ConversationItem; is_anchor: boolean }>) {
+const RecallMessage = observer(function RecallMessage(props: Readonly<{ item: ConversationItem; is_anchor: boolean }>) {
+  const theme = useAppearance().preset;
   if (props.item.type === "user") {
     return (
       <article className={styles.message} data-anchor={props.is_anchor} data-role="user">
@@ -82,7 +84,7 @@ function RecallMessage(props: Readonly<{ item: ConversationItem; is_anchor: bool
     return (
       <article className={styles.message} data-anchor={props.is_anchor} data-role="summary">
         <small>上下文摘要</small>
-        <MarkdownContent text={props.item.text} />
+        <MarkdownContent theme={theme} text={props.item.text} />
       </article>
     );
   }
@@ -103,7 +105,7 @@ function RecallMessage(props: Readonly<{ item: ConversationItem; is_anchor: bool
   return (
     <article className={styles.message} data-anchor={props.is_anchor} data-role="assistant">
       <small>助手</small>
-      {text ? <MarkdownContent text={text} /> : <p className={styles.no_text}>此消息仅包含工具调用或思考过程。</p>}
+      {text ? <MarkdownContent theme={theme} text={text} /> : <p className={styles.no_text}>此消息仅包含工具调用或思考过程。</p>}
     </article>
   );
-}
+});

@@ -1,0 +1,40 @@
+.skip {
+  position: fixed;
+  top: -60px;
+  left: 20px;
+  background: white;
+  padding: 10px;
+  z-index: 50;
+  &:focus {
+    top: 10px;
+  }
+}
+.footer {
+  max-width: 1176px;
+  margin: auto;
+  padding: 25px 24px;
+  border-top: 1px solid var(--site-line);
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  color: var(--site-muted);
+  font-size: 11px;
+  > a {
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--site-ink);
+  }
+}
+.preview {
+  margin-left: auto;
+}
+@media (max-width: 760px) {
+  .footer {
+    flex-wrap: wrap;
+    gap: 12px 20px;
+  }
+  .preview {
+    width: 100%;
+    margin-left: 0;
+  }
+}

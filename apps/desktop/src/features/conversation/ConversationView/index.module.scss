@@ -30,11 +30,11 @@
 
   &::-webkit-scrollbar-thumb {
     border-radius: 999px;
-    background: rgb(95 102 115 / 18%);
+    background: color-mix(in srgb, var(--ez-text-secondary) 18%, transparent);
   }
 
   &:hover::-webkit-scrollbar-thumb {
-    background: rgb(95 102 115 / 30%);
+    background: color-mix(in srgb, var(--ez-text-secondary) 30%, transparent);
   }
 }
 
@@ -221,8 +221,8 @@
   color: var(--ez-primary);
   background: linear-gradient(
     to bottom,
-    rgb(248 249 251 / 0%),
-    rgb(248 249 251 / 92%) 66%,
+    transparent,
+    color-mix(in srgb, var(--ez-surface-subtle) 92%, transparent) 66%,
     var(--ez-surface-subtle) 84%
   );
   font-size: var(--ez-font-small);
@@ -407,10 +407,10 @@
   strong { flex: 0 0 auto; color: inherit; font-weight: 400; }
 }
 
-.tool_status { flex: 0 0 auto; color: #325243; font-weight: 500; }
-.tool_status[data-status="running"] { color: #2f4778; }
-.tool_status[data-status="proposed"] { color: #805d26; }
-.tool_status[data-status="failed"] { color: #7d3f3f; }
+.tool_status { flex: 0 0 auto; color: var(--ez-success-text); font-weight: 500; }
+.tool_status[data-status="running"] { color: var(--ez-primary-text); }
+.tool_status[data-status="proposed"] { color: var(--ez-warning-text); }
+.tool_status[data-status="failed"] { color: var(--ez-danger); }
 .tool_input { min-width: 0; flex: 0 1 auto; margin-left: 8px; overflow: hidden; color: var(--ez-text-muted); text-overflow: ellipsis; white-space: nowrap; }
 .tool_summary { min-width: 0; flex: 1 1 auto; overflow: hidden; color: var(--ez-text-muted); text-overflow: ellipsis; white-space: nowrap; }
 

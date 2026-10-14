@@ -5,7 +5,7 @@
   display: grid;
   place-items: center;
   padding: 24px;
-  background: rgb(24 30 43 / 28%);
+  background: var(--ez-overlay);
   backdrop-filter: blur(3px);
 }
 
@@ -45,7 +45,7 @@
 }
 
 .error { margin-top: 12px !important; padding: 8px 10px; border-radius: var(--ez-radius-small); color: var(--ez-danger) !important; background: var(--ez-danger-soft); }
-.primary { border-color: transparent !important; color: #fff !important; background: var(--ez-primary) !important; }
-.danger { border-color: transparent !important; color: #fff !important; background: var(--ez-danger) !important; }
+.primary { border-color: transparent !important; color: var(--ez-on-primary) !important; background: var(--ez-primary) !important; }
+.danger { border-color: transparent !important; color: var(--ez-on-danger) !important; background: var(--ez-danger) !important; }
 .form { display: grid; gap: 8px; margin: 16px 0; }
 .form input { min-height: var(--ez-control-height); padding: 0 8px; border: 1px solid var(--ez-border-strong); border-radius: var(--ez-radius-small); background: var(--ez-surface); color: var(--ez-text); }

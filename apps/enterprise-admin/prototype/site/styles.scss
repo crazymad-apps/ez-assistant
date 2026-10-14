@@ -1,0 +1,50 @@
+/* 仅用于官网演示入口；不影响管理后台或产品工作台。 */
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif;
+  color: #26303c;
+  background: #fff;
+  font-synthesis: none;
+  --site-ink: #26303c;
+  --site-muted: #687389;
+  --site-blue: #2e81d8;
+  --site-line: #e6ecf3;
+  --site-paper: #fff;
+  --site-soft: #f5f8fc;
+  --site-selected: #edf3fd;
+  --site-success: #3fa66a;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  min-width: 320px;
+}
+button,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+a {
+  color: inherit;
+  text-decoration: none;
+}
+button {
+  font: inherit;
+}
+a:focus-visible,
+button:focus-visible {
+  outline: 3px solid var(--site-blue);
+  outline-offset: 5px;
+}
+html {
+  scroll-behavior: smooth;
+  scroll-padding-top: 120px;
+}
+::selection {
+  background: #d9eaff;
+}
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+}

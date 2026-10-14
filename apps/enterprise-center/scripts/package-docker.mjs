@@ -33,6 +33,8 @@ function checkNative(path) {
   }
 }
 checkNative(join(directory, 'node_modules'));
-cpSync(join(root, 'deploy/Dockerfile'), join(directory, 'Dockerfile'));
-writeFileSync(join(directory, '.dockerignore'), '*\n!Dockerfile\n!package.json\n!package-lock.json\n!dist/**\n!public/**\n!node_modules/**\n');
+for (const file of ['Dockerfile', 'Dockerfile.entry', 'nginx.conf', 'center-proxy.conf', 'compose.yaml']) {
+  cpSync(join(root, 'deploy', file), join(directory, file));
+}
+writeFileSync(join(directory, '.dockerignore'), '*\n!Dockerfile\n!Dockerfile.entry\n!nginx.conf\n!center-proxy.conf\n!package.json\n!package-lock.json\n!dist/\n!dist/**\n!public/\n!public/**\n!node_modules/\n!node_modules/**\n');
 process.stdout.write(JSON.stringify({ directory, version }) + '\n');

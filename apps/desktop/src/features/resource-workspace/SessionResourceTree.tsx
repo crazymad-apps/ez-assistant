@@ -8,7 +8,7 @@ import type {
 } from "@ez-assistant/protocol";
 import { Icon } from "../../components/Icon";
 import { InlineIconButton } from "../../components/InlineIconButton";
-import { resolveMaterialFileIcon, resolveMaterialFolderIcon } from "./materialResourceIcon";
+import { ResourceMaterialIcon } from "./ResourceMaterialIcon";
 import type { ResourceMenuLocation } from "./ResourceContextMenu";
 import type { ResourceViewState } from "./resourceViewState";
 import styles from "./ResourceWorkspace/index.module.scss";
@@ -419,10 +419,7 @@ function ResourceEntryRow(props: Readonly<{
 }
 
 function ResourceFileIcon(props: Readonly<{ file_name: string }>) {
-  const icon_url = resolveMaterialFileIcon(props.file_name);
-  return icon_url
-    ? <img alt="" aria-hidden="true" className={styles.tree_file_icon} src={icon_url} />
-    : <Icon name="file" size={16} />;
+  return <ResourceMaterialIcon name={props.file_name} kind="file" className={styles.tree_file_icon} />;
 }
 
 function ResourceFolderIcon(props: Readonly<{
@@ -430,10 +427,7 @@ function ResourceFolderIcon(props: Readonly<{
   open: boolean;
   root: boolean;
 }>) {
-  const icon_url = resolveMaterialFolderIcon(props.folder_name, props.open, props.root);
-  return icon_url
-    ? <img alt="" aria-hidden="true" className={styles.tree_folder_icon} src={icon_url} />
-    : <Icon name="folder" size={17} />;
+  return <ResourceMaterialIcon name={props.folder_name} kind="folder" open={props.open} root={props.root} size={17} className={styles.tree_folder_icon} />;
 }
 
 export function locatorKey(locator: SessionResourceLocator): string {

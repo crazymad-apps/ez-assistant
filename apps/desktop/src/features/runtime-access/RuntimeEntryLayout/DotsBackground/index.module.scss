@@ -4,7 +4,7 @@
   z-index: -1;
   opacity: 0.62;
   pointer-events: none;
-  background-image: radial-gradient(circle, #819ccf50 1px, transparent 1px);
+  background-image: radial-gradient(circle, color-mix(in srgb, var(--ez-entry-dots) 30%, transparent) 1px, transparent 1px);
   background-size: 64px 64px;
 }
 .background[data-dots-state="ready"] {

@@ -16,12 +16,13 @@ import { McpSettingsPage } from "./McpSettingsPage";
 import { AgentSettingsPage } from "./AgentSettingsPage";
 import { PluginSettingsPage } from "./PluginSettingsPage";
 import { NotificationSettingsPage } from "./NotificationSettingsPage";
+import { AppearanceSettingsPage } from "./AppearanceSettingsPage";
 import styles from "./index.module.scss";
 
 const pages: ReadonlyArray<{ id: SettingsPage; label: string; icon: IconName }> = [
+  { id: "appearance", label: "外观", icon: "palette" },
   { id: "notifications", label: "系统通知", icon: "bell" },
   { id: "runtime", label: "Runtime", icon: "terminal" },
-  { id: "devices", label: "智能终端", icon: "device" },
   { id: "models", label: "模型", icon: "model" },
   { id: "memory", label: "记忆", icon: "pin" },
   { id: "permissions", label: "权限", icon: "shield" },
@@ -106,6 +107,7 @@ export const SettingsDialog = observer(function SettingsDialog() {
             ))}
           </nav>
           <div className={styles.content}>
+            {settings.page === "appearance" && <AppearanceSettingsPage />}
             {runtime_pages.includes(settings.page) && <RuntimeSettingsPage onNavigate={selectPage} onDirtyChange={setFormDirty} />}
             {settings.page === "notifications" && <NotificationSettingsPage />}
             {settings.page === "devices" && <DeviceSettingsPage />}

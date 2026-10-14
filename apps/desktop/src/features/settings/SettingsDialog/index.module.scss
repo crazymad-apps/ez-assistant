@@ -7,7 +7,7 @@
   display: grid;
   place-items: center;
   padding: 24px;
-  background: rgb(24 30 43 / 28%);
+  background: var(--ez-overlay);
   backdrop-filter: blur(3px);
 }
 
@@ -283,7 +283,7 @@
   border-radius: 999px;
   background: var(--ez-border-strong);
 
-  i { position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: white; transition: transform var(--ez-motion-fast) var(--ez-ease-standard); }
+  i { position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--ez-switch-thumb); transition: transform var(--ez-motion-fast) var(--ez-ease-standard); }
   &[aria-checked="true"] { background: var(--ez-primary); }
   &[aria-checked="true"] i { transform: translateX(16px); }
   &:disabled { opacity: 0.5; }
@@ -326,7 +326,7 @@
   label { display: block; }
   input { width: 100%; height: var(--ez-control-height); padding: 0 8px; border: 1px solid var(--ez-border-strong); border-radius: var(--ez-radius-small); outline: 0; font: inherit; letter-spacing: 0.12em; }
   input:focus { @include fields.focus-border; }
-  > button { min-height: var(--ez-control-height); padding: 0 10px; border: 0; border-radius: var(--ez-radius-small); color: white; background: var(--ez-primary); }
+  > button { min-height: var(--ez-control-height); padding: 0 10px; border: 0; border-radius: var(--ez-radius-small); color: var(--ez-on-primary); background: var(--ez-primary); }
   > button:disabled { opacity: 0.45; }
 }
 
@@ -415,7 +415,7 @@
 .model_actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .danger_button { color: var(--ez-danger) !important; }
 .danger_menu_item { color: var(--ez-danger) !important; }
-.primary_button { border-color: transparent !important; color: #fff !important; background: var(--ez-primary) !important; }
+.primary_button { border-color: transparent !important; color: var(--ez-on-primary) !important; background: var(--ez-primary) !important; }
 .empty_models { margin: 50px 0; color: var(--ez-text-muted); text-align: center; }
 .more_button { width: var(--ez-control-height); padding: 0 !important; }
 
@@ -459,7 +459,7 @@
   display: grid;
   place-items: center;
   padding: 24px;
-  background: rgb(24 30 43 / 22%);
+  background: var(--ez-overlay);
 }
 
 .confirm_dialog {
@@ -498,7 +498,7 @@
 
 }
 
-.danger_primary_button { border-color: transparent !important; color: #fff !important; background: var(--ez-danger) !important; }
+.danger_primary_button { border-color: transparent !important; color: var(--ez-on-danger) !important; background: var(--ez-danger) !important; }
 
 .placeholder p { max-width: 520px; margin: 0; color: var(--ez-text-secondary); line-height: 1.7; }
 

@@ -1,3 +1,5 @@
+import { observer } from "mobx-react-lite";
+import { useAppearance } from "../../../../stores/AppearanceContext";
 import { useId, useLayoutEffect, useRef } from 'react';
 import { Collapse } from '../../../../components/Collapse';
 import { MarkdownContent } from '../../../../components/MarkdownContent';
@@ -5,9 +7,10 @@ import { useOutputFollow } from '../useOutputFollow';
 import { useRootStore } from '../../../../stores/RootStoreContext';
 import styles from './index.module.scss';
 
-export function ReasoningBox(
+export const ReasoningBox = observer(function ReasoningBox(
   props: Readonly<{ state_key: string; text: string; summary?: boolean; is_open: boolean; on_toggle: () => void }>,
 ) {
+  const theme = useAppearance().preset;
   const id = useId();
   const preview = useRef<HTMLElement>(null);
   const scroll = useRef<HTMLDivElement>(null);
@@ -57,7 +60,7 @@ export function ReasoningBox(
       <section className={styles.summary} aria-label="思考摘要" data-summary="true">
         <div className={styles.preview} ref={(node) => { preview.current = node; }}>
           <div className={styles.summary_text}>
-            <MarkdownContent is_streaming text={props.text.replace(/\s+/g, ' ').trim()} />
+            <MarkdownContent theme={theme} is_streaming text={props.text.replace(/\s+/g, ' ').trim()} />
           </div>
         </div>
       </section>
@@ -87,4 +90,4 @@ export function ReasoningBox(
       </Collapse>
     </section>
   );
-}
+});

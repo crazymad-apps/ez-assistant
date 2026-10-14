@@ -25,7 +25,7 @@ npm run build:bundle
 
 命令末尾输出 JSON 的 `directory` 为制品路径；`npm run assemble` 只执行装配，要求两包此前已分别构建。
 装配不覆盖旧目录、不复制 .env、源码、原型或开发依赖，也不执行数据库操作；正式分发流水线归 C06。
-制品包含后端 dist、package.json/lock、README/.env.example 以及 public/admin 静态页面。
+制品包含后端 dist、package.json/lock、README/.env.example 以及 public/admin 与 public/site 静态页面。
 
 在输出目录中：
 
@@ -35,12 +35,12 @@ npm ci --omit=dev --ignore-scripts
 node --env-file=.env dist/main.js
 ```
 
-只有一个 Node 服务，`/admin/` 与 `/api/` 同源；不需要 Vite、TypeScript、前端 node_modules 或额外静态服务器。
-默认入口先依据 Vite manifest 校验首页、共享/延迟加载资源，缺失、空文件或清单无效时返回 ADMIN_ASSETS_INVALID 并在连接数据库前退出；这不是文件内容签名验证。
+非 Docker 完整模式只有一个 Node 服务，`/`、`/admin/` 与 `/api/` 同源；不需要 Vite、TypeScript、前端 node_modules 或额外静态服务器。
+默认入口先依据 Vite manifest 校验首页、共享/延迟加载资源，缺失、空文件或清单无效时返回 ADMIN_ASSETS_INVALID／SITE_ASSETS_INVALID 并在连接数据库前退出；这不是文件内容签名验证。
 后台设置同源脚本 CSP、nosniff、no-referrer、禁止嵌入及 no-store；Ant Design 动态样式保留 inline style。
 构建清单、隐藏文件和非后台目录不提供静态访问；未知资源和 API 返回 404，不回落首页。
 
-仅后端开发使用 `npm run start:api` 或 `node --env-file=.env dist/main.js --api-only`；它明确跳过后台装配，不作为完整产品交付。
+仅后端开发使用 `npm run start:api` 或 `node --env-file=.env dist/main.js --api-only`；它明确跳过公开页与后台装配，不作为完整产品交付。
 
 ### 实时开发预览
 
@@ -209,8 +209,13 @@ Provider/model/协议，不自动重试或跟随跳转。中心自产错误有 `
 代理正常收完请求正文不会中断响应；取消、超时和关闭均销毁在途网络。
 
 后台“调用记录”提供管理员分页/筛选、详情及按需查看请求/响应快照。“记录策略”控制正文采集和
-保留期；默认关闭，正文 7 天、索引 90 天。关闭不删除已有文件。模型参数页只能测试已保存且未修改的
+保留期；模式为关闭、仅异常与未确认、全部调用，默认关闭，正文 7 天、索引 90 天。模式在调用开始时冻结。
+仅异常模式也从开始时有界暂存，只有确认正常才丢弃正文；关闭不删除已有文件。模型参数页只能测试已保存且未修改的
 固定配置，使用短非流式请求、30 秒期限与 1 MiB 响应限制；不会修改企业默认，也不证明全部能力可用。
+
+正文按请求消息卡片和响应事件分栏阅读；Responses 的 `instructions` 显示为“系统提示词”，
+连续增量按相邻归属聚合，异常和原始来源可展开核对。阅读投影只存在当前页面，收起、切换或权限失效后释放。
+操作说明见[查看模型调用正文与异常](../../docs/site/manual/call-evidence.md)。
 
 `GET /api/llm-usage` 为管理员提供按用户、时间（小时/天/月）及“服务商 / 模型”联合键的用量聚合；
 `GET /api/llm-usage/models` 查询历史联合键选项。中心从上游 Chat Completions 或 Responses 的
@@ -221,9 +226,20 @@ Provider/model/协议，不自动重试或跟随跳转。中心自产错误有 `
 
 启用正文采集前设置 `CENTER_SNAPSHOT_ROOT`，预先创建独立、绝对、非公开的持久目录。目录权限
 0700、文件 0600；禁止符号链接。文件按 UTC 开始日期及调用 UUID 存放，各侧上限 8 MiB，采集与待写
-缓冲共 64 MiB；超限保留 UTF-8 前缀并标记部分。压缩响应仍原样转发，但不作为文本快照保存。
+缓冲共 64 MiB（小片段以固定页预留，含待写）；超限保留实际字节前缀并标记部分，不能裁掉 UTF-8 尾字节。
+压缩／非 UTF-8 响应也保存实际字节，管理读取返回互斥的 text 或 body_base64，不自动解压。
+正文读取最多两个并发槽，超出返回 SNAPSHOT_READ_BUSY；读取、Base64 及编码临时内存独立于采集预算。
+WS 桥接正文标明来源，转换前首个失败帧单独保存为 upstream-failure.bin，上限 1 MiB，共享采集预算；
+它不是已交付的响应，握手失败没有业务帧时不会伪造正文。未收到、合法空正文、采集失败分别表达。
 文件先独占写入 `.part` 并 flush，使用同目录 hard link 原子发布固定名称后移除 `.part`，避免 POSIX
 rename 覆盖已存在终态文件；快照根所在文件系统须支持同目录 hard link。
+
+响应观察与 HTTP 转发、usage、快照完整性独立。观察支持 Responses/Chat SSE 和 JSON、compact 及计量；
+分帧缓冲为单事件 1 MiB、JSON 8 MiB、进程共 16 MiB，超限不终止转发。只有可靠正常才按异常策略丢弃。
+Center 不复制 Adapter 的完整校验，normal 不等于 Runtime 任务成功；Runtime 独有失败需用全部调用模式定向排查。
+迁移 011 将旧 enabled=false/true 一次映射到 off/all，保持保留期；历史观察为空。旧后台写入缺 mode 时拒绝并提示刷新。
+Center/Admin 配套更新，不改变 Host 企业协议版本。迁移不可原地降级；已有环境须按安全规则备份并恢复验证，
+回退同时恢复匹配的程序、数据库及私有快照目录，不能直接启动旧 Center。
 
 关闭先取消模型调用及目录刷新，等待调用索引和文件收尾最多 10 秒，再释放 HTTP/数据库。
 重启将未结算调用标为 unknown，未提交完整性的已发布文件仅恢复为 partial；完整文件缺失/摘要
@@ -267,7 +283,7 @@ Agent 名称支持 NFC 中文，限制 1—64 个 Unicode 字符且不能有首�
 
 ## Docker 交付
 
-运行 `npm run package:docker` 在 Docker 外准备完整制品，再按 [部署说明](deploy/README.md) 上传和构建。镜像不安装依赖或编译，前后端共用 7320 端口；默认支持 HTTP，HTTPS 可通过代理扩展。
+运行 `npm run package:docker` 在 Docker 外准备完整制品，再按 [部署说明](deploy/README.md) 上传和构建。Center 与 Nginx 入口镜像来自同一装配产物，镜像不安装依赖或编译；入口独占对外 7320 端口，Center 仅走容器网络；默认支持 HTTP，HTTPS 可通过代理扩展。
 
 ## F06 企业历史续接
 
@@ -350,3 +366,27 @@ multipart 的 `manifest` 字段传原始 UTF-8 字节的 base64，避免浏览�
 中心固定代理 `/responses/compact` 和 `/responses/input_tokens`。HTTP 上游直接转发；WS 上游的 compact 使用独立连接发送有效输入及 `compaction_trigger`，完整终态校验成功后才返回整个规范窗口，不影响其他续接连接。计量始终使用 HTTP；不支持时保留既有 usage 与增量估算。配置绑定同时保护原生压缩，关闭响应 ID 续接仍保留配置周期。
 
 迁移 `010-context-compaction.sql` 扩展既有 Provider 周期、固定参数与调用类型，不另建费用账本。消费聚合包括普通生成及压缩，计量请求不计消费。当前企业协议及最低协议均为 3；正式升级仍须按数据库安全规则备份、验证及确认。已核实的真实上游为订阅 WS V2；其他 HTTP compact 和计量组合须分别验证后声明 supported。
+
+### 官网内容维护（v0.31.0 F01 M0）
+
+按最新要求，更新日志直接在版本详情编辑，复用现有更新说明；首页与手册采用独立固定静态目录。
+官网自动取各平台最新可用安装包，不另外选择官网版本或上传联合内容 ZIP。
+
+维护约定见[官网内容维护](../../docs/site/README.md)，目标配置与接口见
+[F01 技术方案](../../docs/versions/v0.31.0/features/F01-企业中心官网与公开页面/技术方案.md)。
+M0 已实现并完成隔离验证：`site:build` 输出公开静态目录，`site:publish` 校验后更新，
+`CENTER_SITE_CONTENT_ROOT` 配置固定内容目录；日常更新不连接数据库、不重建平台或重启。
+旧 `site:pack`、版本内容上传及专属迁移已移除，没有新增数据库字段。正式页面和 Node 双入口装配已在 M1 完成，Docker 同端口 Nginx 分流已在 M2 完成隔离验证；
+本轮未修改真实部署或用户数据库。
+
+
+### 正式公开页面（v0.31.0 F01 M1）
+
+`npm run build:bundle` 同时构建并装配 `public/site` 与 `public/admin`。默认 `npm start` 在连接数据库前
+检查两套资源；`--api-only` 仅用于明确的 API 开发场景。完整模式 `/` 进入官网，`/download`、
+`/changelog`、`/manual` 和 `/manual/:articleId` 可直接访问与刷新，后台仍为 `/admin/`。
+未知 API、路径和缺失文件保留真实错误，不回落首页。没有部署内容目录时，官网显示内容尚未发布。
+
+`GET /api/site/downloads` 返回各平台当前最新可用安装包；可选 `version` 查询固定版本。
+点击下载前复核小清单，文件仍走原 installer 路径，由浏览器管理完成或失败；不会自动替换版本。
+本地内容预览已使用正式页面布局，详见内容维护说明。测试示例留在隔离目录；正式首页配置与九篇初始手册已在 docs/site 维护，发布日志草稿不输出到静态目录。

@@ -1,0 +1,20 @@
+.blocks {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+  > button {
+    align-self: flex-start;
+  }
+}
+.requests {
+  gap: 8px;
+}
+.message {
+  border-bottom: 1px solid var(--ez-border);
+  padding-bottom: 16px;
+  min-width: 0;
+  &:last-child {
+    border-bottom: 0;
+  }
+}

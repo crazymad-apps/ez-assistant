@@ -25,9 +25,9 @@ describe("AccountMenu", () => {
 
     const view = render(<AccountMenu connection={connection} />);
     expect(screen.getByRole("button", { name: "账号与 Runtime" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "账号与 Runtime" }).querySelector('[data-icon="settings"]')).toBeVisible();
+    expect(screen.getByRole("button", { name: "账号与 Runtime" }).querySelector('[data-icon="settings"]')).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "账号与 Runtime" }));
-    expect(screen.getByRole("menuitem", { name: "设置" })).toBeEnabled();
+    expect(screen.queryByRole("menuitem", { name: "设置" })).not.toBeInTheDocument();
     expect(screen.getByText("Runtime 已连接")).toBeVisible();
     expect(screen.queryByText("运行时已连接")).not.toBeInTheDocument();
     view.unmount();
@@ -40,11 +40,13 @@ describe("AccountMenu", () => {
     runInAction(() => {
       root.connection.state = "connected";
       root.navigation.left_sidebar_width = 360;
+      connection.phase = "workspace";
       connection.current = root;
     });
 
     const view = render(<AccountMenu connection={connection} sidebar />);
     fireEvent.click(screen.getByRole("button", { name: "账号与 Runtime" }));
+    expect(screen.getByRole("menuitem", { name: "设置" })).toBeEnabled();
     expect(screen.getByRole("menu", { name: "账号菜单" })).toHaveStyle({
       width: "calc(min(360px, 100vw - 56px) - 24px)",
     });

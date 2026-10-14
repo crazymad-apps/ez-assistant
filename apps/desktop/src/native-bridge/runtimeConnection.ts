@@ -1,4 +1,4 @@
-import type { HostAccessCommand, HostAccessStatus, RuntimeHostCapabilities } from "@ez-assistant/protocol";
+import type { HostAccessCommand, HostAccessStatus, HostMode, RuntimeHostCapabilities } from "@ez-assistant/protocol";
 import { invoke, type InvokeArgs, type InvokeOptions } from "@tauri-apps/api/core";
 import type { RuntimeBootstrap } from "./runtimeBootstrap";
 
@@ -48,6 +48,12 @@ export async function restoreRuntimeConnection(): Promise<RuntimeBootstrap | nul
   return invoke("restore_runtime_connection");
 }
 
-export function manageLocalHost(command: HostAccessCommand): Promise<HostAccessStatus> {
-  return invoke("manage_local_host", { command });
+/** 本机 IPC 投影；保存值来自 HostAccessStatus，运行中身份不能用于覆盖编辑值。 */
+export type LocalHostStatus = HostAccessStatus & {
+  instance_id: string;
+  current_mode: HostMode;
+  current_center_url: string | null;
+};
+export function manageLocalHost(command: HostAccessCommand, expected_instance_id?: string): Promise<LocalHostStatus> {
+  return invoke("manage_local_host", { command, expectedInstanceId: expected_instance_id });
 }

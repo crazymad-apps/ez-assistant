@@ -1,3 +1,5 @@
+import { observer } from "mobx-react-lite";
+import { useAppearance } from "../../stores/AppearanceContext";
 import { revealFileLabel } from "../../platform/fileManager";
 import { useCallback, useState } from "react";
 import { MarkdownContent } from "../../components/MarkdownContent";
@@ -7,7 +9,8 @@ import { useRootStore } from "../../stores/RootStoreContext";
 import { createResourceObjectUrl } from "../../native-bridge/resourceObjectUrl";
 import { ResourceContextMenu, type ResourceMenuLocation } from "./ResourceContextMenu";
 
-export function ConversationMarkdownContent(props: Readonly<{ is_streaming?: boolean; text: string }>) {
+export const ConversationMarkdownContent = observer(function ConversationMarkdownContent(props: Readonly<{ is_streaming?: boolean; text: string }>) {
+  const theme = useAppearance().preset;
   const root = useRootStore();
   const session = root.navigation.selected_session_id;
   const draft = root.navigation.selected_draft_key;
@@ -29,7 +32,7 @@ export function ConversationMarkdownContent(props: Readonly<{ is_streaming?: boo
     } catch (error) { showError(error); }
   }, [root, scope, showError, base]);
   return <>
-    <MarkdownContent allow_relative_local_resources={!!base} is_streaming={props.is_streaming} text={props.text} load_local_image={scope ? loadImage : undefined}
+    <MarkdownContent theme={theme} allow_relative_local_resources={!!base} is_streaming={props.is_streaming} text={props.text} load_local_image={scope ? loadImage : undefined}
       on_local_resource_open={scope ? open : undefined}
       on_local_resource_context_menu={scope ? (reference, location) => { try { setMenu({path:hostFilePath(reference, base),location}); } catch (error) { showError(error); } } : undefined}/>
     {menu && scope && <ResourceContextMenu location={menu.location} on_close={() => setMenu(null)} items={[
@@ -41,4 +44,4 @@ export function ConversationMarkdownContent(props: Readonly<{ is_streaming?: boo
       ] : []),
     ]}/>}
   </>;
-}
+});

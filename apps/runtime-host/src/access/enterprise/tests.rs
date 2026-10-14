@@ -46,9 +46,13 @@ struct Mock {
     proxy_script: Mutex<std::collections::VecDeque<Response>>,
     proxy_hold: Mutex<Option<Arc<Held>>>,
     plugin: Mutex<Option<PluginFixture>>,
+    agent_requests: AtomicUsize,
+    agent_requested: Notify,
+    plugin_resolve_hold: Mutex<Option<Arc<Held>>>,
 }
 #[derive(Clone)]
 struct PluginFixture {
+    version: String,
     bytes: Vec<u8>,
     sha256: String,
     deprecated: bool,
@@ -131,7 +135,7 @@ async fn mock_plugin_market(State(mock): State<Arc<Mock>>) -> Json<Value> {
         Some(plugin) if !plugin.deprecated => json!([{
             "name":"warehouse-cad-guidance", "display_name":"Warehouse CAD Guidance",
             "description":"", "versions":[{
-                "version":"0.1.0", "archive_format":"tar_gzip", "sha256":plugin.sha256,
+                "version":plugin.version, "archive_format":"tar_gzip", "sha256":plugin.sha256,
                 "size_bytes":plugin.bytes.len(), "skills":["compact-shelving-cad"], "mcp":[]
             }]
         }]),
@@ -140,9 +144,14 @@ async fn mock_plugin_market(State(mock): State<Arc<Mock>>) -> Json<Value> {
 }
 async fn mock_plugin_resolve(State(mock): State<Arc<Mock>>) -> Response {
     let plugin = mock.plugin.lock().unwrap().clone();
+    let held = mock.plugin_resolve_hold.lock().unwrap().take();
+    if let Some(held) = held {
+        held.started.notify_one();
+        held.release.notified().await;
+    }
     match plugin {
         Some(plugin) if !plugin.deprecated => Json(json!({"package":{
-            "name":"warehouse-cad-guidance", "version":"0.1.0",
+            "name":"warehouse-cad-guidance", "version":plugin.version,
             "archive_format":"tar_gzip", "sha256":plugin.sha256,
             "size_bytes":plugin.bytes.len()
         }}))
@@ -217,9 +226,14 @@ impl Fixture {
             .route("/api/auth/login", post(mock_login))
             .route("/api/auth/me", get(mock_me))
             .route("/api/auth/logout", post(mock_logout))
+            .route("/api/runtime/agents", get(|State(mock): State<Arc<Mock>>| async move {
+                mock.agent_requests.fetch_add(1, Ordering::SeqCst);
+                mock.agent_requested.notify_one();
+                Json(json!([]))
+            }))
             .route("/api/runtime/plugins", get(mock_plugin_market))
             .route("/api/runtime/plugins/warehouse-cad-guidance/resolve", post(mock_plugin_resolve))
-            .route("/api/runtime/plugins/warehouse-cad-guidance/versions/0.1.0/package", get(mock_plugin_download))
+            .route("/api/runtime/plugins/warehouse-cad-guidance/versions/{version}/package", get(mock_plugin_download))
             .route(
                 "/api/auth/password",
                 post(|| async { StatusCode::NO_CONTENT }),

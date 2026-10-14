@@ -223,3 +223,24 @@ it("allows retrying a failed quit and resumes client terminal creation", async (
   await store.confirm();
   expect(native.quit).toHaveBeenCalledTimes(2);
 });
+
+
+it("waits for application preference saving before quit and keeps the dialog open after failure", async () => {
+  let finish!: () => void;
+  const flush = vi.fn().mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }))
+    .mockRejectedValueOnce(new Error("配色尚未保存"));
+  const store = createStore(null, { flush_preferences: flush });
+  store.request("quit_desktop");
+  const closing = store.confirm();
+  expect(native.quit).not.toHaveBeenCalled();
+  finish();
+  await closing;
+  expect(native.quit).toHaveBeenCalledOnce();
+  native.quit.mockClear();
+  const retry = createStore(null, { flush_preferences: flush });
+  retry.request("quit_desktop");
+  await retry.confirm();
+  expect(native.quit).not.toHaveBeenCalled();
+  expect(retry.error_message).toBe("配色尚未保存");
+  expect(retry.intent).toBe("quit_desktop");
+});

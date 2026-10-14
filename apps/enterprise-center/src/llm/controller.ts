@@ -62,11 +62,16 @@ export class CallsController {
   @Get('llm-calls/:id/snapshot')
   @ApiOperation({ operationId: 'getLlmSnapshot' })
   @ApiParam({ name: 'id', format: 'uuid' })
-  @ApiQuery({ name: 'side', enum: ['request', 'response'] })
+  @ApiQuery({ name: 'side', enum: ['request', 'response', 'upstream_failure'] })
   @ApiOkResponse({ type: SnapshotContent })
   snapshot(@Param('id') id: string, @Query() value: unknown, @Req() request: AuthenticatedRequest) {
     const query = queryFields(value, ['side']);
-    return this.calls.snapshot(request.token, id, enumeration(query.side, ['request', 'response']), request.id);
+    return this.calls.snapshot(
+      request.token,
+      id,
+      enumeration(query.side, ['request', 'response', 'upstream_failure']),
+      request.id,
+    );
   }
 
   @Get('llm-recording-settings')
@@ -97,7 +102,7 @@ export class CallsController {
     const cancelled = new AbortController();
 
     const close = () => {
-      if (!reply.raw.writableFinished) cancelled.abort();
+      if (!reply.raw.writableFinished) cancelled.abort(new DOMException('downstream_closed', 'AbortError'));
     };
 
     reply.raw.once('close', close);

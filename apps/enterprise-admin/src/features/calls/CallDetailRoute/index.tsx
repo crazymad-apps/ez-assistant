@@ -1,12 +1,19 @@
 import { callKindLabel } from '../callKindLabel';
 import { useCallback } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router';
-import { Alert, Button, Card, Descriptions, Tabs, Space } from 'antd';
+import { Alert, Button, Card, Descriptions, Space } from 'antd';
 import { observer } from 'mobx-react-lite';
 import { callApi } from '../../../request/calls';
 import { useResourceQuery } from '../../../request/useResourceQuery';
-import { SnapshotPanel } from '../SnapshotPanel';
-import { outcomeLabels, usageLabels, usageReasonLabels } from '../model';
+import { BodyReader } from '../BodyReader';
+import {
+  outcomeLabels,
+  usageLabels,
+  usageReasonLabels,
+  observationLabels,
+  evidenceReasonLabels,
+  sourceLabels,
+} from '../model';
 import styles from './index.module.scss';
 
 export const CallDetailRoute = observer(function CallDetailRoute() {
@@ -20,19 +27,21 @@ export const CallDetailRoute = observer(function CallDetailRoute() {
   return (
     <section className={styles.page}>
       <Card
-        title="调用详情"
-        extra={
-          <Space>
-            <Button onClick={query.reload}>刷新</Button>
-            <Button onClick={() => navigate(`/calls?${searchParams.toString()}`)}>返回列表</Button>
-          </Space>
+        title={
+          <div className={styles.header}>
+            <span>调用详情</span>
+            <Space wrap>
+              <Button onClick={query.reload}>刷新</Button>
+              <Button onClick={() => navigate(`/calls?${searchParams.toString()}`)}>返回列表</Button>
+            </Space>
+          </div>
         }
       >
         {query.error && <Alert type="error" title={query.error} />}
         {row && (
           <Descriptions
             size="small"
-            column={2}
+            column={{ xs: 1, sm: 1, md: 2 }}
             items={[
               { key: 'id', label: '调用 ID', children: row.id },
               { key: 'user', label: '调用用户', children: `${row.username ?? '—'} (${row.user_id ?? '—'})` },
@@ -53,7 +62,21 @@ export const CallDetailRoute = observer(function CallDetailRoute() {
                 label: '转发结果 / HTTP',
                 children: `${outcomeLabels[row.outcome]} / ${row.http_status ?? '—'}`,
               },
-              { key: 'reason', label: '原因', children: row.reason ?? '—' },
+              {
+                key: 'observation',
+                label: '响应观察',
+                children: `${row.response_observation ? observationLabels[row.response_observation] : '历史未记录'}${row.response_observation_reason ? ` · ${evidenceReasonLabels[row.response_observation_reason] ?? row.response_observation_reason}` : ''}`,
+              },
+              {
+                key: 'source',
+                label: '响应来源',
+                children: row.response_source ? sourceLabels[row.response_source] : '历史未记录',
+              },
+              {
+                key: 'reason',
+                label: '原因',
+                children: row.reason ? (evidenceReasonLabels[row.reason] ?? row.reason) : '—',
+              },
               {
                 key: 'usage',
                 label: 'Token 用量',
@@ -71,26 +94,8 @@ export const CallDetailRoute = observer(function CallDetailRoute() {
         )}
       </Card>
       <Alert type="info" title="转发完成仅表示 HTTP 2xx 正文完整转发，不代表模型业务或任务成功。" />
-      {row && (
-        <Card className={styles.body_section}>
-          <Tabs
-            key={id}
-            destroyOnHidden
-            items={(['request', 'response'] as const).map((side) => ({
-              key: side,
-              label: side === 'request' ? '请求正文' : '响应正文',
-              children: (
-                <SnapshotPanel
-                  key={`${row[side].state}:${row[side].sha256}`}
-                  id={id}
-                  side={side}
-                  snapshot={row[side]}
-                />
-              ),
-            }))}
-          />
-        </Card>
-      )}
+      {query.error && row && <Alert type="warning" title="刷新失败，当前为上次读取内容。" />}
+      {row && <BodyReader key={id} row={row} />}
     </section>
   );
 });

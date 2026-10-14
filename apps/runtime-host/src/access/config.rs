@@ -247,6 +247,41 @@ mod tests {
     }
 
     #[test]
+    fn clearing_binding_when_switching_personal_preserves_enterprise_address() {
+        let mut document = crate::host_configuration::personal_document();
+        configure_identity(
+            &mut document,
+            Some(assistant_protocol::HostMode::Enterprise),
+            Some("https://saved.example/center"),
+            false,
+        )
+        .unwrap();
+        document["enterprise"]["center_id"] =
+            toml_edit::value("01234567-89ab-4cde-8f01-23456789abcd");
+        configure_identity(
+            &mut document,
+            Some(assistant_protocol::HostMode::Personal),
+            None,
+            true,
+        )
+        .unwrap();
+        // 序列化再读取模拟应用重开；个人模式没有活动中心不等于删除已保存地址。
+        let mut restored = document.to_string().parse::<DocumentMut>().unwrap();
+        let (mode, url, binding) = identity_fields(&restored);
+        assert_eq!(mode, Some(assistant_protocol::HostMode::Personal));
+        assert_eq!(url.as_deref(), Some("https://saved.example/center"));
+        assert!(binding.is_none());
+        configure_identity(
+            &mut restored,
+            Some(assistant_protocol::HostMode::Enterprise),
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(identity_fields(&restored).1, url);
+    }
+
+    #[test]
     fn a_port_override_keeps_remote_access_closed_by_default() {
         let configuration: AccessConfiguration = toml::from_str("port = 7241").unwrap();
         assert_eq!(configuration.public.port, 7241);

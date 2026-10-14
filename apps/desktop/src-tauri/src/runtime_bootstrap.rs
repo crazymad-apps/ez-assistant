@@ -1,6 +1,8 @@
 //! 受信任桌面进程中的 Runtime discovery、启动与 bootstrap。
 
 mod desktop_update;
+mod management;
+pub(crate) use management::{ExpectedHostConfiguration, LocalHostStatus};
 pub(crate) mod upgrade;
 #[cfg(windows)]
 mod windows;
@@ -118,6 +120,11 @@ enum RuntimeBootstrapErrorCode {
     ComponentMismatch,
     RuntimeUpgradeRequired,
     RuntimeStopFailed,
+    ConfigurationConflict,
+    ConfigurationUnavailable,
+    InvalidRequest,
+    OperationNotAllowed,
+    DesktopUpdateBusy,
 }
 
 #[derive(Debug, Error)]
@@ -202,6 +209,11 @@ impl RuntimeBootstrapCoordinator {
 
     pub(crate) async fn bootstrap(&self) -> Result<RuntimeBootstrap, RuntimeBootstrapError> {
         let _operation = self.lifecycle_gate.lock().await;
+        self.bootstrap_under_gate().await
+    }
+
+    /// 调用方已持有生命周期 gate；管理读写复用启动过程，不能再次获取同一锁。
+    async fn bootstrap_under_gate(&self) -> Result<RuntimeBootstrap, RuntimeBootstrapError> {
         if self.runtime_home.as_os_str().is_empty() {
             return Err(bootstrap_error(
                 RuntimeBootstrapErrorCode::RuntimeHomeUnavailable,
@@ -281,8 +293,20 @@ impl RuntimeBootstrapCoordinator {
     }
 
     pub(crate) async fn restart(&self) -> Result<RuntimeBootstrap, RuntimeBootstrapError> {
+        self.restart_checked(None).await
+    }
+
+    /// 保存成功后可按已有实例与修订核对再停止；不保存配置、不恢复旧配置。
+    /// 调用方先持有 updater permit，此方法只获取一次 lifecycle gate。
+    pub(crate) async fn restart_checked(
+        &self,
+        expected: Option<&ExpectedHostConfiguration>,
+    ) -> Result<RuntimeBootstrap, RuntimeBootstrapError> {
         let _operation = self.lifecycle_gate.lock().await;
         let (previous, original) = self.discover_target(false).await?;
+        if let Some(expected) = expected {
+            expected.verify_instance(&previous)?;
+        }
         let source = original
             .executable_path
             .as_ref()
@@ -298,6 +322,10 @@ impl RuntimeBootstrapCoordinator {
         crate::runtime_source::verify(source, digest, &version)
             .await
             .map_err(|_| source_unavailable())?;
+        // 来源检查可能耗时；在发出停止前重新核对保存快照及 discovery，避免停止另一个实例。
+        if let Some(expected) = expected {
+            self.verify_saved_configuration(&previous, expected).await?;
+        }
         self.send_command_to(
             &previous,
             "desktop-restart-runtime",
@@ -804,15 +832,26 @@ pub(crate) async fn restart_runtime(
     updater: State<'_, crate::desktop_update::DesktopUpdater>,
     coordinator: State<'_, RuntimeBootstrapCoordinator>,
     lifecycle: State<'_, DesktopLifecycleCoordinator>,
+    expected: Option<ExpectedHostConfiguration>,
 ) -> Result<RuntimeBootstrap, RuntimeBootstrapError> {
-    let _permit = updater.lifecycle_permit().await.map_err(|_| {
+    // F02 应用配置还需排除下载；普通生命周期入口保持原有安装互斥行为。
+    let _permit = if expected.is_some() {
+        updater.configuration_permit().await
+    } else {
+        updater.lifecycle_permit().await
+    }
+    .map_err(|_| {
         bootstrap_error(
-            RuntimeBootstrapErrorCode::RuntimeUnavailable,
-            "正在安装更新，请稍候。",
+            RuntimeBootstrapErrorCode::DesktopUpdateBusy,
+            "更新正在进行，请完成后重试。",
         )
     })?;
     lifecycle.update_runtime_state(NativeRuntimeState::Restarting);
-    let result = coordinator.restart().await;
+    let result = if let Some(expected) = &expected {
+        coordinator.restart_checked(Some(expected)).await
+    } else {
+        coordinator.restart().await
+    };
     lifecycle.update_runtime_state(if result.is_ok() {
         NativeRuntimeState::Connected
     } else {

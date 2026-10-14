@@ -1,0 +1,37 @@
+.figure {
+  margin: 16px 0;
+  svg {
+    display: block;
+    width: 100%;
+    max-height: 170px;
+  }
+  figcaption {
+    font-size: 9px;
+    color: var(--site-muted);
+    text-align: center;
+    line-height: 1.5;
+    margin-top: 9px;
+  }
+}
+.quote {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 10px;
+  caption {
+    caption-side: top;
+    text-align: center;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 10px;
+    color: var(--site-ink);
+  }
+  td,
+  th {
+    border: 1px solid var(--site-line);
+    padding: 10px 6px;
+    text-align: left;
+  }
+  th {
+    background: var(--site-soft);
+  }
+}

@@ -1,10 +1,28 @@
 services:
-  center:
-    image: ${CENTER_IMAGE:?Specify the versioned Center image}
-    container_name: ez-enterprise-center
+  entry:
+    image: ${CENTER_ENTRY_IMAGE:?Specify the matching versioned entry image}
     restart: unless-stopped
     ports:
-      - "${CENTER_BIND_ADDRESS:-0.0.0.0}:${CENTER_PUBLISHED_PORT:-7320}:7320"
+      - "${CENTER_BIND_ADDRESS:-0.0.0.0}:${CENTER_PUBLISHED_PORT:-7320}:8080"
+    volumes:
+      - type: bind
+        source: ./data/site-content
+        target: /srv/site-content
+        read_only: true
+        bind:
+          create_host_path: false
+    networks:
+      - entry
+    depends_on:
+      center:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp
+    stop_grace_period: 60s
+  center:
+    image: ${CENTER_IMAGE:?Specify the matching versioned Center image}
+    restart: unless-stopped
     env_file:
       - ./center.env
     environment:
@@ -13,15 +31,19 @@ services:
       CENTER_DATABASE_AUTO_UPGRADE: "false"
       CENTER_SNAPSHOT_ROOT: /data/snapshots
       CENTER_PLUGIN_ROOT: /data/plugins
+      CENTER_DESKTOP_RELEASE_ROOT: /data/desktop-releases
       CENTER_MODEL_TEMPLATES_FILE: /config/model-templates.json
     volumes:
       - ./data/snapshots:/data/snapshots
       - ./data/plugins:/data/plugins
+      - ./data/desktop-releases:/data/desktop-releases
       - ./config/model-templates.json:/config/model-templates.json:ro
     networks:
+      - entry
       - database
     stop_grace_period: 60s
 networks:
+  entry: {}
   database:
     external: true
     name: ${CENTER_DOCKER_NETWORK:?Specify the existing database network}

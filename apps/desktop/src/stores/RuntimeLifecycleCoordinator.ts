@@ -102,6 +102,8 @@ export class RuntimeLifecycleCoordinator {
   }
 
   reconnectAfterNativeRuntimeMutation(bootstrap?: RuntimeBootstrap): Promise<void> {
+    // 首页的空业务 Store 也会收到原生重启广播；没有用户选择时不得自动登录或初始化。
+    if (!bootstrap && !this.#selected_bootstrap) return Promise.resolve();
     this.#reconnect_attempt = 0;
     return this.connect(this.#selected_bootstrap?.binding_id ? undefined : bootstrap);
   }

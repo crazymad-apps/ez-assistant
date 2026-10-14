@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { observable, runInAction } from "mobx";
+import type { LocalHostStatus } from "../../src/native-bridge/runtimeConnection";
 import type { RuntimeBootstrap } from "../../src/native-bridge/runtimeBootstrap";
 
 const native = vi.hoisted(() => ({
   desktop: true,
+  manage: vi.fn(), restart: vi.fn(),
   local: vi.fn<() => Promise<RuntimeBootstrap>>(), begin: vi.fn<() => Promise<string>>(),
   upgrade: vi.fn<() => Promise<RuntimeBootstrap>>(), prepare: vi.fn(async () => undefined),
   connect: vi.fn<(binding: string, origin: string | null, password: string, remember: boolean) => Promise<{ bootstrap: RuntimeBootstrap; warning: string | null }>>(),
@@ -17,9 +19,11 @@ vi.mock("../../src/runtime-client/webLogin", () => ({
   discoverWebHost: vi.fn(async () => ({ mode: "personal" })), loginWeb: web.login, bootstrapWebRuntime: web.bootstrap, logoutWeb: web.logout, takeWebLoginToken: web.token,
   WebLoginError: class extends Error {},
 }));
+vi.mock("../../src/native-bridge/desktopLifecycle", () => ({ restartNativeRuntime: native.restart }));
 vi.mock("../../src/native-bridge/runtimeBootstrap", () => ({ bootstrapRuntime: native.local, upgradeRuntime: native.upgrade }));
-vi.mock("../../src/native-bridge/runtimeConnection", () => ({ beginRuntimeConnection: native.begin, connectRuntimeTarget: native.connect, activateRuntimeBinding: native.activate, clearRuntimeBinding: native.clear, openRuntimeWeb: vi.fn(), restoreRuntimeConnection: native.restore, probeRuntimeTarget: vi.fn(), prepareDesktopUpdate: native.prepare }));
+vi.mock("../../src/native-bridge/runtimeConnection", () => ({ beginRuntimeConnection: native.begin, connectRuntimeTarget: native.connect, activateRuntimeBinding: native.activate, clearRuntimeBinding: native.clear, openRuntimeWeb: vi.fn(), restoreRuntimeConnection: native.restore, probeRuntimeTarget: vi.fn(), prepareDesktopUpdate: native.prepare, manageLocalHost: native.manage }));
 vi.mock("../../src/stores/RootStore", () => ({ RootStore: class {
+  constructor(readonly options: { flush_application_preferences?: () => Promise<void> } = {}) {}
   connection = observable({ markDisconnected: vi.fn(), state: "disconnected", last_error_code: null as string | null, error_message: null as string | null, address: "" });
   settings = { open: vi.fn(), close: vi.fn(), showNotice: vi.fn() };
   dispose = vi.fn();
@@ -319,6 +323,202 @@ describe("Update admission", () => {
     web.bootstrap.mockRejectedValueOnce({ code: "center_unavailable", message: "offline" });
     await entry.recheckSession(); expect(entry.update_required).toBe(true);
     await entry.recheckSession(); expect(entry.update_required).toBe(false); expect(entry.phase).toBe("workspace");
+    entry.dispose();
+  });
+});
+
+
+it("preserves the application preference flush across identity owner replacements", async () => {
+  const flush = vi.fn(async () => undefined);
+  const entry = new ApplicationConnectionStore(new RootStore(), flush);
+  await entry.initialize();
+  await entry.signOut(false);
+  const landing = entry.current as unknown as { options: { flush_application_preferences: () => Promise<void> } };
+  expect(landing.options.flush_application_preferences).toBe(flush);
+  await entry.login("fixture");
+  const workspace = entry.current as unknown as { options: { flush_application_preferences: () => Promise<void> } };
+  expect(workspace.options.flush_application_preferences).toBe(flush);
+  await workspace.options.flush_application_preferences();
+  expect(flush).toHaveBeenCalledOnce();
+  entry.dispose();
+});
+
+const loginStatus = (patch: Partial<LocalHostStatus> = {}): LocalHostStatus => ({
+  instance_id: "host-before", revision: "revision-1", mode: "enterprise", current_mode: "enterprise",
+  center_url: "https://center.example.com/tenant", current_center_url: "https://center.example.com/tenant", center_id: "old-center",
+  password_configured: false, listener_state: "listening", restart_required: false, error: null,
+  configuration: { remote_enabled: true, scheme: "https", port: 7440, server_names: ["runtime.example.com"], tls_certificate: "cert.pem", tls_private_key: "key.pem" },
+  ...patch,
+});
+
+async function loginEntry(status = loginStatus()) {
+  const entry = new ApplicationConnectionStore(new RootStore());
+  runInAction(() => { entry.phase = "entry"; });
+  native.manage.mockReset().mockResolvedValue(status);
+  native.restart.mockReset().mockResolvedValue(bootstrap("host-after"));
+  await entry.openLoginOptions();
+  return entry;
+}
+
+describe("login options configuration lifecycle", () => {
+  it("keeps the address draft when toggling, but saves personal mode without the hidden address and never logs in after restart", async () => {
+    const entry = await loginEntry();
+    entry.editLoginOptions({ center_url: "https://new.example.com/path", mode: "personal" });
+    entry.editLoginOptions({ mode: "enterprise" });
+    expect(entry.login_options?.draft.center_url).toBe("https://new.example.com/path");
+    entry.editLoginOptions({ mode: "personal" });
+    entry.confirmLoginOptions();
+    expect(native.manage).toHaveBeenCalledTimes(1);
+    const saved = loginStatus({ revision: "revision-2", mode: "personal", center_id: undefined, restart_required: true,
+      configuration: { ...loginStatus().configuration, remote_enabled: false } });
+    native.manage.mockResolvedValueOnce(saved).mockResolvedValueOnce({ ...saved, instance_id: "host-after", current_mode: "personal", current_center_url: null, restart_required: false });
+    await entry.applyLoginOptions();
+    expect(native.manage.mock.calls[1]).toEqual([{ type: "configure", payload: { expected_revision: "revision-1", mode: "personal", clear_center_binding: true, configuration: saved.configuration } }, "host-before"]);
+    expect(native.restart).toHaveBeenCalledWith({ instance_id: "host-before", revision: "revision-2" });
+    expect(native.begin).toHaveBeenCalled();
+    expect(native.connect).not.toHaveBeenCalled();
+    expect(entry.phase).toBe("entry");
+    expect(entry.mode).toBe("personal");
+    expect(entry.login_options_notice).toBe("登录选项已生效");
+    expect(entry.credentials_epoch).toBe(1);
+    expect(entry.pending).toBe(false);
+    native.manage.mockResolvedValue({ ...saved, current_mode: "personal", current_center_url: null, restart_required: false });
+    await entry.openLoginOptions();
+    entry.editLoginOptions({ mode: "enterprise" });
+    expect(entry.login_options?.draft.center_url).toBe("https://center.example.com/tenant");
+    entry.dispose();
+  });
+
+  it("does not save unchanged options and applies already saved configuration without another write", async () => {
+    const entry = await loginEntry();
+    entry.confirmLoginOptions();
+    expect(entry.login_options?.phase).toBe("edit");
+    await entry.applyLoginOptions();
+    expect(native.restart).not.toHaveBeenCalled();
+    entry.closeLoginOptions();
+    const saved = loginStatus({ restart_required: true, current_mode: "personal", current_center_url: null });
+    native.manage.mockResolvedValueOnce(saved).mockResolvedValueOnce({ ...saved, instance_id: "host-after", current_mode: "enterprise", current_center_url: saved.center_url, restart_required: false });
+    await entry.openLoginOptions();
+    entry.confirmLoginOptions();
+    await entry.applyLoginOptions();
+    expect(native.manage.mock.calls.every(([command]) => command.type === "get_status")).toBe(true);
+    expect(native.restart).toHaveBeenCalledOnce();
+    entry.dispose();
+  });
+
+  it.each(["invalid_request", "configuration_conflict", "desktop_update_busy"])("never restarts on explicit %s rejection", async (code) => {
+    const entry = await loginEntry();
+    entry.editLoginOptions({ mode: "personal" }); entry.confirmLoginOptions();
+    native.manage.mockRejectedValueOnce({ code });
+    await entry.applyLoginOptions();
+    expect(native.restart).not.toHaveBeenCalled();
+    expect(entry.login_options?.draft.mode).toBe("personal");
+    expect(entry.login_options?.baseline?.revision).toBe("revision-1");
+    expect(entry.pending).toBe(false);
+    entry.dispose();
+  });
+
+  it("reads back a lost save response without replaying configure or automatically restarting", async () => {
+    const entry = await loginEntry();
+    entry.editLoginOptions({ mode: "personal" }); entry.confirmLoginOptions();
+    const saved = loginStatus({ mode: "personal", center_id: undefined, revision: "revision-2", restart_required: true, configuration: { ...loginStatus().configuration, remote_enabled: false } });
+    native.manage.mockRejectedValueOnce({ code: "configuration_unavailable" }).mockResolvedValueOnce(saved);
+    await entry.applyLoginOptions();
+    expect(native.manage.mock.calls.map(([command]) => command.type)).toEqual(["get_status", "configure", "get_status"]);
+    expect(native.restart).not.toHaveBeenCalled();
+    expect(entry.login_options?.recovery).toBe("restart");
+    expect(entry.login_options?.message).toContain("尚未确认重启");
+    entry.confirmLoginOptions();
+    native.manage.mockResolvedValueOnce({ ...saved, instance_id: "host-after", current_mode: "personal", current_center_url: null, restart_required: false });
+    await entry.applyLoginOptions();
+    expect(native.manage.mock.calls.filter(([command]) => command.type === "configure")).toHaveLength(1);
+    expect(native.restart).toHaveBeenCalledOnce();
+    entry.dispose();
+  });
+
+  it("checks a newly started instance after read failure without restarting it again", async () => {
+    const saved = loginStatus({ restart_required: true });
+    const entry = await loginEntry(saved);
+    entry.confirmLoginOptions();
+    native.manage.mockRejectedValueOnce(new Error("read unavailable"));
+    await entry.applyLoginOptions();
+    expect(entry.login_options?.recovery).toBe("check_applied");
+    native.manage.mockResolvedValueOnce({ ...saved, instance_id: "host-after", restart_required: false });
+    await entry.checkLoginOptions();
+    expect(native.manage).toHaveBeenLastCalledWith({ type: "get_status" }, "host-after");
+    expect(native.restart).toHaveBeenCalledOnce();
+    expect(entry.login_options_notice).toBe("登录选项已生效");
+    entry.dispose();
+  });
+
+  it.each(["runtime_stop_failed", "runtime_startup_failed", "configuration_conflict", "desktop_update_busy"])("does not replay a saved write or bootstrap another Host after %s", async (code) => {
+    const saved = loginStatus({ restart_required: true });
+    const entry = await loginEntry(saved);
+    const starts = native.local.mock.calls.length;
+    entry.confirmLoginOptions();
+    native.restart.mockRejectedValueOnce({ code });
+    native.manage.mockRejectedValueOnce({ code: "configuration_unavailable" });
+    await entry.applyLoginOptions();
+    expect(entry.login_options?.recovery).toBe("check_applied");
+    expect(entry.login_options?.baseline).toEqual(saved);
+    expect(entry.pending).toBe(false);
+    expect(entry.updates.operation_blocked).toBe(false);
+    native.manage.mockRejectedValueOnce({ code: "configuration_conflict" });
+    await entry.checkLoginOptions();
+    expect(native.manage).toHaveBeenLastCalledWith({ type: "get_status" }, saved.instance_id);
+    expect(native.manage.mock.calls.every(([command]) => command.type === "get_status")).toBe(true);
+    expect(native.local.mock.calls).toHaveLength(starts);
+    expect(native.restart).toHaveBeenCalledOnce();
+    expect(native.connect).not.toHaveBeenCalled();
+    expect(entry.login_options_notice).toBeNull();
+    entry.dispose();
+  });
+
+  it("blocks duplicate writes, login, target changes and updates while saving", async () => {
+    const entry = await loginEntry();
+    entry.editLoginOptions({ mode: "personal" }); entry.confirmLoginOptions();
+    const response = deferred<LocalHostStatus>();
+    native.manage.mockReturnValueOnce(response.promise);
+    const applying = entry.applyLoginOptions();
+    await entry.applyLoginOptions();
+    entry.chooseTarget("remote"); entry.closeLoginOptions();
+    await entry.connectDesktop(null, "", false);
+    await entry.updates.start();
+    expect(entry.target).toBe("local");
+    expect(native.connect).not.toHaveBeenCalled();
+    expect(update.start).not.toHaveBeenCalled();
+    expect(native.manage.mock.calls.filter(([command]) => command.type === "configure")).toHaveLength(1);
+    response.resolve(loginStatus());
+    await applying;
+    expect(native.restart).not.toHaveBeenCalled();
+    entry.dispose();
+  });
+
+  it("discards late reads after closing or switching the target", async () => {
+    const entry = await loginEntry();
+    entry.closeLoginOptions();
+    const response = deferred<LocalHostStatus>();
+    native.manage.mockReturnValueOnce(response.promise);
+    const opening = entry.openLoginOptions();
+    await Promise.resolve();
+    entry.chooseTarget("remote");
+    response.resolve(loginStatus()); await opening;
+    expect(entry.login_options).toBeNull();
+    expect(entry.target).toBe("remote");
+    entry.dispose();
+  });
+
+  it("closes workspace settings on disconnect and does not reopen them on ordinary recovery", async () => {
+    const entry = new ApplicationConnectionStore(new RootStore());
+    await entry.initialize(); await entry.connectDesktop(null, "", false);
+    const root = entry.current!;
+    vi.mocked(root.settings.close).mockClear();
+    runInAction(() => { root.connection.state = "disconnected"; });
+    expect(entry.phase).toBe("entry");
+    expect(root.settings.close).toHaveBeenCalled();
+    runInAction(() => { root.connection.state = "connected"; });
+    expect(entry.phase).toBe("workspace");
+    expect(root.settings.open).not.toHaveBeenCalled();
     entry.dispose();
   });
 });

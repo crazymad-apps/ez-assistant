@@ -300,7 +300,7 @@ fn released_v0251_host_refuses_upgraded_database_without_changing_data_files() {
     stop(&discovery, &mut current);
     let personal = home.path().join("users/_personal");
     let upgraded = readonly(&personal.join("data/runtime.sqlite3"));
-    assert_eq!(count(&upgraded, "schema_migrations"), 8);
+    assert_eq!(count(&upgraded, "schema_migrations"), 10);
     assert_eq!(count(&upgraded, "sessions"), 1);
     assert_eq!(
         upgraded
@@ -310,7 +310,7 @@ fn released_v0251_host_refuses_upgraded_database_without_changing_data_files() {
                 |r| r.get::<_, String>(0)
             )
             .unwrap(),
-        "0.29.0"
+        "0.30.0"
     );
     let backup_dir = fs::read_dir(home.path().join("backups/host-layout"))
         .unwrap()
@@ -441,8 +441,8 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
         .json()
         .unwrap();
     assert_eq!(health["database_version"], env!("CARGO_PKG_VERSION"));
-    // 数据库最低 Host 与应用协议 minimum 独立；v0.29.0 的新续接状态要求提升数据库下限。
-    assert_eq!(health["min_compatible_host_version"], "0.29.0");
+    // 数据库最低 Host 与应用协议 minimum 独立；v0.30.0 的冻结压缩机制要求提升数据库下限。
+    assert_eq!(health["min_compatible_host_version"], "0.30.0");
     let configuration =
         fs::read_to_string(home.path().join("users/_personal/config.toml")).unwrap();
     assert!(!configuration.contains("default_model"));
@@ -489,7 +489,7 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
             })
             .unwrap()
     };
-    assert_eq!(count("schema_migrations"), 8);
+    assert_eq!(count("schema_migrations"), 10);
     assert_eq!(count("database_compatibility"), 1);
     assert_eq!(count("providers"), 0);
     assert_eq!(count("model_fixed_configs"), 0);
@@ -546,7 +546,7 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row
                 .get::<_, i64>(0))
             .unwrap(),
-        8
+        10
     );
     assert_eq!(
         database

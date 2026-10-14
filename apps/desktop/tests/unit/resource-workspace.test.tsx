@@ -1,3 +1,5 @@
+import { AppearanceProvider } from "../../src/stores/AppearanceContext";
+import { AppearanceStore } from "../../src/stores/AppearanceStore";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { ResourceWorkspace } from "../../src/features/resource-workspace/ResourceWorkspace";
@@ -79,10 +81,10 @@ describe("ResourceWorkspace", () => {
 
 function renderWorkspace(store: RootStore) {
   return render(
-    <RootStoreProvider store={store}>
+    <AppearanceProvider store={new AppearanceStore()}><RootStoreProvider store={store}>
       <ResourceWorkspace />
       <div id="overlay-root" />
-    </RootStoreProvider>,
+    </RootStoreProvider></AppearanceProvider>,
   );
 }
 

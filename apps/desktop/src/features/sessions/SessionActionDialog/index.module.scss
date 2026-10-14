@@ -5,7 +5,7 @@
   display: grid;
   place-items: center;
   padding: 24px;
-  background: rgb(36 42 54 / 28%);
+  background: var(--ez-overlay);
   backdrop-filter: blur(2px);
 }
 
@@ -83,8 +83,8 @@
 .primary,
 .danger {
   border-color: transparent !important;
-  color: #fff !important;
+  color: var(--ez-on-primary) !important;
 }
 
 .primary { background: var(--ez-primary) !important; }
-.danger { background: var(--ez-danger) !important; }
+.danger { color: var(--ez-on-danger) !important; background: var(--ez-danger) !important; }

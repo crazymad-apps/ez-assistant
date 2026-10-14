@@ -1,6 +1,9 @@
+import { SiteDownload, SiteDownloadQuery, SiteContent, SiteChangelogEntry, SiteNode, SiteNotesPreviewInput } from '../contracts/site-content.js';
+import { releaseNotes } from '../site-content/markdown.js';
+import { limitedText, object } from './manifest.js';
 import { Body, Controller, Get, Inject, Param, Post, Put, Query, Req, Res } from '@nestjs/common';
 import { RouteConfig } from '@nestjs/platform-fastify';
-import { ApiBody, ApiConsumes, ApiDefaultResponse, ApiNoContentResponse, ApiOkResponse, ApiOperation, ApiParam, ApiProduces, ApiTags } from '@nestjs/swagger';
+import { ApiExtraModels, ApiBody, ApiConsumes, ApiDefaultResponse, ApiNoContentResponse, ApiOkResponse, ApiOperation, ApiParam, ApiProduces, ApiTags } from '@nestjs/swagger';
 import type { FastifyReply } from 'fastify';
 import { Access } from '../security.js';
 import type { AuthenticatedRequest } from '../security.js';
@@ -13,9 +16,32 @@ import { IdentityError } from '../identity/errors.js';
 @Controller('api')
 @Access('admin')
 @ApiTags('desktop-releases')
+@ApiExtraModels(SiteContent)
 @ApiDefaultResponse({ type: CenterErrorResponse, description: '权限、发布状态或文件校验失败' })
 export class DesktopReleasesController {
   constructor(@Inject(DesktopReleaseService) private readonly releases: DesktopReleaseService) {}
+
+  @Get('site/downloads')
+  @Access('public')
+  @ApiOperation({ operationId: 'getSiteDownloads', summary: '各平台最新可用安装包，或指定版本', security: [] })
+  @ApiOkResponse({ type: [SiteDownload] })
+  downloads(@Query() query: SiteDownloadQuery) { return this.releases.downloads(query); }
+
+  @Get('site/changelog')
+  @Access('public')
+  @ApiOperation({ operationId: 'getSiteChangelog', summary: '读取曾发布版本的更新日志', security: [] })
+  @ApiOkResponse({ type: [SiteChangelogEntry] })
+  changelog() { return this.releases.changelog(); }
+
+  @Post('desktop-releases/notes-preview')
+  @RouteConfig({ desktopReleaseNotes: true })
+  @ApiOperation({ operationId: 'previewDesktopReleaseNotes', summary: '预览未保存的 Markdown 更新日志' })
+  @ApiBody({ type: SiteNotesPreviewInput })
+  @ApiOkResponse({ type: [SiteNode] })
+  previewNotes(@Body() body: unknown) {
+    const input = object(body, ['notes']);
+    return releaseNotes(limitedText(input.notes, 16 * 1024));
+  }
 
   @Get('desktop-releases')
   @ApiOperation({ operationId: 'listDesktopReleases', summary: '安装版本列表' })

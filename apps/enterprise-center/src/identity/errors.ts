@@ -1,6 +1,7 @@
 import { CenterError } from '../errors.js';
 
 const messages = {
+  SITE_CONTENT_INVALID: '内容格式、引用或资源不符合要求。',
   DESKTOP_RELEASE_INVALID: '发布文件或请求格式不符合要求。',
   DESKTOP_RELEASE_SIGNATURE_INVALID: '发布清单签名校验失败。',
   DESKTOP_RELEASE_FILE_INVALID: '安装文件与发布清单不一致。',
@@ -18,6 +19,8 @@ const messages = {
   FEEDBACK_TOO_LARGE: '反馈内容或环境信息超过大小限制。',
   CALL_NOT_FOUND: '调用记录不存在。',
   PACKAGE_NOT_FOUND: '插件版本不存在。',
+  RECORDING_SETTINGS_OUTDATED: '记录策略格式已更新，请刷新管理页面后重试。',
+  SNAPSHOT_READ_BUSY: '正文读取繁忙，请稍后重试。',
   SNAPSHOT_ROOT_UNAVAILABLE: '快照目录未配置或不可用。',
   MODEL_NOT_FOUND: '模型或服务商不存在，请刷新目录或保存固定配置。',
   MODEL_CONFIGURATION_CHANGED: '服务商连接已变化，请重新刷新。',

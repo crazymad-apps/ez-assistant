@@ -1,10 +1,24 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import type { RuntimeBootstrap } from "../../src/native-bridge/runtimeBootstrap";
 const bridge = vi.hoisted(() => ({ invoke: vi.fn() }));
-vi.mock("@tauri-apps/api/core", () => ({ invoke: bridge.invoke }));
-import { activateRuntimeBinding, clearRuntimeBinding, invokeRuntime } from "../../src/native-bridge/runtimeConnection";
+vi.mock("@tauri-apps/api/core", () => ({ invoke: bridge.invoke, isTauri: () => true }));
+import { activateRuntimeBinding, clearRuntimeBinding, invokeRuntime, manageLocalHost } from "../../src/native-bridge/runtimeConnection";
+import { restartNativeRuntime } from "../../src/native-bridge/desktopLifecycle";
 const target = (id: string) => ({ binding_id: id, target_kind: "remote" } as RuntimeBootstrap);
 beforeEach(() => { vi.clearAllMocks(); clearRuntimeBinding(); });
+it("keeps local management independent of a remote binding and passes confirmed restart guards", async () => {
+  activateRuntimeBinding(target("remote"));
+  bridge.invoke.mockResolvedValue({ instance_id: "local", current_mode: "personal", current_center_url: null, center_url: "https://saved.example" });
+  const result = await manageLocalHost({ type: "get_status" }, "local");
+  expect(bridge.invoke).toHaveBeenLastCalledWith("manage_local_host", { command: { type: "get_status" }, expectedInstanceId: "local" });
+  expect(result.center_url).toBe("https://saved.example");
+  expect(result.current_center_url).toBeNull();
+  const expected = { instance_id: "local", revision: "saved" };
+  await restartNativeRuntime(expected);
+  expect(bridge.invoke).toHaveBeenLastCalledWith("restart_runtime", { expected });
+  await restartNativeRuntime();
+  expect(bridge.invoke).toHaveBeenLastCalledWith("restart_runtime");
+});
 it("freezes native request headers and discards results after A-B-A", async () => {
   let resolve!: (value: string) => void;
   bridge.invoke.mockReturnValue(new Promise<string>((done) => { resolve = done; }));

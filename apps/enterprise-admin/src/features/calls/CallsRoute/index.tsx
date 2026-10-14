@@ -10,7 +10,7 @@ import { callApi } from '../../../request/calls';
 import { useResourceQuery } from '../../../request/useResourceQuery';
 import { useElementHeight } from '../../../components/useElementHeight';
 import { RecordingDialog } from '../RecordingDialog';
-import { outcomeLabels, snapshotLabels, usageLabels } from '../model';
+import { outcomeLabels, snapshotLabel, usageLabels, recordingLabels, observationLabels } from '../model';
 import styles from './index.module.scss';
 
 type Query = NonNullable<ListLlmCallsData['query']>;
@@ -19,7 +19,16 @@ export const CallsRoute = observer(function CallsRoute() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [draft, setDraft] = useState<Query>(() => {
     const initial: Query = { limit: 50, offset: 0 };
-    for (const name of ['id', 'provider_instance_id', 'model_id', 'kind', 'outcome', 'from', 'to'] as const) {
+    for (const name of [
+      'id',
+      'provider_instance_id',
+      'model_id',
+      'kind',
+      'outcome',
+      'response_observation',
+      'from',
+      'to',
+    ] as const) {
       const value = searchParams.get(name);
       if (value) Object.assign(initial, { [name]: value });
     }
@@ -69,8 +78,18 @@ export const CallsRoute = observer(function CallsRoute() {
       key: 'duration',
       width: 100,
 
+      render: (_: unknown, row: CallDetails) => {
+        if (!row.ended_at) return '—';
+        const elapsed = Date.parse(row.ended_at) - Date.parse(row.started_at);
+        return elapsed >= 0 ? `${(elapsed / 1000).toFixed(1)} 秒` : '时间异常';
+      },
+    },
+    {
+      title: '响应观察',
+      key: 'observation',
+      width: 145,
       render: (_: unknown, row: CallDetails) =>
-        row.ended_at ? `${((Date.parse(row.ended_at) - Date.parse(row.started_at)) / 1000).toFixed(1)} 秒` : '—',
+        row.response_observation ? observationLabels[row.response_observation] : '历史未记录',
     },
     { title: 'HTTP', dataIndex: 'http_status', width: 80 },
     {
@@ -84,8 +103,7 @@ export const CallsRoute = observer(function CallsRoute() {
       key: 'snapshot',
       width: 180,
 
-      render: (_: unknown, row: CallDetails) =>
-        `${snapshotLabels[row.request.state]} / ${snapshotLabels[row.response.state]}`,
+      render: (_: unknown, row: CallDetails) => `${snapshotLabel(row.request)} / ${snapshotLabel(row.response)}`,
     },
     {
       title: '操作',
@@ -116,12 +134,8 @@ export const CallsRoute = observer(function CallsRoute() {
         {settings.value && (
           <Alert
             type="info"
-            title={
-              settings.value.enabled
-                ? '当前已开启请求和响应正文采集；每条调用以开始时的策略为准。'
-                : '当前未开启请求和响应正文采集；调用索引和 Token 用量仍会记录。'
-            }
-            action={!settings.value.enabled && <Button onClick={() => setSettingsOpen(true)}>设置采集</Button>}
+            title={`当前正文留存：${recordingLabels[settings.value.mode]}；每条调用以开始时的策略为准。`}
+            action={settings.value.mode === 'off' && <Button onClick={() => setSettingsOpen(true)}>设置采集</Button>}
           />
         )}
         <Form
@@ -183,6 +197,17 @@ export const CallsRoute = observer(function CallsRoute() {
               value={draft.outcome}
               onChange={(outcome) => setDraft({ ...draft, outcome })}
               options={Object.entries(outcomeLabels).map(([value, label]) => ({ value, label }))}
+            />
+          </Form.Item>
+          <Form.Item label="响应观察" htmlFor="call-observation">
+            <Select
+              id="call-observation"
+              className={styles.select}
+              allowClear
+              placeholder="响应观察"
+              value={draft.response_observation}
+              onChange={(response_observation) => setDraft({ ...draft, response_observation })}
+              options={Object.entries(observationLabels).map(([value, label]) => ({ value, label }))}
             />
           </Form.Item>
           <Form.Item label="调用类型" htmlFor="call-filter-5">

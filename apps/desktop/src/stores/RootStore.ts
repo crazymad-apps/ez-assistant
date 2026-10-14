@@ -148,7 +148,7 @@ export class RootStore {
   #feedback_disposer: IReactionDisposer;
   #feedback_navigator_disposer: () => void;
 
-  constructor(private readonly target_options: Readonly<{ target_kind?: "local" | "remote"; target_address?: string; restore_resources?: boolean }> = {}) {
+  constructor(private readonly target_options: Readonly<{ target_kind?: "local" | "remote"; target_address?: string; restore_resources?: boolean; flush_application_preferences?: () => Promise<void> }> = {}) {
     this.#runtime = new RuntimeLifecycleCoordinator({
       on_event: (event) => {
         this.feedback.setScope(this.notificationScope());
@@ -240,7 +240,10 @@ export class RootStore {
       reconnect_runtime: (bootstrap) => this.#runtime.reconnectAfterNativeRuntimeMutation(bootstrap),
       mark_runtime_stopped: () => this.connection.markRuntimeStopped(),
       save_preferences: () => this.#schedulePreferencesSave(),
-      flush_preferences: () => this.flushPreferences(),
+      flush_preferences: async () => {
+        await this.flushPreferences();
+        await this.target_options.flush_application_preferences?.();
+      },
     });
     this.#resource_scope_disposer = reaction(
       () => this.navigation.selected_session_id ? `session:${this.navigation.selected_session_id}`

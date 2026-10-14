@@ -1,5 +1,6 @@
 //! Host 私有用户服务缓存。初始化和关闭共用用户锁，所有异步装配均由 Host 子系统监督。
 
+mod enterprise_sync;
 mod services;
 
 use crate::{
@@ -53,6 +54,11 @@ struct OpenDomain {
     reply: oneshot::Sender<Result<Arc<ReadyServices>, DomainError>>,
 }
 
+enum DomainRequest {
+    Open(OpenDomain),
+    WarmUp(AccessPermit),
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum DomainError {
     #[error(transparent)]
@@ -65,12 +71,19 @@ pub(crate) enum DomainError {
 
 pub(crate) struct UserDomains {
     slots: Mutex<HashMap<Key, Slot>>,
-    open: mpsc::UnboundedSender<OpenDomain>,
+    open: mpsc::UnboundedSender<DomainRequest>,
     stopping: CancellationToken,
     stopped: watch::Receiver<Option<bool>>,
 }
 
 impl UserDomains {
+    /// 登录只排队预热，不等待存储或中心网络；初始化仍由用户域 owner 收尾。
+    pub(crate) fn warm_up(&self, permit: &AccessPermit) {
+        if !self.stopping.is_cancelled() && permit.check().is_ok() {
+            let _ = self.open.send(DomainRequest::WarmUp(permit.clone()));
+        }
+    }
+
     pub(crate) async fn wait_shutdown(&self) -> Result<(), DomainError> {
         let mut stopped = self.stopped.clone();
         match stopped.wait_for(Option::is_some).await {
@@ -141,13 +154,13 @@ impl UserDomains {
             // 锁被转交给受监督任务，HTTP 断开不会释放初始化互斥或丢失资源收尾。
             let (reply, result) = oneshot::channel();
             self.open
-                .send(OpenDomain {
+                .send(DomainRequest::Open(OpenDomain {
                     key,
                     permit: permit.clone(),
                     slot: slot.clone(),
                     guard,
                     reply,
-                })
+                }))
                 .map_err(|_| DomainError::Shutdown)?;
             return tokio::select! {
                 () = self.stopping.cancelled() => Err(DomainError::Shutdown),
@@ -176,7 +189,7 @@ pub(crate) struct UserDomainService {
     #[cfg(test)]
     pub(crate) model: Option<Arc<dyn assistant_runtime::ModelServiceFactory>>,
     domains: Arc<UserDomains>,
-    requests: mpsc::UnboundedReceiver<OpenDomain>,
+    requests: mpsc::UnboundedReceiver<DomainRequest>,
     stopped: watch::Sender<Option<bool>>,
 }
 
@@ -246,7 +259,18 @@ impl UserDomainService {
             tokio::select! {
                 biased;
                 () = shutdown.cancelled() => break,
-                Some(request) = self.requests.recv() => self.spawn(&mut tasks, request, shutdown.clone()),
+                Some(request) = self.requests.recv() => match request {
+                    DomainRequest::Open(request) => self.spawn(&mut tasks, request, shutdown.clone()),
+                    DomainRequest::WarmUp(permit) => {
+                        let domains = self.domains.clone();
+                        tasks.spawn(async move {
+                            if domains.ensure(&permit).await.is_err() {
+                                eprintln!("runtime-host: enterprise login warm-up unavailable");
+                            }
+                            true
+                        });
+                    }
+                },
                 Some(result) = tasks.join_next(), if !tasks.is_empty() => {
                     if !matches!(result, Ok(true)) { failed = true; eprintln!("runtime-host: user domain cleanup failed"); }
                 }
@@ -258,7 +282,9 @@ impl UserDomainService {
         self.requests.close();
         // 尚未装配的请求只退还锁；已运行的用户任务并行关闭，不按用户累加期限。
         while let Some(request) = self.requests.recv().await {
-            let _ = request.reply.send(Err(DomainError::Shutdown));
+            if let DomainRequest::Open(request) = request {
+                let _ = request.reply.send(Err(DomainError::Shutdown));
+            }
         }
         let drained = tokio::time::timeout(Duration::from_secs(14), async {
             while let Some(result) = tasks.join_next().await {
@@ -441,6 +467,15 @@ async fn run_domain(
     });
     drop(guard);
     let mut supervisor = HostSupervisor::new(Duration::from_secs(10));
+    if let Some(key) = key.clone() {
+        let runtime = services.runtime.clone();
+        let credentials = credentials.clone();
+        supervisor.spawn_subsystem(
+            "enterprise_login_sync",
+            FailurePolicy::Degrade,
+            move |cancel| enterprise_sync::run(runtime, credentials, key, cancel),
+        );
+    }
     supervisor.spawn_subsystem("speech_service", FailurePolicy::Degrade, move |cancel| {
         speech.run_until(cancel)
     });

@@ -32,7 +32,7 @@ import type { RuntimeClient } from '../runtime-client/RuntimeClient';
 
 export type RuntimeSettingsPageId =
   'runtime' | 'runtime_connection' | 'host_access' | 'runtime_diagnostics' | 'runtime_local';
-export type SettingsPage = RuntimeSettingsPageId | 'models' | 'permissions' | 'memory' | 'skills' | 'devices' | 'mcp' | 'plugins' | 'agents' | 'notifications';
+export type SettingsPage = RuntimeSettingsPageId | 'appearance' | 'models' | 'permissions' | 'memory' | 'skills' | 'devices' | 'mcp' | 'plugins' | 'agents' | 'notifications';
 
 type SettingsDependencies = Readonly<{
   get_client: () => RuntimeClient | null;

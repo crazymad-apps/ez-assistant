@@ -44,24 +44,24 @@
 
   &[data-button-variant="primary"] {
     border-color: transparent;
-    color: #fff;
+    color: var(--ez-on-primary);
     background: var(--ez-primary);
 
     &:hover:not(:disabled) {
       border-color: transparent;
-      color: #fff;
+      color: var(--ez-on-primary);
       background: var(--ez-primary-hover);
     }
   }
 
   &[data-button-variant="danger"] {
     border-color: transparent;
-    color: #fff;
+    color: var(--ez-on-danger);
     background: var(--ez-danger);
 
     &:hover:not(:disabled) {
       border-color: transparent;
-      color: #fff;
+      color: var(--ez-on-danger);
       background: var(--ez-danger);
       filter: brightness(.94);
     }

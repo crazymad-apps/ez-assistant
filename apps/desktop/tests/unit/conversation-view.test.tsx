@@ -1,4 +1,5 @@
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { render } from "../support/renderWithAppearance";
+import { act, cleanup, fireEvent, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeEvent } from "@ez-assistant/protocol";
 import { RootStore } from "../../src/stores/RootStore";

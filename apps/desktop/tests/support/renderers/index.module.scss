@@ -1,0 +1,3 @@
+.fixture { padding: 24px; color: var(--ez-text); background: var(--ez-surface); nav { display: flex; gap: 12px; } }
+.editor { height: 300px; margin-block: 24px; }
+.terminal { height: 240px; > div { height: 100%; } }

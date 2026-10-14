@@ -1,14 +1,16 @@
 import { Column, Entity, PrimaryColumn } from 'typeorm';
 import type { Protocol } from '../contracts/models.js';
-import type { SnapshotState } from './snapshots.js';
+import type { SnapshotResult, SnapshotState } from './snapshots.js';
 
 export type Outcome = 'in_progress' | 'forwarded' | 'rejected' | 'upstream_error' | 'interrupted' | 'unknown';
+export type RecordingMode = 'off' | 'anomalies' | 'all';
+export type ResponseSource = 'upstream_http' | 'websocket_bridge' | 'websocket_compact';
 export type UsageState = 'pending' | 'available' | 'partial' | 'unavailable';
 
 @Entity({ schema: 'public', name: 'llm_recording_settings', synchronize: false })
 export class RecordingEntity {
   @PrimaryColumn('boolean') singleton!: boolean;
-  @Column('boolean') enabled!: boolean;
+  @Column('text') mode!: RecordingMode;
   @Column('integer') content_retention_days!: number;
   @Column('integer') index_retention_days!: number;
   @Column('timestamptz') usage_available_from!: Date;
@@ -29,6 +31,12 @@ export class CallEntity {
   @Column({ type: 'integer', nullable: true }) http_status!: number | null;
   @Column({ type: 'text', nullable: true }) reason!: string | null;
   @Column('text') outcome!: Outcome;
+  @Column({ type: 'text', nullable: true }) response_observation!: import('./response-observer.js').Observation | null;
+  @Column({ type: 'text', nullable: true }) response_observation_reason!: string | null;
+  @Column({ type: 'text', nullable: true }) response_source!: ResponseSource | null;
+  @Column({ type: 'text', nullable: true }) response_content_type!: string | null;
+  @Column({ type: 'text', nullable: true }) response_content_encoding!: string | null;
+  @Column({ type: 'jsonb', nullable: true }) upstream_failure_snapshot!: SnapshotResult | null;
   @Column({ type: 'bigint', nullable: true }) input_tokens!: string | null;
   @Column({ type: 'bigint', nullable: true }) output_tokens!: string | null;
   @Column({ type: 'bigint', nullable: true }) total_tokens!: string | null;

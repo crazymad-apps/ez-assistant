@@ -5,8 +5,10 @@ import { isAbsolute, join, relative, resolve } from 'node:path';
 
 export const snapshotLimit = 8 * 1024 * 1024;
 const memoryLimit = 64 * 1024 * 1024;
-export type Side = 'request' | 'response';
-export type SnapshotState = 'disabled' | 'pending' | 'complete' | 'partial' | 'failed' | 'expired' | 'missing';
+export type Side = 'request' | 'response' | 'upstream_failure';
+const fileName = (side: Side) => (side === 'upstream_failure' ? 'upstream-failure.bin' : `${side}.txt`);
+export type SnapshotState =
+  'disabled' | 'pending' | 'complete' | 'partial' | 'failed' | 'expired' | 'missing' | 'not_received';
 export type SnapshotResult = {
   state: SnapshotState;
   path: string | null;
@@ -41,18 +43,40 @@ export class SnapshotMemory {
 export class Capture {
   private chunks: Buffer[] = [];
   private size = 0;
+  private reserved = 0;
   reason: string | null = null;
 
-  constructor(private readonly memory: SnapshotMemory) {}
+  constructor(
+    private readonly memory: SnapshotMemory,
+    private readonly limit = snapshotLimit,
+  ) {}
+
+  get bytes(): number {
+    return this.size;
+  }
 
   append(chunk: Buffer): void {
     if (this.reason) return;
-    const wanted = Math.min(chunk.length, snapshotLimit - this.size);
-    const count = this.memory.reserve(wanted);
-    if (count) this.chunks.push(Buffer.from(chunk.subarray(0, count)));
-    this.size += count;
-    if (count < wanted) this.reason = 'memory_limit';
-    else if (wanted < chunk.length) this.reason = 'size_limit';
+    // 小 delta 复用固定页，避免每字节一个 Buffer 使对象开销突破字节预算。
+    let offset = 0;
+    while (offset < chunk.length && this.size < this.limit) {
+      if (this.size === this.reserved) {
+        const count = this.memory.reserve(Math.min(16384, this.limit - this.reserved));
+        if (!count) {
+          this.reason = 'memory_limit';
+          return;
+        }
+        this.chunks.push(Buffer.allocUnsafe(count));
+        this.reserved += count;
+      }
+      const tail = this.chunks.at(-1)!;
+      const used = tail.length - (this.reserved - this.size);
+      const count = Math.min(chunk.length - offset, tail.length - used);
+      chunk.copy(tail, used, offset, offset + count);
+      this.size += count;
+      offset += count;
+    }
+    if (offset < chunk.length) this.reason = 'size_limit';
   }
 
   interrupt(): void {
@@ -60,45 +84,17 @@ export class Capture {
   }
 
   content(): readonly Buffer[] {
-    const original = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
-    for (const chunk of this.chunks) original.decode(chunk, { stream: true });
-    let length = this.size;
-    if (this.reason && length) {
-      // 只复制至多四字节检查尾部，发布直接遍历已预留 chunks，避免另聚合一份 8 MiB 正文。
-      const tail = Buffer.alloc(Math.min(4, length));
-      let cursor = tail.length;
-      for (let i = this.chunks.length - 1; i >= 0 && cursor; i--) {
-        const chunk = this.chunks[i]!;
-        const count = Math.min(cursor, chunk.length);
-        chunk.copy(tail, cursor - count, chunk.length - count);
-        cursor -= count;
-      }
-      let start = tail.length - 1;
-      while (start >= 0 && (tail[start]! & 0xc0) === 0x80) start--;
-      if (start >= 0) {
-        const lead = tail[start]!;
-        let width = 1;
-        if (lead >= 0xc2 && lead <= 0xdf) width = 2;
-        else if (lead >= 0xe0 && lead <= 0xef) width = 3;
-        else if (lead >= 0xf0 && lead <= 0xf4) width = 4;
-        if (width > tail.length - start) length -= tail.length - start;
-      }
-    }
-    const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
-    const buffers: Buffer[] = [];
-    for (const chunk of this.chunks) {
-      const prefix = chunk.subarray(0, Math.min(chunk.length, length));
-      decoder.decode(prefix, { stream: true });
-      buffers.push(prefix);
-      length -= prefix.length;
-      if (!length) break;
-    }
-    decoder.decode();
-    return buffers;
+    // 文件是实际采集字节的证据；无效 UTF-8 或截断尾部也必须原样保存。
+    if (!this.chunks.length) return [];
+    return [
+      ...this.chunks.slice(0, -1),
+      this.chunks.at(-1)!.subarray(0, this.chunks.at(-1)!.length - (this.reserved - this.size)),
+    ];
   }
 
   release(): void {
-    this.memory.release(this.size);
+    this.memory.release(this.reserved);
+    this.reserved = 0;
     this.chunks = [];
     this.size = 0;
   }
@@ -174,11 +170,11 @@ export class SnapshotFiles {
       await file.close();
     }
     // link 提供原子且不覆盖的固定名称发布；POSIX rename 会覆盖既有终态文件，故不用它。
-    await link(part, join(directory, `${side}.txt`));
+    await link(part, join(directory, fileName(side)));
     await unlink(part);
     return {
       state: capture.reason ? 'partial' : 'complete',
-      path: [...this.parts(id, started), `${side}.txt`].join('/'),
+      path: [...this.parts(id, started), fileName(side)].join('/'),
       bytes,
       sha256: digest.digest('hex'),
       reason: capture.reason,
@@ -188,16 +184,24 @@ export class SnapshotFiles {
   async read(id: string, started: Date, side: Side): Promise<{ body: Buffer; result: SnapshotResult } | null> {
     try {
       const directory = await this.directory(id, started, false);
-      const file = await open(join(directory, `${side}.txt`), constants.O_RDONLY | constants.O_NOFOLLOW);
+      const file = await open(join(directory, fileName(side)), constants.O_RDONLY | constants.O_NOFOLLOW);
       try {
         const stat = await file.stat();
         if (!stat.isFile() || stat.size > snapshotLimit) throw new Error('SNAPSHOT_FILE_INVALID');
-        const body = await file.readFile();
+        // 不用 readFile：校验后文件被外部扩大时也不得突破单快照读取上限。
+        const body = Buffer.alloc(stat.size);
+        let offset = 0;
+        while (offset < body.length) {
+          const { bytesRead } = await file.read(body, offset, body.length - offset, offset);
+          if (!bytesRead) throw new Error('SNAPSHOT_FILE_CHANGED');
+          offset += bytesRead;
+        }
+        if ((await file.read(Buffer.alloc(1), 0, 1, offset)).bytesRead) throw new Error('SNAPSHOT_FILE_CHANGED');
         return {
           body,
           result: {
             state: 'partial',
-            path: [...this.parts(id, started), `${side}.txt`].join('/'),
+            path: [...this.parts(id, started), fileName(side)].join('/'),
             bytes: body.length,
             sha256: createHash('sha256').update(body).digest('hex'),
             reason: 'recovered_unknown',
@@ -212,7 +216,7 @@ export class SnapshotFiles {
     }
   }
 
-  /** 只清理可确认归属的四个固定名称；未知条目/链接使批次停止，不递归扩张删除。 */
+  /** 只清理可确认归属的固定快照名称；未知条目/链接使批次停止，不递归扩张删除。 */
   async clean(id: string, started: Date, partsOnly = false): Promise<void> {
     let directory: string;
     try {
@@ -223,7 +227,11 @@ export class SnapshotFiles {
     }
     const entries = await readdir(directory, { withFileTypes: true });
     for (const entry of entries) {
-      if (!/^(request|response)\.(txt|part)$/.test(entry.name) || !entry.isFile() || entry.isSymbolicLink())
+      if (
+        !/^(?:(request|response)\.(txt|part)|upstream_failure\.part|upstream-failure\.bin)$/.test(entry.name) ||
+        !entry.isFile() ||
+        entry.isSymbolicLink()
+      )
         throw new Error('SNAPSHOT_UNKNOWN_ENTRY');
     }
     for (const entry of entries)

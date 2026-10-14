@@ -157,7 +157,8 @@ export type AuditDetails = {
     skill_count?: number;
     mcp_count?: number;
     call_id?: string;
-    side?: 'request' | 'response';
+    side?: 'request' | 'response' | 'upstream_failure';
+    mode?: 'off' | 'anomalies' | 'all';
     enabled?: boolean;
     content_retention_days?: number;
     index_retention_days?: number;
@@ -464,7 +465,7 @@ export type UsageModelOption = {
 };
 
 export type CallSnapshot = {
-    state: 'disabled' | 'pending' | 'complete' | 'partial' | 'failed' | 'expired' | 'missing';
+    state: 'disabled' | 'pending' | 'complete' | 'partial' | 'failed' | 'expired' | 'missing' | 'not_received';
     bytes: number | null;
     sha256: string | null;
     reason: string | null;
@@ -484,6 +485,12 @@ export type CallDetails = {
     http_status: number | null;
     reason: string | null;
     outcome: 'in_progress' | 'forwarded' | 'rejected' | 'upstream_error' | 'interrupted' | 'unknown';
+    response_observation: 'pending' | 'normal' | 'anomalous' | 'unconfirmed';
+    response_observation_reason: string | null;
+    response_source: 'upstream_http' | 'websocket_bridge' | 'websocket_compact';
+    response_content_type: string | null;
+    response_content_encoding: string | null;
+    upstream_failure: CallSnapshot | null;
     usage_state: 'pending' | 'available' | 'partial' | 'unavailable';
     usage_reason: string | null;
     input_tokens: string | null;
@@ -503,15 +510,16 @@ export type CallPage = {
 };
 
 export type SnapshotContent = {
-    state: 'disabled' | 'pending' | 'complete' | 'partial' | 'failed' | 'expired' | 'missing';
+    state: 'disabled' | 'pending' | 'complete' | 'partial' | 'failed' | 'expired' | 'missing' | 'not_received';
     bytes: number | null;
     sha256: string | null;
     reason: string | null;
     text: string | null;
+    body_base64: string | null;
 };
 
 export type RecordingSettings = {
-    enabled: boolean;
+    mode: 'off' | 'anomalies' | 'all';
     content_retention_days: number;
     index_retention_days: number;
 };
@@ -757,6 +765,88 @@ export type HandleFeedbackRequest = {
     expected_handling_note: string | null;
     status: 'pending' | 'processing' | 'resolved' | 'closed';
     handling_note: string | null;
+};
+
+export type SiteScenario = {
+    id: string;
+    label: string;
+    plugin: string;
+    prompt: string;
+    intro: string;
+    title: string;
+    body: string;
+    file: string;
+    reply: string;
+    steps: Array<string>;
+    kind: 'drawing' | 'scene' | 'quote' | 'notes';
+};
+
+export type SiteNode = {
+    kind: 'text' | 'paragraph' | 'heading' | 'strong' | 'em' | 's' | 'blockquote' | 'bullet_list' | 'ordered_list' | 'list_item' | 'code' | 'code_inline' | 'link' | 'image' | 'break' | 'hr' | 'table' | 'thead' | 'tbody' | 'tr' | 'th' | 'td';
+    text?: string;
+    href?: string;
+    id?: string;
+    level?: number;
+    start?: number;
+    children?: Array<SiteNode>;
+};
+
+export type SiteHomeSection = {
+    scenarios?: Array<SiteScenario>;
+    kind: 'hero' | 'workspace' | 'capabilities' | 'modes' | 'resources' | 'closing';
+    title: string;
+    description: string;
+    body: Array<SiteNode>;
+};
+
+export type SiteArticle = {
+    id: string;
+    title: string;
+    date: string;
+    applies_to: string;
+    body: Array<SiteNode>;
+};
+
+export type SiteChapter = {
+    title: string;
+    articles: Array<SiteArticle>;
+};
+
+export type SiteAsset = {
+    id: string;
+    type: 'image/png' | 'image/jpeg' | 'image/webp';
+    size: number;
+    sha256: string;
+};
+
+export type SiteContent = {
+    format: 1;
+    home: Array<SiteHomeSection>;
+    manual: Array<SiteChapter>;
+    assets: Array<SiteAsset>;
+};
+
+export type SiteDownload = {
+    target: 'darwin-aarch64' | 'windows-x86_64' | 'windows-aarch64';
+    version: string;
+    published_at: string;
+    name: string;
+    size: number;
+    sha256: string;
+    url: string;
+};
+
+export type SiteChangelogEntry = {
+    version: string;
+    published_at: string;
+    body: Array<SiteNode>;
+};
+
+export type SiteNotesPreviewInput = {
+    /**
+     * Markdown 正文，最多 16 KiB UTF-8
+     */
+    notes: string;
 };
 
 export type DesktopTargetSummary = {
@@ -1616,6 +1706,7 @@ export type ListLlmCallsData = {
         provider_instance_id?: string;
         model_id?: string;
         outcome?: string;
+        response_observation?: string;
         kind?: string;
         from?: string;
         to?: string;
@@ -1670,7 +1761,7 @@ export type GetLlmSnapshotData = {
         id: string;
     };
     query: {
-        side: 'request' | 'response';
+        side: 'request' | 'response' | 'upstream_failure';
     };
     url: '/api/llm-calls/{id}/snapshot';
 };
@@ -2331,6 +2422,74 @@ export type HandleFeedbackResponses = {
 };
 
 export type HandleFeedbackResponse = HandleFeedbackResponses[keyof HandleFeedbackResponses];
+
+export type GetSiteDownloadsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        version?: string;
+    };
+    url: '/api/site/downloads';
+};
+
+export type GetSiteDownloadsErrors = {
+    /**
+     * 权限、发布状态或文件校验失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type GetSiteDownloadsError = GetSiteDownloadsErrors[keyof GetSiteDownloadsErrors];
+
+export type GetSiteDownloadsResponses = {
+    200: Array<SiteDownload>;
+};
+
+export type GetSiteDownloadsResponse = GetSiteDownloadsResponses[keyof GetSiteDownloadsResponses];
+
+export type GetSiteChangelogData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/site/changelog';
+};
+
+export type GetSiteChangelogErrors = {
+    /**
+     * 权限、发布状态或文件校验失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type GetSiteChangelogError = GetSiteChangelogErrors[keyof GetSiteChangelogErrors];
+
+export type GetSiteChangelogResponses = {
+    200: Array<SiteChangelogEntry>;
+};
+
+export type GetSiteChangelogResponse = GetSiteChangelogResponses[keyof GetSiteChangelogResponses];
+
+export type PreviewDesktopReleaseNotesData = {
+    body: SiteNotesPreviewInput;
+    path?: never;
+    query?: never;
+    url: '/api/desktop-releases/notes-preview';
+};
+
+export type PreviewDesktopReleaseNotesErrors = {
+    /**
+     * 权限、发布状态或文件校验失败
+     */
+    default: CenterErrorResponse;
+};
+
+export type PreviewDesktopReleaseNotesError = PreviewDesktopReleaseNotesErrors[keyof PreviewDesktopReleaseNotesErrors];
+
+export type PreviewDesktopReleaseNotesResponses = {
+    200: Array<SiteNode>;
+};
+
+export type PreviewDesktopReleaseNotesResponse = PreviewDesktopReleaseNotesResponses[keyof PreviewDesktopReleaseNotesResponses];
 
 export type ListDesktopReleasesData = {
     body?: never;

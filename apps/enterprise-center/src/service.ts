@@ -7,11 +7,13 @@ import { checkDatabase } from './database/check.js';
 import { createPool } from './database/pool.js';
 import { upgradeDatabase } from './database/upgrade.js';
 import { createDataSource } from './database/source.js';
-import { checkAdminAssets } from './admin-assets.js';
+import { join, dirname } from 'node:path';
+import { checkAdminAssets, checkSiteAssets } from './admin-assets.js';
 
 /** 维护池完成升级即关闭，随后唯一业务 DataSource 接管；HTTP 关闭后再释放业务池。 */
 export async function startService(config: CenterConfig, adminRoot?: string) {
-  if (adminRoot) await checkAdminAssets(adminRoot);
+  const siteRoot = adminRoot ? join(dirname(adminRoot), 'site') : undefined;
+  if (adminRoot) { await checkAdminAssets(adminRoot); await checkSiteAssets(siteRoot!); }
   const pool = createPool(config.database);
   try {
     if (config.autoUpgrade) await upgradeDatabase(pool);
@@ -23,7 +25,7 @@ export async function startService(config: CenterConfig, adminRoot?: string) {
   let app: Awaited<ReturnType<typeof createHttpApp>> | undefined;
   try {
     await source.initialize();
-    app = await createHttpApp({ ...config, source }, adminRoot);
+    app = await createHttpApp({ ...config, source }, adminRoot, siteRoot);
     await app.listen(config.port, config.host);
     const runningApp = app;
     let closing: Promise<void> | undefined;

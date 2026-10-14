@@ -54,10 +54,6 @@ export const OutputHostingMenu = observer(function OutputHostingMenu(props: Read
             )}
           </DropdownMenuItem>
         ))}
-        <DropdownMenuItem onSelect={() => store.settings.open("devices")}>
-          <strong>管理智能终端</strong>
-          <Icon className={styles.hosting_option_tail} name="chevron-right" size={14} />
-        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );

@@ -1,4 +1,5 @@
 //! 真 HTTP 身份边界与临时 SQLite 用户域；确定性模型仅从测试装配注入。
+mod login_sync;
 pub(super) mod models;
 mod resources;
 mod tools;
@@ -22,6 +23,7 @@ async fn center_package_download_installs_for_one_user_and_rejects_deprecated_se
     let sha256 = format!("{:x}", Sha256::digest(&bytes));
     let mut f = Fixture::with_domains(true, None).await;
     *f.mock.plugin.lock().unwrap() = Some(PluginFixture {
+        version: "0.1.0".into(),
         bytes,
         sha256: sha256.clone(),
         deprecated: false,
@@ -276,14 +278,14 @@ impl Fixture {
 #[tokio::test]
 async fn concurrent_readiness_routes_one_runtime_per_user_and_restores_after_logout() {
     let mut f = Fixture::with_domains(true, None).await;
-    let alice = f.login("alice").await;
-    let bob = f.login("bob").await;
     assert!(
         !f.home
             .path()
             .join(format!("users/{CENTER_ID}_1/data/runtime.sqlite3"))
             .exists()
     );
+    let alice = f.login("alice").await;
+    let bob = f.login("bob").await;
     let (a, b, a2) = tokio::join!(f.ready(&alice), f.ready(&bob), f.ready(&alice));
     assert_eq!(
         (a.status(), b.status(), a2.status()),
@@ -357,12 +359,12 @@ async fn concurrent_readiness_routes_one_runtime_per_user_and_restores_after_log
 #[tokio::test]
 async fn initialization_failure_keeps_login_and_is_retryable_without_affecting_other_user() {
     let mut f = Fixture::with_domains(true, None).await;
-    let alice = f.login("alice").await;
-    let bob = f.login("bob").await;
     let home = f.home.path().join(format!("users/{CENTER_ID}_1"));
     // 在第一次开库前使用户根不可用；修复夹具后同一凭据可重试。
     std::fs::rename(&home, home.with_extension("saved")).unwrap();
     std::fs::write(&home, "not a directory").unwrap();
+    let alice = f.login("alice").await;
+    let bob = f.login("bob").await;
     assert_eq!(
         f.ready(&alice).await.status(),
         StatusCode::SERVICE_UNAVAILABLE
@@ -709,8 +711,8 @@ async fn hold_database(f: &Fixture) -> rusqlite::Connection {
 #[tokio::test]
 async fn disconnected_initialization_waiter_does_not_own_the_initialization_task() {
     let mut f = Fixture::with_domains(true, None).await;
-    let alice = f.login("alice").await;
     let connection = hold_database(&f).await;
+    let alice = f.login("alice").await;
     let domains = f.state.domains.clone().unwrap();
     let permit = f.permit(&alice);
     let first = tokio::spawn(async move { domains.ensure(&permit).await });
@@ -729,8 +731,8 @@ async fn disconnected_initialization_waiter_does_not_own_the_initialization_task
 #[tokio::test]
 async fn center_outage_interrupts_readiness_without_reporting_a_lost_login() {
     let mut f = Fixture::with_domains(true, None).await;
-    let alice = f.login("alice").await;
     let connection = hold_database(&f).await;
+    let alice = f.login("alice").await;
     let request = f.request(reqwest::Method::POST, "/runtime/ensure-ready", Some(&alice));
     let waiting = tokio::spawn(async move { request.send().await.unwrap() });
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -755,8 +757,8 @@ async fn center_outage_interrupts_readiness_without_reporting_a_lost_login() {
 #[tokio::test]
 async fn logout_during_initialization_does_not_resurrect_old_requests_or_block_new_login() {
     let mut f = Fixture::with_domains(true, None).await;
-    let alice = f.login("alice").await;
     let connection = hold_database(&f).await;
+    let alice = f.login("alice").await;
     let domains = f.state.domains.clone().unwrap();
     let permit = f.permit(&alice);
     let first = tokio::spawn(async move { domains.ensure(&permit).await });

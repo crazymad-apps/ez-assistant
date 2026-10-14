@@ -1,3 +1,5 @@
+import { useAppearance } from "../../stores/AppearanceContext";
+import { applyMonacoTheme, registerMonacoThemes } from "./monacoThemes";
 import { forwardRef, useId, useEffect, useImperativeHandle, useRef, useState } from "react";
 import type { ResourceViewState } from "./resourceViewState";
 import styles from "./ResourceWorkspace/index.module.scss";
@@ -18,6 +20,7 @@ export const MonacoTextViewer = forwardRef<MonacoTextViewerHandle, Readonly<{
   text: string;
   word_wrap: boolean;
 }>>(function MonacoTextViewer(props, ref) {
+  const appearance = useAppearance();
   const instance_id = useId();
   const container_ref = useRef<HTMLDivElement>(null);
   const editor_ref = useRef<MonacoEditor | null>(null);
@@ -37,6 +40,7 @@ export const MonacoTextViewer = forwardRef<MonacoTextViewerHandle, Readonly<{
     void loadMonaco()
       .then((monaco) => {
         if (disposed || !container_ref.current) return;
+        applyMonacoTheme(appearance.theme_id);
         const model_uri = monaco.Uri.parse(
           `inmemory://ez-resource/${encodeURIComponent(instance_id)}/${encodeURIComponent(props.resource_key)}/${encodeURIComponent(props.file_name)}`,
         );
@@ -73,7 +77,8 @@ export const MonacoTextViewer = forwardRef<MonacoTextViewerHandle, Readonly<{
           capture();
         }
       })
-      .catch(() => {
+      .catch((error: unknown) => {
+        console.warn("Resource editor initialization failed", error);
         editor_ref.current?.dispose();
         editor_ref.current = null;
         model?.dispose();
@@ -90,7 +95,7 @@ export const MonacoTextViewer = forwardRef<MonacoTextViewerHandle, Readonly<{
       editor_ref.current = null;
       model?.dispose();
     };
-  }, [instance_id, props.file_name, props.initial_line, props.resource_key, props.text, props.view_state]);
+  }, [appearance, instance_id, props.file_name, props.initial_line, props.resource_key, props.text, props.view_state]);
 
   useEffect(() => {
     editor_ref.current?.updateOptions({ wordWrap: props.word_wrap ? "on" : "off" });
@@ -126,6 +131,7 @@ async function loadMonaco(): Promise<MonacoApi> {
     root.MonacoEnvironment = {
       getWorker: (_module_id, label) => new (worker_constructors.get(label) ?? worker_module.default)(),
     };
+    registerMonacoThemes(monaco.editor);
     return monaco as MonacoApi;
   });
   let monaco: MonacoApi;

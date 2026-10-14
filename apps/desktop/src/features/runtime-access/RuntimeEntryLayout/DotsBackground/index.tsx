@@ -21,10 +21,15 @@ export function DotsBackground() {
     let paused = false;
     let previous_frame_at = performance.now();
     const reduced = matchMedia("(prefers-reduced-motion: reduce)");
-    const dark = matchMedia("(prefers-color-scheme: dark)");
+    // 配色由应用根变量决定；更新材质即可，不重建装饰动画或跟随系统明暗。
+    const palette = () => {
+      const css = getComputedStyle(document.documentElement);
+      return { color: css.getPropertyValue("--ez-entry-dots").trim(), line: css.getPropertyValue("--ez-entry-lines").trim() };
+    };
+    let apply_colors: (() => void) | null = null;
     const fine = matchMedia("(pointer: fine)");
     function destroy() {
-      const previous = effect; effect = null;
+      const previous = effect; effect = null; apply_colors = null;
       if (previous) {
         // Vanta.destroy 会清空 renderer 引用，先保留它再释放 GPU 与上下文。
         const renderer = previous.renderer;
@@ -48,8 +53,9 @@ export function DotsBackground() {
         (window as Window & { THREE?: typeof Three }).THREE = THREE;
         const { default: create } = await import("vanta/src/vanta.dots.js");
         if (disposed || reduced.matches || effect) return;
-        const color = dark.matches ? 0xa0b7e3 : 0x819ccf;
-        const line_color = dark.matches ? 0x7489b0 : 0xa6b8d8;
+        const colors = palette();
+        const color = new THREE.Color(colors.color).getHex();
+        const line_color = new THREE.Color(colors.line).getHex();
         const value = create({ el: host, THREE, color, color2: line_color, backgroundAlpha: 0, size: 3, spacing: 70, showLines: false, mouseControls: true, touchControls: false, gyroControls: false, minHeight: 100, minWidth: 100, scale: 1, scaleMobile: 1 }) as DotsEffect;
         effect = value;
         if (!value.renderer || !value.starField) { destroy(); return; }
@@ -69,6 +75,11 @@ export function DotsBackground() {
         const material = new THREE.LineBasicMaterial({ color: line_color, transparent: true, opacity: .45, depthWrite: false });
         const links = new THREE.LineSegments(geometry, material); links.frustumCulled = false;
         value.starField.add(links);
+        apply_colors = () => {
+          const current = palette();
+          (value.starField.material as Three.PointsMaterial).color.set(current.color);
+          material.color.set(current.line);
+        };
         const camera = value.camera; camera.tx = 160; camera.ty = 320; camera.tz = 310;
         camera.position.set(160, 320, 310); camera.lookAt(0, 0, 0);
         value.onMouseMove = (x, y) => {
@@ -102,9 +113,11 @@ export function DotsBackground() {
     const refresh = () => { void mount(); };
     const resize = new ResizeObserver(() => effect?.resize()); resize.observe(host);
     document.addEventListener("visibilitychange", playback); document.documentElement.addEventListener("mouseleave", reset);
-    reduced.addEventListener("change", refresh); dark.addEventListener("change", refresh);
+    reduced.addEventListener("change", refresh);
+    const theme_observer = new MutationObserver(() => apply_colors?.());
+    theme_observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
     void mount();
-    return () => { disposed = true; resize.disconnect(); reduced.removeEventListener("change", refresh); dark.removeEventListener("change", refresh); document.removeEventListener("visibilitychange", playback); document.documentElement.removeEventListener("mouseleave", reset); destroy(); };
+    return () => { disposed = true; resize.disconnect(); reduced.removeEventListener("change", refresh); theme_observer.disconnect(); document.removeEventListener("visibilitychange", playback); document.documentElement.removeEventListener("mouseleave", reset); destroy(); };
   }, []);
   return <div ref={element} className={styles.background} aria-hidden="true" data-dots-state="static" />;
 }

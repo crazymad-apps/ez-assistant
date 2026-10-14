@@ -1,0 +1,24 @@
+.body {
+  padding-top: 12px;
+  > p {
+    color: var(--site-muted);
+    line-height: 1.9;
+  }
+  h3 {
+    font-size: 23px;
+    margin-top: 28px;
+  }
+  li {
+    padding: 7px 0;
+    line-height: 1.7;
+  }
+}
+.article {
+  line-height: 1.9;
+  margin: 0;
+}
+.note {
+  font-size: 12px;
+  padding-top: 16px;
+  border-top: 1px solid var(--site-line);
+}

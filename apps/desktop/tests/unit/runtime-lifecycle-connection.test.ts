@@ -43,6 +43,17 @@ beforeEach(() => { vi.clearAllMocks(); transport.command.mockImplementation(asyn
 afterEach(() => { owners.splice(0).forEach((owner) => owner.dispose()); vi.restoreAllMocks(); });
 
 describe("selected Runtime lifecycle", () => {
+  it("ignores native restart completion on the entry page until the user selects a connection", async () => {
+    const { coordinator } = create();
+    coordinator.prepareForNativeRuntimeMutation("restart");
+    await coordinator.reconnectAfterNativeRuntimeMutation();
+    expect(transport.bootstrap).not.toHaveBeenCalled();
+    expect(transport.ready).not.toHaveBeenCalled();
+    expect(transport.command).not.toHaveBeenCalled();
+    await coordinator.reconnectAfterNativeRuntimeMutation(bootstrap("http://explicit"));
+    expect(transport.ready).toHaveBeenCalled();
+  });
+
   it("refreshes application capabilities when background MCP discovery completes", async () => {
     const { coordinator } = create();
     await coordinator.connect(bootstrap("http://a"));

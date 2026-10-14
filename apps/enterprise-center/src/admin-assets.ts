@@ -8,8 +8,16 @@ function record(value: unknown): value is Record<string, unknown> {
 
 /** 复用 Vite 构建清单校验入口、共享和延迟加载资源；启动失败发生在任何数据库操作之前。 */
 export async function checkAdminAssets(root: string): Promise<void> {
+  return checkAssets(root, 'admin');
+}
+
+export async function checkSiteAssets(root: string): Promise<void> {
+  return checkAssets(root, 'site');
+}
+
+async function checkAssets(root: string, kind: 'admin' | 'site'): Promise<void> {
   const fail = () => {
-    throw new CenterError('ADMIN_ASSETS_INVALID', '管理后台资源缺失或不完整，请重新装配 Center 制品。');
+    throw new CenterError(kind === 'admin' ? 'ADMIN_ASSETS_INVALID' : 'SITE_ASSETS_INVALID', `${kind === 'admin' ? '管理后台' : '官网'}资源缺失或不完整，请重新装配 Center 制品。`);
   };
   try {
     // 制品资源不能通过软链逃离静态根目录，也不能将目录误当成资源文件。
@@ -40,7 +48,7 @@ export async function checkAdminAssets(root: string): Promise<void> {
       !record(entry) ||
       entry.isEntry !== true ||
       typeof entry.file !== 'string' ||
-      !html.includes(`/admin/${entry.file}`)
+      !html.includes(`${kind === 'admin' ? '/admin/' : '/'}${entry.file}`)
     )
       return fail();
     for (const chunk of Object.values(manifest)) {
@@ -63,7 +71,7 @@ export async function checkAdminAssets(root: string): Promise<void> {
           fail();
       }
       for (const resource of resources) {
-        if (typeof resource !== 'string' || !/^assets\/[a-zA-Z0-9_./-]+$/.test(resource)) return fail();
+        if (typeof resource !== 'string' || !(kind === 'admin' ? /^assets\/[a-zA-Z0-9_./-]+$/ : /^site-assets\/[a-zA-Z0-9_./-]+$/).test(resource)) return fail();
         await file(resource);
       }
     }

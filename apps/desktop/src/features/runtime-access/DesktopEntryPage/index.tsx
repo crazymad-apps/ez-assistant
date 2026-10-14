@@ -1,3 +1,4 @@
+import { LoginOptionsDialog } from "../LoginOptionsDialog";
 import type { ApplicationConnectionStore } from "../ApplicationConnectionStore";
 import { RuntimeConnectionForm } from "../RuntimeConnectionForm";
 import { RuntimeEntryLayout } from "../RuntimeEntryLayout";
@@ -10,6 +11,7 @@ export function DesktopEntryPage({ connection }: DesktopEntryPageProps) {
   return (
     <RuntimeEntryLayout>
       <RuntimeConnectionForm connection={connection} />
+      <LoginOptionsDialog connection={connection} />
     </RuntimeEntryLayout>
   );
 }

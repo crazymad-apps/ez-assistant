@@ -1,6 +1,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { ApprovalMode, ModelSelection } from "@ez-assistant/protocol";
 import { parseResourceSnapshot, type ResourceWorkspaceSnapshot } from "../features/resource-workspace/resourceWorkspaceSnapshot";
+import { DEFAULT_THEME_ID, isThemeId, type ThemeId } from "../styles/themePresets";
 
 export type DesktopPreferences = {
   readonly left_sidebar_open: boolean;
@@ -19,6 +20,34 @@ export type DesktopCloseBehavior = "hide_to_tray" | "quit_desktop";
 
 const defaults: DesktopPreferences = { left_sidebar_open: true, right_sidebar_open: true, left_sidebar_width: 286, right_sidebar_width: 380, expanded_workspace_ids: null, close_behavior: "hide_to_tray", default_approval_mode: "auto", last_model_selection: null };
 const WEB_KEY = "ez-assistant:view";
+const WEB_THEME_KEY = "ez-assistant:theme";
+
+export type DesktopThemePreference = {
+  readonly theme_id: ThemeId;
+  readonly recovered_unknown: boolean;
+};
+
+/** Web 保持同步读写，原生复用现有偏好文件；均不读写身份分区的布局快照。 */
+export function loadDesktopTheme(): DesktopThemePreference | Promise<DesktopThemePreference> {
+  if (isTauri()) return invoke<DesktopThemePreference>("load_desktop_theme");
+  const value = localStorage.getItem(WEB_THEME_KEY);
+  if (value === null) return { theme_id: DEFAULT_THEME_ID, recovered_unknown: false };
+  return {
+    theme_id: isThemeId(value) ? value : DEFAULT_THEME_ID,
+    recovered_unknown: !isThemeId(value),
+  };
+}
+
+export function saveDesktopTheme(theme_id: ThemeId): void | Promise<void> {
+  if (!isThemeId(theme_id)) throw new Error("不支持的配色方案。");
+  if (isTauri()) return invoke<void>("save_desktop_theme", { themeId: theme_id });
+  // 布局按整份 JSON 保存，独立标量键避免其他标签的旧布局覆盖主题，不新增存储设施。
+  localStorage.setItem(WEB_THEME_KEY, theme_id);
+}
+
+export async function applyDesktopTheme(theme_id: ThemeId): Promise<void> {
+  if (isTauri()) await invoke<void>("apply_desktop_theme", { themeId: theme_id });
+}
 
 export function viewingSnapshot(value: ResourceWorkspaceSnapshot | null | undefined, native: boolean, local = native): ResourceWorkspaceSnapshot | null {
   const snapshot = parseResourceSnapshot(value);

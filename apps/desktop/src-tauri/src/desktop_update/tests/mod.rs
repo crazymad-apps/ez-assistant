@@ -7,6 +7,24 @@ const SIGNATURE: &str = include_str!("fixtures/release.json.sig");
 const KEY: &str = include_str!("fixtures/test-public-key.txt");
 const ARTIFACT: &[u8] = include_bytes!("fixtures/artifact.txt");
 
+#[tokio::test]
+async fn configuration_permit_blocks_download_and_install_without_cancelling_jobs() {
+    let updater = DesktopUpdater::default();
+    for phase in [Phase::Downloading, Phase::Installing] {
+        updater.inner.lock().unwrap().snapshot.phase = phase;
+        assert!(updater.configuration_permit().await.is_err());
+        assert!(updater.snapshot().phase == phase);
+    }
+    updater.inner.lock().unwrap().snapshot.phase = Phase::Downloading;
+    // 普通启停保留旧语义；只有配置变更要求同时排除下载。
+    drop(updater.lifecycle_permit().await.unwrap());
+    updater.inner.lock().unwrap().snapshot.phase = Phase::Idle;
+    let permit = updater.configuration_permit().await.unwrap();
+    assert!(updater.jobs.try_lock().is_err());
+    drop(permit);
+    assert!(updater.jobs.try_lock().is_ok());
+}
+
 #[tokio::test(start_paused = true)]
 async fn checks_start_immediately_and_coalesce_sleep_without_overlapping() {
     use std::sync::atomic::{AtomicUsize, Ordering};

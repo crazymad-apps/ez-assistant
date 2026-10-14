@@ -1,3 +1,6 @@
+import { AppearanceProvider } from '../../src/stores/AppearanceContext';
+import { AppearanceStore } from '../../src/stores/AppearanceStore';
+import { applyDocumentTheme } from '../../src/styles/themePresets';
 import { manageLocalHost } from '../../src/native-bridge/runtimeConnection';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -37,6 +40,49 @@ afterEach(() => {
 });
 
 describe('SettingsDialog model management', () => {
+  it('applies a radio choice immediately, keeps focus, and retries a failed save after reopening', async () => {
+    const save = vi.fn().mockRejectedValueOnce(new Error('storage unavailable')).mockResolvedValue(undefined);
+    const appearance = new AppearanceStore({ load: () => ({ theme_id: 'default_light', recovered_unknown: false }), save }, { apply: applyDocumentTheme, applyNative: async () => undefined });
+    await appearance.initialize();
+    const store = settingsStore();
+    store.settings.page = 'appearance';
+    const view = renderDialog(store, appearance);
+    const user = userEvent.setup();
+    expect(screen.getByRole('group', { name: '配色方案' })).toBeVisible();
+    expect(screen.getAllByRole('radio')).toHaveLength(4);
+    expect(screen.getByText('仅此浏览器的当前站点')).toBeVisible();
+    const monokai = screen.getByRole('radio', { name: 'Monokai' });
+    await user.click(monokai);
+    expect(monokai).toBeChecked();
+    expect(monokai).toHaveFocus();
+    expect(document.documentElement.dataset.theme).toBe('monokai');
+    await screen.findByRole('button', { name: '重试' });
+    view.unmount();
+    renderDialog(store, appearance);
+    expect(screen.getByRole('radio', { name: 'Monokai' })).toBeChecked();
+    await user.click(screen.getByRole('button', { name: '重试' }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: '重试' })).not.toBeInTheDocument());
+    expect(save.mock.calls).toEqual([['monokai'], ['monokai']]);
+    appearance.dispose(); store.dispose();
+  });
+
+  it('keeps native appearance retry separate from a successful save', async () => {
+    const native = vi.fn().mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('native unavailable')).mockResolvedValue(undefined);
+    const save = vi.fn();
+    const appearance = new AppearanceStore({ load: () => ({ theme_id: 'default_light', recovered_unknown: false }), save }, { apply: applyDocumentTheme, applyNative: native });
+    await appearance.initialize();
+    await waitFor(() => expect(appearance.applying_native).toBe(false));
+    const store = settingsStore(); store.settings.page = 'appearance';
+    renderDialog(store, appearance);
+    fireEvent.click(screen.getByRole('radio', { name: 'Solarized Dark' }));
+    const retry = await screen.findByRole('button', { name: '重试窗口外观' });
+    expect(screen.getByText('配色已保存，窗口外观未更新。')).toBeVisible();
+    fireEvent.click(retry);
+    await waitFor(() => expect(screen.queryByRole('button', { name: '重试窗口外观' })).not.toBeInTheDocument());
+    expect(save).toHaveBeenCalledTimes(1);
+    appearance.dispose(); store.dispose();
+  });
+
   it('shows managed model status and refresh without local editing controls', async () => {
     const store = settingsStore();
     store.settings.model_settings = {
@@ -511,7 +557,7 @@ describe('SettingsDialog model management', () => {
     expect(screen.getByRole('region', { name: '当前连接' })).toHaveTextContent('http://remote.example:9000');
     fireEvent.click(screen.getByRole('button', { name: /^访问设置/ }));
     fireEvent.change(await screen.findByLabelText('新密码'), { target: { value: 'pending-password' } });
-    fireEvent.click(screen.getByRole('button', { name: '返回 Runtime' }));
+    fireEvent.click(screen.getByRole('button', { name: '外观' }));
     const confirmation = screen.getByRole('dialog', { name: '放弃未保存的修改？' });
     fireEvent.click(within(confirmation).getByRole('button', { name: '取消' }));
     expect(screen.getByLabelText('新密码')).toHaveValue('pending-password');
@@ -530,6 +576,9 @@ describe('SettingsDialog model management', () => {
     store.settings.page = 'host_access';
     store.connection.state = 'connected';
     vi.mocked(manageLocalHost).mockResolvedValue({
+      instance_id: 'host-test',
+      current_mode: 'enterprise',
+      current_center_url: 'http://center.test',
       revision: 'enterprise',
       mode: 'enterprise',
       center_url: 'http://center.test',
@@ -1103,11 +1152,11 @@ function pinnedCollection(): PinnedMemoryCollectionSnapshot {
   };
 }
 
-function renderDialog(store: RootStore) {
+function renderDialog(store: RootStore, appearance = new AppearanceStore()) {
   return render(
-    <AppMessageProvider><RootStoreProvider store={store}>
+    <AppearanceProvider store={appearance}><AppMessageProvider><RootStoreProvider store={store}>
       <SettingsDialog />
-    </RootStoreProvider></AppMessageProvider>,
+    </RootStoreProvider></AppMessageProvider></AppearanceProvider>,
   );
 }
 

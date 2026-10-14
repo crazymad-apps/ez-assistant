@@ -5,7 +5,7 @@
   display: grid;
   place-items: center;
   z-index: 100;
-  background: rgb(20 24 32 / 34%);
+  background: var(--ez-overlay);
 }
 .dialog {
   width: min(640px, calc(100vw - 32px));

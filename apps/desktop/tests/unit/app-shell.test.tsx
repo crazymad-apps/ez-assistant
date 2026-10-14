@@ -375,7 +375,7 @@ describe("AppShell session header", () => {
 function renderShell(store: RootStore, overrides: Partial<ApplicationConnectionStore> = {}) {
   const connection = {
     account_label: "个人用户", host_label: "本地 Host", pending: false,
-    current: store, desktop: false, session: null, web_pending: false,
+    current: store, phase: "workspace", desktop: false, session: null, web_pending: false,
     updates: { visible: false },
     requestLogout: vi.fn(), showPassword: vi.fn(), openWeb: vi.fn(),
     ...overrides,

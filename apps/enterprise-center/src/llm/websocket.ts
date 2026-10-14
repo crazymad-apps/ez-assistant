@@ -33,6 +33,7 @@ type Input = {
   connectTimeout: number;
   idleTimeout: number;
   sink: TransferSink;
+  failureFrame?: (chunk: Buffer) => void;
   started?: () => void;
   sent?: () => void;
   finish?: (signal: AbortSignal) => Promise<void>;
@@ -77,7 +78,6 @@ export class ResponsesWebsocket {
   }
 
   private discard(chain: Chain): void {
-
     if (chain.id) this.responses.delete(chain.id);
     this.chains.delete(chain);
     chain.socket.terminate();
@@ -89,7 +89,8 @@ export class ResponsesWebsocket {
     clearTimeout(this.idleTimer);
     this.idleTimer = undefined;
     if (this.closed) return;
-    const idle = [...this.chains].filter((chain) => !chain.busy && chain.idleSince !== undefined)
+    const idle = [...this.chains]
+      .filter((chain) => !chain.busy && chain.idleSince !== undefined)
       .sort((a, b) => a.idleSince! - b.idleSince!);
     if (idle.length <= (this.limits.retainedIdleConnections ?? 20)) return;
     const oldest = idle[0]!;
@@ -104,7 +105,9 @@ export class ResponsesWebsocket {
     const full = this.chains.size >= (this.limits.maxConnections ?? 256);
     if (!userFull && !full) return;
     // 只回收空闲链；正在生成或建连的链不会被新请求驱逐。
-    const candidate = (userFull ? owned : [...this.chains]).filter((chain) => !chain.busy).sort((a, b) => (a.idleSince ?? 0) - (b.idleSince ?? 0))[0];
+    const candidate = (userFull ? owned : [...this.chains])
+      .filter((chain) => !chain.busy)
+      .sort((a, b) => (a.idleSince ?? 0) - (b.idleSince ?? 0))[0];
     if (!candidate) throw new ControlError('llm_proxy_unavailable');
     this.discard(candidate);
   }
@@ -224,7 +227,10 @@ export class ResponsesWebsocket {
       if (chain.id) this.responses.delete(chain.id);
       chain.id = result.id;
       chain.upstreamId = result.upstreamId;
-      if (!retain) { this.discard(chain); return 200; }
+      if (!retain) {
+        this.discard(chain);
+        return 200;
+      }
       this.responses.set(result.id, chain);
       chain.busy = false;
       chain.idleSince = Date.now();
@@ -241,31 +247,50 @@ export class ResponsesWebsocket {
     input.signal.throwIfAborted();
     if (this.closed) throw new ControlError('llm_proxy_unavailable');
     const body = object(JSON.parse(input.body.toString('utf8')));
-    if (!body || !Array.isArray(body.input) || typeof body.model !== 'string' ||
-      Object.keys(body).some(key => !['model', 'input', 'instructions'].includes(key)))
+    if (
+      !body ||
+      !Array.isArray(body.input) ||
+      typeof body.model !== 'string' ||
+      Object.keys(body).some((key) => !['model', 'input', 'instructions'].includes(key))
+    )
       throw new ControlError('llm_request_invalid');
-    const retained = body.input.filter(item => {
+    const retained = body.input.filter((item) => {
       const message = object(item);
       return message && ['user', 'developer', 'system'].includes(String(message.role));
     });
-    const wire = Buffer.from(JSON.stringify({
-      type: 'response.create', model: body.model, store: false,
-      ...(body.instructions !== undefined ? { instructions: body.instructions } : {}),
-      tools: [], include: ['reasoning.encrypted_content'],
-      input: [...body.input, { type: 'compaction_trigger' }],
-    }));
+    const wire = Buffer.from(
+      JSON.stringify({
+        type: 'response.create',
+        model: body.model,
+        store: false,
+        ...(body.instructions !== undefined ? { instructions: body.instructions } : {}),
+        tools: [],
+        include: ['reasoning.encrypted_content'],
+        input: [...body.input, { type: 'compaction_trigger' }],
+      }),
+    );
     const chain = await this.open(input);
     try {
-      await this.exchange(chain, input, wire, undefined, response => {
+      await this.exchange(chain, input, wire, undefined, (response) => {
         const output = response.output;
-        if (!Array.isArray(output) || output.length !== 1 ||
+        if (
+          !Array.isArray(output) ||
+          output.length !== 1 ||
           object(output[0])?.type !== 'compaction' ||
-          typeof object(output[0])?.encrypted_content !== 'string' || !object(output[0])?.encrypted_content ||
-          !Number.isSafeInteger(response.created_at)) throw new TransferError('upstream_connection');
-        const result = Buffer.from(JSON.stringify({
-          id: response.id, object: 'response.compaction', created_at: response.created_at,
-          output: [...retained, ...output], ...(response.usage !== undefined ? { usage: response.usage } : {}),
-        }));
+          typeof object(output[0])?.encrypted_content !== 'string' ||
+          !object(output[0])?.encrypted_content ||
+          !Number.isSafeInteger(response.created_at)
+        )
+          throw new TransferError('upstream_connection');
+        const result = Buffer.from(
+          JSON.stringify({
+            id: response.id,
+            object: 'response.compaction',
+            created_at: response.created_at,
+            output: [...retained, ...output],
+            ...(response.usage !== undefined ? { usage: response.usage } : {}),
+          }),
+        );
         return result;
       });
       await input.finish?.(input.signal);
@@ -292,6 +317,8 @@ export class ResponsesWebsocket {
       let processing = false;
       let done = false;
       let headersSent = false;
+      let currentFrame: Buffer | undefined;
+      let frameDelivered = false;
       let upstreamId: string | undefined;
       let timer: NodeJS.Timeout | undefined;
       const socket = chain.socket;
@@ -321,6 +348,8 @@ export class ResponsesWebsocket {
         try {
           while (queue.length && !done) {
             const chunk = queue.shift()!;
+            currentFrame = chunk;
+            frameDelivered = false;
             const event = object(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(chunk)));
             if (!event || typeof event.type !== 'string' || !/^[a-z][a-z0-9_.]*$/.test(event.type))
               throw new TransferError('upstream_connection');
@@ -368,6 +397,7 @@ export class ResponsesWebsocket {
                 input.sink.headers(200, { 'content-type': 'application/json' });
                 headersSent = true;
                 arm('downstream_idle');
+                frameDelivered = true;
                 await input.sink.chunk(result, abort.signal);
               }
             } else {
@@ -376,6 +406,7 @@ export class ResponsesWebsocket {
                 headersSent = true;
               }
               arm('downstream_idle');
+              frameDelivered = true;
               await input.sink.chunk(
                 Buffer.from(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`),
                 abort.signal,
@@ -392,12 +423,17 @@ export class ResponsesWebsocket {
               resolve({ id, upstreamId });
               return;
             }
-            if (event.type === 'response.failed' || event.type === 'response.incomplete')
+            if (
+              event.type === 'response.failed' ||
+              event.type === 'response.incomplete' ||
+              event.type === 'response.cancelled'
+            )
               throw new TransferError('upstream_connection');
             if (queued < 64 * 1024) socket.resume();
             arm('upstream_idle');
           }
         } catch (error) {
+          if (!done && currentFrame && !frameDelivered) input.failureFrame?.(currentFrame);
           fail(
             error instanceof ControlError || error instanceof TransferError || error instanceof WebsocketResponseError
               ? error
@@ -409,10 +445,16 @@ export class ResponsesWebsocket {
       };
       const message = (raw: RawData, binary: boolean) => {
         if (done) return;
-        if (binary) return failed();
         const chunk = Array.isArray(raw) ? Buffer.concat(raw) : Buffer.from(raw as ArrayBuffer);
+        if (binary) {
+          input.failureFrame?.(chunk);
+          return failed();
+        }
         queued += chunk.length;
-        if (queued > (this.limits.maxBufferBytes ?? 16 * 1024 * 1024)) return failed();
+        if (queued > (this.limits.maxBufferBytes ?? 16 * 1024 * 1024)) {
+          input.failureFrame?.(chunk);
+          return failed();
+        }
         queue.push(chunk);
         if (queued >= 64 * 1024) socket.pause();
         void drain();

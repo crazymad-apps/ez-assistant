@@ -248,14 +248,15 @@ fn tool_response() -> String {
             "finish_reason":null
         }]
     });
+    // 正式 Runtime 在窗口占用达到 90% 时压缩；夹具需越过 8192 * 0.9。
     let terminal = json!({
         "id":"compaction-tool",
         "model":"offline-model",
         "choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],
         "usage":{
-            "prompt_tokens":6_800,
+            "prompt_tokens":7_400,
             "completion_tokens":200,
-            "total_tokens":7_000,
+            "total_tokens":7_600,
             "prompt_tokens_details":{"cached_tokens":5_500}
         }
     });

@@ -13,6 +13,9 @@ export const desktopReleaseApi = {
   get: async (token: string, version: string, signal?: AbortSignal) =>
     (await sdk.getDesktopRelease({ ...options(token, signal), path: { version } })).data,
 
+  previewNotes: async (token: string, notes: string, signal: AbortSignal) =>
+    (await sdk.previewDesktopReleaseNotes({ ...options(token, signal), body: { notes } })).data,
+
   notes: async (token: string, version: string, body: DesktopReleaseNotesInput) =>
     (await sdk.updateDesktopReleaseNotes({ ...options(token), path: { version }, body })).data,
 

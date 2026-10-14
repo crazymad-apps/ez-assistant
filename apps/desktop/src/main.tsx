@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { configure } from "mobx";
 import { App } from "./app/App";
+import { AppearanceStore } from "./stores/AppearanceStore";
 import { RootStore } from "./stores/RootStore";
 import "./styles/index.scss";
 
@@ -16,9 +17,13 @@ document.documentElement.dataset.platform = navigator.platform.toLocaleLowerCase
   ? "macos"
   : "other";
 
-const store = new RootStore();
-createRoot(root_element).render(
-  <StrictMode>
-    <App store={store} />
-  </StrictMode>,
-);
+// 展示偏好先于业务连接与首屏挂载，不随账号或 Host 更换。
+const appearance = new AppearanceStore();
+void appearance.initialize().then(() => {
+  const store = new RootStore({ flush_application_preferences: () => appearance.flushForExit() });
+  createRoot(root_element).render(
+    <StrictMode>
+      <App store={store} appearance={appearance} />
+    </StrictMode>,
+  );
+});

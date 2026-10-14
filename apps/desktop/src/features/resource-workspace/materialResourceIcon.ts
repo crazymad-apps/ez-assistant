@@ -30,16 +30,16 @@ const icon_assets = import.meta.glob("/node_modules/material-icon-theme/icons/*.
   query: "?url",
 }) as Readonly<Record<string, string>>;
 
-export function resolveMaterialFileIcon(file_name: string): string | null {
+export function resolveMaterialFileIcon(file_name: string, light: boolean): string | null {
   const normalized_name = file_name.toLowerCase();
-  const exact_icon = manifest.light?.fileNames?.[normalized_name]
+  const exact_icon = (light ? manifest.light?.fileNames?.[normalized_name] : undefined)
     ?? manifest.fileNames?.[normalized_name];
   if (exact_icon) return resolveIconAsset(exact_icon);
 
   const parts = normalized_name.split(".");
   for (let index = 1; index < parts.length; index += 1) {
     const extension = parts.slice(index).join(".");
-    const extension_icon = manifest.light?.fileExtensions?.[extension]
+    const extension_icon = (light ? manifest.light?.fileExtensions?.[extension] : undefined)
       ?? manifest.fileExtensions?.[extension];
     if (extension_icon) return resolveIconAsset(extension_icon);
   }
@@ -50,32 +50,33 @@ export function resolveMaterialFolderIcon(
   folder_name: string,
   open: boolean,
   root: boolean,
+  light: boolean,
 ): string | null {
   const normalized_name = folder_name.toLowerCase();
   const icon_id = root
-    ? resolveRootFolderIcon(normalized_name, open)
-    : resolveFolderIcon(normalized_name, open);
+    ? resolveRootFolderIcon(normalized_name, open, light)
+    : resolveFolderIcon(normalized_name, open, light);
   return icon_id ? resolveIconAsset(icon_id) : null;
 }
 
-function resolveFolderIcon(folder_name: string, open: boolean): string | undefined {
+function resolveFolderIcon(folder_name: string, open: boolean, light: boolean): string | undefined {
   if (open) {
-    return manifest.light?.folderNamesExpanded?.[folder_name]
+    return (light ? manifest.light?.folderNamesExpanded?.[folder_name] : undefined)
       ?? manifest.folderNamesExpanded?.[folder_name]
       ?? manifest.folderExpanded;
   }
-  return manifest.light?.folderNames?.[folder_name]
+  return (light ? manifest.light?.folderNames?.[folder_name] : undefined)
     ?? manifest.folderNames?.[folder_name]
     ?? manifest.folder;
 }
 
-function resolveRootFolderIcon(folder_name: string, open: boolean): string | undefined {
+function resolveRootFolderIcon(folder_name: string, open: boolean, light: boolean): string | undefined {
   if (open) {
-    return manifest.light?.rootFolderNamesExpanded?.[folder_name]
+    return (light ? manifest.light?.rootFolderNamesExpanded?.[folder_name] : undefined)
       ?? manifest.rootFolderNamesExpanded?.[folder_name]
       ?? manifest.rootFolderExpanded;
   }
-  return manifest.light?.rootFolderNames?.[folder_name]
+  return (light ? manifest.light?.rootFolderNames?.[folder_name] : undefined)
     ?? manifest.rootFolderNames?.[folder_name]
     ?? manifest.rootFolder;
 }

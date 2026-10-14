@@ -19,8 +19,12 @@ export const callApi = {
   get: async (token: string, id: string, signal?: AbortSignal) =>
     (await sdk.getLlmCall({ ...options(token, signal), path: { id } })).data,
 
-  snapshot: async (token: string, id: string, side: 'request' | 'response', signal?: AbortSignal) =>
-    (await sdk.getLlmSnapshot({ ...options(token, signal), path: { id }, query: { side } })).data,
+  snapshot: async (
+    token: string,
+    id: string,
+    side: 'request' | 'response' | 'upstream_failure',
+    signal?: AbortSignal,
+  ) => (await sdk.getLlmSnapshot({ ...options(token, signal), path: { id }, query: { side } })).data,
 
   settings: async (token: string, signal?: AbortSignal) =>
     (await sdk.getLlmRecordingSettings(options(token, signal))).data,

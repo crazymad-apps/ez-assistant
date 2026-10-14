@@ -7,7 +7,7 @@
   display: grid;
   place-items: center;
   padding: 24px;
-  background: rgb(20 24 32 / 34%);
+  background: var(--ez-overlay);
 }
 
 .dialog,
@@ -46,7 +46,7 @@
 .dialog header button { width: var(--ez-control-height); padding: 0; border-color: transparent; }
 .dialog button:disabled,
 .confirm_dialog button:disabled { opacity: .48; }
-.dialog .primary { border-color: var(--ez-primary); background: var(--ez-primary); color: white; }
+.dialog .primary { border-color: var(--ez-primary); background: var(--ez-primary); color: var(--ez-on-primary); }
 .danger { color: var(--ez-danger) !important; }
 
 .body { overflow: auto; padding: 18px 20px 20px; }

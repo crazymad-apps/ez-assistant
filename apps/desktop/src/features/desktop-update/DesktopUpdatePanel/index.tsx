@@ -1,3 +1,4 @@
+import { useAppearance } from "../../../stores/AppearanceContext";
 import { observer } from "mobx-react-lite";
 import { Button } from "../../../components/Button";
 import { Dialog } from "../../../components/Dialog";
@@ -6,6 +7,7 @@ import type { DesktopUpdateStore } from "../DesktopUpdateStore";
 import styles from "./index.module.scss";
 
 export const DesktopUpdatePanel = observer(function DesktopUpdatePanel({ store }: Readonly<{ store: DesktopUpdateStore }>) {
+  const theme = useAppearance().preset;
   const state = store.snapshot;
   const error = store.command_error ?? state.error;
   const dismiss_label = state.required ? "关闭" : "稍后";
@@ -14,7 +16,7 @@ export const DesktopUpdatePanel = observer(function DesktopUpdatePanel({ store }
     aria_labelledby="desktop-update-title" backdrop_class_name={styles.backdrop} dialog_class_name={styles.panel}>
     <h2 id="desktop-update-title">{store.installing ? "正在更新" : "有新版本可用"}</h2>
     <div className={styles.content}>
-      {state.notes && <MarkdownContent text={state.notes} />}
+      {state.notes && <MarkdownContent theme={theme} text={state.notes} />}
       {store.installing ? <p role="status">正在完成更新，应用将自动重启…</p>
         : <p className={styles.notice}>{state.stops_local_host ? "更新将重启应用，并中断本机正在运行的任务。请先保存手头的工作。" : "更新将重启应用。请先保存手头的工作。"}</p>}
       {store.downloading && <div className={styles.progress} role="status">
@@ -26,7 +28,7 @@ export const DesktopUpdatePanel = observer(function DesktopUpdatePanel({ store }
     <footer>
       {!store.installing && <Button onClick={() => store.hide()}>{store.downloading ? "收起" : dismiss_label}</Button>}
       {store.downloading ? <Button onClick={() => void store.cancel()}>取消下载</Button>
-        : !store.installing && state.available && <Button variant="primary" onClick={() => void store.start()}>{state.phase === "failed" ? "重试更新" : "更新并重启"}</Button>}
+        : !store.installing && state.available && <Button variant="primary" disabled={store.operation_blocked} onClick={() => void store.start()}>{state.phase === "failed" ? "重试更新" : "更新并重启"}</Button>}
     </footer>
   </Dialog>;
 });

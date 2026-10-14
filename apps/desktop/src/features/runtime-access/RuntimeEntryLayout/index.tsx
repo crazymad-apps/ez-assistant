@@ -26,7 +26,7 @@ export function RuntimeEntryLayout({
       </header>
       <DotsBackground />
       <section className={styles.content} data-runtime-entry-content>
-        <img className={styles.mark} src={appLogo} alt="EZ Assistant" />
+        <div className={styles.brand}><img className={styles.mark} src={appLogo} alt="" /><span>ez-assistant</span></div>
         {children}
       </section>
     </main>

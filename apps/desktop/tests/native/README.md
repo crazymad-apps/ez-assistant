@@ -47,3 +47,32 @@ swift apps/desktop/tests/native/output-follow.swift http://127.0.0.1:1436/tests/
 夹具直接引用产品 `useOutputFollow`，使用真实 WebKit 布局、ResizeObserver 和 scroll 事件，
 检查增长跟随、上翻锚点、键盘回底、内外层独立意图；成功输出 PASS，30 秒超时失败。
 不加载 Runtime 或用户数据。真实浏览器输入与正式 Host 组合验证见 `web-observation.spec.ts`。
+
+# 原生主题启动与窗口恢复（F04 M0）
+
+先在 Desktop 工程运行 Vite：
+
+```bash
+npm run dev -- --host 127.0.0.1 --port 1437 --strictPort
+```
+
+仓库根目录另开终端，新建一次性场景后连续运行两轮：
+
+```bash
+probe_dir=$(mktemp -d "$PWD/.runtime-test/f04-native-XXXXXX")
+node apps/desktop/scripts/run-cargo.mjs run -p ez-assistant-desktop --example appearance_probe -- "$probe_dir"
+node apps/desktop/scripts/run-cargo.mjs run -p ez-assistant-desktop --example appearance_probe -- "$probe_dir" second
+```
+
+探针直接复用产品偏好模块、主窗口构造、原生应用命令及前端 AppearanceStore；沿用平台窗口
+配置和窗口状态插件。第一轮从 Monokai 启动，检查四套投影并保存 Solarized Dark；第二轮
+确认该选择和窗口尺寸／位置恢复。每轮检查原生明暗、WebView 媒体查询、隐藏／唤起与保存，
+最多等待 45 秒，失败返回非零退出码。
+
+不装配 Host、不操作数据库。偏好和窗口状态位于所传的新场景目录；应用身份带场景后缀，
+WebView 使用非持久模式。窗口状态插件使用场景中的绝对文件名；插件会建立独立应用配置空目录，
+退出时仅尝试移除该空目录。不得传入用户配置或复用无关场景。
+
+macOS 的主体加载前底色受 Sidebar 材质影响，不保证与预设 RGB 完全一致。此夹具不代表正式
+Host 页面、所有系统首帧、减少透明度、更新重开及其他平台已经验收；完整界面和渲染器由后续
+里程碑验证。结束后停止这次 Vite 即可。

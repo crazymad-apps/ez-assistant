@@ -5,7 +5,7 @@
   display: grid;
   place-items: center;
   padding: 24px;
-  background: rgb(24 30 43 / 28%);
+  background: var(--ez-overlay);
   backdrop-filter: blur(3px);
 }
 
@@ -55,7 +55,7 @@
     }
 
     button:disabled { opacity: 0.5; }
-    .primary_button { border-color: var(--ez-primary); color: #fff; background: var(--ez-primary); }
+    .primary_button { border-color: var(--ez-primary); color: var(--ez-on-primary); background: var(--ez-primary); }
   }
 }
 

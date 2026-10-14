@@ -9,9 +9,9 @@
   padding: 58px 24px 24px;
   // 色层覆盖整个视口，给点阵增加远近层次，不围绕表单制造白色光圈。
   background:
-    radial-gradient(ellipse at 3% 12%, #d8e5f6 0, transparent 52%),
-    radial-gradient(ellipse at 96% 78%, #e2def2 0, transparent 48%),
-    radial-gradient(ellipse at 32% 110%, #dcecf0 0, transparent 52%), #eef2f8;
+    radial-gradient(ellipse at 3% 12%, var(--ez-primary-soft) 0, transparent 52%),
+    radial-gradient(ellipse at 96% 78%, var(--ez-surface-muted) 0, transparent 48%),
+    radial-gradient(ellipse at 32% 110%, var(--ez-primary-soft) 0, transparent 52%), var(--ez-surface-subtle);
 }
 // 与 AppShell 的 42px 顶栏保持同一垂直中心，匹配原生红绿灯的位置。
 .title_bar {
@@ -37,16 +37,18 @@
   z-index: 1;
   width: min(384px, 100%);
 }
+.brand { display: flex; justify-content: center; align-items: center; gap: 12px; margin-bottom: 24px; color: var(--ez-text); font-size: var(--ez-font-large); font-weight: 650; }
 .mark {
   display: block;
   width: 52px;
   height: 52px;
-  margin: 0 auto 24px;
+  flex-shrink: 0;
 }
 // 矮窗口优先收紧装饰；极小窗口仍允许内容自然滚动，避免裁掉表单或错误。
 @media (max-height: 620px) {
   .page { padding-top: 50px; padding-bottom: 16px; }
-  .mark { width: 40px; height: 40px; margin-bottom: 16px; }
+  .mark { width: 40px; height: 40px; }
+  .brand { margin-bottom: 16px; }
 }
 
 .title_bar[data-native-window="true"] {

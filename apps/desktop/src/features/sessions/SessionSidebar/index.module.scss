@@ -1,9 +1,7 @@
 .sidebar {
-  --ez-text-secondary: #4f5765;
-  --ez-text-muted: #697280;
   --ez-sidebar-row-background: color-mix(in srgb, var(--ez-surface-muted) 42%, transparent);
   // 高光沿上缘圆角向侧边衰减，下半圈透明，避免形成完整描边。
-  --ez-sidebar-row-highlight: linear-gradient(180deg, rgb(255 255 255 / 32%), rgb(255 255 255 / 14%) 25%, transparent 60%);
+  --ez-sidebar-row-highlight: linear-gradient(180deg, color-mix(in srgb, var(--ez-highlight) 32%, transparent), color-mix(in srgb, var(--ez-highlight) 14%, transparent) 25%, transparent 60%);
 
   display: flex;
   flex-direction: column;
@@ -104,7 +102,7 @@
 
 .quick_action[aria-current="page"],
 .session_row[data-selected="true"] {
-  color: #3157d7;
+  color: var(--ez-primary-text);
   background: var(--ez-sidebar-row-background);
   --ez-sidebar-edge-opacity: 1;
   font-weight: 600;
@@ -161,7 +159,7 @@
   --ez-control-default-height: var(--ez-control-height-small);
   min-width: 0;
   padding: 0;
-  color: #9299a6;
+  color: var(--ez-text-muted);
   font-size: var(--ez-font-base);
   font-weight: 400;
   text-align: left;
@@ -247,7 +245,7 @@
 }
 
 .workspace_remove_action {
-  color: var(--ez-danger, #d84b4b);
+  color: var(--ez-danger);
 }
 
 .workspace_action,

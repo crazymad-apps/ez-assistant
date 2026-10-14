@@ -132,7 +132,7 @@ it.skipIf(process.env.CENTER_WS_HOST_TEST !== '1')(
         Object.assign(new CallEntity(), { id: randomUUID(), started_at: new Date() }),
         records,
         new SnapshotMemory(),
-        false,
+        'off',
       );
       vi.spyOn(record, 'settle').mockImplementation(async (_outcome, status, reason) => {
         outcomes.push({ status, reason });

@@ -654,29 +654,21 @@ async fn verify_remote_with_client(
     })
 }
 
-/// Host 管理始终走本机 bootstrap，与当前选择的企业账号及远程目标无关。
+/// Host 管理独立于企业账号。锁顺序固定为 updater jobs → bootstrap lifecycle gate；
+/// 返回后释放 permit，调用方才能进行旧连接清理或再次重启。
 #[tauri::command]
 pub(crate) async fn manage_local_host(
+    updater: State<'_, crate::desktop_update::DesktopUpdater>,
     local: State<'_, RuntimeBootstrapCoordinator>,
     command: assistant_protocol::HostAccessCommand,
-) -> Result<assistant_protocol::HostAccessStatus, ConnectionError> {
-    let bootstrap = local.bootstrap().await.map_err(|_| unavailable())?;
-    let response = http()?.post(format!("{}/commands", bootstrap.base_url))
-        .bearer_auth(&bootstrap.access_token).headers(crate::runtime_compatibility::headers())
-        .json(&serde_json::json!({"request_id":"desktop-host-management","command":{"scope":"host_access","payload":command}}))
-        .send().await.map_err(|_| unavailable())?;
-    let success = response.status().is_success();
-    let value: serde_json::Value = decode_json(response).await?;
-    if !success {
-        return Err(ConnectionError {
-            code: "configuration_unavailable",
-            message: value["error"]["message"]
-                .as_str()
-                .unwrap_or("无法保存 Host 配置。")
-                .to_owned(),
-        });
-    }
-    serde_json::from_value(value["result"]["payload"].clone()).map_err(|_| unavailable())
+    expected_instance_id: Option<String>,
+) -> Result<
+    crate::runtime_bootstrap::LocalHostStatus,
+    crate::runtime_bootstrap::RuntimeBootstrapError,
+> {
+    local
+        .manage_host(&updater, command, expected_instance_id.as_deref())
+        .await
 }
 
 #[cfg(test)]

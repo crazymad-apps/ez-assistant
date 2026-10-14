@@ -56,7 +56,7 @@ it('文件已发布而索引未结算时恢复为 unknown/partial；清理先文
   const repository = source.getRepository(CallEntity);
   vi.spyOn(source.getRepository(RecordingEntity), 'findOneByOrFail').mockResolvedValue({
     singleton: true,
-    enabled: true,
+    mode: 'all',
     content_retention_days: 7,
     index_retention_days: 90,
     usage_available_from: new Date('2020-01-01T00:00:00Z'),
@@ -155,7 +155,7 @@ it('服务关闭取消正在转发的上游，并等待唯一一次索引结算�
   });
   const records = new CallRecords(source, new SnapshotFiles());
   const row = Object.assign(new CallEntity(), { id: randomUUID(), started_at: new Date(), provider_name: null });
-  vi.spyOn(records, 'begin').mockResolvedValue(new CallRecording(row, records, new SnapshotMemory(), false));
+  vi.spyOn(records, 'begin').mockResolvedValue(new CallRecording(row, records, new SnapshotMemory(), 'off'));
   const proxy = new ModelProxy(identities, models, records, {});
   let started!: () => void;
   const arriving = new Promise<void>((resolve) => {
@@ -179,7 +179,7 @@ it('服务关闭取消正在转发的上游，并等待唯一一次索引结算�
     expect(update).toHaveBeenCalledTimes(1);
     expect(update.mock.calls[0]?.[1]).toMatchObject({
       outcome: 'interrupted',
-      reason: 'cancelled',
+      reason: 'center_shutdown',
       provider_name: 'test',
     });
   } finally {
@@ -200,7 +200,7 @@ it('准入等待期间主体撤销不能遗漏，WS 不得在撤销之后建连'
     Object.assign(new CallEntity(), { id: randomUUID() }),
     records,
     new SnapshotMemory(),
-    false,
+    'off',
   );
   vi.spyOn(records, 'begin').mockResolvedValue(record);
   const settled = vi.spyOn(record, 'settle').mockResolvedValue();
@@ -271,7 +271,7 @@ it('准入等待期间主体撤销不能遗漏，WS 不得在撤销之后建连'
     identities.revokeUser(1);
     resume();
     await failed;
-    expect(settled).toHaveBeenCalledWith('interrupted', null, 'cancelled');
+    expect(settled).toHaveBeenCalledWith('interrupted', null, 'identity_revoked');
   } finally {
     resume();
     await proxy.close();

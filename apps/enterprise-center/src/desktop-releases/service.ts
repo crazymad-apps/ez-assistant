@@ -1,3 +1,5 @@
+import { releaseNotes } from '../site-content/markdown.js';
+import type { SiteChangelogEntry, SiteDownload } from '../contracts/site-content.js';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
@@ -8,7 +10,7 @@ import { IdentityService } from '../identity/service.js';
 import { IdentityError } from '../identity/errors.js';
 import { DesktopReleaseEntity, DesktopReleaseTargetEntity } from './entity.js';
 import { DesktopReleaseFiles } from './files.js';
-import { compareVersions, invalid, limitedText, object, parseManifest, target, verifyReleaseSignature, version } from './manifest.js';
+import { compareVersions, desktopTargets, invalid, limitedText, object, parseManifest, target, verifyReleaseSignature, version } from './manifest.js';
 import type { ReleaseManifest } from './manifest.js';
 
 export class DesktopReleaseService {
@@ -55,6 +57,42 @@ export class DesktopReleaseService {
     const result = releases.map(release => ({ version: release.version, notes: release.notes.slice(0, 200),
       targets: rows.filter(row => row.version === release.version).map(row => ({ target: row.target, publication: row.publication })) }));
     await this.identities.requireAdmin(this.source.manager, token);
+    return result;
+  }
+
+  /** 发布历史只投影现有版本行；单条 SQL 固定正文与首次发布事实，撤回不会抹去日志。 */
+  async changelog(): Promise<SiteChangelogEntry[]> {
+    const rows: { version: string; notes: string; published_at: Date }[] = await this.source.query(`
+      SELECT r.version, r.notes, MIN(t.first_published_at) AS published_at
+      FROM desktop_releases r JOIN desktop_release_targets t ON t.version = r.version
+      WHERE t.first_published_at IS NOT NULL AND btrim(r.notes) <> ''
+      GROUP BY r.version, r.notes`);
+    rows.sort((a, b) => compareVersions(b.version, a.version));
+    return rows.filter(row => row.notes.trim()).map(row => ({ version: row.version, published_at: row.published_at.toISOString(), body: releaseNotes(row.notes) }));
+  }
+
+  /** 首次安装按平台独立选择；每次复核发布状态与实际文件，不缓存最新版本指针。 */
+  async downloads(input: unknown): Promise<SiteDownload[]> {
+    const query = object(input, ['version']);
+    const requested = query.version === undefined ? undefined : version(query.version);
+    const rows = await this.source.manager.findBy(DesktopReleaseTargetEntity, { publication: 'published', ...(requested ? { version: requested } : {}) });
+    rows.sort((a, b) => compareVersions(b.version, a.version));
+    const result: SiteDownload[] = [];
+    for (const platform of desktopTargets) {
+      for (const row of rows.filter(item => item.target === platform)) {
+        try {
+          const selected = await this.published(platform, row.version);
+          if (!selected.manifest.host.enterprise_protocols.some(value => value >= enterpriseProtocol.minimum && value <= enterpriseProtocol.current)) continue;
+          const file = selected.manifest.files.find(item => item.purposes.includes('installer'))!;
+          result.push({ target: platform, version: row.version, published_at: selected.row.first_published_at!.toISOString(),
+            name: file.name, size: file.size, sha256: file.sha256,
+            url: `/api/desktop-updates/${platform}/releases/${row.version}/files/installer` });
+          break;
+        } catch (error) {
+          if (!(error instanceof IdentityError) || !['DESKTOP_RELEASE_NOT_FOUND', 'DESKTOP_RELEASE_FILE_UNAVAILABLE'].includes(error.code)) throw error;
+        }
+      }
+    }
     return result;
   }
 

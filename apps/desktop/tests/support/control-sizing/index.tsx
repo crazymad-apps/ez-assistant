@@ -8,9 +8,12 @@ import skills from "../../../src/features/settings/SettingsDialog/SkillSettingsP
 import composer from "../../../src/features/composer/ComposerDock/index.module.scss";
 import workspace from "../../../src/features/workspaces/WorkspaceEditorDialog/index.module.scss";
 import "../../../src/styles/index.scss";
+import { applyDocumentTheme, DEFAULT_THEME_ID } from "../../../src/styles/themePresets";
 import styles from "./index.module.scss";
 
 // 只使用生产控件与样式，不装配 Runtime、不读取用户配置，供浏览器与 E2E 复用。
+applyDocumentTheme(DEFAULT_THEME_ID);
+
 function ControlSizingFixture() {
   const [open, setOpen] = useState("");
   const [value, setValue] = useState("保持原值");
