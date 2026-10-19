@@ -1,3 +1,5 @@
+import { DesktopPinsStore, pinReference, type DesktopPins, type DesktopPin } from "./DesktopPinsStore";
+import { parseDesktopWorkspace, type DesktopWorkspaceSnapshot } from "../features/resource-workspace/desktopWorkspaceSnapshot";
 import { ClientResources } from "../runtime-client/ClientResources";
 import type { ResourceWorkspaceSnapshot } from "../features/resource-workspace/resourceWorkspaceSnapshot";
 import { action, makeObservable, observable, reaction, runInAction, type IReactionDisposer } from "mobx";
@@ -44,8 +46,9 @@ import {
   NativeResourceFailure,
   openSessionResourceInSystem as openNativeSessionResourceInSystem,
 } from "../native-bridge/nativeResource";
-import { RuntimeClientError } from "../runtime-client/RuntimeClient";
+import { RuntimeClientError, type RuntimeClient } from "../runtime-client/RuntimeClient";
 import type { RuntimeBootstrap } from "../native-bridge/runtimeBootstrap";
+import { NetworkDevicesStore } from "./NetworkDevicesStore";
 import { ConnectionStore } from "./ConnectionStore";
 import { ComposerQuoteStore } from "./ComposerQuoteStore";
 import { ConversationSearchStore } from "./ConversationSearchStore";
@@ -55,6 +58,7 @@ import { LiveExecutionStore } from "./LiveExecutionStore";
 import { MemorySettingsStore } from "./MemorySettingsStore";
 import { NavigationStore, type ConversationLocation } from "./NavigationStore";
 import {
+  isDraftCustomized,
   draftKeyForWorkspace,
   NewSessionDraftStore,
   type NewSessionDraft,
@@ -76,9 +80,10 @@ export class RootStore {
   readonly notifications = new NotificationStore({
     scope: () => this.notificationScope(),
     navigate: (target) => this.openNotificationTarget(target),
-    resolveContent: (notification) => resolveNotificationContent(this.#runtime.client, notification),
+    acceptsScope: (scope) => this.notificationDevice(scope) !== undefined,
+    resolveContent: (notification) => resolveNotificationContent(this.notificationClient(notification.target.scope), notification),
   });
-  readonly feedback_center = new FeedbackCenterStore({ client: () => this.#runtime.client, scope: () => this.notificationScope() });
+  readonly feedback_center = new FeedbackCenterStore({ client: () => this.#local_runtime.client, scope: () => this.notificationScopeFor(this.#local_runtime.client) });
   readonly feedback = new FeedbackStore({ client: () => this.#runtime.client, scope: () => this.notificationScope() });
   readonly pending_notifications = new PendingNotificationStore({
     client: () => this.#runtime.client,
@@ -87,16 +92,17 @@ export class RootStore {
       .find((session) => session.session_id === id)?.title,
     feedback: this.feedback,
   });
-  readonly connection = new ConnectionStore();
-  readonly composer_quotes = new ComposerQuoteStore();
+  readonly local_connection = new ConnectionStore();
+  readonly local_composer_quotes = new ComposerQuoteStore();
   readonly transient_focus = new TransientFocusStore();
-  readonly projection = new RuntimeProjectionStore();
-  readonly live_execution = new LiveExecutionStore();
+  readonly local_projection = new RuntimeProjectionStore();
+  readonly local_live_execution = new LiveExecutionStore();
   readonly navigation = new NavigationStore();
-  readonly resource_workspace = new ResourceWorkspaceStore(() => this.#runtime.client);
-  readonly files: ClientResources;
-  directory_picker: Readonly<{ initial_path: string | null; resolve: (path: string | null) => void }> | null = null;
-  readonly new_session_drafts = new NewSessionDraftStore();
+  readonly local_resource_workspace = new ResourceWorkspaceStore(() => this.#local_runtime.client, (id) => this.network.devices.some((device) => device.id === id && device.desktop_control));
+  readonly local_files: ClientResources;
+  readonly network: NetworkDevicesStore;
+  directory_picker: Readonly<{ files: ClientResources; initial_path: string | null; resolve: (path: string | null) => void }> | null = null;
+  readonly local_new_session_drafts = new NewSessionDraftStore();
   readonly conversation_search = new ConversationSearchStore();
   readonly settings: SettingsStore;
   readonly memory_settings: MemorySettingsStore;
@@ -105,8 +111,8 @@ export class RootStore {
   pending_session_action = false;
   pending_workspace_action = false;
   workspace_editor: Readonly<
-    | { mode: "create"; primary_directory: string | null }
-    | { mode: "edit"; workspace_id: WorkspaceId }
+    | { device: string | null; mode: "create"; primary_directory: string | null }
+    | { device: string | null; mode: "edit"; workspace_id: WorkspaceId }
   > | null = null;
   composer_pending = false;
   interaction_error: string | null = null;
@@ -122,7 +128,7 @@ export class RootStore {
     action?: "retry_title";
   }> | null = null;
 
-  readonly #runtime: RuntimeLifecycleCoordinator;
+  readonly #local_runtime: RuntimeLifecycleCoordinator;
   readonly #run_interaction: RunInteractionController;
   readonly #session_management: SessionManagementController;
   #disposed = false;
@@ -132,6 +138,9 @@ export class RootStore {
   #preferences_initialization: Promise<void> | null = null;
   #initial_connection: Promise<void> | null = null;
   #pending_snapshot: ResourceWorkspaceSnapshot | null = null;
+  readonly pins = new DesktopPinsStore((pins) => this.flushPreferences(pins));
+  #workspace_snapshot: DesktopWorkspaceSnapshot | null = null;
+  #preferences_read_failed = false;
   #preferences_ready = false;
   #preferences_pending: Promise<void> = Promise.resolve();
   #last_saved_preferences = "";
@@ -146,22 +155,24 @@ export class RootStore {
   #provider_defaults_disposer: IReactionDisposer;
   #pending_notifications_disposer: IReactionDisposer;
   #feedback_disposer: IReactionDisposer;
+  #device_navigation_disposer: IReactionDisposer;
   #feedback_navigator_disposer: () => void;
 
   constructor(private readonly target_options: Readonly<{ target_kind?: "local" | "remote"; target_address?: string; restore_resources?: boolean; flush_application_preferences?: () => Promise<void> }> = {}) {
-    this.#runtime = new RuntimeLifecycleCoordinator({
+    this.#local_runtime = new RuntimeLifecycleCoordinator({
       on_event: (event) => {
+        this.notifications.ingest(event, this.notificationScopeFor(this.#local_runtime.client));
+        if (this.navigation.target_device) return;
         this.feedback.setScope(this.notificationScope());
         this.feedback.ingest(event);
-        this.pending_notifications.setConnection(this.notificationScope(), this.connection.state === "connected" && !this.projection.is_stale);
+        this.pending_notifications.setConnection(this.notificationScope(), this.local_connection.state === "connected" && !this.local_projection.is_stale);
         this.pending_notifications.ingest(event);
-        this.notifications.ingest(event);
       },
       require_selected_target: this.target_options.target_kind !== undefined,
-      connection: this.connection,
-      live_execution: this.live_execution,
+      connection: this.local_connection,
+      live_execution: this.local_live_execution,
       navigation: this.navigation,
-      projection: this.projection,
+      projection: this.local_projection,
       report_interaction_error: (message) => {
         this.interaction_error = message;
       },
@@ -196,11 +207,34 @@ export class RootStore {
         }
       },
     });
+    this.network = new NetworkDevicesStore(() => this.#local_runtime.client, this.navigation,
+      (message) => this.showInteractionError(message), () => this.local_files.desktop,
+      (device, event) => {
+        this.notifications.ingest(event, this.notificationScopeFor(this.network.contexts.get(device)?.runtime.client ?? null));
+        if (this.navigation.target_device !== device) return;
+        this.feedback.setScope(this.notificationScope());
+        this.feedback.ingest(event);
+        this.pending_notifications.setConnection(this.notificationScope(), this.connection.state === "connected" && !this.projection.is_stale);
+        this.pending_notifications.ingest(event);
+      }, () => this.workspace_editor?.device ?? null, {
+        restore: (device, context) => {
+          const saved = this.#workspace_snapshot?.devices.find((item) => item.device === device);
+          if (!saved) return;
+          runInAction(() => { context.sidebar.expanded_workspaces.replace(saved.expanded); });
+          if (saved.defaults) context.drafts.applyDefaults(saved.defaults.approval, saved.defaults.model);
+        },
+        retain: () => { this.#workspace_snapshot = this.captureDesktopWorkspace(); },
+      });
+    this.#device_navigation_disposer = reaction(() => this.navigation.target_device, () => {
+      this.conversation_search.reset();
+      this.#conversation_search_revision++;
+      runInAction(() => { this.interaction_error = null; this.session_notice = null; });
+    });
     this.#pending_notifications_disposer = reaction(
       () => ({ state: this.connection.state, scope: this.notificationScope(), stale: this.projection.is_stale }),
       ({ state, scope, stale }) => {
         this.feedback.setScope(scope);
-        this.feedback_center.setScope(scope);
+        this.feedback_center.setScope(this.notificationScopeFor(this.#local_runtime.client));
         this.pending_notifications.setConnection(scope, state === "connected" && !stale);
       },
       { fireImmediately: true },
@@ -213,7 +247,7 @@ export class RootStore {
       },
       ({ state, scope, session_id }) => {
         this.feedback.setScope(scope);
-        this.feedback_center.setScope(scope);
+        this.feedback_center.setScope(this.notificationScopeFor(this.#local_runtime.client));
         if (state === "connected" && session_id) void this.feedback.refresh(session_id);
       },
       { fireImmediately: true },
@@ -227,18 +261,18 @@ export class RootStore {
       if (request?.status === "pending") this.feedback.open(request);
       else this.showInteractionError("这个问题已处理或已失效，当前显示会话最新状态。");
     });
-    this.files = new ClientResources(() => this.#runtime.client, this.target_options.target_kind !== "remote");
+    this.local_files = new ClientResources(() => this.#local_runtime.client, this.target_options.target_kind !== "remote");
     this.device_gateway = new DeviceGatewayStore({
-      get_client: () => this.#runtime.client,
-      refresh_application: () => this.#runtime.loadApplication(),
+      get_client: () => this.#local_runtime.client,
+      refresh_application: () => this.#local_runtime.loadApplication(),
     });
     this.desktop_lifecycle = new DesktopLifecycleStore({
-      resources: this.resource_workspace,
-      get_application: () => this.target_options.target_kind === "remote" ? null : this.projection.application,
+      resources: this.local_resource_workspace,
+      get_application: () => this.target_options.target_kind === "remote" ? null : this.local_projection.application,
       is_local_target: () => this.target_options.target_kind !== "remote",
-      prepare_runtime_mutation: (kind) => this.#runtime.prepareForNativeRuntimeMutation(kind),
-      reconnect_runtime: (bootstrap) => this.#runtime.reconnectAfterNativeRuntimeMutation(bootstrap),
-      mark_runtime_stopped: () => this.connection.markRuntimeStopped(),
+      prepare_runtime_mutation: (kind) => this.#local_runtime.prepareForNativeRuntimeMutation(kind),
+      reconnect_runtime: (bootstrap) => this.#local_runtime.reconnectAfterNativeRuntimeMutation(bootstrap),
+      mark_runtime_stopped: () => this.local_connection.markRuntimeStopped(),
       save_preferences: () => this.#schedulePreferencesSave(),
       flush_preferences: async () => {
         await this.flushPreferences();
@@ -246,13 +280,12 @@ export class RootStore {
       },
     });
     this.#resource_scope_disposer = reaction(
-      () => this.navigation.selected_session_id ? `session:${this.navigation.selected_session_id}`
-        : `draft:${this.navigation.selected_draft_key ?? "unbound"}`,
-      (scope) => this.resource_workspace.selectScope(scope),
+      () => ({ resources: this.reading_resources, scope: this.reading_scope }),
+      ({ resources, scope }) => resources.selectScope(scope),
       { fireImmediately: true },
     );
     this.#resource_snapshot_disposer = reaction(
-      () => this.resource_workspace.captureSnapshot(),
+      () => this.captureDesktopWorkspace(),
       () => this.#schedulePreferencesSave(),
     );
     // 原生滚动事件以 capture 接住嵌套查看器；查看状态仍由各页面持有。
@@ -262,10 +295,10 @@ export class RootStore {
     window.addEventListener("keyup", this.#save_view_state);
     window.addEventListener("blur", this.#flush_view_state);
     window.addEventListener("pagehide", this.#flush_view_state);
-    window.addEventListener("pagehide", this.resource_workspace.disconnectTerminals);
+    window.addEventListener("pagehide", this.local_resource_workspace.disconnectTerminals);
     this.desktop_lifecycle.start();
     this.#runtime_state_disposer = reaction(
-      () => this.connection.state,
+      () => this.local_connection.state,
       (state) => {
         this.desktop_lifecycle.syncRuntimeState(state);
         if (state === "connected") void this.#restoreResourceSnapshot();
@@ -273,10 +306,10 @@ export class RootStore {
       { fireImmediately: true },
     );
     this.settings = new SettingsStore({
-      get_client: () => this.#runtime.client,
+      get_client: () => this.#local_runtime.client,
       get_permission_context: () => {
-        const session_id = this.navigation.selected_session_id;
-        const session = this.projection.application?.active_sessions.find(
+        const session_id = this.navigation.target_device ? null : this.navigation.selected_session_id;
+        const session = this.local_projection.application?.active_sessions.find(
           (candidate) => candidate.session_id === session_id,
         );
         return {
@@ -284,29 +317,33 @@ export class RootStore {
           workspace_id: session?.workspace_id ?? null,
         };
       },
-      refresh_application: () => this.#runtime.loadApplication(),
+      refresh_application: () => this.#local_runtime.loadApplication(),
     });
     this.memory_settings = new MemorySettingsStore({
-      get_client: () => this.#runtime.client,
+      get_client: () => this.#local_runtime.client,
     });
+    const current_resources = () => this.resource_workspace;
+    const current_files = () => this.files;
+    const current_connection = () => this.connection;
+    const current_runtime = () => this.#runtime;
     this.#session_management = new SessionManagementController({
-      resources: this.resource_workspace,
-      files: this.files,
-      connection: this.connection,
+      get resources() { return current_resources(); },
+      get files() { return current_files(); },
+      get connection() { return current_connection(); },
       navigation: this.navigation,
-      runtime: this.#runtime,
+      get runtime() { return current_runtime(); },
       save_preferences: () => this.#schedulePreferencesSave(),
-      select_draft: (workspace_id) => this.openNewSessionDraft(workspace_id),
+      select_draft: (workspace_id) => this.openNewSessionDraft(workspace_id, this.navigation.target_device),
       select_session: (session_id) => this.selectSession(session_id),
       state: this,
     });
     this.#run_interaction = new RunInteractionController({
-      connection: this.connection,
-      runtime: this.#runtime,
+      get connection() { return current_connection(); },
+      get runtime() { return current_runtime(); },
       state: this,
     });
     this.#provider_defaults_disposer = reaction(
-      () => this.projection.application?.providers.map((provider) => provider.provider_instance_id).join("\n") ?? null,
+      () => this.local_projection.application?.providers.map((provider) => provider.provider_instance_id).join("\n") ?? null,
       () => this.#discardUnavailableDefaultModel(),
     );
     makeObservable(this, {
@@ -338,6 +375,7 @@ export class RootStore {
       locateTextQuoteSource: action,
       cancelChildTask: action,
       openNewSessionDraft: action,
+      switchDraftDevice: action,
       moveNewSessionDraft: action,
       clearNewSessionDraft: action,
       materializeNewSessionDraft: action,
@@ -400,6 +438,79 @@ export class RootStore {
     });
   }
 
+  get device_context() { return this.navigation.target_device ? this.network.contexts.get(this.navigation.target_device) : undefined; }
+  get connection() { return this.device_context?.connection ?? this.local_connection; }
+  get projection() { return this.device_context?.projection ?? this.local_projection; }
+  get live_execution() { return this.device_context?.live_execution ?? this.local_live_execution; }
+  get composer_quotes() { return this.device_context?.quotes ?? this.local_composer_quotes; }
+  get resource_workspace() { return this.device_context?.resources ?? this.local_resource_workspace; }
+  deviceLabel(device: string | null): string {
+    if (device === null && this.target_options.target_kind === "remote") return this.target_options.target_address?.split("/users/")[0] ?? "当前 Host";
+    return this.network.label(device);
+  }
+
+  get reading_device() { return this.navigation.target_device; }
+
+  get reading_context() { return this.reading_device ? this.network.contexts.get(this.reading_device) : undefined; }
+
+  get reading_resources() { return this.reading_context?.resources ?? this.local_resource_workspace; }
+
+  get reading_files() { return this.reading_context?.files ?? this.local_files; }
+
+  get reading_projection() { return this.reading_context?.projection ?? this.local_projection; }
+
+  get reading_connection() { return this.reading_context?.connection ?? this.local_connection; }
+
+  get reading_drafts() { return this.reading_context?.drafts ?? this.local_new_session_drafts; }
+
+  get reading_scope() {
+    return this.navigation.selected_session_id
+      ? `session:${this.navigation.selected_session_id}` : `draft:${this.navigation.selected_draft_key ?? "unbound"}`;
+  }
+
+  async connectReadingResources(): Promise<void> {
+    const device = this.reading_device;
+    const scope = this.reading_scope;
+    try {
+      if (device) await this.network.ensureConnected(device);
+      if (this.#disposed || this.reading_device !== device || this.reading_scope !== scope) return;
+      const runtime = device ? this.network.context(device).runtime : this.#local_runtime;
+      const client = runtime.client;
+      if (client && scope.startsWith("session:")) {
+        const result = await client.command({ type: "get_session_view", payload: { session_id: scope.slice(8) } });
+        if (this.#disposed || client !== runtime.client || this.reading_device !== device || this.reading_scope !== scope) return;
+        if (result.payload.snapshot.value.session.session_id !== scope.slice(8)) throw new Error("资源会话归属不匹配。");
+        runInAction(() => this.reading_projection.applySessionSnapshot(result.payload.snapshot));
+      }
+    } catch (failure) { if (!this.#disposed) this.showInteractionError(displayError(failure)); }
+  }
+
+  captureDesktopWorkspace(pins: DesktopPins = this.pins.value): DesktopWorkspaceSnapshot {
+    const retained = new Map(this.#workspace_snapshot?.devices.map((item) => [item.device, item]));
+    retained.set(null, { device: null, expanded: [...this.navigation.expanded_workspaces], resources: viewingSnapshot(this.local_resource_workspace.captureSnapshot(), this.local_files.desktop, this.local_files.native_host) });
+    for (const [device, context] of this.network.contexts) retained.set(device, {
+      device, expanded: [...context.sidebar.expanded_workspaces], defaults: { approval: context.drafts.default_approval_mode, model: context.drafts.default_model_selection }, resources: viewingSnapshot(context.resources.captureSnapshot(), this.local_files.desktop, false),
+    });
+    const named_pins = { ...pins, items: pins.items.map((pin) => {
+      const projection = pin.device ? this.network.contexts.get(pin.device)?.projection : this.local_projection;
+      const current = projection?.application?.active_sessions.find((session) => session.session_id === pin.session_id);
+      const device_name = pin.device ? this.network.devices.find((device) => device.id === pin.device)?.name ?? pin.device_name : pin.device_name;
+      return { ...pin, title: current?.title ?? pin.title, device_name };
+    }) };
+    return { version: 1, owner: this.target_options.target_address ?? "local", pins: named_pins,
+      devices: [...retained.values()] };
+  }
+
+  get new_session_drafts() { return this.device_context?.drafts ?? this.local_new_session_drafts; }
+  get files() { return this.device_context?.files ?? this.local_files; }
+  get #runtime() { return this.device_context?.runtime ?? this.#local_runtime; }
+  get sidebar_context() { return this.network.browsing_device ? this.network.contexts.get(this.network.browsing_device) : undefined; }
+  get sidebar_projection() { return this.sidebar_context?.projection ?? this.local_projection; }
+  get sidebar_navigation() { return this.sidebar_context?.sidebar ?? this.navigation; }
+  get sidebar_connection() { return this.sidebar_context?.connection ?? this.local_connection; }
+  get remote_device() { return this.navigation.target_device !== null; }
+
+  get local_runtime_client() { return this.#local_runtime.client; }
   get runtime_client() { return this.#runtime.client; }
 
   connect(bootstrap?: RuntimeBootstrap): Promise<void> {
@@ -415,12 +526,18 @@ export class RootStore {
       this.new_session_drafts.open("unbound");
       this.navigation.selectDraft("unbound");
     }
-    await this.#runtime.connect(bootstrap);
+    await this.#local_runtime.connect(bootstrap);
+    if (bootstrap?.session?.identity && this.target_options.target_kind !== "remote") {
+      if (!this.#disposed) void this.network.refresh();
+    }
     if (this.#disposed || this.connection.state !== "connected") return;
     const draft_key = this.navigation.selected_draft_key;
     if (draft_key) void this.#loadNewSessionDraftSkills(draft_key);
     await this.#restoreResourceSnapshot();
+    await this.retryPinImport();
   }
+
+  retryLocalConnection(): void { this.#local_runtime.retryConnection(); }
 
   retryConnection(): void {
     this.#runtime.retryConnection();
@@ -443,8 +560,11 @@ export class RootStore {
           this.files.desktop ? preferences.last_model_selection : null,
         );
       });
+      this.#workspace_snapshot = this.local_files.desktop ? parseDesktopWorkspace(preferences.desktop_workspace, this.target_options.target_address ?? "local") : null;
+      if (this.#workspace_snapshot) this.pins.load(this.#workspace_snapshot.pins);
       this.#pending_snapshot = this.target_options.restore_resources === false ? null : viewingSnapshot(preferences.resource_workspace, this.files.desktop, this.files.native_host);
     } catch (failure) {
+      this.#preferences_read_failed = true;
       runInAction(() => { this.interaction_error = `桌面状态读取失败：${displayError(failure)}`; });
     }
   }
@@ -456,18 +576,27 @@ export class RootStore {
   async #restoreConnectedResources(): Promise<void> {
     if (this.#disposed) return;
     try {
-      if (this.#pending_snapshot) await this.resource_workspace.restoreSnapshot(this.#pending_snapshot);
+      if (this.#workspace_snapshot && this.target_options.restore_resources !== false) {
+        for (const saved of this.#workspace_snapshot.devices) {
+          if (this.#disposed) return;
+          const context = saved.device ? this.network.context(saved.device) : null;
+          runInAction(() => { (context?.sidebar ?? this.navigation).expanded_workspaces.replace(saved.expanded); });
+          const snapshot = viewingSnapshot(saved.resources, this.local_files.desktop, !saved.device && this.local_files.native_host);
+          if (snapshot) await (context?.resources ?? this.local_resource_workspace).restoreSnapshot(snapshot);
+        }
+        await this.connectReadingResources();
+      } else if (this.#pending_snapshot) await this.local_resource_workspace.restoreSnapshot(this.#pending_snapshot);
     } catch (failure) {
       runInAction(() => { this.interaction_error = `右栏恢复失败：${displayError(failure)}`; });
     } finally {
       this.#pending_snapshot = null;
-      this.#preferences_ready = !this.#disposed;
+      this.#preferences_ready = !this.#disposed && !this.#preferences_read_failed;
       this.#discardUnavailableDefaultModel();
     }
   }
 
   toggleWorkspace(workspace_id: WorkspaceId): void {
-    this.navigation.toggleWorkspace(workspace_id);
+    this.sidebar_navigation.toggleWorkspace(workspace_id);
     this.#schedulePreferencesSave();
   }
 
@@ -498,28 +627,53 @@ export class RootStore {
 
   #notification_navigation = 0;
 
-  notificationScope(): string | null {
-    const client = this.#runtime?.client;
-    return client ? JSON.stringify([client.address, client.instance_id, client.login_context]) : null;
+  notificationScopeFor(client: RuntimeClient | null): string | null {
+    return client ? JSON.stringify([client.address, client.instance_id, client.login_context, client.target_device]) : null;
+  }
+
+  notificationScope(): string | null { return this.notificationScopeFor(this.#runtime?.client); }
+
+  notificationDevice(scope: string): string | null | undefined {
+    if (this.#disposed || !this.#local_runtime.client) return undefined;
+    try {
+      const value: unknown = JSON.parse(scope);
+      const local = this.#local_runtime.client;
+      if (!Array.isArray(value) || value.length !== 4 || value[0] !== local.address
+        || value[1] !== local.instance_id || value[2] !== local.login_context) return undefined;
+      const device: unknown = value[3];
+      return device === null || (typeof device === "string" && this.network.devices.some((item) => item.id === device && item.enabled))
+        ? device : undefined;
+    } catch { return undefined; }
+  }
+
+  notificationClient(scope: string): RuntimeClient | null {
+    if (this.#disposed) return null;
+    const clients = [this.#local_runtime.client, ...[...this.network.contexts.values()].map((context) => context.runtime.client)];
+    return clients.find((client) => this.notificationScopeFor(client) === scope) ?? null;
   }
 
   async openNotificationTarget(target: NotificationTarget): Promise<boolean> {
-    const client = this.#runtime.client;
-    if (!client || this.#disposed || target.scope !== this.notificationScope()) return false;
+    if (this.composer_pending || this.pending_session_action) return false;
+    const device = this.notificationDevice(target.scope);
+    if (device === undefined) return false;
     const generation = ++this.#notification_navigation;
-    const selection = () => JSON.stringify([this.navigation.selected_session_id, this.navigation.selected_draft_key, this.navigation.selected_child_task_id]);
+    const selection = () => JSON.stringify([this.navigation.target_device, this.navigation.selected_session_id, this.navigation.selected_draft_key, this.navigation.selected_child_task_id]);
     const previous_selection = selection();
+    if (device && !this.notificationClient(target.scope)) await this.network.ensureConnected(device);
+    const client = this.notificationClient(target.scope);
+    if (!client || this.#disposed || generation !== this.#notification_navigation || selection() !== previous_selection) return false;
+    const projection = device ? this.network.context(device).projection : this.local_projection;
     const result = await client.command({ type: "get_session_view", payload: { session_id: target.owner.session_id } });
-    if (this.#disposed || client !== this.#runtime.client || target.scope !== this.notificationScope()
+    if (this.#disposed || client !== this.notificationClient(target.scope)
       || generation !== this.#notification_navigation || selection() !== previous_selection) return false;
     const view = result.payload.snapshot.value;
     if (view.session.session_id !== target.owner.session_id) throw new Error("通知来源会话不匹配。");
     runInAction(() => {
-      this.projection.applySessionSnapshot(result.payload.snapshot);
+      projection.applySessionSnapshot(result.payload.snapshot);
       this.transient_focus.clear();
       this.interaction_error = null;
       this.navigation.setListMode(view.session.lifecycle === "archived" ? "archived" : "active");
-      this.navigation.selectSession(target.owner.session_id);
+      this.navigation.selectSession(target.owner.session_id, true, device);
       this.settings.close();
       if (target.kind === "approval" && !view.approvals.items.some((item) => item.approval_id === target.approval_id)) {
         this.interaction_error = "这项审批已处理或已失效，当前显示会话最新状态。";
@@ -532,18 +686,26 @@ export class RootStore {
     return true;
   }
 
-  async selectSession(session_id: SessionId): Promise<void> {
+  async selectSession(session_id: SessionId, target_device: string | null = this.navigation.target_device): Promise<void> {
+    if (target_device !== this.navigation.target_device && (this.pending_session_action || this.composer_pending)) { this.showInteractionError("请等待当前操作完成后切换会话设备。"); return; }
+    if (target_device) this.network.context(target_device);
     this.transient_focus.clear();
     this.interaction_error = null;
-    this.navigation.selectSession(session_id);
+    this.conversation_search.reset();
+    this.#conversation_search_revision++;
+    this.navigation.selectSession(session_id, true, target_device);
+    if (target_device) await this.network.ensureConnected(target_device);
+    if (this.navigation.target_device !== target_device || this.navigation.selected_session_id !== session_id) return;
     await this.#runtime.loadSession(session_id);
   }
 
   async openChildTask(session_id: SessionId, child_task_id: ChildTaskId): Promise<void> {
+    const device = this.navigation.target_device;
     this.transient_focus.clear();
     if (this.navigation.selected_session_id !== session_id) {
       await this.selectSession(session_id);
     }
+    if (this.navigation.target_device !== device || this.navigation.selected_session_id !== session_id) return;
     this.navigation.openChildTask(child_task_id);
     await this.#runtime.loadChildTask(session_id, child_task_id);
   }
@@ -554,24 +716,24 @@ export class RootStore {
   }
 
   async navigateBack(): Promise<void> {
+    if (this.pending_session_action || this.composer_pending) return;
     this.transient_focus.clear();
+    const previous = this.navigation.conversation_history[this.navigation.conversation_history_index - 1];
+    if (previous?.target_device) this.network.context(previous.target_device);
     const location = this.navigation.goBack();
     if (location) {
-      const loaded = await this.#loadConversationLocation(location);
-      if (!loaded) {
-        this.navigation.goForward();
-      }
+      await this.#loadConversationLocation(location);
     }
   }
 
   async navigateForward(): Promise<void> {
+    if (this.pending_session_action || this.composer_pending) return;
     this.transient_focus.clear();
+    const next = this.navigation.conversation_history[this.navigation.conversation_history_index + 1];
+    if (next?.target_device) this.network.context(next.target_device);
     const location = this.navigation.goForward();
     if (location) {
-      const loaded = await this.#loadConversationLocation(location);
-      if (!loaded) {
-        this.navigation.goBack();
-      }
+      await this.#loadConversationLocation(location);
     }
   }
 
@@ -595,7 +757,7 @@ export class RootStore {
         payload: { session_id, query, scope, offset, limit: 40 },
       });
       if (
-        revision !== this.#conversation_search_revision
+        revision !== this.#conversation_search_revision || client !== this.#runtime.client
         || query !== this.conversation_search.query.trim()
         || scope !== this.conversation_search.scope
       ) {
@@ -608,7 +770,7 @@ export class RootStore {
         reset,
       ));
     } catch (error: unknown) {
-      if (revision === this.#conversation_search_revision) {
+      if (revision === this.#conversation_search_revision && client === this.#runtime.client) {
         runInAction(() => this.conversation_search.failSearch(displayError(error)));
       }
     }
@@ -638,9 +800,9 @@ export class RootStore {
           after: 3,
         },
       });
-      runInAction(() => this.conversation_search.applyRecall(result.payload));
+      if (client === this.#runtime.client && this.conversation_search.selected_hit === hit) runInAction(() => this.conversation_search.applyRecall(result.payload));
     } catch (error: unknown) {
-      runInAction(() => this.conversation_search.failRecall(displayError(error)));
+      if (client === this.#runtime.client) runInAction(() => this.conversation_search.failRecall(displayError(error)));
     }
   }
 
@@ -700,10 +862,14 @@ export class RootStore {
     await this.#run_interaction.cancelChildTask(session_id, child_task_id);
   }
 
-  openNewSessionDraft(workspace_id: WorkspaceId | null = null): void {
+  openNewSessionDraft(workspace_id: WorkspaceId | null = null, device: string | null = null): void {
+    if (this.composer_pending || this.pending_session_action) return;
+    const context = device ? this.network.context(device) : undefined;
+    const drafts = context?.drafts ?? this.local_new_session_drafts;
+    const projection = context?.projection ?? this.local_projection;
     this.transient_focus.clear();
     if (workspace_id) {
-      const workspace = this.projection.application?.workspaces.find((item) => (
+      const workspace = projection.application?.workspaces.find((item) => (
         item.workspace_id === workspace_id && item.lifecycle === "active"
       ));
       if (!workspace) {
@@ -712,10 +878,36 @@ export class RootStore {
       }
     }
     const key = draftKeyForWorkspace(workspace_id);
-    this.new_session_drafts.open(key);
-    this.navigation.selectDraft(key);
+    drafts.open(key);
+    this.navigation.selectDraft(key, device);
     this.interaction_error = null;
-    void this.#loadNewSessionDraftSkills(key);
+    if (device) void this.network.ensureConnected(device).then(() => {
+      if (this.navigation.target_device === device && this.navigation.selected_draft_key === key) void this.#loadNewSessionDraftSkills(key);
+    });
+    else void this.#loadNewSessionDraftSkills(key);
+  }
+
+  switchDraftDevice(device: string | null): void {
+    if (device === this.network.self_device) device = null;
+    if (device === this.navigation.target_device || this.composer_pending || this.pending_session_action) return;
+    if (device && (!this.network.available || !this.network.devices.some((item) => item.id === device && item.enabled))) return;
+    const source_store = this.new_session_drafts;
+    const source_files = this.files;
+    const source = source_store.get(this.navigation.selected_draft_key);
+    if (source?.quotes.length) { this.showInteractionError("引用属于当前设备，请移除引用后再切换设备；原草稿会保留。"); return; }
+    if (source?.materialization_attempt || source?.attachments.some((item) => item.state === "uploading" || item.attachment_id)) return;
+    const context = device ? this.network.context(device) : undefined;
+    const destination = context?.drafts ?? this.local_new_session_drafts;
+    const files = context?.files ?? this.local_files;
+    const existing = destination.get("unbound");
+    if (source && (!existing || !isDraftCustomized(existing, destination.default_approval_mode, destination.default_model_selection))) {
+      try {
+        source_files.transferSelectionsTo(files, source.attachments.map((item) => item.selection_id));
+        destination.takeContentFrom("unbound", source);
+        source_store.remove(source.key);
+      } catch (error) { this.showInteractionError(displayError(error)); return; }
+    }
+    this.openNewSessionDraft(null, device);
   }
 
   async clearNewSessionDraft(key: NewSessionDraftKey): Promise<void> {
@@ -845,7 +1037,7 @@ export class RootStore {
       const message = displayError(error);
       runInAction(() => {
         if (!sameOwner()) return;
-        if (!previous_attempt && !(error instanceof NativeResourceFailure && error.code === "materialization_response_unknown")) {
+        if (!previous_attempt && !(error instanceof NativeResourceFailure && (error.code === "materialization_response_unknown" || error.outcome === "unknown"))) {
           this.new_session_drafts.clearMaterializationAttempt(key);
         }
         this.new_session_drafts.setAttachmentTransferState(key, "failed", message);
@@ -901,13 +1093,26 @@ export class RootStore {
     }
   }
 
-  addWorkspace(): void {
-    if (this.pending_workspace_action || this.pending_session_action) return;
-    this.workspace_editor = { mode: "create", primary_directory: null };
+  #workspaceManagement(device: string | null): SessionManagementController {
+    const context = device ? this.network.context(device) : undefined;
+    return new SessionManagementController({
+      connection: context?.connection ?? this.local_connection, runtime: context?.runtime ?? this.#local_runtime,
+      resources: context?.resources ?? this.local_resource_workspace, files: context?.files ?? this.local_files,
+      navigation: this.navigation, state: this, save_preferences: () => this.#schedulePreferencesSave(),
+      select_draft: (id) => this.openNewSessionDraft(id, device),
+      select_session: (id) => this.selectSession(id, device),
+    });
   }
 
-  openWorkspaceEditor(workspace_id: WorkspaceId): void {
-    this.workspace_editor = { mode: "edit", workspace_id };
+  workspaceProjection(device: string | null) { return device ? this.network.context(device).projection : this.local_projection; }
+
+  addWorkspace(device: string | null = this.navigation.target_device): void {
+    if (this.pending_workspace_action || this.pending_session_action) return;
+    this.workspace_editor = { device, mode: "create", primary_directory: null };
+  }
+
+  openWorkspaceEditor(workspace_id: WorkspaceId, device: string | null = this.navigation.target_device): void {
+    this.workspace_editor = { device, mode: "edit", workspace_id };
   }
 
   closeWorkspaceEditor(): void {
@@ -915,9 +1120,11 @@ export class RootStore {
   }
 
   async chooseWorkspaceDirectory(initial_path: string | null = null): Promise<string | null> {
-    if (this.files.native_host) return this.#session_management.chooseWorkspaceDirectory();
+    const device = this.workspace_editor ? this.workspace_editor.device : this.navigation.target_device;
+    const files = device ? this.network.context(device).files : this.local_files;
+    if (files.native_host) return this.#session_management.chooseWorkspaceDirectory();
     if (this.directory_picker || this.#disposed) return null;
-    return new Promise((resolve) => runInAction(() => { this.directory_picker = {initial_path, resolve}; }));
+    return new Promise((resolve) => runInAction(() => { this.directory_picker = {files, initial_path, resolve}; }));
   }
 
   finishDirectorySelection(path: string | null): void {
@@ -932,9 +1139,10 @@ export class RootStore {
   }>): Promise<boolean> {
     const editor = this.workspace_editor;
     if (!editor) return false;
+    const management = this.#workspaceManagement(editor.device);
     const saved = editor.mode === "create"
-      ? await this.#session_management.registerWorkspace(input)
-      : await this.#session_management.updateWorkspace({ workspace_id: editor.workspace_id, ...input }) !== null;
+      ? await management.registerWorkspace(input)
+      : await management.updateWorkspace({ workspace_id: editor.workspace_id, ...input }) !== null;
     if (saved) {
       runInAction(() => {
         this.workspace_editor = null;
@@ -943,34 +1151,39 @@ export class RootStore {
     return saved;
   }
 
-  async removeWorkspace(workspace_id: WorkspaceId): Promise<boolean> {
+  async removeWorkspace(workspace_id: WorkspaceId, device: string | null = this.network.browsing_device): Promise<boolean> {
+    const context = device ? this.network.context(device) : undefined;
+    const drafts = context?.drafts ?? this.local_new_session_drafts;
+    const files = context?.files ?? this.local_files;
     const key = draftKeyForWorkspace(workspace_id);
-    if (this.composer_pending || this.new_session_drafts.get(key)?.materialization_attempt) {
+    if (this.composer_pending || drafts.get(key)?.materialization_attempt) {
       this.interaction_error = "该项目仍有待确认的首次发送，暂不能移除。";
       return false;
     }
-    const removed = await this.#session_management.removeWorkspace(workspace_id);
+    const removed = await this.#workspaceManagement(device).removeWorkspace(workspace_id);
     if (removed) {
-      const draft = this.new_session_drafts.get(key)?.materialization_attempt
-        ? null : this.new_session_drafts.remove(key);
-      if (draft) await releaseDraftSelections(draft, this.files);
+      const draft = drafts.get(key)?.materialization_attempt
+        ? null : drafts.remove(key);
+      if (draft) await releaseDraftSelections(draft, files);
     }
     return removed;
   }
 
-  listRemovedWorkspaces(): Promise<WorkspaceSummary[] | null> {
-    return this.#session_management.listRemovedWorkspaces();
+  listRemovedWorkspaces(device: string | null = this.network.browsing_device): Promise<WorkspaceSummary[] | null> {
+    return this.#workspaceManagement(device).listRemovedWorkspaces();
   }
 
-  restoreWorkspace(workspace_id: WorkspaceId): Promise<boolean> {
-    return this.#session_management.restoreWorkspace(workspace_id);
+  restoreWorkspace(workspace_id: WorkspaceId, device: string | null = this.network.browsing_device): Promise<boolean> {
+    return this.#workspaceManagement(device).restoreWorkspace(workspace_id);
   }
 
   async openWorkspace(workspace_id: WorkspaceId): Promise<void> {
-    await this.#session_management.openWorkspace(workspace_id);
+    if (this.network.browsing_device) { this.showInteractionError("远端路径不能在本机直接打开，请先下载文件。"); return; }
+    await this.#workspaceManagement(null).openWorkspace(workspace_id);
   }
 
   async openSessionWorkspaceDirectory(session_id: SessionId, directory_index: number): Promise<void> {
+    if (this.remote_device) { this.showInteractionError("远端路径不能在本机直接打开，请先下载文件。"); return; }
     await this.#session_management.openSessionWorkspaceDirectory(session_id, directory_index);
   }
 
@@ -980,6 +1193,7 @@ export class RootStore {
   ): Promise<void> {
     this.interaction_error = null;
     try {
+      if (this.remote_device) throw new Error("远端路径不能在本机直接打开，请先下载文件。");
       await openNativeSessionResourceInSystem(session_id, locator);
     } catch (error: unknown) {
       runInAction(() => {
@@ -994,6 +1208,7 @@ export class RootStore {
   ): Promise<void> {
     this.interaction_error = null;
     try {
+      if (this.remote_device) throw new Error("远端路径不能在本机直接打开，请先下载文件。");
       await copyNativeSessionResourcePath(session_id, locator);
     } catch (error: unknown) {
       runInAction(() => {
@@ -1041,22 +1256,24 @@ export class RootStore {
     return this.#session_management.exportSession(session_id, title);
   }
 
-  async listSessionPage(filter: "active" | "archived", offset: number, query?: string) {
-    const client = this.#runtime.client;
-    if (!client || this.connection.state !== "connected") throw new Error("Runtime 未连接");
+  async listSessionPage(filter: "active" | "archived", offset: number, query?: string, target_device: string | null = this.network.browsing_device) {
+    const runtime = target_device ? this.network.context(target_device).runtime : this.#local_runtime;
+    const client = runtime.client;
+    if (!client || this.sidebar_connection.state !== "connected") throw new Error("Runtime 未连接");
     const result = await client.command({ type: "list_sessions", payload: { filter, offset, limit: 100, query: query ?? null } });
-    if (client !== this.#runtime.client) throw new Error("Runtime 连接已变化，请重试");
+    if (client !== runtime.client) throw new Error("Runtime 连接已变化，请重试");
     return result.payload;
   }
 
   async loadMoreSessions(filter: "active" | "archived"): Promise<void> {
-    const application = this.projection.application;
+    const projection = this.sidebar_projection;
+    const application = projection.application;
     if (!application) return;
     const offset = filter === "active" ? application.active_sessions_next_offset : application.archived_sessions_next_offset;
     if (offset === null || offset === undefined) return;
     const page = await this.listSessionPage(filter, offset);
-    if (application !== this.projection.application) return;
-    this.projection.appendSessionPage(filter, page.sessions, page.has_more ? offset + 100 : null);
+    if (application !== projection.application) return;
+    projection.appendSessionPage(filter, page.sessions, page.has_more ? offset + 100 : null);
   }
 
   async listSkills(workspace_id?: WorkspaceId | null): Promise<SkillManagementSnapshot> {
@@ -1135,8 +1352,25 @@ export class RootStore {
     return this.#session_management.renameSession(session_id, title);
   }
 
-  async setSessionPinned(session_id: SessionId, is_pinned: boolean): Promise<boolean> {
-    return this.#session_management.setSessionPinned(session_id, is_pinned);
+  isSessionPinned(session: { session_id: string; is_pinned: boolean }, device: string | null): boolean {
+    return this.local_files.desktop ? this.pins.has(session.session_id, device) : session.is_pinned;
+  }
+
+  async retryPinImport(): Promise<void> {
+    if (this.local_files.desktop && this.#preferences_ready && this.local_runtime_client) {
+      await this.pins.importLegacy(this.local_runtime_client, this.target_options.target_kind !== "remote");
+    }
+  }
+
+  async removePin(pin: DesktopPin): Promise<void> { await this.pins.set(pin, false); }
+
+  async setSessionPinned(session_id: SessionId, is_pinned: boolean, device: string | null = this.navigation.target_device): Promise<boolean> {
+    if (!this.local_files.desktop) return this.#session_management.setSessionPinned(session_id, is_pinned);
+    if (!this.#preferences_ready || !this.pins.value.imported) return false;
+    const projection = device ? this.network.contexts.get(device)?.projection : this.local_projection;
+    const session = projection?.session_views.get(session_id)?.session ?? projection?.application?.active_sessions.find((item) => item.session_id === session_id);
+    if (!session) return false;
+    return this.pins.set(pinReference(session, device, this.deviceLabel(device)), is_pinned);
   }
 
   async setMessageFeedback(
@@ -1291,14 +1525,16 @@ export class RootStore {
   }
 
   async locateConversationRun(session_id: SessionId, run_id: RunId): Promise<boolean> {
-    if (!this.#runtime.client) {
+    const client = this.#runtime.client;
+    if (!client) {
       return false;
     }
     try {
-      const result = await this.#runtime.client.command({
+      const result = await client.command({
         type: "get_conversation_page_around_run",
         payload: { session_id, run_id, limit: 30 },
       });
+      if (client !== this.#runtime.client) return false;
       const location: ConversationLocation = {
         session_id,
         child_task_id: null,
@@ -1316,6 +1552,7 @@ export class RootStore {
       }
       return loaded;
     } catch (error: unknown) {
+      if (client !== this.#runtime.client) return false;
       runInAction(() => this.projection.failLoadingPrevious(session_id, displayError(error)));
       return false;
     }
@@ -1352,8 +1589,13 @@ export class RootStore {
     expected_generation?: number,
     is_current: () => boolean = () => true,
   ): Promise<boolean> {
+    const device = location.target_device === undefined ? this.navigation.target_device : location.target_device;
+    if (device) await this.network.ensureConnected(device);
+    const client = this.#runtime.client;
+    const prior_guard = is_current;
+    is_current = () => prior_guard() && this.#runtime.client === client && this.navigation.target_device === device;
     if (!is_current()) return false;
-    if (!this.#runtime.client) {
+    if (!client) {
       this.showInteractionError("Runtime 当前不可用。");
       return false;
     }
@@ -1462,6 +1704,7 @@ export class RootStore {
     this.#pending_notifications_disposer();
     this.pending_notifications.dispose();
     this.#feedback_disposer();
+    this.#device_navigation_disposer();
     this.#feedback_navigator_disposer();
     this.feedback.dispose();
     this.feedback_center.dispose();
@@ -1473,20 +1716,22 @@ export class RootStore {
     window.removeEventListener("keyup", this.#save_view_state);
     window.removeEventListener("blur", this.#flush_view_state);
     window.removeEventListener("pagehide", this.#flush_view_state);
-    window.removeEventListener("pagehide", this.resource_workspace.disconnectTerminals);
+    window.removeEventListener("pagehide", this.local_resource_workspace.disconnectTerminals);
     this.transient_focus.clear();
     this.#resource_scope_disposer();
-    this.resource_workspace.dispose();
-    this.files.dispose();
+    this.pins.dispose();
+    this.local_resource_workspace.dispose();
+    this.local_files.dispose();
     this.finishDirectorySelection(null);
-    this.#runtime.dispose();
+    this.network.dispose();
+    this.#local_runtime.dispose();
     this.device_gateway.dispose();
     this.settings.mcp.dispose();
     this.desktop_lifecycle.dispose();
     this.#runtime_state_disposer();
     this.#provider_defaults_disposer();
-    for (const draft of this.new_session_drafts.clear()) {
-      void releaseDraftSelections(draft, this.files);
+    for (const draft of this.local_new_session_drafts.clear()) {
+      void releaseDraftSelections(draft, this.local_files);
     }
     if (this.#preferences_save_timer !== null) {
       window.clearTimeout(this.#preferences_save_timer);
@@ -1507,10 +1752,12 @@ export class RootStore {
     }, 300);
   }
 
-  async flushPreferences(): Promise<void> {
+  async flushPreferences(pins?: DesktopPins): Promise<void> {
+    if (this.pins.busy && !pins) return this.#preferences_pending;
+    if (pins && (!this.#preferences_ready || this.#disposed)) throw new Error("本机偏好尚不可保存。");
     if (this.#preferences_save_timer !== null) window.clearTimeout(this.#preferences_save_timer);
     this.#preferences_save_timer = null;
-    if (!this.#preferences_ready || this.#disposed || this.resource_workspace.shutting_down) return this.#preferences_pending;
+    if (!this.#preferences_ready || this.#disposed || this.local_resource_workspace.shutting_down) return this.#preferences_pending;
     try {
       const preferences = {
         left_sidebar_open: this.navigation.left_sidebar_open,
@@ -1519,15 +1766,16 @@ export class RootStore {
         right_sidebar_width: this.navigation.right_sidebar_width,
         expanded_workspace_ids: [...this.navigation.expanded_workspaces],
         close_behavior: this.desktop_lifecycle.close_behavior,
-        default_approval_mode: this.files.desktop
-          ? this.new_session_drafts.default_approval_mode
+        default_approval_mode: this.local_files.desktop
+          ? this.local_new_session_drafts.default_approval_mode
           : "auto" as const,
-        last_model_selection: this.files.desktop
-          ? this.new_session_drafts.default_model_selection
+        last_model_selection: this.local_files.desktop
+          ? this.local_new_session_drafts.default_model_selection
           : null,
-        resource_workspace: viewingSnapshot(this.resource_workspace.captureSnapshot(), this.files.desktop, this.files.native_host),
+        resource_workspace: null,
+        desktop_workspace: this.local_files.desktop ? this.captureDesktopWorkspace(pins) : undefined,
       };
-      if (!this.files.desktop) {
+      if (!this.local_files.desktop) {
         await saveDesktopPreferences(preferences);
         return;
       }
@@ -1547,24 +1795,27 @@ export class RootStore {
   }
 
   #discardUnavailableDefaultModel(): void {
-    if (!this.files.desktop || !this.#preferences_ready) return;
-    const application = this.projection.application;
-    const selection = this.new_session_drafts.default_model_selection;
+    if (!this.local_files.desktop || !this.#preferences_ready) return;
+    const application = this.local_projection.application;
+    const selection = this.local_new_session_drafts.default_model_selection;
     if (!application || !selection || application.providers.some(
       (provider) => provider.provider_instance_id === selection.provider_instance_id,
     )) return;
     runInAction(() => {
-      this.new_session_drafts.discardUnavailableDefaultModel(selection);
+      this.local_new_session_drafts.discardUnavailableDefaultModel(selection);
       this.interaction_error = "上次使用的模型所属服务商已删除，已改用默认模型。";
     });
     this.#schedulePreferencesSave();
   }
 
   async #loadNewSessionDraftSkills(key: NewSessionDraftKey): Promise<void> {
-    const client = this.#runtime.client;
-    const instance_id = this.connection.instance_id;
-    const draft = this.new_session_drafts.get(key);
-    if (!client || !draft || !this.new_session_drafts.beginSkillLoad(key)) return;
+    const runtime = this.#runtime;
+    const connection = this.connection;
+    const drafts = this.new_session_drafts;
+    const client = runtime.client;
+    const instance_id = connection.instance_id;
+    const draft = drafts.get(key);
+    if (!client || !draft || !drafts.beginSkillLoad(key)) return;
     const request = {};
     this.#draft_skill_requests.set(key, request);
     try {
@@ -1573,25 +1824,28 @@ export class RootStore {
         payload: { include_plugins: true, ...(draft.workspace_id ? { workspace_id: draft.workspace_id } : {}) },
       });
       runInAction(() => {
-        if (client === this.#runtime.client && instance_id === this.connection.instance_id
+        if (client === runtime.client && instance_id === connection.instance_id
           && this.#draft_skill_requests.get(key) === request
-          && this.new_session_drafts.get(key)?.workspace_id === draft.workspace_id)
-          this.new_session_drafts.applySkillOptions(key, result.payload.snapshot.skills);
+          && drafts.get(key)?.workspace_id === draft.workspace_id)
+          drafts.applySkillOptions(key, result.payload.snapshot.skills);
       });
     } catch {
       runInAction(() => {
-        if (client === this.#runtime.client && instance_id === this.connection.instance_id
+        if (client === runtime.client && instance_id === connection.instance_id
           && this.#draft_skill_requests.get(key) === request
-          && this.new_session_drafts.get(key)?.workspace_id === draft.workspace_id)
-          this.new_session_drafts.failSkillLoad(key);
+          && drafts.get(key)?.workspace_id === draft.workspace_id)
+          drafts.failSkillLoad(key);
       });
     }
   }
 
   async #verifyNewSessionDraftMcp(key: NewSessionDraftKey): Promise<void> {
-    const client = this.#runtime.client;
-    const instance_id = this.connection.instance_id;
-    const draft = this.new_session_drafts.get(key);
+    const runtime = this.#runtime;
+    const connection = this.connection;
+    const drafts = this.new_session_drafts;
+    const client = runtime.client;
+    const instance_id = connection.instance_id;
+    const draft = drafts.get(key);
     if (!client || !draft?.selected_mcp) return;
     const request = {};
     const server_key = draft.selected_mcp.server_key;
@@ -1602,10 +1856,10 @@ export class RootStore {
         variant: draft.variant,
       });
       runInAction(() => {
-        if (client === this.#runtime.client && instance_id === this.connection.instance_id
+        if (client === runtime.client && instance_id === connection.instance_id
           && this.#draft_mcp_requests.get(key) === request
-          && this.new_session_drafts.get(key)?.workspace_id === draft.workspace_id) {
-          this.new_session_drafts.setSelectedMcpAvailability(
+          && drafts.get(key)?.workspace_id === draft.workspace_id) {
+          drafts.setSelectedMcpAvailability(
             key, server_key, available.some((server) => server.server_key === server_key),
           );
         }

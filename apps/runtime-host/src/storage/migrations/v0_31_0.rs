@@ -26,13 +26,14 @@ mod tests {
             .prefix("v031-release-")
             .tempdir_in(root)
             .unwrap();
-        let manifest = manifest();
+        let entries = manifest();
+        let manifest = &entries[..10];
         migrate(home.path(), "0.30.0", &manifest[..9]).unwrap();
         let path = home.path().join("data/runtime.sqlite3");
         let old = Connection::open(&path).unwrap();
         old.execute("INSERT INTO sessions(session_id,title,system_prompt_json,skill_catalog_json,lifecycle,body_generation,message_count,created_at_ms,updated_at_ms,context_management_mode) VALUES('release-fixture','保留会话','[]','[]','active',1,0,1,1,'local_summary')", []).unwrap();
         drop(old);
-        let report = migrate(home.path(), "0.31.0", &manifest).unwrap();
+        let report = migrate(home.path(), "0.31.0", manifest).unwrap();
         assert_eq!(report.applied, ["0.31.0"]);
         let backup = report.backup.unwrap().join("runtime.sqlite3");
         for database in [&path, &backup] {
@@ -41,7 +42,7 @@ mod tests {
             let row: (i64, String, String) = connection.query_row("SELECT COUNT(*),title,context_management_mode FROM sessions WHERE session_id='release-fixture'", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
             assert_eq!(row, (1, "保留会话".into(), "local_summary".into()));
         }
-        let repeated = migrate(home.path(), "0.31.0", &manifest).unwrap();
+        let repeated = migrate(home.path(), "0.31.0", manifest).unwrap();
         assert!(repeated.applied.is_empty());
         assert!(repeated.backup.is_none());
     }

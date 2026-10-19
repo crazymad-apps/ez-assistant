@@ -67,6 +67,7 @@ fn preferences_round_trip_without_runtime_state() {
             model_id: "model-a".to_owned(),
         }),
         resource_workspace: Some(serde_json::json!({"current_scope_key":"session:a","groups":[]})),
+        desktop_workspace: None,
     };
     save_to_directory(directory.path(), preferences).expect("save");
     let loaded = load_from_directory(directory.path()).expect("load");
@@ -174,4 +175,33 @@ fn invalid_device_defaults_are_rejected_instead_of_becoming_runtime_state() {
         })
         .is_err()
     );
+}
+
+#[test]
+fn network_preferences_backup_original_once_and_preserve_other_namespaces_and_theme() {
+    let directory = tempdir().unwrap();
+    save_to_directory(directory.path(), DesktopPreferences::default()).unwrap();
+    save_theme_to_directory(directory.path(), "default_light").unwrap();
+    let original = fs::read(directory.path().join(PREFERENCES_FILE)).unwrap();
+    let namespace = "http://host.test:7240/users/11111111-1111-4111-8111-111111111111/7";
+    let preferences = DesktopPreferences {
+        desktop_workspace: Some(
+            serde_json::json!({ "version": 1, "owner": namespace, "pins": { "imported": true, "items": [] } }),
+        ),
+        ..DesktopPreferences::default()
+    };
+    save_namespace(directory.path(), preferences.clone(), Some(namespace)).unwrap();
+    let backup = directory
+        .path()
+        .join("desktop-preferences.pre-network.json");
+    assert_eq!(fs::read(&backup).unwrap(), original);
+    let restored: PreferencesDocument =
+        serde_json::from_slice(&fs::read(&backup).unwrap()).unwrap();
+    assert!(restored.hosts.is_empty());
+    save_namespace(directory.path(), preferences.clone(), Some(namespace)).unwrap();
+    let document = load_document(directory.path()).unwrap();
+    assert_eq!(document.hosts.get(namespace), Some(&preferences));
+    assert_eq!(document.local, DesktopPreferences::default());
+    assert_eq!(document.theme_id, Some(serde_json::json!("default_light")));
+    assert_eq!(fs::read(&backup).unwrap(), original);
 }

@@ -22,7 +22,7 @@ import shared from "./index.module.scss";
 export const SkillSettingsPage = observer(function SkillSettingsPage() {
   const store = useRootStore();
   const settings = store.settings;
-  const workspaces = store.projection.application?.workspaces.filter((item) => item.lifecycle === "active") ?? [];
+  const workspaces = store.local_projection.application?.workspaces.filter((item) => item.lifecycle === "active") ?? [];
   const [tab, setTab] = useState<"skills" | "diagnostics">("skills");
   const [scope_open, setScopeOpen] = useState(false);
   const [selected_name, setSelectedName] = useState<string | null>(null);
@@ -96,7 +96,7 @@ export const SkillSettingsPage = observer(function SkillSettingsPage() {
             trigger_class_name={styles.workspace_select}
             trigger_variant="compact"
           />
-          {store.files.native_host && <details className={styles.directory_menu}>
+          {store.local_files.native_host && <details className={styles.directory_menu}>
             <summary>打开来源目录</summary>
             <div>
               {directory_sources.map((item) => {

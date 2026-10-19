@@ -4,7 +4,7 @@ import type { AddressInfo } from 'node:net';
 import Fastify from 'fastify';
 import { expect, it } from 'vitest';
 import { RequestBodies, requestModel } from '../../dist/llm/body.js';
-import { responseHeaders, transfer } from '../../dist/llm/transport.js';
+import { responseHeaders, requestHeaders, transfer } from '../../dist/llm/transport.js';
 
 it('只解析准入字段，拒绝重复转义 model、非对象、非法 UTF-8 与 stream', () => {
   expect(requestModel(Buffer.from('{"model":"m","n":9007199254740993,"nested":{"model":"x"}}'))).toEqual({
@@ -59,6 +59,8 @@ it('两协议保持原始请求和响应，过滤伪造控制头，不跟随跳�
     expect(Buffer.concat(chunks)).toEqual(payload);
     expect(request.headers.authorization).toBe('Bearer secret');
     expect(request.headers['accept-encoding']).toBe('identity');
+    expect(request.headers['x-opencode-session']).toBe('stable-session');
+    expect(request.headers['user-agent']).toBe('ez-assistant/test');
     response.writeHead(307, {
       location: '/redirect',
       'x-ez-center-control': '1',
@@ -77,6 +79,7 @@ it('两协议保持原始请求和响应，过滤伪造控制头，不跟随跳�
         endpoint: `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`,
         protocol,
         apiKey: 'secret',
+        requestHeaders: requestHeaders(['X-OpenCode-Session', 'stable-session', 'User-Agent', 'ez-assistant/test', 'Authorization', 'ignored-client-secret']),
         body: payload,
         signal: new AbortController().signal,
         connectTimeout: 1000,
@@ -232,4 +235,16 @@ it('压缩与计量固定路由独立于生成，拒绝辅助请求混入续接�
     server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));
   }
+});
+
+it('请求头只透传白名单原值，缺失不生成；重复、控制字符和超长均拒绝', () => {
+  expect(requestHeaders(['Authorization', 'Bearer ignored', 'Cookie', 'ignored'])).toEqual({});
+  expect(requestHeaders(['X-OpenCode-Session', 'owner', 'User-Agent', 'ez-assistant/test'])).toEqual({ 'x-opencode-session': 'owner', 'user-agent': 'ez-assistant/test' });
+  for (const values of [
+    ['x-opencode-session', 'one', 'X-OpenCode-Session', 'two'],
+    ['User-Agent', 'one', 'user-agent', 'two'],
+    ['x-opencode-session', 'x'.repeat(129)], ['User-Agent', 'x'.repeat(257)],
+    ['x-opencode-session', ''], ['User-Agent', '   '], ['User-Agent', 'bad\r\nheader'],
+    ['x-opencode-session', 'bad\0header'],
+  ]) expect(() => requestHeaders(values)).toThrow('模型请求格式无效');
 });

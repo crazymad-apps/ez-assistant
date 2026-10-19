@@ -47,7 +47,7 @@ export function ModelSettingsPopover(props: ModelSettingsPopoverProps) {
     });
   }
   return (
-    <ModelPicker
+    <ModelPicker source="conversation"
       title="模型设置" label={props.model_display_name}
       providers={props.providers} selection={props.selection} follow_default
       additional_categories={categories}

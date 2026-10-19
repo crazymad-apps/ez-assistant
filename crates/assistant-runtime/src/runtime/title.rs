@@ -218,6 +218,11 @@ async fn begin_title_generation(
         &prepared.model,
         context.model_factory.as_ref(),
         None,
+        &super::model::conversation_routing_id(
+            &assistant_protocol::ConversationOwner::MainSession {
+                session_id: session.id().clone(),
+            },
+        ),
     )?;
     if !compiled.model.capabilities().tool_calls {
         return Err(RuntimeError::InvalidRequest {

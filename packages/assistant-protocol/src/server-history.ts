@@ -2,6 +2,9 @@ import type { ModelFeatureSupport, ProviderConnection } from "./generated/assist
 
 /** 与 Rust ProviderConnection 的纯能力投影一致；自定义接口须显式声明，不由模型名猜测。 */
 export function serverHistorySupport(connection: ProviderConnection): ModelFeatureSupport {
+  if (connection.provider_type === "opencode") {
+    return connection.protocol_preference === "responses" && connection.server_history_support_override !== "unsupported" ? "unknown" : "unsupported";
+  }
   const responses = ["openai", "deepseek", "dashscope_api", "dashscope_plan", "moonshot"].includes(connection.provider_type)
     && connection.protocol_preference !== "chat_completions";
   if (!responses) return "unsupported";

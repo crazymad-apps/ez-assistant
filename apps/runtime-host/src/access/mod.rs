@@ -4,6 +4,7 @@ mod config;
 mod credentials;
 pub(crate) mod enterprise;
 pub(crate) mod offline;
+pub(crate) mod registration;
 #[cfg(test)]
 mod tests;
 
@@ -30,6 +31,10 @@ pub(crate) enum AccessError {
     Center(#[from] enterprise::CenterError),
     #[error("登录已失效，请重新登录。")]
     Unauthorized,
+    #[error("没有该设备的访问权限。")]
+    NetworkDenied,
+    #[error("设备访问已结束，请重新连接。")]
+    NetworkEnded,
     #[error("操作过于频繁，请稍后重试。")]
     Busy,
     #[error("配置已被修改，请重新载入后保存。")]
@@ -48,7 +53,9 @@ impl AccessError {
             Self::Center(_) => RuntimeErrorCode::ConfigurationUnavailable,
             Self::Conflict => RuntimeErrorCode::ConfigurationConflict,
             Self::Unavailable | Self::Busy => RuntimeErrorCode::ConfigurationUnavailable,
-            Self::Unauthorized => RuntimeErrorCode::OperationNotAllowed,
+            Self::Unauthorized | Self::NetworkDenied | Self::NetworkEnded => {
+                RuntimeErrorCode::OperationNotAllowed
+            }
             Self::Invalid(_) | Self::PortInUse(_) => RuntimeErrorCode::InvalidRequest,
         };
         RuntimeErrorInfo::new(code, self.to_string())
@@ -59,6 +66,12 @@ struct AccessRequest {
     command: Option<HostAccessCommand>,
     permit: AccessPermit,
     reply: oneshot::Sender<Result<HostAccessStatus, AccessError>>,
+}
+
+struct RegistrationRequest {
+    command: assistant_protocol::HostRegistrationCommand,
+    permit: AccessPermit,
+    reply: oneshot::Sender<Result<assistant_protocol::HostRegistrationStatus, AccessError>>,
 }
 
 struct CenterBindingRequest {
@@ -72,12 +85,31 @@ pub(crate) struct HostAccessHandle {
     pub(crate) protected_files: Arc<RwLock<Vec<std::path::PathBuf>>>,
     pub(crate) credentials: Arc<Credentials>,
     commands: mpsc::Sender<AccessRequest>,
+    queries: mpsc::Sender<AccessRequest>,
     remote: Arc<RwLock<RemoteAccess>>,
     center: Arc<RwLock<Option<enterprise::CenterClient>>>,
     binding: mpsc::Sender<CenterBindingRequest>,
+    registration: mpsc::Sender<RegistrationRequest>,
+    pub(crate) network: registration::network::Network,
 }
 
 impl HostAccessHandle {
+    pub(crate) async fn registration(
+        &self,
+        command: assistant_protocol::HostRegistrationCommand,
+        permit: AccessPermit,
+    ) -> Result<assistant_protocol::HostRegistrationStatus, AccessError> {
+        permit.check()?;
+        let (reply, receive) = oneshot::channel();
+        self.registration
+            .try_send(RegistrationRequest {
+                command,
+                permit,
+                reply,
+            })
+            .map_err(|_| AccessError::Busy)?;
+        receive.await.map_err(|_| AccessError::Unavailable)?
+    }
     pub(crate) fn center(&self) -> Option<enterprise::CenterClient> {
         self.center
             .read()
@@ -105,7 +137,12 @@ impl HostAccessHandle {
     ) -> Result<HostAccessStatus, AccessError> {
         permit.check()?;
         let (reply, receive) = oneshot::channel();
-        self.commands
+        let sender = if matches!(command, Some(HostAccessCommand::GetStatus)) {
+            &self.queries
+        } else {
+            &self.commands
+        };
+        sender
             .try_send(AccessRequest {
                 command,
                 permit,
@@ -121,39 +158,51 @@ pub(crate) struct HostAccessService {
     source: Arc<LocalConfigSource>,
     credentials: Arc<Credentials>,
     commands: mpsc::Receiver<AccessRequest>,
+    queries: Option<mpsc::Receiver<AccessRequest>>,
     remote: Arc<RwLock<RemoteAccess>>,
     configuration: HostAccessConfiguration,
     center: Arc<RwLock<Option<enterprise::CenterClient>>>,
     binding: mpsc::Receiver<CenterBindingRequest>,
+    registration: mpsc::Receiver<RegistrationRequest>,
     identity_restart_required: bool,
+    network: registration::network::Network,
 }
 
 impl HostAccessService {
     pub(crate) fn new(source: Arc<LocalConfigSource>) -> (Self, HostAccessHandle) {
         let (commands, receive) = mpsc::channel(16);
+        let (queries, query_receive) = mpsc::channel(16);
         let credentials = Arc::new(Credentials::new());
         let remote = Arc::new(RwLock::new(RemoteAccess::default()));
         let center = Arc::new(RwLock::new(None));
         let (binding, bindings) = mpsc::channel(16);
+        let (registration, registrations) = mpsc::channel(16);
         let protected_files = Arc::new(RwLock::new(Vec::new()));
+        let network = registration::network::Network::new(credentials.clone());
         let handle = HostAccessHandle {
+            network: network.clone(),
             protected_files: protected_files.clone(),
             credentials: credentials.clone(),
             commands,
+            queries,
             remote: remote.clone(),
             center: center.clone(),
             binding,
+            registration,
         };
         (
             Self {
+                network,
                 protected_files,
                 source,
                 credentials,
                 commands: receive,
+                queries: Some(query_receive),
                 remote,
                 configuration: HostAccessConfiguration::default(),
                 center,
                 binding: bindings,
+                registration: registrations,
                 identity_restart_required: false,
             },
             handle,
@@ -191,12 +240,33 @@ impl HostAccessService {
 
     pub(crate) async fn run_until(
         mut self,
-        state: HttpState,
+        _state: HttpState,
         shutdown: CancellationToken,
     ) -> Result<(), AccessError> {
+        let mut identities = self.credentials.subscribe_changes();
+        let mut queries = self.queries.take().expect("access service starts once");
+        let mut recovery = tokio::time::interval(std::time::Duration::from_secs(30));
+        recovery.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
+                _ = identities.changed() => { if self.publish_network().await.is_err() { self.network.clear(); } },
+                _ = self.network.refresh.notified() => {
+                    self.with_status_queries(self.refresh_network(), &mut queries).await;
+                },
+                _ = recovery.tick() => {
+                    if *self.network.status.borrow() != assistant_protocol::HostNetworkState::Online {
+                        self.with_status_queries(self.refresh_network(), &mut queries).await;
+                    }
+                },
                 () = shutdown.cancelled() => break,
+                request = self.registration.recv() => {
+                    let Some(request) = request else { break; };
+                    let result = self.with_status_queries(
+                        self.registration(request.command, request.permit), &mut queries,
+                    ).await;
+                    if self.publish_network().await.is_err() { self.network.clear(); }
+                    let _ = request.reply.send(result);
+                },
                 request = self.binding.recv() => {
                     let Some(request) = request else { break; };
                     let result = self.bind_center(&request.url, &request.id).await;
@@ -204,12 +274,39 @@ impl HostAccessService {
                 },
                 request = self.commands.recv() => {
                     let Some(request) = request else { break; };
-                    let result = self.execute(request.command, &request.permit, &state).await;
+                    let result = self.execute(request.command, &request.permit).await;
                     let _ = request.reply.send(result);
                 },
+                Some(request) = queries.recv() => self.reply_status(request).await,
             }
         }
         Ok(())
+    }
+
+    /// 中心同步可等待网络，但本机只读配置不排在它后面；所有配置写入仍由原 actor 串行执行。
+    async fn with_status_queries<T>(
+        &self,
+        operation: impl std::future::Future<Output = T>,
+        queries: &mut mpsc::Receiver<AccessRequest>,
+    ) -> T {
+        tokio::pin!(operation);
+        loop {
+            tokio::select! {
+                result = &mut operation => return result,
+                Some(request) = queries.recv() => self.reply_status(request).await,
+            }
+        }
+    }
+
+    async fn reply_status(&self, request: AccessRequest) {
+        let result = async {
+            request.permit.check()?;
+            let document = load(self.source.as_ref()).await?;
+            request.permit.check()?;
+            Ok(self.status(&document))
+        }
+        .await;
+        let _ = request.reply.send(result);
     }
 
     /// 与 Host 配置操作共用 actor；文件 CAS 检查外部改动，不覆盖另一个中心的绑定。
@@ -235,7 +332,6 @@ impl HostAccessService {
         &mut self,
         command: Option<HostAccessCommand>,
         permit: &AccessPermit,
-        _state: &HttpState,
     ) -> Result<HostAccessStatus, AccessError> {
         permit.check()?;
         let Some(command) = command else {
@@ -278,8 +374,11 @@ impl HostAccessService {
                     center_url.as_deref(),
                     clear_center_binding.unwrap_or(false),
                 )?;
-                let identity_changed =
-                    previous_identity != config::identity_fields(&document.document);
+                if mode.is_some() || center_url.is_some() || clear_center_binding == Some(true) {
+                    config::resolve_center(&mut document.document).await?;
+                }
+                let current_identity = config::identity_fields(&document.document);
+                let identity_changed = previous_identity != current_identity;
                 if self.remote_enabled() && !same_endpoint(&configuration, &self.configuration) {
                     return Err(AccessError::Invalid("请先关闭非本地访问，再修改监听配置。"));
                 }
@@ -317,6 +416,9 @@ impl HostAccessService {
                 document = save(self.source.as_ref(), document).await?;
                 self.identity_restart_required |= identity_changed;
                 self.apply_policy(&document)?;
+                if identity_changed {
+                    self.network.clear();
+                }
             }
         }
         Ok(self.status(&document))
@@ -434,6 +536,7 @@ impl RemoteAccess {
 }
 impl Drop for HostAccessService {
     fn drop(&mut self) {
+        self.network.clear();
         // actor 异常退出同样拒绝远程访问并结束已有流；本机入口仍可报告服务不可用。
         if let Ok(mut remote) = self.remote.write() {
             remote.disable();

@@ -311,6 +311,8 @@
 }
 
 .session_open {
+  gap: 6px;
+  > svg { flex-shrink: 0; }
   height: auto;
   display: flex;
   min-width: 0;

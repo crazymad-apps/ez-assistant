@@ -5,6 +5,11 @@ mod legacy_schema;
 
 use super::*;
 
+#[test]
+fn compiled_release_has_complete_migration_manifest() {
+    validate_manifest(env!("CARGO_PKG_VERSION"), &manifest()).unwrap();
+}
+
 fn db(home: &Path) -> Connection {
     let path = home.join(DATA_DIRECTORY).join(DATABASE_FILE);
     fs::create_dir_all(path.parent().unwrap()).unwrap();

@@ -78,6 +78,8 @@ pub trait ChildTaskWorkspaceFactory: Send + Sync {
 ///
 /// 本类型不实现 `Debug`，因为它短暂借用 API Key。工厂不得保存借用或输出 credential。
 pub struct ModelServiceFactoryRequest<'a> {
+    /// 宿主派生的稳定会话路由；独立于 Run、正文 generation 和服务端历史绑定。
+    pub conversation_routing_id: Option<&'a str>,
     /// 配置已解析的唯一机制；具体工厂不得从模型名或续接开关猜测。
     pub context_management_mode: agent_model::ContextManagementMode,
     /// 已解析续接策略与 owner 的不透明绑定；None 用于所有旁路调用。

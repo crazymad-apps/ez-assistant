@@ -40,6 +40,29 @@ use crate::{
     work_plan::UpdatePlanTool,
 };
 
+/// 现有稳定 owner 直接派生路由；不持久化第二份映射，不依赖配置或正文周期。
+pub(super) fn conversation_routing_id(owner: &assistant_protocol::ConversationOwner) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(b"ez-assistant/conversation-routing/v1\0");
+    let (session, child) = match owner {
+        assistant_protocol::ConversationOwner::MainSession { session_id } => (session_id, None),
+        assistant_protocol::ConversationOwner::ChildTask {
+            session_id,
+            child_task_id,
+        } => (session_id, Some(child_task_id)),
+    };
+    hash.update((session.as_str().len() as u64).to_be_bytes());
+    hash.update(session.as_str().as_bytes());
+    if let Some(child) = child {
+        hash.update(b"child\0");
+        hash.update(child.as_str().as_bytes());
+    } else {
+        hash.update(b"main\0");
+    }
+    format!("{:x}", hash.finalize())
+}
+
 /// 一次配置快照编译出的模型调用边界。
 ///
 /// Run 和连接验证共用这条构造链，避免两者对 endpoint、credential、协议 Adapter、
@@ -47,7 +70,7 @@ use crate::{
 pub(super) struct CompiledModelService {
     input_token_count_supported: bool,
     pub(super) model: Arc<dyn ModelService>,
-    /// 压缩与无状态子任务模板使用无父观察器的服务；续接 child 派生独立服务。
+    /// 压缩与子任务模板使用无父观察器服务；实际 child 始终派生独立 owner 服务。
     background_model: Arc<dyn ModelService>,
     pub(super) provider: agent_types::ProviderId,
     pub(super) protocol: ModelProtocol,
@@ -59,7 +82,7 @@ pub(super) struct CompiledModelService {
 
 /// 父 Run 冻结的模型装配输入；每个 child owner/正文 generation 派生服务，
 /// 不重新选择配置，不复制 Journal，压缩服务仍保持无状态。
-pub(crate) struct HistoryModelBinding {
+pub(crate) struct OwnerModelBinding {
     snapshot: Arc<ConfigSnapshot>,
     model: ResolvedModelConfig,
     factory: Arc<dyn crate::ModelServiceFactory>,
@@ -68,8 +91,33 @@ pub(crate) struct HistoryModelBinding {
     store: Arc<dyn RuntimeStore>,
     session: Arc<SessionController>,
     observer: Option<Arc<dyn ModelAttemptObserver>>,
+    auxiliary: Option<Arc<AuxiliaryVisionBinding>>,
 }
-impl HistoryModelBinding {
+impl OwnerModelBinding {
+    pub(crate) fn bind_child_agent(
+        &self,
+        agent: &Agent,
+        child: &assistant_protocol::ChildTaskId,
+        model: Arc<dyn ModelService>,
+    ) -> RuntimeResult<Agent> {
+        let mut agent = agent
+            .try_with_model(model)
+            .map_err(|source| RuntimeError::AgentBuildFailed { source })?;
+        if let Some(auxiliary) = &self.auxiliary {
+            let inspector =
+                auxiliary.compile(&assistant_protocol::ConversationOwner::ChildTask {
+                    session_id: self.session.id().clone(),
+                    child_task_id: child.clone(),
+                })?;
+            agent = agent
+                .try_with_tool(inspection_tool(inspector, &self.environment)?)
+                .map_err(|_| RuntimeError::InternalStateUnavailable {
+                    component: "child vision tool",
+                })?;
+        }
+        Ok(agent)
+    }
+
     pub(crate) fn compile_child(
         &self,
         child: &assistant_protocol::ChildTaskId,
@@ -106,6 +154,7 @@ impl HistoryModelBinding {
             observer,
             Some(owner),
             Some(owner.rsplit_once(':').map_or(owner, |(base, _)| base)),
+            &conversation_routing_id(&conversation_owner),
         )?;
         bind_image_preparation(
             &mut compiled,
@@ -137,6 +186,74 @@ struct RequestPreparingModelService {
     measurement_session: Option<Arc<SessionController>>,
     session_binding: Option<String>,
     input_token_count_supported: bool,
+}
+
+struct AuxiliaryVisionBinding {
+    snapshot: Arc<ConfigSnapshot>,
+    model: ResolvedModelConfig,
+    factory: Arc<dyn crate::ModelServiceFactory>,
+    environment: crate::SessionExecutionEnvironment,
+    selection: assistant_protocol::ModelSelection,
+    timeout: Duration,
+    output_budget: u32,
+}
+
+impl AuxiliaryVisionBinding {
+    fn compile(
+        &self,
+        owner: &assistant_protocol::ConversationOwner,
+    ) -> RuntimeResult<agent_tools::SharedImageInspector> {
+        let mut auxiliary = compile_resolved_model_service(
+            &self.snapshot,
+            &self.model,
+            self.factory.as_ref(),
+            None,
+            &conversation_routing_id(owner),
+        )?;
+        if !auxiliary.capabilities.image_input {
+            return Err(RuntimeError::InvalidRequest {
+                reason: "辅助模型不支持图片输入，请重新选择。",
+            });
+        }
+        let image_preprocessor =
+            auxiliary
+                .image_preprocessor
+                .clone()
+                .ok_or(RuntimeError::InvalidRequest {
+                    reason: "辅助模型缺少图片预处理能力。",
+                })?;
+        bind_image_preparation(&mut auxiliary, &self.environment, None, None);
+        let (reasoning, provider_options) = protocol_request_options(
+            &auxiliary.provider,
+            auxiliary.protocol,
+            &auxiliary.capabilities,
+            None,
+        )?;
+        Ok(Arc::new(AuxiliaryVisionInspector {
+            selection: self.selection.clone(),
+            model: auxiliary.model,
+            image_preprocessor,
+            reasoning,
+            provider_options,
+            timeout: self.timeout,
+            max_output_tokens: self.output_budget.min(auxiliary.max_output_tokens),
+        }))
+    }
+}
+
+fn inspection_tool(
+    inspector: agent_tools::SharedImageInspector,
+    environment: &crate::SessionExecutionEnvironment,
+) -> RuntimeResult<agent_tools::InspectImagesTool> {
+    let workdir = agent_tools::AbsolutePath::new(&environment.working_directory).map_err(|_| {
+        RuntimeError::InternalStateUnavailable {
+            component: "vision tool working directory",
+        }
+    })?;
+    Ok(agent_tools::InspectImagesTool::new(
+        inspector,
+        agent_tools::SessionPathResolver::new(workdir),
+    ))
 }
 
 struct AuxiliaryVisionInspector {
@@ -611,7 +728,7 @@ impl ModelService for ObservedModelService {
 
 /// 单次 Run 已同时冻结 Agent 规格和对应授权闸。
 pub(super) struct CompiledRunAgent {
-    history_model_binding: Option<Arc<HistoryModelBinding>>,
+    history_model_binding: Option<Arc<OwnerModelBinding>>,
     shell: Option<crate::FrozenShellEnvironment>,
     prepared_model: crate::config::PreparedModel,
     auxiliary_model: Option<crate::config::PreparedModel>,
@@ -628,7 +745,7 @@ pub(super) struct CompiledRunAgent {
 }
 
 pub(super) struct CompiledRunParts {
-    pub(super) history_model_binding: Option<Arc<HistoryModelBinding>>,
+    pub(super) history_model_binding: Option<Arc<OwnerModelBinding>>,
     pub(super) shell: Option<crate::FrozenShellEnvironment>,
     pub(super) model_binding: Arc<crate::config::PreparedModel>,
     pub(super) agent: Agent,
@@ -786,6 +903,9 @@ impl AssistantRuntime {
             None,
             Some(&format!("{state_owner}:{generation}")),
             Some(&state_owner),
+            &conversation_routing_id(&assistant_protocol::ConversationOwner::MainSession {
+                session_id: session.id().clone(),
+            }),
         )?;
         bind_image_preparation(
             &mut compiled,
@@ -872,8 +992,57 @@ pub(super) async fn compile_run_agent(
             state.server_history_key.as_deref().unwrap_or("initial")
         )
     };
-    let history_model_binding = model_config.server_history_key.as_ref().map(|_| {
-        Arc::new(HistoryModelBinding {
+    let mut compiled = compile_resolved_model_service_with_history(
+        snapshot,
+        model_config,
+        resources.model_factory.as_ref(),
+        model_attempt_observer.clone(),
+        Some(&format!(
+            "{history_owner}:{}",
+            session.lock_state()?.body_generation
+        )),
+        Some(&history_owner),
+        &conversation_routing_id(&assistant_protocol::ConversationOwner::MainSession {
+            session_id: session.id().clone(),
+        }),
+    )?;
+    let auxiliary_selection = registry.managed_models()?.settings.vision_model.clone();
+    let mut auxiliary_prepared = None;
+    let mut auxiliary_binding = None;
+    let image_inspector = if !compiled.capabilities.image_input && compiled.capabilities.tool_calls
+    {
+        if let Some(selection) = &auxiliary_selection {
+            let prepared_auxiliary = registry
+                .prepare_model(snapshot, Some(selection), resources.store.as_ref())
+                .await?;
+            let binding = Arc::new(AuxiliaryVisionBinding {
+                snapshot: Arc::new(snapshot.clone()),
+                model: prepared_auxiliary.model.clone(),
+                factory: resources.model_factory.clone(),
+                environment: session.environment().clone(),
+                selection: selection.clone(),
+                timeout: active
+                    .vision()
+                    .map_or(Duration::from_secs(60), |vision| vision.timeout),
+                output_budget: active
+                    .vision()
+                    .map_or(4096, |vision| vision.max_output_tokens),
+            });
+            let inspector =
+                binding.compile(&assistant_protocol::ConversationOwner::MainSession {
+                    session_id: session.id().clone(),
+                })?;
+            auxiliary_binding = Some(binding);
+            auxiliary_prepared = Some(prepared_auxiliary);
+            Some(inspector)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let history_model_binding = Some({
+        Arc::new(OwnerModelBinding {
             snapshot: Arc::new(snapshot.clone()),
             model: model_config.clone(),
             factory: resources.model_factory.clone(),
@@ -882,74 +1051,9 @@ pub(super) async fn compile_run_agent(
             owner: history_owner.clone(),
             store: resources.store.clone(),
             observer: model_attempt_observer.clone(),
+            auxiliary: auxiliary_binding,
         })
     });
-    let mut compiled = compile_resolved_model_service_with_history(
-        snapshot,
-        model_config,
-        resources.model_factory.as_ref(),
-        model_attempt_observer,
-        Some(&format!(
-            "{history_owner}:{}",
-            session.lock_state()?.body_generation
-        )),
-        Some(&history_owner),
-    )?;
-    let auxiliary_selection = registry.managed_models()?.settings.vision_model.clone();
-    let mut auxiliary_prepared = None;
-    let image_inspector: Option<agent_tools::SharedImageInspector> =
-        if !compiled.capabilities.image_input && compiled.capabilities.tool_calls {
-            if let Some(selection) = &auxiliary_selection {
-                let prepared_auxiliary = registry
-                    .prepare_model(snapshot, Some(selection), resources.store.as_ref())
-                    .await?;
-                let mut auxiliary = compile_resolved_model_service(
-                    snapshot,
-                    &prepared_auxiliary.model,
-                    resources.model_factory.as_ref(),
-                    None,
-                )?;
-                if !auxiliary.capabilities.image_input {
-                    return Err(RuntimeError::InvalidRequest {
-                        reason: "辅助模型不支持图片输入，请重新选择。",
-                    });
-                }
-                let image_preprocessor =
-                    auxiliary
-                        .image_preprocessor
-                        .clone()
-                        .ok_or(RuntimeError::InvalidRequest {
-                            reason: "辅助模型缺少图片预处理能力。",
-                        })?;
-                bind_image_preparation(&mut auxiliary, session.environment(), None, None);
-                let (reasoning, provider_options) = protocol_request_options(
-                    &auxiliary.provider,
-                    auxiliary.protocol,
-                    &auxiliary.capabilities,
-                    None,
-                )?;
-                let timeout = active
-                    .vision()
-                    .map_or(Duration::from_secs(60), |vision| vision.timeout);
-                let output_budget = active
-                    .vision()
-                    .map_or(4096, |vision| vision.max_output_tokens);
-                auxiliary_prepared = Some(prepared_auxiliary);
-                Some(Arc::new(AuxiliaryVisionInspector {
-                    selection: selection.clone(),
-                    model: auxiliary.model,
-                    image_preprocessor,
-                    reasoning,
-                    provider_options,
-                    timeout,
-                    max_output_tokens: output_budget.min(auxiliary.max_output_tokens),
-                }) as agent_tools::SharedImageInspector)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
     prepared.ensure_current(registry)?;
     if let Some(auxiliary) = &auxiliary_prepared {
         auxiliary.ensure_current(registry)?;
@@ -1004,6 +1108,7 @@ pub(super) async fn compile_run_agent(
         session.id().clone(),
         session.environment().workspace_id.clone(),
     ));
+    let has_auxiliary_vision = image_inspector.is_some();
     let bundle = resources
         .run_tool_factory
         .compile(crate::RunToolFactoryRequest {
@@ -1203,7 +1308,12 @@ pub(super) async fn compile_run_agent(
         && session.role()? == crate::SessionRole::Controller;
     let mut tool_assembly = RunToolAssembly::default();
     tool_assembly.contribute(RunToolContribution::frozen(base_tools.clone()));
-    let mut child_base_tools = base_tools.clone();
+    // child 的辅助识图在获得独立 owner 后加入，不能复用父会话绑定的工具句柄。
+    let mut child_base_tools = if has_auxiliary_vision {
+        base_tools.clone().without_tool("inspect_images")
+    } else {
+        base_tools.clone()
+    };
     if compiled.model.capabilities().tool_calls {
         tool_assembly.contribute(
             RunToolContribution::tool(crate::feedback::AskUserTool::new(
@@ -1464,6 +1574,7 @@ pub(super) fn compile_resolved_model_service(
     model_config: &ResolvedModelConfig,
     model_factory: &dyn crate::ModelServiceFactory,
     model_attempt_observer: Option<Arc<dyn ModelAttemptObserver>>,
+    routing_id: &str,
 ) -> RuntimeResult<CompiledModelService> {
     compile_resolved_model_service_with_history(
         snapshot,
@@ -1472,6 +1583,7 @@ pub(super) fn compile_resolved_model_service(
         model_attempt_observer,
         None,
         None,
+        routing_id,
     )
 }
 
@@ -1484,6 +1596,7 @@ fn compile_resolved_model_service_with_history(
     model_attempt_observer: Option<Arc<dyn ModelAttemptObserver>>,
     history_owner: Option<&str>,
     state_owner: Option<&str>,
+    routing_id: &str,
 ) -> RuntimeResult<CompiledModelService> {
     model_factory.ensure_available()?;
     let active = snapshot
@@ -1501,6 +1614,7 @@ fn compile_resolved_model_service_with_history(
     let create_bundle = |binding: Option<&str>| {
         model_factory
             .create_model(ModelServiceFactoryRequest {
+                conversation_routing_id: Some(routing_id),
                 context_management_mode: model_config.context_management_mode(),
                 server_history_binding: binding,
                 provider_state_binding: state_binding.as_deref(),

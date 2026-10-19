@@ -16,8 +16,8 @@
 //!   Context Overflow、协议、Tool arguments 和取消的分类，只携带脱敏诊断信息。
 //! - [`TraceContext`]：用 correlation ID 和可选的 1-based attempt 串联跨层诊断，
 //!   不代表业务 Run，也不进入 Provider HTTP 字段。
-//! - [`RetryingModelService`]：按显式有限策略重试建流前瞬态错误，并报告 attempt
-//!   事实；一旦获得事件流便停止介入，Core 始终只看到一个 Model Step。
+//! - [`RetryingModelService`]：按显式有限策略恢复瞬态失败，也可显式启用工具参数
+//!   错误反馈纠正；废弃未提交响应并报告 attempt，Core 始终只看到一个 Model Step。
 //!
 //! 最小调用示例见 `service.rs` 内联测试：`FakeModelService` 演示了通过
 //! [`ModelService`] SPI 完成一次 Turn 的完整路径；真实 Adapter 的端到端调用见

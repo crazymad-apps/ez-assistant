@@ -1,4 +1,5 @@
 import { isTauri } from "@tauri-apps/api/core";
+import { captureRuntimeBinding } from "../native-bridge/runtimeConnection";
 import * as native from "../native-bridge/nativeResource";
 import { RuntimeClientError, type RuntimeClient } from "./RuntimeClient";
 import type {
@@ -14,7 +15,7 @@ import type {
 
 /** 每个 RootStore 自己拥有浏览器 File 与上传操作。切换/退出释放引用，迟到结果不能进入新目标。 */
 export class ClientResources {
-  readonly desktop = isTauri();
+  readonly desktop: boolean;
   readonly #selections = new Map<string, File>();
   readonly #operations = new Map<string, AbortController>();
   readonly #pickers = new Set<() => void>();
@@ -23,12 +24,25 @@ export class ClientResources {
   constructor(
     private readonly current: () => RuntimeClient | null,
     readonly local_host: boolean,
-  ) {}
+    native_binding = true,
+  ) { this.desktop = native_binding && isTauri(); }
+  get native_target(): native.NativeResourceTarget {
+    const client = this.current();
+    if (!client || this.#disposed) throw new Error("Host 尚未连接。");
+    return { binding: captureRuntimeBinding(), device: client.target_device };
+  }
   get native_host(): boolean {
     return this.desktop && this.local_host;
   }
   get address(): string {
     return this.current()?.address ?? "";
+  }
+  transferSelectionsTo(target: ClientResources, ids: readonly string[]): void {
+    if (this.#disposed || target.#disposed || this.desktop !== target.desktop) throw new Error("文件选择所属连接已变化。");
+    if (this.desktop) return; // 原生 selection 仍由同一 binding 持有，草稿同步转移唯一引用。
+    const selected = ids.map((id) => [id, this.#file(id)] as const);
+    if (target.#selections.size + selected.length > 128) throw new Error("目标草稿的文件选择过多。");
+    for (const [id, file] of selected) { target.#selections.set(id, file); this.#selections.delete(id); }
   }
   dispose(): void {
     this.#disposed = true;
@@ -55,7 +69,7 @@ export class ClientResources {
       result = await client.resource(path, init, consume);
     } catch (error) {
       if (error instanceof RuntimeClientError)
-        throw new native.NativeResourceFailure(error.message, error.code);
+        throw new native.NativeResourceFailure(error.message, error.code, error.target_device, error.outcome);
       throw error;
     }
     if (this.#disposed || client !== this.current())
@@ -95,7 +109,7 @@ export class ClientResources {
     request,
   ) =>
     this.desktop
-      ? native.listSessionResourceFiles(id, request)
+      ? native.listSessionResourceFiles(id, request, this.native_target)
       : this.json(
           `/sessions/${encodeURIComponent(id)}/resource-files/list`,
           request,
@@ -105,7 +119,7 @@ export class ClientResources {
     request,
   ) =>
     this.desktop
-      ? native.previewSessionResourceFile(id, request)
+      ? native.previewSessionResourceFile(id, request, this.native_target)
       : this.json(
           `/sessions/${encodeURIComponent(id)}/resource-files/preview`,
           request,
@@ -230,7 +244,7 @@ export class ClientResources {
     operation,
   ) => {
     if (this.desktop)
-      return native.uploadSelectedAttachment(session, selection, operation);
+      return native.uploadSelectedAttachment(session, selection, operation, this.native_target);
     const file = this.#file(selection);
     const form = new FormData();
     form.append("file", file, file.name);
@@ -246,7 +260,7 @@ export class ClientResources {
     manifest: SessionMaterializationManifest,
     operation: string,
   ): Promise<SessionMaterializationResult> => {
-    if (this.desktop) return native.materializeNewSession(manifest, operation);
+    if (this.desktop) return native.materializeNewSession(manifest, operation, this.native_target);
     const form = new FormData();
     form.append("manifest", JSON.stringify(manifest));
     for (const declared of manifest.attachments ?? []) {
@@ -275,7 +289,7 @@ export class ClientResources {
       : previewBlob(this.#file(id));
   previewAttachment: typeof native.previewAttachment = async (session, id) =>
     this.desktop
-      ? native.previewAttachment(session, id)
+      ? native.previewAttachment(session, id, this.native_target)
       : this.#preview(
           `/sessions/${encodeURIComponent(session)}/attachments/${encodeURIComponent(id)}/preview`,
         );
@@ -285,7 +299,7 @@ export class ClientResources {
     resource,
   ) =>
     this.desktop
-      ? native.previewToolFile(owner, message, resource)
+      ? native.previewToolFile(owner, message, resource, this.native_target)
       : this.#preview(`${toolPath(owner, message, resource)}/preview`);
   async #preview(path: string): Promise<native.AttachmentPreview> {
     return this.#request(path, {}, async (r) => previewBlob(await r.blob()));
@@ -295,7 +309,7 @@ export class ClientResources {
     id,
   ) =>
     this.desktop
-      ? native.thumbnailAttachment(session, id)
+      ? native.thumbnailAttachment(session, id, this.native_target)
       : this.#request(
           `/sessions/${encodeURIComponent(session)}/attachments/${encodeURIComponent(id)}/thumbnail`,
           {},
@@ -305,47 +319,54 @@ export class ClientResources {
     session,
     name,
   ) => {
-    if (this.desktop) return native.exportSessionMarkdown(session, name);
+    if (this.desktop) return native.exportSessionMarkdown(session, name, this.native_target);
     await this.download(
       `/sessions/${encodeURIComponent(session)}/export.md`,
       name,
     );
     return true;
   };
-  downloadHostFile = (path: string) =>
+  downloadHostFile = (path: string, open_after = false) =>
     this.download(
       "/host-files/download",
       path.split(/[/\\]/).at(-1) || "download",
       { path },
+      open_after,
     );
   downloadSessionFile = (
     session: string,
     locator: SessionResourceLocator,
     name: string,
+    open_after = false,
   ) =>
     this.download(
       `/sessions/${encodeURIComponent(session)}/resource-files/download`,
       name,
       { locator },
+      open_after,
     );
-  downloadAttachment = (session: string, id: string, name: string) =>
+  downloadAttachment = (session: string, id: string, name: string, open_after = false) =>
     this.download(
       `/sessions/${encodeURIComponent(session)}/attachments/${encodeURIComponent(id)}/download`,
       name,
+      undefined,
+      open_after,
     );
   downloadToolFile = (
     owner: ConversationOwner,
     message: string,
     id: string,
     name: string,
-  ) => this.download(`${toolPath(owner, message, id)}/download`, name);
+    open_after = false,
+  ) => this.download(`${toolPath(owner, message, id)}/download`, name, undefined, open_after);
   download = async (
     path: string,
     name: string,
     body?: unknown,
+    open_after = false,
   ): Promise<void> => {
     if (this.desktop) {
-      await native.downloadRuntimeResource(path, name, body);
+      await native.downloadRuntimeResource(path, name, body, this.native_target, open_after);
       return;
     }
     const blob = await this.#request(

@@ -16,7 +16,7 @@ export const RuntimeOverviewPage = observer(function RuntimeOverviewPage(props: 
   desktop: boolean;
 }>) {
   const root = useRootStore();
-  const connection = root.connection;
+  const connection = root.local_connection;
 
   return <SettingsPageContainer title="Runtime">
     <section className={styles.connection} aria-label="当前连接">
@@ -34,6 +34,11 @@ export const RuntimeOverviewPage = observer(function RuntimeOverviewPage(props: 
       </div>
     </section>
     <div className={styles.sections}>
+      {props.desktop && <button className={styles.row} onClick={() => props.onNavigate("host_registration")} type="button">
+        <span className={styles.icon}><Icon name="globe" size={18} /></span>
+        <strong className={styles.row_text}>企业组网</strong>
+        <Icon name="chevron-right" size={16} />
+      </button>}
       <button className={styles.row} onClick={() => props.onNavigate("host_access")} type="button">
         <span className={styles.icon}><Icon name="shield" size={18} /></span>
         <strong className={styles.row_text}>访问设置</strong>

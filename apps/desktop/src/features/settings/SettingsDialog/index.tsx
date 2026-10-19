@@ -32,12 +32,13 @@ const pages: ReadonlyArray<{ id: SettingsPage; label: string; icon: IconName }> 
   { id: "agents", label: "智能体", icon: "bot" },
 ];
 
-const runtime_pages: readonly SettingsPage[] = ["runtime", "runtime_connection", "host_access", "runtime_diagnostics", "runtime_local"];
+const runtime_pages: readonly SettingsPage[] = ["runtime", "runtime_connection", "host_access", "runtime_diagnostics", "runtime_local", "host_registration"];
 
 export const SettingsDialog = observer(function SettingsDialog() {
   const store = useRootStore();
   const settings = store.settings;
   const close_button_ref = useRef<HTMLButtonElement>(null);
+  const [form_pending, setFormPending] = useState(false);
   const [form_dirty, setFormDirty] = useState(false);
   const [pending_navigation, setPendingNavigation] = useState<Readonly<
     { type: "close" } | { type: "page"; page: SettingsPage }
@@ -50,6 +51,7 @@ export const SettingsDialog = observer(function SettingsDialog() {
   }, [settings.is_open, settings.page, store.memory_settings]);
 
   function requestClose() {
+    if (form_pending) return;
     if (form_dirty) {
       setPendingNavigation({ type: "close" });
       return;
@@ -59,6 +61,7 @@ export const SettingsDialog = observer(function SettingsDialog() {
   }
 
   function selectPage(page: SettingsPage) {
+    if (form_pending) return;
     if (form_dirty) {
       setPendingNavigation({ type: "page", page });
       return;
@@ -80,6 +83,7 @@ export const SettingsDialog = observer(function SettingsDialog() {
     <>
     <Dialog
       aria_label="设置"
+      dismissible={!form_pending}
       backdrop_class_name={styles.backdrop}
       dialog_class_name={styles.dialog}
       initial_focus_ref={close_button_ref}
@@ -88,7 +92,7 @@ export const SettingsDialog = observer(function SettingsDialog() {
     >
         <header className={styles.dialog_header}>
           <h2>设置</h2>
-          <button aria-label="关闭设置" onClick={requestClose} ref={close_button_ref} type="button">
+          <button disabled={form_pending} aria-label="关闭设置" onClick={requestClose} ref={close_button_ref} type="button">
             <Icon name="x" size={17} />
           </button>
         </header>
@@ -97,6 +101,7 @@ export const SettingsDialog = observer(function SettingsDialog() {
             {pages.map((page) => (
               <button
                 aria-current={(page.id === "runtime" ? runtime_pages.includes(settings.page) : settings.page === page.id) ? "page" : undefined}
+                disabled={form_pending}
                 key={page.id}
                 onClick={() => selectPage(page.id)}
                 type="button"
@@ -108,7 +113,7 @@ export const SettingsDialog = observer(function SettingsDialog() {
           </nav>
           <div className={styles.content}>
             {settings.page === "appearance" && <AppearanceSettingsPage />}
-            {runtime_pages.includes(settings.page) && <RuntimeSettingsPage onNavigate={selectPage} onDirtyChange={setFormDirty} />}
+            {runtime_pages.includes(settings.page) && <RuntimeSettingsPage onNavigate={selectPage} onDirtyChange={setFormDirty} onPendingChange={setFormPending} />}
             {settings.page === "notifications" && <NotificationSettingsPage />}
             {settings.page === "devices" && <DeviceSettingsPage />}
             {settings.page === "models" && (

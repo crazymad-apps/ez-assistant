@@ -14,8 +14,12 @@ export type LoginOptionsState = {
 };
 
 export function loginOptionsChanged(status: LocalHostStatus, draft: LoginOptionsDraft): boolean {
+  // 同一 URL 也可能换了中心实例；显式保存时由 Host 核验，待重启配置不重复提交。
   return (
-    draft.mode !== status.mode || (draft.mode === 'enterprise' && draft.center_url.trim() !== (status.center_url ?? ''))
+    (draft.mode === 'enterprise' && !status.restart_required) ||
+    draft.mode !== status.mode || (draft.mode === 'enterprise' && (
+      draft.center_url.trim() !== (status.center_url ?? '')
+    ))
   );
 }
 
@@ -68,14 +72,15 @@ export function loginOptionsIntent(status: LocalHostStatus, draft: LoginOptionsD
   };
 }
 
-/** 回读只核验保存事实，不推断原写请求是否成功，也不重放写入。 */
+/** 中心 ID 由 Host 解析；首次保存核对用户意图，收到权威结果后重启回读还须匹配该 ID。 */
 export function matchesLoginOptions(actual: LocalHostStatus, intended: LocalHostStatus): boolean {
   const a = actual.configuration,
     b = intended.configuration;
   return (
     actual.mode === intended.mode &&
     (actual.center_url ?? '') === (intended.center_url ?? '') &&
-    (actual.center_id ?? '') === (intended.center_id ?? '') &&
+    ((intended.mode === 'enterprise' && !intended.center_id)
+      ? Boolean(actual.center_id) : (actual.center_id ?? '') === (intended.center_id ?? '')) &&
     a.remote_enabled === b.remote_enabled &&
     a.port === b.port &&
     a.scheme === b.scheme &&

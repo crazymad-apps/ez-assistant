@@ -81,6 +81,23 @@ it("does not report successful cleanup when Host reports failure without Closed"
   await closed;
 });
 
+it("releases a terminal locally when the WebSocket close handshake never finishes", async () => {
+  const terminal = new TerminalSocket("http://runtime.test", "token", source, { cols: 80, rows: 24 }, vi.fn(), new AbortController().signal);
+  const socket = SocketFixture.connections[0]!;
+  socket.open();
+  socket.message({ type: "created", terminal_id: "owned", directory_name: "workspace", shell: "zsh", shell_name: "zsh" });
+  await terminal.created;
+  vi.spyOn(socket, "close").mockImplementation(() => { socket.readyState = 2; });
+  let released = false;
+  const closing = terminal.close().then(() => { released = true; });
+
+  await vi.advanceTimersByTimeAsync(4999);
+  expect(released).toBe(false);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(released).toBe(true);
+  await closing;
+});
+
  it("reports incompatible Host before terminal creation", async () => {
   const terminal = new TerminalSocket("http://runtime.test", "token", source, { cols: 80, rows: 24 }, vi.fn(), new AbortController().signal);
   const socket = SocketFixture.connections[0]!;
@@ -101,4 +118,18 @@ it("sends the captured Cookie login context in Open without putting it in the UR
   socket.message({ type: "created", terminal_id: "owned", directory_name: "workspace", shell: "zsh", shell_name: "zsh" });
   await terminal.created;
   owner.abort();
+});
+
+it("routes a remote terminal through the local Host without placing credentials in the URL", async () => {
+  const terminal = new TerminalSocket("http://local.test:7240", "secret", source, { cols: 80, rows: 24 }, vi.fn(), new AbortController().signal, null, "login-one", "device-one", 20_000);
+  const socket = SocketFixture.connections[0]!;
+  expect(socket.url.toString()).toBe("ws://local.test:7240/user-terminals/socket?target_device=device-one");
+  socket.open();
+  expect(JSON.parse(socket.sent[0] as string)).toMatchObject({ bearer: "secret", login_context: "login-one", source });
+  const failed = expect(terminal.created).rejects.toThrow("超时");
+  await vi.advanceTimersByTimeAsync(19_999);
+  expect(socket.readyState).toBe(1);
+  await vi.advanceTimersByTimeAsync(1);
+  await failed;
+  expect(socket.readyState).toBe(3);
 });

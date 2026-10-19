@@ -252,7 +252,7 @@ describe("ContextPanel", () => {
       relative_path: "",
     });
     expect(copy).toHaveBeenCalledWith("/workspace/old-project");
-    expect(store.workspace_editor).toEqual({ mode: "edit", workspace_id: "workspace-1" });
+    expect(store.workspace_editor).toEqual({ mode: "edit", workspace_id: "workspace-1", device: null });
     expect(screen.queryByText("本会话创建时使用")).not.toBeInTheDocument();
     expect(screen.queryByText("工作区不是强沙盒。", { exact: false })).not.toBeInTheDocument();
   });

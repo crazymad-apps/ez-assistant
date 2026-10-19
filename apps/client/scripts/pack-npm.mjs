@@ -60,6 +60,12 @@ for (const argument of hostArguments) {
   const name = `@ez-assistant/client-${target}`, directory = join(work, `platform-${target}`);
   await mkdir(join(directory, "host"), { recursive: true });
   await cp(host, join(directory, "host/ez-assistant-runtime")); await chmod(join(directory, "host/ez-assistant-runtime"), 0o755);
+  if (os === "darwin") {
+    const capture = join(dirname(host), "ez-assistant-desktop-capture");
+    assert((await stat(capture)).isFile(), "macOS Host 随包采集程序缺失");
+    await cp(capture, join(directory, "host/ez-assistant-desktop-capture"));
+    await chmod(join(directory, "host/ez-assistant-desktop-capture"), 0o755);
+  }
   await writeFile(join(directory, "host/manifest.json"), JSON.stringify({ version, min_compatible_version: minimum, platform: os, arch: cpu, sha256: createHash("sha256").update(bytes).digest("hex") }, null, 2) + "\n");
   await writeFile(join(directory, "package.json"), JSON.stringify({ name, version: hostPackageVersion, os: [os], cpu: [cpu], ...(os === "linux" ? { libc: ["glibc"] } : {}), files: ["host"], license: "UNLICENSED", description: "EZ Assistant Client platform payload (Host with embedded Web)" }, null, 2));
   const packed = JSON.parse(runNpm(["pack", "--ignore-scripts", "--json", "--pack-destination", output], directory))[0];

@@ -158,5 +158,33 @@
       "server_history_support_override": "supported"
     },
     "expected": "unsupported"
+  },
+  {
+    "name": "opencode chat_completions does not inherit history support",
+    "connection": {
+      "display_name": "OpenCode",
+      "provider_type": "opencode",
+      "endpoint": "https://opencode.ai/inference/go/openai/v1",
+      "protocol_preference": "chat_completions",
+      "models_path": "/inference/go/v1/models",
+      "discovery_format": "openai",
+      "server_history_enabled": false,
+      "server_history_support_override": null
+    },
+    "expected": "unsupported"
+  },
+  {
+    "name": "opencode responses does not inherit history support",
+    "connection": {
+      "display_name": "OpenCode",
+      "provider_type": "opencode",
+      "endpoint": "https://opencode.ai/inference/go/openai/v1",
+      "protocol_preference": "responses",
+      "models_path": "/inference/go/v1/models",
+      "discovery_format": "openai",
+      "server_history_enabled": false,
+      "server_history_support_override": null
+    },
+    "expected": "unknown"
   }
 ]

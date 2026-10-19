@@ -12,6 +12,7 @@ export class TerminalSocket {
   readonly created: Promise<CreatedTerminal>;
   readonly #socket: WebSocket;
   readonly #closed: Promise<void>;
+  readonly #cancel: () => void;
   #resolveCreated!: (value: CreatedTerminal) => void;
   #rejectCreated!: (error: Error) => void;
   #resolveClosed!: () => void;
@@ -24,16 +25,20 @@ export class TerminalSocket {
   #timer: ReturnType<typeof setTimeout>;
 
   constructor(address: string, bearer: string, source: TerminalSource, size: TerminalSize,
-    receive: (event: TerminalEvent) => void, signal: AbortSignal, shell: ShellKind | null = null, login_context: string | null = null) {
+    receive: (event: TerminalEvent) => void, private readonly signal: AbortSignal, shell: ShellKind | null = null, login_context: string | null = null, target_device: string | null = null, timeout_ms = target_device ? 90_000 : 15_000) {
     const url = new URL("/user-terminals/socket", address);
+    if (target_device) url.searchParams.set("target_device", target_device);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     this.created = new Promise((resolve, reject) => { this.#resolveCreated = resolve; this.#rejectCreated = reject; });
     this.#closed = new Promise((resolve) => { this.#resolveClosed = resolve; });
     this.#socket = new WebSocket(url);
     this.#socket.binaryType = "arraybuffer";
-    const cancel = () => this.disconnect();
-    signal.addEventListener("abort", cancel, { once: true });
-    this.#timer = setTimeout(() => { this.#rejectCreated(new Error("终端连接超时。")); this.disconnect(); }, 15_000);
+    this.#cancel = () => {
+      if (this.#created && !this.#closing && !this.#ended) receive({ type: "error", message: "终端已断开，请重新打开。" });
+      this.disconnect();
+    };
+    signal.addEventListener("abort", this.#cancel, { once: true });
+    this.#timer = setTimeout(() => { this.#rejectCreated(new Error("终端连接超时。")); this.disconnect(); }, Math.max(0, timeout_ms));
     this.#socket.onopen = () => {
       if (this.#closing) { this.disconnect(); return; }
       this.#send({ type: "open", client_compatibility: currentCompatibility(), bearer: bearer || null, login_context, source, size, shell });
@@ -79,13 +84,13 @@ export class TerminalSocket {
     this.#socket.onerror = () => this.#rejectCreated(new Error("无法连接 Host 终端。"));
     this.#socket.onclose = () => {
       clearTimeout(this.#timer);
-      signal.removeEventListener("abort", cancel);
+      signal.removeEventListener("abort", this.#cancel);
       this.#rejectCreated(new Error("终端连接已关闭。"));
       this.#finishInput(new Error("终端连接已关闭。"));
       if (this.#created && !this.#closing && !this.#ended) receive({ type: "error", message: "终端已断开，请重新创建。" });
       this.#resolveClosed();
     };
-    if (signal.aborted) cancel();
+    if (signal.aborted) this.#cancel();
   }
 
   #send(control: UserTerminalControl): void {
@@ -112,7 +117,14 @@ export class TerminalSocket {
   /** 页面离开/连接切换不能等待异步渲染或 xterm，立即关闭本 socket。 */
   disconnect(): void {
     this.#closing = true;
+    clearTimeout(this.#timer);
+    this.signal.removeEventListener("abort", this.#cancel);
+    this.#rejectCreated(new Error("终端连接已关闭。"));
+    this.#finishInput(new Error("终端连接已关闭。"));
     this.#socket.close();
+    // 卡住的 WS 关闭握手不能继续阻塞本地标签回收；远端 PTY 仍由 Host 观察断连后清理。
+    // 本地释放不伪造 Host 的 Closed 回执，显式清理错误仍由 close() 保留。
+    this.#resolveClosed();
   }
   async close(): Promise<void> {
     if (!this.#closing && this.#socket.readyState === WebSocket.OPEN) this.#send({ type: "close" });

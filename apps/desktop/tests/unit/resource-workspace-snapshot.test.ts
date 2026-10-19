@@ -45,7 +45,10 @@ describe("right workspace restart snapshot", () => {
     expect(after.tabs.map((tab) => tab.type)).toEqual(["context", "workspace", "text", "terminal", "browser"]);
     expect(after.active_tab.type).toBe("browser");
     await vi.waitFor(() => expect(native.createBrowser).toHaveBeenCalledWith("https://example.com/last", expect.any(Function)));
-    expect([...after.terminals.values()][0]!.status).toBe("idle");
+    const terminal = [...after.terminals.values()][0]!;
+    expect(terminal.status).toBe("exited");
+    terminal.start();
+    expect(terminal.status).toBe("exited");
     const file = after.tabs[2]!;
     expect(resourceTabKey(file)).toBe("resource:fresh-local");
     expect(after.pageState(after.pageKey(after.active_group, file)).preview?.scroll_top).toBe(220);

@@ -194,6 +194,155 @@ impl ModelService for NativeModel {
 }
 
 #[tokio::test]
+async fn native_to_local_keeps_cutoff_through_manual_or_automatic_summary_and_restart() {
+    for automatic in [false, true] {
+        let mut scripts: Vec<_> = (0..4)
+            .map(|i| {
+                ModelScript::Events(message_events(&assistant_text_with_usage(
+                    &format!("response-{i}"),
+                    &"reliable response ".repeat(100),
+                    120,
+                )))
+            })
+            .collect();
+        if automatic {
+            scripts.push(ModelScript::FailEstablishment(
+                ModelError::ContextOverflow {
+                    message: "synthetic local overflow".into(),
+                },
+            ));
+        }
+        scripts.extend([
+            ModelScript::Events(message_events(&assistant_text("summary", "retained task"))),
+            ModelScript::Events(message_events(&assistant_text("continued", "done"))),
+            ModelScript::Events(message_events(&assistant_text("restarted", "done again"))),
+        ]);
+        let factory = Arc::new(NativeFactory {
+            script: Arc::new(ScriptedModelService::new(
+                model_capabilities(false),
+                8192,
+                scripts,
+            )),
+            compactions: Arc::new(AtomicUsize::new(0)),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        });
+        let runtime = runtime_with_factories(
+            factory.clone(),
+            Arc::new(StaticSystemPromptFactory),
+            ToolSetSnapshot::default(),
+            64,
+        );
+        let mut provider = model_fixture::provider("synthetic");
+        provider.connection.provider_type = assistant_protocol::ProviderType::Openai;
+        provider.connection.protocol_preference =
+            assistant_protocol::ProviderProtocolPreference::Responses;
+        provider.server_history_key = Some("native-switch-config".into());
+        runtime.store.put_provider(provider).await.unwrap();
+        let mut parameters = model_fixture::parameters();
+        parameters.server_compaction_enabled = true;
+        parameters.server_compaction_support = assistant_protocol::ModelFeatureSupport::Supported;
+        model_fixture::save_fixed(&runtime, "fixture", parameters.clone()).await;
+        runtime.restore_model_settings().await.unwrap();
+        let id = runtime
+            .create_session(CreateSessionRequest::default())
+            .await
+            .unwrap()
+            .session
+            .session_id;
+        submit_completed_turn(&runtime, &id, "discarded task one").await;
+        submit_completed_turn(&runtime, &id, "discarded task two").await;
+        runtime
+            .compact_session(assistant_protocol::CompactSessionRequest {
+                session_id: id.clone(),
+                operation_id: assistant_protocol::IdempotencyKey::new("native-before-switch")
+                    .unwrap(),
+                expected_generation: 1,
+            })
+            .await
+            .unwrap();
+        let old_history = runtime.store.load_conversation(&id).await.unwrap();
+        submit_completed_turn(&runtime, &id, "after native one").await;
+        submit_completed_turn(&runtime, &id, "after native two").await;
+        parameters.server_compaction_enabled = false;
+        model_fixture::save_fixed(&runtime, "fixture", parameters).await;
+        let switch_request = factory.requests.lock().unwrap().len();
+        if !automatic {
+            let result = runtime
+                .compact_session(assistant_protocol::CompactSessionRequest {
+                    session_id: id.clone(),
+                    operation_id: assistant_protocol::IdempotencyKey::new("local-after-switch")
+                        .unwrap(),
+                    expected_generation: 2,
+                })
+                .await
+                .unwrap();
+            assert!(matches!(
+                result.outcome,
+                assistant_protocol::CompactSessionOutcome::Compacted { .. }
+            ));
+        }
+        submit_completed_turn(&runtime, &id, "continue locally").await;
+        let store = runtime.store.clone();
+        runtime
+            .shutdown(ShutdownRuntimeRequest::default())
+            .await
+            .unwrap();
+        // 只复用测试内存 Store；重新打开正式 Runtime，不能借旧 Journal 掩盖恢复错误。
+        let reopened = AssistantRuntime::open(
+            RuntimeConfig::new(NonZeroUsize::new(64).unwrap()),
+            Arc::new(MissingConfigSource),
+            factory.clone(),
+            Arc::new(StaticSystemPromptFactory),
+            static_run_tool_factory(ToolSetSnapshot::default()),
+            Arc::new(TestChildWorkspaceFactory::default()),
+            store,
+            Arc::new(crate::permission::VolatilePermissionFileStore::default()),
+        )
+        .await
+        .unwrap();
+        reopened
+            .config_registry
+            .replace_document_for_test(TEST_CONFIG);
+        reopened.restore_model_settings().await.unwrap();
+        submit_completed_turn(&reopened, &id, "continue after restart").await;
+        let history = reopened.store.load_conversation(&id).await.unwrap();
+        assert_eq!(
+            &history.messages[..old_history.messages.len()],
+            old_history.messages.as_slice()
+        );
+        assert_eq!(factory.compactions.load(Ordering::SeqCst), 1);
+        {
+            let requests = factory.requests.lock().unwrap();
+            let local_requests = &requests[switch_request..];
+            assert!(local_requests.len() >= 3);
+            for request in local_requests {
+                assert!(
+                    !request
+                        .conversation
+                        .messages
+                        .iter()
+                        .any(|message| old_history.messages.contains(message))
+                );
+                request.conversation.validate_tool_exchange_pairs().unwrap();
+            }
+            assert!(
+                local_requests
+                    .last()
+                    .unwrap()
+                    .conversation
+                    .messages
+                    .iter()
+                    .any(|message| matches!(message, ConversationMessage::ContextSummary(_)))
+            );
+        }
+        reopened
+            .shutdown(ShutdownRuntimeRequest::default())
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
 async fn native_window_survives_manual_generation_switch_model_change_and_journal_reload() {
     let factory = Arc::new(NativeFactory {
         script: Arc::new(ScriptedModelService::new(

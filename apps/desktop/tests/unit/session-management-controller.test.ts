@@ -157,7 +157,7 @@ function controllerFixture(restored: boolean) {
   const load_session = vi.fn().mockResolvedValue(undefined);
   const select_initial_session = vi.fn().mockResolvedValue(undefined);
   const runtime = {
-    client: { command },
+    client: { command, target_device: null },
     loadApplication: load_application,
     loadSession: load_session,
     selectInitialSession: select_initial_session,

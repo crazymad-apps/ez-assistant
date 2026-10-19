@@ -57,7 +57,7 @@ describe("AttachmentPreviewDialog", () => {
 });
 vi.mock("../../src/runtime-client/ClientResources", async (original) => {
   const actual = await original<typeof import("../../src/runtime-client/ClientResources")>();
-  return {...actual, ClientResources: class extends actual.ClientResources { override readonly desktop = true; }};
+  return {...actual, ClientResources: class extends actual.ClientResources { override readonly desktop = true; override get native_target() { return { binding: null, device: null }; } }};
 });
 vi.mock("../../src/stores/RootStoreContext", async () => {
   const { ClientResources } = await import("../../src/runtime-client/ClientResources");

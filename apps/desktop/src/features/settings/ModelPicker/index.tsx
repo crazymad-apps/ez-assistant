@@ -11,6 +11,7 @@ import { SettingsCascadePopover, type SettingsCascadeCategory } from '../../../c
 import { useRootStore } from '../../../stores/RootStoreContext';
 
 export type ModelPickerProps = Readonly<{
+  source?: "conversation" | "settings";
   providers: readonly ProviderSummary[];
   selection: ModelSelection | null;
   title: string;
@@ -32,13 +33,16 @@ export type ModelPickerProps = Readonly<{
 export function ModelPicker(props: ModelPickerProps) {
   const root = useRootStore();
   const settings = root.settings;
+  const remote = props.source === "conversation" && root.remote_device;
+  const client = remote ? root.runtime_client : null;
+  const application = props.source === "conversation" ? root.projection.application : root.local_projection.application;
   const read_only =
-    root.projection.application?.model_settings.management?.read_only ??
+    application?.model_settings.management?.read_only ??
     settings.model_settings.management?.read_only ??
     false;
   const selection =
     read_only && props.follow_default
-      ? (root.projection.application?.model_settings.default_model ?? settings.model_settings.default_model)
+      ? (application?.model_settings.default_model ?? settings.model_settings.default_model)
       : props.selection;
   const [result, setResult] = useState<Readonly<{
     provider_id: ProviderInstanceId;
@@ -56,7 +60,7 @@ export function ModelPicker(props: ModelPickerProps) {
       setResult(null);
     }
     return () => request.current?.abort();
-  }, [props.open]);
+  }, [props.open, client]);
   async function load(provider_id: ProviderInstanceId) {
     request.current?.abort();
     const current = new AbortController();
@@ -73,7 +77,8 @@ export function ModelPicker(props: ModelPickerProps) {
     // 两种来源独立加载，慢目录和失败目录不阻塞持久化模型。
     void (async () => {
       try {
-        const models = await settings.listProviderModels(provider_id, current.signal);
+        const models = client ? (await client.command({ type: "list_provider_models", payload: { provider_instance_id: provider_id } }, { signal: current.signal })).payload.models
+          : await settings.listProviderModels(provider_id, current.signal);
         if (!current.signal.aborted) setResult((value) => (value ? { ...value, models, loading: false } : value));
       } catch (failure: unknown) {
         if (!current.signal.aborted)
@@ -85,7 +90,14 @@ export function ModelPicker(props: ModelPickerProps) {
       }
     })();
     try {
-      const fixed = await settings.listAllFixedModels(provider_id, current.signal);
+      const fixed: ModelFixedConfig[] = [];
+      if (client) {
+        for (let offset = 0; !current.signal.aborted; offset += 20) {
+          const page = (await client.command({ type: "list_fixed_model_configs", payload: { provider_instance_id: provider_id, offset, limit: 20 } }, { signal: current.signal })).payload;
+          fixed.push(...page);
+          if (page.length < 20) break;
+        }
+      } else fixed.push(...await settings.listAllFixedModels(provider_id, current.signal));
       if (!current.signal.aborted) setResult((value) => (value ? { ...value, fixed, fixed_loading: false } : value));
     } catch (failure: unknown) {
       if (!current.signal.aborted)
@@ -192,7 +204,7 @@ export function ModelPicker(props: ModelPickerProps) {
       }
       primary_content={<>{props.providers.length === 0 && <p>暂无服务商</p>}</>}
       footer_content={
-        props.show_manage_providers !== false && (
+        !remote && props.show_manage_providers !== false && (
           <Button
             type="button"
             role="menuitem"

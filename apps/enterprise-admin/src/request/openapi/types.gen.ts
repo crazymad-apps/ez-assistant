@@ -6,6 +6,10 @@ export type ClientOptions = {
 
 export type CenterInfo = {
     /**
+     * 稳定中心身份；地址变化不改变身份
+     */
+    center_id: string;
+    /**
      * 已实现能力；代理就绪后才声明 llm_proxy
      */
     capabilities: Array<string>;
@@ -201,7 +205,7 @@ export type AuditPage = {
 
 export type ProviderConnection = {
     display_name: string;
-    provider_type: 'openai' | 'deepseek' | 'dashscope_api' | 'dashscope_plan' | 'moonshot' | 'zhipu' | 'vllm' | 'local';
+    provider_type: 'openai' | 'opencode' | 'deepseek' | 'dashscope_api' | 'dashscope_plan' | 'moonshot' | 'zhipu' | 'vllm' | 'local';
     endpoint: string;
     protocol_preference: 'auto' | 'responses' | 'chat_completions';
     models_path: string;
@@ -351,7 +355,7 @@ export type RuntimeModelConfiguration = {
     center_id: string;
     reason?: string;
     endpoint?: string;
-    provider_type?: 'openai' | 'deepseek' | 'dashscope_api' | 'dashscope_plan' | 'moonshot' | 'zhipu' | 'vllm' | 'local';
+    provider_type?: 'openai' | 'opencode' | 'deepseek' | 'dashscope_api' | 'dashscope_plan' | 'moonshot' | 'zhipu' | 'vllm' | 'local';
     provider_display_name?: string;
     protocol?: 'open_ai_responses' | 'open_ai_chat_completions';
     model_id?: string;
@@ -767,6 +771,93 @@ export type HandleFeedbackRequest = {
     handling_note: string | null;
 };
 
+export type ApplyHostDevice = {
+    center_id: string;
+    id: string;
+    installation_id: string;
+    name: string;
+    platform: string;
+    host_version: string;
+};
+
+export type HostDeviceSummary = {
+    /**
+     * 管理员列表中的当前授权人数
+     */
+    user_count?: number;
+    id: string;
+    installation_id: string;
+    name: string;
+    platform: string;
+    host_version: string;
+    applicant_user_id: number;
+    status: 'pending' | 'registered' | 'rejected' | 'withdrawn' | 'revoked';
+    enabled: boolean;
+    /**
+     * 当前已认证控制连接是否在线
+     */
+    online: boolean;
+    created_at: string;
+    updated_at: string;
+};
+
+export type HostRegistrationResult = {
+    center_id: string;
+    device: HostDeviceSummary | null;
+};
+
+export type EndHostRegistration = {
+    action: 'withdraw' | 'exit';
+};
+
+export type HostDevicePage = {
+    items: Array<HostDeviceSummary>;
+    total: number;
+    limit: number;
+    offset: number;
+};
+
+export type HostDeviceGrant = {
+    user_id: number;
+    desktop_view: boolean;
+    desktop_control: boolean;
+};
+
+export type HostDeviceDetail = {
+    /**
+     * 管理员列表中的当前授权人数
+     */
+    user_count?: number;
+    id: string;
+    installation_id: string;
+    name: string;
+    platform: string;
+    host_version: string;
+    applicant_user_id: number;
+    status: 'pending' | 'registered' | 'rejected' | 'withdrawn' | 'revoked';
+    enabled: boolean;
+    /**
+     * 当前已认证控制连接是否在线
+     */
+    online: boolean;
+    created_at: string;
+    updated_at: string;
+    assigned_users: Array<IdentityUser>;
+    users: Array<HostDeviceGrant>;
+};
+
+export type HostDeviceState = {
+    status: 'pending' | 'registered' | 'rejected' | 'withdrawn' | 'revoked';
+    name: string;
+    enabled: boolean;
+    users: Array<HostDeviceGrant>;
+};
+
+export type ManageHostDevice = {
+    expected: HostDeviceState;
+    desired: HostDeviceState;
+};
+
 export type SiteScenario = {
     id: string;
     label: string;
@@ -965,6 +1056,16 @@ export type CredentialChangeWritable = {
 export type SaveProviderWritable = {
     connection: ProviderConnection;
     credential: CredentialChangeWritable;
+};
+
+export type ApplyHostDeviceWritable = {
+    center_id: string;
+    id: string;
+    installation_id: string;
+    secret: string;
+    name: string;
+    platform: string;
+    host_version: string;
 };
 
 export type GetCenterInfoData = {
@@ -2422,6 +2523,154 @@ export type HandleFeedbackResponses = {
 };
 
 export type HandleFeedbackResponse = HandleFeedbackResponses[keyof HandleFeedbackResponses];
+
+export type ApplyHostDeviceData = {
+    body: ApplyHostDeviceWritable;
+    path?: never;
+    query?: never;
+    url: '/api/host-devices';
+};
+
+export type ApplyHostDeviceErrors = {
+    /**
+     * 登记身份、用户权限或编辑冲突
+     */
+    default: CenterErrorResponse;
+};
+
+export type ApplyHostDeviceError = ApplyHostDeviceErrors[keyof ApplyHostDeviceErrors];
+
+export type ApplyHostDeviceResponses = {
+    200: HostRegistrationResult;
+};
+
+export type ApplyHostDeviceResponse = ApplyHostDeviceResponses[keyof ApplyHostDeviceResponses];
+
+export type GetHostRegistrationData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/api/host-devices/{id}/registration';
+};
+
+export type GetHostRegistrationErrors = {
+    /**
+     * 登记身份、用户权限或编辑冲突
+     */
+    default: CenterErrorResponse;
+};
+
+export type GetHostRegistrationError = GetHostRegistrationErrors[keyof GetHostRegistrationErrors];
+
+export type GetHostRegistrationResponses = {
+    200: HostRegistrationResult;
+};
+
+export type GetHostRegistrationResponse = GetHostRegistrationResponses[keyof GetHostRegistrationResponses];
+
+export type EndHostRegistrationData = {
+    body: EndHostRegistration;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/api/host-devices/{id}/registration';
+};
+
+export type EndHostRegistrationErrors = {
+    /**
+     * 登记身份、用户权限或编辑冲突
+     */
+    default: CenterErrorResponse;
+};
+
+export type EndHostRegistrationError = EndHostRegistrationErrors[keyof EndHostRegistrationErrors];
+
+export type EndHostRegistrationResponses = {
+    200: HostRegistrationResult;
+};
+
+export type EndHostRegistrationResponse = EndHostRegistrationResponses[keyof EndHostRegistrationResponses];
+
+export type ListHostDevicesData = {
+    body?: never;
+    path?: never;
+    query: {
+        search?: string;
+        /**
+         * 按已登记／未登记分栏分页，未登记中待审批优先
+         */
+        status: string;
+        limit?: number;
+        offset?: number;
+    };
+    url: '/api/admin/host-devices';
+};
+
+export type ListHostDevicesErrors = {
+    /**
+     * 登记身份、用户权限或编辑冲突
+     */
+    default: CenterErrorResponse;
+};
+
+export type ListHostDevicesError = ListHostDevicesErrors[keyof ListHostDevicesErrors];
+
+export type ListHostDevicesResponses = {
+    200: HostDevicePage;
+};
+
+export type ListHostDevicesResponse = ListHostDevicesResponses[keyof ListHostDevicesResponses];
+
+export type GetHostDeviceData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/api/admin/host-devices/{id}';
+};
+
+export type GetHostDeviceErrors = {
+    /**
+     * 登记身份、用户权限或编辑冲突
+     */
+    default: CenterErrorResponse;
+};
+
+export type GetHostDeviceError = GetHostDeviceErrors[keyof GetHostDeviceErrors];
+
+export type GetHostDeviceResponses = {
+    200: HostDeviceDetail;
+};
+
+export type GetHostDeviceResponse = GetHostDeviceResponses[keyof GetHostDeviceResponses];
+
+export type ManageHostDeviceData = {
+    body: ManageHostDevice;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/api/admin/host-devices/{id}';
+};
+
+export type ManageHostDeviceErrors = {
+    /**
+     * 登记身份、用户权限或编辑冲突
+     */
+    default: CenterErrorResponse;
+};
+
+export type ManageHostDeviceError = ManageHostDeviceErrors[keyof ManageHostDeviceErrors];
+
+export type ManageHostDeviceResponses = {
+    200: HostDeviceDetail;
+};
+
+export type ManageHostDeviceResponse = ManageHostDeviceResponses[keyof ManageHostDeviceResponses];
 
 export type GetSiteDownloadsData = {
     body?: never;

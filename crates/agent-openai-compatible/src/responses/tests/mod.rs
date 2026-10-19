@@ -1124,6 +1124,74 @@ fn non_streaming_decode_reuses_the_item_state_machine() {
 }
 
 #[tokio::test]
+async fn completed_function_with_missing_closers_is_regenerated_with_error_feedback() {
+    // 保留本次故障的结构，使用虚拟路径；done/completed 不代表 arguments JSON 合法。
+    let bad = r#"{"files":[{"path":"game.js","edits":[]}"#;
+    let good = format!("{bad}]}}");
+    let response = |arguments: &str| {
+        [
+            json!({"type":"response.created","response":{"id":"resp_correction","model":"deepseek-flash"}}),
+            json!({"type":"response.output_item.added","output_index":0,"item":{"id":"fc_correction","type":"function_call","call_id":"call_correction","name":"edit_file","arguments":"","status":"in_progress"}}),
+            json!({"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_correction","delta":arguments}),
+            json!({"type":"response.function_call_arguments.done","output_index":0,"item_id":"fc_correction","arguments":arguments}),
+            json!({"type":"response.output_item.done","output_index":0,"item":{"id":"fc_correction","type":"function_call","call_id":"call_correction","name":"edit_file","arguments":arguments,"status":"completed"}}),
+            json!({"type":"response.completed","response":{"id":"resp_correction","model":"deepseek-flash","status":"completed"}}),
+        ].iter().map(|event| format!("data: {event}\n\n")).collect::<String>()
+    };
+    let transport = Arc::new(RecordedTransport::new([
+        Ok(RecordedResponse::new(200, response(bad))),
+        Ok(RecordedResponse::new(200, response(&good))),
+    ]));
+    let base = OpenAiResponsesService::with_transport(
+        "https://deepseek.test",
+        BearerCredential::new("fixture-key"),
+        "deepseek-flash",
+        128_000,
+        ResponsesProtocolAdapter::deepseek(),
+        transport.clone(),
+    )
+    .unwrap();
+    let service = agent_model::RetryingModelService::new(
+        Arc::new(base),
+        agent_model::ModelRetryPolicy::new(
+            Default::default(),
+            vec![std::time::Duration::ZERO; 2],
+            std::time::Duration::ZERO,
+        )
+        .with_tool_argument_corrections(2),
+    );
+    let mut request = request(vec![user("user_correction", "edit the file")]);
+    request.tools.push(ToolDefinition {
+        name: tool_name("edit_file"),
+        description: "Edit a file".into(),
+        input_schema: json!({"type":"object","properties":{"files":{"type":"array"}}}),
+    });
+    let stream = service
+        .stream(request, ModelCallContext::default())
+        .await
+        .unwrap();
+    let collected = EventCollector::collect_validated(stream).await;
+    let message = collected.assert_finished();
+    assert!(
+        matches!(&message.parts[0], AssistantPart::ToolCall(call) if call.arguments == serde_json::from_str::<Value>(&good).unwrap())
+    );
+    let requests = transport.take_requests();
+    assert_eq!(requests.len(), 2);
+    let corrected_wire: Value = serde_json::from_slice(&requests[1].body).unwrap();
+    assert!(corrected_wire["input"].to_string().contains("invalid JSON"));
+    assert!(
+        corrected_wire["input"]
+            .to_string()
+            .contains("No tool calls from that response were executed")
+    );
+    assert!(
+        !corrected_wire["input"]
+            .to_string()
+            .contains("function_call")
+    );
+}
+
+#[tokio::test]
 async fn service_posts_to_responses_and_keeps_chat_transport_independent() {
     let transport = Arc::new(RecordedTransport::new([Ok(RecordedResponse::new(
         200, TEXT_SSE,

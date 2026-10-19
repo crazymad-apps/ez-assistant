@@ -10,15 +10,12 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::Serialize;
 use sha2::Digest;
 use tokio::io::AsyncWriteExt;
 
 use super::{MAX_ATTACHMENT_BYTES, error::runtime_status};
 use crate::{access::AccessPermit, attachment_hash};
-
-const RANDOM_NAME_BYTES: usize = 16;
 
 #[derive(Serialize)]
 struct UploadErrorBody {
@@ -105,7 +102,7 @@ pub(super) async fn upload_attachment(
     drop(staging);
 
     let media_type = match tokio::task::spawn_blocking({
-        let path = staging_path.clone();
+        let path = staging_path.to_path_buf();
         move || crate::image::sniff_media_type(&path)
     })
     .await
@@ -157,30 +154,21 @@ pub(super) async fn upload_attachment(
     }
 }
 
+/// TempPath 由上传 future 持有：取消时只清理 staging，不删除 Runtime 已搬走的提交结果。
 pub(super) async fn create_staging_file(
     user_root: &std::path::Path,
-) -> io::Result<(PathBuf, tokio::fs::File)> {
-    for _ in 0..16 {
-        let mut random = [0_u8; RANDOM_NAME_BYTES];
-        getrandom::fill(&mut random).map_err(io::Error::other)?;
-        let path = user_root
-            .join("data/staging/uploads")
-            .join(format!("{}.part", URL_SAFE_NO_PAD.encode(random)));
-        match tokio::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&path)
-            .await
-        {
-            Ok(file) => return Ok((path, file)),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "attachment staging name collision",
-    ))
+) -> io::Result<(tempfile::TempPath, tokio::fs::File)> {
+    let directory = user_root.join("data/staging/uploads");
+    // 文件与 guard 在同一阻塞操作内创建；等待者取消时，返回值被丢弃也会自动清理。
+    let (file, path) = tokio::task::spawn_blocking(move || {
+        tempfile::Builder::new()
+            .suffix(".part")
+            .tempfile_in(directory)
+            .map(|file| file.into_parts())
+    })
+    .await
+    .map_err(io::Error::other)??;
+    Ok((path, tokio::fs::File::from_std(file)))
 }
 
 pub(super) fn valid_original_name(name: &str) -> bool {
@@ -192,7 +180,7 @@ pub(super) fn valid_original_name(name: &str) -> bool {
         && !name.contains('\\')
 }
 
-pub(super) async fn cleanup(path: &PathBuf) {
+pub(super) async fn cleanup(path: &std::path::Path) {
     match tokio::fs::remove_file(path).await {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}

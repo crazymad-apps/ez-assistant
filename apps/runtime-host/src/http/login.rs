@@ -249,6 +249,8 @@ pub(super) fn access_error(error: AccessError) -> Response {
         AccessError::Center(CenterError::Unavailable) => StatusCode::SERVICE_UNAVAILABLE,
         AccessError::Center(CenterError::InvalidRequest) => StatusCode::BAD_REQUEST,
         AccessError::Center(CenterError::Busy) => StatusCode::TOO_MANY_REQUESTS,
+        AccessError::NetworkDenied => StatusCode::FORBIDDEN,
+        AccessError::NetworkEnded => StatusCode::CONFLICT,
         AccessError::Unauthorized => StatusCode::UNAUTHORIZED,
         AccessError::Busy => StatusCode::TOO_MANY_REQUESTS,
         AccessError::Conflict => StatusCode::CONFLICT,
@@ -268,6 +270,8 @@ pub(super) fn access_error(error: AccessError) -> Response {
         }
         AccessError::Busy | AccessError::Center(CenterError::Busy) => "busy",
         AccessError::Unavailable => "configuration_unavailable",
+        AccessError::NetworkDenied => "device_access_denied",
+        AccessError::NetworkEnded => "device_access_ended",
         _ => "invalid_request",
     };
     (

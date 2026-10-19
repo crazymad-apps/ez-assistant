@@ -64,6 +64,7 @@ pub(crate) async fn serve(config: ServeConfig) -> Result<(), Box<dyn Error>> {
     let mut supervisor = HostSupervisor::new(SHUTDOWN_TIMEOUT);
     let shutdown = supervisor.shutdown_handle();
     let terminals = user_terminal::UserTerminalService::new();
+    let desktop = crate::desktop_media::service::DesktopService::new()?;
     let mut state = HttpState::starting(
         HttpEndpointState::new(
             endpoint.access_token(),
@@ -82,6 +83,7 @@ pub(crate) async fn serve(config: ServeConfig) -> Result<(), Box<dyn Error>> {
         enterprise,
     );
     domains.shared.protected_files = state.access.protected_files.clone();
+    state.desktop = Some(desktop.handle.clone());
     state.domains = Some(handle);
     println!(
         "EZ Assistant Runtime is listening at {} (discovery: {})",
@@ -91,6 +93,14 @@ pub(crate) async fn serve(config: ServeConfig) -> Result<(), Box<dyn Error>> {
     let server = RuntimeServer::new(endpoint, state.clone());
     supervisor.spawn_subsystem("host_http", FailurePolicy::ShutdownHost, move |shutdown| {
         server.serve_until(shutdown)
+    });
+    supervisor.spawn_subsystem("desktop_views", FailurePolicy::Degrade, move |shutdown| {
+        desktop.run_until(shutdown)
+    });
+    let network = state.access.network.clone();
+    let network_state = Some(state.clone());
+    supervisor.spawn_subsystem("host_network", FailurePolicy::Degrade, move |shutdown| {
+        network.run_until(shutdown, network_state)
     });
     let access_state = state.clone();
     supervisor.spawn_subsystem("host_access", FailurePolicy::Degrade, move |shutdown| {

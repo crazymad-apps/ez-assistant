@@ -5,7 +5,7 @@ import { RuntimeLifecycleCoordinator } from "../../src/stores/RuntimeLifecycleCo
 
 afterEach(() => vi.restoreAllMocks());
 
-it("freezes an unknown first send and recovers by the same key without uploading again", async () => {
+it.each([null, "11111111-1111-4111-8111-111111111111"])("recovers an unknown first send on its original device %s without uploading again", async (device) => {
   const committed = {
     session: { session_id: "committed-session", workspace_id: null },
     input_id: "first-input", run: { run_id: "first-run" }, attachments: [],
@@ -14,19 +14,21 @@ it("freezes an unknown first send and recovers by the same key without uploading
     ? { payload: { snapshot: { skills: [] } } }
     : { payload: { materialization: committed } });
   vi.spyOn(RuntimeLifecycleCoordinator.prototype, "client", "get")
-    .mockReturnValue({ command } as never);
+    .mockReturnValue({ command, target_device: device } as never);
   vi.spyOn(RuntimeLifecycleCoordinator.prototype, "loadApplication").mockResolvedValue();
   vi.spyOn(RuntimeLifecycleCoordinator.prototype, "loadSession").mockResolvedValue();
   const store = new RootStore();
-  store.connection.markConnected("instance-1", {
+  vi.spyOn(store.network, "ensureConnected").mockResolvedValue();
+  const connection = device ? store.network.context(device).connection : store.connection;
+  connection.markConnected("instance-1", {
     mode: "personal", min_compatible_version: "0.28.0", runtime_version: "0.28.0",
     max_command_bytes: 65536, max_attachment_bytes: null, sse: true, streaming_upload: true,
     features: ["session_materialization"],
   });
-  store.openNewSessionDraft(null);
+  store.openNewSessionDraft(null, device);
   store.new_session_drafts.updateText("unbound", "original request");
   const upload = vi.spyOn(store.files, "materializeNewSession")
-    .mockRejectedValueOnce(new NativeResourceFailure("response lost", "materialization_response_unknown"));
+    .mockRejectedValueOnce(new NativeResourceFailure("response lost", device ? "network_disconnected" : "materialization_response_unknown", device, "unknown"));
   expect(await store.materializeNewSessionDraft("unbound")).toBe(false);
   const frozen = store.new_session_drafts.get("unbound")?.materialization_attempt;
   expect(frozen?.message).toBe("original request");
@@ -35,7 +37,9 @@ it("freezes an unknown first send and recovers by the same key without uploading
   expect(store.new_session_drafts.get("unbound")?.text).toBe("original request");
   expect(store.new_session_drafts.get("unbound")?.materialization_attempt).toBe(frozen);
 
+  store.network.select(null);
   expect(await store.materializeNewSessionDraft("unbound")).toBe(true);
+  expect(store.navigation.target_device).toBe(device);
   expect(command).toHaveBeenCalledWith({ type: "get_session_materialization",
     payload: { idempotency_key: frozen?.idempotency_key } });
   expect(upload).toHaveBeenCalledTimes(1);

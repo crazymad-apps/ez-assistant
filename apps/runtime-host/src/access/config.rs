@@ -185,6 +185,27 @@ pub(super) fn configure_identity(
     crate::host_configuration::set_mode(document, mode, center_url).map_err(AccessError::Invalid)
 }
 
+/// 由 Host 从目标地址取得中心 ID；UI 不判断地址是否属于同一中心。
+pub(super) async fn resolve_center(document: &mut DocumentMut) -> Result<(), AccessError> {
+    let (mode, url, _) = identity_fields(document);
+    if mode == Some(assistant_protocol::HostMode::Enterprise) {
+        let client = super::enterprise::CenterClient::new(url.ok_or(AccessError::Unavailable)?)?;
+        let id = client
+            .center_identity()
+            .await
+            .map_err(|error| match error {
+                super::enterprise::CenterError::ProtocolIncompatible => {
+                    AccessError::Invalid("配置未保存：企业中心不支持身份识别，请更新企业中心。")
+                }
+                _ => {
+                    AccessError::Invalid("配置未保存：无法读取目标企业中心身份，请检查地址及连接。")
+                }
+            })?;
+        document["enterprise"]["center_id"] = toml_edit::value(id);
+    }
+    Ok(())
+}
+
 pub(super) fn identity_fields(
     document: &DocumentMut,
 ) -> (
@@ -211,7 +232,7 @@ mod tests {
     use crate::config_source::LocalConfigSource;
 
     #[test]
-    fn switching_center_requires_explicit_binding_clear_and_keeps_other_configuration() {
+    fn address_change_preserves_binding_and_explicit_replacement_clears_it() {
         let mut document = crate::host_configuration::personal_document();
         configure_identity(
             &mut document,
@@ -223,14 +244,16 @@ mod tests {
         document["enterprise"]["center_id"] =
             toml_edit::value("01234567-89ab-4cde-8f01-23456789abcd");
         document["host_access"]["port"] = toml_edit::value(7241);
-        assert!(
-            configure_identity(
-                &mut document,
-                Some(assistant_protocol::HostMode::Enterprise),
-                Some("https://second.example"),
-                false
-            )
-            .is_err()
+        configure_identity(
+            &mut document,
+            Some(assistant_protocol::HostMode::Enterprise),
+            Some("https://second.example"),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            identity_fields(&document).2.as_deref(),
+            Some("01234567-89ab-4cde-8f01-23456789abcd")
         );
         configure_identity(
             &mut document,

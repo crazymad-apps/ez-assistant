@@ -14,6 +14,7 @@ import {
 const PREFERENCE_KEY = 'ez-assistant:system-notifications';
 type Dependencies = Readonly<{
   scope: () => string | null;
+  acceptsScope?: (scope: string) => boolean;
   navigate: (target: NotificationTarget) => Promise<boolean | void>;
   resolveContent: (notification: SystemNotification) => Promise<SystemNotification | null>;
 }>;
@@ -64,6 +65,10 @@ export class NotificationStore {
     }
     window.addEventListener('focus', this.#onFocus);
     window.addEventListener('storage', this.#onStorage);
+  }
+
+  #acceptsScope(scope: string): boolean {
+    return this.dependencies.acceptsScope?.(scope) ?? scope === this.dependencies.scope();
   }
 
   async refreshPermission(): Promise<void> {
@@ -119,8 +124,7 @@ export class NotificationStore {
     }
   }
 
-  ingest(envelope: RuntimeEventEnvelope): void {
-    const scope = this.dependencies.scope();
+  ingest(envelope: RuntimeEventEnvelope, scope = this.dependencies.scope()): void {
     if (!scope || this.#disposed) return;
     const event = envelope.event;
     if (event.type === 'feedback_published' || event.type === 'feedback_changed') {
@@ -165,7 +169,7 @@ export class NotificationStore {
   }
 
   feedbackPublished(target: NotificationTarget & { kind: 'feedback' }, suppress_completion = true, body = '等待你的回复，请返回会话回答问题。'): void {
-    if (target.scope !== this.dependencies.scope() || this.#disposed) return;
+    if (!this.#acceptsScope(target.scope) || this.#disposed) return;
     if (suppress_completion) this.#feedback_runs.add(JSON.stringify([target.scope, target.run_id]));
     trimSet(this.#feedback_runs);
     void this.publish({ target, title: '会话通知', body });
@@ -181,7 +185,7 @@ export class NotificationStore {
 
   async publish(notification: SystemNotification): Promise<void> {
     const key = notificationKey(notification.target);
-    if (this.#seen.has(key) || notification.target.scope !== this.dependencies.scope() || this.#disposed) return;
+    if (this.#seen.has(key) || !this.#acceptsScope(notification.target.scope) || this.#disposed) return;
     this.#seen.add(key);
     trimSet(this.#seen);
     if (!this.enabled) return;
@@ -191,7 +195,7 @@ export class NotificationStore {
       !this.#disposed &&
       this.enabled &&
       generation === this.#generation &&
-      notification.target.scope === this.dependencies.scope();
+      this.#acceptsScope(notification.target.scope);
     try {
       const permission = await this.platform.permission(false);
       if (!active()) return;
@@ -314,9 +318,9 @@ export class NotificationStore {
   }
 
   async activate(target: NotificationTarget, focus_window = false): Promise<boolean> {
-    if (this.#disposed || target.scope !== this.dependencies.scope()) return false;
+    if (this.#disposed || !this.#acceptsScope(target.scope)) return false;
     const activation = ++this.#activation;
-    const current = () => !this.#disposed && activation === this.#activation && target.scope === this.dependencies.scope();
+    const current = () => !this.#disposed && activation === this.#activation && this.#acceptsScope(target.scope);
     try {
       if (focus_window) await this.platform.focus();
       if (!current()) return false;

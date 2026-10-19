@@ -28,6 +28,7 @@ fn own_data_and_shared_skills_have_distinct_access_from_host_private_files() {
         "users/bob/config.toml",
         "users/alice-other/data",
         "host.toml",
+        "network/identity.json",
         "run/runtime.json",
         "backups/old/data",
     ] {

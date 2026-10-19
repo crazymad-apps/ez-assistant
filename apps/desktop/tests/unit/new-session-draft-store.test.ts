@@ -73,7 +73,7 @@ describe("NewSessionDraftStore", () => {
     await vi.waitFor(() => expect(store.new_session_drafts.get("unbound")?.skill_status).toBe("ready"));
     vi.mocked(materializeNewSession).mockRejectedValueOnce(new Error("MCP 服务已不可用，请重新选择"));
     expect(await store.materializeNewSessionDraft("unbound")).toBe(false);
-    expect(materializeNewSession).toHaveBeenCalledWith(expect.objectContaining({ mcp_server_key: "github", skill_name: "review", mode: "start_goal", message: "创建 issue" }), expect.any(String));
+    expect(materializeNewSession).toHaveBeenCalledWith(expect.objectContaining({ mcp_server_key: "github", skill_name: "review", mode: "start_goal", message: "创建 issue" }), expect.any(String), expect.objectContaining({ binding: null }));
     expect(store.new_session_drafts.get("unbound")).toMatchObject({ selected_mcp: { server_key: "github" }, goal_armed: true, selected_skill_name: "review" });
     expect(store.interaction_error).toContain("重新选择");
     store.new_session_drafts.updateVariant("unbound", "plan");

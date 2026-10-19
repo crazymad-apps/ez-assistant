@@ -6,6 +6,8 @@ import { AdminApp } from './AdminApp';
 import { PageLayout } from './PageLayout';
 import { LoginRoute, RequireIdentity } from './IdentityRoutes';
 import { ModelsRoute, ProviderRoute, ProviderEditor, ModelEditor } from '../features/models';
+import { DevicesRoute } from '../features/devices/DevicesRoute';
+import { DeviceDetailRoute } from '../features/devices/DeviceDetailRoute';
 import { UsersRoute } from '../features/users/UsersRoute';
 import { CallsRoute, CallDetailRoute } from '../features/calls';
 import { UsageRoute } from '../features/usage/UsageRoute';
@@ -51,6 +53,16 @@ export function adminRoutes(): RouteObject[] {
                   path: '/users',
                   element: <UsersRoute />,
                   handle: { title: '用户管理', menu: '/users' } satisfies RouteHeading,
+                },
+                {
+                  path: '/devices',
+                  element: <DevicesRoute />,
+                  handle: { title: '设备管理', menu: '/devices' } satisfies RouteHeading,
+                },
+                {
+                  path: '/devices/:id',
+                  element: <DeviceDetailRoute />,
+                  handle: { title: '设备详情', menu: '/devices' } satisfies RouteHeading,
                 },
                 ...[
                   { path: '/models', element: <ModelsRoute />, title: '模型管理' },

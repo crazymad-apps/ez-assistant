@@ -169,7 +169,8 @@ export function validParameters(p: ModelParameters, complete: boolean): boolean 
 }
 
 export function resolveProtocol(connection: ProviderConnection): Protocol {
-  const responses = ['openai', 'deepseek', 'dashscope_api', 'dashscope_plan', 'moonshot'].includes(
+  if (connection.provider_type === 'opencode' && connection.protocol_preference === 'auto') invalid();
+  const responses = ['opencode', 'openai', 'deepseek', 'dashscope_api', 'dashscope_plan', 'moonshot'].includes(
     connection.provider_type,
   );
   if (connection.protocol_preference === 'responses' && !responses) invalid();
@@ -181,6 +182,7 @@ export function resolveProtocol(connection: ProviderConnection): Protocol {
 export function executable(connection: ProviderConnection, parameters: ModelParameters): boolean {
   return (
     validParameters(parameters, true) &&
+    !(connection.provider_type === 'opencode' && (parameters.server_compaction_enabled || parameters.input_token_count_support === 'supported')) &&
     !(parameters.server_compaction_enabled && resolveProtocol(connection) !== 'open_ai_responses') &&
     parameters.streaming === 'supported' &&
     !(
@@ -243,6 +245,10 @@ export function parseConnection(value: unknown): ProviderConnection {
     discovery_format,
     protocol_preference: enumeration(input.protocol_preference, preferences),
   };
+  // OpenCode 首批仅接入 HTTP；显式声明也不能开启未验证的续接或 WS 路由。
+  if (provider_type === 'opencode' && (
+    connection.responses_transport !== 'http' || connection.server_history_support_override === 'supported'
+  )) invalid();
   if (connection.responses_transport === 'websocket' && resolveProtocol(connection) !== 'open_ai_responses') invalid();
   resolveProtocol(connection);
   if (connection.server_history_enabled && serverHistorySupport(connection) !== 'supported') invalid();

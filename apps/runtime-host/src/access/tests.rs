@@ -2,15 +2,56 @@
 
 use super::*;
 
+#[tokio::test]
+async fn local_status_is_available_while_center_request_is_pending() {
+    let home = tempfile::Builder::new()
+        .prefix("login-status-")
+        .tempdir_in(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.runtime-test"))
+        .unwrap();
+    let path = home.path().join("host.toml");
+    std::fs::write(
+        &path,
+        crate::host_configuration::personal_document().to_string(),
+    )
+    .unwrap();
+    let (mut service, handle) = HostAccessService::new(Arc::new(LocalConfigSource::new(path)));
+    service.prepare().await.unwrap();
+    let mut queries = service.queries.take().unwrap();
+    let finished = tokio::sync::Notify::new();
+    let (status, ()) = tokio::join!(
+        async {
+            let result = tokio::time::timeout(
+                std::time::Duration::from_millis(250),
+                handle.command(
+                    Some(HostAccessCommand::GetStatus),
+                    AccessPermit::new(true, None, CancellationToken::new()),
+                ),
+            )
+            .await;
+            finished.notify_one();
+            result
+                .expect("local configuration must not wait for the center")
+                .unwrap()
+        },
+        service.with_status_queries(finished.notified(), &mut queries),
+    );
+    assert_eq!(status.mode, Some(assistant_protocol::HostMode::Personal));
+    assert!(!status.restart_required);
+}
+
 #[test]
 fn remote_ip_access_includes_forwarded_loopback_but_requires_enabled_policy() {
     let (commands, _receive) = mpsc::channel(1);
+    let credentials = Arc::new(Credentials::new());
     let handle = HostAccessHandle {
+        network: registration::network::Network::new(credentials.clone()),
         protected_files: Arc::new(RwLock::new(Vec::new())),
         center: Arc::new(RwLock::new(None)),
         binding: mpsc::channel(1).0,
-        credentials: Arc::new(Credentials::new()),
+        registration: mpsc::channel(1).0,
+        credentials,
         commands,
+        queries: mpsc::channel(1).0,
         remote: Arc::new(RwLock::new(RemoteAccess::default())),
     };
     let addresses = [

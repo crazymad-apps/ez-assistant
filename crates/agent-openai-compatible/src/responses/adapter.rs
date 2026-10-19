@@ -61,6 +61,11 @@ pub struct ResponsesProtocolAdapter {
 }
 
 impl ResponsesProtocolAdapter {
+    /// OpenCode 的显式兼容方言；模型能力由宿主固定配置提供。
+    pub fn opencode() -> Self {
+        Self::openai_compatible(ProviderId::new("opencode").expect("static OpenCode provider id"))
+    }
+
     /// 未命中精确路由时使用的保守兼容方言：文本、流式、Auto function call，
     /// 不猜测图片函数结果、reasoning 续传或额外 ToolChoice。
     pub fn openai_compatible(provider: ProviderId) -> Self {

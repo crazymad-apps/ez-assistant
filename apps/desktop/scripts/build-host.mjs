@@ -1,5 +1,9 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
+import { selectMacDeveloperDirectory } from "./mac-developer-directory.mjs";
+
+selectMacDeveloperDirectory("desktop-capture");
 
 const desktop = fileURLToPath(new URL("../", import.meta.url));
 const environment = { ...process.env, EZ_ASSISTANT_WEB_DIST: fileURLToPath(new URL("../dist", import.meta.url)) };
@@ -15,6 +19,18 @@ if (process.platform === "win32" && process.argv.includes("--release")) {
   }
 }
 await run(["run", "cargo", "--", "build", "-p", "assistant-runtime-host", ...process.argv.slice(2)]);
+if (process.platform === "darwin" || process.platform === "win32") {
+  const args = process.argv.slice(2);
+  const index = args.indexOf("--target");
+  const target = index < 0 ? args.find((value) => value.startsWith("--target="))?.slice(9) : args[index + 1];
+  const output = resolve(desktop, "../..", process.env.CARGO_TARGET_DIR ?? "target", target ?? "",
+    args.includes("--release") ? "release" : "debug", `ez-assistant-desktop-capture${process.platform === "win32" ? ".exe" : ""}`);
+  await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [fileURLToPath(new URL("../../runtime-host/scripts/build-desktop-capture.mjs", import.meta.url)), output, ...(target ? [target] : [])], { env: environment, stdio: "inherit" });
+    child.once("error", reject);
+    child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`Desktop capture build exited with ${code}`)));
+  });
+}
 
 function run(arguments_) {
   return new Promise((resolve, reject) => {

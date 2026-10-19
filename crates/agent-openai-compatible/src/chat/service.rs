@@ -66,6 +66,7 @@ pub struct OpenAiChatCompletionsService {
     /// 调用方为当前模型配置的上下文窗口上限。
     context_window_tokens: u64,
     max_input_tokens: Option<u64>,
+    opencode_identity: Option<crate::OpenCodeRequestIdentity>,
     /// Provider 方言配置。
     adapter: ChatProtocolAdapter,
     /// 底层 HTTP Transport。
@@ -75,6 +76,12 @@ pub struct OpenAiChatCompletionsService {
 }
 
 impl OpenAiChatCompletionsService {
+    /// 绑定 OpenCode 的不可变请求身份；其他方言不会发送这些头。
+    pub fn with_opencode_identity(mut self, identity: crate::OpenCodeRequestIdentity) -> Self {
+        self.opencode_identity = Some(identity);
+        self
+    }
+
     /// 用默认 [`ReqwestTransport`] 和显式上下文窗口创建服务。
     /// 在构造期绑定已知输入限制；不向 Provider wire 增加非标准字段。
     ///
@@ -221,6 +228,7 @@ impl OpenAiChatCompletionsService {
             model: model.into(),
             context_window_tokens,
             max_input_tokens: None,
+            opencode_identity: None,
             adapter,
             transport,
             capabilities,
@@ -261,7 +269,7 @@ impl ModelService for OpenAiChatCompletionsService {
             let body = serde_json::to_vec(&chat_request).map_err(|error| {
                 ModelError::Config(format!("failed to serialize the encoded request: {error}"))
             })?;
-            let transport_request = TransportRequest {
+            let mut transport_request = TransportRequest {
                 trace: context.trace.clone(),
                 method: "POST".to_owned(),
                 url: self.completion_url(),
@@ -275,6 +283,11 @@ impl ModelService for OpenAiChatCompletionsService {
                 ],
                 body,
             };
+            crate::shared::apply_identity(
+                &self.adapter.provider,
+                self.opencode_identity.as_ref(),
+                &mut transport_request.headers,
+            )?;
             // 等待响应头期间也可被取消；取消时丢弃 execute future 即关闭请求。
             let response = tokio::select! {
                 result = self.transport.execute(transport_request) => result,

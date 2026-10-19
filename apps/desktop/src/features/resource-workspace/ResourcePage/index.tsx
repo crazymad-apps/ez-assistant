@@ -1,3 +1,4 @@
+import { ResourceDesktop } from "../ResourceDesktop";
 import { revealFileLabel } from "../../../platform/fileManager";
 import { observer } from "mobx-react-lite";
 import { useEffect, useState, type RefObject } from "react";
@@ -20,18 +21,18 @@ export const ResourcePage = observer(function ResourcePage(props: Readonly<{
   viewports: RefObject<Map<string, HTMLDivElement>>;
 }>) {
   const root_store = useRootStore();
-  const store = root_store.resource_workspace;
+  const store = root_store.reading_resources;
   const { group, tab, key } = props.page;
   const { active, viewports } = props;
   const scope_key = group.scope_key;
   const session_id = scope_key.startsWith("session:") ? scope_key.slice(8) : null;
-  const session_view = session_id ? root_store.projection.session_views.get(session_id) : undefined;
-  const draft = scope_key.startsWith("draft:") ? root_store.new_session_drafts.get(scope_key.slice(6) as NewSessionDraftKey) : undefined;
-  const workspace = root_store.projection.application?.workspaces.find((item) => item.workspace_id === draft?.workspace_id);
+  const session_view = session_id ? root_store.reading_projection.session_views.get(session_id) : undefined;
+  const draft = scope_key.startsWith("draft:") ? root_store.reading_drafts.get(scope_key.slice(6) as NewSessionDraftKey) : undefined;
+  const workspace = root_store.reading_projection.application?.workspaces.find((item) => item.workspace_id === draft?.workspace_id);
   const view_state = store.view_states.get(key)!;
   const roots = session_view ? sessionRoots(session_view.workspace)
     : workspace ? draftRoots(workspace.user_directory ?? workspace.agent_directory, workspace.additional_directories)
-      : view_state.roots ?? (session_id ? sessionRoots(undefined) : []);
+      : session_id ? sessionRoots(undefined) : [];
   useEffect(() => {
     // Host 重连会暂时清掉投影；保留根的展示信息，不把已有页面改成另一个根。
     if (session_view || workspace) view_state.roots = roots;
@@ -57,8 +58,8 @@ export const ResourcePage = observer(function ResourcePage(props: Readonly<{
             else store.openSessionResource(scope_key, session_id, entry.locator, entry.display_name);
           },
         },
-        ...(!directory ? [{label:"下载文件",on_select:()=>runResourceAction(root_store.files.downloadSessionFile(session_id,entry.locator,entry.display_name),"下载失败。")}] : []),
-        ...(root_store.files.native_host ? [
+        ...(!directory ? [{label:"下载文件",on_select:()=>runResourceAction(root_store.reading_files.downloadSessionFile(session_id,entry.locator,entry.display_name),"下载失败。")}] : []),
+        ...(root_store.reading_files.native_host ? [
         {
           label: "使用系统应用打开",
           on_select: () => runResourceAction(
@@ -78,6 +79,7 @@ export const ResourcePage = observer(function ResourcePage(props: Readonly<{
   }
 
   function renderTabContent() {
+    if (tab.type === "desktop") { const controller = store.desktops.get(tab.desktopId); if (controller) return <ResourceDesktop controller={controller} active={active} />; }
     if (tab.type === "terminal") {
       const controller = store.terminals.get(tab.terminalId);
       if (controller) return <ResourceTerminal controller={controller} active={active} />;
@@ -104,6 +106,7 @@ export const ResourcePage = observer(function ResourcePage(props: Readonly<{
           on_open_resource_menu={openTreeResourceMenu}
           roots={roots}
           session_id={session_id}
+          on_open_host_file={(path) => store.openHostFile(scope_key, path)}
         />
       );
     }
@@ -177,7 +180,7 @@ function draftRoots(primary: string, additional: readonly string[]): SessionReso
     `draft-${index}`,
     directory,
     index === 0 ? "主目录" : `附加目录 ${index}`,
-    null,
+    { root: index === 0 ? { type: "workspace_primary" } : { type: "workspace_additional", directory_index: index - 1 }, relative_path: "" },
   ));
 }
 

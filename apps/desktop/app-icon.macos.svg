@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="48 48 416 416" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
   <title id="title">EZ Assistant for macOS</title>
   <desc id="desc">The Quiet rocket mark on an optically balanced macOS app icon plate.</desc>
 
@@ -43,7 +43,7 @@
     </mask>
   </defs>
 
-  <!-- 画布贴合底板边界，移除额外透明留白，保留图案与圆角的原有比例。 -->
+  <!-- Dock 保留图标的透明边界；四周各留 48px，使底板保持原来的显示尺寸。 -->
   <rect x="48" y="48" width="416" height="416" rx="92" fill="url(#plate)" />
   <circle cx="256" cy="256" r="154" fill="url(#planet)" mask="url(#quiet-cutout)" />
   <path

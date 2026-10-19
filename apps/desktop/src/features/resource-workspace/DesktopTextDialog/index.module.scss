@@ -1,0 +1,7 @@
+@use "../../../styles/fields";
+.backdrop { position: fixed; inset: 0; display: grid; place-items: center; background: var(--ez-overlay); z-index: var(--ez-z-modal); }
+.dialog { width: min(520px, calc(100vw - 40px)); padding: 24px; display: flex; flex-direction: column; gap: 16px; border: 1px solid var(--ez-border); border-radius: var(--ez-radius-large); background: var(--ez-surface); color: var(--ez-text); box-shadow: var(--ez-shadow-shell); }
+.dialog h3 { margin: 0; }
+.input { box-sizing: border-box; width: 100%; resize: vertical; padding: 12px; font: inherit; color: var(--ez-text); background: var(--ez-surface); border: 1px solid var(--ez-border-strong); border-radius: var(--ez-radius-small); &:focus { @include fields.focus-border; } }
+.hint { color: var(--ez-text-secondary); font-size: var(--ez-font-small); }
+.actions { display: flex; justify-content: flex-end; gap: 8px; }

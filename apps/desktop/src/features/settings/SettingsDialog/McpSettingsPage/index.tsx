@@ -14,7 +14,7 @@ import styles from "./index.module.scss";
 export const McpSettingsPage = observer(function McpSettingsPage(props: Readonly<{ onDirtyChange: (dirty: boolean) => void }>) {
   const root = useRootStore();
   const settings = root.settings.mcp;
-  const application = root.projection.application;
+  const application = root.local_projection.application;
   const available = application?.capabilities.mcp_management ?? false;
   const [search, setSearch] = useState("");
   const [editing, setEditing] = useState<{ server: McpServerSnapshot | null; revision: string } | null>(null);

@@ -15,6 +15,9 @@ export type IconName =
   | "collapse-all"
   | "device"
   | "desktop"
+  | "windows"
+  | "macos"
+  | "linux"
   | "edit"
   | "eye"
   | "eye-off"
@@ -84,6 +87,9 @@ const paths: Record<IconName, ReactNode> = {
     </g>
   ),
   desktop: <><rect x="3" y="4" width="18" height="13" rx="2" /><path d="M8 21h8M12 17v4" /></>,
+  windows: <path fill="currentColor" stroke="none" d="M3 4h8v8H3zm10 0h8v8h-8zM3 14h8v8H3zm10 0h8v8h-8z" />,
+  macos: <><path fill="currentColor" stroke="none" d="M16.9 2c.2 1.4-.4 2.8-1.2 3.7-.9 1-2.3 1.6-3.5 1.5-.2-1.4.4-2.7 1.3-3.6C14.4 2.7 15.8 2.1 16.9 2ZM19.6 17.4c-.5 1.2-.8 1.7-1.5 2.8-.9 1.2-2 2.6-3.4 2.6-1.2 0-1.5-.8-3.2-.8s-2 .8-3.2.8c-1.4 0-2.4-1.3-3.3-2.5-2.5-3.5-2.8-7.5-1.2-9.9C5 8.7 6.8 7.7 8.5 7.7c1.3 0 2.2.8 3.2.8s2.6-.9 4.3-.9c1.5 0 3 .8 3.9 2-3.5 1.9-2.9 6.6-.3 7.8Z" /></>,
+  linux: <><path d="M7 10V7a5 5 0 0 1 10 0v3c0 2 3 4 3 7 0 2-3 3-8 3s-8-1-8-3c0-3 3-5 3-7Z" /><ellipse cx="12" cy="14.5" rx="4" ry="5" /><path d="m10 8 2-1 2 1-2 2-2-2ZM7 19l-3 2h5m8-2 3 2h-5" /><circle cx="10" cy="5.5" r=".6" fill="currentColor" stroke="none" /><circle cx="14" cy="5.5" r=".6" fill="currentColor" stroke="none" /></>,
   edit: <><path d="m4 20 4.2-1 10-10a2.1 2.1 0 0 0-3-3l-10 10L4 20Z" /><path d="m13.7 7.5 3 3" /></>,
   eye: <><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" /><circle cx="12" cy="12" r="3" /></>,
   "eye-off": <><path d="m3 3 18 18M10.6 5.1 12 5c6.5 0 10 7 10 7a20 20 0 0 1-3 3.9M6.2 6.2A20 20 0 0 0 2 12s3.5 7 10 7a11 11 0 0 0 5.8-1.8M9.9 9.9a3 3 0 0 0 4.2 4.2" /></>,

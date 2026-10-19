@@ -77,7 +77,7 @@ describe("SessionResourceTree", () => {
       locator: { root: { type: "workspace_primary" }, relative_path: "" },
       include_hidden: false,
       include_generated: false,
-    });
+    }, { binding: null, device: null });
     const root_control = screen.getByText("project").closest("button");
     expect(root_control).not.toBeNull();
     fireEvent.click(root_control!);
@@ -106,7 +106,7 @@ describe("SessionResourceTree", () => {
       locator: { root: { type: "session_private" }, relative_path: "" },
       include_hidden: true,
       include_generated: false,
-    }));
+    }, { binding: null, device: null }));
   });
 
   it("recursively expands available directories and collapses the tree", async () => {
@@ -208,13 +208,13 @@ describe("SessionResourceTree", () => {
     expect(listSessionResourceFiles).toHaveBeenCalledTimes(3);
     expect(listSessionResourceFiles).toHaveBeenCalledWith("session-1", expect.objectContaining({
       locator: { root: { type: "workspace_primary" }, relative_path: "" },
-    }));
+    }), { binding: null, device: null });
     expect(listSessionResourceFiles).toHaveBeenCalledWith("session-1", expect.objectContaining({
       locator: { root: { type: "workspace_primary" }, relative_path: "src" },
-    }));
+    }), { binding: null, device: null });
     expect(listSessionResourceFiles).toHaveBeenCalledWith("session-1", expect.objectContaining({
       locator: { root: { type: "workspace_primary" }, relative_path: "src/components" },
-    }));
+    }), { binding: null, device: null });
   });
 
   it("shows draft roots without fabricating a session path", () => {
@@ -244,7 +244,7 @@ it("rebuilds expanded directories and filtering after eviction without replaying
   first.unmount();
   const second = render(<SessionResourceTree {...props} />);
   await waitFor(() => expect(listSessionResourceFiles).toHaveBeenCalledTimes(3));
-  expect(listSessionResourceFiles).toHaveBeenLastCalledWith("a", expect.objectContaining({ include_hidden: true }));
+  expect(listSessionResourceFiles).toHaveBeenLastCalledWith("a", expect.objectContaining({ include_hidden: true }), { binding: null, device: null });
   expect(screen.getByRole("treeitem")).toHaveAttribute("aria-expanded", "true");
   fireEvent.click(screen.getByRole("button", { name: "全部收起" }));
   second.unmount();
@@ -257,11 +257,11 @@ it("rebuilds expanded directories and filtering after eviction without replaying
 vi.mock("../../src/stores/RootStoreContext", async () => {
   const { ClientResources } = await import("../../src/runtime-client/ClientResources");
   const files = new ClientResources(() => null, true);
-  return {useRootStore: () => ({files})};
+  return {useRootStore: () => ({reading_files: files})};
 });
 vi.mock("../../src/runtime-client/ClientResources", async (original) => {
   const actual = await original<typeof import("../../src/runtime-client/ClientResources")>();
-  return {...actual, ClientResources: class extends actual.ClientResources { override readonly desktop = true; }};
+  return {...actual, ClientResources: class extends actual.ClientResources { override readonly desktop = true; override get native_target() { return { binding: null, device: null }; } }};
 });
 
 function render(element: ReactElement) {

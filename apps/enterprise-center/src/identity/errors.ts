@@ -1,6 +1,13 @@
 import { CenterError } from '../errors.js';
 
 const messages = {
+  DEVICE_ACCESS_DENIED: '未获设备访问授权。',
+  DEVICE_ACCESS_ENDED: '设备访问已结束，请重新发起。',
+  DEVICE_NOT_FOUND: '设备不存在。',
+  DEVICE_CONFLICT: '安装或登记标识已使用，请核实原登记。',
+  DEVICE_CHANGED: '设备登记或授权已变化，请重新读取。',
+  DEVICE_CENTER_MISMATCH: '中心身份不匹配。',
+  DEVICE_CREDENTIAL_INVALID: '设备凭据无效。',
   SITE_CONTENT_INVALID: '内容格式、引用或资源不符合要求。',
   DESKTOP_RELEASE_INVALID: '发布文件或请求格式不符合要求。',
   DESKTOP_RELEASE_SIGNATURE_INVALID: '发布清单签名校验失败。',
@@ -22,6 +29,7 @@ const messages = {
   RECORDING_SETTINGS_OUTDATED: '记录策略格式已更新，请刷新管理页面后重试。',
   SNAPSHOT_READ_BUSY: '正文读取繁忙，请稍后重试。',
   SNAPSHOT_ROOT_UNAVAILABLE: '快照目录未配置或不可用。',
+  MODEL_TEST_REQUIRES_CLIENT: 'OpenCode 推理测试请在客户端使用已保存配置执行；目录刷新只验证模型列表。',
   MODEL_NOT_FOUND: '模型或服务商不存在，请刷新目录或保存固定配置。',
   MODEL_CONFIGURATION_CHANGED: '服务商连接已变化，请重新刷新。',
   MODEL_CONFIGURATION_INVALID: '模型参数不完整或能力组合无效。',

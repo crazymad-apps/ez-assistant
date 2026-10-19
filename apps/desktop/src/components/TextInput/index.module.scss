@@ -1,0 +1,11 @@
+@use "../../styles/fields";
+
+.input {
+  width: 100%; min-width: 0; height: var(--ez-control-height-default);
+  border: 1px solid var(--ez-border-strong); border-radius: var(--ez-radius-small);
+  padding: 0 10px; background: var(--ez-surface); color: var(--ez-text); font: inherit;
+  &:focus { @include fields.focus-border; }
+  &:disabled { opacity: .55; cursor: not-allowed; }
+  &::placeholder { color: var(--ez-text-muted); }
+  &[aria-invalid="true"] { border-color: var(--ez-danger); }
+}

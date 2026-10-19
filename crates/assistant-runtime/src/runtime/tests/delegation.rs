@@ -1696,3 +1696,55 @@ async fn cancelling_child_removes_its_pending_approval_without_running_the_tool(
     }
     assert!(cancellation_has_child_identity);
 }
+
+#[tokio::test]
+async fn sibling_model_routing_is_distinct_from_parent_and_each_other() {
+    let model = Arc::new(DelegationScenarioModel::delayed(
+        &["routing-child-a", "routing-child-b"],
+        Duration::from_millis(10),
+    ));
+    let factory = Arc::new(RoutingModelFactory::new(model));
+    let runtime = runtime_with_factories(
+        factory.clone(),
+        Arc::new(StaticSystemPromptFactory),
+        ToolSetSnapshot::default(),
+        64,
+    );
+    runtime
+        .config_registry
+        .replace_document_for_test(&config_with_delegation(2, 2, 1000));
+    let session = runtime
+        .create_session(Default::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    set_auto_approval(&runtime, &session).await;
+    submit_completed_turn(&runtime, &session, "two independent tasks").await;
+    let children = runtime.store.load_runtime().await.unwrap().child_tasks;
+    assert_eq!(children.len(), 2);
+    let calls = factory.calls.lock().unwrap();
+    let parent = super::super::model::conversation_routing_id(
+        &assistant_protocol::ConversationOwner::MainSession {
+            session_id: session.clone(),
+        },
+    );
+    assert_eq!(calls.first().unwrap().0, parent);
+    assert_eq!(calls.last().unwrap().0, parent);
+    let child_routes: Vec<_> = children
+        .iter()
+        .map(|child| {
+            super::super::model::conversation_routing_id(
+                &assistant_protocol::ConversationOwner::ChildTask {
+                    session_id: session.clone(),
+                    child_task_id: child.child_task_id.clone(),
+                },
+            )
+        })
+        .collect();
+    assert_ne!(child_routes[0], child_routes[1]);
+    for route in child_routes {
+        assert_ne!(route, parent);
+        assert!(calls.iter().any(|call| call.0 == route));
+    }
+}

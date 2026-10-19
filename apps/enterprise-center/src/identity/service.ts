@@ -25,12 +25,15 @@ function publicUser(user: IdentityUser): IdentityUser {
   };
 }
 
+export type LoginScope = Readonly<{ userId: number }>;
+
 /** 单实例进程拥有 Token；不持久化、不计算摘要、不设 TTL，关闭或重启全部失效。 */
 export class IdentityService {
   readonly passwords = new Passwords();
   readonly limiter = new LoginLimiter();
-  private readonly tokens = new Map<string, number>();
+  private readonly tokens = new Map<string, LoginScope>();
   private readonly llmKeys = new Map<string, string>();
+  private readonly sessionRevoked = new Set<(scope: LoginScope) => void>();
   private pendingWrite: Promise<void> = Promise.resolve();
   private readonly revoked = new Set<(user: number | null) => void>();
 
@@ -42,6 +45,7 @@ export class IdentityService {
   }
 
   onModuleDestroy(): void {
+    for (const scope of this.tokens.values()) for (const notify of this.sessionRevoked) notify(scope);
     this.tokens.clear();
     this.llmKeys.clear();
     for (const notify of this.revoked) notify(null);
@@ -53,6 +57,27 @@ export class IdentityService {
     return () => {
       this.revoked.delete(notify);
     };
+  }
+
+  onSessionRevoked(notify: (scope: LoginScope) => void): () => void {
+    this.sessionRevoked.add(notify);
+    return () => { this.sessionRevoked.delete(notify); };
+  }
+  scope(token: string): LoginScope {
+    const scope = this.tokens.get(token);
+    if (!scope) throw new IdentityError(401, 'TOKEN_INVALID');
+    return scope;
+  }
+  /** 仅由已核实的组网访问在身份事务中调用；普通登录与受控签发共用同一凭据事实。 */
+  async prepareLogin(client: EntityManager, user: IdentityUser, requestId: string, action = 'login'): Promise<LoginResponse> {
+    const center = await client.getRepository(CenterIdentityEntity).findOneByOrFail({ singleton: true });
+    const token = `ct_${randomBytes(32).toString('hex')}`, llm_key = `cl_${randomBytes(32).toString('hex')}`;
+    await this.audit(client, action, requestId, user.id);
+    return { center_id: center.center_id, user: publicUser(user), token, llm_key };
+  }
+  publishLogin(login: LoginResponse) {
+    this.tokens.set(login.token, { userId: login.user.id });
+    this.llmKeys.set(login.llm_key, login.token);
   }
 
   /** 串行化身份写入直到提交后的内存变更完成，避免退出/改密/登录交错复活旧凭据。
@@ -138,16 +163,16 @@ export class IdentityService {
 
   /** 仅在身份事务成功提交后调用；角色和启停变化撤销；改密与重置保留已有凭据。 */
   revokeUser(id: number): void {
-    for (const [token, userId] of this.tokens) if (userId === id) this.revoke(token);
+    for (const [token, userId] of this.tokens) if (userId.userId === id) this.revoke(token);
     for (const notify of this.revoked) notify(id);
   }
 
   private async userForToken(client: EntityManager, token?: string) {
-    const id = token && this.tokens.get(token);
+    const id = token && this.tokens.get(token)?.userId;
     if (!id) throw new IdentityError(401, 'TOKEN_INVALID');
     const row = await users.forIdentity(client, id);
     // 查询期间可能已经退出；不把异步查询前的认证结果当成仍然有效。
-    if (!row?.enabled || this.tokens.get(token!) !== id) throw new IdentityError(401, 'TOKEN_INVALID');
+    if (!row?.enabled || this.tokens.get(token!)?.userId !== id) throw new IdentityError(401, 'TOKEN_INVALID');
     return row;
   }
 
@@ -166,25 +191,23 @@ export class IdentityService {
         ) {
           throw new IdentityError(409, 'AUTH_STATE_CHANGED');
         }
-        const center = await client.getRepository(CenterIdentityEntity).findOneBy({ singleton: true });
-        if (!center) throw new IdentityError(503, 'SERVICE_UNAVAILABLE');
-        const token = `ct_${randomBytes(32).toString('hex')}`,
-          llm_key = `cl_${randomBytes(32).toString('hex')}`;
-        await this.audit(client, 'login', requestId, user.id);
-        return { center_id: center.center_id, user: publicUser(user), token, llm_key };
+        return this.prepareLogin(client, user, requestId);
       },
-      (result) => {
-        this.tokens.set(result.token, result.user.id);
-        this.llmKeys.set(result.llm_key, result.token);
-      },
+      (result) => this.publishLogin(result),
     );
   }
 
-  async me(token?: string): Promise<IdentityResponse> {
+  /** 中心身份与访问地址无关；公开发现与已认证身份使用同一持久事实。 */
+  async centerId(): Promise<string> {
     const center = await this.source.getRepository(CenterIdentityEntity).findOneBy({ singleton: true });
     if (!center) throw new IdentityError(503, 'SERVICE_UNAVAILABLE');
+    return center.center_id;
+  }
+
+  async me(token?: string): Promise<IdentityResponse> {
+    const center_id = await this.centerId();
     const row = await this.userForToken(this.source.manager, token);
-    return { center_id: center.center_id, user: publicUser(row) };
+    return { center_id, user: publicUser(row) };
   }
 
   /** 为后续代理保留已有的用途隔离；LLM key 只关联本次 Token，没有第二套生命周期。 */
@@ -192,15 +215,19 @@ export class IdentityService {
     return this.me(this.llmKeys.get(key));
   }
 
+  discardLogin(token: string): void { this.revoke(token); }
+
   private revoke(token: string): void {
+    const scope = this.tokens.get(token);
     this.tokens.delete(token);
+    if (scope) for (const notify of this.sessionRevoked) notify(scope);
     for (const [key, owner] of this.llmKeys) if (owner === token) this.llmKeys.delete(key);
   }
 
   async logout(token: string | undefined, requestId: string): Promise<void> {
     await this.write(
       async (client) => {
-        const id = token && this.tokens.get(token);
+        const id = token && this.tokens.get(token)?.userId;
         if (id) await this.audit(client, 'logout', requestId, id);
       },
       () => {

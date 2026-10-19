@@ -239,7 +239,10 @@ fn compile_global(
             [1, 2, 4, 8, 16].map(Duration::from_secs).into(),
             Duration::from_secs(30),
         )),
-    };
+    }
+    // 参数纠错与网络重试共用总 attempt 预算；不补 JSON，不改变工具副作用边界。
+    // 显式关闭模型重试时也关闭纠错。
+    .map(|policy| policy.with_tool_argument_corrections(2));
     if !issues.is_empty() {
         return Err(issues);
     }

@@ -6,6 +6,7 @@ import type { ProviderConnection, SaveProviderWritable as SaveProvider } from '.
 import adminStore from '../../../stores/AdminStore';
 import { useLeaveConfirmation } from '../../../app/NavigationGuard/context';
 import { modelApi } from '../../../request/models';
+import { opencodePresets, opencodeUrls } from '../../../../../../packages/assistant-protocol/src/opencode';
 import { providerLabels, serverHistorySupport } from '../model';
 import { useResourceQuery } from '../../../request/useResourceQuery';
 import styles from './index.module.scss';
@@ -45,9 +46,15 @@ const ProviderEditorForm = observer(function ProviderEditorForm() {
   useLeaveConfirmation(dirty, () => setDirty(false));
   const type = Form.useWatch(['connection', 'provider_type'], form) ?? 'openai';
   const credentialMode = Form.useWatch(['credential', 'mode'], form);
-  const responses = ['openai', 'deepseek', 'dashscope_api', 'dashscope_plan', 'moonshot'].includes(type);
+  const opencode = type === 'opencode';
+  const responses = ['opencode', 'openai', 'deepseek', 'dashscope_api', 'dashscope_plan', 'moonshot'].includes(type);
   const watchedConnection = Form.useWatch('connection', form);
+  const urls = opencode && watchedConnection ? opencodeUrls({ ...defaultConnection, ...watchedConnection }) : null;
   const historySupport = serverHistorySupport({ ...defaultConnection, ...watchedConnection });
+  let historyHint = '当前接口尚未确认支持续接。自定义接口需先声明支持；Chat Completions 不支持续接。';
+  if (historySupport === 'supported')
+    historyHint = '开启后复用服务端上下文，减少历史上传；连接或历史失效时用本地上下文重建。';
+  if (opencode) historyHint = 'OpenCode 暂未开放服务端历史续接。';
   useEffect(() => {
     const current = form.getFieldValue('connection') as ProviderConnection | undefined;
     if (current?.server_history_enabled && serverHistorySupport(current) !== 'supported') {
@@ -118,8 +125,11 @@ const ProviderEditorForm = observer(function ProviderEditorForm() {
           <Form.Item name={['connection', 'provider_type']} label="服务商类型">
             <Select
               options={Object.entries(providerLabels).map(([value, label]) => ({ value, label }))}
-              onChange={() => {
-                form.setFieldValue(['connection', 'protocol_preference'], 'auto');
+              onChange={(value) => {
+                form.setFieldValue(
+                  ['connection', 'protocol_preference'],
+                  value === 'opencode' ? 'chat_completions' : 'auto',
+                );
                 form.setFieldValue(['connection', 'responses_transport'], 'http');
                 form.setFieldValue(['connection', 'server_history_support_override'], null);
               }}
@@ -133,6 +143,41 @@ const ProviderEditorForm = observer(function ProviderEditorForm() {
           >
             <Input placeholder="https://服务商地址/v1" />
           </Form.Item>
+          {opencode && (
+            <>
+              <Space wrap>
+                {opencodePresets.map((preset) => (
+                  <Button
+                    key={preset.id}
+                    onClick={() => {
+                      form.setFieldsValue({
+                        connection: { endpoint: preset.endpoint, models_path: preset.models_path },
+                      });
+                      setDirty(true);
+                    }}
+                  >
+                    使用{preset.id === 'go' ? 'Go 订阅' : '普通按量'}地址
+                  </Button>
+                ))}
+              </Space>
+              <Typography.Paragraph type="secondary">
+                点击预设会替换服务地址及模型发现路径，保留所选协议。
+              </Typography.Paragraph>
+              {urls && (
+                <>
+                  <Form.Item label="模型列表地址">
+                    <Input aria-label="模型列表地址" value={urls.discovery} readOnly />
+                  </Form.Item>
+                  <Form.Item label="推理地址">
+                    <Input aria-label="推理地址" value={urls.inference} readOnly />
+                  </Form.Item>
+                </>
+              )}
+              <Typography.Paragraph type="secondary">
+                列表可能包含多种协议的模型，请核对所选协议。当前可保存配置和刷新目录，OpenCode 推理适配尚未开放。
+              </Typography.Paragraph>
+            </>
+          )}
           <Form.Item name={['credential', 'mode']} label="API Key">
             <Select
               options={[
@@ -154,14 +199,18 @@ const ProviderEditorForm = observer(function ProviderEditorForm() {
           <Form.Item
             name={['connection', 'protocol_preference']}
             label="协议偏好"
-            extra={`自动选择：${responses ? 'Responses' : 'Chat Completions'}`}
+            extra={
+              opencode
+                ? 'OpenCode 必须明确选择协议；目录发现成功不代表模型适用此协议。'
+                : `自动选择：${responses ? 'Responses' : 'Chat Completions'}`
+            }
           >
             <Select
               onChange={(value) => {
                 if (value === 'chat_completions') form.setFieldValue(['connection', 'responses_transport'], 'http');
               }}
               options={[
-                { value: 'auto', label: '自动' },
+                ...(!opencode ? [{ value: 'auto', label: '自动' }] : []),
                 ...(responses ? [{ value: 'responses', label: 'Responses' }] : []),
                 { value: 'chat_completions', label: 'Chat Completions' },
               ]}
@@ -173,7 +222,7 @@ const ProviderEditorForm = observer(function ProviderEditorForm() {
             extra="WebSocket 需要上游入口及对应凭据支持；客户端仍通过 HTTP 调用企业中心。"
           >
             <Select
-              disabled={!responses || watchedConnection?.protocol_preference === 'chat_completions'}
+              disabled={opencode || !responses || watchedConnection?.protocol_preference === 'chat_completions'}
               options={[
                 { value: 'http', label: 'HTTP' },
                 { value: 'websocket', label: 'WebSocket' },
@@ -183,7 +232,7 @@ const ProviderEditorForm = observer(function ProviderEditorForm() {
           <Form.Item
             name={['connection', 'models_path']}
             label="模型发现路径"
-            extra="留空使用默认路径；填写同源绝对路径。"
+            extra="留空使用默认路径；同源绝对路径将替换服务地址的整个路径，不能填写完整 URL。"
           >
             <Input placeholder="例如 /v1/models" />
           </Form.Item>
@@ -196,6 +245,7 @@ const ProviderEditorForm = observer(function ProviderEditorForm() {
             getValueFromEvent={(value: 'default' | 'supported' | 'unsupported') => (value === 'default' ? null : value)}
           >
             <Select
+              disabled={opencode}
               options={[
                 { value: 'default', label: '使用服务商默认' },
                 { value: 'supported', label: '明确支持' },
@@ -207,11 +257,7 @@ const ProviderEditorForm = observer(function ProviderEditorForm() {
             name={['connection', 'server_history_enabled']}
             label="使用服务端历史续接"
             valuePropName="checked"
-            extra={
-              historySupport === 'supported'
-                ? '开启后复用服务端上下文，减少历史上传；连接或历史失效时用本地上下文重建。'
-                : '当前接口尚未确认支持续接。自定义接口需先声明支持；Chat Completions 不支持续接。'
-            }
+            extra={historyHint}
           >
             <Switch disabled={historySupport !== 'supported' || adminStore.busy || Boolean(id && !query.value)} />
           </Form.Item>

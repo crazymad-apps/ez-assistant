@@ -35,6 +35,9 @@ if (arguments_[0] === "build") {
   await run(process.execPath, ["scripts/build-host.mjs", "--release", ...targetArguments]);
   await run(process.execPath, ["scripts/prepare-sidecar.mjs", ...targetArguments]);
   arguments_.push("--config", "src-tauri/tauri.bundle.conf.json");
+  if (target ? /apple-darwin|windows-msvc/.test(target) : ["darwin", "win32"].includes(platform)) {
+    arguments_.push("--config", "src-tauri/tauri.capture.conf.json");
+  }
 }
 await run(platform === "win32" ? "tauri.cmd" : "tauri", arguments_);
 

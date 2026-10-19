@@ -456,7 +456,12 @@ fn preflight_response(headers: &HeaderMap, origin: Option<&str>) -> Response {
                 ![
                     "authorization",
                     "content-type",
+                    "range",
+                    "if-range",
+                    "if-none-match",
+                    "if-modified-since",
                     "x-ez-login-context",
+                    "x-ez-target-device",
                     "x-ez-host-bootstrap",
                     assistant_protocol::CLIENT_VERSION_HEADER,
                     assistant_protocol::MIN_COMPATIBLE_VERSION_HEADER,
@@ -480,6 +485,10 @@ fn with_cors(mut response: Response, origin: Option<&str>) -> Response {
         let headers = response.headers_mut();
         // 只开放显式凭据的跨源读取，不允许浏览器跨源携带 Cookie。
         headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
+        headers.insert(
+            axum::http::header::ACCESS_CONTROL_EXPOSE_HEADERS,
+            HeaderValue::from_static("x-ez-network-proxy,content-disposition,content-range,accept-ranges,etag,last-modified"),
+        );
         headers.insert(VARY, HeaderValue::from_static("Origin"));
         headers.insert(
             ACCESS_CONTROL_ALLOW_METHODS,
@@ -488,7 +497,7 @@ fn with_cors(mut response: Response, origin: Option<&str>) -> Response {
         headers.insert(
             ACCESS_CONTROL_ALLOW_HEADERS,
             HeaderValue::from_static(
-                "authorization,content-type,x-ez-client-version,x-ez-min-compatible-version,x-ez-login-context,x-ez-host-bootstrap",
+                "authorization,content-type,range,if-range,if-none-match,if-modified-since,x-ez-client-version,x-ez-min-compatible-version,x-ez-login-context,x-ez-host-bootstrap,x-ez-target-device",
             ),
         );
     }
@@ -526,7 +535,7 @@ fn has_local_proof(state: &HttpState, request: &Request) -> bool {
 
 /// fetch 通过头传递账号上下文；浏览器直接加载的 GET 资源可通过 query 传递。
 /// 该值只用于发现旧页面，不是凭据，不能据此选择或切换用户。
-fn expected_login_context(request: &Request) -> Option<String> {
+pub(super) fn expected_login_context(request: &Request) -> Option<String> {
     if let Some(value) = request.headers().get("x-ez-login-context") {
         return value.to_str().ok().map(str::to_owned);
     }

@@ -36,11 +36,12 @@ export function SessionResourceTree(props: Readonly<{
   focus_locator: SessionResourceLocator | null;
   roots: readonly SessionResourceRootItem[];
   session_id: SessionId | null;
+  on_open_host_file?: (path: string) => void;
   on_open_file?: (entry: SessionResourceEntry) => void;
   on_open_resource_menu?: (entry: SessionResourceEntry, location: ResourceMenuLocation) => void;
 }>) {
 
-  const files = useResourceRoot().files;
+  const files = useResourceRoot().reading_files;
   const [include_hidden, setIncludeHidden] = useState(props.view_state?.tree?.include_hidden ?? false);
   const [include_generated, setIncludeGenerated] = useState(props.view_state?.tree?.include_generated ?? false);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set(props.view_state?.tree?.expanded.map(locatorKey)));
@@ -49,8 +50,24 @@ export function SessionResourceTree(props: Readonly<{
   const request_generation = useRef(0);
   const locator_registry = useRef(new Map<string, SessionResourceLocator>(props.view_state?.tree?.expanded.map((locator) => [locatorKey(locator), locator])));
 
+  function projectPath(locator: SessionResourceLocator): string {
+    const root = props.roots.find((item) => item.locator && rootKey(item.locator.root) === rootKey(locator.root));
+    if (!root?.path || locator.relative_path.split(/[\\/]/).some((part) => part === "..")) throw new Error("项目目录不可用。");
+    return `${root.path.replace(/[/\\]+$/, "")}/${locator.relative_path}`;
+  }
+
+  async function listProjectDirectory(locator: SessionResourceLocator) {
+    const result = await files.listHostFiles(projectPath(locator), include_hidden);
+    return { ...result, entries: result.entries.map((entry): SessionResourceEntry => ({
+      locator: { root: locator.root, relative_path: [locator.relative_path, entry.display_name].filter(Boolean).join("/") },
+      display_name: entry.display_name, kind: entry.kind, state: entry.state, is_symbolic_link: entry.is_symbolic_link,
+      is_hidden: entry.display_name.startsWith("."), is_generated: false, size_bytes: entry.size_bytes ?? undefined,
+    })) };
+  }
+
+  const root_identity = JSON.stringify(props.roots);
   const loadDirectory = useCallback(async (locator: SessionResourceLocator) => {
-    if (!props.session_id) return null;
+    if (!props.session_id && !props.on_open_host_file) return null;
     const key = locatorKey(locator);
     const generation = request_generation.current;
     setDirectories((current) => {
@@ -64,11 +81,9 @@ export function SessionResourceTree(props: Readonly<{
       return next;
     });
     try {
-      const result = await files.listSessionResourceFiles(props.session_id, {
-        locator,
-        include_hidden,
-        include_generated,
-      });
+      const result = props.session_id ? await files.listSessionResourceFiles(props.session_id, {
+        locator, include_hidden, include_generated,
+      }) : await listProjectDirectory(locator);
       if (generation !== request_generation.current) return;
       setDirectories((current) => {
         const next = new Map(current).set(key, {
@@ -96,7 +111,7 @@ export function SessionResourceTree(props: Readonly<{
       });
       return null;
     }
-  }, [include_generated, include_hidden, props.session_id]);
+  }, [include_generated, include_hidden, props.session_id, files, root_identity]);
 
   const scroll_ref = useRef<HTMLDivElement>(null);
   const restore_scroll = useRef<number | null>(props.view_state?.tree?.scroll_top ?? 0);
@@ -164,7 +179,7 @@ export function SessionResourceTree(props: Readonly<{
   }
 
   async function expandAll() {
-    if (!props.session_id) return;
+    if (!props.session_id && !props.on_open_host_file) return;
     const generation = request_generation.current;
     const queue = props.roots.flatMap((root) => root.locator ? [root.locator] : []);
     const visited = new Set<string>();
@@ -203,10 +218,10 @@ export function SessionResourceTree(props: Readonly<{
     <div className={styles.tree_view}>
       <div className={styles.tree_toolbar}>
         <label><input checked={include_hidden} onChange={(event) => setIncludeHidden(event.target.checked)} type="checkbox" />显示隐藏项</label>
-        <label><input checked={include_generated} onChange={(event) => setIncludeGenerated(event.target.checked)} type="checkbox" />显示生成目录</label>
+        {props.session_id && <label><input checked={include_generated} onChange={(event) => setIncludeGenerated(event.target.checked)} type="checkbox" />显示生成目录</label>}
         <div className={styles.tree_toolbar_actions}>
           <InlineIconButton
-            disabled={!props.session_id || !props.roots.some((root) => root.locator)}
+            disabled={(!props.session_id && !props.on_open_host_file) || !props.roots.some((root) => root.locator)}
             icon="expand-all"
             label="全部展开"
             onClick={() => void expandAll()}
@@ -258,7 +273,7 @@ export function SessionResourceTree(props: Readonly<{
                   expanded={expanded}
                   locator={locator}
                   on_refresh={(value) => void loadDirectory(value)}
-                  on_open_file={props.on_open_file}
+                  on_open_file={props.session_id ? props.on_open_file : (entry) => props.on_open_host_file?.(projectPath(entry.locator))}
                   on_open_resource_menu={props.on_open_resource_menu}
                   on_toggle={toggle}
                   state={state}

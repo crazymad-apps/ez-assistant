@@ -126,3 +126,24 @@ describe('通知返回业务位置', () => {
     expect(store.navigation.selected_session_id).toBe('previous');
   });
 });
+
+
+it('reopens a released device for its notification without querying the local session with the same id', async () => {
+  const { store, command, target } = fixture();
+  const device = '11111111-1111-4111-8111-111111111111';
+  const local = store.local_runtime_client!;
+  const remote = new RuntimeClient({ base_url: local.address, access_token: 'fixture', instance_id: local.instance_id,
+    capabilities: local.capabilities, started_runtime: false }, undefined, device);
+  clients.push(remote);
+  const remote_command = vi.spyOn(remote, 'command').mockResolvedValue(response('destination'));
+  runInAction(() => { store.network.devices = [{ id: device, name: 'remote', platform: 'test', enabled: true, online: true, desktop_view: false, desktop_control: false }]; });
+  const reconnect = vi.spyOn(store.network, 'ensureConnected').mockImplementation(async (id) => {
+    vi.spyOn(store.network.context(id).runtime, 'client', 'get').mockReturnValue(remote);
+  });
+  expect(await store.openNotificationTarget({ ...target, scope: store.notificationScopeFor(remote)! })).toBe(true);
+  expect(reconnect).toHaveBeenCalledExactlyOnceWith(device);
+  expect(remote_command).toHaveBeenCalledExactlyOnceWith({ type: 'get_session_view', payload: { session_id: 'destination' } });
+  expect(command).not.toHaveBeenCalled();
+  expect(store.navigation.target_device).toBe(device);
+  expect(store.local_projection.session_views.has('destination')).toBe(false);
+});

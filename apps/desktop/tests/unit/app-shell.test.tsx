@@ -62,7 +62,7 @@ describe("AppShell session header", () => {
     const show_password = vi.fn();
     const open_web = vi.fn();
     const request_logout = vi.fn();
-    const retry = vi.spyOn(store, "retryConnection").mockImplementation(() => undefined);
+    const retry = vi.spyOn(store, "retryLocalConnection").mockImplementation(() => undefined);
     renderShell(store, {
       desktop: true, account_label: "测试用户", host_label: "本机 Host",
       session: { identity: { display_name: "测试用户" } } as ApplicationConnectionStore["session"],
@@ -172,7 +172,7 @@ describe("AppShell session header", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "选择最近会话" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Second session" }));
-    expect(select).toHaveBeenCalledWith("session-2");
+    expect(select).toHaveBeenCalledWith("session-2", null);
 
     fireEvent.click(screen.getByRole("button", { name: "更多会话操作" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "置顶" }));

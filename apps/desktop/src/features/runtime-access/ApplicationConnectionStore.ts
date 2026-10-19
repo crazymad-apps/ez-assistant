@@ -156,8 +156,12 @@ export class ApplicationConnectionStore {
           const code = loginOptionsErrorCode(error);
           if (["configuration_conflict"].includes(code ?? "")) {
             this.#setLoginOptions({ phase: "issue", recovery: "reload", message: "配置已变化，请重新核对。重新载入将放弃未保存的修改。" });
-          } else if (["invalid_request", "operation_not_allowed", "desktop_update_busy"].includes(code ?? "")) {
-            this.#setLoginOptions({ phase: "edit", message: "配置未保存，请检查输入或等待当前更新完成后重新确认。" });
+          } else if (code === "desktop_update_busy") {
+            this.#setLoginOptions({ phase: "edit", message: "更新正在下载或安装，请完成后再保存登录选项。" });
+          } else if (["invalid_request", "operation_not_allowed"].includes(code ?? "")) {
+            const message = typeof error === "object" && error !== null && "message" in error && typeof error.message === "string"
+              ? error.message : "配置未保存，请检查输入和本机管理权限。";
+            this.#setLoginOptions({ phase: "edit", message });
           } else {
             this.#setLoginOptions({ recovery: "check_save", expected_instance: state.baseline.instance_id });
             await this.#checkLoginOptions(owner, generation, "check_save");
@@ -216,6 +220,9 @@ export class ApplicationConnectionStore {
       const actual = await manageLocalHost({ type: "get_status" }, state.expected_instance);
       if (!this.#ownsLoginOptions(owner, generation)) return;
       runInAction(() => { this.mode = actual.current_mode; this.local_state = "ready"; this.local_error = null; });
+      if (recovery === "check_save" && state.intended.mode === "enterprise" && !state.intended.center_id && actual.revision === state.baseline?.revision) {
+        this.#setLoginOptions({ phase: "edit", recovery: null, message: "未确认中心身份已核验，请重新保存。" }); return;
+      }
       if (!matchesLoginOptions(actual, state.intended) || (recovery === "check_applied" && actual.revision !== state.intended.revision)) {
         this.#setLoginOptions({ phase: "issue", baseline: actual, recovery: "reload", message: "实际配置与本次确认不一致，请重新核对。重新载入将放弃未保存的修改。" }); return;
       }
@@ -584,24 +591,28 @@ export class ApplicationConnectionStore {
     if (this.current !== store) this.current?.dispose();
     if (this.#initial !== store && this.#initial !== this.current) this.#initial?.dispose();
     this.#initial = null;
-    this.#auth_reaction = reaction(() => [store.connection.state, store.connection.last_error_code] as const, ([state, code]) => {
+    // 基础连接就绪即完成登录；会话正文、右栏及置顶恢复继续由 RootStore 管理。
+    // 不能让这些恢复请求继续占用账号操作锁，也不能在它们迟到完成时重设页面。
+    let connected!: () => void;
+    const ready = new Promise<void>((resolve) => { connected = resolve; });
+    this.#auth_reaction = reaction(() => [store.local_connection.state, store.local_connection.last_error_code] as const, ([state, code]) => {
       if (generation !== this.#generation || (this.logout_confirmation && this.pending)) return;
       if (code === "center_protocol_incompatible") { this.#connectionError({ code }); }
       else if (code === "login_context_changed") { this.#clear(); runInAction(() => { this.phase = "loading"; }); void this.recheckSession(); }
       else if (code === "authentication_required") this.#authenticationRequired();
       else if (state !== "connected" && this.phase === "workspace") {
-        runInAction(() => { this.phase = this.desktop ? "entry" : "loading"; this.error = store.connection.error_message ?? "连接已中断，请重试。"; });
-      } else if (state === "connected") { runInAction(() => { this.phase = "workspace"; this.error = null; }); }
+        runInAction(() => { this.phase = this.desktop ? "entry" : "loading"; this.error = store.local_connection.error_message ?? "连接已中断，请重试。"; });
+      } else if (state === "connected") { runInAction(() => { this.phase = "workspace"; this.error = null; }); connected(); }
     });
     runInAction(() => { this.current = store; });
-    await store.connect(bootstrap);
+    await Promise.race([store.connect({ ...bootstrap, session }), ready]);
     if (generation !== this.#generation || this.update_required) { store.dispose(); return; }
     runInAction(() => {
-      if (store.connection.state === "connected") {
+      if (store.local_connection.state === "connected") {
         if (this.desktop) { if (this.#return_to_settings) store.settings.open("runtime"); else store.settings.close(); }
         this.#return_to_settings = false; this.phase = "workspace"; this.connected_target = bootstrap.target_kind ?? null; this.error = null;
       }
-      else { this.error = store.connection.error_message ?? "初始化失败，请重试。"; }
+      else { this.error = store.local_connection.error_message ?? "初始化失败，请重试。"; }
     });
   }
 }

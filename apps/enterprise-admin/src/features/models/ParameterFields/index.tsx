@@ -8,6 +8,7 @@ type Props = {
   readonly sources: Record<string, string>;
   readonly disabled: boolean;
   readonly responses: boolean;
+  readonly server_features_available?: boolean;
   readonly onChange: (parameters: ModelParameters) => void;
 };
 const sourceLabels: Record<string, string> = {
@@ -87,7 +88,9 @@ export function ParameterFields(props: Props) {
               disabled={
                 props.disabled ||
                 (!props.value.server_compaction_enabled &&
-                  (!props.responses || props.value.server_compaction_support !== 'supported'))
+                  (props.server_features_available === false ||
+                    !props.responses ||
+                    props.value.server_compaction_support !== 'supported'))
               }
               onChange={(value) =>
                 props.onChange({
@@ -106,7 +109,11 @@ export function ParameterFields(props: Props) {
               aria-label="输入计量能力"
               disabled={props.disabled}
               value={props.value.input_token_count_support}
-              options={supports}
+              options={
+                props.server_features_available === false
+                  ? supports.filter((option) => option.value !== 'supported')
+                  : supports
+              }
               onChange={(value) => set('input_token_count_support', value)}
             />
           </Form.Item>
@@ -115,7 +122,9 @@ export function ParameterFields(props: Props) {
           {props.value.server_compaction_enabled
             ? 'Agent 按窗口阈值或模型超限触发服务端压缩，手动压缩使用相同机制。'
             : '自动和手动压缩均使用本地摘要。'}
-          计量不可用时沿用现有估算，等待正常响应校准。{!props.responses && '服务端压缩需要 Responses 协议。'}
+          计量不可用时沿用现有估算，等待正常响应校准。
+          {props.server_features_available === false && 'OpenCode 暂不开放服务端压缩和输入计量。'}
+          {!props.responses && '服务端压缩需要 Responses 协议。'}
         </Typography.Paragraph>
       </Card>
       <Card title="模型能力" size="small" type="inner">

@@ -6,6 +6,7 @@ import { observer } from "mobx-react-lite";
 import { useEffect, useId, useRef, useState } from "react";
 import type { ProviderConnection, ProviderCredentialChange, ProviderSummary, ProviderType } from "@ez-assistant/protocol";
 import { useRootStore } from "../../../stores/RootStoreContext";
+import { OpenCodeConnectionFields } from "./OpenCodeConnectionFields";
 import { ModelFieldSelector } from "./ModelFieldSelector";
 import { SettingsMessages } from "./SettingsMessages";
 import { SettingsPageContainer } from "./SettingsPageContainer";
@@ -26,9 +27,12 @@ export const ProviderConnectionForm = observer(function ProviderConnectionForm(p
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const busy = settings.pending_action !== null;
-  const responses = ["openai", "deepseek", "dashscope_api", "dashscope_plan", "moonshot"].includes(connection.provider_type);
+  const opencode = connection.provider_type === "opencode";
+  const responses = ["opencode", "openai", "deepseek", "dashscope_api", "dashscope_plan", "moonshot"].includes(connection.provider_type);
   const history_support = serverHistorySupport(connection);
-  const history_reason = history_support === "unknown" ? "尚未确认当前接口支持续接，可在接口选项中声明能力。" : "当前接口不支持服务端历史续接。";
+  let history_reason = "当前接口不支持服务端历史续接。";
+  if (history_support === "unknown") history_reason = "尚未确认当前接口支持续接，可在接口选项中声明能力。";
+  if (opencode) history_reason = "OpenCode 暂未开放服务端历史续接。";
 
   function change(patch: Partial<ProviderConnection>) {
     setConnection((current) => {
@@ -59,6 +63,7 @@ export const ProviderConnectionForm = observer(function ProviderConnectionForm(p
             aria-controls={secret_id} aria-pressed={show_secret} disabled={busy || clear_secret} onClick={() => setShowSecret(!show_secret)} />
         </span></div>
       </div>
+      {opencode && <OpenCodeConnectionFields connection={connection} onChange={change} />}
       {props.provider?.has_api_key && <div className={styles.runtime_actions}>
         <Button type="button" onClick={() => { setClearSecret(!clear_secret); setSecret(""); setShowSecret(false); setDirty(true); }}>{clear_secret ? "取消清除密钥" : "清除密钥"}</Button>
         {clear_secret && <span>保存后清除密钥</span>}
@@ -67,9 +72,9 @@ export const ProviderConnectionForm = observer(function ProviderConnectionForm(p
       <p>{history_support === "supported" ? "开启后由服务商保存响应，用于后续增量续接；本地仍保留会话。" : history_reason}</p></div>
       <CollapsibleSection title="接口选项"><div className={styles.model_form}>
         <ModelFieldSelector disabled={busy} label="接口协议" value={connection.protocol_preference} options={[
-          { value: "auto", label: "自动" }, { value: "chat_completions", label: "Chat Completions" }, ...(responses ? [{ value: "responses" as const, label: "Responses" }] : []),
+          ...(!opencode ? [{ value: "auto" as const, label: "自动" }] : []), { value: "chat_completions", label: "Chat Completions" }, ...(responses ? [{ value: "responses" as const, label: "Responses" }] : []),
         ]} onChange={(protocol_preference) => change({ protocol_preference })} />
-        <ModelFieldSelector disabled={busy} label="续接能力" value={connection.server_history_support_override ?? "default"} options={[
+        <ModelFieldSelector disabled={busy || opencode} label="续接能力" value={connection.server_history_support_override ?? "default"} options={[
           { value: "default", label: "使用服务商默认" }, { value: "supported", label: "明确支持" }, { value: "unsupported", label: "明确不支持" },
         ]} onChange={(value) => change({ server_history_support_override: value === "default" ? null : value })} />
         <label>模型列表接口<input aria-label="模型列表接口" value={connection.models_path} onChange={(event) => change({ models_path: event.target.value })} placeholder="留空使用适配器默认接口" /></label>

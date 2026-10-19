@@ -22,14 +22,14 @@ export const WorkspaceGroup = observer(function WorkspaceGroup(props: Readonly<{
 }>) {
   const store = useRootStore();
   const [remove_open, setRemoveOpen] = useState(false);
-  const is_expanded = store.navigation.expanded_workspaces.has(props.workspace.workspace_id);
-  const duplicated = (store.projection.application?.workspaces ?? []).filter((workspace) =>
+  const is_expanded = store.sidebar_navigation.expanded_workspaces.has(props.workspace.workspace_id);
+  const duplicated = (store.sidebar_projection.application?.workspaces ?? []).filter((workspace) =>
     workspace.lifecycle === "active" && workspace.label === props.workspace.label
   ).length > 1;
   const name = `${props.workspace.label}${duplicated ? ` · ${props.workspace.workspace_id.slice(0, 8)}` : ""}`;
   const retained_session_count = [
-    ...(store.projection.application?.active_sessions ?? []),
-    ...(store.projection.application?.archived_sessions ?? []),
+    ...(store.sidebar_projection.application?.active_sessions ?? []),
+    ...(store.sidebar_projection.application?.archived_sessions ?? []),
   ].filter((session) => session.workspace_id === props.workspace.workspace_id).length;
 
   async function removeWorkspace() {
@@ -50,7 +50,7 @@ export const WorkspaceGroup = observer(function WorkspaceGroup(props: Readonly<{
           <Icon name="folder" size={17} />
           <span>{name}</span>
         </button>
-        {store.navigation.list_mode === "active" && (
+        {store.sidebar_navigation.list_mode === "active" && (
           <DropdownMenu className={styles.workspace_menu_root}>
             <DropdownMenuTrigger
               aria-label={`${name} 项目操作`}
@@ -61,19 +61,19 @@ export const WorkspaceGroup = observer(function WorkspaceGroup(props: Readonly<{
             <DropdownMenuContent aria-label={`${name} 项目操作`}>
               <DropdownMenuItem
                 disabled={
-                  store.connection.state !== "connected" ||
+                  store.sidebar_connection.state !== "connected" ||
                   store.pending_session_action ||
                   store.pending_workspace_action
                 }
-                onSelect={() => store.openNewSessionDraft(props.workspace.workspace_id)}
+                onSelect={() => store.openNewSessionDraft(props.workspace.workspace_id, store.network.browsing_device)}
               >
                 <Icon name="plus" size={15} />
                 <span>在此新建会话</span>
-                {store.new_session_drafts.hasDraft(draftKeyForWorkspace(props.workspace.workspace_id)) && (
+                {(store.sidebar_context?.drafts ?? store.local_new_session_drafts).hasDraft(draftKeyForWorkspace(props.workspace.workspace_id)) && (
                   <em className={styles.draft_indicator}>有草稿</em>
                 )}
               </DropdownMenuItem>
-              {store.files.native_host && <DropdownMenuItem onSelect={() => void store.openWorkspace(props.workspace.workspace_id)}>
+              {!store.network.browsing_device && store.local_files.native_host && <DropdownMenuItem onSelect={() => void store.openWorkspace(props.workspace.workspace_id)}>
                 <Icon name="folder" size={15} />
                 <span>打开工作目录</span>
               </DropdownMenuItem>}
@@ -83,7 +83,7 @@ export const WorkspaceGroup = observer(function WorkspaceGroup(props: Readonly<{
               </DropdownMenuItem>
               <DropdownMenuItem
                 disabled={store.pending_workspace_action}
-                onSelect={() => store.openWorkspaceEditor(props.workspace.workspace_id)}
+                onSelect={() => store.openWorkspaceEditor(props.workspace.workspace_id, store.network.browsing_device)}
               >
                 <Icon name="edit" size={15} />
                 <span>编辑项目…</span>
@@ -91,7 +91,7 @@ export const WorkspaceGroup = observer(function WorkspaceGroup(props: Readonly<{
               <DropdownMenuItem
                 className={styles.workspace_remove_action}
                 disabled={
-                  store.connection.state !== "connected" ||
+                  store.sidebar_connection.state !== "connected" ||
                   store.pending_session_action ||
                   store.pending_workspace_action
                 }
@@ -138,41 +138,43 @@ export const WorkspaceGroup = observer(function WorkspaceGroup(props: Readonly<{
 });
 
 export const SessionList = observer(function SessionList(props: Readonly<{
+  target_device?: string | null;
   id?: string;
   indent?: "nested" | "root";
   sessions: readonly SessionSummary[];
 }>) {
   const store = useRootStore();
+  const target = props.target_device === undefined ? store.network.browsing_device : props.target_device;
 
   return (
     <div className={styles.session_list} data-indent={props.indent ?? "nested"} id={props.id}>
       {props.sessions.map((session) => (
         <div
           className={styles.session_row}
-          data-has-actions={store.navigation.list_mode === "active"}
-          data-selected={store.navigation.selected_session_id === session.session_id}
+          data-has-actions={store.sidebar_navigation.list_mode === "active"}
+          data-selected={store.navigation.target_device === target && store.navigation.selected_session_id === session.session_id}
           key={session.session_id}
         >
           <button
-            aria-current={store.navigation.selected_session_id === session.session_id ? "page" : undefined}
+            aria-current={store.navigation.target_device === target && store.navigation.selected_session_id === session.session_id ? "page" : undefined}
             className={styles.session_open}
             data-navigation-action
-            onClick={() => void store.selectSession(session.session_id)}
+            onClick={() => void store.selectSession(session.session_id, target)}
             title={`${session.title} · ${session.workspace_id
-              ? store.projection.application?.workspaces.find((workspace) => workspace.workspace_id === session.workspace_id)?.label ?? "项目"
+              ? store.sidebar_projection.application?.workspaces.find((workspace) => workspace.workspace_id === session.workspace_id)?.label ?? "项目"
               : "无项目"}`}
             type="button"
           >
             <span className={`${styles.session_title} ${styles.title_refresh}`} key={session.title}>{session.title}</span>
           </button>
-          {store.navigation.list_mode === "active" && <button
-            aria-label={`${session.is_pinned ? "取消置顶" : "置顶"} ${session.title}`}
+          {(store.local_files.desktop || (target === null && !store.remote_device)) && store.sidebar_navigation.list_mode === "active" && <button
+            aria-label={`${store.isSessionPinned(session, target) ? "取消置顶" : "置顶"} ${session.title}`}
             className={styles.session_pin_action}
-            disabled={store.connection.state !== "connected" || store.pending_session_action}
-            onClick={() => void store.setSessionPinned(session.session_id, !session.is_pinned)}
-            title={session.is_pinned ? "取消置顶" : "置顶"}
+            disabled={store.sidebar_connection.state !== "connected" || store.pending_session_action || (store.local_files.desktop && (store.pins.busy || !store.pins.value.imported))}
+            onClick={() => void store.setSessionPinned(session.session_id, !store.isSessionPinned(session, target), target)}
+            title={store.isSessionPinned(session, target) ? "取消置顶" : "置顶"}
             type="button"
-          ><Icon name={session.is_pinned ? "pin" : "pin-outline"} size={14} /></button>}
+          ><Icon name={store.isSessionPinned(session, target) ? "pin" : "pin-outline"} size={14} /></button>}
           {session.active_run_id ? (
             <svg
               aria-label="正在运行"

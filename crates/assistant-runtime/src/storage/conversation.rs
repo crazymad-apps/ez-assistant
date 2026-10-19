@@ -65,26 +65,33 @@ pub struct ContextReplacementResult {
 
 /// 从完整产品 Conversation 派生 Agent 当前应读取的有效上下文。
 ///
-/// 压缩摘要既是产品历史中的边界标记，也是执行上下文的新起点；开头连续的 System prefix
-/// 始终保留。没有摘要时整份 Conversation 都是有效上下文。该投影不修改持久化正文。
+/// 文本摘要和可靠原生压缩都保留截断语义；本地模式不回放原生窗口，只使用其后事实。
+/// 开头连续的 System prefix 始终保留。该投影不修改持久化正文。
 pub fn execution_context_from_product_history(
     history: &ConversationSnapshot,
 ) -> ConversationSnapshot {
-    // 原生窗口不能解密成文本摘要；本地机制仍可使用完整历史中的原始事实。
-    let local = ConversationSnapshot::new(
-        history
-            .messages
-            .iter()
-            .filter(|message| !is_native_compaction(message))
-            .cloned()
-            .collect(),
-    );
-    let history = &local;
     let prefix_end = history
         .messages
         .iter()
         .take_while(|message| matches!(message, ConversationMessage::System(_)))
         .count();
+    // 必须先定位可靠原生边界，再移除其不透明内容；反过来会重新展开已压缩原文。
+    // 先收窄历史还使后续损坏文本摘要的回退不能越过这条边界。
+    let native_end = history.messages.iter().rposition(|message| {
+        matches!(message, ConversationMessage::Assistant(assistant)
+            if is_native_compaction(message)
+            && matches!(assistant.parts.as_slice(), [agent_types::AssistantPart::ProviderState(state)]
+                if state.context_effect() == Some(agent_types::ProviderContextEffect::ReplacePriorContext)))
+    }).map_or(prefix_end, |index| index + 1);
+    let local = ConversationSnapshot::new(
+        history.messages[..prefix_end]
+            .iter()
+            .chain(&history.messages[native_end..])
+            .filter(|message| !is_native_compaction(message))
+            .cloned()
+            .collect(),
+    );
+    let history = &local;
     let summary_index = history
         .messages
         .iter()
@@ -468,6 +475,123 @@ mod tests {
         })
     }
 
+    fn native_boundary(value: &str) -> ConversationMessage {
+        let ConversationMessage::Assistant(mut message) = assistant_with_usage(value) else {
+            unreachable!()
+        };
+        message.purpose = agent_types::AssistantMessagePurpose::ContextCompaction;
+        message.parts = vec![agent_types::AssistantPart::ProviderState(
+            agent_types::OpaqueProviderState::new_routed(
+                ProviderId::new("test").unwrap(),
+                agent_types::ProtocolId::new("responses").unwrap(),
+                "responses.compacted_window",
+                "application/json",
+                1,
+                None,
+                "a".repeat(64),
+                b"{}".to_vec(),
+            )
+            .unwrap()
+            .with_context_effect(agent_types::ProviderContextEffect::ReplacePriorContext)
+            .unwrap(),
+        )];
+        ConversationMessage::Assistant(message)
+    }
+
+    #[test]
+    fn local_mode_keeps_latest_native_cutoff_instead_of_reopening_older_history() {
+        for earlier_summary in [false, true] {
+            let mut messages = vec![system("system"), user("old")];
+            if earlier_summary {
+                messages.push(summary("old-summary"));
+            }
+            messages.extend([native_boundary("first-native"), user("between")]);
+            messages.push(native_boundary("latest-native"));
+            let mut history = ConversationSnapshot::new(messages);
+            assert_eq!(
+                execution_context_from_product_history(&history).messages,
+                vec![system("system")]
+            );
+            history.messages.push(user("after"));
+            let expected = ConversationSnapshot::new(vec![system("system"), user("after")]);
+            assert_eq!(execution_context_from_product_history(&history), expected);
+            let restored: ConversationSnapshot =
+                serde_json::from_slice(&serde_json::to_vec(&history).unwrap()).unwrap();
+            assert_eq!(execution_context_from_product_history(&restored), expected);
+            assert_eq!(restored, history);
+        }
+    }
+
+    #[test]
+    fn invalid_local_summary_cannot_restore_a_user_before_the_native_cutoff() {
+        let mut invalid_summary = summary("invalid-summary");
+        let ConversationMessage::ContextSummary(value) = &mut invalid_summary else {
+            unreachable!()
+        };
+        value.retained_user_message_id = Some(message_id("old"));
+        let history = ConversationSnapshot::new(vec![
+            system("system"),
+            user("old"),
+            native_boundary("native"),
+            user("after"),
+            invalid_summary,
+            user("latest"),
+        ]);
+        assert_eq!(
+            execution_context_from_product_history(&history).messages,
+            vec![system("system"), user("after"), user("latest")]
+        );
+        // 仅有用途标记而没有可靠替代状态的记录不能成为截断依据。
+        let mut incomplete = assistant_with_usage("incomplete");
+        let ConversationMessage::Assistant(value) = &mut incomplete else {
+            unreachable!()
+        };
+        value.purpose = agent_types::AssistantMessagePurpose::ContextCompaction;
+        let history = ConversationSnapshot::new(vec![user("old"), incomplete, user("latest")]);
+        assert_eq!(
+            execution_context_from_product_history(&history).messages,
+            vec![user("old"), user("latest")]
+        );
+    }
+
+    #[test]
+    fn local_mode_retains_tool_pairs_after_native_cutoff_without_old_call_ids() {
+        let pair = |name: &str| {
+            let ConversationMessage::Assistant(mut call) = assistant_with_usage(name) else {
+                unreachable!()
+            };
+            call.parts = vec![agent_types::AssistantPart::ToolCall(
+                agent_types::ToolCall {
+                    id: agent_types::ToolCallId::new("same-call").unwrap(),
+                    name: agent_types::ToolName::new("read_file").unwrap(),
+                    arguments: serde_json::json!({}),
+                },
+            )];
+            call.finish_reason = FinishReason::ToolCalls;
+            [
+                ConversationMessage::Assistant(call),
+                ConversationMessage::Tool(agent_types::ToolMessage {
+                    id: message_id(&format!("{name}-result")),
+                    result: agent_types::ToolResult {
+                        call_id: agent_types::ToolCallId::new("same-call").unwrap(),
+                        status: agent_types::ToolResultStatus::Success,
+                        content: agent_types::ToolResultContent::text(name),
+                        metadata: None,
+                    },
+                }),
+            ]
+        };
+        let mut messages = pair("old").to_vec();
+        messages.push(native_boundary("native"));
+        let retained = pair("new");
+        messages.extend(retained.clone());
+        let history = ConversationSnapshot::new(messages);
+        history.validate_tool_exchange_pairs().unwrap();
+        let projected = execution_context_from_product_history(&history);
+        assert_eq!(projected.messages, retained);
+        projected.validate_tool_exchange_pairs().unwrap();
+    }
+
     #[test]
     fn repeated_compaction_preserves_product_history_and_moves_only_the_execution_boundary() {
         let prefix = system("system");
@@ -561,21 +685,17 @@ mod tests {
 
     #[test]
     fn local_summary_after_native_mode_preserves_original_history_and_retained_tail() {
-        let mut native = assistant_with_usage("old-native");
-        let ConversationMessage::Assistant(message) = &mut native else {
-            unreachable!()
-        };
-        message.purpose = agent_types::AssistantMessagePurpose::ContextCompaction;
-        let mut second_native = native.clone();
-        let ConversationMessage::Assistant(message) = &mut second_native else {
-            unreachable!()
-        };
-        message.id = message_id("second-native");
-        let history =
-            ConversationSnapshot::new(vec![user("first"), native, user("retained"), second_native]);
+        let history = ConversationSnapshot::new(vec![
+            user("first"),
+            native_boundary("old-native"),
+            user("between"),
+            native_boundary("second-native"),
+            user("after"),
+            user("retained"),
+        ]);
         assert_eq!(
             execution_context_from_product_history(&history).messages,
-            vec![user("first"), user("retained")]
+            vec![user("after"), user("retained")]
         );
         let replacement =
             ConversationSnapshot::new(vec![summary("new-local-summary"), user("retained")]);

@@ -3,7 +3,7 @@ import { Link, NavLink } from 'react-router';
 import { ArrowRightOutlined } from '@ant-design/icons';
 import { DownloadDialog } from '../../DownloadDialog';
 import { previewMode } from '../../request';
-import logo from '../../assets/app-icon.svg';
+import logo from '../../assets/app-icon.png';
 import type { SiteContent } from '../../../request/openapi';
 import styles from './index.module.scss';
 

@@ -1,5 +1,6 @@
 .workspace {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
 
   min-width: 0;
@@ -10,10 +11,10 @@
   border-left: 1px solid var(--ez-border);
   background: var(--ez-sidebar);
 
-  grid-template-rows: 42px minmax(0, 1fr);
 }
 
 .tab_bar {
+  flex: 0 0 42px;
   display: flex;
   min-width: 0;
   align-items: center;
@@ -107,6 +108,7 @@
 }
 
 .content {
+  flex: 1;
   overflow: hidden;
   min-width: 0;
   min-height: 0;
@@ -622,4 +624,15 @@ button.tree_entry_control {
   height: 100%;
   padding: 18px clamp(16px, 4vw, 36px) 48px;
   background: var(--ez-surface);
+}
+
+.scope_bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  min-width: 0;
+  > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  > button { flex-shrink: 0; }
 }

@@ -2,7 +2,7 @@
 
 import { type Client, type ClientMeta, formDataBodySerializer, type Options as Options2, type RequestResult, type TDataShape } from './client';
 import { client } from './client.gen';
-import type { ChangeOwnPasswordData, ChangeOwnPasswordErrors, ChangeOwnPasswordResponses, CreateAgentData, CreateAgentErrors, CreateAgentResponses, CreateModelProviderData, CreateModelProviderErrors, CreateModelProviderResponses, CreateUserData, CreateUserErrors, CreateUserResponses, DeleteAgentData, DeleteAgentErrors, DeleteAgentResponses, DeleteModelProviderData, DeleteModelProviderErrors, DeleteModelProviderResponses, DeleteUserData, DeleteUserErrors, DeleteUserResponses, DiscoverDesktopUpdateData, DiscoverDesktopUpdateErrors, DiscoverDesktopUpdateResponses, DownloadDesktopReleaseData, DownloadDesktopReleaseErrors, DownloadDesktopReleaseResponses, DownloadRuntimePluginPackageData, DownloadRuntimePluginPackageErrors, DownloadRuntimePluginPackageResponses, GetAdminFeedbackData, GetAdminFeedbackErrors, GetAdminFeedbackResponses, GetAgentData, GetAgentErrors, GetAgentResponses, GetCenterInfoData, GetCenterInfoErrors, GetCenterInfoResponses, GetCurrentIdentityData, GetCurrentIdentityErrors, GetCurrentIdentityResponses, GetCurrentPluginPackageData, GetCurrentPluginPackageErrors, GetCurrentPluginPackageResponses, GetDesktopReleaseData, GetDesktopReleaseErrors, GetDesktopReleaseResponses, GetLlmCallData, GetLlmCallErrors, GetLlmCallResponses, GetLlmRecordingSettingsData, GetLlmRecordingSettingsErrors, GetLlmRecordingSettingsResponses, GetLlmSnapshotData, GetLlmSnapshotErrors, GetLlmSnapshotResponses, GetLlmUsageData, GetLlmUsageErrors, GetLlmUsageResponses, GetModelCatalogData, GetModelCatalogErrors, GetModelCatalogResponses, GetModelProviderData, GetModelProviderErrors, GetModelProviderResponses, GetModelProviderUsageData, GetModelProviderUsageErrors, GetModelProviderUsageResponses, GetModelSettingsData, GetModelSettingsErrors, GetModelSettingsResponses, GetModelTemplateStatusData, GetModelTemplateStatusErrors, GetModelTemplateStatusResponses, GetOwnFeedbackData, GetOwnFeedbackErrors, GetOwnFeedbackResponses, GetPluginData, GetPluginErrors, GetPluginResponses, GetPublishedDesktopReleaseData, GetPublishedDesktopReleaseErrors, GetPublishedDesktopReleaseResponses, GetRuntimeModelConfigurationData, GetRuntimeModelConfigurationErrors, GetRuntimeModelConfigurationResponses, GetRuntimePluginData, GetRuntimePluginErrors, GetRuntimePluginResponses, GetSiteChangelogData, GetSiteChangelogErrors, GetSiteChangelogResponses, GetSiteDownloadsData, GetSiteDownloadsErrors, GetSiteDownloadsResponses, HandleFeedbackData, HandleFeedbackErrors, HandleFeedbackResponses, ListAdminFeedbackData, ListAdminFeedbackErrors, ListAdminFeedbackResponses, ListAgentsData, ListAgentsErrors, ListAgentsResponses, ListDesktopReleasesData, ListDesktopReleasesErrors, ListDesktopReleasesResponses, ListFixedModelConfigurationsData, ListFixedModelConfigurationsErrors, ListFixedModelConfigurationsResponses, ListLlmCallsData, ListLlmCallsErrors, ListLlmCallsResponses, ListLlmUsageModelsData, ListLlmUsageModelsErrors, ListLlmUsageModelsResponses, ListManagementAuditData, ListManagementAuditErrors, ListManagementAuditResponses, ListModelProvidersData, ListModelProvidersErrors, ListModelProvidersResponses, ListOwnFeedbackData, ListOwnFeedbackErrors, ListOwnFeedbackResponses, ListPluginsData, ListPluginsErrors, ListPluginsResponses, ListRuntimeAgentsData, ListRuntimeAgentsErrors, ListRuntimeAgentsResponses, ListRuntimePluginsData, ListRuntimePluginsErrors, ListRuntimePluginsResponses, ListUsersData, ListUsersErrors, ListUsersResponses, LoginData, LoginErrors, LoginResponses, LogoutData, LogoutErrors, LogoutResponses, PreviewDesktopReleaseNotesData, PreviewDesktopReleaseNotesErrors, PreviewDesktopReleaseNotesResponses, QueryModelConfigurationData, QueryModelConfigurationErrors, QueryModelConfigurationResponses, RefreshModelCatalogData, RefreshModelCatalogErrors, RefreshModelCatalogResponses, ReloadModelTemplatesData, ReloadModelTemplatesErrors, ReloadModelTemplatesResponses, ResetModelConfigurationData, ResetModelConfigurationErrors, ResetModelConfigurationResponses, ResetUserPasswordData, ResetUserPasswordErrors, ResetUserPasswordResponses, ResolveRuntimePluginData, ResolveRuntimePluginErrors, ResolveRuntimePluginResponses, SaveLlmRecordingSettingsData, SaveLlmRecordingSettingsErrors, SaveLlmRecordingSettingsResponses, SaveModelConfigurationData, SaveModelConfigurationErrors, SaveModelConfigurationResponses, SaveModelSettingsData, SaveModelSettingsErrors, SaveModelSettingsResponses, SetDesktopReleasePublicationData, SetDesktopReleasePublicationErrors, SetDesktopReleasePublicationResponses, SetPluginPublicationData, SetPluginPublicationErrors, SetPluginPublicationResponses, SubmitFeedbackData, SubmitFeedbackErrors, SubmitFeedbackResponses, TestModelConfigurationData, TestModelConfigurationErrors, TestModelConfigurationResponses, UpdateAgentData, UpdateAgentErrors, UpdateAgentResponses, UpdateDesktopReleaseNotesData, UpdateDesktopReleaseNotesErrors, UpdateDesktopReleaseNotesResponses, UpdateModelProviderData, UpdateModelProviderErrors, UpdateModelProviderResponses, UpdatePluginData, UpdatePluginErrors, UpdatePluginResponses, UpdateUserData, UpdateUserErrors, UpdateUserResponses, UploadDesktopReleaseData, UploadDesktopReleaseErrors, UploadDesktopReleaseResponses, UploadPluginPackageData, UploadPluginPackageErrors, UploadPluginPackageResponses } from './types.gen';
+import type { ApplyHostDeviceData, ApplyHostDeviceErrors, ApplyHostDeviceResponses, ChangeOwnPasswordData, ChangeOwnPasswordErrors, ChangeOwnPasswordResponses, CreateAgentData, CreateAgentErrors, CreateAgentResponses, CreateModelProviderData, CreateModelProviderErrors, CreateModelProviderResponses, CreateUserData, CreateUserErrors, CreateUserResponses, DeleteAgentData, DeleteAgentErrors, DeleteAgentResponses, DeleteModelProviderData, DeleteModelProviderErrors, DeleteModelProviderResponses, DeleteUserData, DeleteUserErrors, DeleteUserResponses, DiscoverDesktopUpdateData, DiscoverDesktopUpdateErrors, DiscoverDesktopUpdateResponses, DownloadDesktopReleaseData, DownloadDesktopReleaseErrors, DownloadDesktopReleaseResponses, DownloadRuntimePluginPackageData, DownloadRuntimePluginPackageErrors, DownloadRuntimePluginPackageResponses, EndHostRegistrationData, EndHostRegistrationErrors, EndHostRegistrationResponses, GetAdminFeedbackData, GetAdminFeedbackErrors, GetAdminFeedbackResponses, GetAgentData, GetAgentErrors, GetAgentResponses, GetCenterInfoData, GetCenterInfoErrors, GetCenterInfoResponses, GetCurrentIdentityData, GetCurrentIdentityErrors, GetCurrentIdentityResponses, GetCurrentPluginPackageData, GetCurrentPluginPackageErrors, GetCurrentPluginPackageResponses, GetDesktopReleaseData, GetDesktopReleaseErrors, GetDesktopReleaseResponses, GetHostDeviceData, GetHostDeviceErrors, GetHostDeviceResponses, GetHostRegistrationData, GetHostRegistrationErrors, GetHostRegistrationResponses, GetLlmCallData, GetLlmCallErrors, GetLlmCallResponses, GetLlmRecordingSettingsData, GetLlmRecordingSettingsErrors, GetLlmRecordingSettingsResponses, GetLlmSnapshotData, GetLlmSnapshotErrors, GetLlmSnapshotResponses, GetLlmUsageData, GetLlmUsageErrors, GetLlmUsageResponses, GetModelCatalogData, GetModelCatalogErrors, GetModelCatalogResponses, GetModelProviderData, GetModelProviderErrors, GetModelProviderResponses, GetModelProviderUsageData, GetModelProviderUsageErrors, GetModelProviderUsageResponses, GetModelSettingsData, GetModelSettingsErrors, GetModelSettingsResponses, GetModelTemplateStatusData, GetModelTemplateStatusErrors, GetModelTemplateStatusResponses, GetOwnFeedbackData, GetOwnFeedbackErrors, GetOwnFeedbackResponses, GetPluginData, GetPluginErrors, GetPluginResponses, GetPublishedDesktopReleaseData, GetPublishedDesktopReleaseErrors, GetPublishedDesktopReleaseResponses, GetRuntimeModelConfigurationData, GetRuntimeModelConfigurationErrors, GetRuntimeModelConfigurationResponses, GetRuntimePluginData, GetRuntimePluginErrors, GetRuntimePluginResponses, GetSiteChangelogData, GetSiteChangelogErrors, GetSiteChangelogResponses, GetSiteDownloadsData, GetSiteDownloadsErrors, GetSiteDownloadsResponses, HandleFeedbackData, HandleFeedbackErrors, HandleFeedbackResponses, ListAdminFeedbackData, ListAdminFeedbackErrors, ListAdminFeedbackResponses, ListAgentsData, ListAgentsErrors, ListAgentsResponses, ListDesktopReleasesData, ListDesktopReleasesErrors, ListDesktopReleasesResponses, ListFixedModelConfigurationsData, ListFixedModelConfigurationsErrors, ListFixedModelConfigurationsResponses, ListHostDevicesData, ListHostDevicesErrors, ListHostDevicesResponses, ListLlmCallsData, ListLlmCallsErrors, ListLlmCallsResponses, ListLlmUsageModelsData, ListLlmUsageModelsErrors, ListLlmUsageModelsResponses, ListManagementAuditData, ListManagementAuditErrors, ListManagementAuditResponses, ListModelProvidersData, ListModelProvidersErrors, ListModelProvidersResponses, ListOwnFeedbackData, ListOwnFeedbackErrors, ListOwnFeedbackResponses, ListPluginsData, ListPluginsErrors, ListPluginsResponses, ListRuntimeAgentsData, ListRuntimeAgentsErrors, ListRuntimeAgentsResponses, ListRuntimePluginsData, ListRuntimePluginsErrors, ListRuntimePluginsResponses, ListUsersData, ListUsersErrors, ListUsersResponses, LoginData, LoginErrors, LoginResponses, LogoutData, LogoutErrors, LogoutResponses, ManageHostDeviceData, ManageHostDeviceErrors, ManageHostDeviceResponses, PreviewDesktopReleaseNotesData, PreviewDesktopReleaseNotesErrors, PreviewDesktopReleaseNotesResponses, QueryModelConfigurationData, QueryModelConfigurationErrors, QueryModelConfigurationResponses, RefreshModelCatalogData, RefreshModelCatalogErrors, RefreshModelCatalogResponses, ReloadModelTemplatesData, ReloadModelTemplatesErrors, ReloadModelTemplatesResponses, ResetModelConfigurationData, ResetModelConfigurationErrors, ResetModelConfigurationResponses, ResetUserPasswordData, ResetUserPasswordErrors, ResetUserPasswordResponses, ResolveRuntimePluginData, ResolveRuntimePluginErrors, ResolveRuntimePluginResponses, SaveLlmRecordingSettingsData, SaveLlmRecordingSettingsErrors, SaveLlmRecordingSettingsResponses, SaveModelConfigurationData, SaveModelConfigurationErrors, SaveModelConfigurationResponses, SaveModelSettingsData, SaveModelSettingsErrors, SaveModelSettingsResponses, SetDesktopReleasePublicationData, SetDesktopReleasePublicationErrors, SetDesktopReleasePublicationResponses, SetPluginPublicationData, SetPluginPublicationErrors, SetPluginPublicationResponses, SubmitFeedbackData, SubmitFeedbackErrors, SubmitFeedbackResponses, TestModelConfigurationData, TestModelConfigurationErrors, TestModelConfigurationResponses, UpdateAgentData, UpdateAgentErrors, UpdateAgentResponses, UpdateDesktopReleaseNotesData, UpdateDesktopReleaseNotesErrors, UpdateDesktopReleaseNotesResponses, UpdateModelProviderData, UpdateModelProviderErrors, UpdateModelProviderResponses, UpdatePluginData, UpdatePluginErrors, UpdatePluginResponses, UpdateUserData, UpdateUserErrors, UpdateUserResponses, UploadDesktopReleaseData, UploadDesktopReleaseErrors, UploadDesktopReleaseResponses, UploadPluginPackageData, UploadPluginPackageErrors, UploadPluginPackageResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -615,6 +615,78 @@ export const handleFeedback = <ThrowOnError extends boolean = false>(options: Op
 });
 
 /**
+ * 设备主动申请，重复登记标识返回当前结果
+ */
+export const applyHostDevice = <ThrowOnError extends boolean = false>(options: Options<ApplyHostDeviceData, ThrowOnError>): RequestResult<ApplyHostDeviceResponses, ApplyHostDeviceErrors, ThrowOnError> => (options.client ?? client).post<ApplyHostDeviceResponses, ApplyHostDeviceErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/host-devices',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * 设备凭据查询本登记；不存在时 device 为 null
+ */
+export const getHostRegistration = <ThrowOnError extends boolean = false>(options: Options<GetHostRegistrationData, ThrowOnError>): RequestResult<GetHostRegistrationResponses, GetHostRegistrationErrors, ThrowOnError> => (options.client ?? client).get<GetHostRegistrationResponses, GetHostRegistrationErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/host-devices/{id}/registration',
+    ...options
+});
+
+/**
+ * 设备凭据撤回申请或注销；退出不要求用户登录
+ */
+export const endHostRegistration = <ThrowOnError extends boolean = false>(options: Options<EndHostRegistrationData, ThrowOnError>): RequestResult<EndHostRegistrationResponses, EndHostRegistrationErrors, ThrowOnError> => (options.client ?? client).post<EndHostRegistrationResponses, EndHostRegistrationErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/host-devices/{id}/registration',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * 管理员按已登记／未登记分栏分页查询设备
+ */
+export const listHostDevices = <ThrowOnError extends boolean = false>(options: Options<ListHostDevicesData, ThrowOnError>): RequestResult<ListHostDevicesResponses, ListHostDevicesErrors, ThrowOnError> => (options.client ?? client).get<ListHostDevicesResponses, ListHostDevicesErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/admin/host-devices',
+    ...options
+});
+
+/**
+ * 管理员查询登记与授权集合
+ */
+export const getHostDevice = <ThrowOnError extends boolean = false>(options: Options<GetHostDeviceData, ThrowOnError>): RequestResult<GetHostDeviceResponses, GetHostDeviceErrors, ThrowOnError> => (options.client ?? client).get<GetHostDeviceResponses, GetHostDeviceErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/admin/host-devices/{id}',
+    ...options
+});
+
+/**
+ * 比较所见原值，原子审批、授权、启停或注销
+ */
+export const manageHostDevice = <ThrowOnError extends boolean = false>(options: Options<ManageHostDeviceData, ThrowOnError>): RequestResult<ManageHostDeviceResponses, ManageHostDeviceErrors, ThrowOnError> => (options.client ?? client).patch<ManageHostDeviceResponses, ManageHostDeviceErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/admin/host-devices/{id}',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
  * 各平台最新可用安装包，或指定版本
  */
 export const getSiteDownloads = <ThrowOnError extends boolean = false>(options?: Options<GetSiteDownloadsData, ThrowOnError>): RequestResult<GetSiteDownloadsResponses, GetSiteDownloadsErrors, ThrowOnError> => (options?.client ?? client).get<GetSiteDownloadsResponses, GetSiteDownloadsErrors, ThrowOnError>({
@@ -667,7 +739,7 @@ export const getDesktopRelease = <ThrowOnError extends boolean = false>(options:
 });
 
 /**
- * 上传完整平台发布文件，创建草稿
+ * 上传平台安装文件，新建草稿或覆盖同版本平台文件并保留发布状态
  */
 export const uploadDesktopRelease = <ThrowOnError extends boolean = false>(options: Options<UploadDesktopReleaseData, ThrowOnError>): RequestResult<UploadDesktopReleaseResponses, UploadDesktopReleaseErrors, ThrowOnError> => (options.client ?? client).post<UploadDesktopReleaseResponses, UploadDesktopReleaseErrors, ThrowOnError>({
     ...formDataBodySerializer,

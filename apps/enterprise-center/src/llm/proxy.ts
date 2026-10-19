@@ -15,8 +15,8 @@ import type { CallRecording } from './records.js';
 import { ResponseObserver } from './response-observer.js';
 import { UsageObserver } from './usage.js';
 import { ControlError } from './errors.js';
-import { transfer, responseHeaders, TransferError } from './transport.js';
-import type { TransferSink } from './transport.js';
+import { transfer, responseHeaders, requestHeaders, TransferError } from './transport.js';
+import type { TransferSink, ProxyRequestHeaders } from './transport.js';
 import { ResponsesWebsocket, WebsocketResponseError } from './websocket.js';
 import type { WebsocketLimits } from './websocket.js';
 
@@ -118,6 +118,7 @@ export class ModelProxy {
     kind: 'proxy' | 'admin_test';
     operation?: ModelOperation;
     historyBinding?: string;
+    requestHeaders?: ProxyRequestHeaders;
     finish?: (signal: AbortSignal) => Promise<void>;
     admitted?: (record: CallRecording) => void;
     sent?: () => void;
@@ -185,6 +186,7 @@ export class ModelProxy {
           protocol: input.protocol,
           operation: input.operation,
           apiKey: route.provider.api_key,
+          requestHeaders: input.requestHeaders,
           body: input.body,
           signal: transferSignal,
           connectTimeout: this.options.connectTimeout ?? 10000,
@@ -281,6 +283,8 @@ export class ModelProxy {
         control(reply, request.id, failure);
       });
       scope.addHook('onRequest', async (request) => {
+        // 在准入与调用记录创建前拒绝重复、超长或不安全的透传头。
+        requestHeaders(request.raw.rawHeaders);
         let key: string | undefined;
         try {
           key = requestCredential(request);
@@ -336,6 +340,7 @@ export class ModelProxy {
               body,
               signal: cancelled.signal,
               kind: 'proxy',
+              requestHeaders: requestHeaders(request.raw.rawHeaders),
               operation,
               historyBinding:
                 typeof request.headers['x-ez-center-history-binding'] === 'string'

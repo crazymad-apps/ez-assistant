@@ -22,7 +22,7 @@ describe("RemovedWorkspacesDialog", () => {
     expect(await screen.findByText("同名项目")).toBeVisible();
     expect(screen.getByText("仅使用私有目录")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "恢复" }));
-    await waitFor(() => expect(restore).toHaveBeenCalledWith("original-id"));
+    await waitFor(() => expect(restore).toHaveBeenCalledWith("original-id", null));
     await waitFor(() => expect(close).toHaveBeenCalled());
   });
 });

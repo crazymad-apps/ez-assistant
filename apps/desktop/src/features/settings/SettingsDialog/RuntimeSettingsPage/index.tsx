@@ -4,6 +4,7 @@ import type { RuntimeSettingsPageId } from "../../../../stores/SettingsStore";
 import { useRootStore } from "../../../../stores/RootStoreContext";
 import { RuntimeConnectionSettings } from "../../../runtime-access/RuntimeConnectionSettings";
 import { HostAccessSettings } from "../../../runtime-access/HostAccessSettings";
+import { HostRegistrationPage } from "../HostRegistrationPage";
 import { RuntimeOverviewPage } from "../RuntimeOverviewPage";
 import { RuntimeDiagnosticsPage } from "../RuntimeDiagnosticsPage";
 import { LocalRuntimeSettingsPage } from "../LocalRuntimeSettingsPage";
@@ -12,13 +13,16 @@ import { LocalRuntimeSettingsPage } from "../LocalRuntimeSettingsPage";
 export const RuntimeSettingsPage = observer(function RuntimeSettingsPage(props: Readonly<{
   onNavigate: (page: RuntimeSettingsPageId) => void;
   onDirtyChange: (dirty: boolean) => void;
+  onPendingChange: (pending: boolean) => void;
 }>) {
   const root = useRootStore();
   const desktop = isTauri();
   const local = desktop && root.desktop_lifecycle.local_impact_known;
-  const target = local ? "这台电脑" : root.connection.address ?? "尚未连接";
+  const target = local ? "这台电脑" : root.local_connection.address ?? "尚未连接";
   const back = () => props.onNavigate("runtime");
   switch (root.settings.page) {
+    case "host_registration":
+      return <HostRegistrationPage onBack={back} onDirtyChange={props.onDirtyChange} onPendingChange={props.onPendingChange} />;
     case "runtime_connection":
       if (desktop) return <RuntimeConnectionSettings on_back={back} />;
       break;

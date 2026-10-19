@@ -15,7 +15,7 @@ type OperationView = Readonly<{ intent: PluginOperationIntent | null; snapshot: 
 export const PluginSettingsPage = observer(function PluginSettingsPage(props: Readonly<{ onDirtyChange: (dirty: boolean) => void }>) {
   const root = useRootStore();
   const show_message = useAppMessage();
-  const client = root.runtime_client;
+  const client = root.local_runtime_client;
   const owner = useRef(client);
   owner.current = client;
   const file_ref = useRef<HTMLInputElement>(null);
@@ -41,7 +41,7 @@ export const PluginSettingsPage = observer(function PluginSettingsPage(props: Re
   const selected_identity = selected ? `${selected.name}:${selected.sha256 ?? ""}` : null;
   const selected_identity_ref = useRef(selected_identity);
   selected_identity_ref.current = selected_identity;
-  const center_available = root.connection.capabilities?.mode === "enterprise";
+  const center_available = root.local_connection.capabilities?.mode === "enterprise";
   const query = search.trim().toLocaleLowerCase();
   const market_plugins = market ?? [];
   const selected_market = market_plugins.find((item) => item.name === selected_name) ?? null;

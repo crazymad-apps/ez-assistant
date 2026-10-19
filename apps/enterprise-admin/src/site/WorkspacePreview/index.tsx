@@ -23,7 +23,7 @@ import {
 } from '@ant-design/icons';
 import type { SiteScenario } from '../../request/openapi';
 import { ResultPreview } from '../ResultPreview';
-import logo from '../assets/app-icon.svg';
+import logo from '../assets/app-icon.png';
 import styles from './index.module.scss';
 
 /** 官网独立演示投影，布局对齐 Desktop；演示数据不接入真实 Runtime。 */

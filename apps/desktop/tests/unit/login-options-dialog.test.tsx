@@ -132,7 +132,7 @@ describe('LoginOptionsDialog', () => {
     render(<LoginOptionsDialog connection={connection} />);
     expect(screen.queryByText(/旧中心绑定/)).not.toBeInTheDocument();
     expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '保存并重启' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '保存并重启' })).toBeEnabled();
     fireEvent.change(screen.getByLabelText('企业中心地址'), { target: { value: 'https://another.example.com/path' } });
     fireEvent.click(screen.getByRole('button', { name: '使用模式' }));
     fireEvent.click(screen.getByRole('option', { name: '个人模式' }));
@@ -144,7 +144,7 @@ describe('LoginOptionsDialog', () => {
     expect(apply).not.toHaveBeenCalled();
     expect(screen.getByRole('dialog', { name: '确认应用登录选项' })).toBeVisible();
     await waitFor(() => expect(screen.getByRole('button', { name: '返回修改' })).toHaveFocus());
-    expect(screen.getByText(/旧中心绑定将自动清除/)).toBeVisible();
+    expect(screen.getByText(/已有设备登记和用户数据保留/)).toBeVisible();
     expect(screen.getByText(/全部用户任务/)).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: '返回修改' }));
     expect(screen.getByLabelText('企业中心地址')).toHaveValue('https://another.example.com/path');

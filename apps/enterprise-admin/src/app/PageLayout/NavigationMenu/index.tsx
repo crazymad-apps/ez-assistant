@@ -3,6 +3,7 @@ import { useMatches, useNavigate } from 'react-router';
 import { Menu } from 'antd';
 import {
   AuditOutlined,
+  DesktopOutlined,
   DownloadOutlined,
   CommentOutlined,
   TeamOutlined,
@@ -26,6 +27,7 @@ export const NavigationMenu = observer(function NavigationMenu() {
       onClick={({ key }) => void navigate(key)}
       items={[
         { key: '/users', icon: <TeamOutlined />, label: '用户管理' },
+        { key: '/devices', icon: <DesktopOutlined />, label: '设备管理' },
         { key: '/models', icon: <ApiOutlined />, label: '模型管理' },
         { key: '/agents', icon: <RobotOutlined />, label: '智能体管理' },
         { key: '/plugins', icon: <AppstoreOutlined />, label: '插件管理' },

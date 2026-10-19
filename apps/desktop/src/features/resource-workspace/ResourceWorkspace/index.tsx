@@ -26,32 +26,40 @@ import { shellBadges, shellLabels } from "../../../runtime-client/shellPresentat
 
 export const ResourceWorkspace = observer(function ResourceWorkspace(props: Readonly<{ hidden?: boolean; overlay_root_ref?: RefObject<HTMLDivElement | null> }>) {
   const root_store = useRootStore();
-  const store = root_store.resource_workspace;
+  const store = root_store.reading_resources;
   const owner = store.active_group;
   const viewports = useRef(new Map<string, HTMLDivElement>());
   const fallback_overlay = useRef<HTMLDivElement>(null);
   const active_browser_id = store.active_tab.type === "browser" ? store.active_tab.browserId : null;
-  useBrowserSurface(active_browser_id ? store.browsers.get(active_browser_id) : undefined, !props.hidden,
+  useBrowserSurface(active_browser_id ? store.browsers.get(active_browser_id) : undefined, !props.hidden && root_store.reading_connection.state === "connected",
     viewports, active_browser_id, props.overlay_root_ref ?? fallback_overlay);
-  const session_id = root_store.navigation.selected_session_id;
-  const draft_key = root_store.navigation.selected_draft_key;
-  const application = root_store.projection.application;
-  const session_view = session_id ? root_store.projection.session_views.get(session_id) : undefined;
-  const draft = root_store.new_session_drafts.get(draft_key);
+  const scope_key = root_store.reading_scope;
+  const session_id = scope_key.startsWith("session:") ? scope_key.slice(8) : null;
+  const draft_key = scope_key.startsWith("draft:") ? scope_key.slice(6) : null;
+  const application = root_store.reading_projection.application;
+  const session_view = session_id ? root_store.reading_projection.session_views.get(session_id) : undefined;
+  const draft = root_store.reading_drafts.get(draft_key as import("../../../stores/NewSessionDraftStore").NewSessionDraftKey | null);
   const draft_workspace = application?.workspaces.find((item) => item.workspace_id === draft?.workspace_id);
-  const scope_key = session_id ? `session:${session_id}` : draft_key ? `draft:${draft_key}` : null;
   const [closing_terminal, setClosingTerminal] = useState<string | null>(null);
-  const terminal_available = Boolean(session_view || (!session_id && draft_workspace));
-  const workspace_available = Boolean(session_id || draft_workspace);
+  const connected = root_store.reading_connection.state === "connected";
+  const terminal_available = connected && Boolean(session_view || (!session_id && draft_workspace));
+  const desktop_device = root_store.network.online_devices.find((device) => device.id === root_store.reading_device && device.desktop_view);
+  const desktop_available = Boolean(desktop_device && root_store.local_files.native_host);
+  const openDesktop = () => { if (desktop_device && desktop_available) store.openDesktop(desktop_device.id, desktop_device.name, desktop_device.desktop_control); };
+  const workspace_available = connected && Boolean(session_id || draft_workspace);
   const tab_refs = useRef(new Map<string, HTMLButtonElement>());
   useEffect(() => { setClosingTerminal(null); }, [scope_key]);
 
   useEffect(() => {
     const tab = tab_refs.current.get(store.active_tab_key);
-    if (typeof tab?.scrollIntoView === "function") {
-      tab.scrollIntoView({ block: "nearest", inline: "nearest" });
-    }
-  }, [store.active_tab_key]);
+    const reveal = () => tab?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+    reveal();
+    const scroller = tab?.parentElement?.parentElement;
+    if (!scroller || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(reveal);
+    observer.observe(scroller);
+    return () => observer.disconnect();
+  }, [store, store.active_tab_key]);
 
   function focusTab(key: string) {
     const tab = tab_refs.current.get(key);
@@ -120,6 +128,10 @@ export const ResourceWorkspace = observer(function ResourceWorkspace(props: Read
   return (
     <aside className={styles.workspace} aria-label="资源栏" aria-hidden={props.hidden}
       data-shell-open={!props.hidden} data-shell-sidebar="right" inert={props.hidden}>
+      {!connected && <div role="status" className={styles.scope_bar}>
+        <span>{root_store.reading_connection.error_message ?? "原设备暂不可用"}</span>
+        <Button size="small" variant="text" onClick={() => void root_store.connectReadingResources()}>重新连接</Button>
+      </div>}
       <header className={styles.tab_bar} data-tauri-drag-region="deep">
         <div aria-label="资源标签" className={styles.tab_scroller} onWheel={handleTabWheel} role="tablist">
           {store.tabs.map((tab) => {
@@ -182,6 +194,8 @@ export const ResourceWorkspace = observer(function ResourceWorkspace(props: Read
           workspace_available={workspace_available}
           terminal_available={terminal_available}
           on_terminal={openTerminal}
+          desktop_available={desktop_available}
+          on_desktop={openDesktop}
           on_workspace={() => { if (scope_key && workspace_available) store.openWorkspace(scope_key); }}
           on_browser={() => store.openBrowser(undefined, owner)}
           on_error={(failure) => root_store.showInteractionError(String(failure))}
@@ -197,10 +211,11 @@ export const ResourceWorkspace = observer(function ResourceWorkspace(props: Read
               on_select={() => scope_key && workspace_available && store.openWorkspace(scope_key)}
             />
             <ResourceMenuItem disabled={!terminal_available} icon="terminal" label="终端" on_select={openTerminal} />
+            <ResourceMenuItem disabled={!desktop_available} icon="desktop" label="远程桌面" on_select={openDesktop} />
           </DropdownMenuContent>
         </DropdownMenu>}
       </header>
-      <div className={styles.content}>
+      {connected && <div className={styles.content}>
         {store.browser_error && <p role="alert">{store.browser_error}</p>}
         <section className={styles.tab_panel} hidden={store.active_tab_key !== CONTEXT_TAB_KEY}
           aria-labelledby="resource-tab-context" id={tabPanelId(CONTEXT_TAB_KEY)} role="tabpanel">
@@ -215,7 +230,7 @@ export const ResourceWorkspace = observer(function ResourceWorkspace(props: Read
             <ResourcePage page={page} active={active && !props.hidden} viewports={viewports} />
           </section>;
         })}
-      </div>
+      </div>}
       {closing_terminal && <CloseTerminalDialog title={store.terminals.get(closing_terminal)?.title ?? "终端"}
         on_cancel={() => setClosingTerminal(null)} on_confirm={() => closeTerminal(closing_terminal)} />}
 
@@ -251,5 +266,6 @@ function tabIcon(tab: ResourceTab): IconName {
     case "pdf": return "file";
     case "browser": return "globe";
     case "terminal": return "terminal";
+    case "desktop": return "desktop";
   }
 }

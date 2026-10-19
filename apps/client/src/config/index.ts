@@ -5,6 +5,7 @@ import type { HostMode, HostAccessConfiguration } from "@ez-assistant/protocol/n
 import { Cancelled, ClientError, cancelled } from "../errors.js";
 import { HostControl } from "../host/control.js";
 import { note, safe } from "../terminal/output.js";
+import { configureNetwork } from "./network.js";
 import { configureStartup } from "./startup.js";
 
 type Action = "identity" | "password" | "remote" | "port" | "transport" | "domains" | "review" | "save" | "reload" | "back";
@@ -35,10 +36,11 @@ export async function configure(host: HostControl): Promise<boolean> {
     while (true) {
       cancelled(signal);
       const root = answer(await p.select({ message: "选择配置范围", showInstructions: false, signal, options: [
-        { value: "access", label: "Host 访问设置" }, { value: "startup", label: "启动设置" }, { value: "exit", label: "退出配置" },
+        { value: "access", label: "Host 访问设置" }, { value: "network", label: "企业组网" }, { value: "startup", label: "启动设置" }, { value: "exit", label: "退出配置" },
       ] }));
       if (root === "exit") { p.outro("已退出配置"); return failed; }
       if (root === "startup") { failed = await configureStartup(host.home, signal, () => saved.push("启动设置")); continue; }
+      if (root === "network") { failed = await configureNetwork(host); continue; }
       let session = await host.configuration();
       let draft = structuredClone(session.status.configuration); let blocked = false;
       let mode: HostMode = session.status.mode ?? "personal";

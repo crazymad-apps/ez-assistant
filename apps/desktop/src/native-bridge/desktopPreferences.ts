@@ -4,6 +4,7 @@ import { parseResourceSnapshot, type ResourceWorkspaceSnapshot } from "../featur
 import { DEFAULT_THEME_ID, isThemeId, type ThemeId } from "../styles/themePresets";
 
 export type DesktopPreferences = {
+  readonly desktop_workspace?: unknown;
   readonly left_sidebar_open: boolean;
   readonly right_sidebar_open: boolean;
   readonly left_sidebar_width: number;

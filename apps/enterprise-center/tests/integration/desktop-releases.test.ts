@@ -74,7 +74,7 @@ async function start() {
 
 afterAll(async () => { vi.restoreAllMocks(); await app?.close(); if (source.isInitialized) await source.destroy(); await pool.end(); });
 
-it('签名、真实上传发布下载、权限、不可变制品、事务失败与撤回闭环', async () => {
+it('签名、真实上传发布下载、权限、同版本覆盖、事务失败与撤回闭环', async () => {
   expect((await pool.query("SELECT host(inet_server_addr()) AS host,inet_server_port() AS port,current_database() AS db,current_user AS role,current_setting('data_directory') AS dir")).rows[0])
     .toEqual({ host: scenario.postgres_host, port: scenario.postgres_port, db: scenario.database, role: scenario.role, dir: join(root, 'pgdata') });
   expect((await pool.query("SELECT COUNT(*) FROM pg_tables WHERE schemaname='public'")).rows[0].count).toBe('0');
@@ -149,7 +149,28 @@ it('签名、真实上传发布下载、权限、不可变制品、事务失败�
   const response = await fetch(candidate.url, { redirect: 'error' });
   expect(response.status).toBe(200); expect(response.headers.get('cache-control')).toBe('no-store');
   expect(Buffer.from(await response.arrayBuffer())).toEqual(fixtureA.bytes);
-  expect((await upload(await fixture('0.29.1', 'different installer'))).statusCode).toBe(409);
+  const publishedBefore = (await detail()).json().targets[0];
+  const replacement = await fixture('0.29.1', 'different installer');
+  // 发布中的替换仍须校验全部内容，事务失败保留旧清单与可下载文件。
+  expect((await upload(replacement, admin, { bytes: Buffer.from('broken') })).statusCode).toBe(400);
+  const failedReplace = vi.spyOn(app!.get(IdentityService), 'audit').mockRejectedValueOnce(new Error('test replacement rollback'));
+  expect((await upload(replacement)).statusCode).toBe(503);
+  failedReplace.mockRestore();
+  expect((await detail()).json().targets[0]).toEqual(publishedBefore);
+  expect(Buffer.from(await (await fetch(candidate.url)).arrayBuffer())).toEqual(fixtureA.bytes);
+  expect((await upload(replacement)).json().result).toBe('replaced');
+  const replaced = (await detail()).json().targets[0];
+  expect(replaced.publication).toBe('published');
+  expect(replaced.first_published_at).toBe(publishedBefore.first_published_at);
+  expect(replaced.manifest_text).toBe(replacement.text);
+  expect((await app!.inject(check)).json().manifest).toBe(replacement.text);
+  expect(Buffer.from(await (await fetch(candidate.url)).arrayBuffer())).toEqual(replacement.bytes);
+  expect((await app!.inject('/api/site/downloads')).json()[0].sha256).toBe(sha(replacement.bytes));
+  expect((await publish('withdrawn', 'published')).statusCode).toBe(409); // 旧清单不能撤回新包。
+  const replaceAudit = await count('management_audit');
+  expect((await upload(replacement)).json().result).toBe('unchanged');
+  expect(await count('management_audit')).toBe(replaceAudit);
+  expect((await upload(fixtureA)).json().result).toBe('replaced');
   const notes = (notes: string, expected_notes: string) => app!.inject({ method: 'PUT', url: '/api/desktop-releases/0.29.1/notes', headers: headers(admin), payload: { notes, expected_notes } });
   const raced = await Promise.all([notes('更新内容 A', ''), notes('更新内容 B', '')]);
   expect(raced.map(value => value.statusCode).sort()).toEqual([200, 409]);
@@ -166,7 +187,14 @@ it('签名、真实上传发布下载、权限、不可变制品、事务失败�
   expect(download.stream!.destroyed).toBe(true);
   expect((await fetch(candidate.url)).status).toBe(404);
   expect((await stat(join(root, 'releases', fixtureA.manifest.files[0]!.sha256))).size).toBe(fixtureA.bytes.length);
-  expect((await upload(await fixture('0.29.1', 'replace withdrawn'))).statusCode).toBe(409);
+  const withdrawnReplacement = await fixture('0.29.1', 'replace withdrawn');
+  expect((await upload(withdrawnReplacement)).json().result).toBe('replaced');
+  const withdrawn = (await detail()).json().targets[0];
+  expect(withdrawn.publication).toBe('withdrawn');
+  expect(withdrawn.first_published_at).toBe(publishedBefore.first_published_at);
+  expect(withdrawn.manifest_text).toBe(withdrawnReplacement.text);
+  expect((await fetch(candidate.url)).status).toBe(404);
+  expect((await upload(fixtureA)).json().result).toBe('replaced');
   const staleToken = admin;
   await app!.close(); await start(); admin = await login();
   expect((await app!.inject({ url: '/api/desktop-releases', headers: headers(staleToken) })).statusCode).toBe(401);

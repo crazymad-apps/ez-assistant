@@ -554,7 +554,9 @@ export const ConversationView = observer(function ConversationView() {
   }
   if (history.items.length === 0 && !live_run) {
     if (!child_view) {
-      return <EmptyConversation title="开始一段新会话" detail="从下方输入消息开始对话。" />;
+      return store.remote_device
+        ? <EmptyConversation title="会话暂无消息" detail="当前正在查看远端会话。" />
+        : <EmptyConversation title="开始一段新会话" detail="从下方输入消息开始对话。" />;
     }
   }
 

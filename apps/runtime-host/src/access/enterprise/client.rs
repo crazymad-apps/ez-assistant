@@ -4,7 +4,9 @@ mod agents;
 mod feedback;
 mod models;
 pub(crate) mod plugins;
+mod registration;
 pub(crate) use models::ModelConfiguration;
+pub(crate) use registration::RegistrationReply;
 
 use super::CenterError;
 use assistant_protocol::{HostPasswordRequest, HostUserIdentity, SecretValue};
@@ -78,7 +80,7 @@ pub(super) fn valid_center_id(id: &str) -> bool {
             }
         })
 }
-fn valid_secret(value: &SecretValue, prefix: &str) -> bool {
+pub(super) fn valid_secret(value: &SecretValue, prefix: &str) -> bool {
     value.expose().strip_prefix(prefix).is_some_and(|v| {
         v.len() == 64
             && v.bytes()
@@ -211,7 +213,11 @@ async fn response(request: RequestBuilder) -> Result<(StatusCode, Vec<u8>), Cent
             (StatusCode::UNAUTHORIZED, Some("AUTH_FAILED")) => CenterError::AuthenticationFailed,
             (StatusCode::UNAUTHORIZED, _) => CenterError::InvalidCredentials,
             (StatusCode::BAD_REQUEST, _) => CenterError::InvalidRequest,
-            (StatusCode::CONFLICT, Some("AUTH_STATE_CHANGED")) => CenterError::StateChanged,
+            (
+                StatusCode::CONFLICT,
+                Some("AUTH_STATE_CHANGED" | "DEVICE_CHANGED" | "DEVICE_CONFLICT"),
+            ) => CenterError::StateChanged,
+            (StatusCode::CONFLICT, Some("DEVICE_CENTER_MISMATCH")) => CenterError::IdentityMismatch,
             (StatusCode::TOO_MANY_REQUESTS, _) => CenterError::Busy,
             _ => CenterError::Unavailable,
         });

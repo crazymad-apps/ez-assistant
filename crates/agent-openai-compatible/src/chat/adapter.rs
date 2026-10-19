@@ -77,6 +77,11 @@ pub struct ChatProtocolAdapter {
 }
 
 impl ChatProtocolAdapter {
+    /// OpenCode 的显式兼容方言；模型能力由宿主固定配置提供。
+    pub fn opencode() -> Self {
+        Self::openai_compatible(ProviderId::new("opencode").expect("static OpenCode provider id"))
+    }
+
     /// 构造 OpenAI 基础方言：不支持 reasoning 字段，标准 generation 参数全部支持，
     /// max tokens 参数使用 `max_tokens` 字段名。
     ///

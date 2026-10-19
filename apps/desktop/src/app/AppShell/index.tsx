@@ -84,27 +84,28 @@ export const AppShell = observer(function AppShell() {
             <SessionHeader on_search={() => setSearchDialogOpen(true)} on_toggle_sidebar={() => store.toggleLeftSidebar()} session={session} sidebar_open={sidebar_expanded} />
             <ChildTaskSubheader />
           </div>
-          {store.connection.state !== "connected" && application && (
+          {store.connection.state !== "connected" && (application || store.remote_device) && (
             <div className={styles.connection_notice} role="status">
               <span>{store.connection.error_message ?? "Runtime 连接不可用，当前内容为上次快照。"}</span>
               <button onClick={() => store.retryConnection()} type="button">重新连接</button>
             </div>
           )}
+          {store.remote_device && store.interaction_error && <p role="alert" className={styles.connection_notice}>{store.interaction_error}</p>}
           <div className={styles.conversation_content}>
-            <ConversationView />
+            <ConversationView key={navigation.target_device ?? "local"} />
           </div>
           <div className={styles.composer_slot}>
-            <ComposerDock read_only={store.navigation.selected_child_task_id !== null} />
+            {<ComposerDock key={navigation.target_device ?? "local"} read_only={store.navigation.selected_child_task_id !== null} />}
           </div>
         </section>
         {navigation.effective_right_sidebar_open && <SidebarResizeHandle side="right" />}
-        <ResourceWorkspace hidden={!navigation.effective_right_sidebar_open} overlay_root_ref={overlay_root_ref} />
+        {<ResourceWorkspace key={store.reading_device ?? "local"} hidden={!navigation.effective_right_sidebar_open} overlay_root_ref={overlay_root_ref} />}
       </div>
       <div className={styles.window_controls} data-app-title-bar>
         <DesktopWindowControls />
       </div>
       <SettingsDialog />
-      <SessionSearchDialog on_close={() => setSearchDialogOpen(false)} open={search_dialog_open} />
+      <SessionSearchDialog key={store.network.browsing_device ?? "local"} on_close={() => setSearchDialogOpen(false)} open={search_dialog_open} />
       {store.directory_picker && <HostDirectoryDialog />}
       <DesktopLifecycleDialog />
       <ConversationSearchDialog />

@@ -26,6 +26,8 @@ fn incompatible_requests_leave_the_ready_instance_running() {
     for (version, minimum, expected) in [
         (None, None, "missing_declaration"),
         (Some("0.25.1"), Some("0.25.1"), "client_too_old"),
+        // F05 新 Provider wire 值不能交给缺少运行时枚举校验的旧客户端。
+        (Some("0.31.0"), Some("0.30.0"), "client_too_old"),
         (Some(FUTURE_VERSION), Some(FUTURE_VERSION), "host_too_old"),
         (Some(CURRENT_VERSION), None, "invalid_declaration"),
     ] {

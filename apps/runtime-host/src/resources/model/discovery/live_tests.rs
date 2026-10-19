@@ -208,6 +208,7 @@ async fn live_fixed_parameters_complete_one_text_turn() {
     let provider = agent_types::ProviderId::new("dashscope").expect("provider");
     let bundle = factory
         .create_model(ModelServiceFactoryRequest {
+            conversation_routing_id: None,
             context_management_mode: agent_model::ContextManagementMode::LocalSummary,
             server_history_binding: None,
             provider_state_binding: None,

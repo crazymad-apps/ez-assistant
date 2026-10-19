@@ -31,7 +31,7 @@ import type {
 import type { RuntimeClient } from '../runtime-client/RuntimeClient';
 
 export type RuntimeSettingsPageId =
-  'runtime' | 'runtime_connection' | 'host_access' | 'runtime_diagnostics' | 'runtime_local';
+  'runtime' | 'runtime_connection' | 'host_access' | 'runtime_diagnostics' | 'runtime_local' | 'host_registration';
 export type SettingsPage = RuntimeSettingsPageId | 'appearance' | 'models' | 'permissions' | 'memory' | 'skills' | 'devices' | 'mcp' | 'plugins' | 'agents' | 'notifications';
 
 type SettingsDependencies = Readonly<{

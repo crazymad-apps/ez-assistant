@@ -46,7 +46,9 @@ const ModelEditorForm = observer(function ModelEditorForm() {
   const responses = Boolean(
     connection &&
     connection.protocol_preference !== 'chat_completions' &&
-    ['openai', 'deepseek', 'dashscope_api', 'dashscope_plan', 'moonshot'].includes(connection.provider_type),
+    ['opencode', 'openai', 'deepseek', 'dashscope_api', 'dashscope_plan', 'moonshot'].includes(
+      connection.provider_type,
+    ),
   );
   const query = useResourceQuery(read),
     detail = query.value;
@@ -175,6 +177,7 @@ const ModelEditorForm = observer(function ModelEditorForm() {
             <ParameterFields
               value={draft}
               responses={responses}
+              server_features_available={connection?.provider_type !== 'opencode'}
               sources={
                 detail.source === 'fixed'
                   ? Object.fromEntries(Object.keys(draft).map((key) => [key, 'fixed']))
@@ -219,6 +222,7 @@ const ModelEditorForm = observer(function ModelEditorForm() {
             </Space>
             <Card title="配置测试" size="small" type="inner">
               <ModelTest
+                provider_type={connection?.provider_type}
                 selection={{ provider_instance_id: id, model_id: chosen }}
                 disabled={dirty || detail.source !== 'fixed' || detail.requires_configuration}
               />

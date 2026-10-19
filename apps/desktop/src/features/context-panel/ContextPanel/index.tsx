@@ -294,7 +294,7 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
             </dl>
           )}
           {session && (
-            <button className={styles.system_context_row} onClick={() => void openSystemContext()} type="button">
+            <button disabled={store.remote_device} title={store.remote_device ? "组网设备暂不支持查看系统上下文" : undefined} className={styles.system_context_row} onClick={() => void openSystemContext()} type="button">
               <strong>系统上下文</strong>
               <em>{system_context_loading ? "读取中…" : "查看原文"}</em>
             </button>

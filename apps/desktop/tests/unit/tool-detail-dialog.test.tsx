@@ -167,6 +167,7 @@ describe("ToolDetailDialog", () => {
       owner,
       "message-image",
       "tool-image-call-0",
+      { binding: null, device: null },
     ));
     expect(await screen.findByRole("img")).toBeVisible();
     expect(screen.getByText("/workspace/reference.png")).toBeVisible();
@@ -232,5 +233,5 @@ vi.mock("../../src/stores/RootStoreContext", async () => {
 });
 vi.mock("../../src/runtime-client/ClientResources", async (original) => {
   const actual = await original<typeof import("../../src/runtime-client/ClientResources")>();
-  return {...actual, ClientResources: class extends actual.ClientResources { override readonly desktop = true; }};
+  return {...actual, ClientResources: class extends actual.ClientResources { override readonly desktop = true; override get native_target() { return { binding: null, device: null }; } }};
 });

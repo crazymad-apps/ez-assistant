@@ -552,7 +552,7 @@ describe('SettingsDialog model management', () => {
       },
     });
     vi.mocked(manageLocalHost).mockImplementation(hostAccessCommand);
-    vi.spyOn(store, 'runtime_client', 'get').mockReturnValue({ hostAccessCommand } as unknown as RuntimeClient);
+    vi.spyOn(store, 'local_runtime_client', 'get').mockReturnValue({ hostAccessCommand } as unknown as RuntimeClient);
     renderDialog(store);
     expect(screen.getByRole('region', { name: '当前连接' })).toHaveTextContent('http://remote.example:9000');
     fireEvent.click(screen.getByRole('button', { name: /^访问设置/ }));
@@ -636,7 +636,7 @@ describe('SettingsDialog model management', () => {
       });
     const restart = vi.spyOn(store.desktop_lifecycle, 'request').mockImplementation(() => {});
     vi.mocked(manageLocalHost).mockImplementation(hostAccessCommand);
-    vi.spyOn(store, 'runtime_client', 'get').mockReturnValue({
+    vi.spyOn(store, 'local_runtime_client', 'get').mockReturnValue({
       address: 'http://127.0.0.1:7240',
       hostAccessCommand,
     } as unknown as RuntimeClient);

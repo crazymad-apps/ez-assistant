@@ -166,13 +166,14 @@ export const SessionHeader = observer(function SessionHeader({ session, sidebar_
             {session?.title ?? "新会话"}
           </button>
         )}
+        {store.remote_device && <span className={styles.session_role_badge}>{store.network.label(store.navigation.target_device)}</span>}
         {session && is_controller && (
           <span className={styles.session_role_badge}>主控</span>
         )}
         {session?.custom_agent && <span className={styles.session_role_badge} title="创建会话时冻结的智能体配置">
           {session.custom_agent.name} · {session.custom_agent.source.type === "center" ? "企业" : "个人"}
         </span>}
-        {session && !is_controller && (
+        {session && !is_controller && !store.remote_device && (
           <div
             className={styles.proxy_control}
             title={!controller_available ? "主控会话暂不可用" : undefined}
@@ -199,8 +200,8 @@ export const SessionHeader = observer(function SessionHeader({ session, sidebar_
         )}
       </div>
       <div className={styles.session_actions}>
-        <PendingNotifications key={store.pending_notifications.scope} />
-        <DropdownMenu>
+        {<PendingNotifications key={store.pending_notifications.scope} />}
+        {<DropdownMenu>
           <DropdownMenuTrigger aria-label="更多会话操作" className={styles.header_icon_button} inlineIcon="more" />
           <DropdownMenuContent aria-label="会话操作" className={styles.session_menu}>
             <DropdownMenuItem onSelect={() => store.resetSidebarLayout()}>
@@ -245,9 +246,9 @@ export const SessionHeader = observer(function SessionHeader({ session, sidebar_
             )}
             {!is_archived && session && !is_controller && (
               <>
-                <DropdownMenuItem disabled={store.pending_session_action} onSelect={() => void store.setSessionPinned(session.session_id, !session.is_pinned)}>
-                  <span>{session.is_pinned ? "取消置顶" : "置顶"}</span>
-                  {session.is_pinned && <Icon name="check" size={14} />}
+                <DropdownMenuItem disabled={store.pending_session_action || (store.local_files.desktop && (store.pins.busy || !store.pins.value.imported))} onSelect={() => void store.setSessionPinned(session.session_id, !store.isSessionPinned(session, store.navigation.target_device))}>
+                  <span>{store.isSessionPinned(session, store.navigation.target_device) ? "取消置顶" : "置顶"}</span>
+                  {store.isSessionPinned(session, store.navigation.target_device) && <Icon name="check" size={14} />}
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   disabled={blocks_archive || store.pending_session_action}
@@ -274,7 +275,7 @@ export const SessionHeader = observer(function SessionHeader({ session, sidebar_
               </DropdownMenuItem>
             )}
           </DropdownMenuContent>
-        </DropdownMenu>
+        </DropdownMenu>}
         <InlineIconButton
           label={store.navigation.effective_right_sidebar_open ? "收起资源栏" : "展开资源栏"}
           className={styles.context_toggle}

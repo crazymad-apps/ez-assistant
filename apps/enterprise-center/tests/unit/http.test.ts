@@ -8,6 +8,7 @@ import { IdentityError } from '../../dist/identity/errors.js';
 let app: Awaited<ReturnType<typeof createHttpApp>>;
 beforeAll(async () => {
   app = await createHttpApp();
+  vi.spyOn(app.get(IdentityService), 'centerId').mockResolvedValue('11111111-1111-4111-8111-111111111111');
 });
 afterAll(async () => {
   await app.close();
@@ -17,10 +18,11 @@ it('GET /api/info 只暴露软件与协议兼容事实', async () => {
   const response = await app.inject({ method: 'GET', url: '/api/info' });
   expect(response.statusCode).toBe(200);
   expect(response.json()).toEqual({
+    center_id: '11111111-1111-4111-8111-111111111111',
     software_version: '0.1.0',
     protocol_version: 3,
     min_protocol_version: 3,
-    capabilities: ['managed_models', 'llm_proxy', 'plugin_market', 'managed_agents', 'feedback'],
+    capabilities: ['managed_models', 'llm_proxy', 'plugin_market', 'managed_agents', 'feedback', 'host_registration'],
   });
   expect(response.headers['cache-control']).toBe('no-store');
 });
@@ -133,7 +135,7 @@ it('OpenAPI 在线与离线快照一致，只包含已实现接口', async () =>
     },
   });
   expect(document.components?.schemas?.CenterInfo).toMatchObject({
-    required: ['capabilities', 'software_version', 'protocol_version', 'min_protocol_version'],
+    required: ['center_id', 'capabilities', 'software_version', 'protocol_version', 'min_protocol_version'],
     properties: {
       software_version: { type: 'string' },
       protocol_version: { type: 'integer', minimum: 1 },

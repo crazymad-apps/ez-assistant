@@ -1,3 +1,4 @@
+import { DesktopController } from "./DesktopController";
 import type { RuntimeClient } from "../../runtime-client/RuntimeClient";
 import { action, computed, makeObservable, observable, runInAction } from "mobx";
 import { TerminalController } from "./TerminalController";
@@ -56,7 +57,8 @@ export type ResourceTab =
   | Readonly<{ type: "image"; resource: ResourceHandle }>
   | Readonly<{ type: "pdf"; resource: ResourceHandle }>
   | Readonly<{ type: "browser"; browserId: string }>
-  | Readonly<{ type: "terminal"; terminalId: string }>;
+  | Readonly<{ type: "terminal"; terminalId: string }>
+  | Readonly<{ type: "desktop"; desktopId: string; name: string }>;
 
 const CONTEXT_TAB: ResourceTab = { type: "context" };
 export const CONTEXT_TAB_KEY = "context";
@@ -91,6 +93,8 @@ export class ResourceWorkspaceStore {
   readonly workspace_locations = observable.map<ResourceScopeKey, SessionResourceLocator>();
   readonly browsers = observable.map<string, BrowserController>({}, { deep: false });
   readonly terminals = observable.map<string, TerminalController>({}, { deep: false });
+  readonly desktops = observable.map<string, DesktopController>({}, { deep: false });
+  #next_desktop_id = 1;
   #restoring = false;
   #generation = 0;
   #next_terminal_id = 1;
@@ -99,7 +103,7 @@ export class ResourceWorkspaceStore {
   #next_resource_key = 1;
   readonly #resource_keys = new Map<string, string>();
 
-  constructor(private readonly getClient: () => RuntimeClient | null = () => null) {
+  constructor(private readonly getClient: () => RuntimeClient | null = () => null, private readonly desktopControl?: (device: string) => boolean) {
     makeObservable(this, {
       current_scope_key: observable, shutting_down: observable,
       tabs: computed, active_group: computed, mounted_pages: computed,
@@ -108,6 +112,7 @@ export class ResourceWorkspaceStore {
       browser_error: observable,
       openBrowser: action,
       openTerminal: action,
+      openDesktop: action,
       active_tab: computed,
       openTab: action,
       activateTab: action,
@@ -128,7 +133,12 @@ export class ResourceWorkspaceStore {
   }
 
   get active_group(): ResourceTabGroup { return this.groups.get(this.current_scope_key)!; }
-  get tabs() { return this.active_group.tabs; }
+  // Store 已按设备隔离；桌面由设备持有，会话只拥有普通资源标签。
+  get tabs(): readonly ResourceTab[] {
+    return [...this.active_group.tabs, ...[...this.desktops].map(([desktopId, controller]): ResourceTab => ({
+      type: "desktop", desktopId, name: controller.name,
+    }))];
+  }
   get active_tab_key(): string { return this.active_group.active_tab_key; }
   set active_tab_key(value: string) { this.active_group.active_tab_key = value; }
   get focused_tab_key(): string { return this.active_group.focused_tab_key; }
@@ -141,10 +151,14 @@ export class ResourceWorkspaceStore {
         if (tab.type === "terminal") pages.push({ key: this.pageKey(group, tab), group, tab });
       }
     }
+    for (const tab of this.tabs) {
+      if (tab.type === "desktop") pages.push({ key: this.pageKey(this.active_group, tab), group: this.active_group, tab });
+    }
     return pages;
   }
 
   pageKey(group: ResourceTabGroup, tab: ResourceTab): string {
+    if (tab.type === "desktop") return resourceTabKey(tab);
     return `${group.id}/${tab.type === "workspace" ? "workspace" : resourceTabKey(tab)}`;
   }
 
@@ -152,6 +166,19 @@ export class ResourceWorkspaceStore {
     let state = this.view_states.get(key);
     if (!state) { state = {}; this.view_states.set(key, state); }
     return state;
+  }
+
+  openDesktop(device: string, name: string, can_control = false): void {
+    if (this.shutting_down || this.active_group.closing) return;
+    const existing = this.tabs.find((tab) => tab.type === "desktop" && this.desktops.get(tab.desktopId)?.device === device);
+    if (existing) { this.activateTab(resourceTabKey(existing)); return; }
+    const client = this.getClient();
+    if (!client) return;
+    const desktopId = `desktop-${this.#next_desktop_id++}`;
+    this.desktops.set(desktopId, new DesktopController(device, name, this.getClient, this.desktopControl ? () => this.desktopControl!(device) : can_control));
+    const key = resourceTabKey({ type: "desktop", desktopId, name });
+    this.pageState(key);
+    this.activateTab(key);
   }
 
   openTerminal(source: TerminalSource, owner = this.active_group, deferred = false): void {
@@ -300,8 +327,14 @@ export class ResourceWorkspaceStore {
   }
 
   selectScope(scopeKey: ResourceScopeKey): void {
+    const previousKey = this.groups.get(this.current_scope_key)?.active_tab_key;
+    const desktopKey = previousKey?.startsWith("desktop:") && this.desktops.has(previousKey.slice(8)) ? previousKey : null;
     if (!this.groups.has(scopeKey)) this.groups.set(scopeKey, new ResourceTabGroup(scopeKey));
     this.current_scope_key = scopeKey;
+    if (desktopKey) {
+      this.active_tab_key = desktopKey;
+      this.focused_tab_key = desktopKey;
+    }
     this.#touchActivePage();
   }
 
@@ -356,12 +389,14 @@ export class ResourceWorkspaceStore {
   captureSnapshot(): ResourceWorkspaceSnapshot {
     const snapshot: ResourceWorkspaceSnapshot = {
       current_scope_key: this.current_scope_key,
+      desktops: [...this.desktops.values()].map((desktop) => ({ device: desktop.device, name: desktop.name, display_id: desktop.display_id })),
+      active_desktop: this.active_tab.type === "desktop" ? this.desktops.get(this.active_tab.desktopId)?.device ?? null : null,
       groups: [...this.groups.values()].filter((group) => group.tabs.length > 1 || group.scope_key === this.current_scope_key).map((group) => ({
         scope_key: group.scope_key,
-        active_index: group.tabs.findIndex((tab) => resourceTabKey(tab) === group.active_tab_key),
-        focused_index: group.tabs.findIndex((tab) => resourceTabKey(tab) === group.focused_tab_key),
+        active_index: group.tabs.filter((tab) => tab.type !== "desktop").findIndex((tab) => resourceTabKey(tab) === group.active_tab_key),
+        focused_index: group.tabs.filter((tab) => tab.type !== "desktop").findIndex((tab) => resourceTabKey(tab) === group.focused_tab_key),
         workspace_location: this.workspace_locations.get(group.scope_key),
-        tabs: group.tabs.map((tab): SavedResourceTab => {
+        tabs: group.tabs.filter((tab) => tab.type !== "desktop").map((tab): SavedResourceTab => {
           let page: SavedResourceTab["page"];
           if ("resource" in tab) page = savedResourcePage(tab);
           else if (tab.type === "browser") {
@@ -435,6 +470,12 @@ export class ResourceWorkspaceStore {
           group.active_tab_key = keys[saved.active_index] ?? CONTEXT_TAB_KEY;
           group.focused_tab_key = keys[saved.focused_index] ?? group.active_tab_key;
         }
+        for (const saved of snapshot.desktops ?? []) {
+          if ([...this.desktops.values()].some((desktop) => desktop.device === saved.device)) continue;
+          const id = `desktop-${this.#next_desktop_id++}`;
+          this.desktops.set(id, new DesktopController(saved.device, saved.name, this.getClient, () => this.desktopControl?.(saved.device) ?? false, saved.display_id, true));
+          if (saved.device === snapshot.active_desktop) this.activateTab(`desktop:${id}`);
+        }
         if (failed.size) this.browser_error = `${failed.size} 个本地文件已不存在或无法访问，未恢复这些标签。`;
       } finally { this.#restoring = false; }
       this.#touchActivePage();
@@ -473,7 +514,7 @@ export class ResourceWorkspaceStore {
   }
 
   async shutdownTerminals(): Promise<void> {
-    runInAction(() => { this.shutting_down = true; });
+    runInAction(() => { this.shutting_down = true; for (const desktop of this.desktops.values()) desktop.disconnect(); });
     try { await Promise.all([...this.terminals.keys()].map((id) => this.closeTerminalTab(id))); }
     catch (failure) { runInAction(() => { this.shutting_down = false; }); throw failure; }
   }
@@ -523,6 +564,18 @@ export class ResourceWorkspaceStore {
   }
 
   closeTab(key: string, owner?: ResourceTabGroup): string {
+    const desktopId = key.startsWith("desktop:") ? key.slice(8) : null;
+    if (desktopId && this.desktops.has(desktopId)) {
+      this.desktops.get(desktopId)!.disconnect();
+      this.desktops.delete(desktopId);
+      this.view_states.delete(key);
+      for (const group of this.groups.values()) {
+        if (group.active_tab_key === key) group.active_tab_key = CONTEXT_TAB_KEY;
+        if (group.focused_tab_key === key) group.focused_tab_key = group.active_tab_key;
+      }
+      this.#touchActivePage();
+      return this.focused_tab_key;
+    }
     const group = owner ?? (this.#hasTab(key) ? this.active_group : undefined) ?? [...this.groups.values()].find((item) => item.tabs.some((tab) => resourceTabKey(tab) === key));
     if (!group) return this.focused_tab_key;
     if (key === CONTEXT_TAB_KEY) return this.focused_tab_key;
@@ -551,7 +604,7 @@ export class ResourceWorkspaceStore {
     return this.focused_tab_key;
   }
 
-  disconnectTerminals = (): void => { for (const terminal of this.terminals.values()) terminal.disconnect(); };
+  disconnectTerminals = (): void => { for (const desktop of this.desktops.values()) desktop.disconnect(); for (const terminal of this.terminals.values()) terminal.disconnect(); };
 
   dispose(): void {
     this.disconnectTerminals();
@@ -562,6 +615,7 @@ export class ResourceWorkspaceStore {
       void terminal.close().catch((failure: unknown) => runInAction(() => { this.browser_error = `终端清理失败：${String(failure)}`; }));
     }
     this.terminals.clear();
+    this.desktops.clear();
     this.cached_pages.clear();
     this.view_states.clear();
     this.groups.clear();
@@ -576,7 +630,7 @@ export class ResourceWorkspaceStore {
   #touchActivePage(): void {
     if (this.#restoring) return;
     const tab = this.active_tab;
-    if (tab.type === "context" || tab.type === "terminal") return;
+    if (tab.type === "context" || tab.type === "terminal" || tab.type === "desktop") return;
     const group = this.active_group;
     const key = this.pageKey(group, tab);
     this.cached_pages.delete(key);
@@ -621,6 +675,7 @@ export function resourceTabKey(tab: ResourceTab): string {
     case "pdf": return `resource:${tab.resource.resource_key}`;
     case "browser": return `browser:${tab.browserId}`;
     case "terminal": return `terminal:${tab.terminalId}`;
+    case "desktop": return `desktop:${tab.desktopId}`;
   }
 }
 
@@ -663,5 +718,6 @@ export function resourceTabTitle(tab: ResourceTab): string {
     case "pdf": return tab.resource.display_name;
     case "browser": return "浏览器";
     case "terminal": return "终端";
+    case "desktop": return `${tab.name} · 桌面`;
   }
 }

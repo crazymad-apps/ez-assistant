@@ -149,3 +149,8 @@ cargo clippy -p agent-tools --all-targets --all-features -- -D warnings
 单路径 `FileToolPolicyAdapter` 只匹配 `FileAuthorizationFacts`；接入批量文件工具的上层策略必须
 处理 `FileBatchAuthorizationFacts`，逐条判断且整批获准后才委托。正式 Host 与两个文件安全验证
 宿主均已接入，不在 Core 通用适配器中推断业务聚合规则。
+
+
+## v0.32.0 冻结工具资源派生
+
+`ToolSetSnapshot::without_tool` 保留其他工具顺序和共享执行句柄，供宿主在获得独立 owner 后重新贡献绑定该 owner 的工具。当前实际调用方是 Runtime 的 child 辅助识图装配；本 crate 不解释业务 owner，也不替换正在执行的工具资源。

@@ -89,6 +89,7 @@ export class NewSessionDraftStore {
       beginMaterialization: action,
       clearMaterializationAttempt: action,
       move: action,
+      takeContentFrom: action,
       setAttachmentTransferState: action,
       remove: action,
       clear: action,
@@ -141,6 +142,12 @@ export class NewSessionDraftStore {
       skill_options: [], skill_status: "idle", selected_mcp_availability: "unverified",
     });
     return true;
+  }
+
+  /** 跨设备只转移可携带的本地内容，目标模型、项目及能力选择保持自己的默认值。 */
+  takeContentFrom(key: NewSessionDraftKey, source: NewSessionDraft): void {
+    const target = this.open(key);
+    this.drafts.set(key, { ...target, text: source.text, quotes: source.quotes, attachments: source.attachments });
   }
 
   updateText(key: NewSessionDraftKey, text: string): void {

@@ -14,8 +14,8 @@ use axum::{
 
 use super::{
     HttpState, MAX_COMMAND_BYTES, attachments, auth, capabilities, commands, compatibility,
-    desktop_update_context, ensure_ready, events, health, login, materializations, plugin_config,
-    plugin_upload, resources, terminals, web,
+    desktop, desktop_update_context, ensure_ready, events, health, login, materializations,
+    plugin_config, plugin_upload, resources, terminals, web,
 };
 
 pub(crate) fn router(state: HttpState) -> Router {
@@ -37,16 +37,10 @@ pub(crate) fn router(state: HttpState) -> Router {
     let resource_body = (services, request_body.clone(), response_body.clone());
 
     // 浏览器可直接加载的 GET 媒体，才允许省略版本头并沿用登录时的版本声明。
-    let media = Router::new()
-        .route("/sessions/{session_id}/attachments/{attachment_id}/download", get(resources::download_attachment))
-        .route("/sessions/{session_id}/messages/{message_id}/resources/{resource_ref_id}/download", get(resources::download_tool_file))
-        .route("/sessions/{session_id}/child-tasks/{child_task_id}/messages/{message_id}/resources/{resource_ref_id}/download", get(resources::download_child_tool_file))
-        .route("/sessions/{session_id}/attachments/{attachment_id}/preview", get(resources::preview_attachment))
-        .route("/sessions/{session_id}/attachments/{attachment_id}/thumbnail", get(resources::thumbnail_attachment))
-        .route("/sessions/{session_id}/messages/{message_id}/resources/{resource_ref_id}/preview", get(resources::preview_tool_file))
-        .route("/sessions/{session_id}/child-tasks/{child_task_id}/messages/{message_id}/resources/{resource_ref_id}/preview", get(resources::preview_child_tool_file))
-        .route("/sessions/{session_id}/export.md", get(resources::export_session_markdown))
-        .route_layer((from_fn(compatibility::allow_session_declaration), resource_body.clone()));
+    let media = media_routes().route_layer((
+        from_fn(compatibility::allow_session_declaration),
+        resource_body.clone(),
+    ));
 
     // 返回本机绝对路径还要有真实本机证明；证明只增加本机能力，不切换前面绑定的用户。
     let native_resources = Router::new()
@@ -62,37 +56,7 @@ pub(crate) fn router(state: HttpState) -> Router {
     // 上传由 handler 按流入字节执行 MAX_ATTACHMENT_BYTES 限制；不能先整体读入内存。
     let files = Router::new()
         .route("/user-terminals/shells", get(terminals::shells))
-        .route("/host-files/list", post(resources::list_host_files))
-        .route(
-            "/host-files/select-directory",
-            post(resources::select_host_directory),
-        )
-        .route("/host-files/preview", post(resources::preview_host_file))
-        .route("/host-files/download", post(resources::download_host_file))
-        .route(
-            "/sessions/{session_id}/resource-files/download",
-            post(resources::download_session_file),
-        )
-        .route(
-            "/sessions/{session_id}/resource-files/list",
-            post(resources::list_session_resource_files),
-        )
-        .route(
-            "/sessions/{session_id}/resource-files/preview",
-            post(resources::preview_session_resource_file),
-        )
-        .route(
-            "/sessions/{session_id}/resource-files/stat",
-            post(resources::stat_session_resource_file),
-        )
-        .route(
-            "/session-materializations",
-            post(materializations::materialize_session).layer(DefaultBodyLimit::disable()),
-        )
-        .route(
-            "/sessions/{session_id}/attachments",
-            post(attachments::upload_attachment).layer(DefaultBodyLimit::disable()),
-        )
+        .merge(file_routes())
         .route(
             "/plugins/inspect",
             post(plugin_upload::inspect_plugin_package).layer(DefaultBodyLimit::disable()),
@@ -117,6 +81,10 @@ pub(crate) fn router(state: HttpState) -> Router {
 
     // 账号操作不隐式打开 Runtime；ensure-ready 自己阻塞到就绪，返回统一的 204。
     let user_control = Router::new()
+        .route(
+            "/host-network/access",
+            post(super::registration::access).layer(DefaultBodyLimit::max(4096)),
+        )
         .route(
             "/auth/password",
             post(login::password).layer(DefaultBodyLimit::max(4096)),
@@ -148,7 +116,22 @@ pub(crate) fn router(state: HttpState) -> Router {
             response_body.clone(),
         ));
 
+    // 本机登记不依赖业务 Runtime；查询/退出也不要求中心用户仍在线。
+    let registration = Router::new()
+        .route("/host-network/events", get(super::registration::events))
+        .route(
+            "/host-network/registration",
+            post(super::registration::command),
+        )
+        .route_layer((
+            login_context.clone(),
+            from_fn_with_state(state.clone(), auth::require_local_proof),
+            version.clone(),
+            request_body.clone(),
+            DefaultBodyLimit::max(4096),
+        ));
     let authenticated = Router::new()
+        .merge(registration)
         .merge(resources)
         .merge(user_control)
         .merge(commands)
@@ -192,10 +175,79 @@ pub(crate) fn router(state: HttpState) -> Router {
                 user_identity,
             )),
         )
+        .route(
+            "/desktop-view/socket",
+            get(desktop::upgrade).layer((
+                from_fn_with_state(state.clone(), auth::require_socket_origin),
+                from_fn_with_state(state.clone(), auth::reject_enterprise_bootstrap),
+            )),
+        )
+        .layer(from_fn_with_state(state.clone(), super::proxy::route))
         .layer(from_fn_with_state(state.clone(), auth::authorize));
 
     let pages = Router::new()
         .fallback(web::serve)
         .layer(from_fn_with_state(state.clone(), auth::authorize_page));
     api.merge(pages).with_state(state)
+}
+
+// 外部 HTTP 与组网内部入口共用同一组业务路由，凭据解析只在各自外层完成。
+fn media_routes() -> Router<HttpState> {
+    Router::new()
+        .route("/sessions/{session_id}/attachments/{attachment_id}/download", get(resources::download_attachment))
+        .route("/sessions/{session_id}/messages/{message_id}/resources/{resource_ref_id}/download", get(resources::download_tool_file))
+        .route("/sessions/{session_id}/child-tasks/{child_task_id}/messages/{message_id}/resources/{resource_ref_id}/download", get(resources::download_child_tool_file))
+        .route("/sessions/{session_id}/attachments/{attachment_id}/preview", get(resources::preview_attachment))
+        .route("/sessions/{session_id}/attachments/{attachment_id}/thumbnail", get(resources::thumbnail_attachment))
+        .route("/sessions/{session_id}/messages/{message_id}/resources/{resource_ref_id}/preview", get(resources::preview_tool_file))
+        .route("/sessions/{session_id}/child-tasks/{child_task_id}/messages/{message_id}/resources/{resource_ref_id}/preview", get(resources::preview_child_tool_file))
+        .route("/sessions/{session_id}/export.md", get(resources::export_session_markdown))
+}
+fn file_routes() -> Router<HttpState> {
+    Router::new()
+        .route("/host-files/list", post(resources::list_host_files))
+        .route(
+            "/host-files/select-directory",
+            post(resources::select_host_directory),
+        )
+        .route("/host-files/preview", post(resources::preview_host_file))
+        .route("/host-files/download", post(resources::download_host_file))
+        .route(
+            "/sessions/{session_id}/resource-files/download",
+            post(resources::download_session_file),
+        )
+        .route(
+            "/sessions/{session_id}/resource-files/list",
+            post(resources::list_session_resource_files),
+        )
+        .route(
+            "/sessions/{session_id}/resource-files/preview",
+            post(resources::preview_session_resource_file),
+        )
+        .route(
+            "/sessions/{session_id}/resource-files/stat",
+            post(resources::stat_session_resource_file),
+        )
+        .route(
+            "/session-materializations",
+            post(materializations::materialize_session).layer(DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/sessions/{session_id}/attachments",
+            post(attachments::upload_attachment).layer(DefaultBodyLimit::disable()),
+        )
+}
+
+/// 仅供已通过组网访问许可的目标请求调用；不开放监听，不再次解析来源凭据或代理。
+pub(super) fn network_resources(state: HttpState) -> Router {
+    file_routes()
+        .route("/user-terminals/shells", get(terminals::shells))
+        .merge(media_routes())
+        .route_layer((
+            from_fn_with_state(state.clone(), auth::bind_user_services),
+            from_fn(auth::guard_request_body),
+            from_fn(auth::guard_response_body),
+        ))
+        .route("/events", get(events::stream_events))
+        .with_state(state)
 }

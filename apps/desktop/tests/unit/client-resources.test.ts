@@ -257,7 +257,26 @@ it("downloads Windows Host files with a basename while preserving the request pa
   const resources = new ClientResources(() => client, false);
   const download = vi.spyOn(resources, "download").mockResolvedValue();
   await resources.downloadHostFile("C:\\项目\\图 片.png");
-  expect(download).toHaveBeenCalledWith("/host-files/download", "图 片.png", { path: "C:\\项目\\图 片.png" });
+  expect(download).toHaveBeenCalledWith("/host-files/download", "图 片.png", { path: "C:\\项目\\图 片.png" }, false);
   resources.dispose();
   client.dispose();
+});
+
+
+it("cancelling an in-flight first send keeps its selection and reports an unknown outcome", async () => {
+  const client = runtime();
+  const resources = new ClientResources(() => client, false);
+  const selected = await choose(resources, new File(["keep me"], "cancel.txt"));
+  const fetcher = vi.fn((_url: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+    init.signal?.addEventListener("abort", () => reject(new DOMException("cancelled", "AbortError")), { once: true });
+  }));
+  vi.stubGlobal("fetch", fetcher);
+  const pending = resources.materializeNewSession({ idempotency_key: "cancel-stable", variant: "build", approval_mode: "auto", mode: "normal", message: "cancel",
+    attachments: [{ selection_key: selected.selection_id, original_name: "cancel.txt", size_bytes: 7 }] }, "cancel-operation");
+  const rejected = expect(pending).rejects.toMatchObject({ code: "materialization_response_unknown" });
+  await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce());
+  await resources.cancelResourceOperation("cancel-operation");
+  await rejected;
+  await expect(resources.previewAttachmentSelection(selected.selection_id)).resolves.toBeDefined();
+  resources.dispose(); client.dispose();
 });

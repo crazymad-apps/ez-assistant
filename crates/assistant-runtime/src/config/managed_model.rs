@@ -171,9 +171,16 @@ pub(crate) fn resolve_provider_protocol(
     connection: &ProviderConnection,
 ) -> RuntimeResult<ModelProtocol> {
     use ProviderProtocolPreference::*;
+    if connection.provider_type == ProviderType::Opencode && connection.protocol_preference == Auto
+    {
+        return Err(invalid(
+            "OpenCode 必须明确选择 Chat Completions 或 Responses 协议。",
+        ));
+    }
     let responses = matches!(
         connection.provider_type,
         ProviderType::Openai
+            | ProviderType::Opencode
             | ProviderType::Deepseek
             | ProviderType::DashscopeApi
             | ProviderType::DashscopePlan
@@ -207,6 +214,12 @@ pub(crate) fn compile_managed_model(
     let protocol = resolve_provider_protocol(&provider.connection)?;
     if parameters.server_compaction_enabled && protocol != ModelProtocol::OpenAiResponses {
         return Err(invalid("服务端压缩要求 Responses 协议。"));
+    }
+    if provider.connection.provider_type == ProviderType::Opencode
+        && (parameters.server_compaction_enabled
+            || parameters.input_token_count_support == ModelFeatureSupport::Supported)
+    {
+        return Err(invalid("OpenCode 暂不支持服务端压缩或输入计量。"));
     }
     let image_input = parameters.image_input == ModelFeatureSupport::Supported;
     let tool_calls = parameters.tool_calls == ModelFeatureSupport::Supported
@@ -262,6 +275,7 @@ pub(crate) fn compile_managed_model(
     };
     let provider_name = match provider.connection.provider_type {
         ProviderType::Openai => "openai",
+        ProviderType::Opencode => "opencode",
         ProviderType::Deepseek => "deepseek",
         ProviderType::DashscopeApi => "dashscope_api",
         ProviderType::DashscopePlan => "dashscope_plan",

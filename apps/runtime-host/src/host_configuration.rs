@@ -108,11 +108,7 @@ fn set_mode_with_default(
             .ok_or("请配置企业中心地址。");
         let url = url?.to_owned();
         center_url::validate(&url)?;
-        if existing.is_some_and(|old| old != url)
-            && document["enterprise"].get("center_id").is_some()
-        {
-            return Err("更换已绑定中心前须显式清除中心绑定。");
-        }
+        // 访问地址不是中心身份；保留已有 center_id，后续登录及组网握手仍核验中心身份。
         document["enterprise"]["center_url"] = value(url);
     } else if explicit_url.is_some() {
         return Err("中心地址只能用于企业配置。");
@@ -173,14 +169,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(doc.to_string(), before);
-        assert!(
-            set_mode_with_default(
-                &mut doc,
-                HostMode::Enterprise,
-                Some("https://new.example"),
-                None
-            )
-            .is_err()
+        set_mode_with_default(
+            &mut doc,
+            HostMode::Enterprise,
+            Some("https://new.example"),
+            None,
+        )
+        .unwrap();
+        let relocated = parse(&doc.to_string()).unwrap().enterprise.unwrap();
+        assert_eq!(relocated.center_url, "https://new.example");
+        assert_eq!(
+            relocated.center_id.as_deref(),
+            Some("01234567-89ab-4cde-8f01-23456789abcd")
         );
         let mut explicit = personal_document();
         set_mode_with_default(

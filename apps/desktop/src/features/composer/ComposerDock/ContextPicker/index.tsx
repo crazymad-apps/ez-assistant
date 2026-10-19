@@ -26,7 +26,7 @@ export function ContextPicker(props: Readonly<{
   empty_text?: string;
   action_label: string;
   action_icon: IconName;
-  on_action: () => void;
+  on_action?: () => void;
   on_open_change: (open: boolean) => void;
   on_select: (value: string | null) => void;
 }>) {
@@ -133,11 +133,11 @@ export function ContextPicker(props: Readonly<{
             </button>)}
             {results.length === 0 && <p className={styles.empty}>{props.empty_text ?? `没有匹配的${props.label}`}</p>}
           </div>
-          <div className={styles.footer}>
-            <button onClick={() => { close(false); props.on_action(); }} type="button">
+          {props.on_action && <div className={styles.footer}>
+            <button onClick={() => { close(false); props.on_action?.(); }} type="button">
               <Icon name={props.action_icon} size={17} />{props.action_label}
             </button>
-          </div>
+          </div>}
         </div>
       </AnchoredOverlay>
     </div>

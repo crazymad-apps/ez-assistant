@@ -4,6 +4,7 @@ import { SOFTWARE_VERSION } from "@ez-assistant/protocol/node";
 import { ClientError, Cancelled } from "./errors.js";
 import { canonicalHome } from "./host/discovery.js";
 import { HostControl } from "./host/control.js";
+import { registration, registrationLines } from "./host/registration.js";
 import { accessCommand } from "./host/http.js";
 import { configure } from "./config/index.js";
 import { line, showTarget, targetHome, working } from "./terminal/output.js";
@@ -51,6 +52,10 @@ for (const [name, description] of Object.entries(descriptions)) {
     if (name === "status") {
       if (target?.health.status === "ready") {
         await showAccess(target.discovery);
+        if (target.capabilities.mode === "enterprise") {
+          try { for (const item of registrationLines(await registration(target.discovery, { type: "get_status" }, abort.signal))) line(item); }
+          catch (error) { line(error instanceof ClientError ? error.message : "设备登记状态尚未核实。"); }
+        }
       }
       return;
     }

@@ -159,3 +159,8 @@ Responses summary/content 在规范 ReasoningPart 和每个 ReasoningDelta 中�
 完整窗口不计入普通 reasoning 的单项 2 MiB/单轮 8 MiB 预算，生成、计量和再次 compact
 一致回放保留消息与图片。JSON 辅助响应沿用有界聚合，整体传输预算为 32 MiB，超过时
 明确报告传输预算错误；该预算不是模型窗口或 OpenAI 压缩协议限制。
+
+
+## v0.32.0 F05 OpenCode 具名方言
+
+Chat／Responses 的 `opencode()` 复用原有 Codec、Decoder 和 HTTP／SSE Service，模型能力与 reasoning 参数由宿主显式提供，不从模型名称猜测底层厂商。`OpenCodeRequestIdentity` 仅接收已校验、不可变的路由及 User-Agent；Service 仅在 OpenCode 方言发送相应头，缺失身份时在 Transport 前报配置错误。它不解释 Session／ChildTask／Run，不生成身份或保存映射。续接、压缩和计量默认关闭，正式 Host 同时拒绝未支持的配置；失败不切换协议或 endpoint。

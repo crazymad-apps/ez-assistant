@@ -7,6 +7,7 @@ mod agents;
 pub(crate) mod client;
 pub(crate) mod feedback;
 mod models;
+mod network;
 #[cfg(test)]
 mod tests;
 
@@ -16,11 +17,12 @@ use super::{
 };
 pub(crate) use agents::HostAgentDirectorySource;
 use assistant_protocol::{HostPasswordRequest, HostUserIdentity, SecretValue};
-pub(crate) use client::{CenterClient, ModelConfiguration};
+pub(crate) use client::{CenterClient, ModelConfiguration, RegistrationReply};
 use futures_util::{
     FutureExt as _,
     future::{BoxFuture, Shared},
 };
+pub(super) use network::Initialization;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
@@ -40,7 +42,7 @@ pub(crate) enum CenterError {
     ModelCapabilityMissing,
     #[error("密码或账号输入不符合要求。")]
     InvalidRequest,
-    #[error("账号状态已改变，请重新提交。")]
+    #[error("中心状态已改变，请重新读取后操作。")]
     StateChanged,
     #[error("操作过于频繁，请稍后重试。")]
     Busy,
@@ -204,6 +206,9 @@ impl Credentials {
             }
             let key = UserKey::from(&identity);
             let issued = issue(&mut state, compatibility, Some(key.clone()))?;
+            if let Some(init) = state.network_initializations.remove(&key) {
+                init.cancelled.cancel();
+            }
             let current = Arc::new(CenterLogin {
                 client: client.clone(),
                 token: login.token.clone(),
@@ -402,6 +407,9 @@ impl Credentials {
     }
 }
 fn end_user(state: &mut super::credentials::CredentialState, key: &UserKey) -> Option<UserState> {
+    if let Some(init) = state.network_initializations.remove(key) {
+        init.cancelled.cancel();
+    }
     let user = state.users.remove(key)?;
     user.connections.cancel();
     state.sessions.retain(|_, session| {

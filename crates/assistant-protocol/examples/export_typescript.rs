@@ -3,6 +3,10 @@
 use std::{env, error::Error, fs, path::PathBuf, process};
 
 use assistant_protocol::{
+    DesktopDisplay, DesktopInput, DesktopInputFrame, DesktopViewOpenRequest, UserTerminalControl,
+    UserTerminalNotice,
+};
+use assistant_protocol::{
     DesktopUpdateContext, DeviceGatewayCommand, DeviceGatewayCommandResult, DeviceGatewayEvent,
     GetApplicationSnapshotRequest, GetApplicationSnapshotResult, GetChildTaskViewRequest,
     GetChildTaskViewResult, GetConversationPageAroundRunRequest,
@@ -20,7 +24,6 @@ use assistant_protocol::{
     SessionMaterializationManifest, SessionMaterializationResult, SessionTitleGenerationSnapshot,
     SubmitInputMode, TodoItemId, UploadAttachmentResult,
 };
-use assistant_protocol::{UserTerminalControl, UserTerminalNotice};
 use ts_rs::{Config, TS};
 
 const OUTPUT_FILE: &str = "assistant-protocol.ts";
@@ -41,9 +44,17 @@ fn export_all(output_directory: PathBuf) -> Result<PathBuf, Box<dyn Error>> {
     export_roots!(
         assistant_protocol::RuntimeCompatibilityError,
         UserTerminalControl,
+        DesktopViewOpenRequest,
+        DesktopDisplay,
+        DesktopInputFrame,
+        DesktopInput,
         UserTerminalNotice,
         assistant_protocol::UserTerminalShellEntry,
         assistant_protocol::ShellCatalogEntry,
+        assistant_protocol::HostNetworkCommand,
+        assistant_protocol::HostNetworkResult,
+        assistant_protocol::HostRegistrationCommand,
+        assistant_protocol::HostRegistrationStatus,
         HostAccessCommand,
         HostAccessStatus,
         DesktopUpdateContext,

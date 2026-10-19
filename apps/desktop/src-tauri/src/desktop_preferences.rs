@@ -47,6 +47,9 @@ pub(crate) struct DesktopPreferences {
     /// WebView 拥有的轻量恢复索引；原生层只限界并原子保存，不装配 Runtime 业务状态。
     #[serde(default)]
     resource_workspace: Option<serde_json::Value>,
+    /// 当前身份的本机置顶和带设备归属的右栏描述。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    desktop_workspace: Option<serde_json::Value>,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -98,6 +101,7 @@ impl Default for DesktopPreferences {
             default_approval_mode: default_approval_mode(),
             last_model_selection: None,
             resource_workspace: None,
+            desktop_workspace: None,
         }
     }
 }
@@ -298,6 +302,9 @@ fn save_namespace(
         .map_err(|_| DesktopPreferencesError::SaveFailed)?;
     let preferences = validate(preferences)?;
     let mut document = load_document(directory)?;
+    if preferences.desktop_workspace.is_some() {
+        backup_legacy_document(directory)?;
+    }
     if let Some(namespace) = namespace {
         validate_namespace(namespace)?;
         if document.hosts.len() >= 64 && !document.hosts.contains_key(namespace) {
@@ -341,6 +348,45 @@ fn write_document(
     fs::rename(&staging, destination).map_err(|_| DesktopPreferencesError::SaveFailed)
 }
 
+/// 首次写新版前保存字节一致、可读的旧偏好；失败时不提交新版，也不覆盖已有备份。
+fn backup_legacy_document(directory: &Path) -> Result<(), DesktopPreferencesError> {
+    use std::io::Write;
+    let source = directory.join(PREFERENCES_FILE);
+    if !source.exists() {
+        return Ok(());
+    }
+    let backup = directory.join("desktop-preferences.pre-network.json");
+    if backup.exists() {
+        let bytes = fs::read(&backup).map_err(|_| DesktopPreferencesError::SaveFailed)?;
+        serde_json::from_slice::<PreferencesDocument>(&bytes)
+            .map_err(|_| DesktopPreferencesError::Invalid)?;
+        return Ok(());
+    }
+    let bytes = fs::read(&source).map_err(|_| DesktopPreferencesError::SaveFailed)?;
+    let mut options = fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let staging = directory.join(".desktop-preferences.backup.tmp");
+    let mut file = options
+        .open(&staging)
+        .map_err(|_| DesktopPreferencesError::SaveFailed)?;
+    file.write_all(&bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|_| DesktopPreferencesError::SaveFailed)?;
+    let saved = fs::read(&staging).map_err(|_| DesktopPreferencesError::SaveFailed)?;
+    if bytes != saved {
+        return Err(DesktopPreferencesError::SaveFailed);
+    }
+    serde_json::from_slice::<PreferencesDocument>(&saved)
+        .map_err(|_| DesktopPreferencesError::Invalid)?;
+    fs::rename(&staging, &backup).map_err(|_| DesktopPreferencesError::SaveFailed)?;
+    Ok(())
+}
+
 fn validate(
     mut preferences: DesktopPreferences,
 ) -> Result<DesktopPreferences, DesktopPreferencesError> {
@@ -348,6 +394,13 @@ fn validate(
         .resource_workspace
         .as_ref()
         .is_some_and(|snapshot| !snapshot.is_object())
+    {
+        return Err(DesktopPreferencesError::Invalid);
+    }
+    if preferences
+        .desktop_workspace
+        .as_ref()
+        .is_some_and(|value| !value.is_object())
     {
         return Err(DesktopPreferencesError::Invalid);
     }

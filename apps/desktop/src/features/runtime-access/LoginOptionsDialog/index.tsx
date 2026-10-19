@@ -167,7 +167,7 @@ export const LoginOptionsDialog = observer(function LoginOptionsDialog({
             {changed && baseline.configuration.remote_enabled && (
               <p>保存后将关闭非本地访问，现有远程连接会断开；重启后需在工作区访问设置中重新开启。</p>
             )}
-            {changed && baseline.center_id && <p>旧中心绑定将自动清除，下次企业登录重新绑定，原数据保留。</p>}
+            {changed && baseline.center_id && <p>已有设备登记和用户数据保留，切换后使用所选中心的登记与授权。</p>}
             {baseline.restart_required && <p>本次重启也会应用其他已保存的待重启配置。</p>}
           </div>
         )}

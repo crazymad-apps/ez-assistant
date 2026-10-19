@@ -55,6 +55,12 @@ pub(crate) fn validate_connection(connection: &ProviderConnection) -> RuntimeRes
         ));
     }
     crate::config::resolve_provider_protocol(connection)?;
+    if connection.provider_type == assistant_protocol::ProviderType::Opencode
+        && connection.server_history_support_override
+            == Some(assistant_protocol::ModelFeatureSupport::Supported)
+    {
+        return Err(invalid("OpenCode 的服务端历史续接尚未验证。"));
+    }
     if connection.server_history_support_override
         == Some(assistant_protocol::ModelFeatureSupport::Unknown)
     {

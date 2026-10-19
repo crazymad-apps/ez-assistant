@@ -13,7 +13,7 @@ export const SessionNavigation = observer(function SessionNavigation({ sidebar_o
   on_search: () => void;
 }>) {
   const store = useRootStore();
-  const recent = [...(store.projection.application?.active_sessions ?? [])]
+  const recent = [...(store.sidebar_projection.application?.active_sessions ?? [])]
     .sort((left, right) => (right.updated_at_ms ?? 0) - (left.updated_at_ms ?? 0))
     .slice(0, 8);
 
@@ -27,12 +27,12 @@ export const SessionNavigation = observer(function SessionNavigation({ sidebar_o
       <DropdownMenuTrigger aria-label="选择最近会话" className={styles.icon_button} inlineIcon="chevron-down" />
       <DropdownMenuContent align="start" aria-label="最近会话" className={styles.recent_menu}>
         {recent.map((item) => <DropdownMenuItem
-          aria-current={item.session_id === store.navigation.selected_session_id ? "page" : undefined}
+          aria-current={store.navigation.target_device === store.network.browsing_device && item.session_id === store.navigation.selected_session_id ? "page" : undefined}
           key={item.session_id}
-          onSelect={() => void store.selectSession(item.session_id)}
+          onSelect={() => void store.selectSession(item.session_id, store.network.browsing_device)}
         >
           <span>{item.title}</span>
-          {item.session_id === store.navigation.selected_session_id && <Icon name="check" size={14} />}
+          {store.navigation.target_device === store.network.browsing_device && item.session_id === store.navigation.selected_session_id && <Icon name="check" size={14} />}
         </DropdownMenuItem>)}
         {recent.length === 0 && <span className={styles.recent_empty}>暂无会话</span>}
       </DropdownMenuContent>

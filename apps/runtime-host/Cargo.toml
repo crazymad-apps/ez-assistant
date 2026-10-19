@@ -3,7 +3,7 @@ name = "assistant-runtime-host"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-rust-version = "1.89"
+rust-version = "1.98"
 
 [[bin]]
 name = "ez-assistant-runtime"
@@ -14,6 +14,7 @@ path = "src/main.rs"
 unsafe_code = "deny"
 
 [dependencies]
+async-trait = "0.1.89"
 agent-context = { path = "../../crates/agent-context" }
 agent-core = { path = "../../crates/agent-core" }
 agent-model = { path = "../../crates/agent-model" }
@@ -65,6 +66,8 @@ ed25519-dalek = "3.0.0"
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-std", "io-util", "net", "rt-multi-thread", "signal"] }
 tokio-util.workspace = true
+tower = { version = "0.5.3", features = ["util"] }
+tokio-tungstenite = { version = "=0.29.0", features = ["rustls-tls-native-roots"] }
 tempfile.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
@@ -72,6 +75,9 @@ url.workspace = true
 argon2 = "=0.5.3"
 
 portable-pty = "=0.9.0"
+# F04：与 Host 统一 aws-lc provider；TURN 类型来自依赖但产品不配置中继。
+webrtc = { version = "=0.21.1", default-features = false, features = ["runtime-tokio", "crypto-aws-lc-rs"] }
+rtc = { version = "=0.21.1", default-features = false, features = ["crypto-aws-lc-rs"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true, features = ["signal", "fs"] }

@@ -279,6 +279,9 @@ export class CallManagement {
         };
         const user = await this.identities.requireAdmin(this.manager, token);
         const provider = await this.models.get(token, selection.provider_instance_id);
+        // 后台不生成 OpenCode 方言或临时会话身份；目录发现不代表推理验证。
+        if (provider.connection.provider_type === 'opencode')
+          throw new IdentityError(400, 'MODEL_TEST_REQUIRES_CLIENT');
         const protocol = resolveProtocol(provider.connection);
         const route = await this.models.admit(token!, selection, protocol, true);
         const parameters = route.configuration.parameters;

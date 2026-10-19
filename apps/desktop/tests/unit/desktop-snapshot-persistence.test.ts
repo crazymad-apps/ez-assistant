@@ -121,7 +121,7 @@ it("starts in a new draft while retaining saved sessions' resource tabs", async 
   expect(store.resource_workspace.active_tab.type).toBe("context");
   expect(store.resource_workspace.groups.get("session:saved")?.tabs.map((tab) => tab.type)).toEqual(["context", "workspace"]);
   await store.flushPreferences();
-  expect(bridge.save.mock.calls[0]?.[0].resource_workspace.current_scope_key).toBe("draft:unbound");
+  expect(bridge.save.mock.calls[0]?.[0].desktop_workspace.devices[0].resources.current_scope_key).toBe("draft:unbound");
 });
 it("starts with automatic approval when preferences cannot be loaded and retains the error", async () => {
   bridge.load.mockRejectedValueOnce(new Error("invalid preferences"));
@@ -149,10 +149,66 @@ it("serializes disk writes and freezes the final snapshot before terminal shutdo
   await store.resource_workspace.shutdownTerminals();
   await store.flushPreferences();
   expect(bridge.save).toHaveBeenCalledTimes(2);
-  expect(persisted.resource_workspace.groups.find((group: { scope_key: string }) => group.scope_key === "session:a").tabs.map((tab: { page: { type: string } }) => tab.page.type)).toEqual(["context", "terminal", "workspace"]);
+  expect(persisted.desktop_workspace.devices[0].resources.groups.find((group: { scope_key: string }) => group.scope_key === "session:a").tabs.map((tab: { page: { type: string } }) => tab.page.type)).toEqual(["context", "terminal", "workspace"]);
 });
 
 vi.mock("../../src/runtime-client/ClientResources", async (original) => {
   const actual = await original<typeof import("../../src/runtime-client/ClientResources")>();
   return {...actual, ClientResources: class extends actual.ClientResources { override readonly desktop = true; }};
+});
+
+
+it("preserves invalid identity snapshots instead of replacing them with an empty working state", async () => {
+  bridge.load.mockResolvedValueOnce({ ...defaults, desktop_workspace: { version: 1, owner: "another-account", pins: { imported: true, items: [] }, selection: null, devices: [] } });
+  const store = create({ target_kind: "remote", target_address: "https://host.example" });
+  await store.connect();
+  await store.flushPreferences();
+  expect(bridge.save).not.toHaveBeenCalled();
+  expect(store.interaction_error).toContain("未覆盖");
+});
+
+it("retains device expansion and draft defaults when an unused connection is released", async () => {
+  const device = "11111111-1111-4111-8111-111111111111";
+  const store = create(); await store.connect();
+  const context = store.network.context(device);
+  context.sidebar.toggleWorkspace("project-a");
+  context.drafts.applyDefaults("ask", { provider_instance_id: "remote-provider", model_id: "remote-model" });
+  store.navigation.selectSession(null, false, device);
+  store.navigation.selectSession(null, false, null);
+  expect(store.network.contexts.has(device)).toBe(false);
+  const restored = store.network.context(device);
+  expect(restored.sidebar.expanded_workspaces.has("project-a")).toBe(true);
+  expect(restored.drafts.default_model_selection).toEqual({ provider_instance_id: "remote-provider", model_id: "remote-model" });
+  expect(restored.drafts.default_approval_mode).toBe("ask");
+  expect(store.local_new_session_drafts.default_model_selection).toBeNull();
+});
+
+
+it("ignores old fixed/project resource selections while retaining session tabs and following navigation", async () => {
+  bridge.load.mockResolvedValueOnce({ ...defaults, desktop_workspace: {
+    version: 1, owner: "local", pins: { imported: true, items: [] },
+    selection: { device: null, scope: "session:saved" }, devices: [{ device: null, expanded: ["project-a"], resources: {
+      current_scope_key: "project:orphan", groups: [
+        { scope_key: "project:orphan", active_index: 1, focused_index: 1, tabs: [{ page: { type: "context" } }, { page: { type: "workspace" } }] },
+        { scope_key: "session:saved", active_index: 1, focused_index: 1, tabs: [{ page: { type: "context" } }, { page: { type: "workspace" } }] },
+      ],
+    } }],
+  } });
+  const store = create(); await store.connect();
+  expect(store.reading_scope).toBe("draft:unbound");
+  expect(store.reading_resources.groups.has("project:orphan")).toBe(false);
+  expect(store.reading_resources.groups.get("session:saved")?.tabs).toHaveLength(2);
+  expect(store.navigation.expanded_workspaces.has("project-a")).toBe(true);
+  store.navigation.selectSession("saved");
+  expect(store.reading_resources.active_tab.type).toBe("workspace");
+  store.navigation.navigateTo({ session_id: "notification", child_task_id: null, anchor_message_id: null, scroll_offset: null });
+  expect(store.reading_scope).toBe("session:notification");
+  store.navigation.goBack();
+  expect(store.reading_scope).toBe("session:saved");
+  store.navigation.goForward();
+  expect(store.reading_scope).toBe("session:notification");
+  store.openNewSessionDraft(null);
+  expect(store.reading_scope).toBe("draft:unbound");
+  await store.flushPreferences();
+  expect(bridge.save.mock.calls.at(-1)?.[0].desktop_workspace).not.toHaveProperty("selection");
 });

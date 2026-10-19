@@ -2,6 +2,9 @@ import { ApiProperty } from '@nestjs/swagger';
 
 // class 为 Swagger 提供运行时元数据；Controller 返回值与文档使用同一 DTO。
 export class CenterInfo {
+  @ApiProperty({ type: String, format: 'uuid', description: '稳定中心身份；地址变化不改变身份' })
+  readonly center_id!: string;
+
   @ApiProperty({ type: [String], description: '已实现能力；代理就绪后才声明 llm_proxy' })
   readonly capabilities!: string[];
 

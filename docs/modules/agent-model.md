@@ -22,8 +22,14 @@
 - `RetryingModelService` 对建流与流中瞬态错误共用显式有限 attempt 预算；流中断开
   释放旧流后从同一可靠请求恢复。`TurnRestarted` 只废弃未提交的响应，之后重新开始
   Part 生命周期；不允许重放工具。认证、配置、协议、上下文溢出及取消不进入瞬态重试。
-- 重试等待必须响应取消，复用完全相同的 `ModelRequest`，并透明委托 capabilities 与
+- 瞬态重试等待必须响应取消，复用完全相同的 `ModelRequest`，并透明委托 capabilities 与
   context window 与独立输入限制；Core 不解释重试策略，只将 TurnRestarted 投影为当前 Step 重新开始并清除未提交 usage。
+- `ModelRetryPolicy.with_tool_argument_corrections` 可显式启用流内 `ToolArguments` 反馈纠正，默认关闭。
+  纠正只在有工具定义的请求中生效，次数上限同时受自身额度及共享 delays 总 attempt 预算约束；
+  使用 `ContextInsertionPlan::request_only_internal` 给下一 attempt 追加一条有界解析错误说明，
+  不修改冻结 system、不修补参数、不伪造 Tool Call/Result、不写回规范 Conversation。
+  同一未提交响应中的工具均未执行，纠正提示要求重新生成尚未执行的调用，保留历史已完成结果；
+  重复纠正替换临时反馈，不累积消息。编码请求阶段的坏参数、其他协议错误、取消和无工具旁路均不触发此路径。
 - `ModelService` 直接暴露当前实例绑定模型的 `context_window_tokens`；调用方不得按
   provider/model 名称猜测窗口。`max_input_tokens()` 提供当前实例绑定模式的可选输入上限；
   未声明返回 None，不从窗口大小补值。

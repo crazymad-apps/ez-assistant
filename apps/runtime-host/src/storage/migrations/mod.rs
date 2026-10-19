@@ -20,6 +20,7 @@ mod v0_28_1;
 mod v0_29_0;
 mod v0_30_0;
 mod v0_31_0;
+mod v0_32_0;
 
 #[cfg(test)]
 use std::fs;
@@ -114,7 +115,7 @@ struct MigrationReport {
 }
 
 // 启动与布局迁移共用版本链，避免新入口遗漏于只读准入/目标投影。
-fn manifest() -> [Migration; 10] {
+fn manifest() -> [Migration; 11] {
     [
         v0_25_1::entry(),
         v0_25_2::entry(),
@@ -126,6 +127,7 @@ fn manifest() -> [Migration; 10] {
         v0_29_0::entry(),
         v0_30_0::entry(),
         v0_31_0::entry(),
+        v0_32_0::entry(),
     ]
 }
 

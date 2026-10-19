@@ -15,7 +15,7 @@ type Editor = Readonly<{ original: CustomAgentSnapshot | null; value: CustomAgen
 export const AgentSettingsPage = observer(function AgentSettingsPage(props: Readonly<{ onDirtyChange: (dirty: boolean) => void }>) {
   const root = useRootStore();
   const show_message = useAppMessage();
-  const client = root.runtime_client;
+  const client = root.local_runtime_client;
   const owner = useRef(client);
   owner.current = client;
   const [agents, setAgents] = useState<readonly CustomAgentSnapshot[]>([]);

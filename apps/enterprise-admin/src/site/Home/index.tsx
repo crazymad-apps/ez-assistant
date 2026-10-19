@@ -22,7 +22,7 @@ import { DownloadDialog } from '../DownloadDialog';
 import { useDownloadPlatform } from '../DownloadOptions/useDownloadPlatform';
 import { DotsBackground } from './DotsBackground';
 import { UsageModes } from '../UsageModes';
-import logo from '../assets/app-icon.svg';
+import logo from '../assets/app-icon.png';
 import styles from './index.module.scss';
 
 export function Home() {

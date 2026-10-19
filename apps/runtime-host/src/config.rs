@@ -34,6 +34,9 @@ pub(crate) enum CliAction {
     Serve(ServeArguments),
     /// Read or atomically edit access settings without starting the Runtime.
     Access(AccessArguments),
+    /// Local OS capture diagnostic; no Runtime data or remote access.
+    #[command(hide = true)]
+    DesktopMedia(crate::desktop_media::Diagnostics),
     #[command(hide = true)]
     BuildInfoJson,
 }

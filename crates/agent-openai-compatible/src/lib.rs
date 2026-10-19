@@ -83,7 +83,8 @@ pub use responses::{
     ResponsesProtocolAdapter, decode_response as decode_responses_response,
 };
 pub use shared::{
-    BearerCredential, BodyStream, ObservedTransport, ProviderWireEvent, ProviderWireObserver,
-    RecordedWireRequest, ReqwestTransport, SseFrame, SseParser, ToolSchemaDialect, Transport,
-    TransportError, TransportFuture, TransportRequest, TransportResponse, TransportTimeouts,
+    BearerCredential, BodyStream, ObservedTransport, OpenCodeRequestIdentity, ProviderWireEvent,
+    ProviderWireObserver, RecordedWireRequest, ReqwestTransport, SseFrame, SseParser,
+    ToolSchemaDialect, Transport, TransportError, TransportFuture, TransportRequest,
+    TransportResponse, TransportTimeouts,
 };

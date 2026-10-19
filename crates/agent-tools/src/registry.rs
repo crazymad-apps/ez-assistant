@@ -107,6 +107,22 @@ impl ToolSetSnapshot {
         Ok(self)
     }
 
+    /// 派生不含指定工具的快照，保留其他工具的顺序与共享执行句柄。
+    /// 宿主可在绑定独立执行资源后重新贡献同名工具；不改变原始快照。
+    pub fn without_tool(mut self, name: &str) -> Self {
+        if let Some(index) = self.by_name.remove(name) {
+            self.definitions.remove(index);
+            self.tools.remove(index);
+            self.by_name = self
+                .definitions
+                .iter()
+                .enumerate()
+                .map(|(index, definition)| (definition.name.as_str().to_owned(), index))
+                .collect();
+        }
+        self
+    }
+
     /// 按稳定顺序合并另一份不可变快照。
     ///
     /// 只有定义相同且共享同一冻结执行句柄的重复项才会被折叠；其他同名项均视为冲突。
@@ -468,6 +484,22 @@ mod tests {
         ) -> ToolExecuteFuture<'a, Self::Output> {
             Box::pin(std::future::ready(Ok(input)))
         }
+    }
+
+    #[test]
+    fn removing_a_tool_preserves_other_dispatch_and_allows_owner_rebinding() {
+        let base = ToolSetSnapshot::default()
+            .try_with_tool(AddTool)
+            .unwrap()
+            .try_with_tool(ParallelTool)
+            .unwrap();
+        let derived = base.clone().without_tool("add");
+        assert_eq!(base.len(), 2);
+        assert_eq!(derived.len(), 1);
+        let call = crate::testutil::tool_call("parallel_tool", serde_json::json!({"limit": 1}));
+        let batch = Dispatcher::resolve_batch(&derived, &[call]);
+        assert!(matches!(batch.get(0), Some(ResolvedBatchItemRef::Valid(_))));
+        assert_eq!(derived.try_with_tool(AddTool).unwrap().len(), 2);
     }
 
     #[test]

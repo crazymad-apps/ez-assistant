@@ -24,7 +24,8 @@ export const SessionSearchDialog = observer(function SessionSearchDialog({ open,
   const [search_next, setSearchNext] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const application = store.projection.application;
+  const application = store.sidebar_projection.application;
+  const target_device = store.network.browsing_device;
   const trimmed_query = query.trim();
   const sessions = trimmed_query
     ? matches
@@ -44,7 +45,7 @@ export const SessionSearchDialog = observer(function SessionSearchDialog({ open,
     setSearchNext(null);
     setLoading(false);
     setError(null);
-  }, [open]);
+  }, [open, target_device]);
 
   useEffect(() => {
     const generation = ++request_generation.current;
@@ -69,7 +70,7 @@ export const SessionSearchDialog = observer(function SessionSearchDialog({ open,
       });
     }, 180);
     return () => window.clearTimeout(timer);
-  }, [open, scope, store, trimmed_query]);
+  }, [open, scope, store, trimmed_query, target_device]);
 
   async function loadMore() {
     if (loading || next_offset == null) return;
@@ -95,8 +96,8 @@ export const SessionSearchDialog = observer(function SessionSearchDialog({ open,
   }
 
   function openSession(session: SessionSummary) {
-    store.navigation.setListMode(scope);
-    void store.selectSession(session.session_id);
+    store.sidebar_navigation.setListMode(scope);
+    void store.selectSession(session.session_id, target_device);
     on_close();
   }
 

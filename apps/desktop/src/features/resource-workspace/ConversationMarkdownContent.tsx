@@ -27,7 +27,7 @@ export const ConversationMarkdownContent = observer(function ConversationMarkdow
   const open = useCallback((reference: string) => {
     if (!scope) return;
     try {
-      root.resource_workspace.openHostFile(scope, hostFilePath(reference, base));
+    root.resource_workspace.openHostFile(scope, hostFilePath(reference, base));
       if (!root.navigation.effective_right_sidebar_open) root.toggleRightSidebar();
     } catch (error) { showError(error); }
   }, [root, scope, showError, base]);

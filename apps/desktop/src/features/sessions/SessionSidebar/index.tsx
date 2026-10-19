@@ -1,3 +1,5 @@
+import { DesktopPins } from "./DesktopPins";
+import { DeviceSelector } from "../DeviceSelector";
 import { Button } from "../../../components/Button";
 import { observer } from "mobx-react-lite";
 import { useEffect, useRef, useState } from "react";
@@ -20,16 +22,18 @@ export const SessionSidebar = observer(function SessionSidebar({ hidden = false,
 }>) {
   const store = useRootStore();
   const application_connection = useApplicationConnection();
-  const application = store.projection.application;
+  const application = store.sidebar_projection.application;
+  const local_application = store.local_projection.application;
   const [pinned_section_open, setPinnedSectionOpen] = useState(true);
   const [workspace_section_open, setWorkspaceSectionOpen] = useState(true);
   const [restore_dialog_open, setRestoreDialogOpen] = useState(false);
   const [unbound_section_open, setUnboundSectionOpen] = useState(true);
   const previous_pinned_ids = useRef<Set<string> | null>(null);
+  const browse_device = store.network.browsing_device;
   const [list_loading, setListLoading] = useState(false);
   const [list_error, setListError] = useState<string | null>(null);
   const sessions =
-    store.navigation.list_mode === "active"
+    store.sidebar_navigation.list_mode === "active"
       ? (application?.active_sessions ?? [])
       : (application?.archived_sessions ?? []);
   const workspaces = application?.workspaces ?? [];
@@ -39,21 +43,23 @@ export const SessionSidebar = observer(function SessionSidebar({ hidden = false,
     session.role !== "controller"
     && (!session.workspace_id || active_workspace_ids.has(session.workspace_id))
   ));
-  const next_offset = store.navigation.list_mode === "active" ? application?.active_sessions_next_offset : application?.archived_sessions_next_offset;
-  const pinned = visible_sessions.filter((session) => session.is_pinned);
-  const unpinned = visible_sessions.filter((session) => !session.is_pinned);
-  const controller_id = application?.controller_availability.status === "available"
-    ? application.controller_availability.session_id : null;
+  const next_offset = store.sidebar_navigation.list_mode === "active" ? application?.active_sessions_next_offset : application?.archived_sessions_next_offset;
+  const pinned = (local_application?.active_sessions ?? []).filter((session) => session.is_pinned && session.role !== "controller"
+    && (!session.workspace_id || local_application?.workspaces.some((workspace) => workspace.workspace_id === session.workspace_id && workspace.lifecycle === "active")));
+  const unpinned = visible_sessions.filter((session) => !store.isSessionPinned(session, browse_device));
+  const controller_id = local_application?.controller_availability.status === "available"
+    ? local_application.controller_availability.session_id : null;
 
   async function loadMore() {
     if (list_loading || next_offset == null) return;
+    const target = browse_device;
     setListLoading(true);
     setListError(null);
     try {
-      await store.loadMoreSessions(store.navigation.list_mode);
+      await store.loadMoreSessions(store.sidebar_navigation.list_mode);
     } catch (error) {
-      setListError(error instanceof Error ? error.message : "加载失败");
-    } finally { setListLoading(false); }
+      if (store.network.browsing_device === target) setListError(error instanceof Error ? error.message : "加载失败");
+    } finally { if (store.network.browsing_device === target) setListLoading(false); }
   }
   const groups = active_workspaces
     .map((workspace) => ({
@@ -62,16 +68,19 @@ export const SessionSidebar = observer(function SessionSidebar({ hidden = false,
     }));
   const unbound = unpinned.filter((session) => !session.workspace_id);
 
+  useEffect(() => { setListLoading(false); setListError(null); }, [browse_device]);
+
   useEffect(() => {
-    const current_ids = new Set(visible_sessions.filter((session) => session.is_pinned).map((session) => session.session_id));
+    if (browse_device && !store.local_files.desktop) return;
+    const current_ids = new Set(visible_sessions.filter((session) => store.isSessionPinned(session, browse_device)).map((session) => session.session_id));
     for (const session of visible_sessions) {
       if (previous_pinned_ids.current?.has(session.session_id) && !current_ids.has(session.session_id)) {
-        if (session.workspace_id) store.navigation.ensureWorkspaceExpanded(session.workspace_id);
+        if (session.workspace_id) store.sidebar_navigation.ensureWorkspaceExpanded(session.workspace_id);
         else setUnboundSectionOpen(true);
       }
     }
     previous_pinned_ids.current = current_ids;
-  }, [store.navigation, visible_sessions]);
+  }, [store.navigation, visible_sessions, browse_device]);
 
   return (
     <aside
@@ -91,8 +100,8 @@ export const SessionSidebar = observer(function SessionSidebar({ hidden = false,
           aria-current={store.navigation.selected_draft_key === draftKeyForWorkspace(null) ? "page" : undefined}
           className={styles.quick_action}
           data-navigation-action
-          disabled={store.connection.state !== "connected" || store.pending_session_action || store.pending_workspace_action}
-          onClick={() => store.openNewSessionDraft(null)}
+          disabled={store.local_connection.state !== "connected" || store.pending_session_action || store.pending_workspace_action}
+          onClick={() => store.openNewSessionDraft(null, store.network.browsing_device)}
           type="button"
         ><Icon name="plus" size={17} /><span>新建会话</span></button>
         <button
@@ -100,8 +109,8 @@ export const SessionSidebar = observer(function SessionSidebar({ hidden = false,
           aria-current={controller_id && store.navigation.selected_session_id === controller_id ? "page" : undefined}
           className={styles.quick_action}
           data-navigation-action
-          disabled={!controller_id || store.connection.state !== "connected"}
-          onClick={() => { if (controller_id) void store.selectSession(controller_id); }}
+          disabled={!controller_id || store.local_connection.state !== "connected"}
+          onClick={() => { if (controller_id) void store.selectSession(controller_id, null); }}
           type="button"
         ><Icon name="bot" size={17} /><span>助理会话</span></button>
         <button
@@ -126,7 +135,7 @@ export const SessionSidebar = observer(function SessionSidebar({ hidden = false,
 
       <div className={styles.session_scroll}>
           <>
-            {pinned.length > 0 && <section aria-label="置顶会话" className={styles.pinned_section}>
+            {(store.local_files.desktop ? store.pins.value.items.length > 0 || !!store.pins.error : pinned.length > 0) && <section aria-label="置顶会话" className={styles.pinned_section}>
               <div className={styles.section_header}>
                 <button
                   aria-expanded={pinned_section_open}
@@ -143,9 +152,10 @@ export const SessionSidebar = observer(function SessionSidebar({ hidden = false,
                 ><Icon name="chevron-down" size={14} /></button>
               </div>
               <Collapse open={pinned_section_open}>
-                <SessionList indent="root" sessions={pinned} />
+                {store.local_files.desktop ? <DesktopPins /> : <SessionList indent="root" sessions={pinned} target_device={null} />}
               </Collapse>
             </section>}
+            <DeviceSelector />
             <div className={`${styles.section_header} ${styles.workspace_section_header}`}>
               <button
                 aria-expanded={workspace_section_open}
@@ -160,11 +170,11 @@ export const SessionSidebar = observer(function SessionSidebar({ hidden = false,
                   aria-label="添加项目"
                   className={styles.section_action}
                   disabled={
-                    store.connection.state !== "connected" ||
+                    store.sidebar_connection.state !== "connected" ||
                     store.pending_workspace_action ||
                     store.pending_session_action
                   }
-                  onClick={() => void store.addWorkspace()}
+                  onClick={() => void store.addWorkspace(store.network.browsing_device)}
                   type="button"
                 >
                   <Icon name="plus" size={14} />
@@ -174,7 +184,7 @@ export const SessionSidebar = observer(function SessionSidebar({ hidden = false,
                 <button
                   aria-label="恢复已移除项目"
                   className={styles.section_restore}
-                  disabled={store.connection.state !== "connected" || store.pending_workspace_action}
+                  disabled={store.sidebar_connection.state !== "connected" || store.pending_workspace_action}
                   onClick={() => setRestoreDialogOpen(true)}
                   type="button"
                 ><Icon name="refresh" size={14} /></button>
@@ -193,7 +203,7 @@ export const SessionSidebar = observer(function SessionSidebar({ hidden = false,
               <div>
                 {groups.map((group) => (
                   <WorkspaceGroup
-                    key={group.workspace.workspace_id}
+                    key={`${store.network.browsing_device ?? "local"}:${group.workspace.workspace_id}`}
                     sessions={group.sessions}
                     workspace={group.workspace}
                   />
@@ -211,17 +221,17 @@ export const SessionSidebar = observer(function SessionSidebar({ hidden = false,
                   >
                     独立会话
                   </button>
-                  {store.navigation.list_mode === "active" && (
+                  {store.sidebar_navigation.list_mode === "active" && (
                     <Tooltip content="新建独立会话">
                       <button
                         aria-label="新建独立会话"
                         className={styles.section_action}
                         disabled={
-                          store.connection.state !== "connected" ||
+                          store.sidebar_connection.state !== "connected" ||
                           store.pending_session_action ||
                           store.pending_workspace_action
                         }
-                        onClick={() => store.openNewSessionDraft(null)}
+                        onClick={() => store.openNewSessionDraft(null, store.network.browsing_device)}
                         type="button"
                       >
                         <Icon name="plus" size={14} />
@@ -243,13 +253,13 @@ export const SessionSidebar = observer(function SessionSidebar({ hidden = false,
                 </Collapse>
               </section>
             )}
-            {sessions.length === 0 && <div className={styles.empty_list}>暂无会话</div>}
+            {store.sidebar_connection.state === "connected" && sessions.length === 0 && <div className={styles.empty_list}>暂无会话</div>}
           </>
         {next_offset != null && <Button variant="text" size="small" disabled={list_loading} onClick={() => void loadMore()}>{list_loading ? "加载中…" : "加载更多"}</Button>}
         {list_error && <p role="alert">{list_error}</p>}
       </div>
       {application_connection && <AccountMenu connection={application_connection} sidebar />}
-      <RemovedWorkspacesDialog on_close={() => setRestoreDialogOpen(false)} open={restore_dialog_open} />
+      <RemovedWorkspacesDialog key={store.network.browsing_device ?? "local"} on_close={() => setRestoreDialogOpen(false)} open={restore_dialog_open} />
     </aside>
   );
 });

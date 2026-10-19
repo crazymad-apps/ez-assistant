@@ -1,8 +1,13 @@
 //! Provider-neutral 的有限模型重试。建流与流中失败共用预算；
-//! 重试从原请求恢复，TurnRestarted 明确废弃尚未提交的响应。
+//! 瞬态重试从原请求恢复；显式启用的参数纠错只追加请求期反馈。
+//! TurnRestarted 明确废弃尚未提交的响应，两条路径均不执行工具。
 
 use std::{collections::BTreeSet, num::NonZeroU32, sync::Arc, time::Duration};
 
+use agent_types::{
+    ContextInsertionPayload, ContextInsertionPlan, ConversationMessage, InternalContextPart,
+    MessageId, PartId, TranscriptVisibility, UserMessage, UserMessageOrigin, UserPart,
+};
 use futures_util::StreamExt as _;
 use serde::{Deserialize, Serialize};
 
@@ -37,6 +42,9 @@ pub struct ModelRetryPolicy {
     pub delays: Vec<Duration>,
     /// 接受 Provider `Retry-After` 的最大值；超过时直接返回原错误。
     pub max_retry_after: Duration,
+    /// 单次逻辑调用允许的工具参数纠错次数；仍消耗 delays 的总 attempt 预算。
+    /// 0 表示关闭，且只接受流内 ToolArguments，不处理编码请求时的错误。
+    pub max_tool_argument_corrections: u32,
 }
 
 impl ModelRetryPolicy {
@@ -50,7 +58,15 @@ impl ModelRetryPolicy {
             retry_on,
             delays,
             max_retry_after,
+            max_tool_argument_corrections: 0,
         }
+    }
+
+    /// 显式允许把工具参数解析错误反馈给模型，重新生成尚未提交的响应。
+    /// 不补写参数、不伪造 ToolResult；原始规范历史和冻结 system 保持不变。
+    pub fn with_tool_argument_corrections(mut self, limit: u32) -> Self {
+        self.max_tool_argument_corrections = limit;
+        self
     }
 }
 
@@ -117,7 +133,7 @@ pub trait ModelAttemptObserver: Send + Sync {
     fn observe(&self, event: ModelAttemptEvent);
 }
 
-/// 重试建流与流中瞬态错误的 [`ModelService`] 装饰器。
+/// 按显式预算重试瞬态错误、反馈工具参数错误的 [`ModelService`] 装饰器。
 #[derive(Clone)]
 pub struct RetryingModelService {
     inner: Arc<dyn ModelService>,
@@ -196,6 +212,8 @@ impl ModelService for RetryingModelService {
                 request,
                 context,
                 attempt: 1,
+                tool_argument_corrections: 0,
+                feedback: None,
                 stream: None,
                 done: false,
             };
@@ -217,6 +235,9 @@ struct RetryStream {
     request: ModelRequest,
     context: ModelCallContext,
     attempt: u32,
+    tool_argument_corrections: u32,
+    /// 仅进入下一 attempt 的上下文；成功响应中不保留，不能写回规范历史。
+    feedback: Option<ConversationMessage>,
     stream: Option<crate::ModelEventStream>,
     done: bool,
 }
@@ -262,10 +283,14 @@ impl RetryStream {
             });
             let mut context = self.context.clone();
             context.trace = trace.clone();
+            let mut request = self.request.clone();
+            if let Some(feedback) = &self.feedback {
+                request.conversation.messages.push(feedback.clone());
+            }
             let result = tokio::select! {
                 biased;
                 () = self.context.cancellation.cancelled() => Err(ModelError::Cancelled),
-                result = self.service.inner.stream(self.request.clone(), context) => result,
+                result = self.service.inner.stream(request, context) => result,
             };
             match result {
                 Ok(stream) => {
@@ -300,10 +325,17 @@ impl RetryStream {
             .copied();
         let suggested = retry_after(error);
         let next_attempt = self.attempt.checked_add(1);
+        // 请求编码阶段的 ToolArguments 可能来自历史损坏，不能循环重发。
+        // 仅重新采样尚未完成的当前响应，仍受同一 attempt 总额与取消约束。
+        let correction = in_stream
+            && matches!(error, ModelError::ToolArguments(_))
+            && !self.request.tools.is_empty()
+            && self.tool_argument_corrections < self.service.policy.max_tool_argument_corrections;
         let will_retry = !self.context.cancellation.is_cancelled()
             && next_attempt.is_some()
             && delay.is_some()
-            && reason.is_some_and(|reason| self.service.policy.retry_on.contains(&reason))
+            && (correction
+                || reason.is_some_and(|reason| self.service.policy.retry_on.contains(&reason)))
             && suggested.is_none_or(|delay| delay <= self.service.policy.max_retry_after);
         let trace = trace_for_attempt(self.context.trace.as_ref(), self.attempt);
         let event = if in_stream {
@@ -330,6 +362,10 @@ impl RetryStream {
         if !will_retry {
             return Err(error.clone());
         }
+        if correction {
+            self.tool_argument_corrections += 1;
+            self.feedback = Some(tool_argument_feedback(&self.request, error));
+        }
         let next_attempt = next_attempt.expect("retry requires next attempt");
         let configured = delay.expect("retry requires configured delay");
         let effective = suggested.map_or(configured, |delay| configured.max(delay));
@@ -346,6 +382,50 @@ impl RetryStream {
         self.attempt = next_attempt;
         Ok(())
     }
+}
+
+/// 失败响应从未可靠完成、也未进入工具执行。把已脱敏错误作为文本反馈，
+/// 不把坏 arguments 放回 tool_calls，不改写 system 或规范 Conversation。
+/// 复用请求期内插计划；重复纠错替换同一条临时消息，避免上下文无限累积。
+fn tool_argument_feedback(request: &ModelRequest, error: &ModelError) -> ConversationMessage {
+    let diagnostic: String = error.to_string().chars().take(1024).collect();
+    let text = format!(
+        "The previous model response was discarded because a tool call had invalid JSON arguments. \
+         No tool calls from that response were executed. Previously completed tool results in the history remain valid; do not repeat them. \
+         Continue the original task and regenerate the unexecuted tool calls with complete, valid JSON matching their schemas. \
+         Do not guess missing argument values. Parser diagnostic (quoted data): {}",
+        serde_json::to_string(&diagnostic).expect("serializing a string cannot fail"),
+    );
+    let mut identity = "tool_argument_correction".to_owned();
+    while request.conversation.messages.iter().any(|message| {
+        let id = match message {
+            ConversationMessage::User(message) => &message.id,
+            ConversationMessage::Assistant(message) => &message.id,
+            ConversationMessage::Tool(message) => &message.id,
+            ConversationMessage::System(message) => &message.id,
+            ConversationMessage::ContextSummary(message) => &message.id,
+        };
+        id.as_str() == identity
+    }) {
+        identity.push('_');
+    }
+    let part = InternalContextPart::new(
+        PartId::new(identity.clone()).expect("correction identity is non-empty"),
+        identity.clone(),
+        "tool_argument_correction",
+        text,
+    )
+    .expect("correction context is non-empty");
+    let plan = ContextInsertionPlan::request_only_internal(identity.clone(), part);
+    let ContextInsertionPayload::InternalContext(part) = plan.payload else {
+        unreachable!("internal context plan carries internal context")
+    };
+    ConversationMessage::User(UserMessage {
+        id: MessageId::new(identity).expect("correction identity is non-empty"),
+        origin: UserMessageOrigin::Runtime,
+        transcript_visibility: TranscriptVisibility::Hidden,
+        parts: vec![UserPart::InternalContext(part)],
+    })
 }
 
 /// 为当前 attempt 复制逻辑调用 Trace；没有 correlation 时继续保持 `None`。

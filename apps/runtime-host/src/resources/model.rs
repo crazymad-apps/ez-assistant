@@ -2,6 +2,8 @@
 
 mod discovery;
 mod managed;
+#[cfg(test)]
+mod opencode_tests;
 pub(crate) use managed::CenterModelLoader;
 pub(crate) use managed::CenterModelServiceFactory;
 
@@ -53,6 +55,27 @@ impl HostModelServiceFactory {
         request: ModelServiceFactoryRequest<'_>,
         transport: Option<Arc<dyn agent_openai_compatible::Transport>>,
     ) -> Result<ModelServiceBundle, ModelServiceFactoryError> {
+        let opencode_identity = if request.provider.as_str() == "opencode" {
+            if request.context_management_mode != agent_model::ContextManagementMode::LocalSummary
+                || request.server_history_binding.is_some()
+                || request.input_token_count_supported
+            {
+                return Err(ModelServiceFactoryError::new(
+                    "OpenCode 暂不支持服务端压缩、历史续接或输入计量。",
+                ));
+            }
+            Some(
+                agent_openai_compatible::OpenCodeRequestIdentity::new(
+                    request.conversation_routing_id.ok_or_else(|| {
+                        ModelServiceFactoryError::new("OpenCode 缺少稳定会话路由。")
+                    })?,
+                    &format!("ez-assistant/{}", assistant_protocol::SOFTWARE_VERSION),
+                )
+                .map_err(model_service_error)?,
+            )
+        } else {
+            None
+        };
         if request.context_management_mode == agent_model::ContextManagementMode::ServerCompaction
             && (request.protocol != ModelProtocol::OpenAiResponses
                 || request.provider_state_binding.is_none())
@@ -103,20 +126,22 @@ impl HostModelServiceFactory {
                 }
                 adapter =
                     adapter.with_tool_image_projection(request.capabilities.tool_image_projection);
-                Arc::new(
-                    OpenAiChatCompletionsService::with_transport_and_capabilities(
-                        request.endpoint,
-                        BearerCredential::new(request.api_key.to_owned()),
-                        request.model,
-                        request.context_window_tokens,
-                        adapter,
-                        capabilities,
-                        transport,
-                    )
-                    .map_err(model_service_error)?
-                    .with_max_input_tokens(request.max_input_tokens)
-                    .map_err(model_service_error)?,
+                let service = OpenAiChatCompletionsService::with_transport_and_capabilities(
+                    request.endpoint,
+                    BearerCredential::new(request.api_key.to_owned()),
+                    request.model,
+                    request.context_window_tokens,
+                    adapter,
+                    capabilities,
+                    transport,
                 )
+                .map_err(model_service_error)?
+                .with_max_input_tokens(request.max_input_tokens)
+                .map_err(model_service_error)?;
+                Arc::new(match opencode_identity {
+                    Some(identity) => service.with_opencode_identity(identity),
+                    None => service,
+                })
             }
             ModelProtocol::OpenAiResponses => {
                 let mut adapter = responses_adapter(request.provider)
@@ -140,6 +165,10 @@ impl HostModelServiceFactory {
                 .map_err(model_service_error)?
                 .with_max_input_tokens(request.max_input_tokens)
                 .map_err(model_service_error)?;
+                let service = match opencode_identity {
+                    Some(identity) => service.with_opencode_identity(identity),
+                    None => service,
+                };
                 let service = if request.context_management_mode
                     == agent_model::ContextManagementMode::ServerCompaction
                 {
@@ -182,6 +211,7 @@ fn chat_adapter(
     reasoning_enabled: bool,
 ) -> ChatProtocolAdapter {
     match (provider.as_str(), reasoning_enabled) {
+        ("opencode", _) => ChatProtocolAdapter::opencode(),
         ("deepseek", true) => ChatProtocolAdapter::deepseek(),
         ("vllm", true) => ChatProtocolAdapter::vllm(),
         _ => ChatProtocolAdapter::openai_compatible(provider.clone()),
@@ -190,6 +220,7 @@ fn chat_adapter(
 
 fn responses_adapter(provider: &agent_types::ProviderId) -> ResponsesProtocolAdapter {
     match provider.as_str() {
+        "opencode" => ResponsesProtocolAdapter::opencode(),
         "deepseek" => ResponsesProtocolAdapter::deepseek(),
         "dashscope_api" | "dashscope_plan" => ResponsesProtocolAdapter::qwen(),
         "moonshot" => ResponsesProtocolAdapter::kimi(),
@@ -240,6 +271,47 @@ fn reasoning_replay_policy(provider: &agent_types::ProviderId) -> Option<Reasoni
 mod tests {
     use agent_types::ProviderId;
     #[test]
+    fn opencode_execution_requires_a_stable_conversation_route() {
+        use super::*;
+        let home = tempfile::tempdir().unwrap();
+        let factory = HostModelServiceFactory::new(home.path());
+        let provider = ProviderId::new("opencode").unwrap();
+        let capabilities = assistant_runtime::ResolvedModelCapabilities {
+            image_input: false,
+            reasoning: None,
+            tool_calls: false,
+            tool_image_projection: agent_model::ToolImageProjection::Unsupported,
+            tool_choice: agent_model::ToolChoiceCapabilities::default(),
+            streaming: true,
+        };
+        for protocol in [
+            ModelProtocol::OpenAiResponses,
+            ModelProtocol::OpenAiChatCompletions,
+        ] {
+            let result = factory.create_model(ModelServiceFactoryRequest {
+                conversation_routing_id: None,
+                context_management_mode: agent_model::ContextManagementMode::LocalSummary,
+                server_history_binding: None,
+                provider_state_binding: None,
+                input_token_count_supported: false,
+                compaction_threshold_tokens: std::num::NonZeroU64::new(1024).unwrap(),
+                external_configuration: None,
+                provider: &provider,
+                protocol,
+                capabilities: &capabilities,
+                endpoint: "https://center.test/api/llm/providers/fixture/v1",
+                model: "test-model",
+                api_key: "fixture",
+                context_window_tokens: 8192,
+                max_input_tokens: None,
+                connect_timeout: std::time::Duration::from_secs(1),
+                request_timeout: std::time::Duration::from_secs(1),
+            });
+            assert!(result.err().unwrap().to_string().contains("OpenCode"));
+        }
+    }
+
+    #[test]
     fn both_protocols_bind_input_limits_without_changing_the_context_window() {
         use super::*;
         use assistant_runtime::ResolvedModelCapabilities;
@@ -256,6 +328,7 @@ mod tests {
         };
         let build = |protocol, limit, context_management_mode| {
             factory.create_model(ModelServiceFactoryRequest {
+                conversation_routing_id: None,
                 context_management_mode,
                 server_history_binding: None,
                 provider_state_binding: None,

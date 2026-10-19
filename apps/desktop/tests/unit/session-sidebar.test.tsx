@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   ApplicationSnapshot,
@@ -7,6 +7,7 @@ import type {
 import { RootStore } from "../../src/stores/RootStore";
 import { RootStoreProvider } from "../../src/stores/RootStoreContext";
 import { SessionSidebar as ControlledSessionSidebar } from "../../src/features/sessions/SessionSidebar";
+import { DesktopPins } from "../../src/features/sessions/SessionSidebar/DesktopPins";
 import { SessionSearchDialog } from "../../src/features/sessions/SessionSearchDialog";
 import { useState } from "react";
 
@@ -178,10 +179,10 @@ describe("SessionSidebar grouping", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "project 项目操作" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "在此新建会话" }));
-    expect(create_session).toHaveBeenCalledWith("workspace-1");
+    expect(create_session).toHaveBeenCalledWith("workspace-1", null);
 
     fireEvent.click(screen.getByRole("button", { name: "新建会话" }));
-    expect(create_session).toHaveBeenCalledWith(null);
+    expect(create_session).toHaveBeenCalledWith(null, null);
   });
 
   it("shows a draft hint in menus without adding a Session row", () => {
@@ -249,7 +250,7 @@ describe("SessionSidebar grouping", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "新建独立会话" }));
 
-    expect(create_session).toHaveBeenCalledWith(null);
+    expect(create_session).toHaveBeenCalledWith(null, null);
   });
 
   it("confirms before removing a workspace without deleting its existing sessions", async () => {
@@ -294,7 +295,7 @@ describe("SessionSidebar grouping", () => {
     expect(screen.queryByRole("menuitem", { name: /恢复已移除项目/ })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("menuitem", { name: "编辑项目…" }));
 
-    expect(store.workspace_editor).toEqual({ mode: "edit", workspace_id: "workspace-1" });
+    expect(store.workspace_editor).toEqual({ mode: "edit", workspace_id: "workspace-1", device: null });
   });
 
   it("hides a removed workspace and all of its sessions until it is restored", () => {
@@ -349,6 +350,38 @@ describe("SessionSidebar grouping", () => {
     const session = screen.getByRole("button", { name: /^工作区会话/ });
     expect(session.parentElement?.querySelector("svg[aria-label='正在运行']")).toBeInTheDocument();
     expect(session.parentElement?.querySelector("time")).not.toBeInTheDocument();
+  });
+
+  it.each([null, "11111111-1111-4111-8111-111111111111"])("updates the pinned running indicator from its own device snapshot (device=%s)", (device) => {
+    const store = connectedStore();
+    const projection = device ? store.network.context(device).projection : store.local_projection;
+    const snapshot = applicationSnapshot();
+    projection.applyApplicationSnapshot({ observed_sequence: 2, value: snapshot });
+    store.pins.load({ imported: true, items: [{ device, session_id: "bound-session", title: "工作区会话", device_name: "工作设备" }] });
+    render(<RootStoreProvider store={store}><DesktopPins /></RootStoreProvider>);
+
+    try {
+      expect(screen.queryByRole("img", { name: "正在运行" })).not.toBeInTheDocument();
+      act(() => projection.applyApplicationSnapshot({ observed_sequence: 3, value: {
+        ...snapshot,
+        active_sessions: [{ ...snapshot.active_sessions[0]!, active_run_id: "run-1" }],
+      } }));
+      expect(screen.getByRole("img", { name: "正在运行" })).toBeInTheDocument();
+
+      act(() => projection.applyApplicationSnapshot({ observed_sequence: 4, value: snapshot }));
+      expect(screen.queryByRole("img", { name: "正在运行" })).not.toBeInTheDocument();
+
+      // 另一设备的同名 ID 正在运行，不能点亮此置顶入口。
+      const other = device ? store.local_projection : store.network.context("22222222-2222-4222-8222-222222222222").projection;
+      act(() => other.applyApplicationSnapshot({ observed_sequence: 5, value: {
+        ...snapshot,
+        active_sessions: [{ ...snapshot.active_sessions[0]!, active_run_id: "other-run" }],
+      } }));
+      expect(screen.queryByRole("img", { name: "正在运行" })).not.toBeInTheDocument();
+    } finally {
+      cleanup();
+      store.dispose();
+    }
   });
 
   it("renders a large visible session list and reports the desktop baseline", () => {

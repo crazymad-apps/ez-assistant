@@ -486,3 +486,37 @@ GoalBudgetSnapshot 删除 `max_total_tokens`，GoalPauseReasonSnapshot 删除 `t
 累计 `used_total_tokens` 和 `usage_complete` 保留。Runtime 不再按累计 token 暂停，旧存储
 token 暂停投影为需要显式继续，客户端仅展示累计用量。Rust/TS 同源更新，兼容下限沿用
 本版已确定的 0.30.0；不改已发布数据库 schema 或强制续跑旧暂停目标。
+
+## v0.32.0 F01 M0 登记管理投影
+
+`HostRegistrationCommand/Status` 为本机登记专用 HTTP 契约，公开安装／登记 ID、本机意图及
+中心设备摘要，不含设备秘密、用户 Token 或授权集合。`error` 非空表示本次同步失败，
+`device=null` 不能脱离错误与本机意图解释为退出完成；登记 ID 与会话/Workspace ID 无关。
+TS 由既有导出器生成；M0 保留软件与兼容基线，仅增加新入口，不给旧客户端严格解析的
+`RuntimeHostFeature` 枚举增加 wire 值，不预建 WS 协议。
+
+
+### v0.32.0 F01 M1 连接投影
+
+`HostRegistrationStatus.connection` 使用 `HostNetworkState` 区分未连接、连接中、在线、重试、
+冲突、不兼容、凭据失效及本地故障；旧数据缺省未连接，不推断业务可用性。
+中心与 Host 的控制协议私有于传输适配层，凭据不进入共享应用 DTO；软件兼容基线沿 M0。
+
+### v0.32.0 F01 M2 用户设备访问投影
+
+`HostNetworkCommand/Result` 为用户级目录与访问意图，`HostNetworkCapability` 固定普通访问、
+桌面查看、桌面控制。设备目录仅含本人可用项和必要状态，访问结果不含中心或本机登录 Token。
+已结束访问返回 `closed`；不会持久化许可或复用会话 ID。私有 WS 控制动作不进入共享协议，
+TS 继续由 Rust 导出；新增独立 HTTP 入口不修改既有 Runtime 命令和兼容下限。
+
+### v0.32.0 F03 当前 Host 识别
+
+`HostNetworkResult::Devices.self_device_id` 投影本次控制连接的登记身份，未登记时为空。Desktop 与 Web 据此合并目录中的自身入口并复用直连 Host；仅公开编号，不开放登记管理权限，不改变持久化或应用兼容下限。
+
+### v0.32.0 F04 M1 查看意图
+
+`DesktopViewOpenRequest` 承载本机 UI 的目标设备、首消息认证与兼容信息，Token 沿用秘密值语义，TS 使用既有生成投影。SDP、ICE、编码帧和协商状态为 Host 私有传输契约，不进入共享 Agent 模型或持久化结构。
+
+## v0.32.0 F05 M0 OpenCode 配置边界
+
+`ProviderType` 增加 `opencode`，仍由 Rust 导出 TS，Center DTO/OpenAPI 对齐同一 wire 值。新类型不是普通 OpenAI 的别名。旧 TS 客户端不校验未知 Provider，应用最低兼容版本因此统一为 0.32.0；不改变企业协议 3 或数据库下限。OpenCode 的 Responses 续接保持未知，Chat 不支持，能力覆盖不得提升为支持。TS 地址预设与 URL 派生仅投影连接事实，不持久化套餐、派生 URL 或 UI 状态。

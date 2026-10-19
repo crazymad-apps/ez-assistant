@@ -93,7 +93,7 @@ export const ReleaseUploadDialog = observer(function ReleaseUploadDialog(props: 
       if (detail.targets.some((row) => row.target === selection.target && row.manifest_text === selection.text))
         props.onUploaded(selection.version);
       else {
-        setError('中心当前文件与本次选择不同。已核对，可重新上传草稿。');
+        setError('中心当前文件与本次选择不同。已核对，可重新上传并覆盖安装文件。');
         setPhase('selected');
       }
     } catch (error) {
@@ -158,7 +158,10 @@ export const ReleaseUploadDialog = observer(function ReleaseUploadDialog(props: 
         <Button disabled={active || phase === 'unknown'} onClick={() => input.current?.click()}>
           选择发布文件
         </Button>
-        <Typography.Text type="secondary">选择同一平台的 release.json、release.json.sig 和安装文件。</Typography.Text>
+        <Typography.Text type="secondary">
+          选择同一平台的 release.json、release.json.sig
+          和安装文件。同版本、同平台重复上传会覆盖安装文件，保留原发布状态。
+        </Typography.Text>
         {selection && (
           <>
             <Typography.Text strong>

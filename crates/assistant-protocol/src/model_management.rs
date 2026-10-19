@@ -146,6 +146,7 @@ pub enum ProviderProtocolPreference {
 #[ts(export_to = "assistant-protocol.ts")]
 pub enum ProviderType {
     Openai,
+    Opencode,
     Deepseek,
     DashscopeApi,
     DashscopePlan,
@@ -198,6 +199,16 @@ impl ProviderConnection {
                 | ProviderType::Moonshot
         ) && self.protocol_preference
             != ProviderProtocolPreference::ChatCompletions;
+        // OpenCode 首批只验证 HTTP/SSE，显式覆盖也不能启用未接入的续接能力。
+        if self.provider_type == ProviderType::Opencode {
+            return if self.protocol_preference == ProviderProtocolPreference::Responses
+                && self.server_history_support_override != Some(Unsupported)
+            {
+                Unknown
+            } else {
+                Unsupported
+            };
+        }
         if !responses {
             return Unsupported;
         }

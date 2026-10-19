@@ -18,7 +18,7 @@ export class TerminalController {
   selected_shell: ShellKind | null = null;
   shell_name: string | null = null;
   #requested_shell: ShellKind | null = null;
-  #client: RuntimeClient | null = null;
+  #opening: AbortController | null = null;
   shell_catalog: readonly UserTerminalShellEntry[] = [];
   ready = false;
   readonly source: TerminalSource;
@@ -46,7 +46,7 @@ export class TerminalController {
       ready: observable, needs_close_confirmation: computed,
       start: action, restart: action, reportError: action, selectShell: action,
     });
-    this.status = deferred ? "idle" : "starting";
+    this.status = deferred ? "exited" : "starting";
     if (!deferred) this.#pending = this.#prepare();
   }
 
@@ -65,20 +65,30 @@ export class TerminalController {
   }
 
   async #prepare(): Promise<void> {
+    // 重连可能排在旧启动之后；关闭已发出时，不再创建新的查询和取消 owner。
+    if (this.#closing) return;
+    const opening = new AbortController();
+    this.#opening = opening;
+    const deadline = Date.now() + (this.getClient()?.target_device ? 90_000 : 15_000);
+    const timer = setTimeout(() => opening.abort(new Error("终端连接超时。")), Math.max(0, deadline - Date.now()));
     try {
       const client = this.getClient();
       if (!client) throw new Error("Host 尚未连接。");
-      this.#client ??= client;
-      if (client !== this.#client) throw new Error("Host 连接已切换，请重新创建终端。");
-      const catalog = await client.listUserTerminalShells();
+      const catalog = await waitForOpening(client.listUserTerminalShells(opening.signal), opening.signal);
       if (this.status === "closing" || this.status === "closed") return;
       if (client !== this.getClient()) throw new Error("Host 连接已切换，请重新创建终端。");
       runInAction(() => { this.shell_catalog = catalog; });
       if (!catalog.some((entry) => entry.shell === this.#requested_shell)) {
         throw new Error("所选 Shell 当前不可用，请选择其他 Shell 或重新启动以刷新列表。");
       }
-      await this.#start(client, this.#requested_shell);
-    } catch (failure: unknown) { if (this.status !== "closing" && this.status !== "closed") this.reportError(failure); }
+      await this.#start(client, this.#requested_shell, opening.signal, deadline);
+    } catch (failure: unknown) {
+      if (opening.signal.aborted) this.#socket?.disconnect();
+      if (this.status !== "closing" && this.status !== "closed") this.reportError(failure);
+    } finally {
+      clearTimeout(timer);
+      if (this.#opening === opening) this.#opening = null;
+    }
   }
 
   get needs_close_confirmation(): boolean { return this.status === "starting" || this.status === "running"; }
@@ -89,7 +99,11 @@ export class TerminalController {
     this.fit();
   }
 
-  disconnect(): void { this.#socket?.disconnect(); }
+  disconnect(): void {
+    this.#opening?.abort(new Error("终端连接已断开，请重新打开。"));
+    this.#socket?.disconnect();
+    if (this.status === "starting" || this.status === "running") this.reportError("终端连接已断开，请重新打开。");
+  }
 
   unmount(): void { this.#container = null; }
   focus(): void { this.#emulator?.terminal.focus(); }
@@ -127,13 +141,14 @@ export class TerminalController {
   close(): Promise<void> {
     if (this.#closing) return this.#closing;
     runInAction(() => { this.status = "closing"; this.error = null; });
+    this.#opening?.abort(new Error("终端已关闭。"));
     clearTimeout(this.#input_timer);
     this.#input_timer = undefined;
     clearTimeout(this.#resize_timer);
     this.#input = [];
     this.#input_bytes = 0;
     this.#closing = this.#pending.then(async () => {
-      // 创建过程中关闭也必须接住Host 连接；只有回收成功才移除标签与模拟器。
+      // 取消尚未完成的启动，并等待原 socket 关闭；Host 负责接住迟到创建并回收 PTY。
       await this.#socket?.close();
       this.#emulator?.terminal.dispose();
       this.#emulator?.host.remove();
@@ -148,47 +163,49 @@ export class TerminalController {
   }
 
   reportError(failure: unknown): void {
+    this.#input = [];
+    this.#input_bytes = 0;
     this.error = terminalError(failure);
     this.status = "error";
   }
 
-  async #start(client: RuntimeClient, shell: ShellKind | null): Promise<void> {
-    try {
-      if (!this.#emulator) {
-        this.#emulator = await createTerminalEmulator();
-        const terminal = this.#emulator.terminal;
-        terminal.onData((data) => this.#enqueue(new TextEncoder().encode(data), [...data].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)));
-        terminal.onBinary((data) => this.#enqueue(Uint8Array.from(data, (value) => value.charCodeAt(0)), true));
-        // macOS 的 Cmd+C/Cmd+V 使用 xterm 自带 copy/paste；不映射为中断/普通字符。
-        terminal.attachCustomKeyEventHandler((event) => !(event.metaKey && ["c", "v"].includes(event.key.toLowerCase())));
-        if (this.#container) this.#container.append(this.#emulator.host);
-        runInAction(() => { this.ready = true; });
-      }
-      if (this.status === "closing") return;
-      const size = this.#size();
-      await this.#socket?.close();
-      if (this.#closing) return;
-      this.#emulator.terminal.reset();
-      runInAction(() => { this.terminal_id = null; });
-      if (client !== this.getClient()) throw new Error("Host 连接已切换，请重新创建终端。");
-      const socket = client.openUserTerminal(this.source, size, (event) => { if (socket === this.#socket) this.#receive(event, socket); }, shell);
-      this.#socket = socket;
-      const created = await socket.created;
-      if (client !== this.getClient()) {
-        await socket.close();
-        throw new Error("Host 连接已切换，请重新创建终端。");
-      }
-      runInAction(() => {
-        this.terminal_id = created.terminal_id;
-        this.shell_kind = created.shell;
-        this.shell_name = created.shell_name;
-        this.selected_shell = shell;
-      });
+  async #start(client: RuntimeClient, shell: ShellKind | null, signal: AbortSignal, deadline: number): Promise<void> {
+    if (!this.#emulator) {
+      this.#emulator = await createTerminalEmulator();
+      const terminal = this.#emulator.terminal;
+      terminal.onData((data) => this.#enqueue(new TextEncoder().encode(data), [...data].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)));
+      terminal.onBinary((data) => this.#enqueue(Uint8Array.from(data, (value) => value.charCodeAt(0)), true));
+      // macOS 的 Cmd+C/Cmd+V 使用 xterm 自带 copy/paste；不映射为中断/普通字符。
+      terminal.attachCustomKeyEventHandler((event) => !(event.metaKey && ["c", "v"].includes(event.key.toLowerCase())));
+      if (this.#container) this.#container.append(this.#emulator.host);
+      runInAction(() => { this.ready = true; });
+    }
+    signal.throwIfAborted();
+    if (this.status === "closing") return;
+    const size = this.#size();
+    await this.#socket?.close();
+    signal.throwIfAborted();
+    if (this.#closing) return;
+    this.#emulator.terminal.reset();
+    runInAction(() => { this.terminal_id = null; });
+    if (client !== this.getClient()) throw new Error("Host 连接已切换，请重新创建终端。");
+    const socket = client.openUserTerminal(this.source, size, (event) => { if (socket === this.#socket) this.#receive(event, socket); }, shell, { signal, timeout_ms: Math.max(0, deadline - Date.now()) });
+    this.#socket = socket;
+    const created = await waitForOpening(socket.created, signal);
+    if (client !== this.getClient()) {
+      await socket.close();
+      throw new Error("Host 连接已切换，请重新创建终端。");
+    }
+    runInAction(() => {
+      this.terminal_id = created.terminal_id;
+      this.shell_kind = created.shell;
+      this.shell_name = created.shell_name;
+      this.selected_shell = shell;
+    });
 
-      runInAction(() => { if (this.status === "starting") this.status = "running"; });
-      this.fit();
-      void this.#flushInput();
-    } catch (failure) { if (this.status !== "closing") this.reportError(failure); }
+    runInAction(() => { if (this.status === "starting") this.status = "running"; });
+    this.fit();
+    void this.#flushInput();
   }
 
   #receive(event: TerminalEvent, socket: TerminalSocket): void {
@@ -223,9 +240,10 @@ export class TerminalController {
 
   async #flushInput(): Promise<void> {
     if (this.#writing) return;
+    const socket = this.#socket;
     this.#writing = true;
     try {
-      while (this.#input_bytes && this.status === "running" && this.terminal_id) {
+      while (this.#input_bytes && this.status === "running" && this.terminal_id && socket === this.#socket) {
         const block = new Uint8Array(Math.min(INPUT_BLOCK, this.#input_bytes));
         let offset = 0;
         while (offset < block.length) {
@@ -236,10 +254,15 @@ export class TerminalController {
           if (count === first.length) this.#input.shift(); else this.#input[0] = first.subarray(count);
         }
         this.#input_bytes -= block.length;
-        await this.#socket?.write(block);
+        await socket?.write(block);
       }
-    } catch (failure) { if (!this.#closing) this.reportError(failure); }
-    finally { this.#writing = false; }
+    } catch (failure) {
+      if (!this.#closing && socket === this.#socket && this.status === "running") this.reportError(failure);
+    } finally {
+      this.#writing = false;
+      // 旧连接的 ACK／失败不得消费新终端输入，也不能阻塞新队列。
+      if (socket !== this.#socket && this.status === "running" && this.#input_bytes) void this.#flushInput();
+    }
   }
 
   #size(): TerminalSize { return { cols: this.#emulator?.terminal.cols ?? 80, rows: this.#emulator?.terminal.rows ?? 24 }; }
@@ -249,4 +272,13 @@ function terminalError(failure: unknown): string {
   if (failure instanceof Error) return failure.message;
   if (failure && typeof failure === "object" && "message" in failure) return String(failure.message);
   return typeof failure === "string" ? failure : "终端操作失败。";
+}
+
+function waitForOpening<T>(pending: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const cancel = () => reject(signal.reason);
+    signal.addEventListener("abort", cancel, { once: true });
+    if (signal.aborted) cancel();
+    pending.then(resolve, reject).finally(() => signal.removeEventListener("abort", cancel));
+  });
 }

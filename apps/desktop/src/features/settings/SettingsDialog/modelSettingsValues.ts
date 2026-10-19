@@ -1,7 +1,7 @@
 import type { ModelFeatureSupport, ModelParameters, ModelTokenLimit, ProviderConnection, ProviderType } from "@ez-assistant/protocol";
 
 export const provider_labels: Record<ProviderType, string> = {
-  openai: "OpenAI", deepseek: "DeepSeek", dashscope_api: "百炼 API", dashscope_plan: "百炼套餐", moonshot: "Kimi / Moonshot", zhipu: "智谱", vllm: "vLLM", local: "本地兼容服务",
+  opencode: "OpenCode", openai: "OpenAI", deepseek: "DeepSeek", dashscope_api: "百炼 API", dashscope_plan: "百炼套餐", moonshot: "Kimi / Moonshot", zhipu: "智谱", vllm: "vLLM", local: "本地兼容服务",
 };
 export const support_options: readonly { value: ModelFeatureSupport; label: string }[] = [
   { value: "unknown", label: "未知" }, { value: "supported", label: "支持" }, { value: "unsupported", label: "不支持" },
@@ -49,6 +49,7 @@ export function compileTokenDraft(parameters: ModelParameters, draft: TokenDraft
 }
 // 链接来自本版 docs/resources/v0.25.1-服务商参数文档核查.md；不据文档自动写入模型参数。
 export const provider_documents: Partial<Record<ProviderType, string>> = {
+  opencode: "https://opencode.ai/v2/docs/console/api/inference/",
   deepseek: "https://api-docs.deepseek.com/api/create-chat-completion/",
   dashscope_api: "https://help.aliyun.com/zh/model-studio/qwen3-8-max",
   dashscope_plan: "https://help.aliyun.com/en/model-studio/token-plan-personal-quick-start",
@@ -95,6 +96,7 @@ export function sameParameters(left: ModelParameters, right: ModelParameters): b
 
 /** 与 ProviderType.discovery_format 保持一致；列表路径不预填，由 Host 适配器决定默认值。 */
 export const provider_defaults: Record<ProviderType, Pick<ProviderConnection, "discovery_format" | "protocol_preference">> = {
+  opencode: { discovery_format: "openai", protocol_preference: "chat_completions" },
   openai: { discovery_format: "openai", protocol_preference: "auto" },
   deepseek: { discovery_format: "openai", protocol_preference: "auto" },
   dashscope_api: { discovery_format: "dashscope_native", protocol_preference: "chat_completions" },

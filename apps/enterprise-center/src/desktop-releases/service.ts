@@ -124,8 +124,6 @@ export class DesktopReleaseService {
               verifyReleaseSignature(Buffer.from(text), signature, this.publicKey);
               manifest = parseManifest(text);
               original = await this.source.manager.findOneBy(DesktopReleaseTargetEntity, { version: manifest.version, target: manifest.target });
-              if (original?.first_published_at && original.manifest_sha256 !== createHash('sha256').update(text).digest('hex'))
-                throw new IdentityError(409, 'DESKTOP_RELEASE_IMMUTABLE');
             } else throw invalid();
           } else {
             if (!manifest || part.fieldname !== 'files' || received.has(part.filename)) { part.file.destroy(); throw invalid(); }
@@ -145,16 +143,15 @@ export class DesktopReleaseService {
           signal.throwIfAborted();
           const current = await manager.findOneBy(DesktopReleaseTargetEntity, { version: accepted.version, target: accepted.target });
           if (current?.manifest_sha256 === sha) return { version: accepted.version, target: accepted.target, manifest_sha256: sha, result: 'unchanged' as const };
-          if (current?.first_published_at) throw new IdentityError(409, 'DESKTOP_RELEASE_IMMUTABLE');
           if ((current?.manifest_sha256 ?? null) !== (original?.manifest_sha256 ?? null)
             || (current?.publication ?? null) !== (original?.publication ?? null)) throw new IdentityError(409, 'DESKTOP_RELEASE_CHANGED');
           if (!await manager.existsBy(DesktopReleaseEntity, { version: accepted.version }))
             await manager.insert(DesktopReleaseEntity, { version: accepted.version, notes: '', created_at: new Date(), updated_at: new Date() });
           await manager.save(DesktopReleaseTargetEntity, { version: accepted.version, target: accepted.target,
-            manifest_text: text, manifest_signature: signature, manifest_sha256: sha, publication: 'draft', first_published_at: null });
+            manifest_text: text, manifest_signature: signature, manifest_sha256: sha, publication: current?.publication ?? 'draft', first_published_at: current?.first_published_at ?? null });
           const result = current ? 'replaced' as const : 'created' as const;
           await this.identities.audit(manager, 'desktop_release_uploaded', requestId, actor.id, undefined, null,
-            { version: accepted.version, target: accepted.target, sha256: sha, result });
+            { version: accepted.version, target: accepted.target, sha256: sha, previous_sha256: current?.manifest_sha256 ?? null, result });
           return { version: accepted.version, target: accepted.target, manifest_sha256: sha, result };
         });
       } catch (error) {

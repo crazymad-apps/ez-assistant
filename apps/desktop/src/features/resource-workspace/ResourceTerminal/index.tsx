@@ -60,6 +60,9 @@ export const ResourceTerminal = observer(function ResourceTerminal(props: Readon
         {controller.status === "error" &&
           <Button size="small" variant="text" onClick={() => controller.restart()}>重新启动</Button>}
       </div>}
+    {controller.status === "exited" && <div className={styles.notice} role="status">
+      <span>终端已结束</span><Button size="small" variant="text" onClick={() => controller.restart()}>重新打开</Button>
+    </div>}
     <div className={styles.viewport} ref={viewport} />
     {switch_target && <Dialog aria_label="切换终端 Shell" backdrop_class_name={dialogStyles.backdrop}
       dialog_class_name={dialogStyles.dialog} on_close={() => setSwitchTarget(null)}>

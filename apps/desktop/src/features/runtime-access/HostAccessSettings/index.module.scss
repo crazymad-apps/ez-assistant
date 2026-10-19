@@ -5,9 +5,8 @@
 .card h4, .card p { margin: 0; }
 .card p { color: var(--ez-text-secondary); font-size: 13px; line-height: 1.6; }
 .card label { font-size: 13px; color: var(--ez-text-secondary); }
-.card input:not([type="checkbox"]), .card textarea { width: 100%; min-width: 0; border: 1px solid var(--ez-border-strong); border-radius: var(--ez-radius-small); padding: 8px 10px; background: var(--ez-surface); color: var(--ez-text); font: inherit; }
-.card input:not([type="checkbox"]) { height: var(--ez-control-height-default); }
-.card input:not([type="checkbox"]):focus, .card textarea:focus { @include fields.focus-border; }
+.card textarea { width: 100%; min-width: 0; border: 1px solid var(--ez-border-strong); border-radius: var(--ez-radius-small); padding: 8px 10px; background: var(--ez-surface); color: var(--ez-text); font: inherit; }
+.card textarea:focus { @include fields.focus-border; }
 .card fieldset { display: grid; gap: 10px; min-width: 0; margin: 0; padding: 0; border: 0; }
 .card fieldset:disabled { opacity: .65; }
 .password_row { display: flex; gap: 10px; align-items: center; }

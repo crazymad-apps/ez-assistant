@@ -16,6 +16,13 @@ import type {
   UploadAttachmentResult,
 } from "@ez-assistant/protocol";
 
+/** 固定原生登录 binding 与业务设备，文件选择本身仍在本机。 */
+export type NativeResourceTarget = Readonly<{ binding: string | null; device: string | null }>;
+
+function resourceOptions(target?: NativeResourceTarget) {
+  return target?.device ? { headers: { "x-ez-target-device": target.device } } : undefined;
+}
+
 export type AttachmentSelection = Readonly<{
   selection_id: string;
   original_name: string;
@@ -56,7 +63,7 @@ export type LocalResourceSibling = Readonly<{
 export class NativeResourceFailure extends Error {
   readonly code: string | null;
 
-  constructor(message: string, code: string | null = null) {
+  constructor(message: string, code: string | null = null, readonly target_device: string | null = null, readonly outcome: "unknown" | "not_executed" | null = null) {
     super(message);
     this.name = "NativeResourceFailure";
     this.code = code;
@@ -94,46 +101,50 @@ export async function uploadSelectedAttachment(
   session_id: SessionId,
   selection_id: string,
   operation_id: string,
+  target?: NativeResourceTarget,
 ): Promise<UploadAttachmentResult> {
   ensureDesktopBridge();
   return invoke<UploadAttachmentResult>("upload_selected_attachment", {
     sessionId: session_id,
     selectionId: selection_id,
     operationId: operation_id,
-  }).catch(normalizeResourceFailure);
+  }, resourceOptions(target), target?.binding ?? captureRuntimeBinding()).catch(normalizeResourceFailure);
 }
 
 export async function materializeNewSession(
   manifest: SessionMaterializationManifest,
   operation_id: string,
+  target?: NativeResourceTarget,
 ): Promise<SessionMaterializationResult> {
   ensureDesktopBridge();
   return invoke<SessionMaterializationResult>("materialize_new_session", {
     manifest,
     operationId: operation_id,
-  }).catch(normalizeResourceFailure);
+  }, resourceOptions(target), target?.binding ?? captureRuntimeBinding()).catch(normalizeResourceFailure);
 }
 
 export async function listSessionResourceFiles(
   session_id: SessionId,
   request: ListSessionResourceFilesRequest,
+  target?: NativeResourceTarget,
 ): Promise<ListSessionResourceFilesResult> {
   ensureDesktopBridge();
   return invoke<ListSessionResourceFilesResult>("list_session_resource_files", {
     sessionId: session_id,
     request,
-  }).catch(normalizeResourceFailure);
+  }, resourceOptions(target), target?.binding ?? captureRuntimeBinding()).catch(normalizeResourceFailure);
 }
 
 export async function previewSessionResourceFile(
   session_id: SessionId,
   request: PreviewSessionResourceFileRequest,
+  target?: NativeResourceTarget,
 ): Promise<PreviewSessionResourceFileResult> {
   ensureDesktopBridge();
   return invoke<PreviewSessionResourceFileResult>("preview_session_resource_file", {
     sessionId: session_id,
     request,
-  }).catch(normalizeResourceFailure);
+  }, resourceOptions(target), target?.binding ?? captureRuntimeBinding()).catch(normalizeResourceFailure);
 }
 
 export async function openSessionResourceInSystem(
@@ -227,12 +238,13 @@ export async function copyLocalResourcePath(resource_key: string): Promise<void>
 export async function previewAttachment(
   session_id: SessionId,
   attachment_id: AttachmentId,
+  target?: NativeResourceTarget,
 ): Promise<AttachmentPreview> {
   ensureDesktopBridge();
   return invoke<AttachmentPreview>("preview_attachment", {
     sessionId: session_id,
     attachmentId: attachment_id,
-  }).catch(normalizeResourceFailure);
+  }, resourceOptions(target), target?.binding ?? captureRuntimeBinding()).catch(normalizeResourceFailure);
 }
 
 export async function previewAttachmentSelection(selection_id: string): Promise<AttachmentPreview> {
@@ -245,12 +257,13 @@ export async function previewAttachmentSelection(selection_id: string): Promise<
 export async function thumbnailAttachment(
   session_id: SessionId,
   attachment_id: AttachmentId,
+  target?: NativeResourceTarget,
 ): Promise<string> {
   ensureDesktopBridge();
   return invoke<string>("thumbnail_attachment", {
     sessionId: session_id,
     attachmentId: attachment_id,
-  }).catch(normalizeResourceFailure);
+  }, resourceOptions(target), target?.binding ?? captureRuntimeBinding()).catch(normalizeResourceFailure);
 }
 
 export async function openAttachmentInSystem(
@@ -290,6 +303,7 @@ export async function previewToolFile(
   owner: ConversationOwner,
   message_id: MessageId,
   resource_ref_id: ResourceRefId,
+  target?: NativeResourceTarget,
 ): Promise<AttachmentPreview> {
   ensureDesktopBridge();
   return invoke<AttachmentPreview>("preview_tool_file", {
@@ -297,7 +311,7 @@ export async function previewToolFile(
     childTaskId: owner.type === "child_task" ? owner.child_task_id : null,
     messageId: message_id,
     resourceRefId: resource_ref_id,
-  }).catch(normalizeResourceFailure);
+  }, resourceOptions(target), target?.binding ?? captureRuntimeBinding()).catch(normalizeResourceFailure);
 }
 
 export async function openToolFileInSystem(
@@ -345,12 +359,13 @@ export async function copyToolFilePath(
 export async function exportSessionMarkdown(
   session_id: SessionId,
   suggested_name: string,
+  target?: NativeResourceTarget,
 ): Promise<boolean> {
   ensureDesktopBridge();
   const result = await invoke<{ readonly saved: boolean }>("export_session_markdown", {
     sessionId: session_id,
     suggestedName: suggested_name,
-  }).catch(normalizeResourceFailure);
+  }, resourceOptions(target), target?.binding ?? captureRuntimeBinding()).catch(normalizeResourceFailure);
   return result.saved;
 }
 
@@ -367,13 +382,15 @@ function normalizeResourceFailure(error: unknown): never {
       throw new NativeResourceFailure(
         candidate.message,
         typeof candidate.code === "string" ? candidate.code : null,
+        typeof candidate.target_device === "string" ? candidate.target_device : null,
+        candidate.outcome === "unknown" || candidate.outcome === "not_executed" ? candidate.outcome : null,
       );
     }
   }
   throw new NativeResourceFailure("本机资源操作失败。");
 }
 
-export async function downloadRuntimeResource(path: string, suggested_name: string, body?: unknown): Promise<void> {
+export async function downloadRuntimeResource(path: string, suggested_name: string, body?: unknown, target?: NativeResourceTarget, open_after = false): Promise<void> {
   ensureDesktopBridge();
-  await invoke("download_runtime_resource", {path, suggestedName: suggested_name, body: body ?? null}).catch(normalizeResourceFailure);
+  await invoke("download_runtime_resource", {path, suggestedName: suggested_name, body: body ?? null, openAfter: open_after}, resourceOptions(target), target?.binding ?? captureRuntimeBinding()).catch(normalizeResourceFailure);
 }

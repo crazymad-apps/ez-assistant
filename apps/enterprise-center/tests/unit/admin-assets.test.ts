@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { checkAdminAssets } from '../../dist/admin-assets.js';
 import { createHttpApp } from '../../dist/app.js';
 import { startService } from '../../dist/service.js';
+import { IdentityService } from '../../dist/identity/service.js';
 import { loadConfig } from '../../dist/config.js';
 
 let directory: string;
@@ -108,6 +109,7 @@ describe('同源 HTTP 静态装配', () => {
     expect(redirect.headers.location).toBe('/admin/');
     for (const file of ['app.js', 'app.css'])
       expect((await app.inject({ method: 'GET', url: `/admin/assets/${file}` })).statusCode).toBe(200);
+    vi.spyOn(app.get(IdentityService), 'centerId').mockResolvedValue('11111111-1111-4111-8111-111111111111');
     expect((await app.inject({ method: 'GET', url: '/api/info' })).json().software_version).toBe('0.1.0');
     expect((await app.inject({ method: 'GET', url: '/api/docs/swagger-ui.css' })).statusCode).toBe(200);
     expect((await app.inject({ method: 'GET', url: '/api/users' })).statusCode).not.toBe(200);

@@ -17,7 +17,7 @@ use assistant_protocol::{
     AttachmentId, AttachmentState, ChildTaskId, GetAttachmentRequest,
     ListSessionResourceFilesRequest, ListSessionResourceFilesResult, MessageId,
     PreviewSessionResourceFileRequest, PreviewSessionResourceFileResult, ResourceRefId,
-    RuntimeCommand, RuntimeCommandResult, RuntimeErrorInfo, RuntimeHostFeature, SessionId,
+    RuntimeCommand, RuntimeCommandResult, RuntimeHostFeature, SessionId,
     SessionMaterializationManifest, SessionMaterializationResult, SessionResourceLocator,
     UploadAttachmentResult,
 };
@@ -149,7 +149,7 @@ pub(crate) struct ExportResult {
     saved: bool,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum NativeResourceErrorCode {
     InvalidRequest,
@@ -168,17 +168,31 @@ enum NativeResourceErrorCode {
     RuntimeUnavailable,
     ResourceOutsideRoot,
     Cancelled,
+    #[serde(untagged)]
+    Proxy(String),
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct NativeResourceError {
     code: NativeResourceErrorCode,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_device: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct RuntimeFailureBody {
-    error: RuntimeErrorInfo,
+    error: ResourceFailureInfo,
+}
+
+#[derive(Deserialize)]
+struct ResourceFailureInfo {
+    code: String,
+    message: String,
+    outcome: Option<String>,
+    target_device: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -977,6 +991,7 @@ pub(crate) async fn upload_selected_attachment(
         &bridge.http,
         &bootstrap.base_url,
         &bootstrap.access_token,
+        coordinator.native_headers(),
         &session_id,
         &selected,
         cancellation,
@@ -1051,6 +1066,7 @@ pub(crate) async fn materialize_new_session(
         &bridge.http,
         &bootstrap.base_url,
         &bootstrap.access_token,
+        coordinator.native_headers(),
         &manifest,
         &selected,
         cancellation,
@@ -1091,7 +1107,7 @@ pub(crate) async fn preview_attachment(
             attachment_id.as_str()
         ))
         .bearer_auth(&bootstrap.access_token)
-        .headers(crate::runtime_compatibility::headers())
+        .headers(coordinator.native_headers())
         .send()
         .await
         .map_err(|_| runtime_unavailable())?;
@@ -1143,7 +1159,7 @@ pub(crate) async fn thumbnail_attachment(
             attachment_id.as_str()
         ))
         .bearer_auth(&bootstrap.access_token)
-        .headers(crate::runtime_compatibility::headers())
+        .headers(coordinator.native_headers())
         .send()
         .await
         .map_err(|_| runtime_unavailable())?;
@@ -1193,7 +1209,7 @@ pub(crate) async fn preview_tool_file(
         .http
         .get(url)
         .bearer_auth(&bootstrap.access_token)
-        .headers(crate::runtime_compatibility::headers())
+        .headers(coordinator.native_headers())
         .send()
         .await
         .map_err(|_| runtime_unavailable())?;
@@ -1758,6 +1774,7 @@ pub(crate) async fn export_session_markdown(
         format!("/sessions/{}/export.md", session_id.as_str()),
         None,
         export_file_name(&suggested_name),
+        false,
     )
     .await
 }
@@ -1770,6 +1787,7 @@ pub(crate) async fn download_runtime_resource(
     path: String,
     body: Option<serde_json::Value>,
     suggested_name: String,
+    open_after: Option<bool>,
 ) -> Result<ExportResult, NativeResourceError> {
     // 只允许当前 Host 的文件下载路由；不能借该入口提交业务命令或跳转到另一台主机。
     if !(path == "/host-files/download"
@@ -1788,7 +1806,16 @@ pub(crate) async fn download_runtime_resource(
         .filter(|name| !name.is_empty() && !name.chars().any(char::is_control))
         .unwrap_or("download")
         .to_owned();
-    save_runtime_download(app, bridge, coordinator, path, body, file_name).await
+    save_runtime_download(
+        app,
+        bridge,
+        coordinator,
+        path,
+        body,
+        file_name,
+        open_after.unwrap_or(false),
+    )
+    .await
 }
 
 async fn save_runtime_download(
@@ -1798,6 +1825,7 @@ async fn save_runtime_download(
     path: String,
     body: Option<serde_json::Value>,
     file_name: String,
+    open_after: bool,
 ) -> Result<ExportResult, NativeResourceError> {
     let (sender, receiver) = tokio::sync::oneshot::channel();
     app.dialog()
@@ -1835,7 +1863,7 @@ async fn save_runtime_download(
     let mut response = tokio::select! {
         biased;
         () = coordinator.cancellation.cancelled() => return Err(error(NativeResourceErrorCode::Cancelled, "连接切换，下载已取消。")),
-        result = request.bearer_auth(&bootstrap.access_token).headers(crate::runtime_compatibility::headers()).send() => result.map_err(|_| runtime_unavailable())?,
+        result = request.bearer_auth(&bootstrap.access_token).headers(coordinator.native_headers()).send() => result.map_err(|_| runtime_unavailable())?,
     };
     if !response.status().is_success() {
         return Err(decode_runtime_failure(response, NativeResourceErrorCode::ExportFailed).await);
@@ -1889,6 +1917,19 @@ async fn save_runtime_download(
         let _ = tokio::fs::remove_file(&temporary).await;
     }
     write_result?;
+    if open_after {
+        coordinator
+            .ensure_active()
+            .map_err(|_| runtime_unavailable())?;
+        app.opener()
+            .open_path(target.to_string_lossy(), None::<&str>)
+            .map_err(|_| {
+                error(
+                    NativeResourceErrorCode::SystemOpenFailed,
+                    "文件已下载，但无法使用系统应用打开。",
+                )
+            })?;
+    }
     Ok(ExportResult { saved: true })
 }
 
@@ -1896,6 +1937,7 @@ async fn upload_selected(
     http: &reqwest::Client,
     base_url: &str,
     access_token: &str,
+    headers: reqwest::header::HeaderMap,
     session_id: &SessionId,
     selected: &SelectedAttachment,
     cancellation: CancellationToken,
@@ -1907,7 +1949,7 @@ async fn upload_selected(
             session_id.as_str()
         ))
         .bearer_auth(access_token)
-        .headers(crate::runtime_compatibility::headers())
+        .headers(headers)
         .multipart(Form::new().part("file", part))
         .send();
     let response = tokio::select! {
@@ -1934,6 +1976,7 @@ async fn materialize_selected(
     http: &reqwest::Client,
     base_url: &str,
     access_token: &str,
+    headers: reqwest::header::HeaderMap,
     manifest: &SessionMaterializationManifest,
     selected: &[(String, SelectedAttachment)],
     cancellation: CancellationToken,
@@ -1952,12 +1995,12 @@ async fn materialize_selected(
     let request = http
         .post(format!("{base_url}/session-materializations"))
         .bearer_auth(access_token)
-        .headers(crate::runtime_compatibility::headers())
+        .headers(headers)
         .multipart(form)
         .send();
     let response = tokio::select! {
         () = cancellation.cancelled() => {
-            return Err(error(NativeResourceErrorCode::Cancelled, "首次发送已取消。"));
+            return Err(error(NativeResourceErrorCode::MaterializationResponseUnknown, "首次发送已取消，提交结果待确认。"));
         }
         response = request => response.map_err(|_| error(
             NativeResourceErrorCode::MaterializationResponseUnknown,
@@ -2162,7 +2205,7 @@ async fn get_attachment(
         .map_err(|_| runtime_unavailable())?
         .post(format!("{}/commands", bootstrap.base_url))
         .bearer_auth(&bootstrap.access_token)
-        .headers(crate::runtime_compatibility::headers())
+        .headers(coordinator.native_headers())
         .json(&CommandRequest {
             request_id: "desktop-open-attachment".to_owned(),
             command: CommandScope::Runtime(RuntimeCommand::GetAttachment(GetAttachmentRequest {
@@ -2189,22 +2232,22 @@ async fn decode_runtime_failure(
     fallback: NativeResourceErrorCode,
 ) -> NativeResourceError {
     if let Ok(body) = response.json::<RuntimeFailureBody>().await {
-        let code = match body.error.code {
-            assistant_protocol::RuntimeErrorCode::InvalidRequest => {
-                NativeResourceErrorCode::InvalidRequest
-            }
-            assistant_protocol::RuntimeErrorCode::OperationNotAllowed => {
-                NativeResourceErrorCode::ResourceOutsideRoot
-            }
-            assistant_protocol::RuntimeErrorCode::ResourceNotPreviewable => {
-                NativeResourceErrorCode::ResourceNotPreviewable
-            }
-            assistant_protocol::RuntimeErrorCode::ResourceTooLarge
-            | assistant_protocol::RuntimeErrorCode::AttachmentTooLarge => {
+        if body.error.target_device.is_some() || body.error.outcome.is_some() {
+            return NativeResourceError {
+                code: NativeResourceErrorCode::Proxy(body.error.code),
+                message: body.error.message,
+                target_device: body.error.target_device,
+                outcome: body.error.outcome,
+            };
+        }
+        let code = match body.error.code.as_str() {
+            "invalid_request" => NativeResourceErrorCode::InvalidRequest,
+            "operation_not_allowed" => NativeResourceErrorCode::ResourceOutsideRoot,
+            "resource_not_previewable" => NativeResourceErrorCode::ResourceNotPreviewable,
+            "resource_too_large" | "attachment_too_large" => {
                 NativeResourceErrorCode::ResourceTooLarge
             }
-            assistant_protocol::RuntimeErrorCode::AttachmentNotFound
-            | assistant_protocol::RuntimeErrorCode::AttachmentUnavailable => {
+            "attachment_not_found" | "attachment_unavailable" => {
                 NativeResourceErrorCode::AttachmentUnavailable
             }
             _ => fallback,
@@ -2308,6 +2351,8 @@ fn error(code: NativeResourceErrorCode, message: impl Into<String>) -> NativeRes
     NativeResourceError {
         code,
         message: message.into(),
+        target_device: None,
+        outcome: None,
     }
 }
 

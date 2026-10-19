@@ -1,16 +1,19 @@
 //! 单连接控制、心跳与有界 I/O；所有退出路径都先取消并等待所属 PTY。
 
-use super::{TerminalError, TerminalEvent, failure, process::TerminalProcess, pty_size};
+use super::{
+    TerminalError, TerminalEvent, failure, process::TerminalProcess, pty_size, transport::Transport,
+};
 use crate::{
     access::AccessPermit,
-    http::{HttpState, terminals},
+    http::{
+        HttpState,
+        socket_auth::{self, SocketAuthentication},
+        terminals,
+    },
 };
 use assistant_protocol::{UserTerminalControl as Control, UserTerminalNotice as Notice};
-use axum::{
-    extract::ws::{Message, WebSocket},
-    http::HeaderMap,
-};
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use axum::extract::ws::{Message, WebSocket};
+use std::{sync::Arc, time::Duration};
 use tokio::{
     sync::{OwnedSemaphorePermit, mpsc},
     time::{Instant, timeout},
@@ -20,18 +23,22 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 const HEARTBEAT: Duration = Duration::from_secs(10);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub(crate) struct SocketAuthentication {
-    pub(crate) state: HttpState,
-    pub(crate) headers: HeaderMap,
-    pub(crate) peer: SocketAddr,
-    pub(crate) permit: Option<AccessPermit>,
+/// 首帧认证后的业务参数；本机凭据不会进入桥接载荷。
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Open {
+    pub source: assistant_protocol::UserTerminalSource,
+    pub size: assistant_protocol::UserTerminalSize,
+    pub shell: Option<assistant_protocol::ShellKind>,
+    pub client: assistant_protocol::ClientCompatibility,
 }
 
 pub(crate) async fn serve(
-    mut socket: WebSocket,
+    socket: WebSocket,
     auth: SocketAuthentication,
     slot: OwnedSemaphorePermit,
 ) -> Result<(), TerminalError> {
+    let mut socket = Transport::Local(Box::new(socket));
     let owner = auth.state.terminals.clone();
     let open = tokio::select! { biased;
         () = owner.shutdown.cancelled() => return Ok(()),
@@ -49,7 +56,7 @@ pub(crate) async fn serve(
                 source,
                 size,
                 shell,
-            } => terminals::authenticate(
+            } => socket_auth::authenticate(
                 &auth,
                 bearer.as_ref().map(|token| token.expose()),
                 login_context.as_deref(),
@@ -76,12 +83,39 @@ pub(crate) async fn serve(
     };
     // 普通 Cookie 的历史声明不能替代当前页面首帧；认证和兼容通过前不解析目录、不创建 PTY。
     if let Err(error) =
-        terminals::validate_compatibility(&auth.headers, client_compatibility.as_ref())
+        socket_auth::validate_compatibility(&auth.headers, client_compatibility.as_ref())
     {
         let _ = notice(&mut socket, Notice::CompatibilityError { error }).await;
         return Ok(());
     }
-    let services = match terminals::services(&auth, &permit).await {
+    let open = Open {
+        source,
+        size,
+        shell,
+        client: client_compatibility.expect("compatibility validated"),
+    };
+    if let Some(device) = auth.target {
+        return super::bridge::connect(socket, auth.state, permit, device, open, slot).await;
+    }
+    run(socket, auth.state, permit, open, slot).await
+}
+
+/// 两种传输共用唯一 PTY 执行循环。调用 owner 必须等待此 future 完成，尤其不能取消 spawn 中途。
+pub(super) async fn run(
+    mut socket: Transport,
+    state: HttpState,
+    permit: AccessPermit,
+    open: Open,
+    slot: OwnedSemaphorePermit,
+) -> Result<(), TerminalError> {
+    let owner = state.terminals.clone();
+    let Open {
+        source,
+        size,
+        shell,
+        ..
+    } = open;
+    let services = match terminals::services(&state, &permit).await {
         Ok(services) => services,
         Err(_) => {
             let _ = notice(
@@ -91,19 +125,25 @@ pub(crate) async fn serve(
                 },
             )
             .await;
+            let _ = send(&mut socket, Message::Close(None)).await;
             return Ok(());
         }
     };
+    let (disconnected, connection_ended) = socket.cancellation();
     let (events, mut output) = mpsc::channel(2);
     // 不可取消 PTY spawn 的 JoinHandle；取得结果并登记后才观察关闭，避免中途丢下子进程。
     let created = async {
         let _gate = tokio::select! { biased;
             () = owner.shutdown.cancelled() => return Err(failure("Host 正在关闭。")),
+            () = disconnected.cancelled() => return Err(failure("终端连接已关闭。")),
+            () = connection_ended.cancelled() => return Err(failure("组网连接已关闭。")),
             () = permit.ended() => return Err(failure("登录已失效。")),
             gate = owner.source_gate.lock() => gate,
         };
         let (origin, directory) = tokio::select! { biased;
             () = owner.shutdown.cancelled() => return Err(failure("Host 正在关闭。")),
+            () = disconnected.cancelled() => return Err(failure("终端连接已关闭。")),
+            () = connection_ended.cancelled() => return Err(failure("组网连接已关闭。")),
             () = permit.ended() => return Err(failure("登录已失效。")),
             directory = timeout(Duration::from_secs(10), terminals::directory(&services, &permit, &source)) =>
                 directory.map_err(|_| failure("终端启动目录解析超时。"))??,
@@ -129,6 +169,7 @@ pub(crate) async fn serve(
                 },
             )
             .await;
+            let _ = send(&mut socket, Message::Close(None)).await;
             return Ok(());
         }
     };
@@ -152,6 +193,8 @@ pub(crate) async fn serve(
         loop {
             tokio::select! { biased;
                 () = cancelled.cancelled() => return Ok(()),
+                () = disconnected.cancelled() => return Err(failure("终端连接已关闭。")),
+                () = connection_ended.cancelled() => return Err(failure("组网连接已关闭。")),
                 () = services.cancellation.cancelled() => return Ok(()),
                 () = permit.ended() => return Err(failure("登录或访问权限已失效。")),
                 // 截止时间独立于 10 秒 Ping tick，避免末次响应稍晚于 tick 时多保活一轮。
@@ -238,7 +281,7 @@ fn control(text: &str) -> Result<Control, TerminalError> {
     serde_json::from_str(text).map_err(|_| failure("终端控制消息无效。"))
 }
 
-async fn notice(socket: &mut WebSocket, notice: Notice) -> Result<(), TerminalError> {
+pub(super) async fn notice(socket: &mut Transport, notice: Notice) -> Result<(), TerminalError> {
     send(
         socket,
         Message::Text(
@@ -250,7 +293,7 @@ async fn notice(socket: &mut WebSocket, notice: Notice) -> Result<(), TerminalEr
     .await
 }
 
-async fn send(socket: &mut WebSocket, message: Message) -> Result<(), TerminalError> {
+async fn send(socket: &mut Transport, message: Message) -> Result<(), TerminalError> {
     timeout(WRITE_TIMEOUT, socket.send(message))
         .await
         .map_err(|_| failure("终端网络写入超时。"))?

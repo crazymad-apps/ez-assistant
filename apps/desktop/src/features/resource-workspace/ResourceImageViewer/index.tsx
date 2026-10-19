@@ -94,6 +94,8 @@ export function ResourceImageViewer(
         minScale={min_scale}
         maxScale={4}
         wheel={{ step: scale * 0.001 }}
+        // 小于视口的轴保持居中，避免 disablePadding 的边界夹取将图片拉回左上角。
+        centerZoomedOut
         disablePadding
         zoomAnimation={{ disabled: true }}
         doubleClick={{ disabled: true }}

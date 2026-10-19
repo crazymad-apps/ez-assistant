@@ -1,12 +1,15 @@
 import { AppearanceProvider } from "../../src/stores/AppearanceContext";
 import { AppearanceStore } from "../../src/stores/AppearanceStore";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { runInAction } from "mobx";
+import * as nativeMenu from "../../src/native-bridge/resourceMenu";
+import { DevicePicker } from "../../src/features/runtime-access/DevicePicker";
 import { ResourceWorkspace } from "../../src/features/resource-workspace/ResourceWorkspace";
 import { RootStore } from "../../src/stores/RootStore";
 import { RootStoreProvider } from "../../src/stores/RootStoreContext";
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("ResourceWorkspace", () => {
   it("renders the fixed context tab and hides the desktop browser entry on Web", () => {
@@ -80,6 +83,7 @@ describe("ResourceWorkspace", () => {
 });
 
 function renderWorkspace(store: RootStore) {
+  runInAction(() => { store.reading_connection.state = "connected"; });
   return render(
     <AppearanceProvider store={new AppearanceStore()}><RootStoreProvider store={store}>
       <ResourceWorkspace />
@@ -109,5 +113,42 @@ it("keeps session DOM instances until LRU eviction and restores only the selecte
   act(() => root.navigation.selectSession("a"));
   expect(screen.getByRole("tree")).not.toBe(first);
   expect(screen.getAllByRole("tab")).toHaveLength(2);
+  view.unmount(); root.dispose();
+});
+
+
+it.each([false, true])("right add menu opens the body device with control permission (native=%s)", async (native) => {
+  const root = new RootStore();
+  const device = "11111111-1111-4111-8111-111111111111";
+  const context = root.network.context(device);
+  runInAction(() => {
+    root.network.devices = [{ id: device, name: "远程 Mac", platform: "macos", enabled: true, online: true, desktop_view: true, desktop_control: true }];
+  });
+  root.navigation.selectSession("one", true, device);
+  vi.spyOn(root.local_files, "native_host", "get").mockReturnValue(true);
+  vi.spyOn(nativeMenu, "supportsNativeResourceMenu").mockReturnValue(native);
+  const open = vi.spyOn(context.resources, "openDesktop").mockImplementation(() => {});
+  const popup = vi.fn();
+  vi.spyOn(nativeMenu, "createResourceMenu").mockImplementation(async (_workspace, _browser, _terminal, desktop) => ({
+    popup: async (...args) => { popup(...args); desktop?.(); }, dispose: async () => {},
+  }));
+  const view = renderWorkspace(root);
+  fireEvent.click(screen.getByRole("button", { name: "新建资源标签" }));
+  if (!native) fireEvent.click(screen.getByRole("menuitem", { name: "远程桌面" }));
+  await vi.waitFor(() => expect(open).toHaveBeenCalledWith(device, "远程 Mac", true));
+  if (native) expect(popup.mock.calls[0]?.[3]).toBe(true);
+  view.unmount(); root.dispose();
+});
+
+it("device selector only selects devices and does not open desktops", () => {
+  const root = new RootStore();
+  vi.spyOn(root.network, "refresh").mockResolvedValue();
+  const device = "11111111-1111-4111-8111-111111111111";
+  runInAction(() => { root.network.devices = [{ id: device, name: "远程 Mac", platform: "macos", enabled: true, online: true, desktop_view: true, desktop_control: true }]; });
+  const view = render(<AppearanceProvider store={new AppearanceStore()}><RootStoreProvider store={root}>
+    <DevicePicker device={device} aria_label="切换设备" on_select={() => {}} />
+  </RootStoreProvider></AppearanceProvider>);
+  fireEvent.click(screen.getByRole("button", { name: "切换设备" }));
+  expect(screen.queryByText(/查看.*桌面/)).not.toBeInTheDocument();
   view.unmount(); root.dispose();
 });

@@ -57,7 +57,7 @@ export class DesktopReleasesController {
   @Post('desktop-releases/packages')
   @Access('admin', 'desktop_release_uploaded')
   @RouteConfig({ desktopReleaseUpload: true })
-  @ApiOperation({ operationId: 'uploadDesktopRelease', summary: '上传完整平台发布文件，创建草稿' })
+  @ApiOperation({ operationId: 'uploadDesktopRelease', summary: '上传平台安装文件，新建草稿或覆盖同版本平台文件并保留发布状态' })
   @ApiConsumes('multipart/form-data')
   @ApiBody({ schema: { type: 'object', required: ['manifest', 'signature', 'files'], properties: {
     manifest: { type: 'string', description: '第一个字段：release.json 原始 UTF-8 字节的 base64（最多 64 KiB 解码字节）' },

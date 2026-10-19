@@ -11,10 +11,10 @@ import styles from "./index.module.scss";
 export const RuntimeDiagnosticsPage = observer(function RuntimeDiagnosticsPage({ on_back }: Readonly<{ on_back: () => void }>) {
   const store = useRootStore();
   const settings = store.settings;
-  const connection = store.connection;
+  const connection = store.local_connection;
   const capabilities = connection.capabilities;
-  const runtime_lifecycle = store.projection.application?.runtime_lifecycle ?? null;
-  const status = settings.status ?? store.projection.application?.configuration ?? null;
+  const runtime_lifecycle = store.local_projection.application?.runtime_lifecycle ?? null;
+  const status = settings.status ?? store.local_projection.application?.configuration ?? null;
   const address = connection.address;
   const connection_state = connection.state;
   const windows = capabilities?.platform === "windows";
@@ -73,7 +73,7 @@ export const RuntimeDiagnosticsPage = observer(function RuntimeDiagnosticsPage({
             <div><dt>错误分类</dt><dd>{connection.last_error_code ?? "—"}</dd></div>
           </dl>
           <div className={styles.runtime_actions}>
-            <button onClick={() => store.retryConnection()} type="button">重新连接</button>
+            <button onClick={() => store.retryLocalConnection()} type="button">重新连接</button>
           </div>
         </article>
         <article>

@@ -64,11 +64,17 @@ impl AssistantRuntime {
             .prepare_model(&snapshot, Some(&selection), self.store.as_ref())
             .await?;
         let selection = prepared.selection.clone();
+        let routing_id = crate::id::generate("connection-test").map_err(|_| {
+            RuntimeError::InternalStateUnavailable {
+                component: "connection test routing id",
+            }
+        })?;
         let compiled = match super::model::compile_resolved_model_service(
             &snapshot,
             &prepared.model,
             self.model_factory.as_ref(),
             None,
+            &routing_id,
         ) {
             Ok(compiled) => compiled,
             Err(RuntimeError::ModelBuildFailed { .. }) => {

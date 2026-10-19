@@ -1,8 +1,10 @@
 //! Host 私有用户终端 owner：连接任务由 Supervisor 收齐，PTY 不进入 Agent 或 Runtime Store。
 
+pub(crate) mod bridge;
 mod process;
 mod prompt;
 mod shell;
+mod transport;
 pub(crate) use shell::catalog as shell_catalog;
 pub(crate) mod socket;
 #[cfg(test)]

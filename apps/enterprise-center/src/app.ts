@@ -4,7 +4,7 @@ import { enterpriseProtocol } from './protocol.js';
 import 'reflect-metadata';
 import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { Controller, Get, HttpException, Module } from '@nestjs/common';
+import { Controller, Get, HttpException, Inject, Module } from '@nestjs/common';
 import type { ArgumentsHost, ExceptionFilter } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter } from '@nestjs/platform-fastify';
@@ -39,6 +39,9 @@ import { PluginError } from './plugins/errors.js';
 import { AgentsController } from './agents/controller.js';
 import { AgentsService } from './agents/service.js';
 import { AgentError } from './agents/errors.js';
+import { HostDevicesController } from './host-devices/controller.js';
+import { HostNetwork } from './host-devices/network.js';
+import { HostDevicesService } from './host-devices/service.js';
 import { FeedbackController } from './feedback/controller.js';
 import { FeedbackService } from './feedback/service.js';
 import type { CenterConfig } from './config.js';
@@ -63,18 +66,20 @@ function httpFailure(status: number, requestId: string): CenterErrorResponse {
 @Controller('api')
 @ApiTags('center')
 class InfoController {
+  constructor(@Inject(IdentityService) private readonly identity: IdentityService) {}
   @Get('info')
   @Access('public')
   @ApiOperation({ operationId: 'getCenterInfo', summary: '查询中心软件与协议兼容信息', security: [] })
   @ApiOkResponse({ type: CenterInfo })
   @ApiDefaultResponse({ type: CenterErrorResponse, description: '请求失败，返回脱敏原因码与请求标识' })
-  info(): CenterInfo {
+  async info(): Promise<CenterInfo> {
     return {
+      center_id: await this.identity.centerId(),
       software_version: version,
       protocol_version: enterpriseProtocol.current,
       min_protocol_version: enterpriseProtocol.minimum,
       // M1 市场分发和 M2 完整 Agent 配置读取均已通过真实 HTTP 验证。
-      capabilities: ['managed_models', 'llm_proxy', 'plugin_market', 'managed_agents', 'feedback'],
+      capabilities: ['managed_models', 'llm_proxy', 'plugin_market', 'managed_agents', 'feedback', 'host_registration'],
     };
   }
 }
@@ -90,6 +95,7 @@ class InfoController {
     PluginsController,
     AgentsController,
     FeedbackController,
+    HostDevicesController,
     DesktopReleasesController,
   ],
 })
@@ -148,6 +154,8 @@ export async function createHttpApp(
   const pluginFiles = new PluginFiles(identity?.pluginRoot, adminRoot);
   const releaseFiles = new DesktopReleaseFiles(identity?.desktopReleaseRoot, adminRoot);
   const releases = new DesktopReleaseService(identities, identity?.source, releaseFiles, identity?.origin, identity?.desktopUpdateKeyFile);
+  const devices = new HostDevicesService(identities);
+  const network = new HostNetwork(devices, identities);
   const app = await NestFactory.create<NestFastifyApplication>(
     {
       module: CenterModule,
@@ -160,6 +168,8 @@ export async function createHttpApp(
           useValue: models,
         },
         { provide: IdentityService, useValue: identities },
+        { provide: HostDevicesService, useValue: devices },
+        { provide: HostNetwork, useValue: network },
         { provide: FeedbackService, useValue: new FeedbackService(identities, identity?.source) },
         { provide: UsersService, useValue: new UsersService(identities, identity?.source) },
         { provide: AuditService, useValue: new AuditService(identity?.source) },
@@ -196,6 +206,7 @@ export async function createHttpApp(
   try {
     if (identity) await records.initialize();
     proxy.install(adapter.getInstance());
+    network.install(adapter.getInstance());
     const fastify = adapter.getInstance();
     await fastify.register(multipart, { limits: { fields: 2, files: 2, parts: 4, fileSize: 512 * 1024 * 1024, fieldSize: 96 * 1024 } });
     // 原样交给上传 owner 逐块接收；通用 JSON bodyLimit 不适用于完整归档。

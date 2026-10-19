@@ -11,6 +11,7 @@ export const RemovedWorkspacesDialog = observer(function RemovedWorkspacesDialog
   on_close,
 }: Readonly<{ open: boolean; on_close: () => void }>) {
   const store = useRootStore();
+  const device = store.network.browsing_device;
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [load_error, setLoadError] = useState<string | null>(null);
@@ -23,19 +24,19 @@ export const RemovedWorkspacesDialog = observer(function RemovedWorkspacesDialog
     setWorkspaces([]);
     setLoadError(null);
     setRestoreError(null);
-    void store.listRemovedWorkspaces().then((result) => {
+    void store.listRemovedWorkspaces(device).then((result) => {
       if (!active) return;
       if (result) setWorkspaces(result);
       else setLoadError(store.interaction_error ?? "读取已移除项目失败，请重试。");
       setLoading(false);
     });
     return () => { active = false; };
-  }, [open, store]);
+  }, [open, store, device]);
 
   async function reload() {
     setLoading(true);
     setLoadError(null);
-    const result = await store.listRemovedWorkspaces();
+    const result = await store.listRemovedWorkspaces(device);
     if (result) setWorkspaces(result);
     else setLoadError(store.interaction_error ?? "读取已移除项目失败，请重试。");
     setLoading(false);
@@ -43,7 +44,7 @@ export const RemovedWorkspacesDialog = observer(function RemovedWorkspacesDialog
 
   async function restore(workspace_id: string) {
     setRestoreError(null);
-    const success = await store.restoreWorkspace(workspace_id);
+    const success = await store.restoreWorkspace(workspace_id, device);
     if (!success) {
       setRestoreError({ workspace_id, message: store.interaction_error ?? "恢复失败，请重试。" });
       return;

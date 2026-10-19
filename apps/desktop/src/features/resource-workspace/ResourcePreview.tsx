@@ -79,9 +79,9 @@ export const ResourcePreview = observer(function ResourcePreview(props: Readonly
 }>) {
   const theme = useAppearance().preset;
   const root = useRootStore();
-  const files = root.files;
+  const files = root.reading_files;
   const { resource } = props.tab;
-  const openHost = (path: string) => root.resource_workspace.openHostFile(resource.scope_key, path);
+  const openHost = (path: string) => root.reading_resources.openHostFile(resource.scope_key, path);
   const native_available = sourceIsNative(resource.source, files);
   const source = resource.source;
   const [revision, setRevision] = useState(0);
@@ -171,16 +171,17 @@ export const ResourcePreview = observer(function ResourcePreview(props: Readonly
     }
   }
 
-  function download() {
+  function download(open_after = false) {
     switch (source.type) {
-      case "host_file": return files.downloadHostFile(source.path);
-      case "session_file": return files.downloadSessionFile(source.session_id, source.locator, resource.display_name);
-      case "attachment": return files.downloadAttachment(source.session_id, source.attachment_id, resource.display_name);
-      case "tool_file": return files.downloadToolFile(source.owner, source.message_id, source.resource_ref_id, resource.display_name);
+      case "host_file": return files.downloadHostFile(source.path, open_after);
+      case "session_file": return files.downloadSessionFile(source.session_id, source.locator, resource.display_name, open_after);
+      case "attachment": return files.downloadAttachment(source.session_id, source.attachment_id, resource.display_name, open_after);
+      case "tool_file": return files.downloadToolFile(source.owner, source.message_id, source.resource_ref_id, resource.display_name, open_after);
       case "local_file": return Promise.reject(new Error("请使用系统应用打开本地文件。"));
     }
   }
   const actions = () => [
+    ...(!native_available && files.desktop ? [{ label: "下载并打开", on_select: () => runAction(download(true), "无法下载并打开文件。") }] : []),
     ...(native_available ? resourceActionItems(openInSystem, revealInDirectory, runAction) : []),
     ...(source.type === "local_file" ? [] : [{label:"下载文件",on_select:()=>runAction(download(),"下载失败。")}]),
   ];
@@ -320,6 +321,7 @@ export const ResourcePreview = observer(function ResourcePreview(props: Readonly
         )}
         {action_error && <span className={styles.resource_action_error} role="alert">{action_error}</span>}
         <ResourceActionsMenu
+          on_download_open={!native_available && files.desktop ? () => runAction(download(true), "无法下载并打开文件。") : undefined}
           native_available={native_available}
           copy_available={native_available || source.type === "host_file"}
           on_download={source.type === "local_file" ? undefined : () => runAction(download(), "下载失败。")}
@@ -380,6 +382,7 @@ function loadPreview(resource: ResourceHandle, files: ClientResources): Promise<
 }
 
 function ResourceActionsMenu(props: Readonly<{
+  on_download_open?: () => void;
   native_available: boolean;
   copy_available: boolean;
   on_download?: () => void;
@@ -430,6 +433,7 @@ function ResourceActionsMenu(props: Readonly<{
         )}
         <ResourceActionMenuItem icon="refresh" label="重新加载" on_select={props.on_refresh} />
         {props.on_download && <ResourceActionMenuItem icon="arrow-down" label="下载文件" on_select={props.on_download} />}
+        {props.on_download_open && <ResourceActionMenuItem icon="external-link" label="下载并打开" on_select={props.on_download_open} />}
         {props.native_available && <ResourceActionMenuItem icon="external-link" label="使用系统应用打开" on_select={props.on_open_system} />}
         {props.native_available && <ResourceActionMenuItem icon="folder" label={revealFileLabel()} on_select={props.on_reveal} />}
         {props.copy_available && <ResourceActionMenuItem icon="copy" label="复制完整路径" on_select={props.on_copy_path} />}
@@ -750,7 +754,7 @@ function BreadcrumbSiblings(props: Readonly<{
   session_id: string;
   show_arrow: boolean;
 }>) {
-  const files = useRootStore().files;
+  const files = useRootStore().reading_files;
   const [entries, setEntries] = useState<readonly SessionResourceEntry[] | null>(null);
   const [error, setError] = useState(false);
   const parent_path = props.locator.relative_path.split("/").filter(Boolean).slice(0, -1).join("/");

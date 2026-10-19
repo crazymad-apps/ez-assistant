@@ -10,6 +10,7 @@ import styles from "./index.module.scss";
 
 export const HostDirectoryDialog = observer(function HostDirectoryDialog() {
   const root = useRootStore();
+  const files = root.directory_picker?.files ?? root.files;
   const [target, setTarget] = useState(
     root.directory_picker?.initial_path ?? null,
   );
@@ -24,7 +25,7 @@ export const HostDirectoryDialog = observer(function HostDirectoryDialog() {
     const abort = new AbortController();
     setLoading(true);
     setError(null);
-    void root.files
+    void files
       .listHostFiles(target, hidden, abort.signal)
       .then((result) => {
         if (abort.signal.aborted) return;
@@ -41,13 +42,13 @@ export const HostDirectoryDialog = observer(function HostDirectoryDialog() {
         if (!abort.signal.aborted) setLoading(false);
       });
     return () => abort.abort();
-  }, [root, target, hidden, refresh]);
+  }, [files, target, hidden, refresh]);
   async function select() {
     if (!listing || error || loading || selecting) return;
     const owner = root.directory_picker;
     setSelecting(true);
     try {
-      const path = await root.files.selectHostDirectory(listing.path);
+      const path = await files.selectHostDirectory(listing.path);
       if (root.directory_picker === owner) root.finishDirectorySelection(path);
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : "目录不可用。");
@@ -70,7 +71,7 @@ export const HostDirectoryDialog = observer(function HostDirectoryDialog() {
       <header>
         <div>
           <h3>选择工作目录</h3>
-          <small>{root.files.address}</small>
+          <small>{files.address}</small>
         </div>
         <InlineIconButton
           icon="x"

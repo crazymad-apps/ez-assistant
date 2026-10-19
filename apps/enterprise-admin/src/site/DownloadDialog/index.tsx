@@ -1,6 +1,6 @@
 import { Modal } from 'antd';
 import { DownloadOptions } from '../DownloadOptions';
-import logo from '../assets/app-icon.svg';
+import logo from '../assets/app-icon.png';
 import styles from './index.module.scss';
 
 export function DownloadDialog({ open, onClose }: { readonly open: boolean; readonly onClose: () => void }) {

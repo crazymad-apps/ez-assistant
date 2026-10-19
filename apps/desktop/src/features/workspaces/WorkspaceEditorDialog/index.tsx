@@ -17,7 +17,7 @@ export const WorkspaceEditorDialog = observer(function WorkspaceEditorDialog(pro
   const store = useRootStore();
   const editor = props.editor ?? store.workspace_editor;
   const workspace = editor?.mode === "edit"
-    ? store.projection.application?.workspaces.find((item) => item.workspace_id === editor.workspace_id)
+    ? store.workspaceProjection(editor.device).application?.workspaces.find((item) => item.workspace_id === editor.workspace_id)
     : null;
   const initial_primary = editor?.mode === "create" ? editor.primary_directory : workspace?.user_directory;
   const initial_label = editor?.mode === "create"

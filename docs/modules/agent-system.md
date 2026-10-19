@@ -274,6 +274,11 @@ Provider-neutral 的模型重试只允许包装 `ModelService::stream()` 的建�
   的固定总时长；持续收到正文或心跳 chunk 时可以长期运行。若确需模型 Step 或 Run 总时长上限，
   必须使用独立的执行预算，不能复用 Transport 空闲超时。
 - Config、Auth、Protocol、ToolArguments、ContextOverflow 和 Cancelled 不进入通用重试。
+- v0.32.0 用户另行确认流内 `ToolArguments` 的有限反馈纠正：宿主显式装配纠正额度，
+  与原 delays 共用总 attempt 预算；错误只作为下一请求末尾的临时内部文本，不回填坏参数或
+  猜测缺失值。`TurnRestarted` 废弃当前尚未提交响应，之前完整提交的工具结果保持可靠；
+  当前响应中的工具均未执行，重生成不能重放历史工具。建流前参数错误、其他协议错误与取消不获此许可。
+  该机制不改变 ToolCall 的 JSON 不变量、Recorder 契约、数据库或规范历史格式。
 - Tool、Recorder、Pinned Store 和 RecallSource 不因模型重试能力获得通用自动重试。
 
 Core 不知道 attempt，也不增加重试状态机；Runtime 或其他上层宿主只通过装配后的单个

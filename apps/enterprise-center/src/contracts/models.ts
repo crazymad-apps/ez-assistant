@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export const providerTypes = [
   'openai',
+  'opencode',
   'deepseek',
   'dashscope_api',
   'dashscope_plan',

@@ -358,3 +358,63 @@ fn server_compaction_switches_are_independent_and_require_verified_responses() {
         agent_model::ContextManagementMode::LocalSummary
     );
 }
+
+#[test]
+fn opencode_requires_explicit_protocol_and_preserves_provider_identity() {
+    let mut stored = provider(ProviderType::Opencode, ProviderProtocolPreference::Auto);
+    assert!(super::super::validation::validate_connection(&stored.connection).is_err());
+    for (preference, protocol) in [
+        (
+            ProviderProtocolPreference::ChatCompletions,
+            ModelProtocol::OpenAiChatCompletions,
+        ),
+        (
+            ProviderProtocolPreference::Responses,
+            ModelProtocol::OpenAiResponses,
+        ),
+    ] {
+        stored.connection.protocol_preference = preference;
+        super::super::validation::validate_connection(&stored.connection).unwrap();
+        let compiled = compile_managed_model(
+            &stored,
+            &selection(),
+            &parameters(),
+            &GenerationConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(compiled.protocol(), protocol);
+        assert_eq!(compiled.provider().as_str(), "opencode");
+        assert!(!compiled.server_history_enabled);
+        assert!(!compiled.input_token_count_supported);
+        let mut auxiliary_endpoints = parameters();
+        auxiliary_endpoints.input_token_count_support = ModelFeatureSupport::Supported;
+        assert!(
+            compile_managed_model(
+                &stored,
+                &selection(),
+                &auxiliary_endpoints,
+                &GenerationConfig::default()
+            )
+            .is_err()
+        );
+        auxiliary_endpoints.input_token_count_support = ModelFeatureSupport::Unknown;
+        auxiliary_endpoints.server_compaction_support = ModelFeatureSupport::Supported;
+        auxiliary_endpoints.server_compaction_enabled = true;
+        assert!(
+            compile_managed_model(
+                &stored,
+                &selection(),
+                &auxiliary_endpoints,
+                &GenerationConfig::default()
+            )
+            .is_err()
+        );
+
+        stored.connection.server_history_enabled = true;
+        assert!(super::super::validation::validate_connection(&stored.connection).is_err());
+        stored.connection.server_history_enabled = false;
+    }
+    stored.connection.server_history_support_override = Some(ModelFeatureSupport::Supported);
+    assert!(super::super::validation::validate_connection(&stored.connection).is_err());
+    assert!(serde_json::from_str::<ProviderType>("\"future-provider\"").is_err());
+}

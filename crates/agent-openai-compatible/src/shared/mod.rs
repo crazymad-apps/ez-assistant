@@ -4,6 +4,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 mod credential;
 mod endpoint;
+mod opencode;
 mod quoted_text;
 mod sse;
 mod tool_schema;
@@ -14,6 +15,8 @@ mod tests;
 
 pub use credential::BearerCredential;
 pub(crate) use endpoint::{join_endpoint, route_fingerprint, validate_base_url};
+pub use opencode::OpenCodeRequestIdentity;
+pub(crate) use opencode::apply_identity;
 pub(crate) use quoted_text::render_quoted_text;
 pub use sse::{SseFrame, SseParser};
 pub use tool_schema::ToolSchemaDialect;

@@ -52,12 +52,19 @@ pub struct OpenAiResponsesService {
     model: String,
     context_window_tokens: u64,
     max_input_tokens: Option<u64>,
+    opencode_identity: Option<crate::OpenCodeRequestIdentity>,
     adapter: ResponsesProtocolAdapter,
     transport: Arc<dyn Transport>,
     capabilities: ModelCapabilities,
 }
 
 impl OpenAiResponsesService {
+    /// 绑定 OpenCode 的不可变请求身份；其他方言不会发送这些头。
+    pub fn with_opencode_identity(mut self, identity: crate::OpenCodeRequestIdentity) -> Self {
+        self.opencode_identity = Some(identity);
+        self
+    }
+
     /// 注入当前调用的可信 owner/配置作用域，用于新状态归属及续接校验。
     /// 已保存完整压缩窗口的回放不以该指纹判断模型或入口地址兼容性。
     ///
@@ -251,6 +258,7 @@ impl OpenAiResponsesService {
             model,
             context_window_tokens,
             max_input_tokens: None,
+            opencode_identity: None,
             adapter,
             transport,
             capabilities,
@@ -332,7 +340,7 @@ impl ModelService for OpenAiResponsesService {
                     "failed to serialize the encoded Responses request: {error}"
                 ))
             })?;
-            let transport_request = TransportRequest {
+            let mut transport_request = TransportRequest {
                 trace: context.trace.clone(),
                 method: "POST".to_owned(),
                 url: self.responses_url(),
@@ -346,6 +354,11 @@ impl ModelService for OpenAiResponsesService {
                 ],
                 body,
             };
+            crate::shared::apply_identity(
+                &self.adapter.provider,
+                self.opencode_identity.as_ref(),
+                &mut transport_request.headers,
+            )?;
             let response = tokio::select! {
                 result = self.transport.execute(transport_request) => result,
                 () = context.cancellation.cancelled() => return Err(ModelError::Cancelled),

@@ -219,6 +219,33 @@ describe('provider and fixed model settings', () => {
     );
     expect(screen.queryByLabelText('API Key')).not.toBeInTheDocument();
   });
+  it('keeps custom OpenCode addresses until a preset is explicitly applied and saves an explicit protocol', async () => {
+    const store = modelStore();
+    const save = vi.spyOn(store.settings, 'saveProvider').mockResolvedValue(null);
+    show(store);
+    fireEvent.click(screen.getByRole('button', { name: /测试服务商 https/ }));
+    await screen.findByRole('button', { name: '配置模型 fixture' });
+    fireEvent.click(screen.getByRole('button', { name: '编辑' }));
+    fireEvent.click(screen.getByRole('button', { name: '服务商类型' }));
+    fireEvent.click(screen.getByRole('option', { name: 'OpenCode' }));
+    expect(screen.getByLabelText('服务地址')).toHaveValue(modelProvider.connection.endpoint);
+    fireEvent.click(screen.getByRole('button', { name: '使用Go 订阅地址' }));
+    expect(screen.getByLabelText('服务地址')).toHaveValue('https://opencode.ai/inference/go/openai/v1');
+    expect(screen.getByLabelText('模型列表地址')).toHaveValue('https://opencode.ai/inference/go/v1/models');
+    expect(screen.getByLabelText('推理地址')).toHaveValue('https://opencode.ai/inference/go/openai/v1/chat/completions');
+    fireEvent.click(screen.getByRole('button', { name: '接口选项' }));
+    fireEvent.click(screen.getByRole('button', { name: '接口协议' }));
+    expect(screen.queryByRole('option', { name: '自动' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('option', { name: 'Responses' }));
+    expect(screen.getByLabelText('推理地址')).toHaveValue('https://opencode.ai/inference/go/openai/v1/responses');
+    expect(screen.getByText('OpenCode 暂未开放服务端历史续接。')).toBeVisible();
+    expect(screen.getByRole('checkbox', { name: '使用服务端历史续接' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: '保存服务商' }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith('provider-1', expect.objectContaining({
+      provider_type: 'opencode', protocol_preference: 'responses', models_path: '/inference/go/v1/models',
+      server_history_enabled: false, server_history_support_override: null,
+    }), { mode: 'unchanged' }));
+  });
   it('requires explicit custom Responses support and keeps a failed save draft', async () => {
     const store = modelStore();
     const save = vi.spyOn(store.settings, 'saveProvider').mockResolvedValue(null);

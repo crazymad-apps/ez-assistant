@@ -10,6 +10,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+// v0.32.0 显式登记发布入口；新库、升级与重启必须保持同一完整账本。
+const CURRENT_MIGRATION_COUNT: i64 = 11;
+
 struct Host(Child);
 impl Drop for Host {
     fn drop(&mut self) {
@@ -300,7 +303,10 @@ fn released_v0251_host_refuses_upgraded_database_without_changing_data_files() {
     stop(&discovery, &mut current);
     let personal = home.path().join("users/_personal");
     let upgraded = readonly(&personal.join("data/runtime.sqlite3"));
-    assert_eq!(count(&upgraded, "schema_migrations"), 10);
+    assert_eq!(
+        count(&upgraded, "schema_migrations"),
+        CURRENT_MIGRATION_COUNT
+    );
     assert_eq!(count(&upgraded, "sessions"), 1);
     assert_eq!(
         upgraded
@@ -489,7 +495,7 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
             })
             .unwrap()
     };
-    assert_eq!(count("schema_migrations"), 10);
+    assert_eq!(count("schema_migrations"), CURRENT_MIGRATION_COUNT);
     assert_eq!(count("database_compatibility"), 1);
     assert_eq!(count("providers"), 0);
     assert_eq!(count("model_fixed_configs"), 0);
@@ -546,7 +552,7 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row
                 .get::<_, i64>(0))
             .unwrap(),
-        10
+        CURRENT_MIGRATION_COUNT
     );
     assert_eq!(
         database

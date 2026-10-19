@@ -177,6 +177,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn opencode_configuration_keeps_dialect_at_the_center_proxy() {
+        const CENTER: &str = "01234567-89ab-4cde-8f01-23456789abcd";
+        let client = CenterClient::new("https://center.test".to_owned()).unwrap();
+        for protocol in ["open_ai_responses", "open_ai_chat_completions"] {
+            let wire = serde_json::json!({
+                "state": "ready", "center_id": CENTER,
+                "endpoint": format!("https://center.test/api/llm/providers/{CENTER}/v1"),
+                "provider_type": "opencode", "provider_display_name": "OpenCode",
+                "protocol": protocol, "model_id": "unaltered-id",
+                "parameters": ModelParameters {
+                    context_window_tokens: assistant_protocol::ModelTokenLimit::Known(8192.try_into().unwrap()),
+                    max_output_tokens: assistant_protocol::ModelTokenLimit::Known(1024.try_into().unwrap()),
+                    streaming: ModelFeatureSupport::Supported, ..Default::default()
+                },
+                "server_history_enabled": false, "server_history_support": "unknown",
+                "server_history_binding": null
+            });
+            let ready = client
+                .compile_model_configuration(serde_json::from_value(wire.clone()).unwrap(), CENTER)
+                .unwrap();
+            let ModelConfiguration::Ready(ready) = ready else {
+                panic!("expected ready")
+            };
+            assert_eq!(ready.model_id(), "unaltered-id");
+            let mut unknown = wire;
+            unknown["provider_type"] = serde_json::json!("future-provider");
+            assert!(serde_json::from_value::<ConfigurationResponse>(unknown).is_err());
+        }
+    }
+
+    #[test]
     fn enterprise_history_requires_consistent_policy_capability_and_bounded_binding() {
         const CENTER: &str = "01234567-89ab-4cde-8f01-23456789abcd";
         let client = CenterClient::new("https://center.test".to_owned()).unwrap();

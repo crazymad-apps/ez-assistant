@@ -7,8 +7,8 @@ import { Cancelled, ClientError, object, errorFromHost } from "../errors.js";
 import type { Discovery } from "./discovery.js";
 
 /** 使用原生 Agent，不读取代理设置，不跟随重定向；凭据只发送至固定 loopback origin。 */
-export function request(target: Discovery, path: string, body?: unknown, signal?: AbortSignal): Promise<unknown> {
-  return requestWithHeaders(target, path, body, signal, compatibilityHeaders());
+export function request(target: Discovery, path: string, body?: unknown, signal?: AbortSignal, userToken?: string): Promise<unknown> {
+  return requestWithHeaders(target, path, body, signal, { ...compatibilityHeaders(), ...(userToken ? { authorization: `Bearer ${userToken}`, "x-ez-host-bootstrap": target.access_token } : {}) });
 }
 function requestAs(target: Discovery, path: string, body: unknown, signal: AbortSignal | undefined, compatibility: ClientCompatibility): Promise<unknown> {
   return requestWithHeaders(target, path, body, signal, {

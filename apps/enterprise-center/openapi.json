@@ -2982,6 +2982,305 @@
         ]
       }
     },
+    "/api/host-devices": {
+      "post": {
+        "operationId": "applyHostDevice",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApplyHostDevice"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostRegistrationResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "登记身份、用户权限或编辑冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "设备主动申请，重复登记标识返回当前结果",
+        "tags": [
+          "host-devices"
+        ]
+      }
+    },
+    "/api/host-devices/{id}/registration": {
+      "get": {
+        "operationId": "getHostRegistration",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostRegistrationResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "登记身份、用户权限或编辑冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "设备凭据查询本登记；不存在时 device 为 null",
+        "tags": [
+          "host-devices"
+        ]
+      },
+      "post": {
+        "operationId": "endHostRegistration",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EndHostRegistration"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostRegistrationResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "登记身份、用户权限或编辑冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "设备凭据撤回申请或注销；退出不要求用户登录",
+        "tags": [
+          "host-devices"
+        ]
+      }
+    },
+    "/api/admin/host-devices": {
+      "get": {
+        "operationId": "listHostDevices",
+        "parameters": [
+          {
+            "required": false,
+            "name": "search",
+            "in": "query",
+            "schema": {
+              "maxLength": 80,
+              "type": "string"
+            }
+          },
+          {
+            "description": "按已登记／未登记分栏分页，未登记中待审批优先",
+            "name": "status",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "required": false,
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20,
+              "type": "number"
+            }
+          },
+          {
+            "required": false,
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "minimum": 0,
+              "maximum": 1000000,
+              "default": 0,
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostDevicePage"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "登记身份、用户权限或编辑冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "管理员按已登记／未登记分栏分页查询设备",
+        "tags": [
+          "host-devices"
+        ]
+      }
+    },
+    "/api/admin/host-devices/{id}": {
+      "get": {
+        "operationId": "getHostDevice",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostDeviceDetail"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "登记身份、用户权限或编辑冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "管理员查询登记与授权集合",
+        "tags": [
+          "host-devices"
+        ]
+      },
+      "patch": {
+        "operationId": "manageHostDevice",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManageHostDevice"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostDeviceDetail"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "登记身份、用户权限或编辑冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "比较所见原值，原子审批、授权、启停或注销",
+        "tags": [
+          "host-devices"
+        ]
+      }
+    },
     "/api/site/downloads": {
       "get": {
         "operationId": "getSiteDownloads",
@@ -3244,7 +3543,7 @@
             }
           }
         },
-        "summary": "上传完整平台发布文件，创建草稿",
+        "summary": "上传平台安装文件，新建草稿或覆盖同版本平台文件并保留发布状态",
         "tags": [
           "desktop-releases"
         ]
@@ -3574,6 +3873,11 @@
       "CenterInfo": {
         "type": "object",
         "properties": {
+          "center_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "稳定中心身份；地址变化不改变身份"
+          },
           "capabilities": {
             "description": "已实现能力；代理就绪后才声明 llm_proxy",
             "type": "array",
@@ -3600,6 +3904,7 @@
           }
         },
         "required": [
+          "center_id",
           "capabilities",
           "software_version",
           "protocol_version",
@@ -4232,6 +4537,7 @@
             "type": "string",
             "enum": [
               "openai",
+              "opencode",
               "deepseek",
               "dashscope_api",
               "dashscope_plan",
@@ -4892,6 +5198,7 @@
             "type": "string",
             "enum": [
               "openai",
+              "opencode",
               "deepseek",
               "dashscope_api",
               "dashscope_plan",
@@ -6758,6 +7065,330 @@
           "expected_handling_note",
           "status",
           "handling_note"
+        ]
+      },
+      "ApplyHostDevice": {
+        "type": "object",
+        "properties": {
+          "center_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "installation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "secret": {
+            "type": "string",
+            "writeOnly": true,
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 80
+          },
+          "platform": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "host_version": {
+            "type": "string",
+            "maxLength": 64
+          }
+        },
+        "required": [
+          "center_id",
+          "id",
+          "installation_id",
+          "secret",
+          "name",
+          "platform",
+          "host_version"
+        ]
+      },
+      "HostDeviceSummary": {
+        "type": "object",
+        "properties": {
+          "user_count": {
+            "type": "number",
+            "description": "管理员列表中的当前授权人数"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "installation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "platform": {
+            "type": "string"
+          },
+          "host_version": {
+            "type": "string"
+          },
+          "applicant_user_id": {
+            "type": "number"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "registered",
+              "rejected",
+              "withdrawn",
+              "revoked"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "online": {
+            "type": "boolean",
+            "description": "当前已认证控制连接是否在线"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "installation_id",
+          "name",
+          "platform",
+          "host_version",
+          "applicant_user_id",
+          "status",
+          "enabled",
+          "online",
+          "created_at",
+          "updated_at"
+        ]
+      },
+      "HostRegistrationResult": {
+        "type": "object",
+        "properties": {
+          "center_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "device": {
+            "nullable": true,
+            "type": "object",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/HostDeviceSummary"
+              }
+            ]
+          }
+        },
+        "required": [
+          "center_id",
+          "device"
+        ]
+      },
+      "EndHostRegistration": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "withdraw",
+              "exit"
+            ]
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "HostDevicePage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HostDeviceSummary"
+            }
+          },
+          "total": {
+            "type": "number"
+          },
+          "limit": {
+            "type": "number"
+          },
+          "offset": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ]
+      },
+      "HostDeviceGrant": {
+        "type": "object",
+        "properties": {
+          "user_id": {
+            "type": "number",
+            "minimum": 1
+          },
+          "desktop_view": {
+            "type": "boolean"
+          },
+          "desktop_control": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "user_id",
+          "desktop_view",
+          "desktop_control"
+        ]
+      },
+      "HostDeviceDetail": {
+        "type": "object",
+        "properties": {
+          "user_count": {
+            "type": "number",
+            "description": "管理员列表中的当前授权人数"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "installation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "platform": {
+            "type": "string"
+          },
+          "host_version": {
+            "type": "string"
+          },
+          "applicant_user_id": {
+            "type": "number"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "registered",
+              "rejected",
+              "withdrawn",
+              "revoked"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "online": {
+            "type": "boolean",
+            "description": "当前已认证控制连接是否在线"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "assigned_users": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IdentityUser"
+            }
+          },
+          "users": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HostDeviceGrant"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "installation_id",
+          "name",
+          "platform",
+          "host_version",
+          "applicant_user_id",
+          "status",
+          "enabled",
+          "online",
+          "created_at",
+          "updated_at",
+          "assigned_users",
+          "users"
+        ]
+      },
+      "HostDeviceState": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "registered",
+              "rejected",
+              "withdrawn",
+              "revoked"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 80
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "users": {
+            "maxItems": 100,
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HostDeviceGrant"
+            }
+          }
+        },
+        "required": [
+          "status",
+          "name",
+          "enabled",
+          "users"
+        ]
+      },
+      "ManageHostDevice": {
+        "type": "object",
+        "properties": {
+          "expected": {
+            "$ref": "#/components/schemas/HostDeviceState"
+          },
+          "desired": {
+            "$ref": "#/components/schemas/HostDeviceState"
+          }
+        },
+        "required": [
+          "expected",
+          "desired"
         ]
       },
       "SiteScenario": {

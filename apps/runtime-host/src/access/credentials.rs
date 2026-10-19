@@ -142,6 +142,7 @@ pub(super) struct CredentialState {
     password_hash: Option<String>,
     pub(super) sessions: HashMap<[u8; 32], LoginSession>,
     pub(super) users: HashMap<UserKey, UserState>,
+    pub(super) network_initializations: HashMap<UserKey, Arc<super::enterprise::Initialization>>,
     attempts: f64,
     refilled: Instant,
 }
@@ -228,6 +229,7 @@ impl Credentials {
                 password_hash: None,
                 sessions: HashMap::new(),
                 users: HashMap::new(),
+                network_initializations: HashMap::new(),
                 attempts: 5.0,
                 refilled: Instant::now(),
             }),

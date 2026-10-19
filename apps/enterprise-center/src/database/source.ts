@@ -3,6 +3,7 @@ import { DataSource } from 'typeorm';
 import type { DatabaseConfig } from '../config.js';
 import { ProviderEntity, FixedConfigEntity, ModelSettingsEntity } from '../models/entity.js';
 import { DesktopReleaseEntity, DesktopReleaseTargetEntity } from '../desktop-releases/entity.js';
+import { HostDeviceEntity, HostDeviceUserEntity } from '../host-devices/entity.js';
 import { FeedbackEntity } from '../feedback/entity.js';
 import { UserEntity } from '../users/entity.js';
 import { CenterIdentityEntity } from '../identity/entity.js';
@@ -22,6 +23,8 @@ export function createDataSource(config: DatabaseConfig): DataSource {
       RecordingEntity,
       UserEntity,
       FeedbackEntity,
+      HostDeviceEntity,
+      HostDeviceUserEntity,
       DesktopReleaseEntity,
       DesktopReleaseTargetEntity,
       CenterIdentityEntity,

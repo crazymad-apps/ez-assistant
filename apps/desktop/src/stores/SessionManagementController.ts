@@ -361,7 +361,7 @@ export class SessionManagementController {
       const result = await client.command({ type: "update_workspace", payload: input });
       await runtime.loadApplication();
       const selected_session_id = this.dependencies.navigation.selected_session_id;
-      if (selected_session_id) {
+      if (selected_session_id && this.dependencies.navigation.target_device === client.target_device) {
         await runtime.loadSession(selected_session_id);
       }
       return result.payload.workspace;

@@ -17,6 +17,7 @@ fn optional_tables_keep_declared_defaults_without_a_model_catalog() {
         Duration::from_secs(300)
     );
     let retry = active.retry_policy().expect("product retry defaults");
+    assert_eq!(retry.max_tool_argument_corrections, 2);
     assert_eq!(retry.delays, [1, 2, 4, 8, 16].map(Duration::from_secs));
     assert_eq!(retry.retry_on.len(), 4);
     assert_eq!(retry.max_retry_after, Duration::from_secs(30));

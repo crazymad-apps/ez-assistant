@@ -1,9 +1,9 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TerminalController } from "../../src/features/resource-workspace/TerminalController";
 import { ResourceWorkspaceStore } from "../../src/features/resource-workspace/ResourceWorkspaceStore";
 
 const fake = vi.hoisted(() => ({
-  catalog: vi.fn(),
+  catalog: vi.fn(), opening: vi.fn(),
   create: vi.fn(), restart: vi.fn(), close: vi.fn(), ack: vi.fn(), input: vi.fn(), resize: vi.fn(),
   receive: null as null | ((event: { type: "output"; bytes: number[] } | { type: "exited"; code: number } | { type: "error"; message: string }) => void),
   onData: null as null | ((data: string) => void),
@@ -11,7 +11,8 @@ const fake = vi.hoisted(() => ({
   write: vi.fn(), dispose: vi.fn(),
 }));
 import type { RuntimeClient } from "../../src/runtime-client/RuntimeClient";
-const client = { listUserTerminalShells: () => fake.catalog(), openUserTerminal: (source: unknown, size: unknown, receive: unknown, shell: unknown) => {
+const client = { listUserTerminalShells: (signal?: AbortSignal) => fake.catalog(signal), openUserTerminal: (source: unknown, size: unknown, receive: unknown, shell: unknown, opening: unknown) => {
+  fake.opening(opening);
   let id = "";
   return {
     created: fake.create(source, size, receive, shell).then((created: {terminal_id: string}) => { id = created.terminal_id; return created; }),
@@ -299,4 +300,88 @@ it("retains a terminal through global cache eviction and closes workspace-source
   expect(store.active_tab_key).toBe("workspace:session:21");
   store.releaseScope("session:owner");
   expect(store.terminals.size).toBe(0);
+});
+
+
+afterEach(() => vi.useRealTimers());
+it("cancels catalog discovery immediately, including a late result", async () => {
+  let resolved!: (value: unknown) => void;
+  fake.catalog.mockImplementationOnce(() => new Promise(resolve => { resolved = resolve; }));
+  const controller = new TerminalController(source, vi.fn(), false, () => client);
+  const signal = fake.catalog.mock.calls[0]![0] as AbortSignal;
+  await controller.close();
+  expect(signal.aborted).toBe(true);
+  resolved([{ shell: null, name: "zsh" }]);
+  await settle();
+  expect(fake.create).not.toHaveBeenCalled();
+  expect(controller.status).toBe("closed");
+});
+
+it.each([null, "target-device"])("shares one total startup budget for %s", async (target_device) => {
+  vi.useFakeTimers();
+  let catalog!: (value: unknown) => void;
+  fake.catalog.mockImplementationOnce(() => new Promise(resolve => { catalog = resolve; }));
+  fake.create.mockImplementationOnce(() => new Promise(() => {}));
+  const remote = { ...client, target_device } as RuntimeClient;
+  const controller = new TerminalController(source, vi.fn(), false, () => remote);
+  const budget = target_device ? 90_000 : 15_000;
+  await vi.advanceTimersByTimeAsync(budget - 1000);
+  catalog([{ shell: null, name: "zsh" }]);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(fake.opening).toHaveBeenCalledWith(expect.objectContaining({ timeout_ms: 1000 }));
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(controller.status).toBe("error");
+  expect(controller.error).toContain("超时");
+  await controller.close();
+});
+
+it("reopens explicitly with the same owner's new client without replaying input", async () => {
+  let current = client;
+  const controller = new TerminalController(source, vi.fn(), false, () => current);
+  await settle();
+  controller.disconnect();
+  current = { ...client } as RuntimeClient;
+  fake.onData?.("must not replay\r");
+  controller.restart();
+  await settle();
+  expect(controller.status).toBe("running");
+  expect(fake.create).toHaveBeenCalledTimes(2);
+  expect(fake.input).not.toHaveBeenCalled();
+  await controller.close();
+});
+
+it("does not start queued discovery after the terminal tab has been closed", async () => {
+  const controller = new TerminalController(source, vi.fn(), false, () => client);
+  await settle();
+  fake.catalog.mockImplementation(() => new Promise(() => {}));
+
+  controller.restart();
+  const closing = controller.close();
+  await settle();
+  const catalog_calls = fake.catalog.mock.calls.length;
+  // 旧实现会开始新的无限等待；清理仍允许失败用例及时退出。
+  controller.disconnect();
+  await closing;
+
+  expect(catalog_calls).toBe(1);
+  expect(controller.status).toBe("closed");
+  expect(fake.create).toHaveBeenCalledOnce();
+});
+
+
+it("ignores a late input failure from the replaced socket and drains only the new input", async () => {
+  let rejectOld!: (reason: Error) => void;
+  fake.input.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectOld = reject; }));
+  const controller = new TerminalController(source, vi.fn(), false, () => client);
+  await settle();
+  fake.onData?.("old input\r");
+  controller.restart();
+  await settle();
+  fake.onData?.("new input\r");
+  rejectOld(new Error("old connection closed"));
+  await settle();
+  expect(controller.status).toBe("running");
+  expect(controller.error).toBeNull();
+  expect(fake.input.mock.calls.map(call => new TextDecoder().decode(call[1]))).toEqual(["old input\r", "new input\r"]);
+  await controller.close();
 });

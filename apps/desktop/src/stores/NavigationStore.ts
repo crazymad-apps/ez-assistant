@@ -9,6 +9,7 @@ export type ConversationReadingPosition = Readonly<{
 }>;
 
 export type ConversationLocation = Readonly<{
+  target_device?: string | null;
   session_id: SessionId;
   child_task_id: ChildTaskId | null;
   anchor_message_id: MessageId | null;
@@ -28,6 +29,7 @@ export const CONVERSATION_MIN_WIDTH = 500;
 const RIGHT_SIDEBAR_REFERENCE_SPACE = 1280 - LEFT_SIDEBAR_DEFAULT_WIDTH;
 
 export class NavigationStore {
+  target_device: string | null = null;
   selected_session_id: SessionId | null = null;
   selected_draft_key: NewSessionDraftKey | null = null;
   selected_child_task_id: ChildTaskId | null = null;
@@ -45,6 +47,7 @@ export class NavigationStore {
 
   constructor() {
     makeObservable(this, {
+      target_device: observable,
       selected_session_id: observable,
       selected_draft_key: observable,
       selected_child_task_id: observable,
@@ -137,10 +140,11 @@ export class NavigationStore {
     );
   }
 
-  selectSession(session_id: SessionId | null, record_history = true): void {
+  selectSession(session_id: SessionId | null, record_history = true, target_device = this.target_device): void {
     if (session_id && record_history) {
       this.navigateTo({
         session_id,
+        target_device,
         child_task_id: null,
         anchor_message_id: null,
         scroll_offset: null,
@@ -150,12 +154,14 @@ export class NavigationStore {
     if (session_id && this.conversation_history.length === 0) {
       this.conversation_history.push({
         session_id,
+        target_device,
         child_task_id: null,
         anchor_message_id: null,
         scroll_offset: null,
       });
       this.conversation_history_index = 0;
     }
+    this.target_device = target_device;
     this.selected_session_id = session_id;
     this.selected_draft_key = null;
     this.selected_child_task_id = null;
@@ -163,7 +169,8 @@ export class NavigationStore {
   }
 
   /** 选择一个纯客户端草稿；它不进入 Session 导航历史，也不伪造 Conversation location。 */
-  selectDraft(key: NewSessionDraftKey): void {
+  selectDraft(key: NewSessionDraftKey, target_device = this.target_device): void {
+    this.target_device = target_device;
     this.selected_session_id = null;
     this.selected_draft_key = key;
     this.selected_child_task_id = null;
@@ -202,15 +209,17 @@ export class NavigationStore {
    * 记录一次 UI 来源跳转。栈只保存可恢复的视图位置，不参与 Runtime 业务状态。
    */
   navigateTo(location: ConversationLocation): void {
+    location = { ...location, target_device: location.target_device === undefined ? this.target_device : location.target_device };
     if (!location.anchor_message_id && location.scroll_offset === null) {
       const previous = [...this.conversation_history].reverse().find((item) => (
-        item.session_id === location.session_id && item.child_task_id === location.child_task_id
+        (item.target_device ?? null) === location.target_device && item.session_id === location.session_id && item.child_task_id === location.child_task_id
       ));
       if (previous) location = { ...previous, anchor_message_id: null };
     }
     const current = this.conversation_history[this.conversation_history_index];
     if (
       current
+      && (current.target_device ?? null) === location.target_device
       && current.session_id === location.session_id
       && current.child_task_id === location.child_task_id
       && current.anchor_message_id === location.anchor_message_id
@@ -282,13 +291,13 @@ export class NavigationStore {
     };
   }
 
-  clearConversationLocations(session_id?: SessionId): void {
+  clearConversationLocations(session_id?: SessionId, target_device = this.target_device): void {
     if (!session_id) {
       this.conversation_history.clear();
       this.conversation_history_index = -1;
     } else {
       const current = this.current_conversation_location;
-      this.conversation_history.replace(this.conversation_history.filter((item) => item.session_id !== session_id));
+      this.conversation_history.replace(this.conversation_history.filter((item) => item.session_id !== session_id || (item.target_device ?? null) !== target_device));
       const retained_index = current ? this.conversation_history.indexOf(current) : -1;
       this.conversation_history_index = retained_index >= 0 ? retained_index
         : Math.min(this.conversation_history_index, this.conversation_history.length - 1);
@@ -390,6 +399,7 @@ export class NavigationStore {
   }
 
   #applyLocation(location: ConversationLocation): void {
+    this.target_device = location.target_device ?? null;
     this.selected_session_id = location.session_id;
     this.selected_draft_key = null;
     this.selected_child_task_id = location.child_task_id;

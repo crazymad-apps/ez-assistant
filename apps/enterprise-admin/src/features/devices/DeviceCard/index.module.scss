@@ -1,0 +1,22 @@
+.content {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+.heading,
+.actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.metadata {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}

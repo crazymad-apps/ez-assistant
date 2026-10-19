@@ -44,6 +44,7 @@ pub(super) async fn materialize_session(
     }
 
     let mut staged = Vec::with_capacity(manifest.attachments.len());
+    let mut staging_guards = Vec::with_capacity(manifest.attachments.len());
     let mut total_bytes = 0_u64;
     for declared in &manifest.attachments {
         let mut field = match multipart.next_field().await {
@@ -130,7 +131,7 @@ pub(super) async fn materialize_session(
         }
         drop(staging_file);
         let media_type = match tokio::task::spawn_blocking({
-            let path = staging_path.clone();
+            let path = staging_path.to_path_buf();
             move || crate::image::sniff_media_type(&path)
         })
         .await
@@ -152,6 +153,7 @@ pub(super) async fn materialize_session(
             size_bytes,
             media_type,
         });
+        staging_guards.push(staging_path);
     }
     match multipart.next_field().await {
         Ok(None) => {}

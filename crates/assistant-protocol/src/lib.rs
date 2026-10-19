@@ -13,6 +13,11 @@ mod feedback;
 mod feedback_center;
 mod host;
 mod host_access;
+mod host_network;
+mod host_registration;
+pub use host_network::{
+    HostNetworkCapability, HostNetworkCommand, HostNetworkDevice, HostNetworkResult,
+};
 mod id;
 mod materialization;
 mod mcp;
@@ -37,6 +42,11 @@ pub use software_version::parse_software_version;
 pub const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// 当前发布要求的应用协议最低兼容软件版本，不表达数据库格式。
 pub const MIN_COMPATIBLE_VERSION: &str = env!("EZ_ASSISTANT_MIN_COMPATIBLE_VERSION");
+
+pub use host_registration::{
+    HostNetworkState, HostRegistrationCommand, HostRegistrationDevice, HostRegistrationIntent,
+    HostRegistrationState, HostRegistrationStatus,
+};
 
 pub use host_access::{
     DesktopUpdateContext, HostAccessCommand, HostAccessConfiguration, HostAccessScheme,
@@ -239,3 +249,6 @@ pub use feedback_center::{
     SubmitFeedbackRequest, SubmittedFeedback, SubmittedFeedbackPage, SubmittedFeedbackStatus,
     SubmittedFeedbackSummary,
 };
+
+mod desktop_view;
+pub use desktop_view::{DesktopDisplay, DesktopInput, DesktopInputFrame, DesktopViewOpenRequest};

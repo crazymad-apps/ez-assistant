@@ -14,6 +14,8 @@ export type SavedResourceTab = Readonly<{
 }>;
 export type ResourceWorkspaceSnapshot = Readonly<{
   current_scope_key: string;
+  desktops?: readonly Readonly<{ device: string; name: string; display_id: string | null }>[];
+  active_desktop?: string | null;
   groups: readonly Readonly<{
     scope_key: string;
     active_index: number;
@@ -54,6 +56,16 @@ export function savedResourcePage(tab: Extract<ResourceTab, { resource: Resource
 export function parseResourceSnapshot(value: unknown): ResourceWorkspaceSnapshot | null {
   if (value == null) return null;
   if (!record(value) || !scope(value.current_scope_key) || !Array.isArray(value.groups) || value.groups.length > 256) throw invalid();
+  if (value.desktops !== undefined) {
+    if (!Array.isArray(value.desktops) || value.desktops.length > 16) throw invalid();
+    const devices = new Set<string>();
+    for (const desktop of value.desktops) {
+      if (!record(desktop) || !text(desktop.device) || !desktop.device || devices.has(desktop.device)
+        || !text(desktop.name) || !(desktop.display_id === null || (text(desktop.display_id) && desktop.display_id.length > 0 && desktop.display_id.length <= 256 && ![...desktop.display_id].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)))) throw invalid();
+      devices.add(desktop.device);
+    }
+    if (value.active_desktop != null && (typeof value.active_desktop !== "string" || !devices.has(value.active_desktop))) throw invalid();
+  }
   let tabs = 0;
   const seen = new Set<string>();
   for (const group of value.groups) {
@@ -66,12 +78,17 @@ export function parseResourceSnapshot(value: unknown): ResourceWorkspaceSnapshot
       if (!record(tab) || !page(tab.page) || (tab.view_state && !viewState(tab.view_state))) throw invalid();
     }
   }
-  return value as ResourceWorkspaceSnapshot;
+  const snapshot = value as ResourceWorkspaceSnapshot;
+  return {
+    ...snapshot,
+    current_scope_key: snapshot.current_scope_key.startsWith("project:") ? "draft:unbound" : snapshot.current_scope_key,
+    groups: snapshot.groups.filter((group) => !group.scope_key.startsWith("project:")),
+  };
 }
 function invalid(): Error { return new Error("右栏快照损坏或超出上限，未能恢复。"); }
 function record(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
 function text(value: unknown): value is string { return typeof value === "string" && value.length <= 16384; }
-function scope(value: unknown): value is string { return text(value) && /^(session:.+|draft:(unbound|workspace:.+))$/.test(value); }
+function scope(value: unknown): value is string { return text(value) && /^(session:.+|project:.+|draft:(unbound|workspace:.+))$/.test(value); }
 function locator(value: unknown): boolean {
   if (!record(value) || !record(value.root) || !text(value.relative_path)) return false;
   return ["session_private", "workspace_primary"].includes(String(value.root.type))

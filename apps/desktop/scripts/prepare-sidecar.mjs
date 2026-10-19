@@ -39,6 +39,10 @@ if (extension === ".exe") {
 }
 await mkdir(outputDirectory, { recursive: true });
 await copyFile(source, destination);
+if (targetTriple.endsWith("apple-darwin") || targetTriple.endsWith("windows-msvc")) {
+  await copyFile(resolve(dirname(source), `ez-assistant-desktop-capture${extension}`),
+    resolve(outputDirectory, `ez-assistant-desktop-capture-${targetTriple}${extension}`));
+}
 
 function resolveTargetTriple(currentPlatform, currentArch) {
   if (currentPlatform === "win32" && currentArch === "x64") return "x86_64-pc-windows-msvc";

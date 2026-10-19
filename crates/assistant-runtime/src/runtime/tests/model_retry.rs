@@ -1,5 +1,6 @@
 //! F01 通过正式 Runtime 验证输入、工具和请求重试的边界。
 use super::*;
+use agent_model::ModelEvent;
 
 fn unavailable() -> ModelScript {
     ModelScript::FailEstablishment(ModelError::Unavailable {
@@ -131,6 +132,99 @@ async fn retry_after_tool_execution_does_not_replay_tool_or_user() {
             .count(),
         1
     );
+}
+
+#[tokio::test]
+async fn malformed_tool_arguments_are_corrected_without_replaying_completed_tools() {
+    let mut corrected = assistant_tool_call("corrected-step", "echo_tool");
+    let AssistantPart::ToolCall(call) = &mut corrected.parts[0] else {
+        panic!("fixture must contain a tool call");
+    };
+    call.id = ToolCallId::new("corrected-call").unwrap();
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(true),
+        8_192,
+        [
+            ModelScript::Events(message_events(&assistant_tool_call(
+                "completed-step",
+                "echo_tool",
+            ))),
+            ModelScript::Events(vec![
+                ModelEvent::TurnStarted {
+                    message_id: MessageId::new("bad-step").unwrap(),
+                    model: corrected.model.clone(),
+                },
+                ModelEvent::ToolCallStarted {
+                    id: ToolCallId::new("bad-call").unwrap(),
+                    name: agent_types::ToolName::new("echo_tool").unwrap(),
+                },
+                ModelEvent::ToolCallDelta {
+                    id: ToolCallId::new("bad-call").unwrap(),
+                    arguments_delta: "{\"files\":[{}".into(),
+                },
+                ModelEvent::TurnFailed {
+                    error: ModelError::ToolArguments(
+                        "invalid JSON: EOF while parsing an array".into(),
+                    ),
+                },
+            ]),
+            ModelScript::Events(message_events(&corrected)),
+            ModelScript::Events(message_events(&assistant_text("final", "done"))),
+        ],
+    ));
+    let tool = ScriptedTool::succeed("echo_tool", json!({"ok": true}), OrderLog::new());
+    let mut tools = ToolRegistry::new();
+    tools.register(tool.clone()).unwrap();
+    let runtime = runtime_with_tools(model.clone(), tools.snapshot());
+    runtime.config_registry.replace_document_for_test(&format!("{TEST_CONFIG}\n[runtime.model_retry]\nretry_on=['unavailable']\ndelays_ms=[1,1]\nmax_retry_after_ms=10\n"));
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    set_auto_approval(&runtime, &session_id).await;
+    let run_id = submit(&runtime, &session_id).await;
+    let terminal = wait_for_terminal(&runtime, &session_id, &run_id).await;
+    assert_eq!(terminal.status, assistant_protocol::RunStatus::Completed);
+    assert_eq!(tool.executed_inputs().len(), 2);
+    let requests = model.take_requests();
+    assert_eq!(requests.len(), 4);
+    let reliable = &requests[1].conversation.messages;
+    assert_eq!(
+        &requests[2].conversation.messages[..reliable.len()],
+        reliable
+    );
+    assert_eq!(requests[2].conversation.messages.len(), reliable.len() + 1);
+    let ConversationMessage::User(feedback) = requests[2].conversation.messages.last().unwrap()
+    else {
+        panic!("model must receive correction feedback");
+    };
+    assert!(
+        matches!(&feedback.parts[0], UserPart::InternalContext(part) if part.text.contains("EOF while parsing an array"))
+    );
+    let conversation = runtime.conversation_snapshot(&session_id).await.unwrap();
+    conversation.validate_tool_exchange_pairs().unwrap();
+    assert_eq!(
+        conversation
+            .messages
+            .iter()
+            .filter(|m| matches!(m, ConversationMessage::User(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        conversation
+            .messages
+            .iter()
+            .filter(|m| matches!(m, ConversationMessage::Tool(_)))
+            .count(),
+        2
+    );
+    assert!(!conversation.messages.iter().any(|message| matches!(message, ConversationMessage::Assistant(message) if message.id.as_str() == "bad-step")));
+    assert!(!requests[3].conversation.messages.iter().any(
+        |message| matches!(message, ConversationMessage::User(message) if message.id == feedback.id)
+    ));
 }
 
 #[tokio::test]

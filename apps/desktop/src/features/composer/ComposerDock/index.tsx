@@ -38,6 +38,7 @@ import { parseSessionCommand } from './sessionCommand';
 import { SlashCommandHelp, SlashCommandMenu } from './SlashCommandMenu';
 import { SkillPicker } from './SkillPicker';
 import { McpServerPicker } from './McpServerPicker';
+import { DevicePicker } from './DevicePicker';
 import { WorkspacePicker } from './WorkspacePicker';
 import { ContextPicker } from './ContextPicker';
 import { PluginOperationDialog } from '../../settings/SettingsDialog/PluginOperationDialog';
@@ -355,7 +356,7 @@ const SessionComposerDock = observer(function SessionComposerDock({
     }
     if (command.name === '/new') {
       setDraft('');
-      store.openNewSessionDraft(session!.workspace_id);
+      store.openNewSessionDraft(session!.workspace_id, store.navigation.target_device);
       return;
     }
     setDraft('');
@@ -790,7 +791,8 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
 }>) {
   const store = useRootStore();
   const application = store.projection.application;
-  const draft = store.new_session_drafts.get(draft_key);
+  const drafts = store.new_session_drafts;
+  const draft = drafts.get(draft_key);
   const [skill_picker_open, setSkillPickerOpen] = useState(false);
   const [mcp_picker_open, setMcpPickerOpen] = useState(false);
   const [workspace_picker_open, setWorkspacePickerOpen] = useState(false);
@@ -860,11 +862,11 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
   useEffect(
     () => () => {
       // 未提交草稿离开 owner 时清理 MCP；结果未知的物化请求必须保留原幂等键和冻结载荷。
-      const leaving = store.new_session_drafts.get(draft_key);
+      const leaving = drafts.get(draft_key);
       if (leaving?.selected_mcp && !leaving.materialization_attempt)
-        store.new_session_drafts.updateSelectedMcp(draft_key, null);
+        drafts.updateSelectedMcp(draft_key, null);
     },
-    [draft_key, store],
+    [draft_key, drafts],
   );
   useEffect(() => resizeTextarea(textarea_ref.current), [draft?.text]);
   useEffect(() => {
@@ -1015,7 +1017,7 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
     } else if (command.name === '/mode' || command.name === '/approval') {
       setActiveOverlay('execution');
     } else if (command.name === '/new') {
-      store.openNewSessionDraft(current_draft.workspace_id);
+      store.openNewSessionDraft(current_draft.workspace_id, store.navigation.target_device);
     } else {
       setShowHelp(true);
     }
@@ -1187,8 +1189,8 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
           <div className={styles.agent_dependencies}>
             <span>智能体依赖待处理：{agent_preparation.dependencies.filter((item) => agentDependencyBlocksSession(item.status)).map((item) => `${item.kind} ${item.reference.name}（${agentDependencyLabel(item.status)}）`).join('、')}</span>
             <div className={styles.agent_dependency_actions}>
-              {agent_preparation.install_candidates.length > 0 && <Button onClick={() => setAgentInstall(agent_preparation)} size="small" variant="text">下载缺少的插件</Button>}
-              <Button onClick={() => store.settings.open('plugins')} size="small" variant="text">管理插件</Button>
+              {!store.remote_device && agent_preparation.install_candidates.length > 0 && <Button onClick={() => setAgentInstall(agent_preparation)} size="small" variant="text">下载缺少的插件</Button>}
+              {!store.remote_device && <Button onClick={() => store.settings.open('plugins')} size="small" variant="text">管理插件</Button>}
               <Button disabled={agent_preparing} onClick={() => void retryAgentInstall()} size="small" variant="text">重新检查依赖</Button>
             </div>
           </div>
@@ -1196,6 +1198,7 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
       {draft.selected_agent && !agent_preparing && !agent_preparation &&
         <ComposerNotice tone="warning" action={{ label: '重新检查依赖', onClick: () => void retryAgentInstall() }}>暂未取得智能体依赖状态。</ComposerNotice>}
       <section aria-label="新会话项目选项" className={`${styles.secondary_drawer} ${styles.draft_context_drawer}`}>
+        <DevicePicker disabled={quick_actions_disabled} />
         <WorkspacePicker
             disabled={quick_actions_disabled}
             has_draft={(workspace_id) => store.new_session_drafts.hasDraft(draftKeyForWorkspace(workspace_id))
@@ -1215,7 +1218,7 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
           disabled={quick_actions_disabled} icon="bot" label="智能体"
           empty_text={agent_loading ? '正在读取智能体…' : undefined}
           notice={agent_center_unavailable ? '企业目录暂不可读取，当前仅显示最后一次有效结果。' : undefined}
-          on_action={() => store.settings.open('agents')}
+          on_action={store.remote_device ? undefined : () => store.settings.open('agents')}
           on_open_change={(open) => { setAgentPickerOpen(open); if (open) setWorkspacePickerOpen(false); }}
           on_select={(value) => {
             const agent = agent_options.find((item) => agentOptionValue({ name: item.config.name, source: item.source }) === value);

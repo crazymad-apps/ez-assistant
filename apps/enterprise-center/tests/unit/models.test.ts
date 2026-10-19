@@ -7,6 +7,7 @@ import {
   validParameters,
   parseConnection,
   resolveProtocol,
+  executable,
 } from '../../dist/models/parameters.js';
 import { parseTemplates } from '../../dist/models/templates.js';
 import { parsePage } from '../../dist/models/discovery.js';
@@ -116,4 +117,30 @@ it('共享参数样例约束 Node/Rust 的协议覆盖和补未知语义', () =>
       expect(Reflect.get(result.parameters, key), vector.name).toEqual(expected);
     expect(result.sources, vector.name).toMatchObject(vector.sources);
   }
+});
+
+it('OpenCode 使用显式协议、独立列表路径，不继承模型名称或续接/WS 能力', () => {
+  const connection = {
+    display_name: 'OpenCode', provider_type: 'opencode',
+    endpoint: 'https://opencode.ai/inference/go/openai/v1',
+    models_path: '/inference/go/v1/models', discovery_format: 'openai',
+    protocol_preference: 'chat_completions', responses_transport: 'http',
+    server_history_enabled: false, server_history_support_override: null,
+  };
+  expect(resolveProtocol(parseConnection(connection))).toBe('open_ai_chat_completions');
+  expect(resolveProtocol(parseConnection({ ...connection, protocol_preference: 'responses' }))).toBe('open_ai_responses');
+  for (const patch of [
+    { protocol_preference: 'auto' }, { responses_transport: 'websocket', protocol_preference: 'responses' },
+    { server_history_enabled: true }, { server_history_support_override: 'supported' },
+    { provider_type: 'future-provider' }, { models_path: 'https://other.test/models' },
+  ]) expect(() => parseConnection({ ...connection, ...patch })).toThrow();
+
+  const parameters = { ...emptyParameters(), context_window_tokens: { state: 'known', value: 8192 } as const,
+    max_output_tokens: { state: 'known', value: 1024 } as const, streaming: 'supported' as const };
+  const responses = parseConnection({ ...connection, protocol_preference: 'responses' });
+  expect(executable(responses, parameters)).toBe(true);
+  expect(executable(responses, { ...parameters, input_token_count_support: 'supported' })).toBe(false);
+  expect(executable(responses, { ...parameters, server_compaction_support: 'supported', server_compaction_enabled: true })).toBe(false);
+  const template = { ...asset[0], provider_type: 'opencode' };
+  expect(parseTemplates([template])[0]?.provider_type).toBe('opencode');
 });

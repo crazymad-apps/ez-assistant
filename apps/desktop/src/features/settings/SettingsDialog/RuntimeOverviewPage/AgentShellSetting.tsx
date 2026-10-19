@@ -10,8 +10,8 @@ export const AgentShellSetting = observer(function AgentShellSetting() {
   const root = useRootStore();
   const settings = root.settings;
   const [open, setOpen] = useState(false);
-  const connection_state = root.connection.state;
-  const address = root.connection.address;
+  const connection_state = root.local_connection.state;
+  const address = root.local_connection.address;
   useEffect(() => {
     setOpen(false);
     void settings.loadAgentShellSettings();

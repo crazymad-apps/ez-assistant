@@ -1,4 +1,5 @@
 //! 可控 Center 与实际 HTTP 路由验证；用户 Runtime 用例仅打开全新 TempDir 人工库。
+mod network;
 mod runtime;
 
 use super::*;

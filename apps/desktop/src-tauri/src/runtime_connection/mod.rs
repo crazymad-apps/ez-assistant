@@ -1,5 +1,6 @@
 //! Desktop 当前连接的原生凭据与不可变请求绑定；不持有 Runtime 业务状态。
 mod passwords;
+pub(crate) mod registration;
 
 use crate::runtime_bootstrap::{RuntimeBootstrap, RuntimeBootstrapCoordinator};
 use assistant_protocol::{
@@ -90,6 +91,7 @@ struct TargetContext {
 #[derive(Clone)]
 pub(crate) struct RuntimeTarget {
     context: Arc<TargetContext>,
+    device: Option<String>,
     pub(crate) cancellation: CancellationToken,
 }
 impl RuntimeTarget {
@@ -97,6 +99,7 @@ impl RuntimeTarget {
         !self.cancellation.is_cancelled()
             && !other.cancellation.is_cancelled()
             && Arc::ptr_eq(&self.context, &other.context)
+            && self.device == other.device
     }
     /// 原生浏览器创建前向已绑定 Host 核验本人；不接受 WebView 自报的用户或 Profile。
     pub(crate) async fn browser_identity(
@@ -126,16 +129,22 @@ impl RuntimeTarget {
     /// 企业普通 Token 表明用户；这份仅原生持有的独立证明表明请求确由本机管理客户端发出。
     pub(crate) fn native_headers(&self) -> reqwest::header::HeaderMap {
         let mut headers = crate::runtime_compatibility::headers();
-        if let Some(proof) = &self.context.local_proof
+        if self.device.is_none()
+            && let Some(proof) = &self.context.local_proof
             && let Ok(value) = proof.parse()
         {
             headers.insert("x-ez-host-bootstrap", value);
+        }
+        if let Some(device) = &self.device
+            && let Ok(value) = device.parse()
+        {
+            headers.insert("x-ez-target-device", value);
         }
         headers
     }
     pub(crate) fn ensure_local(&self) -> Result<(), ConnectionError> {
         self.ensure_active()?;
-        if self.context.local {
+        if self.context.local && self.device.is_none() {
             Ok(())
         } else {
             Err(failure(
@@ -145,6 +154,28 @@ impl RuntimeTarget {
         }
     }
     pub(crate) async fn bootstrap(&self) -> Result<RuntimeBootstrap, ConnectionError> {
+        self.ensure_active()?;
+        if self.device.is_some() {
+            let bootstrap = &self.context.bootstrap;
+            let response = tokio::select! {
+                biased;
+                () = self.cancellation.cancelled() => return Err(stale()),
+                response = http()?.get(format!("{}/capabilities", bootstrap.base_url))
+                    .bearer_auth(&bootstrap.access_token).headers(crate::runtime_compatibility::headers()).send() => response.map_err(|_| unavailable())?,
+            };
+            if !response.status().is_success()
+                || response
+                    .headers()
+                    .get("x-ez-network-proxy")
+                    .and_then(|value| value.to_str().ok())
+                    != Some("2")
+            {
+                return Err(failure(
+                    "network_proxy_unavailable",
+                    "本机 Host 不支持当前企业组网代理。",
+                ));
+            }
+        }
         self.ensure_active()?;
         Ok(self.context.bootstrap.clone())
     }
@@ -157,14 +188,60 @@ impl<'a, R: tauri::Runtime> CommandArg<'a, R> for RuntimeTarget {
             .get("x-ez-runtime-binding")
             .and_then(|value| value.to_str().ok())
             .ok_or_else(|| InvokeError::from(stale()))?;
-        command
+        let mut target = command
             .message
             .state_ref()
             .get::<RuntimeConnection>()
             .target(binding)
-            .map_err(InvokeError::from)
+            .map_err(InvokeError::from)?;
+        if let Some(device) = command.message.headers().get("x-ez-target-device") {
+            let device = device.to_str().map_err(|_| InvokeError::from(stale()))?;
+            // 仅资源 IPC 接受业务目标；控制命令不得忽略目标后继续操作本机。
+            if !target.context.local
+                || !network_resource_command(command.message.command())
+                || !valid_device(device)
+            {
+                return Err(InvokeError::from(failure(
+                    "invalid_device_target",
+                    "此操作不接受该设备目标。",
+                )));
+            }
+            target.device = Some(device.to_owned());
+        }
+        Ok(target)
     }
 }
+
+/// 设备只作为原请求的路由参数，不能改变已认证的 Host 地址。
+fn valid_device(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && bytes[14] == b'4'
+        && matches!(bytes[19], b'8' | b'9' | b'a' | b'b' | b'A' | b'B')
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                *byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+}
+
+fn network_resource_command(command: &str) -> bool {
+    matches!(
+        command,
+        "upload_selected_attachment"
+            | "materialize_new_session"
+            | "list_session_resource_files"
+            | "preview_session_resource_file"
+            | "preview_attachment"
+            | "thumbnail_attachment"
+            | "preview_tool_file"
+            | "export_session_markdown"
+            | "download_runtime_resource"
+    )
+}
+
 impl RuntimeConnection {
     fn begin(&self) -> Result<String, ConnectionError> {
         let mut bytes = [0u8; 16];
@@ -228,6 +305,7 @@ impl RuntimeConnection {
             .filter(|value| value.id == id)
             .ok_or_else(stale)?;
         Ok(RuntimeTarget {
+            device: None,
             context: selected.context.clone().ok_or_else(stale)?,
             cancellation: selected
                 .context
@@ -731,6 +809,38 @@ mod tests {
                 .native_headers()
                 .contains_key("x-ez-host-bootstrap")
         );
+    }
+
+    #[test]
+    fn device_resource_target_keeps_identity_and_strips_local_privilege() {
+        let connection = RuntimeConnection::default();
+        let id = connection.begin().unwrap();
+        connection
+            .bind_with_proof(
+                &id,
+                bootstrap("http://127.0.0.1:1234", "user"),
+                true,
+                Some("proof".into()),
+            )
+            .unwrap();
+        let local = connection.target(&id).unwrap();
+        let mut remote = local.clone();
+        let device = "00112233-4455-4677-8899-aabbccddeeff";
+        assert!(valid_device(device));
+        for invalid in ["", "http://host", "00112233-4455-1677-8899-aabbccddeeff"] {
+            assert!(!valid_device(invalid));
+        }
+        remote.device = Some(device.into());
+        assert_eq!(remote.native_headers()["x-ez-target-device"], device);
+        assert!(!remote.native_headers().contains_key("x-ez-host-bootstrap"));
+        assert!(local.native_headers().contains_key("x-ez-host-bootstrap"));
+        assert!(remote.ensure_local().is_err());
+        assert!(!remote.same_connection(&local));
+        assert!(network_resource_command("materialize_new_session"));
+        assert!(!network_resource_command("manage_local_host"));
+        assert!(!network_resource_command("open_session_resource_in_system"));
+        connection.begin().unwrap();
+        assert!(remote.ensure_active().is_err());
     }
 
     #[test]

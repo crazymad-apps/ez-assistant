@@ -71,6 +71,8 @@ pub(crate) async fn run(arguments: AccessArguments) -> Result<(), Box<dyn Error>
             let code = match &error {
                 AccessError::Conflict => "configuration_conflict",
                 AccessError::Busy => "busy",
+                AccessError::NetworkDenied => "device_access_denied",
+                AccessError::NetworkEnded => "device_access_ended",
                 AccessError::Unauthorized => "host_running",
                 AccessError::PortInUse(_) => "port_in_use",
                 AccessError::Invalid(_) => "invalid_request",
@@ -131,7 +133,7 @@ async fn execute(arguments: AccessArguments) -> Result<Status, AccessError> {
     };
     check_revision(&original, expected_revision)?;
     // Reject invalid requests before the layout upgrade changes the configuration revision.
-    let password_hash = match &request {
+    let (password_hash, center_id) = match &request {
         Change::Configure(request) => {
             let mut candidate = if home.join(crate::host_configuration::FILE).exists() {
                 original.document.clone()
@@ -144,6 +146,12 @@ async fn execute(arguments: AccessArguments) -> Result<Status, AccessError> {
                 request.center_url.as_deref(),
                 request.clear_center_binding.unwrap_or(false),
             )?;
+            if request.mode.is_some()
+                || request.center_url.is_some()
+                || request.clear_center_binding == Some(true)
+            {
+                super::config::resolve_center(&mut candidate).await?;
+            }
             if request.configuration.remote_enabled
                 && original.access.password_hash.is_none()
                 && crate::host_configuration::parse(&candidate.to_string())
@@ -155,12 +163,15 @@ async fn execute(arguments: AccessArguments) -> Result<Status, AccessError> {
             }
             crate::server::tls_configuration(&request.configuration).await?;
             drop(crate::server::bind(request.configuration.port)?);
-            None
+            (None, super::config::identity_fields(&candidate).2)
         }
-        Change::Password(request) => Some(
-            Credentials::new()
-                .hash_password(request.password.clone())
-                .await?,
+        Change::Password(request) => (
+            Some(
+                Credentials::new()
+                    .hash_password(request.password.clone())
+                    .await?,
+            ),
+            None,
         ),
     };
     let layout_home = home.clone();
@@ -178,6 +189,9 @@ async fn execute(arguments: AccessArguments) -> Result<Status, AccessError> {
                 request.center_url.as_deref(),
                 request.clear_center_binding.unwrap_or(false),
             )?;
+            if let Some(id) = center_id {
+                document.document["enterprise"]["center_id"] = toml_edit::value(id);
+            }
             document.access.public = request.configuration;
         }
         Change::Password(_) => {

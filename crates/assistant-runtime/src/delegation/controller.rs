@@ -49,7 +49,7 @@ pub(crate) struct ParentDelegationController {
     variant: AgentVariant,
     context_window_tokens: u64,
     child_agent: Arc<Agent>,
-    child_model_binding: Option<Arc<crate::runtime::model::HistoryModelBinding>>,
+    child_model_binding: Option<Arc<crate::runtime::model::OwnerModelBinding>>,
     child_compactor: Arc<crate::context_compaction::RuntimeContextCompactor>,
     store: Arc<dyn RuntimeStore>,
     registry: Arc<ChildTaskRegistry>,
@@ -76,7 +76,7 @@ pub(crate) struct ParentDelegationResources {
     pub(crate) variant: AgentVariant,
     pub(crate) context_window_tokens: u64,
     pub(crate) child_agent: Arc<Agent>,
-    pub(crate) child_model_binding: Option<Arc<crate::runtime::model::HistoryModelBinding>>,
+    pub(crate) child_model_binding: Option<Arc<crate::runtime::model::OwnerModelBinding>>,
     pub(crate) child_compactor: Arc<crate::context_compaction::RuntimeContextCompactor>,
     pub(crate) store: Arc<dyn RuntimeStore>,
     pub(crate) registry: Arc<ChildTaskRegistry>,
@@ -275,26 +275,27 @@ impl ParentDelegationController {
         let child_compactor = child_model
             .as_ref()
             .map(|model| self.child_compactor.with_model(model.clone()));
-        let scoped_child_agent = if let Some(model) = child_model {
-            match self.child_agent.try_with_model(model) {
-                Ok(agent) => Arc::new(agent),
-                Err(_) => {
-                    let error = RuntimeErrorInfo::new(
-                        RuntimeErrorCode::Internal,
-                        "child model could not be bound",
-                    );
-                    self.settle_accepted_and_publish(
-                        &mut stored,
-                        ChildTaskStatus::Failed,
-                        Some(error.clone()),
-                    )
-                    .await?;
-                    return Err(child_error(&stored, error));
+        let scoped_child_agent =
+            if let (Some(binding), Some(model)) = (&self.child_model_binding, child_model) {
+                match binding.bind_child_agent(&self.child_agent, &stored.child_task_id, model) {
+                    Ok(agent) => Arc::new(agent),
+                    Err(_) => {
+                        let error = RuntimeErrorInfo::new(
+                            RuntimeErrorCode::Internal,
+                            "child model and tools could not be bound",
+                        );
+                        self.settle_accepted_and_publish(
+                            &mut stored,
+                            ChildTaskStatus::Failed,
+                            Some(error.clone()),
+                        )
+                        .await?;
+                        return Err(child_error(&stored, error));
+                    }
                 }
-            }
-        } else {
-            self.child_agent.clone()
-        };
+            } else {
+                self.child_agent.clone()
+            };
         let started_at_ms = match crate::runtime::now_ms() {
             Ok(value) => value,
             Err(_) => {

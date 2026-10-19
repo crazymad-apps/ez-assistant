@@ -4,6 +4,8 @@ import type { ProviderEntity } from './entity.js';
 
 /** 与 Rust/共享 TS 的纯能力投影同义，以共享夹具约束；判断实际上游，不判断中心代理 URL。 */
 export function serverHistorySupport(connection: ProviderConnection): Support {
+  if (connection.provider_type === 'opencode')
+    return connection.protocol_preference === 'responses' && connection.server_history_support_override !== 'unsupported' ? 'unknown' : 'unsupported';
   const responses = ['openai', 'deepseek', 'dashscope_api', 'dashscope_plan', 'moonshot'].includes(connection.provider_type)
     && connection.protocol_preference !== 'chat_completions';
   if (!responses) return 'unsupported';

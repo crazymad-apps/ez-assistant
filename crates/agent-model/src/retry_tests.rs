@@ -297,6 +297,161 @@ fn terminal(error: ModelError) -> ScriptAction {
     ScriptAction::Stream(vec![ModelEvent::TurnFailed { error }])
 }
 
+fn tool_request() -> ModelRequest {
+    let mut request = request();
+    request.tools.push(agent_types::ToolDefinition {
+        name: agent_types::ToolName::new("edit_file").unwrap(),
+        description: "Edit a file".into(),
+        input_schema: serde_json::json!({"type":"object"}),
+    });
+    request
+}
+
+#[tokio::test]
+async fn malformed_tool_arguments_receive_feedback_before_a_bounded_correction() {
+    let error = ModelError::ToolArguments("invalid JSON: EOF while parsing an array".into());
+    let inner = Arc::new(ScriptedService::new([
+        terminal(error.clone()),
+        terminal(error.clone()),
+        terminal(error.clone()),
+    ]));
+    let observer = Arc::new(AttemptCollector::default());
+    let service = RetryingModelService::with_observer(
+        inner.clone(),
+        policy(vec![Duration::ZERO; 5]).with_tool_argument_corrections(2),
+        observer.clone(),
+    );
+    let original = tool_request();
+    let events: Vec<_> = service
+        .stream(original.clone(), ModelCallContext::default())
+        .await
+        .unwrap()
+        .collect()
+        .await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, ModelEvent::TurnRestarted))
+            .count(),
+        2
+    );
+    assert_eq!(events.last(), Some(&ModelEvent::TurnFailed { error }));
+    let calls = inner.calls();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(calls[0].request, original);
+    for call in &calls[1..] {
+        assert_eq!(call.request.system, original.system);
+        assert_eq!(call.request.tools, original.tools);
+        assert_eq!(call.request.conversation.messages.len(), 1);
+        let agent_types::ConversationMessage::User(feedback) =
+            &call.request.conversation.messages[0]
+        else {
+            panic!("correction must carry request-only feedback");
+        };
+        assert_eq!(
+            feedback.transcript_visibility,
+            agent_types::TranscriptVisibility::Hidden
+        );
+        let text = match &feedback.parts[0] {
+            agent_types::UserPart::InternalContext(part) => &part.text,
+            _ => panic!("feedback must use internal context"),
+        };
+        assert!(text.contains("EOF while parsing an array"));
+        assert!(text.contains("No tool calls from that response were executed"));
+    }
+    assert!(matches!(
+        observer.events().last(),
+        Some(ModelAttemptEvent::StreamFailed {
+            will_retry: false,
+            attempt: 3,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn argument_correction_respects_total_attempt_budget_and_cancellation() {
+    let error = ModelError::ToolArguments("unfinished arguments".into());
+    let inner = Arc::new(ScriptedService::new([
+        terminal(error.clone()),
+        terminal(error.clone()),
+    ]));
+    let service = RetryingModelService::new(
+        inner.clone(),
+        policy(vec![Duration::ZERO]).with_tool_argument_corrections(5),
+    );
+    let events: Vec<_> = service
+        .stream(tool_request(), ModelCallContext::default())
+        .await
+        .unwrap()
+        .collect()
+        .await;
+    assert_eq!(inner.calls().len(), 2);
+    assert_eq!(
+        events.last(),
+        Some(&ModelEvent::TurnFailed {
+            error: error.clone()
+        })
+    );
+
+    let cancellation = CancellationToken::new();
+    let observer = Arc::new(CancellingObserver {
+        cancellation: cancellation.clone(),
+        events: Mutex::new(Vec::new()),
+    });
+    let inner = Arc::new(ScriptedService::new([terminal(error)]));
+    let service = RetryingModelService::with_observer(
+        inner.clone(),
+        policy(vec![Duration::ZERO; 5]).with_tool_argument_corrections(2),
+        observer,
+    );
+    let events: Vec<_> = service
+        .stream(tool_request(), ModelCallContext::new(cancellation))
+        .await
+        .unwrap()
+        .collect()
+        .await;
+    assert_eq!(inner.calls().len(), 1);
+    assert_eq!(
+        events.last(),
+        Some(&ModelEvent::TurnFailed {
+            error: ModelError::Cancelled
+        })
+    );
+}
+
+#[tokio::test]
+async fn argument_correction_does_not_retry_request_encoding_or_tool_free_calls() {
+    let error = ModelError::ToolArguments("bad JSON".into());
+    let inner = Arc::new(ScriptedService::new([ScriptAction::Fail(error.clone())]));
+    let service = RetryingModelService::new(
+        inner.clone(),
+        policy(vec![Duration::ZERO; 5]).with_tool_argument_corrections(2),
+    );
+    assert_eq!(
+        service
+            .stream(tool_request(), ModelCallContext::default())
+            .await
+            .err(),
+        Some(error.clone())
+    );
+    assert_eq!(inner.calls().len(), 1);
+
+    let inner = Arc::new(ScriptedService::new([terminal(error.clone())]));
+    let service = RetryingModelService::new(
+        inner.clone(),
+        policy(vec![Duration::ZERO; 5]).with_tool_argument_corrections(2),
+    );
+    let events: Vec<_> = service
+        .stream(request(), ModelCallContext::default())
+        .await
+        .unwrap()
+        .collect()
+        .await;
+    assert_eq!(inner.calls().len(), 1);
+    assert_eq!(events, vec![ModelEvent::TurnFailed { error }]);
+}
+
 #[tokio::test]
 async fn explicitly_allowed_transient_reasons_retry_until_stream_establishes() {
     let inner = Arc::new(ScriptedService::new([

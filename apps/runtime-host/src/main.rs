@@ -5,6 +5,7 @@ mod attachment_hash;
 mod build_info;
 mod config;
 mod config_source;
+mod desktop_media;
 mod device;
 mod endpoint;
 mod host_configuration;
@@ -65,6 +66,9 @@ fn main() {
 
 async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
     match action {
+        CliAction::DesktopMedia(arguments) => {
+            desktop_media::diagnose(arguments).await.map_err(Into::into)
+        }
         CliAction::BuildInfoJson => {
             println!(
                 "{}",

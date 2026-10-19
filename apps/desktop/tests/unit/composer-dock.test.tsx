@@ -1013,6 +1013,7 @@ describe("ComposerDock", () => {
       "session-1",
       "selection-1",
       expect.any(String),
+      { binding: null, device: null },
     ));
     await waitFor(() => expect(submit).toHaveBeenCalledWith(
       "session-1",
@@ -1828,5 +1829,5 @@ function domRect(left: number, top: number, width: number, height: number): DOMR
 
 vi.mock("../../src/runtime-client/ClientResources", async (original) => {
   const actual = await original<typeof import("../../src/runtime-client/ClientResources")>();
-  return {...actual, ClientResources: class extends actual.ClientResources { override readonly desktop = true; }};
+  return {...actual, ClientResources: class extends actual.ClientResources { override readonly desktop = true; override get native_target() { return { binding: null, device: null }; } }};
 });

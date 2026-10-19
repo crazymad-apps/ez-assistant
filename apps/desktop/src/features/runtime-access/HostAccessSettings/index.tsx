@@ -2,6 +2,7 @@ import { manageLocalHost } from "../../../native-bridge/runtimeConnection";
 import { isTauri } from "@tauri-apps/api/core";
 import { observer } from "mobx-react-lite";
 import { useEffect, useState } from "react";
+import { TextInput } from "../../../components/TextInput";
 import { Button } from "../../../components/Button";
 import { SelectionPopover } from "../../../components/SelectionPopover";
 import type { HostMode, HostAccessCommand, HostAccessConfiguration, HostAccessStatus } from "@ez-assistant/protocol";
@@ -11,7 +12,7 @@ import styles from "./index.module.scss";
 
 export const HostAccessSettings = observer(function HostAccessSettings({ onDirtyChange, on_back }: Readonly<{ onDirtyChange: (dirty: boolean) => void; on_back: () => void }>) {
   const root = useRootStore();
-  const client = root.connection.state === "connected" ? root.runtime_client : null;
+  const client = root.local_connection.state === "connected" ? root.local_runtime_client : null;
   const [status, setStatus] = useState<HostAccessStatus | null>(null);
   const [draft, setDraft] = useState<HostAccessConfiguration | null>(null);
   const [mode, setMode] = useState<HostMode>("personal");
@@ -24,7 +25,7 @@ export const HostAccessSettings = observer(function HostAccessSettings({ onDirty
   const [notice, setNotice] = useState<string | null>(null);
   const [scheme_open, setSchemeOpen] = useState(false);
 
-  const command = (value: HostAccessCommand) => isTauri() && root.files.native_host ? manageLocalHost(value) : client ? client.hostAccessCommand(value) : Promise.reject(new Error("请先连接 Host。"));
+  const command = (value: HostAccessCommand) => isTauri() && root.local_files.native_host ? manageLocalHost(value) : client ? client.hostAccessCommand(value) : Promise.reject(new Error("请先连接 Host。"));
   function apply(value: HostAccessStatus) {
     setStatus(value); setDraft(value.configuration); setMode(value.mode ?? "personal"); setCenterUrl(value.center_url ?? ""); setClearBinding(false);
   }
@@ -60,7 +61,7 @@ export const HostAccessSettings = observer(function HostAccessSettings({ onDirty
     try {
       const next = await command(kind === "password"
         ? { type: "set_password", payload: { expected_revision: status.revision, password: submitted } }
-        : { type: "configure", payload: { expected_revision: status.revision, ...(isTauri() && root.files.native_host ? { mode, center_url: mode === "enterprise" ? center_url || undefined : undefined, clear_center_binding: clear_binding } : {}), configuration: { ...draft, server_names: draft.server_names.map((name) => name.trim().toLowerCase()).filter(Boolean) } } });
+        : { type: "configure", payload: { expected_revision: status.revision, ...(isTauri() && root.local_files.native_host ? { mode, center_url: mode === "enterprise" ? center_url || undefined : undefined, clear_center_binding: clear_binding } : {}), configuration: { ...draft, server_names: draft.server_names.map((name) => name.trim().toLowerCase()).filter(Boolean) } } });
       setStatus(next);
       if (kind === "configuration") apply(next);
       onDirtyChange(kind === "password" ? JSON.stringify(draft) !== JSON.stringify(next.configuration) : password.length > 0);
@@ -73,10 +74,10 @@ export const HostAccessSettings = observer(function HostAccessSettings({ onDirty
   const closing_current = locked && draft?.remote_enabled === false && !isLoopbackAddress(client?.address);
   return <SettingsPageContainer title="访问设置" on_back={on_back} back_label="返回 Runtime" actions={<Button disabled={pending} onClick={() => void refresh()} variant="text">重新载入</Button>}>
     {!status || !draft ? <p role="status">{error ?? "正在读取访问设置…"}</p> : <div className={styles.settings}>
-      {isTauri() && root.files.native_host && <section className={styles.card}>
+      {isTauri() && root.local_files.native_host && <section className={styles.card}>
         <h4>本机 Host 身份配置</h4>
         <SelectionPopover aria_label="Host 模式" disabled={pending} open={mode_open} on_open_change={setModeOpen} on_select={(value) => { setMode(value); setPassword(""); onDirtyChange(true); }} options={[{ value: "personal", label: "个人模式" }, { value: "enterprise", label: "企业模式" }]} selected={mode} trigger_variant="field" />
-        {mode === "enterprise" && <><label htmlFor="center-url">企业中心地址</label><input id="center-url" value={center_url} placeholder="https://center.example.com" onChange={(event) => { setCenterUrl(event.target.value); onDirtyChange(true); }} /><p>中心 ID：{status.center_id ?? "首次成功登录后绑定"}</p>
+        {mode === "enterprise" && <><label htmlFor="center-url">企业中心地址</label><TextInput id="center-url" value={center_url} placeholder="https://center.example.com" onChange={(event) => { setCenterUrl(event.target.value); onDirtyChange(true); }} /><p>中心 ID：{status.center_id ?? "首次成功登录后绑定"}</p>
           {status.center_id && <label><input type="checkbox" checked={clear_binding} onChange={(event) => { setClearBinding(event.target.checked); onDirtyChange(true); }} />清除旧中心绑定，下次登录重新绑定（原用户数据保留）</label>}
         </>}
         <p>保存后须重启。重启会中断本机 Host 所有用户的任务，并使所有客户端断开。</p>
@@ -86,7 +87,7 @@ export const HostAccessSettings = observer(function HostAccessSettings({ onDirty
         <p>{status.password_configured ? "已设置密码，可直接修改。" : "先设置密码，再允许非本机客户端访问。"}</p>
         <label htmlFor="new-host-password">新密码</label>
         <div className={styles.password_row}>
-          <input autoComplete="new-password" disabled={pending} id="new-host-password" onChange={(event) => { setPassword(event.target.value); onDirtyChange(true); }} placeholder="输入新密码" type="password" value={password} />
+          <TextInput autoComplete="new-password" disabled={pending} id="new-host-password" onChange={(event) => { setPassword(event.target.value); onDirtyChange(true); }} placeholder="输入新密码" type="password" value={password} />
           <Button disabled={pending || !password.trim() || new TextEncoder().encode(password).length > 1024} onClick={() => void save("password")}>保存密码</Button>
         </div>
       </section>}
@@ -106,11 +107,11 @@ export const HostAccessSettings = observer(function HostAccessSettings({ onDirty
           <label>协议</label>
           <SelectionPopover aria_label="访问协议" disabled={pending || locked} open={scheme_open} on_open_change={setSchemeOpen} on_select={(scheme) => update({ scheme })} options={[{ value: "http", label: "HTTP" }, { value: "https", label: "HTTPS" }]} selected={draft.scheme} trigger_variant="field" />
           <label htmlFor="host-port">端口</label>
-          <input id="host-port" inputMode="numeric" max={65535} min={1} type="number" onChange={(event) => update({ port: Number(event.target.value) })} placeholder="7240" value={draft.port || ""} />
+          <TextInput id="host-port" inputMode="numeric" max={65535} min={1} type="number" onChange={(event) => update({ port: Number(event.target.value) })} placeholder="7240" value={draft.port || ""} />
           {draft.scheme === "https" && <>
             <p>HTTPS 证书需覆盖 127.0.0.1 及实际访问的 IP／域名，并受客户端信任。</p>
-            <label htmlFor="host-certificate">证书路径（Host）</label><input id="host-certificate" onChange={(event) => update({ tls_certificate: event.target.value || null })} placeholder="/absolute/path/host.crt" value={draft.tls_certificate ?? ""} />
-            <label htmlFor="host-private-key">私钥路径（Host）</label><input id="host-private-key" onChange={(event) => update({ tls_private_key: event.target.value || null })} placeholder="/absolute/path/host.key" value={draft.tls_private_key ?? ""} />
+            <label htmlFor="host-certificate">证书路径（Host）</label><TextInput id="host-certificate" onChange={(event) => update({ tls_certificate: event.target.value || null })} placeholder="/absolute/path/host.crt" value={draft.tls_certificate ?? ""} />
+            <label htmlFor="host-private-key">私钥路径（Host）</label><TextInput id="host-private-key" onChange={(event) => update({ tls_private_key: event.target.value || null })} placeholder="/absolute/path/host.key" value={draft.tls_private_key ?? ""} />
           </>}
         </fieldset>
         {locked ? <p>关闭非本地访问后，可修改端口、协议和证书。</p> : <p>修改端口、协议或证书后需重启 Host；访问开关和允许地址立即生效。</p>}

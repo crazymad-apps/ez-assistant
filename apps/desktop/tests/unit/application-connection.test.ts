@@ -14,6 +14,7 @@ const native = vi.hoisted(() => ({
 const update = vi.hoisted(() => ({ read: vi.fn(), listen: vi.fn(), start: vi.fn(), cancel: vi.fn() }));
 vi.mock("../../src/native-bridge/desktopUpdate", () => ({ readDesktopUpdate: update.read, listenDesktopUpdate: update.listen, startDesktopUpdate: update.start, cancelDesktopUpdate: update.cancel }));
 const web = vi.hoisted(() => ({ login: vi.fn(), bootstrap: vi.fn(), logout: vi.fn(), token: vi.fn() }));
+const resources = vi.hoisted(() => ({ restore: vi.fn(async () => undefined) }));
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => native.desktop }));
 vi.mock("../../src/runtime-client/webLogin", () => ({
   discoverWebHost: vi.fn(async () => ({ mode: "personal" })), loginWeb: web.login, bootstrapWebRuntime: web.bootstrap, logoutWeb: web.logout, takeWebLoginToken: web.token,
@@ -25,9 +26,10 @@ vi.mock("../../src/native-bridge/runtimeConnection", () => ({ beginRuntimeConnec
 vi.mock("../../src/stores/RootStore", () => ({ RootStore: class {
   constructor(readonly options: { flush_application_preferences?: () => Promise<void> } = {}) {}
   connection = observable({ markDisconnected: vi.fn(), state: "disconnected", last_error_code: null as string | null, error_message: null as string | null, address: "" });
+  local_connection = this.connection;
   settings = { open: vi.fn(), close: vi.fn(), showNotice: vi.fn() };
   dispose = vi.fn();
-  connect = vi.fn(async (bootstrap: RuntimeBootstrap) => { runInAction(() => { this.connection.state = "connected"; this.connection.address = bootstrap.base_url; }); });
+  connect = vi.fn(async (bootstrap: RuntimeBootstrap) => { runInAction(() => { this.connection.state = "connected"; this.connection.address = bootstrap.base_url; }); await resources.restore(); });
 } }));
 import { RootStore } from "../../src/stores/RootStore";
 import { ApplicationConnectionStore } from "../../src/features/runtime-access/ApplicationConnectionStore";
@@ -42,6 +44,23 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllGlobals(); });
 
 describe("Desktop connection entry and switching", () => {
+  it("releases the login lock before resource restoration and ignores its completion after logout", async () => {
+    const restore = deferred<undefined>();
+    resources.restore.mockReturnValueOnce(restore.promise);
+    const entry = new ApplicationConnectionStore(new RootStore());
+    await entry.connectDesktop(null, "", false);
+    expect(entry.phase).toBe("workspace");
+    expect(entry.pending).toBe(false);
+    const current = entry.current!;
+    await entry.signOut(false);
+    vi.mocked(current.settings.close).mockClear();
+    restore.resolve(undefined);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(entry.phase).toBe("entry");
+    expect(current.settings.close).not.toHaveBeenCalled();
+    entry.dispose();
+  });
   it("detects an upgrade without stopping the Host, then deduplicates explicit upgrade and concurrent startup", async () => {
     const entry = new ApplicationConnectionStore(new RootStore());
     native.local.mockRejectedValueOnce({ code: "runtime_upgrade_required", message: "需要完成本机更新" });
@@ -361,6 +380,53 @@ async function loginEntry(status = loginStatus()) {
 }
 
 describe("login options configuration lifecycle", () => {
+  it.each(["old-center", "new-center"])("uses the Host-resolved center identity after changing address: %s", async (center_id) => {
+    const entry = await loginEntry();
+    entry.editLoginOptions({ center_url: "https://home.example.com" });
+    entry.confirmLoginOptions();
+    const saved = loginStatus({ center_url: "https://home.example.com", center_id, revision: "revision-2", restart_required: true,
+      configuration: { ...loginStatus().configuration, remote_enabled: false } });
+    native.manage.mockResolvedValueOnce(saved).mockResolvedValueOnce({ ...saved, instance_id: "host-after", current_center_url: saved.center_url, restart_required: false });
+    await entry.applyLoginOptions();
+    expect(native.manage.mock.calls[1][0].payload.clear_center_binding).toBe(true);
+    expect(entry.login_options_notice).toBe("登录选项已生效");
+    entry.dispose();
+  });
+
+  it("rechecks the center identity when explicitly saving the same address", async () => {
+    const entry = await loginEntry();
+    entry.confirmLoginOptions();
+    const saved = loginStatus({ center_id: "rebuilt-center", revision: "revision-2", restart_required: true,
+      configuration: { ...loginStatus().configuration, remote_enabled: false } });
+    native.manage.mockResolvedValueOnce(saved).mockResolvedValueOnce({ ...saved, instance_id: "host-after", restart_required: false });
+    await entry.applyLoginOptions();
+    expect(native.manage.mock.calls[1][0].type).toBe("configure");
+    expect(entry.login_options_notice).toBe("登录选项已生效");
+    entry.dispose();
+  });
+
+  it("does not treat unchanged configuration as a verified center after an unknown save result", async () => {
+    const entry = await loginEntry(loginStatus({ configuration: { ...loginStatus().configuration, remote_enabled: false } }));
+    entry.confirmLoginOptions();
+    native.manage.mockRejectedValueOnce(new Error("connection lost")).mockResolvedValueOnce(loginStatus({ configuration: { ...loginStatus().configuration, remote_enabled: false } }));
+    await entry.applyLoginOptions();
+    expect(native.restart).not.toHaveBeenCalled();
+    expect(entry.login_options?.phase).toBe("edit");
+    expect(entry.login_options?.message).toContain("未确认中心身份");
+    entry.dispose();
+  });
+
+  it("shows the local Host rejection instead of suggesting an update is in progress", async () => {
+    const entry = await loginEntry();
+    entry.editLoginOptions({ mode: "personal" }); entry.confirmLoginOptions();
+    native.manage.mockRejectedValueOnce({ code: "invalid_request", message: "请先退出企业组网并确认中心注销，再修改模式或中心绑定。" });
+    await entry.applyLoginOptions();
+    expect(entry.login_options?.message).toContain("请先退出企业组网");
+    expect(entry.login_options?.message).not.toContain("更新");
+    expect(native.restart).not.toHaveBeenCalled();
+    entry.dispose();
+  });
+
   it("keeps the address draft when toggling, but saves personal mode without the hidden address and never logs in after restart", async () => {
     const entry = await loginEntry();
     entry.editLoginOptions({ center_url: "https://new.example.com/path", mode: "personal" });
@@ -389,8 +455,8 @@ describe("login options configuration lifecycle", () => {
     entry.dispose();
   });
 
-  it("does not save unchanged options and applies already saved configuration without another write", async () => {
-    const entry = await loginEntry();
+  it("does not save unchanged personal options and applies already saved configuration without another write", async () => {
+    const entry = await loginEntry(loginStatus({ mode: "personal", current_mode: "personal", center_id: undefined }));
     entry.confirmLoginOptions();
     expect(entry.login_options?.phase).toBe("edit");
     await entry.applyLoginOptions();

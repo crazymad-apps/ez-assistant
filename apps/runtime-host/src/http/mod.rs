@@ -7,14 +7,18 @@ mod attachments;
 mod auth;
 mod commands;
 mod compatibility;
+mod desktop;
 mod error;
 mod events;
 mod login;
 mod materializations;
 mod plugin_config;
 mod plugin_upload;
+pub(crate) mod proxy;
+mod registration;
 pub(crate) mod resources;
 mod routes;
+pub(crate) mod socket_auth;
 mod startup;
 pub(crate) mod terminals;
 mod web;
@@ -53,6 +57,7 @@ pub(crate) struct HttpState {
     connections: CancellationToken,
     file_reads: Arc<tokio::sync::Semaphore>,
     pub(crate) terminals: Arc<crate::user_terminal::UserTerminals>,
+    pub(crate) desktop: Option<Arc<crate::desktop_media::service::DesktopViews>>,
 }
 
 /// HTTP listener 建立前即可冻结的端点与认证配置。
@@ -114,6 +119,7 @@ impl HttpState {
         } = endpoint;
         Self {
             domains: None,
+            desktop: None,
             terminals,
             file_reads: Arc::new(tokio::sync::Semaphore::new(8)),
             startup: StartupStateHandle::new(),
@@ -150,7 +156,7 @@ async fn health(
 async fn capabilities(
     axum::extract::State(state): axum::extract::State<HttpState>,
     axum::Extension(permit): axum::Extension<Option<crate::access::AccessPermit>>,
-) -> Json<RuntimeHostCapabilities> {
+) -> impl axum::response::IntoResponse {
     // 只在 capabilities 查询时读取 PATH；不启动命令、不探测 Shell 环境，不进入普通输入路径。
     let rg_on_path = if permit.is_some() {
         tokio::task::spawn_blocking(|| {
@@ -167,41 +173,50 @@ async fn capabilities(
     } else {
         None
     };
-    Json(RuntimeHostCapabilities {
-        mode: state.access.mode(),
-        platform: permit.as_ref().map(|_| std::env::consts::OS.to_owned()),
-        architecture: permit.as_ref().map(|_| std::env::consts::ARCH.to_owned()),
-        rg_on_path,
-        min_compatible_version: MIN_COMPATIBLE_VERSION.to_owned(),
-        runtime_version: env!("CARGO_PKG_VERSION").to_owned(),
-        max_command_bytes: MAX_COMMAND_BYTES as u64,
-        max_attachment_bytes: Some(MAX_ATTACHMENT_BYTES),
-        sse: true,
-        streaming_upload: true,
-        features: {
-            let mut features = vec![
-                RuntimeHostFeature::StartupDiagnostics,
-                RuntimeHostFeature::EventEnvelopes,
-                RuntimeHostFeature::ApplicationSnapshot,
-                RuntimeHostFeature::SessionView,
-                RuntimeHostFeature::ChildTaskView,
-                RuntimeHostFeature::ConversationPaging,
-                RuntimeHostFeature::ToolDetail,
-                RuntimeHostFeature::QueueControl,
-                RuntimeHostFeature::ApprovalQueue,
-                RuntimeHostFeature::SessionManagement,
-                RuntimeHostFeature::SessionMaterialization,
-                RuntimeHostFeature::SessionResourceFiles,
-                RuntimeHostFeature::HostAccess,
-                RuntimeHostFeature::WebLogin,
-                RuntimeHostFeature::UserTerminals,
-            ];
-            if state.access.center().is_some() {
-                features.push(RuntimeHostFeature::EnterpriseIdentity);
-            }
-            features
-        },
-    })
+    (
+        [
+            ("x-ez-network-proxy", "2"),
+            (
+                "x-ez-desktop-view",
+                if state.desktop.is_some() { "1" } else { "0" },
+            ),
+        ],
+        Json(RuntimeHostCapabilities {
+            mode: state.access.mode(),
+            platform: permit.as_ref().map(|_| std::env::consts::OS.to_owned()),
+            architecture: permit.as_ref().map(|_| std::env::consts::ARCH.to_owned()),
+            rg_on_path,
+            min_compatible_version: MIN_COMPATIBLE_VERSION.to_owned(),
+            runtime_version: env!("CARGO_PKG_VERSION").to_owned(),
+            max_command_bytes: MAX_COMMAND_BYTES as u64,
+            max_attachment_bytes: Some(MAX_ATTACHMENT_BYTES),
+            sse: true,
+            streaming_upload: true,
+            features: {
+                let mut features = vec![
+                    RuntimeHostFeature::StartupDiagnostics,
+                    RuntimeHostFeature::EventEnvelopes,
+                    RuntimeHostFeature::ApplicationSnapshot,
+                    RuntimeHostFeature::SessionView,
+                    RuntimeHostFeature::ChildTaskView,
+                    RuntimeHostFeature::ConversationPaging,
+                    RuntimeHostFeature::ToolDetail,
+                    RuntimeHostFeature::QueueControl,
+                    RuntimeHostFeature::ApprovalQueue,
+                    RuntimeHostFeature::SessionManagement,
+                    RuntimeHostFeature::SessionMaterialization,
+                    RuntimeHostFeature::SessionResourceFiles,
+                    RuntimeHostFeature::HostAccess,
+                    RuntimeHostFeature::WebLogin,
+                    RuntimeHostFeature::UserTerminals,
+                ];
+                if state.access.center().is_some() {
+                    features.push(RuntimeHostFeature::EnterpriseIdentity);
+                }
+                features
+            },
+        }),
+    )
 }
 
 /// 与 capabilities 共用公开网络边界，软件不兼容和未登录时也能读取生效中心。

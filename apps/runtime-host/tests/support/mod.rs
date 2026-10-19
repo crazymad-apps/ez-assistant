@@ -1195,6 +1195,25 @@ pub struct HostProcess {
     access_token: String,
 }
 
+/// 使用默认动态端口区间之外的夹具端口，避免迁移期间被本进程的出站 HTTP 连接占用。
+/// 只用于测试，逐个 bind 核验；调用方持有监听到 spawn 前，绝不修改系统动态端口配置。
+fn reserve_fixture_port() -> TcpListener {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    const START: usize = 16_000;
+    const COUNT: usize = 16_000;
+    for _ in 0..COUNT {
+        let offset = (std::process::id() as usize + NEXT.fetch_add(1, Ordering::Relaxed)) % COUNT;
+        let port = (START + offset) as u16;
+        match TcpListener::bind(("127.0.0.1", port)) {
+            Ok(socket) => return socket,
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
+            Err(error) => panic!("reserve isolated Host port: {error}"),
+        }
+    }
+    panic!("no isolated Host fixture port available")
+}
+
 impl HostProcess {
     pub fn start(runtime_home: &Path) -> Self {
         Self::start_inner(runtime_home, None, None)
@@ -1219,8 +1238,9 @@ impl HostProcess {
             .unwrap_or_else(|_| "schema_version = 1\n".into())
             .parse::<toml_edit::DocumentMut>()
             .unwrap();
+        let mut reservation = None;
         if document.get("host_access").is_none() {
-            let socket = TcpListener::bind("127.0.0.1:0").unwrap();
+            let socket = reserve_fixture_port();
             let config = assistant_protocol::HostAccessConfiguration {
                 port: socket.local_addr().unwrap().port(),
                 ..Default::default()
@@ -1231,6 +1251,7 @@ impl HostProcess {
                 .unwrap();
             document["host_access"] = toml_edit::Item::Table(section.as_table().clone());
             fs::write(path, document.to_string()).unwrap();
+            reservation = Some(socket);
         }
         // Runtime Home 与用户 Home 是不同的扫描来源。只隔离数据库不足以隔离 Skill；
         // 仅为测试子进程指定私有 Home，不改当前进程环境或真实用户目录，重启沿用同一路径。
@@ -1254,6 +1275,8 @@ impl HostProcess {
         if password.is_some() {
             command.arg("--password-stdin").stdin(Stdio::piped());
         }
+        // 配置与目录准备全部完成后再释放端口；产品仍自行绑定，不增加继承 socket 的测试接口。
+        drop(reservation);
         let mut child = command.spawn().expect("spawn Runtime Host");
         if let Some(password) = password {
             child
