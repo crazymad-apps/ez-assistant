@@ -569,10 +569,12 @@ cargo clippy -p assistant-runtime --all-targets --all-features -- -D warnings
 
 ## v0.21.0 M6 speak 与输出结算边界
 
-- `speak` 是只向 Controller 父 Agent 装配的 Runtime 私有工具。它只接受面向朗读的纯文本，并直接
-  限制每次最多 120 个 Unicode 字符；长内容由模型按自然句子或语义边界串行调用多次。单个输出
-  周期最多成功接受 20 个片段，第 21 次在调用 Host TTS 前返回 Tool Error；Tool Description 与
-  隐藏补齐提醒都显式告知模型这一上限。
+- `speak` 是只向 Controller 父 Agent 装配的 Runtime 私有工具。它只接受面向朗读的纯文本，
+  单次最多 1200 个 Unicode 字符；Runtime 按标点组织为每段最多 60 字符的 TTS 请求，超长句
+  按字符切分，保持正文内容和顺序。每次调用在投递前检查整次所需片段数；单个输出周期仍
+  最多成功接受 20 个实际 TTS 片段。Tool Description 与隐藏补齐提醒同步这一约束。
+  子段身份从规范 ToolCallId 派生，串行等待 Host 接纳，每段重查当前 Run；取消时停止余段。
+  中途入队失败反馈已接纳前缀的字符数，提示不得重播。规范 Tool Call/Result 仍保持一对。
   每次通过校验的调用在工具 started 事实落账后立即交给 Host TTS/FIFO；Tool Call/Result
   仍进入既有 Conversation，不增加播报副本、revision 或独立持久表。
 - Tool、Context 与 Goal continuation 共用同一 Run/输出周期。当前 AgentExecution 候选结束时若有效目标需要语音但
