@@ -59,6 +59,7 @@ struct QueueDriverContext {
     output_dispatcher: Arc<dyn crate::ChannelOutputDispatcher>,
     recall_reference_codec: Arc<crate::HmacRecallReferenceCodec>,
     mcp_registry: Arc<crate::mcp::McpRegistry>,
+    mcp_management: super::mcp::McpManagement,
     mcp_config_store: Arc<crate::mcp::McpConfigStore>,
     mcp_image_materializer: Arc<dyn crate::McpImageMaterializer>,
     events: ObservationCoordinator,
@@ -172,6 +173,7 @@ impl AssistantRuntime {
             output_dispatcher: self.output_dispatcher.clone(),
             recall_reference_codec: self.recall_reference_codec.clone(),
             mcp_registry: self.mcp_service.registry.clone(),
+            mcp_management: self.mcp_management(),
             mcp_config_store: self.mcp_service.config_store.clone(),
             mcp_image_materializer: self.mcp_service.image_materializer.clone(),
             events: self.event_sender.clone(),
@@ -339,6 +341,15 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
             }
             continue;
         }
+        // 这里只准备候选身份用于装配权限与模型；尚未写 Store/Session，也不发布 Run 事件。
+        let identity_history =
+            match crate::runtime::load_identity_history(context.store.as_ref(), &session).await {
+                Ok(history) => history,
+                Err(_) => {
+                    fault_driver(&session);
+                    return;
+                }
+            };
         let next = {
             let mut state = match session.lock_state() {
                 Ok(state) => state,
@@ -348,14 +359,25 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                 fault_locked_driver(&mut state);
                 return;
             };
-            let Some(run) = state.runs.get(&input.latest_run_id) else {
-                fault_locked_driver(&mut state);
-                return;
+            let run_id = if let Some(run_id) = &input.latest_run_id {
+                let Some(run) = state.runs.get(run_id) else {
+                    fault_locked_driver(&mut state);
+                    return;
+                };
+                run.snapshot().run_id
+            } else {
+                match crate::run::allocate_run_id(&state, &identity_history) {
+                    Ok(id) => id,
+                    Err(_) => {
+                        fault_locked_driver(&mut state);
+                        return;
+                    }
+                }
             };
             (
                 input_id,
                 input,
-                run.snapshot(),
+                run_id,
                 state.body_generation,
                 state.model_selection.clone(),
                 state.agent_shell_kind,
@@ -363,7 +385,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
         };
         let model_diagnostics = Arc::new(RunModelDiagnostics::new(
             session.id().clone(),
-            next.2.run_id.clone(),
+            next.2.clone(),
             context.events.clone(),
         ));
         let run_cancellation = context.root_cancellation.child_token();
@@ -412,6 +434,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     attachments: context.attachments.clone(),
                     shell,
                     skill_catalog,
+                    skill_package_source: context.skill_package_source.clone(),
                     model_factory: context.model_factory.clone(),
                     context_window: context.context_window.clone(),
                     run_tool_factory: context.run_tool_factory.as_ref(),
@@ -422,20 +445,22 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     controller_tools,
                     output_dispatcher: context.output_dispatcher.clone(),
                     mcp_registry: context.mcp_registry.clone(),
+                    mcp_management: context.mcp_management.clone(),
                     mcp_image_materializer: context.mcp_image_materializer.clone(),
                 },
                 RunAuthorizationInput {
+                    input_id: next.0.clone(),
                     permission_coordinator: context.permission_coordinator.clone(),
                     approval_registry: context.approval_registry.clone(),
-                    variant: next.2.variant,
-                    run_id: next.2.run_id.clone(),
+                    variant: next.1.stored.agent_variant,
+                    run_id: next.2.clone(),
                     cancellation: run_cancellation.clone(),
                     events: context.events.clone(),
                     goal_binding: next.1.stored.goal_binding.as_ref().map(|binding| {
                         GoalRunBinding {
                             goal_id: binding.goal_id.clone(),
                             generation: binding.generation,
-                            run_id: next.2.run_id.clone(),
+                            run_id: next.2.clone(),
                         }
                     }),
                     input_origin: next.1.stored.origin,
@@ -495,7 +520,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                 && state
                     .inputs
                     .get(&next.0)
-                    .is_some_and(|input| input.latest_run_id == next.2.run_id)
+                    .is_some_and(|input| input.latest_run_id == next.1.latest_run_id)
                 && state.body_generation == next.3
                 && state.model_selection == next.4
                 && state.agent_shell_kind == next.5
@@ -503,6 +528,73 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
         if !still_current {
             // 取消、暂停或置顶使本次准备失效，不得为旧 Run 写入失败或用户正文。
             continue;
+        }
+        if next.1.latest_run_id.is_none() {
+            // 装配期间仍可撤销/置顶；重新核对队首并持 mutation 后才真正领取。
+            // Store 成功后安装唯一 Run 控制，再发布接纳事实；失败保留队列并封闭本 Session。
+            let created_at_ms = match super::now_ms() {
+                Ok(now) => now,
+                Err(_) => {
+                    fault_driver(&session);
+                    return;
+                }
+            };
+            let run = crate::StoredRun {
+                shell: None,
+                run_id: next.2.clone(),
+                session_id: session.id().clone(),
+                input_id: next.0.clone(),
+                attempt: 1,
+                status: RunStatus::Accepted,
+                agent_variant: next.1.stored.agent_variant,
+                approval_mode: match session.lock_state() {
+                    Ok(state) => state.approval_mode,
+                    Err(_) => return,
+                },
+                reasoning_effort: None,
+                cancel_requested: false,
+                error: None,
+                message_ids: Vec::new(),
+                message_steps: Default::default(),
+                created_at_ms,
+                started_at_ms: None,
+                finished_at_ms: None,
+            };
+            if context.store.claim_input(run.clone()).await.is_err() {
+                fault_driver(&session);
+                return;
+            }
+            {
+                let mut state = match session.lock_state() {
+                    Ok(state) => state,
+                    Err(_) => return,
+                };
+                state.runs.insert(
+                    run.run_id.clone(),
+                    crate::run::RunRecord::accepted(&run, Vec::new()),
+                );
+                let input = state
+                    .inputs
+                    .get_mut(&next.0)
+                    .expect("verified queued input");
+                input.first_run_id = Some(run.run_id.clone());
+                input.latest_run_id = Some(run.run_id.clone());
+                if let Some(activation) = input.stored.skill_activation.as_mut() {
+                    activation.run_id = Some(run.run_id.clone());
+                }
+                for activation in state
+                    .skill_activations
+                    .iter_mut()
+                    .filter(|activation| activation.input_id.as_ref() == Some(&next.0))
+                {
+                    activation.run_id = Some(run.run_id.clone());
+                }
+            }
+            let _ = context.events.send(RuntimeEvent::RunAccepted {
+                session_id: session.id().clone(),
+                run_id: run.run_id,
+                created_at_ms: Some(created_at_ms),
+            });
         }
         let prepared = prepared.and_then(|(compiled, leases)| {
             compiled.ensure_models_current(&context.config_registry)?;
@@ -533,13 +625,8 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                 {
                     Ok(journal) => journal,
                     Err(error) => {
-                        fail_before_start(
-                            &context,
-                            &session,
-                            &next.2.run_id,
-                            error.to_protocol_info(),
-                        )
-                        .await;
+                        fail_before_start(&context, &session, &next.2, error.to_protocol_info())
+                            .await;
                         continue;
                     }
                 };
@@ -635,7 +722,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                         shell: shell.clone(),
                         operation_id,
                         input_id: next.0.clone(),
-                        run_id: next.2.run_id.clone(),
+                        run_id: next.2.clone(),
                         session_id: session.id().clone(),
                         message: message.clone(),
                         reasoning_effort,
@@ -698,7 +785,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                         stored.queued_message = None;
                         state
                             .runs
-                            .get_mut(&next.2.run_id)
+                            .get_mut(&next.2)
                             .expect("run exists")
                             .extend_message_ids([message.id]);
                     }
@@ -726,12 +813,12 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                         });
                     }
                     state.active_run = Some(ActiveRun {
-                        run_id: next.2.run_id.clone(),
+                        run_id: next.2.clone(),
                         cancellation: cancellation.clone(),
                         goal_signal_latch,
                     });
-                    let record = state.runs.get_mut(&next.2.run_id).expect("run exists");
-                    record.freeze_execution(reasoning_effort, shell);
+                    let record = state.runs.get_mut(&next.2).expect("run exists");
+                    record.freeze_execution(reasoning_effort, shell, started_at);
                     record.model_diagnostics = Some(model_diagnostics.clone());
                     let conversation = state
                         .journal
@@ -751,7 +838,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     if persist_recovered_context(
                         &context,
                         &session,
-                        &next.2.run_id,
+                        &next.2,
                         disclosure_context.as_ref(),
                         shell_context.as_ref(),
                     )
@@ -798,7 +885,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                 drop(binding);
                 let recorder = Arc::new(RuntimeRecorder::new(
                     session.clone(),
-                    next.2.run_id.clone(),
+                    next.2.clone(),
                     context.store.clone(),
                     context.events.clone(),
                     skill_activation_latch,
@@ -837,7 +924,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     };
                     let observed = observe_run_execution(
                         session.clone(),
-                        next.2.run_id.clone(),
+                        next.2.clone(),
                         events,
                         completion,
                         context.events.clone(),
@@ -908,7 +995,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                             let controller = controller_tool_coordinator_from(&context);
                             match crate::run::continue_run_if_required(
                                 &session,
-                                &next.2.run_id,
+                                &next.2,
                                 &outcome,
                                 execution_start_step,
                                 message_step,
@@ -1032,7 +1119,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     match compact_parent_context(
                         compactor.as_ref(),
                         session.clone(),
-                        &next.2.run_id,
+                        &next.2,
                         AutomaticCompactionInput {
                             reason,
                             normal_request,
@@ -1065,7 +1152,10 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                                 conversation: resource_projection.apply(replacement),
                             };
                         }
-                        Err(error) if error.is_cancelled() || cancellation.is_cancelled() => {
+                        Err(error)
+                            if !error.is_committed()
+                                && (error.is_cancelled() || cancellation.is_cancelled()) =>
+                        {
                             break (
                                 Some(agent_core::ExecutionOutcome::Cancelled {
                                     consumption: agent_core::ExecutionConsumption::default(),
@@ -1073,25 +1163,19 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                                 None,
                             );
                         }
-                        Err(_) => {
-                            break (
-                                None,
-                                Some(RuntimeErrorInfo::new(
-                                    assistant_protocol::RuntimeErrorCode::ContextCompactionFailed,
-                                    format!(
-                                        "context compaction failed (reason={})",
-                                        compaction_reason_label(reason)
-                                    ),
-                                )),
-                            );
+                        // Store 已成功时不能把旧投影走进普通终态落盘；保留控制供进程级恢复。
+                        Err(error) if error.is_committed() => {
+                            fault_driver(&session);
+                            return;
                         }
+                        Err(error) => break (None, Some(error.to_protocol_info())),
                     }
                 };
                 let settled = if let Some(error) = forced_error {
                     let controller = controller_tool_coordinator_from(&context);
                     crate::run::settle_run_with_error(
                         &session,
-                        &next.2.run_id,
+                        &next.2,
                         error,
                         crate::run::RunSettlementContext::new(
                             context.store.as_ref(),
@@ -1106,7 +1190,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     let controller = controller_tool_coordinator_from(&context);
                     crate::run::settle_run(
                         &session,
-                        &next.2.run_id,
+                        &next.2,
                         outcome,
                         final_execution_steps.map_or_else(
                             || {
@@ -1144,7 +1228,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
         fail_before_start(
             &context,
             &session,
-            &next.2.run_id,
+            &next.2,
             start_error.unwrap_or_else(|| {
                 RuntimeErrorInfo::new(
                     assistant_protocol::RuntimeErrorCode::Internal,

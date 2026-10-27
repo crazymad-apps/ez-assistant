@@ -36,7 +36,7 @@ use crate::{
         RuntimeToolAuthorizer,
     },
     session::SessionController,
-    skill::{LoadSkillTool, SkillActivationLatch, SkillActivationOwner},
+    skill::{LoadSkillTool, ReadSkillReferenceTool, SkillActivationLatch, SkillActivationOwner},
     work_plan::UpdatePlanTool,
 };
 
@@ -75,7 +75,7 @@ pub(super) struct CompiledModelService {
     pub(super) provider: agent_types::ProviderId,
     pub(super) protocol: ModelProtocol,
     pub(super) capabilities: ResolvedModelCapabilities,
-    pub(super) max_output_tokens: u32,
+    pub(super) max_output_tokens: Option<u32>,
     pub(super) request_timeout: Duration,
     pub(super) image_preprocessor: Option<Arc<dyn ModelImagePreprocessor>>,
 }
@@ -236,7 +236,9 @@ impl AuxiliaryVisionBinding {
             reasoning,
             provider_options,
             timeout: self.timeout,
-            max_output_tokens: self.output_budget.min(auxiliary.max_output_tokens),
+            max_output_tokens: auxiliary
+                .max_output_tokens
+                .map_or(self.output_budget, |limit| self.output_budget.min(limit)),
         }))
     }
 }
@@ -423,6 +425,14 @@ fn map_inspector_error(error: ModelError) -> ImageInspectorError {
 impl RequestPreparingModelService {
     async fn measurement_history(&self) -> Option<[u8; 32]> {
         let (store, owner) = self.native_history.as_ref()?;
+        if matches!(
+            owner,
+            assistant_protocol::ConversationOwner::MainSession { .. }
+        ) && let Some(session) = &self.measurement_session
+        {
+            let state = session.lock_state().ok()?;
+            return crate::session::context_history_hash(&state.journal.as_ref()?.snapshot());
+        }
         let history = match owner {
             assistant_protocol::ConversationOwner::MainSession { session_id } => {
                 store.load_conversation(session_id).await
@@ -452,6 +462,30 @@ impl RequestPreparingModelService {
         let Some((store, owner)) = &self.native_history else {
             return Ok(request.clone());
         };
+        if matches!(
+            owner,
+            assistant_protocol::ConversationOwner::MainSession { .. }
+        ) && let Some(session) = &self.measurement_session
+        {
+            let instructions = {
+                let state = session
+                    .lock_state()
+                    .map_err(|_| ModelError::Protocol("execution window unavailable".into()))?;
+                state
+                    .journal
+                    .as_ref()
+                    .map(|journal| journal.instructions())
+                    .transpose()
+                    .map_err(|_| ModelError::Protocol("execution instructions invalid".into()))?
+            };
+            if let Some(instructions) = instructions {
+                let mut prepared = request.clone();
+                let mut system = request.system.parts().to_vec();
+                system.extend(instructions);
+                prepared.system = SystemPromptSnapshot::new(system);
+                return Ok(prepared);
+            }
+        }
         let history = match owner {
             assistant_protocol::ConversationOwner::MainSession { session_id } => {
                 store.load_conversation(session_id).await
@@ -810,6 +844,8 @@ pub(super) struct RunAuthorizationInput {
     pub(super) approval_registry: Arc<ApprovalRegistry>,
     pub(super) variant: AgentVariant,
     pub(super) run_id: assistant_protocol::RunId,
+    /// 权限/能力预装配直接绑定暂存输入；此时 Run 尚未领取。
+    pub(super) input_id: assistant_protocol::InputId,
     pub(super) cancellation: tokio_util::sync::CancellationToken,
     pub(super) events: ObservationCoordinator,
     pub(super) goal_binding: Option<GoalRunBinding>,
@@ -826,6 +862,7 @@ pub(super) struct RunCompilationResources<'a> {
     >,
     pub(super) shell: Option<crate::FrozenShellEnvironment>,
     pub(super) skill_catalog: crate::SkillCatalog,
+    pub(super) skill_package_source: Arc<dyn crate::SkillPackageSource>,
     pub(super) model_factory: Arc<dyn crate::ModelServiceFactory>,
     pub(super) context_window: Arc<agent_sdk::ContextWindowEvaluator>,
     pub(super) run_tool_factory: &'a dyn RunToolFactory,
@@ -836,6 +873,7 @@ pub(super) struct RunCompilationResources<'a> {
     pub(super) controller_tools: Arc<super::controller::ControllerToolCoordinator>,
     pub(super) output_dispatcher: Arc<dyn crate::ChannelOutputDispatcher>,
     pub(super) mcp_registry: Arc<McpRegistry>,
+    pub(super) mcp_management: super::mcp::McpManagement,
     pub(super) mcp_image_materializer: Arc<dyn McpImageMaterializer>,
 }
 
@@ -1193,11 +1231,7 @@ pub(super) async fn compile_run_agent(
     let permission_scopes = session.permission_scopes();
     let (input_selection, goal_selection) = {
         let state = session.lock_state()?;
-        let input_id = state
-            .runs
-            .get(&authorization.run_id)
-            .map(|run| run.input_id().clone());
-        let input_selection = input_id.as_ref().and_then(|input_id| {
+        let input_selection = Some(&authorization.input_id).and_then(|input_id| {
             state
                 .mcp_selections
                 .iter()
@@ -1315,6 +1349,18 @@ pub(super) async fn compile_run_agent(
         base_tools.clone()
     };
     if compiled.model.capabilities().tool_calls {
+        // 管理工具只进入父 Run，不受连接目录或 mcp_scope 限制，也不复制到 child_base_tools。
+        if resources.mcp_management.available() {
+            tool_assembly.contribute(RunToolContribution::frozen(
+                super::mcp::management_tools::tool_set(
+                    resources.mcp_management.clone(),
+                    session.clone(),
+                )
+                .map_err(|_| RuntimeError::InternalStateUnavailable {
+                    component: "MCP management tool definition",
+                })?,
+            ));
+        }
         tool_assembly.contribute(
             RunToolContribution::tool(crate::feedback::AskUserTool::new(
                 session.clone(),
@@ -1389,6 +1435,16 @@ pub(super) async fn compile_run_agent(
                     component: "speak tool definition",
                 })?,
             );
+        }
+        if let Some(tool) = ReadSkillReferenceTool::for_catalog(
+            &resources.skill_catalog,
+            resources.skill_package_source.clone(),
+        ) {
+            tool_assembly.contribute(RunToolContribution::tool(tool).map_err(|_| {
+                RuntimeError::InternalStateUnavailable {
+                    component: "skill reference tool definition",
+                }
+            })?);
         }
         tool_assembly.contribute(
             RunToolContribution::tool(LoadSkillTool::new(
@@ -1510,6 +1566,7 @@ pub(super) async fn compile_run_agent(
                 events: authorization.events,
                 limits: delegation,
                 skill_catalog: resources.skill_catalog.clone(),
+                skill_package_source: resources.skill_package_source.clone(),
                 mcp_registry: resources.mcp_registry.clone(),
                 disclosure_context: mcp_disclosure.context.clone(),
                 resource_projection: resource_projection.for_child(),

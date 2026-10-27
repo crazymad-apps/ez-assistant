@@ -30,6 +30,8 @@ struct Cli {
 pub(crate) enum CliAction {
     /// Start an independent Runtime Host process and return after it is spawned.
     Launch(LaunchArguments),
+    /// Serve a bundled MCP tool over stdio, without starting the Runtime.
+    Mcp(McpArguments),
     /// Start the Runtime Host.
     Serve(ServeArguments),
     /// Read or atomically edit access settings without starting the Runtime.
@@ -39,6 +41,21 @@ pub(crate) enum CliAction {
     DesktopMedia(crate::desktop_media::Diagnostics),
     #[command(hide = true)]
     BuildInfoJson,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, clap::Args)]
+pub(crate) struct McpArguments {
+    #[command(subcommand)]
+    pub(crate) command: BuiltinMcpCommand,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub(crate) enum BuiltinMcpCommand {
+    #[command(name = "deepseek-search")]
+    DeepseekSearch {
+        #[arg(long, required = true)]
+        stdio: bool,
+    },
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, clap::Args)]

@@ -1,7 +1,7 @@
 //! v0.27.0 Host 目录升级；只用 host.toml 分派版本，最后发布版本才允许装配业务。
 //! 调用方必须持有整个 Home 的实例锁。不可跨文件回滚的步骤以独立、已核验备份恢复。
 
-mod files;
+pub(crate) mod files;
 pub(crate) mod paths;
 #[cfg(test)]
 mod tests;

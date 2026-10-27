@@ -35,6 +35,22 @@ use validation::{
 };
 
 impl AssistantRuntime {
+    /// application 同次复制模型目录与选择，避免外部身份提交窗口中的跨来源混合。
+    pub(super) fn model_management_snapshot(
+        &self,
+    ) -> RuntimeResult<(Vec<ProviderSummary>, ModelSettings)> {
+        self.ensure_running()?;
+        let models = self.managed_models()?;
+        Ok((
+            models
+                .providers
+                .values()
+                .map(|value| provider::summary(value))
+                .collect(),
+            models.settings.clone(),
+        ))
+    }
+
     pub(super) fn ensure_model_editable(&self) -> RuntimeResult<()> {
         if self.managed_models()?.source == crate::ModelSource::External {
             return Err(invalid("模型配置由外部来源管理。"));

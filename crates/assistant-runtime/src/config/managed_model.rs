@@ -180,6 +180,7 @@ pub(crate) fn resolve_provider_protocol(
     let responses = matches!(
         connection.provider_type,
         ProviderType::Openai
+            | ProviderType::Sub2api
             | ProviderType::Opencode
             | ProviderType::Deepseek
             | ProviderType::DashscopeApi
@@ -222,9 +223,10 @@ pub(crate) fn compile_managed_model(
         return Err(invalid("OpenCode 暂不支持服务端压缩或输入计量。"));
     }
     let image_input = parameters.image_input == ModelFeatureSupport::Supported;
-    let tool_calls = parameters.tool_calls == ModelFeatureSupport::Supported
-        && parameters.tool_choice.auto == ModelFeatureSupport::Supported;
-    if !known(parameters.streaming, "流式输出能力未知，请编辑固定配置。")? {
+    // 缺省支持基础工具调用与 auto；明确 Unsupported 仍不能被缺省提升。
+    let tool_calls = parameters.tool_calls != ModelFeatureSupport::Unsupported
+        && parameters.tool_choice.auto != ModelFeatureSupport::Unsupported;
+    if parameters.streaming == ModelFeatureSupport::Unsupported {
         return Err(invalid("当前执行要求模型支持流式输出。"));
     }
     let reasoning = if parameters.reasoning == ModelFeatureSupport::Supported
@@ -252,7 +254,7 @@ pub(crate) fn compile_managed_model(
     };
     let tool_choice = if tool_calls {
         ToolChoiceCapabilities {
-            auto: parameters.tool_choice.auto == ModelFeatureSupport::Supported,
+            auto: parameters.tool_choice.auto != ModelFeatureSupport::Unsupported,
             none: parameters.tool_choice.none == ModelFeatureSupport::Supported,
             required: parameters.tool_choice.required == ModelFeatureSupport::Supported,
             named: parameters.tool_choice.named == ModelFeatureSupport::Supported,
@@ -275,6 +277,7 @@ pub(crate) fn compile_managed_model(
     };
     let provider_name = match provider.connection.provider_type {
         ProviderType::Openai => "openai",
+        ProviderType::Sub2api => "sub2api",
         ProviderType::Opencode => "opencode",
         ProviderType::Deepseek => "deepseek",
         ProviderType::DashscopeApi => "dashscope_api",
@@ -300,17 +303,23 @@ pub(crate) fn compile_managed_model(
     };
     let output = if reasoning.is_some() {
         optional(parameters.reasoning_max_output_tokens)
-            .unwrap_or(u64::from(validated.max_output_tokens()))
+            .or_else(|| validated.max_output_tokens().map(u64::from))
     } else {
-        u64::from(validated.max_output_tokens())
+        validated.max_output_tokens().map(u64::from)
     };
-    let output = u32::try_from(output).map_err(|_| invalid("模型输出上限超出支持范围。"))?;
+    let output = output
+        .map(u32::try_from)
+        .transpose()
+        .map_err(|_| invalid("模型输出上限超出支持范围。"))?;
     let mut generation = global_generation.clone();
-    generation.max_output_tokens = Some(
-        generation
-            .max_output_tokens
-            .map_or(output, |budget| budget.min(output)),
-    );
+    // 模型没有输出上限时保留用户请求预算；两者都未设置则省略 wire 限制。
+    if let Some(output) = output {
+        generation.max_output_tokens = Some(
+            generation
+                .max_output_tokens
+                .map_or(output, |budget| budget.min(output)),
+        );
+    }
     Ok(ResolvedModelConfig {
         context_management_mode: if parameters.server_compaction_enabled {
             agent_model::ContextManagementMode::ServerCompaction
@@ -356,13 +365,6 @@ pub(crate) fn compile_managed_model(
     })
 }
 
-fn known(value: ModelFeatureSupport, missing: &'static str) -> RuntimeResult<bool> {
-    match value {
-        ModelFeatureSupport::Supported => Ok(true),
-        ModelFeatureSupport::Unsupported => Ok(false),
-        ModelFeatureSupport::Unknown => Err(invalid(missing)),
-    }
-}
 fn optional(value: ModelTokenLimit) -> Option<u64> {
     match value {
         ModelTokenLimit::Known(value) => Some(value.get()),

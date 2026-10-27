@@ -149,6 +149,40 @@ fn retained_remote_host_cannot_borrow_bundled_host_compatibility() {
     );
 }
 
+#[test]
+fn local_update_admits_compatible_bundled_host_when_old_host_protocol_has_expired() {
+    let mut source = remote_source("http://127.0.0.1:7320");
+    source.host.version = "0.28.0".into();
+    source.host.min_compatible_version = "0.28.0".into();
+    source.protocols = vec![1];
+    source.remote_origin = None;
+    source.local = Some(RuntimeBootstrap {
+        base_url: "http://127.0.0.1:7240".into(),
+        instance_id: "old-host".into(),
+        access_token: "a".repeat(43),
+        started_runtime: false,
+        capabilities: serde_json::from_value(serde_json::json!({
+            "runtime_version": "0.28.0", "min_compatible_version": "0.28.0",
+            "max_command_bytes": 1024, "max_attachment_bytes": null,
+            "sse": true, "streaming_upload": true, "features": [],
+        }))
+        .unwrap(),
+    });
+    let read = |range| {
+        manifest::VerifiedManifest::read(
+            &announcement(&source),
+            &manifest::public_key(KEY).unwrap(),
+            &source,
+            "darwin-aarch64",
+            "0.29.0",
+            range,
+        )
+    };
+    // 签名夹具中的新版随包 Host 支持协议 2；旧本机 Host 的协议 1 不限制新包。
+    assert!(read((2, 2)).is_ok());
+    assert!(read((3, 3)).is_err());
+}
+
 async fn server(body: Vec<u8>, declared: Option<usize>) -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());

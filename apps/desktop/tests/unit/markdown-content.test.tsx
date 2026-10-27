@@ -2,8 +2,38 @@ import { THEME_PRESETS } from "../../src/styles/themePresets";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MarkdownContent } from "../../src/components/MarkdownContent";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 
-afterEach(cleanup);
+vi.mock("@tauri-apps/api/core", () => ({
+  isTauri: vi.fn(() => false),
+  invoke: vi.fn().mockResolvedValue(undefined),
+}));
+
+afterEach(() => {
+  cleanup();
+  vi.clearAllMocks();
+  vi.mocked(isTauri).mockReturnValue(false);
+});
+
+describe("MarkdownContent external links", () => {
+  it("leaves Web links to the browser in a new tab, including modified clicks", () => {
+    render(<MarkdownContent theme={THEME_PRESETS.default_light} text="[外链](https://example.com/report)" />);
+    const link = screen.getByRole("link", { name: "外链" });
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    expect(fireEvent.click(link)).toBe(true);
+    expect(fireEvent.click(link, { ctrlKey: true })).toBe(true);
+    expect(fireEvent.click(link, { metaKey: true })).toBe(true);
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("keeps Desktop links routed through the native system browser", () => {
+    vi.mocked(isTauri).mockReturnValue(true);
+    render(<MarkdownContent theme={THEME_PRESETS.default_light} text="[外链](https://example.com/report)" />);
+    expect(fireEvent.click(screen.getByRole("link", { name: "外链" }))).toBe(false);
+    expect(invoke).toHaveBeenCalledWith("open_external_http_url", { url: "https://example.com/report" });
+  });
+});
 
 describe("MarkdownContent local resources", () => {
   it("keeps file URIs out of navigable DOM and reports the original encoded reference", () => {

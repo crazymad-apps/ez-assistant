@@ -1,7 +1,7 @@
 import type { ModelFeatureSupport, ModelParameters, ModelTokenLimit, ProviderConnection, ProviderType } from "@ez-assistant/protocol";
 
 export const provider_labels: Record<ProviderType, string> = {
-  opencode: "OpenCode", openai: "OpenAI", deepseek: "DeepSeek", dashscope_api: "百炼 API", dashscope_plan: "百炼套餐", moonshot: "Kimi / Moonshot", zhipu: "智谱", vllm: "vLLM", local: "本地兼容服务",
+  opencode: "OpenCode", openai: "OpenAI", sub2api: "Sub2API", deepseek: "DeepSeek", dashscope_api: "百炼 API", dashscope_plan: "百炼套餐", moonshot: "Kimi / Moonshot", zhipu: "智谱", vllm: "vLLM", local: "本地兼容服务",
 };
 export const support_options: readonly { value: ModelFeatureSupport; label: string }[] = [
   { value: "unknown", label: "未知" }, { value: "supported", label: "支持" }, { value: "unsupported", label: "不支持" },
@@ -12,7 +12,7 @@ export const empty_connection: ProviderConnection = {
 };
 export const token_fields = [
   { key: "context_window_tokens", label: "上下文窗口（Token）", required: true },
-  { key: "max_output_tokens", label: "运行输出上限（Token）", required: true },
+  { key: "max_output_tokens", label: "运行输出上限（Token）", required: false },
   { key: "max_input_tokens", label: "输入上限（可选）", required: false },
   { key: "reasoning_max_input_tokens", label: "思考模式输入上限（可选）", required: false },
   { key: "reasoning_max_output_tokens", label: "思考模式输出上限（可选）", required: false },
@@ -66,8 +66,8 @@ export function parameterRows(parameters: ModelParameters, draft?: TokenDraft): 
     { label: "服务端压缩能力", value: support(parameters.server_compaction_support) },
     { label: "输入计量能力", value: support(parameters.input_token_count_support) },
     ...token_fields.map(({ key, label }) => ({ label, value: draft ? draft[key] || "未知" : tokenLabel(parameters[key]) })),
-    ...([['streaming', '流式输出'], ['image_input', '图片输入'], ['tool_calls', '工具调用'], ['reasoning', '思考能力']] as const).map(([key, label]) => ({ label, value: support(parameters[key]) })),
-    ...(["auto", "none", "required", "named"] as const).map((key) => ({ label: `工具选择 ${key}`, value: support(parameters.tool_choice[key]) })),
+    ...([['streaming', '流式输出'], ['image_input', '图片输入'], ['tool_calls', '工具调用'], ['reasoning', '思考能力']] as const).map(([key, label]) => ({ label, value: (key === "streaming" || key === "tool_calls") && parameters[key] === "unknown" ? "缺省（支持）" : support(parameters[key]) })),
+    ...(["auto", "none", "required", "named"] as const).map((key) => ({ label: `工具选择 ${key}`, value: key === "auto" && parameters.tool_choice[key] === "unknown" ? "缺省（支持）" : support(parameters.tool_choice[key]) })),
     { label: "工具图片传递", value: { unknown: "未知", unsupported: "不支持", native_tool_result: "工具结果原生图片", follow_up_user_message: "后续用户消息图片" }[parameters.tool_image_projection] },
     { label: "思考模式", value: { unknown: "未知", unsupported: "不支持", optional: "可开关", always: "始终开启" }[parameters.reasoning_mode] },
     { label: "支持的思考强度", value: parameters.reasoning_efforts === null ? "未知" : Object.entries(parameters.reasoning_efforts).map(([key, value]) => `${key} → ${value}`).join(" / ") || "无强度档位" },
@@ -96,6 +96,7 @@ export function sameParameters(left: ModelParameters, right: ModelParameters): b
 
 /** 与 ProviderType.discovery_format 保持一致；列表路径不预填，由 Host 适配器决定默认值。 */
 export const provider_defaults: Record<ProviderType, Pick<ProviderConnection, "discovery_format" | "protocol_preference">> = {
+  sub2api: { discovery_format: "sub2api", protocol_preference: "auto" },
   opencode: { discovery_format: "openai", protocol_preference: "chat_completions" },
   openai: { discovery_format: "openai", protocol_preference: "auto" },
   deepseek: { discovery_format: "openai", protocol_preference: "auto" },

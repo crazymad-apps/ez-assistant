@@ -4,6 +4,7 @@ use std::collections::HashSet;
 
 use assistant_protocol::{
     DeviceCapabilitiesSnapshot, InputId, OutputPreferenceSnapshot, RunId, RunStatus,
+    SubmitInputResult,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -368,14 +369,38 @@ impl DownlinkPcmFrame {
     }
 }
 
-/// Runtime 已可靠接受设备输入并分配规范 Input/Run 后的确认。
+/// Runtime 已可靠暂存设备输入的确认；实际领取前没有 Run。
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct InputAccepted {
     pub(super) client_input_id: String,
     pub(super) input_id: InputId,
-    pub(super) run_id: RunId,
-    pub(super) queue_state: RunStatus,
+    pub(super) run_id: Option<RunId>,
+    /// queued 表示可撤销暂存；已经领取的幂等结果可返回已有 Run 状态。
+    pub(super) queue_state: String,
+}
+
+impl InputAccepted {
+    /// 只投影已提交的输入回执；暂存阶段没有执行身份，不能为设备补造 Run。
+    pub(super) fn from_submission(client_input_id: String, result: SubmitInputResult) -> Self {
+        let queue_state = match result.run.as_ref().map(|run| run.status) {
+            None => "queued",
+            Some(RunStatus::Accepted) => "accepted",
+            Some(RunStatus::Running) => "running",
+            Some(RunStatus::Cancelling) => "cancelling",
+            Some(RunStatus::Completed) => "completed",
+            Some(RunStatus::Failed) => "failed",
+            Some(RunStatus::Cancelled) => "cancelled",
+            Some(RunStatus::Interrupted) => "interrupted",
+            Some(RunStatus::CompactionRequired) => "compaction_required",
+        };
+        Self {
+            client_input_id,
+            input_id: result.input_id,
+            run_id: result.run.map(|run| run.run_id),
+            queue_state: queue_state.to_owned(),
+        }
+    }
 }
 
 /// Host 已完整接管一段上行 PCM；终端可释放该段本地缓存。
@@ -461,6 +486,21 @@ pub(super) enum ProtocolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queued_acknowledgement_does_not_invent_a_run() {
+        let acknowledgement = InputAccepted::from_submission(
+            "device-input".to_owned(),
+            SubmitInputResult {
+                input_id: InputId::new("queued-input").unwrap(),
+                run: None,
+            },
+        );
+        let json = serde_json::to_value(acknowledgement).unwrap();
+        assert_eq!(json["queue_state"], "queued");
+        assert_eq!(json["input_id"], "queued-input");
+        assert!(json["run_id"].is_null());
+    }
 
     #[derive(Deserialize)]
     struct EnvelopeFixture {

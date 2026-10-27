@@ -5,7 +5,7 @@ export function serverHistorySupport(connection: ProviderConnection): ModelFeatu
   if (connection.provider_type === "opencode") {
     return connection.protocol_preference === "responses" && connection.server_history_support_override !== "unsupported" ? "unknown" : "unsupported";
   }
-  const responses = ["openai", "deepseek", "dashscope_api", "dashscope_plan", "moonshot"].includes(connection.provider_type)
+  const responses = ["openai", "sub2api", "deepseek", "dashscope_api", "dashscope_plan", "moonshot"].includes(connection.provider_type)
     && connection.protocol_preference !== "chat_completions";
   if (!responses) return "unsupported";
   if (connection.server_history_support_override != null) return connection.server_history_support_override;

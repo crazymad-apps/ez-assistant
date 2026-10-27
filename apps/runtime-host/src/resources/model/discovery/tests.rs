@@ -93,6 +93,73 @@ fn vllm_only_maps_its_declared_context_extension() {
 }
 
 #[test]
+fn openai_accepts_missing_model_object_without_inferring_capabilities() {
+    let models = parse_fixture(
+        json!({"object":"list","data":[
+            {"id":"compatible-model","type":"model","display_name":"Compatible",
+             "created_at":"2026-01-01","max_model_len":8192},
+            {"id":"standard-model","object":"model"}
+        ]}),
+        DiscoveryFormat::OpenAi,
+    )
+    .expect("compatible list");
+    assert_eq!(models.len(), 2);
+    assert_eq!(models[0].model_id, "compatible-model");
+    assert_eq!(models[1].model_id, "standard-model");
+    assert_eq!(
+        models[0].metadata,
+        assistant_runtime::ModelParameters::default()
+    );
+}
+
+#[test]
+fn openai_rejects_explicit_invalid_model_objects_and_invalid_ids() {
+    for object in [
+        json!(null),
+        json!("list"),
+        json!(""),
+        json!(1),
+        json!(false),
+        json!({}),
+    ] {
+        assert_eq!(
+            parse_fixture(
+                json!({"object":"list","data":[{"id":"model","object":object}]}),
+                DiscoveryFormat::OpenAi
+            )
+            .unwrap_err()
+            .kind(),
+            ErrorKind::InvalidResponse,
+        );
+    }
+    for id in [
+        json!(null),
+        json!(""),
+        json!(" spaced "),
+        json!("bad\nmodel"),
+        json!(1),
+        json!("x".repeat(513)),
+    ] {
+        assert_eq!(
+            parse_fixture(
+                json!({"object":"list","data":[{"id":id}]}),
+                DiscoveryFormat::OpenAi
+            )
+            .unwrap_err()
+            .kind(),
+            ErrorKind::InvalidResponse,
+        );
+    }
+    assert!(
+        parse_fixture(
+            json!({"object":"list","data":[{}]}),
+            DiscoveryFormat::OpenAi
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn dashscope_preserves_mode_specific_limits_and_declared_capabilities() {
     let document = dashscope(
         1,
@@ -461,6 +528,29 @@ async fn collects_dashscope_pages_and_rejects_partial_or_inconsistent_results() 
 }
 
 #[tokio::test]
+async fn discovers_missing_model_objects_but_rejects_duplicate_ids() {
+    let server = Server::start(vec![
+        Reply::json(json!({"object":"list","data":[{"id":"compatible-model"}]})),
+        Reply::json(json!({"object":"list","data":[{"id":"duplicate"},{"id":"duplicate"}]})),
+    ])
+    .await;
+    let provider = agent_types::ProviderId::new("openai").expect("provider");
+    let models = discover(request(&provider, &server.endpoint))
+        .await
+        .expect("compatible list");
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].model_id, "compatible-model");
+    assert_eq!(
+        discover(request(&provider, &server.endpoint))
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidResponse
+    );
+    server.close().await;
+}
+
+#[tokio::test]
 async fn handles_empty_success_without_requiring_a_credential() {
     let server = Server::start(vec![Reply::json(openai(&[]))]).await;
     let provider = agent_types::ProviderId::new("local").expect("provider");
@@ -688,5 +778,88 @@ fn moonshot_preserves_live_reasoning_options_without_inventing_output_limits() {
                 .kind(),
             ErrorKind::InvalidResponse
         );
+    }
+}
+
+#[test]
+fn sub2api_shared_vectors_preserve_unknowns_and_ignore_client_instructions() {
+    let vectors: Vec<Value> = serde_json::from_str(include_str!(
+        "../../../../../../packages/assistant-protocol/fixtures/sub2api-discovery.json"
+    ))
+    .unwrap();
+    for vector in vectors {
+        let result = parse_fixture(vector["document"].clone(), DiscoveryFormat::Sub2api);
+        if vector["invalid"] == true {
+            assert!(result.is_err(), "{}", vector["name"]);
+        } else {
+            let models = result.unwrap();
+            let metadata = serde_json::to_value(&models[0].metadata).unwrap();
+            for (field, expected) in vector["expected"].as_object().unwrap() {
+                assert_eq!(&metadata[field], expected, "{}: {field}", vector["name"]);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn sub2api_enhanced_discovery_bounds_prompts_and_falls_back_only_when_unsupported() {
+    for status in [StatusCode::NOT_FOUND, StatusCode::METHOD_NOT_ALLOWED] {
+        let server = Server::start(vec![
+            Reply {
+                status,
+                body: None,
+                location: None,
+            },
+            Reply::json(openai(&["ordinary"])),
+        ])
+        .await;
+        let provider = agent_types::ProviderId::new("sub2api").unwrap();
+        let mut input = request(&provider, &server.endpoint);
+        input.format = DiscoveryFormat::Sub2api;
+        let models = discover(input).await.unwrap();
+        assert_eq!(models[0].model_id, "ordinary");
+        let seen = server.requests.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].path, "/v1/models?client_version=ez-assistant");
+        assert_eq!(seen[1].path, "/v1/models");
+        assert!(seen.iter().all(|request| request.authorization.as_deref()
+            == Some("Bearer fixture-key-not-a-real-secret")));
+        server.close().await;
+    }
+    // 增强目录重复的客户端提示词可超过普通 1 MiB，但仍受整次 8 MiB 限制。
+    let server = Server::start(vec![Reply::json(json!({"models":[{
+        "slug":"enhanced", "context_window":272000,
+        "model_messages":{"instructions_template":"x".repeat(1024 * 1024 + 1)}
+    }]}))])
+    .await;
+    let provider = agent_types::ProviderId::new("sub2api").unwrap();
+    let mut input = request(&provider, &server.endpoint);
+    input.format = DiscoveryFormat::Sub2api;
+    let models = discover(input).await.unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].metadata.context_window_tokens, known(272000));
+    assert_eq!(models[0].metadata.max_output_tokens, Limit::Unknown);
+    server.close().await;
+
+    for reply in [
+        Reply {
+            status: StatusCode::UNAUTHORIZED,
+            body: None,
+            location: None,
+        },
+        Reply {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            body: None,
+            location: None,
+        },
+        Reply::json(json!({"models":[{"slug":" bad "}]})),
+        Reply::json(json!({"models":[{"slug":"duplicate"},{"slug":"duplicate"}]})),
+    ] {
+        let server = Server::start(vec![reply]).await;
+        let mut input = request(&provider, &server.endpoint);
+        input.format = DiscoveryFormat::Sub2api;
+        assert!(discover(input).await.is_err());
+        assert_eq!(server.requests.lock().unwrap().len(), 1);
+        server.close().await;
     }
 }

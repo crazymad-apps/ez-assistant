@@ -300,6 +300,15 @@ async fn isolated_login_configuration_restarts_only_the_confirmed_host() {
         "version = \"0.27.0\"\nmode = \"enterprise\"\n[enterprise]\ncenter_url = \"https://old.example/center\"\ncenter_id = \"01234567-89ab-4cde-8f01-23456789abcd\"\n[host_access]\nremote_enabled = false\nport = {port}\n"
     )).unwrap();
     drop(reservation);
+    let center_id = "11234567-89ab-4cde-8f01-23456789abcd";
+    let (new_center, center_server) = server(vec![(
+        200,
+        serde_json::json!({
+            "center_id": center_id, "protocol_version": 3, "min_protocol_version": 3,
+        })
+        .to_string(),
+    )])
+    .await;
     let coordinator = RuntimeBootstrapCoordinator::new(home.clone(), source).unwrap();
     let worker = coordinator.clone();
     // 观察任务 panic 后仍由测试 owner 关闭实际实例，不把私有 Host 遗留在后台。
@@ -318,14 +327,14 @@ async fn isolated_login_configuration_restarts_only_the_confirmed_host() {
                     expected_revision: before.status.revision,
                     configuration: before.status.configuration,
                     mode: Some(HostMode::Enterprise),
-                    center_url: Some("https://new.example/center".into()),
+                    center_url: Some(new_center.clone()),
                     clear_center_binding: Some(true),
                 },
                 Some(&before.instance_id),
             )
             .await
             .unwrap();
-        assert!(saved.status.center_id.is_none());
+        assert_eq!(saved.status.center_id.as_deref(), Some(center_id));
         assert!(saved.status.restart_required);
         assert_eq!(
             saved.current_center_url.as_deref(),
@@ -364,10 +373,10 @@ async fn isolated_login_configuration_restarts_only_the_confirmed_host() {
         assert!(!after.status.restart_required);
         assert_eq!(
             after.current_center_url.as_deref(),
-            Some("https://new.example/center")
+            Some(new_center.as_str())
         );
         assert_eq!(after.status.center_url, after.current_center_url);
-        // 原来源不可用时拒绝停止，不回退到 Desktop 随包来源。
+        // 当前随包候选不可用时拒绝停止，保留已在运行的实例。
         let discovery = read_discovery(&worker.runtime_home).unwrap();
         let source = discovery.executable_path.unwrap();
         let hidden = source.with_extension("unavailable");
@@ -410,4 +419,11 @@ async fn isolated_login_configuration_restarts_only_the_confirmed_host() {
     }
     assert_no_database(&home);
     result.unwrap();
+    assert!(
+        center_server
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.starts_with("GET /api/info "))
+    );
 }

@@ -1,11 +1,38 @@
 # DeepSeek Responses API WebSearch 工具调用与事件植入讨论
 
 - 记录日期：2026-08-28
-- 状态：讨论记录（待进入正式设计/实现）
+- 状态：2026-10-23 用户确认产品内置资源随 Host 交付，首批 DeepSeek 搜索与 skill-creator，DeepSeek 不单独维护原生 JSON；功能方向与 F05 技术方案已确认，开发计划已确认，M0 已确认，M1 实现与验证完成待用户确认；用户再次明确 DeepSeek Search 默认不启用。取代以下旧方向。历史：2026-10-21 用户明确将当前 DeepSeek Search MCP 封装进通用辅助插件，Key 通过插件原生配置文件设置，插件不默认提供 Key；取代 10 月 20 日内置入口方向，下文旧讨论保留为历史。
 - 来源：v0.20.0 会话；源于「给 Agent 终端接入 DeepSeek 服务端托管的 `web_search` 工具，并把其事件植入当前 Conversation 事件流投影到 UI」的需求
 - 涉及组件：`agent-openai-compatible` / `agent-model` / `agent-types` / `agent-core` / `assistant-runtime` / `assistant-protocol` / `apps/desktop`
 
 > 本文记录阶段性讨论结论，包含「官方调用规范」与「本地事件流植入方案」两部分。进入正式功能设计前需评审定稿。
+
+## 2026-10-23 现行方向：产品内置资源
+
+用户明确“不是将通用辅助直接合并进来，是维护一套内置插件、mcp、skill”，首批为 DeepSeek 搜索和 skill-creator，不将已有独立插件整包并入产品；旧源码与包只作复用参考。用户已确认随 Host 交付更新、插件 MCP 详情／环境变量及 Agent 配置方向，并明确 DeepSeek 不单独维护原生 JSON。[F05 功能设计](../versions/v0.32.1/features/F05-内置插件MCP与Skill/功能设计.md)已确认，[技术方案](../versions/v0.32.1/features/F05-内置插件MCP与Skill/技术方案.md)已确认，[开发计划](../versions/v0.32.1/features/F05-内置插件MCP与Skill/开发计划.md)已确认，M0 已获用户确认，M1 实现与验证完成、待用户确认；方案落实统一 MCP 用户配置、内置来源及同名规则，首批仅搜索，不自动纳入网页读取。DeepSeek Search 默认可见但禁用，保存 Key 不开启，升级保留用户启停意图。M0 已完成受管配置与生效后端，插件覆盖放原 config/mcp-overrides.json，内置覆盖使用用户域 mcp.json 的 managedServers.builtin；UI／Agent 管理入口已完成、待 M1 确认，实际内置资源留在 M2。F04 最终测试按用户指令后置，未记为已验收。
+
+## 2026-10-21 历史方向：通用辅助插件与原生配置
+
+用户明确指向 ez-assistant 当前 Agent 使用的 MCP，要求收录进通用辅助插件，
+DeepSeek Key 通过原生配置文件设置，插件中不默认配置 Key。
+已核对当前 MCP 为会话私有目录中的 Python stdio 实现，Host 已支持插件原生配置目录注入。
+复用现有搜索／读取工具与 Host 契约，由独立插件仓库维护源码和随包运行时；
+本仓库 F05 同步为关联交付，不新增内置服务预设，也不自动迁移既有 MCP 配置。
+
+## 2026-10-20 历史方向：独立 Search／Fetch API 接入内置 MCP 渠道
+
+用户在核对独立搜索接口后明确：集成到内置 MCP 渠道，一个服务一个 MCP，现阶段仅接 DeepSeek 测试；
+默认不启用，用户手动配置并启用。该方向已纳入[v0.32.1 总体设计](../versions/v0.32.1/总体设计.md#35-内置插件mcp-与-skill)，
+取代当前将模型托管搜索作为首期接入方案的建议，不意味着本版整个总体设计或开发计划已确认。
+
+- DeepSeek MCP 独立暴露搜索和网页读取两个工具，复用现有 MCP 发现、调用、权限及会话记录机制；主模型可为其他服务商。
+- 通过 `POST /v1/tools/search` 获取结构化搜索结果，按需通过 `POST /v1/tools/fetch` 获取 Markdown 正文。
+- 内置仅提供入口与实现，默认禁用；用户配置自己的 Key，保存与启用分别执行。未启用不启动、不调用，缺少配置明确提示。
+- 不合并其他搜索服务，不自动复用模型 Key 或企业共享凭据；本期不接 Responses 内置 `web_search`，不添加历史方案中的 `ToolCall.server_side` 标记。
+- 当时独立插件分发是 10 月 19 日助手提出的候选；10 月 20 日以内置 MCP 渠道为准，后由 10 月 21 日用户指令替代。随包实现、配置表单与源码归属待 F05 方案核查，不假定当前已有内置服务预设机制。
+- 参考 2026-10-19 已读取的官方[搜索／抓取指南](https://api-docs.deepseek.com/zh-cn/guides/search/)、[Search 接口](https://api-docs.deepseek.com/zh-cn/api/search/)和[Fetch 接口](https://api-docs.deepseek.com/zh-cn/api/fetch/)；实施前再核对契约，尚未用真实 Key 验证效果或稳定性。
+
+以下第一、二部分保留原讨论事实及当时假设，其中模型范围、工具参数和建议实现均不作为当前已核验的实施依据。
 
 ---
 

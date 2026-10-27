@@ -73,9 +73,7 @@ fn real_llm_delegates_parallel_read_only_tasks_and_parent_summarizes() {
         json!({ "session_id": session_id, "approval_mode": "auto" }),
     );
 
-    let submitted = client.runtime(
-        "submit_input",
-        json!({
+    let submitted = client.submit_started_input(json!({
             "session_id": session_id,
             "message": "Use exactly two delegate_task calls in one model turn. Delegate one child to read alpha.txt and report its token, and the other child to read beta.txt and report its token. Do not read the files in the parent. After both children return, summarize both tokens in the final answer.",
             "variant": "build",

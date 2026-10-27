@@ -1,6 +1,45 @@
 use super::*;
 
 #[test]
+fn decode_returned_reasoning_aliases_without_declared_reasoning_capability() {
+    for (fields, expected) in [
+        (json!({"reasoning": "thought"}), Some("thought")),
+        (json!({"reasoning_content": "legacy"}), Some("legacy")),
+        (
+            json!({"reasoning": "thought", "reasoning_content": "duplicate"}),
+            Some("thought"),
+        ),
+        (
+            json!({"reasoning": null, "reasoning_content": "legacy"}),
+            Some("legacy"),
+        ),
+        (json!({"reasoning": null, "reasoning_content": null}), None),
+    ] {
+        let mut raw = json!({"role": "assistant", "content": "answer"});
+        raw.as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        let response: ChatResponse = serde_json::from_value(json!({
+            "id": "chatcmpl_1", "model": "glm-test",
+            "choices": [{"index": 0, "message": raw, "finish_reason": "stop"}],
+        }))
+        .unwrap();
+        let adapter = base_adapter();
+        assert!(!adapter.supports_reasoning());
+        let message = decode_response(&response, &adapter).unwrap();
+        let thoughts: Vec<_> = message
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                AssistantPart::Reasoning(part) => Some(part.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thoughts, expected.into_iter().collect::<Vec<_>>());
+    }
+}
+
+#[test]
 fn decode_response_maps_message_usage_and_finish_reason() {
     let response: ChatResponse = serde_json::from_value(json!({
         "id": "chatcmpl_1",

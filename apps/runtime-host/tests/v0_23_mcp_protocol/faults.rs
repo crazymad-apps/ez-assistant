@@ -24,7 +24,7 @@ fn formal_host_mcp_disconnect_timeout_and_cancel_never_replay() {
             let session_id = session["session"]["session_id"]
                 .as_str()
                 .expect("session id");
-            let submitted = client.runtime("submit_input", json!({"session_id":session_id,"message":"Read a fixture value","variant":"build","mcp_server_key":"target"}));
+            let submitted = client.submit_started_input(json!({"session_id":session_id,"message":"Read a fixture value","variant":"build","mcp_server_key":"target"}));
             let run_id = submitted["run"]["run_id"].as_str().expect("run id");
             let approval = wait_approval(&mut client, session_id);
             client.runtime("decide_approval", json!({"session_id":session_id,"approval_id":approval["approval_id"],"decision":"allow_once"}));

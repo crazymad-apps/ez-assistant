@@ -1,3 +1,4 @@
+import { ManagedServerEditor } from "./ManagedServerEditor";
 import { copyText } from "../../../../platform/clipboard";
 import { observer } from "mobx-react-lite";
 import { useEffect, useRef, useState } from "react";
@@ -7,14 +8,21 @@ import { SessionActionDialog } from "../../../sessions/SessionActionDialog";
 import { SettingsPageContainer } from "../SettingsPageContainer";
 import { SettingsMessages } from "../SettingsMessages";
 import { ArgsFields, ConnectionField, SecretFields, type SecretRow } from "./ConnectionFields";
-import { emptyTransport, serverDraft, validateMcpDraft } from "./draft";
+import { emptyTransport, priorityLabel, serverDraft, validateMcpDraft } from "./draft";
 import shared from "../index.module.scss";
 import styles from "./index.module.scss";
 
-export const ServerEditor = observer(function ServerEditor(props: Readonly<{
-  server: McpServerSnapshot | null; revision: string; onDone: () => void;
+export type ServerEditorProps = Readonly<{
+  back_label?: string; server: McpServerSnapshot | null; revision: string; onDone: () => void;
   onDirtyChange: (dirty: boolean) => void; onDelete: (server: McpServerSnapshot) => void;
-}>) {
+}>;
+
+export function ServerEditor(props: ServerEditorProps) {
+  if (props.server?.managed) return <ManagedServerEditor {...props} server={props.server} />;
+  return <IndependentServerEditor {...props} />;
+}
+
+const IndependentServerEditor = observer(function IndependentServerEditor(props: ServerEditorProps) {
   const settings = useRootStore().settings.mcp;
   const [draft, setDraft] = useState(() => serverDraft(props.server));
   const [rows, setRows] = useState<SecretRow[]>(() => {
@@ -27,7 +35,7 @@ export const ServerEditor = observer(function ServerEditor(props: Readonly<{
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const error_ref = useRef<HTMLParagraphElement>(null);
-  const busy = settings.pending_action === "save";
+  const busy = settings.pending_action !== null;
   useEffect(() => { props.onDirtyChange(dirty); }, [dirty, props.onDirtyChange]);
   useEffect(() => () => { props.onDirtyChange(false); settings.cancelTest(); }, [props.onDirtyChange, settings]);
 
@@ -62,7 +70,7 @@ export const ServerEditor = observer(function ServerEditor(props: Readonly<{
   return <SettingsPageContainer
     title={title}
     on_back={leave}
-    back_label="返回 MCP 列表"
+    back_label={props.back_label ?? "返回 MCP 列表"}
     actions={props.server && <button className={shared.danger_button} disabled={busy || settings.testing} onClick={() => props.server && props.onDelete(props.server)} type="button">删除服务…</button>}
   >
     <div className={styles.editor}>
@@ -101,10 +109,12 @@ export const ServerEditor = observer(function ServerEditor(props: Readonly<{
         {result && <p data-outcome={result.outcome}>{testResultLabel(result.outcome, result.stage)} · {result.elapsed_ms} ms · {result.tool_count} 个工具{result.diagnostic && result.diagnostic.code !== "tool_description_long" && ` · ${result.diagnostic.message}`}</p>}
         {result?.diagnostic?.code === "tool_description_long" && <p className={styles.warning} role="status">警告：{result.diagnostic.message}</p>}
       </div>
+      {props.server && priorityLabel(props.server) && <p role="status">{priorityLabel(props.server)}；当前配置保留，可继续编辑。</p>}
       <p>测试不会保存或应用配置。本地命令以当前用户权限启动，请确认来源可信。</p>
       <div className={styles.actions}>
         <button disabled={busy || settings.testing} onClick={() => { const server = candidate(); if (server) void settings.test(server); }} type="button">测试连接</button>
         {settings.testing && <button onClick={() => settings.cancelTest()} type="button">取消测试</button>}
+        {props.server && <button disabled={busy || settings.testing || dirty || settings.stale} type="button" onClick={() => props.server && void settings.refresh(props.server, props.revision)}>刷新此服务</button>}
         <span /><button disabled={busy} onClick={leave} type="button">取消</button><button className={shared.primary_button} disabled={busy || settings.testing || settings.stale} onClick={() => void save()} type="button">保存</button>
       </div>
     </div>

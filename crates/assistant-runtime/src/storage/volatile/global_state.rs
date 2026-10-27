@@ -4,7 +4,7 @@ impl VolatileRuntimeStore {
     pub(super) fn search_conversation_titles(
         &self,
         request: ConversationSearchRequest,
-    ) -> StoreFuture<'_, Vec<assistant_protocol::ConversationHistoryHit>> {
+    ) -> StoreFuture<'_, ConversationSearchPage<assistant_protocol::ConversationHistoryHit>> {
         Box::pin(async move {
             let state = self.lock()?;
             let query = request.query.to_lowercase();
@@ -42,9 +42,11 @@ impl VolatileRuntimeStore {
                         lifecycle,
                     });
                 }
-                for child in state.child_tasks.values().filter(|c| {
-                    c.session_id == session.session_id && c.title.to_lowercase().contains(&query)
-                }) {
+                for (_, child) in state
+                    .recovered_child_history(Some(&session.session_id))
+                    .into_iter()
+                    .filter(|(_, child)| child.title.to_lowercase().contains(&query))
+                {
                     hits.push(assistant_protocol::ConversationHistoryHit {
                         owner: ConversationOwner::ChildTask {
                             session_id: session.session_id.clone(),
@@ -62,7 +64,11 @@ impl VolatileRuntimeStore {
             }
             hits.sort_by_key(|hit| std::cmp::Reverse(hit.created_at_ms));
             hits.truncate(request.limit.min(200));
-            Ok(hits)
+            Ok(ConversationSearchPage {
+                hits,
+                partial: false,
+                failed_owners: Vec::new(),
+            })
         })
     }
 
@@ -83,6 +89,7 @@ impl VolatileRuntimeStore {
     ) -> StoreFuture<'_, crate::LoadedSession> {
         let session_id = session_id.clone();
         Box::pin(async move {
+            self.recover_interrupted_exchanges(&session_id).await?;
             {
                 let mut state = self.lock()?;
                 let mut goals = BTreeMap::new();
@@ -106,6 +113,7 @@ impl VolatileRuntimeStore {
                     .map(|i| i.input_id.clone())
                     .collect::<BTreeSet<_>>();
                 state.inputs.retain(|id, _| !stale.contains(id));
+                state.input_identities.retain(|id, _| !stale.contains(id));
                 state.runs.retain(|_, r| !stale.contains(&r.input_id));
                 state
                     .skill_activations
@@ -140,12 +148,15 @@ impl VolatileRuntimeStore {
         Box::pin(async move {
             let state = self.lock()?;
             Ok(crate::LoadedSession {
+                execution_window: None,
                 identities: state
                     .sessions
                     .values()
                     .map(|s| (s.session_id.clone(), s.role, s.lifecycle))
                     .collect(),
                 state: RecoveredRuntime {
+                    run_history: state.recovered_run_history(Some(&session_id)),
+                    child_history: state.recovered_child_history(Some(&session_id)),
                     devices: state.devices.values().cloned().collect(),
                     workspaces: state.workspaces.values().cloned().collect(),
                     attachments: state
@@ -160,34 +171,25 @@ impl VolatileRuntimeStore {
                         .filter(|row| row.session_id == session_id)
                         .cloned()
                         .collect(),
-                    inputs: state
-                        .inputs
-                        .values()
-                        .filter(|row| row.session_id == session_id)
-                        .cloned()
-                        .collect(),
-                    session_commands: state
-                        .session_commands
-                        .values()
-                        .filter(|row| row.session_id == session_id)
-                        .cloned()
-                        .collect(),
-                    mcp_input_selections: state
-                        .mcp_input_selections
-                        .values()
-                        .filter(|row| row.session_id == session_id)
-                        .cloned()
-                        .collect(),
+                    inputs: state.input_projections(Some(&session_id))?,
+                    session_commands: state.command_projections(Some(&session_id))?,
+                    mcp_input_selections: state.mcp_selection_projections(Some(&session_id)),
                     runs: state
                         .runs
                         .values()
-                        .filter(|row| row.session_id == session_id)
+                        .filter(|row| {
+                            row.session_id == session_id
+                                && (!row.status.is_terminal()
+                                    || state.inputs.get(&row.input_id).is_some_and(|input| {
+                                        input.state == StoredInputState::Queued
+                                    }))
+                        })
                         .cloned()
                         .collect(),
                     child_tasks: state
                         .child_tasks
                         .values()
-                        .filter(|row| row.session_id == session_id)
+                        .filter(|row| row.session_id == session_id && !row.status.is_terminal())
                         .cloned()
                         .collect(),
                     work_plans: state
@@ -202,12 +204,7 @@ impl VolatileRuntimeStore {
                         .filter(|row| row.session_id == session_id)
                         .cloned()
                         .collect(),
-                    skill_activations: state
-                        .skill_activations
-                        .values()
-                        .filter(|row| row.session_id == session_id)
-                        .cloned()
-                        .collect(),
+                    skill_activations: state.skill_activation_projections(Some(&session_id)),
                 },
             })
         })
@@ -278,7 +275,7 @@ impl VolatileRuntimeStore {
             Ok(rows
                 .into_iter()
                 .skip(query.offset as usize)
-                .take(query.limit.clamp(1, 201) as usize)
+                .take(query.limit.max(1) as usize)
                 .collect())
         })
     }
@@ -316,6 +313,9 @@ impl VolatileRuntimeStore {
                 .inputs
                 .retain(|input_id, _| !stale_goal_inputs.contains(input_id));
             state
+                .input_identities
+                .retain(|id, _| !stale_goal_inputs.contains(id));
+            state
                 .runs
                 .retain(|_, run| !stale_goal_inputs.contains(&run.input_id));
             state.skill_activations.retain(|_, activation| {
@@ -334,15 +334,33 @@ impl VolatileRuntimeStore {
                 devices: state.devices.values().cloned().collect(),
                 workspaces: state.workspaces.values().cloned().collect(),
                 attachments: state.attachments.values().cloned().collect(),
+                run_history: state.recovered_run_history(None),
+                child_history: state.recovered_child_history(None),
                 sessions: state.sessions.values().cloned().collect(),
-                inputs: state.inputs.values().cloned().collect(),
-                session_commands: state.session_commands.values().cloned().collect(),
-                mcp_input_selections: state.mcp_input_selections.values().cloned().collect(),
-                runs: state.runs.values().cloned().collect(),
-                child_tasks: state.child_tasks.values().cloned().collect(),
+                inputs: state.input_projections(None)?,
+                session_commands: state.command_projections(None)?,
+                mcp_input_selections: state.mcp_selection_projections(None),
+                runs: state
+                    .runs
+                    .values()
+                    .filter(|run| {
+                        !run.status.is_terminal()
+                            || state
+                                .inputs
+                                .get(&run.input_id)
+                                .is_some_and(|input| input.state == StoredInputState::Queued)
+                    })
+                    .cloned()
+                    .collect(),
+                child_tasks: state
+                    .child_tasks
+                    .values()
+                    .filter(|task| !task.status.is_terminal())
+                    .cloned()
+                    .collect(),
                 work_plans: state.work_plans.values().cloned().collect(),
                 goals: state.goals.values().cloned().collect(),
-                skill_activations: state.skill_activations.values().cloned().collect(),
+                skill_activations: state.skill_activation_projections(None),
             })
         })
     }

@@ -1,6 +1,47 @@
 use super::*;
 
 #[test]
+fn stream_returned_reasoning_aliases_without_declared_reasoning_capability() {
+    for field in ["reasoning", "reasoning_content"] {
+        let events = assemble_with_adapter(
+            base_adapter(),
+            vec![
+                chunk(json!({
+                    "id": "chatcmpl_1", "model": "deepseek-reasoner",
+                    "choices": [{"index": 0, "delta": {field: "think"}}],
+                })),
+                chunk(json!({
+                    "id": "chatcmpl_1", "model": "deepseek-reasoner",
+                    "choices": [{"index": 0, "delta": {field: " more"}}],
+                })),
+                content_chunk("answer"),
+                finish_chunk("stop"),
+            ],
+        )
+        .unwrap();
+        let deltas: String = events
+            .iter()
+            .filter_map(|event| match event {
+                ModelEvent::ReasoningDelta { delta, .. } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deltas, "think more", "{field}");
+        let message = events
+            .iter()
+            .find_map(|event| match event {
+                ModelEvent::TurnFinished { message } => Some(message),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            matches!(&message.parts[0], AssistantPart::Reasoning(part) if part.text == "think more")
+        );
+        assert!(matches!(&message.parts[1], AssistantPart::Text(part) if part.text == "answer"));
+    }
+}
+
+#[test]
 fn stream_plain_text_turn_produces_full_event_sequence() {
     let events = assemble(vec![
         content_chunk("Hello"),

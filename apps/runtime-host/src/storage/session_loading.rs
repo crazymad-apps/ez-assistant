@@ -1,4 +1,4 @@
-//! 启动全局事实、会话摘要与单会话状态查询；均不扫描 Conversation 文件。
+//! 全局启动与会话摘要不扫描文件；单会话装配按需核对只读文件历史。
 
 use assistant_protocol::{SessionId, SessionSummary};
 use assistant_runtime::{LoadedSession, RecoveredRuntime, SessionSummaryQuery};
@@ -11,6 +11,58 @@ use super::{
 };
 
 impl StorageEngine {
+    /// 当前 owner 无待提交尾帧，SQL 已只装配真实队列和控制；将可靠文件事实加入只读恢复投影。
+    /// 历史选择补齐已消费 Input 的内存值，不回写 SQL、不注册历史 Run／child，也不发布事件。
+    /// 调用者持有 Store worker，失败由所属会话读取报告，不把不完整文件降为缺省值。
+    pub(super) fn load_session_history_state(
+        &mut self,
+        id: &SessionId,
+        state: &mut RecoveredRuntime,
+    ) -> StorageResult<()> {
+        let facts = self
+            .load_conversation_history(assistant_protocol::ConversationOwner::MainSession {
+                session_id: id.clone(),
+            })?
+            .facts;
+        for activation in &facts.skill_activations {
+            if let Some(input_id) = &activation.input_id
+                && let Some(input) = state
+                    .inputs
+                    .iter_mut()
+                    .find(|input| &input.session_id == id && &input.input_id == input_id)
+            {
+                if input.state != assistant_runtime::StoredInputState::Committed
+                    || input
+                        .skill_activation
+                        .as_ref()
+                        .is_some_and(|existing| existing != activation)
+                {
+                    return Err(invalid_data(
+                        "historical skill activation conflicts with unfinished input",
+                    ));
+                }
+                input.skill_activation = Some(activation.clone());
+            }
+        }
+        state
+            .run_history
+            .extend(facts.runs.into_iter().map(|run| (id.clone(), run)));
+        state.child_history.extend(
+            facts
+                .child_tasks
+                .into_iter()
+                .map(|child| (id.clone(), child)),
+        );
+        state.skill_activations.extend(facts.skill_activations);
+        state.skill_activations.sort_by(|left, right| {
+            (left.created_at_ms, &left.activation_id)
+                .cmp(&(right.created_at_ms, &right.activation_id))
+        });
+        state.mcp_input_selections.extend(facts.mcp_selections);
+        state.session_commands.extend(facts.commands);
+        Ok(())
+    }
+
     pub(super) fn load_runtime_globals(&self) -> StorageResult<RecoveredRuntime> {
         Ok(RecoveredRuntime {
             devices: self.load_devices()?,
@@ -25,7 +77,7 @@ impl StorageEngine {
     ) -> StorageResult<LoadedSession> {
         self.repair_session_resources_scoped(Some(id))?;
         self.recover_attachments_scoped(Some(id))?;
-        let clear = self.recover_session_history_operations_scoped(Some(id))?;
+        self.recover_session_history_operations_scoped(Some(id))?;
         let mut unavailable = self.recover_body_appends_scoped(Some(id))?;
         let mut children = self.recover_child_body_appends_scoped(Some(id))?;
         children.extend(self.recover_pending_child_tool_exchanges_scoped(Some(id))?);
@@ -34,33 +86,40 @@ impl StorageEngine {
         unavailable.extend(self.recover_pending_tool_exchanges_scoped(Some(id))?);
         self.unavailable_sessions.remove(id.as_str());
         self.unavailable_sessions.extend(unavailable);
-        if let Some(session) = self.load_sessions_scoped(Some(id))?.first()
-            && self.recover_session_tool_images(id, session.body_generation)?
-            && !clear.contains(id.as_str())
-        {
-            self.unavailable_sessions.insert(id.as_str().to_owned());
-        }
+        // 历史图片只在实际使用时校验；恢复不扫描／解码主窗口之外的图片与已结束 child。
         if !self.unavailable_sessions.contains(id.as_str()) {
             self.pause_running_goals_for_recovery_scoped(Some(id))?;
             self.backfill_session_usage_scoped(Some(id))?;
         }
-        self.load_session_state(id)
+        let window = self.load_execution_window(id)?;
+        super::usage::snapshot::replace_context(
+            &self.connection,
+            &assistant_protocol::ConversationOwner::MainSession {
+                session_id: id.clone(),
+            },
+            &window.snapshot(),
+        )?;
+        let mut loaded = self.load_session_state(id)?;
+        loaded.execution_window = Some(window);
+        Ok(loaded)
     }
 
-    pub(super) fn load_session_state(&self, id: &SessionId) -> StorageResult<LoadedSession> {
+    pub(super) fn load_session_state(&mut self, id: &SessionId) -> StorageResult<LoadedSession> {
         let mut state = RecoveredRuntime {
             devices: self.load_devices()?,
             workspaces: self.load_all_workspaces()?,
             sessions: self.load_sessions_scoped(Some(id))?,
             inputs: self.load_inputs_scoped(Some(id))?,
-            runs: self.load_runs_scoped(Some(id))?,
+            runs: self.load_unfinished_runs_scoped(Some(id))?,
             session_commands: self.load_session_commands_scoped(id)?,
             mcp_input_selections: self.load_mcp_input_selections_scoped(Some(id))?,
             attachments: self.load_attachments_scoped(Some(id))?,
-            child_tasks: self.load_child_tasks_scoped(Some(id))?,
+            child_tasks: self.load_unfinished_child_tasks_scoped(Some(id))?,
+            child_history: Vec::new(),
             work_plans: self.load_all_work_plans_scoped(Some(id))?,
             goals: self.load_all_goals_scoped(Some(id))?,
             skill_activations: self.load_skill_activations_scoped(Some(id))?,
+            run_history: Vec::new(),
         };
         let pending: bool = self
             .connection
@@ -78,6 +137,11 @@ impl StorageEngine {
                 session.conversation_state =
                     assistant_runtime::StoredConversationState::Unavailable;
             }
+        }
+        if state.sessions.iter().any(|session| {
+            session.conversation_state == assistant_runtime::StoredConversationState::Available
+        }) {
+            self.load_session_history_state(id, &mut state)?;
         }
         // 身份引用允许跨会话，但不因此装配被引用会话的执行状态。
         let mut ids = std::collections::BTreeSet::new();
@@ -128,7 +192,11 @@ impl StorageEngine {
                 ));
             }
         }
-        Ok(LoadedSession { state, identities })
+        Ok(LoadedSession {
+            state,
+            identities,
+            execution_window: None,
+        })
     }
 
     pub(super) fn query_session_summaries(
@@ -165,7 +233,7 @@ impl StorageEngine {
                 lifecycle,
                 query.session_id.as_ref().map(SessionId::as_str),
                 role,
-                query.limit.clamp(1, 201),
+                query.limit.max(1),
                 query.offset,
                 query.query.as_deref()
             ])

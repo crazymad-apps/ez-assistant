@@ -1,6 +1,5 @@
 import { useRef, useState, useEffect } from "react";
 import { observer } from "mobx-react-lite";
-import { AccountMenu } from "../AccountMenu";
 import { Button } from "../../../components/Button";
 import { Icon } from "../../../components/Icon";
 import { getDesktopPlatform } from "../../../native-bridge/desktopLifecycle";
@@ -97,13 +96,11 @@ export const RuntimeConnectionForm = observer(function RuntimeConnectionForm({ c
       </div>}
     </div>
     {update_required && <div className={styles.update} role="status">
-      <strong>需要更新后继续使用</strong>
       {!connection.updates.visible && <p>暂时无法更新，请稍后重试。</p>}
       {connection.updates.visible && <Button variant="primary" size="large" onClick={() => connection.updates.show()}>{connection.updates.installing ? "正在更新" : connection.updates.downloading ? "查看更新进度" : connection.updates.snapshot.available ? "更新并重启" : "查看更新状态"}</Button>}
       {!connection.updates.downloading && !connection.updates.installing && <Button disabled={connection.pending} onClick={() => void connection.retryUpdateConnection()}>重新连接</Button>}
     </div>}
     {!update_required && connection.can_retry && connection.error && <Button disabled={connection.pending} onClick={() => void connection.retryInitialization()}>重试初始化</Button>}
-    {!update_required && !settings && connection.session && <AccountMenu connection={connection} />}
     {settings && <p className={styles.hint}>切换将丢弃未发送草稿，并关闭当前客户端的临时资源。</p>}
     {!update_required && <Button className={styles.submit} size="large" variant="primary" type="submit" disabled={submit_disabled}>{submit_label}<span aria-hidden="true">→</span></Button>}
     <div className={styles.feedback} aria-live="polite">

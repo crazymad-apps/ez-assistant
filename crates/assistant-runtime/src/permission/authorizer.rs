@@ -303,6 +303,12 @@ impl RuntimeToolAuthorizer {
         if invocation.facts::<LoadSkillAuthorizationFacts>().is_some() {
             return ToolAuthorization::Allow;
         }
+        if invocation
+            .facts::<crate::skill::ReadSkillReferenceAuthorizationFacts>()
+            .is_some()
+        {
+            return ToolAuthorization::Allow;
+        }
         // 发现网关只读取本 Run 已披露 Server 的内存目录，并在返回前按当前权限删除
         // 显式 Deny；它不调用远端工具，也不把发现动作本身变成 MCP 授权。
         if invocation
@@ -314,6 +320,17 @@ impl RuntimeToolAuthorizer {
         // 主控工具只由来源门禁通过的 Controller Run 装配，私有 facts 不进入文件权限规则。
         if invocation.facts::<ControllerAuthorizationFacts>().is_some() {
             return ToolAuthorization::Allow;
+        }
+        if let Some(facts) = invocation.facts::<crate::runtime::McpManagementAuthorizationFacts>() {
+            if facts.write && self.variant == AgentVariant::Plan {
+                return deny("Plan cannot configure or refresh MCP servers");
+            }
+            if facts.validate().await.is_err() {
+                return deny("MCP configuration changed; query current metadata before retrying");
+            }
+            if !facts.write {
+                return ToolAuthorization::Allow;
+            }
         }
         // 授权器按解析后的结构化 facts 判断，未知 facts 默认拒绝；不能退回到工具名或原始
         // JSON 猜测权限，否则新工具可能意外绕过现有策略。
@@ -480,6 +497,14 @@ impl RuntimeToolAuthorizer {
         batch: &ResolvedToolBatch,
         recheck_ask_rules: bool,
     ) -> Option<ToolAuthorization> {
+        if let Some(facts) = invocation.facts::<crate::runtime::McpManagementAuthorizationFacts>()
+            && ((facts.write && self.variant == AgentVariant::Plan)
+                || facts.validate().await.is_err())
+        {
+            return Some(deny(
+                "MCP configuration changed or became denied while approval was pending",
+            ));
+        }
         if let Some(facts) = invocation.facts::<McpAuthorizationFacts>() {
             let Some(registry) = &self.mcp_registry else {
                 return Some(deny("mcp_server_unavailable"));

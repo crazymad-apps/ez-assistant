@@ -3,9 +3,11 @@ import { request as httpsRequest } from 'node:https';
 import type { CatalogModel, ModelParameters, ProviderConnection, Support, TokenLimit } from '../contracts/models.js';
 import { efforts } from '../contracts/models.js';
 import { IdentityError } from '../identity/errors.js';
+import { parseSub2api } from './sub2api.js';
 import { emptyParameters, enumeration, text } from './parameters.js';
 
 const failure = () => new IdentityError(502, 'MODEL_DISCOVERY_FAILED');
+class UnsupportedDiscovery extends Error {}
 
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw failure();
@@ -51,6 +53,7 @@ export function parsePage(
   page: number,
 ): { models: CatalogModel[]; total?: number } {
   const document = object(value);
+  if (format === 'sub2api' && Object.hasOwn(document, 'models')) return { models: parseSub2api(document) };
   if (format === 'dashscope_native') {
     if (document.success !== true) throw failure();
     const output = object(document.output),
@@ -112,7 +115,8 @@ export function parsePage(
   return {
     models: document.data.map((value) => {
       const raw = object(value);
-      if (raw.object !== 'model') throw failure();
+      // 兼容服务可能省略条目类型；显式声明时仍须为 model，模型身份继续严格校验。
+      if (Object.hasOwn(raw, 'object') && raw.object !== 'model') throw failure();
       const model = identity(raw, 'id');
       if (format === 'vllm') model.metadata.context_window_tokens = limit(raw.max_model_len);
       if (format === 'moonshot') {
@@ -162,7 +166,7 @@ function moonshot(raw: Record<string, unknown>): ModelParameters {
   return p;
 }
 
-function readPage(url: URL, key: string, signal: AbortSignal): Promise<Buffer> {
+function readPage(url: URL, key: string, signal: AbortSignal, enhanced = false): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const headers: Record<string, string> = { Accept: 'application/json', 'Accept-Encoding': 'identity' };
     if (key) headers.Authorization = `Bearer ${key}`;
@@ -170,6 +174,11 @@ function readPage(url: URL, key: string, signal: AbortSignal): Promise<Buffer> {
       url,
       { method: 'GET', headers, signal },
       (response) => {
+        if (enhanced && (response.statusCode === 404 || response.statusCode === 405)) {
+          response.destroy();
+          reject(new UnsupportedDiscovery());
+          return;
+        }
         if (
           !response.statusCode ||
           response.statusCode < 200 ||
@@ -184,7 +193,8 @@ function readPage(url: URL, key: string, signal: AbortSignal): Promise<Buffer> {
         let length = 0;
         response.on('data', (chunk: Buffer) => {
           length += chunk.length;
-          if (length > 1024 * 1024) {
+          // 增强目录可能逐条重复携带客户端提示词；只扩大本格式的有界读取，不保存提示词。
+          if (length > (enhanced ? 8 : 1) * 1024 * 1024) {
             response.destroy();
             reject(failure());
           } else chunks.push(chunk);
@@ -215,6 +225,9 @@ export async function discover(
   if (connection.models_path) url.pathname = connection.models_path;
   else if (connection.discovery_format === 'dashscope_native') url.pathname = '/api/v1/models';
   else url.pathname = `${url.pathname.replace(/\/$/, '')}/models`;
+  const enhanced = connection.discovery_format === 'sub2api';
+  // Sub2API 将非空 client_version 作为增强清单开关，不是服务端或客户端的兼容版本声明。
+  if (enhanced) url.searchParams.set('client_version', 'ez-assistant');
   const models: CatalogModel[] = [],
     ids = new Set<string>();
   let bytes = 0,
@@ -225,7 +238,14 @@ export async function discover(
         url.searchParams.set('page_no', String(page));
         url.searchParams.set('page_size', '100');
       }
-      const buffer = await readPage(url, key, signal);
+      let buffer: Buffer;
+      try {
+        buffer = await readPage(url, key, signal, enhanced);
+      } catch (error) {
+        if (!(error instanceof UnsupportedDiscovery)) throw error;
+        url.searchParams.delete('client_version');
+        buffer = await readPage(url, key, signal);
+      }
       bytes += buffer.length;
       if (bytes > 8 * 1024 * 1024) throw failure();
       const result = parsePage(

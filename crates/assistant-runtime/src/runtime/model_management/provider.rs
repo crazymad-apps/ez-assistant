@@ -86,10 +86,12 @@ impl AssistantRuntime {
             .put_provider(provider.as_ref().clone())
             .await
             .map_err(|e| RuntimeError::from_store("create provider", e))?;
-        self.managed_models_mut()?
-            .providers
-            .insert(id, provider.clone());
-        self.publish(RuntimeEvent::ConfigChanged);
+        self.event_sender.publish_transition(|| {
+            self.managed_models_mut()?
+                .providers
+                .insert(id, provider.clone());
+            Ok(((), Some(RuntimeEvent::ConfigChanged)))
+        })?;
         Ok(summary(&provider))
     }
 
@@ -146,10 +148,12 @@ impl AssistantRuntime {
             .put_provider(provider.as_ref().clone())
             .await
             .map_err(|e| RuntimeError::from_store("update provider", e))?;
-        self.managed_models_mut()?
-            .providers
-            .insert(request.provider_instance_id, provider.clone());
-        self.publish(RuntimeEvent::ConfigChanged);
+        self.event_sender.publish_transition(|| {
+            self.managed_models_mut()?
+                .providers
+                .insert(request.provider_instance_id, provider.clone());
+            Ok(((), Some(RuntimeEvent::ConfigChanged)))
+        })?;
         Ok(summary(&provider))
     }
 
@@ -167,8 +171,10 @@ impl AssistantRuntime {
             .remove_provider(id.clone())
             .await
             .map_err(|e| RuntimeError::from_store("delete provider", e))?;
-        self.managed_models_mut()?.providers.remove(&id);
-        self.publish(RuntimeEvent::ConfigChanged);
+        self.event_sender.publish_transition(|| {
+            self.managed_models_mut()?.providers.remove(&id);
+            Ok(((), Some(RuntimeEvent::ConfigChanged)))
+        })?;
         Ok(usage)
     }
     /// 删除确认前按存储权威快照查询全量影响；只持短读门，不装配会话或请求模型。
@@ -186,7 +192,7 @@ impl AssistantRuntime {
     }
 }
 
-fn summary(provider: &StoredProvider) -> ProviderSummary {
+pub(super) fn summary(provider: &StoredProvider) -> ProviderSummary {
     ProviderSummary {
         provider_instance_id: provider.provider_instance_id.clone(),
         connection: provider.connection.clone(),

@@ -1,9 +1,11 @@
-import { useState } from 'react';
+import { lazy, Suspense, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 import { Alert, Typography } from 'antd';
 import type { SiteNode } from '../../request/openapi';
 import styles from './index.module.scss';
+
+const CodeBlock = lazy(() => import('./CodeBlock').then((module) => ({ default: module.SiteCodeBlock })));
 
 /** 正文只渲染白名单节点，首页／手册与版本日志预览共用；不解释 HTML。 */
 export function SiteDocument({
@@ -54,12 +56,23 @@ export function SiteDocument({
           return <li key={key}>{children}</li>;
         case 'code':
           return (
-            <pre key={key}>
-              <code>{node.text}</code>
-            </pre>
+            <Suspense
+              key={key}
+              fallback={
+                <pre>
+                  <code>{node.text}</code>
+                </pre>
+              }
+            >
+              <CodeBlock code={node.text ?? ''} language={node.language ?? ''} />
+            </Suspense>
           );
         case 'code_inline':
-          return <code key={key}>{node.text}</code>;
+          return (
+            <code key={key} data-streamdown="inline-code">
+              {node.text}
+            </code>
+          );
         case 'link': {
           const href = safeHref(node.href);
           return preview ? (
@@ -92,8 +105,10 @@ export function SiteDocument({
           return <hr key={key} />;
         case 'table':
           return (
-            <div className={styles.table} key={key} role="region" aria-label="表格" tabIndex={0}>
-              <table>{children}</table>
+            <div data-streamdown="table-wrapper" key={key} role="region" aria-label="表格" tabIndex={0}>
+              <div>
+                <table data-streamdown="table">{children}</table>
+              </div>
             </div>
           );
         case 'thead':

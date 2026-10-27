@@ -29,6 +29,9 @@ async function fixture(triple, machine) {
   binary.writeUInt32LE(0x4550, 128);
   binary.writeUInt16LE(machine, 132);
   await writeFile(join(directory, "ez-assistant-runtime.exe"), binary);
+  await writeFile(join(directory, "ez-assistant-desktop-capture.exe"), binary);
+  await mkdir(join(directory, "runtime-tools/bin"), { recursive: true });
+  await writeFile(join(directory, "runtime-tools/bin/rg.exe"), binary);
   return binary;
 }
 
@@ -38,6 +41,7 @@ describe("Windows sidecar packaging", () => {
       const expected = await fixture(triple, machine);
       await execute(process.execPath, [script, "--target", triple], { env: { ...process.env, CARGO_TARGET_DIR: join(workspace, "target") } });
       assert.deepEqual(await readFile(join(workspace, "apps/desktop/src-tauri/binaries", `ez-assistant-runtime-${triple}.exe`)), expected);
+      assert.deepEqual(await readFile(join(workspace, "apps/desktop/src-tauri/binaries/runtime-tools/bin/rg.exe")), expected);
     });
   }
   it("rejects an x64 Host labeled as ARM64", async () => {

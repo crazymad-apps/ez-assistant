@@ -1,0 +1,203 @@
+[
+  {
+    "name": "metadata is explicit; client prompts and compaction thresholds are ignored",
+    "document": {
+      "models": [
+        {
+          "slug": "model-a",
+          "display_name": "Model A",
+          "context_window": 272000,
+          "max_context_window": 1048576,
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "supported_reasoning_levels": [
+            {
+              "effort": "low"
+            },
+            {
+              "effort": "high"
+            }
+          ],
+          "default_reasoning_level": "high",
+          "supports_parallel_tool_calls": true,
+          "auto_compact_token_limit": 200000,
+          "model_messages": {
+            "instructions_template": "Untrusted upstream text"
+          }
+        }
+      ]
+    },
+    "expected": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 272000
+      },
+      "image_input": "supported",
+      "tool_calls": "supported",
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "low": "low",
+        "high": "high"
+      },
+      "default_reasoning_effort": "high",
+      "max_output_tokens": {
+        "state": "unknown"
+      },
+      "streaming": "unknown",
+      "server_compaction_support": "unknown",
+      "reasoning_mode": "unknown"
+    }
+  },
+  {
+    "name": "none means no configurable effort, not no reasoning or no tools",
+    "document": {
+      "models": [
+        {
+          "slug": "model-b",
+          "context_window": 131072,
+          "input_modalities": [
+            "text"
+          ],
+          "supported_reasoning_levels": [
+            {
+              "effort": "none"
+            }
+          ],
+          "default_reasoning_level": "none",
+          "supports_parallel_tool_calls": false
+        }
+      ]
+    },
+    "expected": {
+      "image_input": "unsupported",
+      "tool_calls": "unknown",
+      "reasoning": "unknown",
+      "reasoning_efforts": {},
+      "default_reasoning_effort": null
+    }
+  },
+  {
+    "name": "missing metadata stays unknown",
+    "document": {
+      "models": [
+        {
+          "slug": "model-c"
+        }
+      ]
+    },
+    "expected": {
+      "context_window_tokens": {
+        "state": "unknown"
+      },
+      "reasoning_efforts": null,
+      "image_input": "unknown"
+    }
+  },
+  {
+    "name": "invalid context remains invalid",
+    "document": {
+      "models": [
+        {
+          "slug": "model-d",
+          "context_window": -1,
+          "max_context_window": 1048576
+        }
+      ]
+    },
+    "expected": {
+      "context_window_tokens": {
+        "state": "invalid"
+      }
+    }
+  },
+  {
+    "name": "ordinary list remains accepted when enhancement is ignored",
+    "document": {
+      "object": "list",
+      "data": [
+        {
+          "id": "ordinary"
+        }
+      ]
+    },
+    "expected": {
+      "context_window_tokens": {
+        "state": "unknown"
+      }
+    }
+  },
+  {
+    "name": "invalid slug",
+    "document": {
+      "models": [
+        {
+          "slug": " bad "
+        }
+      ]
+    },
+    "invalid": true
+  },
+  {
+    "name": "invalid modalities",
+    "document": {
+      "models": [
+        {
+          "slug": "a",
+          "input_modalities": true
+        }
+      ]
+    },
+    "invalid": true
+  },
+  {
+    "name": "invalid effort default",
+    "document": {
+      "models": [
+        {
+          "slug": "a",
+          "supported_reasoning_levels": [
+            {
+              "effort": "low"
+            }
+          ],
+          "default_reasoning_level": "max"
+        }
+      ]
+    },
+    "invalid": true
+  },
+  {
+    "name": "duplicate effort",
+    "document": {
+      "models": [
+        {
+          "slug": "a",
+          "supported_reasoning_levels": [
+            {
+              "effort": "high"
+            },
+            {
+              "effort": "high"
+            }
+          ],
+          "default_reasoning_level": "high"
+        }
+      ]
+    },
+    "invalid": true
+  },
+  {
+    "name": "invalid tool flag",
+    "document": {
+      "models": [
+        {
+          "slug": "a",
+          "supports_parallel_tool_calls": "yes"
+        }
+      ]
+    },
+    "invalid": true
+  }
+]

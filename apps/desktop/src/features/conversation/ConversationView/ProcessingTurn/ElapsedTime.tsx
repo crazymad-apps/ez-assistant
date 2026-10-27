@@ -7,16 +7,18 @@ import { formatElapsed, isRunActive } from './presentation';
 
 /** 只有计时文本订阅秒级更新；折叠正文不重挂载，终态停止定时器。 */
 export const ElapsedTime = observer(function ElapsedTime(
-  props: Readonly<{ run: Pick<LiveRunProjection, 'created_at_ms' | 'finished_at_ms' | 'status'> }>,
+  props: Readonly<{ run: Pick<LiveRunProjection, 'started_at_ms' | 'finished_at_ms' | 'status'> }>,
 ) {
   const store = useRootStore();
   const [now, setNow] = useState(() => performance.now());
-  const active = isRunActive(props.run.status);
+  const has_started = props.run.started_at_ms !== null && Number.isSafeInteger(props.run.started_at_ms) && props.run.started_at_ms >= 0;
+  const active = has_started && props.run.status !== 'accepted' && isRunActive(props.run.status);
   useEffect(() => {
     if (!active) return;
     const timer = window.setInterval(() => setNow(performance.now()), 1000);
     return () => window.clearInterval(timer);
   }, [active]);
+  if (!has_started || props.run.status === 'accepted') return null;
   return (
     <span aria-label="处理耗时">
       {formatElapsed(

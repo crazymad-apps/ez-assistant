@@ -21,7 +21,12 @@ export function markdown(source: string): SiteNode[] {
       let node: SiteNode;
       if (token.type === 'text') node = { kind: 'text', text: token.content };
       else if (token.type === 'softbreak' || token.type === 'hardbreak') node = { kind: 'break' };
-      else if (token.type === 'fence' || token.type === 'code_block') node = { kind: 'code', text: token.content };
+      else if (token.type === 'fence' || token.type === 'code_block') {
+        node = { kind: 'code', text: token.content };
+        // 仅保留 fence 的语言，不把标题、属性或任意 info 字符串传给代码阅读器。
+        const language = token.info.trim().split(/\s+/, 1)[0] ?? '';
+        if (/^[a-zA-Z0-9][a-zA-Z0-9_+.-]{0,63}$/.test(language)) node.language = language;
+      }
       else if (token.type === 'code_inline') node = { kind: 'code_inline', text: token.content };
       else if (token.type === 'hr') node = { kind: 'hr' };
       else if (token.type === 'image') node = { kind: 'image', href: token.attrGet('src') ?? '', text: token.content };

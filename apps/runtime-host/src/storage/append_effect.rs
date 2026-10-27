@@ -19,10 +19,29 @@ use super::{
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(super) enum AppendPurpose {
+    MessageFeedback {
+        change: assistant_runtime::StoredHistoryFeedback,
+    },
+    /// 问答终态只写入文件，原 pending 控制在最终 SQL 事务释放。
+    QuestionFeedback {
+        request: assistant_protocol::FeedbackRequestSnapshot,
+        expected_status: Option<assistant_protocol::FeedbackStatus>,
+    },
+    /// 轮后回答与下一条排队输入共用原 staged 回执，输入正文不成为文件历史。
+    FeedbackInput { input: Box<NewStoredInput> },
+    /// 无父工具回执的 child 与主文件目录共用一次完成事务；依赖原 child 回执。
+    ChildDirectory {
+        child_operation_id: String,
+        child: Box<assistant_runtime::StoredChildTaskHistory>,
+    },
     /// 只追加规范消息，不改变 Input/Run 状态。
     Messages,
-    /// 首次 User Message 已写入，提交 Input 并启动 Run。
+    /// 首次 User Message 或已提交 Input 的 retry 开始，可靠启动 Run。
     UserMessage {
+        #[serde(default)]
+        reuse_committed_input: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_id: Option<InputId>,
         #[serde(default)]
         context_management_mode: agent_model::ContextManagementMode,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -72,12 +91,16 @@ pub(super) enum AppendPurpose {
         cancel_requested: bool,
         error: Option<RuntimeErrorInfo>,
         final_message_id: Option<agent_types::MessageId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_exchange_receipt: Option<String>,
     },
 }
 
 /// 同一 staged append 算法的两种业务目标；物理表和路径只在 Host 内部适配。
 #[derive(Clone, Debug)]
 pub(super) enum ConversationStorageTarget {
+    /// 不创建 Run 的会话历史变更；回执的 run_id 明确为空。
+    SessionMetadata { session_id: SessionId },
     Session {
         session_id: SessionId,
         run_id: RunId,
@@ -86,6 +109,25 @@ pub(super) enum ConversationStorageTarget {
         session_id: SessionId,
         child_task_id: ChildTaskId,
     },
+}
+
+impl ConversationStorageTarget {
+    pub(super) fn owner(&self) -> assistant_protocol::ConversationOwner {
+        match self {
+            Self::Session { session_id, .. } | Self::SessionMetadata { session_id } => {
+                assistant_protocol::ConversationOwner::MainSession {
+                    session_id: session_id.clone(),
+                }
+            }
+            Self::ChildTask {
+                session_id,
+                child_task_id,
+            } => assistant_protocol::ConversationOwner::ChildTask {
+                session_id: session_id.clone(),
+                child_task_id: child_task_id.clone(),
+            },
+        }
+    }
 }
 
 pub(super) fn encode_purpose(purpose: &AppendPurpose) -> StorageResult<String> {
@@ -109,24 +151,49 @@ pub(super) fn apply_purpose(
     purpose: &AppendPurpose,
     target: &ConversationStorageTarget,
     created_at_ms: i64,
+    legacy_history: bool,
 ) -> StorageResult<()> {
     match (purpose, target) {
+        (
+            AppendPurpose::MessageFeedback { .. },
+            ConversationStorageTarget::SessionMetadata { .. },
+        ) => Ok(()),
+        (
+            AppendPurpose::ChildDirectory { child, .. },
+            ConversationStorageTarget::SessionMetadata { .. },
+        ) if !child.inherited && child.status.is_some_and(|status| status.is_terminal()) => Ok(()),
+        (
+            AppendPurpose::QuestionFeedback {
+                request,
+                expected_status,
+            },
+            ConversationStorageTarget::SessionMetadata { session_id },
+        ) if &request.session_id == session_id => super::feedback::apply_feedback_mutation(
+            transaction,
+            &assistant_runtime::FeedbackMutation {
+                request: request.clone(),
+                expected_status: *expected_status,
+            },
+            legacy_history,
+        ),
+        (
+            AppendPurpose::FeedbackInput { input },
+            ConversationStorageTarget::SessionMetadata { session_id },
+        ) if &input.session_id == session_id && input.feedback_answer.is_some() => {
+            super::input_state::apply_input_acceptance(transaction, input, legacy_history)
+                .map(|_| ())
+        }
         (AppendPurpose::Messages, _) => Ok(()),
         (
-            AppendPurpose::UserMessage {
-                context_management_mode,
-                reasoning_effort,
-                shell,
-            },
+            AppendPurpose::UserMessage { .. },
             ConversationStorageTarget::Session { session_id, run_id },
         ) => apply_user_message_start(
             transaction,
             run_id,
             session_id,
-            *reasoning_effort,
-            *context_management_mode,
-            shell.as_ref(),
+            purpose,
             created_at_ms,
+            legacy_history,
         ),
         (
             AppendPurpose::ToolExchange {
@@ -149,19 +216,34 @@ pub(super) fn apply_purpose(
                     "pending tool exchange finalization is inconsistent",
                 ));
             }
-            for activation in skill_activations {
-                super::skill::insert_skill_activation(transaction, activation)?;
+            if legacy_history {
+                for activation in skill_activations {
+                    super::skill::insert_skill_activation(transaction, activation)?;
+                }
             }
             Ok(())
         }
         (
             AppendPurpose::RunSettlement { .. },
             ConversationStorageTarget::Session { session_id, run_id },
-        ) => apply_run_settlement(transaction, run_id, session_id, purpose, created_at_ms),
+        ) => apply_run_settlement(
+            transaction,
+            run_id,
+            session_id,
+            purpose,
+            created_at_ms,
+            legacy_history,
+        ),
         (
             AppendPurpose::TerminalRunInputReconciliation { .. },
             ConversationStorageTarget::Session { session_id, run_id },
-        ) => apply_terminal_run_input_reconciliation(transaction, run_id, session_id, purpose),
+        ) => apply_terminal_run_input_reconciliation(
+            transaction,
+            run_id,
+            session_id,
+            purpose,
+            legacy_history,
+        ),
         (
             AppendPurpose::RunContinuation { .. },
             ConversationStorageTarget::Session { session_id, run_id },
@@ -184,8 +266,10 @@ pub(super) fn apply_purpose(
             },
         ) => {
             clear_child_exchange(transaction, receipt_id, child_task_id, session_id)?;
-            for activation in skill_activations {
-                super::skill::insert_skill_activation(transaction, activation)?;
+            if legacy_history {
+                for activation in skill_activations {
+                    super::skill::insert_skill_activation(transaction, activation)?;
+                }
             }
             Ok(())
         }
@@ -201,6 +285,7 @@ pub(super) fn apply_purpose(
             session_id,
             purpose,
             created_at_ms,
+            legacy_history,
         ),
         _ => Err(invalid_data(
             "append purpose does not match conversation target",
@@ -256,18 +341,20 @@ fn apply_child_settlement(
     session_id: &SessionId,
     purpose: &AppendPurpose,
     finished_at_ms: i64,
+    legacy_history: bool,
 ) -> StorageResult<()> {
     let AppendPurpose::ChildSettlement {
         status,
         cancel_requested,
         error,
         final_message_id,
+        parent_exchange_receipt,
     } = purpose
     else {
         return Err(invalid_data("child task settlement purpose is invalid"));
     };
-    let changed = transaction
-        .execute(
+    let changed = if legacy_history {
+        transaction.execute(
             "UPDATE child_tasks
              SET status = ?1, cancel_requested = MAX(cancel_requested, ?2), final_message_id = ?3,
                  error_code = ?4, error_message = ?5, finished_at_ms = ?6
@@ -288,9 +375,29 @@ fn apply_child_settlement(
                 session_id.as_str(),
             ],
         )
-        .map_err(|source| internal_error("child task could not be settled", source))?;
+    } else {
+        transaction.execute(
+            "UPDATE child_tasks SET status=?1,cancel_requested=MAX(cancel_requested,?2)
+             WHERE child_task_id=?3 AND session_id=?4 AND status IN ('accepted','running')",
+            params![
+                super::mode::child_task_status_value(*status),
+                i64::from(*cancel_requested),
+                child_task_id.as_str(),
+                session_id.as_str()
+            ],
+        )
+    }
+    .map_err(|source| internal_error("child task could not be settled", source))?;
     if changed != 1 {
         return Err(conflict("child task is not in a settleable state"));
+    }
+    if let Some(receipt) = parent_exchange_receipt {
+        super::tool_exchange::freeze_child_for_pending(
+            transaction,
+            receipt,
+            session_id,
+            child_task_id,
+        )?;
     }
     Ok(())
 }
@@ -299,18 +406,55 @@ pub(super) fn apply_user_message_start(
     transaction: &Transaction<'_>,
     run_id: &RunId,
     session_id: &SessionId,
-    reasoning_effort: Option<assistant_protocol::ReasoningEffortKey>,
-    context_management_mode: agent_model::ContextManagementMode,
-    shell: Option<&assistant_runtime::FrozenShellEnvironment>,
+    purpose: &AppendPurpose,
     created_at_ms: i64,
+    legacy_history: bool,
 ) -> StorageResult<()> {
+    let AppendPurpose::UserMessage {
+        reasoning_effort,
+        context_management_mode,
+        shell,
+        reuse_committed_input,
+        input_id,
+    } = purpose
+    else {
+        return Err(invalid_data("run start purpose is invalid"));
+    };
+    if let Some(input_id) = input_id {
+        let matches: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runs WHERE run_id=?1 AND session_id=?2 AND input_id=?3)",
+            params![run_id.as_str(), session_id.as_str(), input_id.as_str()], |row| row.get(0),
+        ).map_err(|source| internal_error("run input identity could not be checked", source))?;
+        if !matches {
+            return Err(conflict("run input does not match start"));
+        }
+    }
+    let shell = shell.as_ref();
     // 新 Run 领取时与输入原子接纳当前机制；已运行的 Run 不经过本入口。
     let changed = transaction.execute(
         "UPDATE sessions SET context_management_mode=?1 WHERE session_id=?2 AND lifecycle='active'",
-        params![super::mode::context_management_mode_value(context_management_mode), session_id.as_str()],
+        params![super::mode::context_management_mode_value(*context_management_mode), session_id.as_str()],
     ).map_err(|source| internal_error("session context mode could not be bound", source))?;
     if changed != 1 {
         return Err(conflict("session cannot accept context management mode"));
+    }
+
+    if *reuse_committed_input {
+        let changed = transaction.execute(
+            "UPDATE runs SET status='running', started_at_ms=?1, reasoning_effort=?2, shell_snapshot_json=?3
+             WHERE run_id=?4 AND session_id=?5 AND status='accepted'
+               AND EXISTS(SELECT 1 FROM inputs WHERE input_id=runs.input_id AND session_id=?5 AND state='committed')",
+            params![created_at_ms, reasoning_effort.map(super::mode::reasoning_effort_value),
+                shell.map(serde_json::to_string).transpose().map_err(|source| internal_error("shell snapshot could not be encoded", source))?,
+                run_id.as_str(), session_id.as_str()],
+        ).map_err(|source| internal_error("retry run could not be started", source))?;
+        if changed != 1 {
+            return Err(conflict("retry run cannot be started"));
+        }
+        if !legacy_history {
+            release_consumed_input_selections(transaction, run_id, session_id)?;
+        }
+        return Ok(());
     }
 
     let target: Option<String> = transaction.query_row(
@@ -344,7 +488,7 @@ pub(super) fn apply_user_message_start(
     let input_updated = transaction
         .execute(
             "UPDATE inputs
-             SET state = 'committed', queued_message_json = NULL
+             SET state = 'committed', queued_message_json = NULL, priority_order = NULL
              WHERE input_id = (SELECT input_id FROM runs WHERE run_id = ?1)
                AND session_id = ?2 AND state = 'queued'",
             params![run_id.as_str(), session_id.as_str()],
@@ -367,6 +511,9 @@ pub(super) fn apply_user_message_start(
     if input_updated != 1 || run_updated != 1 {
         return Err(invalid_data("staged run start state is inconsistent"));
     }
+    if !legacy_history {
+        release_consumed_input_selections(transaction, run_id, session_id)?;
+    }
     Ok(())
 }
 
@@ -376,6 +523,7 @@ pub(super) fn apply_run_settlement(
     session_id: &SessionId,
     purpose: &AppendPurpose,
     finished_at_ms: i64,
+    legacy_history: bool,
 ) -> StorageResult<()> {
     let AppendPurpose::RunSettlement {
         status,
@@ -388,20 +536,47 @@ pub(super) fn apply_run_settlement(
     else {
         return Err(invalid_data("run settlement purpose is invalid"));
     };
+    if !legacy_history
+        && transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM child_tasks WHERE parent_run_id=?1)",
+                [run_id.as_str()],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|source| internal_error("Run child controls could not be checked", source))?
+    {
+        return Err(conflict("Run still has unfinished child controls"));
+    }
     commit_settlement_input(
         transaction,
         run_id,
         session_id,
         queued_user_message.as_ref(),
     )?;
-    transaction.execute(
+    if !legacy_history {
+        release_consumed_input_selections(transaction, run_id, session_id)?;
+    }
+    let feedback_sql = if legacy_history {
         "UPDATE session_feedback SET snapshot_json=json_set(snapshot_json,'$.status','invalidated')
          WHERE run_id=?1 AND session_id=?2 AND json_extract(snapshot_json,'$.status')='pending'
-         AND (json_extract(snapshot_json,'$.mode')='wait' OR ?3 != 'completed')",
-        params![run_id.as_str(), session_id.as_str(), run_status_value(*status)],
-    ).map_err(|source| internal_error("feedback settlement failed", source))?;
-    let updated = transaction
+         AND (json_extract(snapshot_json,'$.mode')='wait' OR ?3 != 'completed')"
+    } else {
+        "DELETE FROM session_feedback WHERE run_id=?1 AND session_id=?2
+         AND json_extract(snapshot_json,'$.status')='pending'
+         AND (json_extract(snapshot_json,'$.mode')='wait' OR ?3 != 'completed')"
+    };
+    transaction
         .execute(
+            feedback_sql,
+            params![
+                run_id.as_str(),
+                session_id.as_str(),
+                run_status_value(*status)
+            ],
+        )
+        .map_err(|source| internal_error("feedback settlement failed", source))?;
+    let updated = if legacy_history {
+        transaction.execute(
             "UPDATE runs
              SET status = ?1, cancel_requested = ?2, error_code = ?3,
                  error_message = ?4, finished_at_ms = ?5
@@ -417,7 +592,19 @@ pub(super) fn apply_run_settlement(
                 session_id.as_str(),
             ],
         )
-        .map_err(|source| internal_error("run could not be settled", source))?;
+    } else {
+        transaction.execute(
+            "UPDATE runs SET status=?1,cancel_requested=?2
+             WHERE run_id=?3 AND session_id=?4 AND status IN ('accepted','running','cancelling')",
+            params![
+                run_status_value(*status),
+                i64::from(*cancel_requested),
+                run_id.as_str(),
+                session_id.as_str()
+            ],
+        )
+    }
+    .map_err(|source| internal_error("run could not be settled", source))?;
     if updated != 1 {
         return Err(conflict("run is not in a settleable state"));
     }
@@ -451,7 +638,7 @@ fn commit_settlement_input(
     let (input_id, input_session_id, user_message_id, state, queued_message_json): (
         String,
         String,
-        String,
+        Option<String>,
         String,
         Option<String>,
     ) = transaction
@@ -484,7 +671,7 @@ fn commit_settlement_input(
         "queued" => {
             let message = queued_user_message
                 .ok_or_else(|| conflict("queued run input requires its original user message"))?;
-            if message.id.as_str() != user_message_id {
+            if Some(message.id.as_str()) != user_message_id.as_deref() {
                 return Err(conflict("queued run input message identity does not match"));
             }
             let stored = queued_message_json
@@ -498,7 +685,7 @@ fn commit_settlement_input(
             }
             let updated = transaction
                 .execute(
-                    "UPDATE inputs SET state = 'committed', queued_message_json = NULL
+                    "UPDATE inputs SET state = 'committed', queued_message_json = NULL, priority_order = NULL
                      WHERE input_id = ?1 AND session_id = ?2 AND user_message_id = ?3
                        AND state = 'queued'",
                     params![input_id, session_id.as_str(), user_message_id],
@@ -520,6 +707,7 @@ pub(super) fn apply_terminal_run_input_reconciliation(
     run_id: &RunId,
     session_id: &SessionId,
     purpose: &AppendPurpose,
+    legacy_history: bool,
 ) -> StorageResult<()> {
     let AppendPurpose::TerminalRunInputReconciliation {
         input_id,
@@ -579,7 +767,7 @@ pub(super) fn apply_terminal_run_input_reconciliation(
     }
     let updated = transaction
         .execute(
-            "UPDATE inputs SET state = 'committed', queued_message_json = NULL
+            "UPDATE inputs SET state = 'committed', queued_message_json = NULL, priority_order = NULL
              WHERE input_id = ?1 AND session_id = ?2 AND user_message_id = ?3
                AND state = 'queued'",
             params![input_id.as_str(), session_id.as_str(), user_message_id],
@@ -591,6 +779,38 @@ pub(super) fn apply_terminal_run_input_reconciliation(
         return Err(conflict(
             "terminal run queued input changed during reconciliation",
         ));
+    }
+    if !legacy_history {
+        release_consumed_input_selections(transaction, run_id, session_id)?;
+    }
+    Ok(())
+}
+
+/// 对应 User 与选择事实已冻结在同一 staged 帧中，预检仅回滚验证，最终调用发生于文件同步后。
+/// 只释放本次 Run 已消费的选择；任一删除失败由调用方事务保留原队列与回执，恢复不重复消费。
+fn release_consumed_input_selections(
+    transaction: &Transaction<'_>,
+    run_id: &RunId,
+    session_id: &SessionId,
+) -> StorageResult<()> {
+    let input_id: String = transaction
+        .query_row(
+            "SELECT i.input_id FROM inputs i JOIN runs r ON r.input_id=i.input_id
+         WHERE r.run_id=?1 AND r.session_id=?2 AND i.session_id=?2 AND i.state='committed'",
+            params![run_id.as_str(), session_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(|source| internal_error("consumed input identity could not be checked", source))?;
+    for statement in [
+        "DELETE FROM skill_activations WHERE input_id=?1 AND session_id=?2",
+        "DELETE FROM mcp_input_selections WHERE input_id=?1 AND session_id=?2",
+        "UPDATE inputs SET skill_activation_json=NULL WHERE input_id=?1 AND session_id=?2 AND state='committed'",
+    ] {
+        transaction
+            .execute(statement, params![input_id, session_id.as_str()])
+            .map_err(|source| {
+                internal_error("consumed input selection could not be released", source)
+            })?;
     }
     Ok(())
 }

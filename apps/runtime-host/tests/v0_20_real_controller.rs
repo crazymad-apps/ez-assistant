@@ -45,9 +45,7 @@ fn configured_model_processes_a_proxy_report_in_the_controller_session() {
             json!({ "title": "v0.20 real managed session" }),
         )["session"]["session_id"],
     );
-    let submitted = client.runtime(
-        "submit_input",
-        json!({
+    let submitted = client.submit_started_input(json!({
             "session_id": target_session_id,
             "message": "Call update_plan exactly once with objective 'Validate controller proxy reporting' and one completed item named 'Prepare report'. After the tool result, reply with exactly: managed session completed",
             "variant": "build",

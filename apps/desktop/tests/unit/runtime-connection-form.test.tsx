@@ -3,12 +3,14 @@ import { runInAction } from "mobx";
 import { describe, expect, it, vi } from "vitest";
 import { ApplicationConnectionStore } from "../../src/features/runtime-access/ApplicationConnectionStore";
 import { RuntimeConnectionForm } from "../../src/features/runtime-access/RuntimeConnectionForm";
+import { WebLoginPage } from "../../src/features/runtime-access/WebLoginPage";
 import { RootStore } from "../../src/stores/RootStore";
 
 vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
   ...await importOriginal<typeof import("@tauri-apps/api/core")>(), isTauri: () => true,
 }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => undefined }));
+vi.mock("../../src/features/runtime-access/RuntimeEntryLayout/DotsBackground", () => ({ DotsBackground: () => null }));
 
 vi.mock("../../src/native-bridge/desktopLifecycle", async (importOriginal) => ({
   ...await importOriginal<typeof import("../../src/native-bridge/desktopLifecycle")>(),
@@ -16,6 +18,44 @@ vi.mock("../../src/native-bridge/desktopLifecycle", async (importOriginal) => ({
 }));
 
 describe("Runtime switch form", () => {
+  it("renders changing initialization phases and real work counts in the Desktop entry", async () => {
+    const root = new RootStore();
+    const connection = new ApplicationConnectionStore(root);
+    runInAction(() => {
+      connection.current = root; connection.pending = true; connection.phase = "entry"; connection.local_state = "ready";
+      root.connection.markStartup({ status: "starting", stage: "history_backup", progress: { completed: 2, total: 7 }, database_version: null, target_version: "0.32.1", error: null });
+    });
+    const view = render(<RuntimeConnectionForm connection={connection} />);
+    expect(screen.getByRole("button", { name: /正在备份会话历史（2 \/ 7 个文件）/ })).toBeDisabled();
+    runInAction(() => root.connection.markStartup({ status: "starting", stage: "history_migration", progress: { completed: 1, total: 4 }, database_version: null, target_version: "0.32.1", error: null }));
+    expect(await screen.findByRole("button", { name: /正在迁移会话历史（1 \/ 4 个会话／子任务）/ })).toBeDisabled();
+    view.unmount(); connection.dispose();
+  });
+
+  it.each(["desktop", "web"] as const)("keeps the %s entry free of account menus after authenticated initialization fails", (entry) => {
+    const connection = new ApplicationConnectionStore(new RootStore());
+    runInAction(() => {
+      connection.phase = entry === "desktop" ? "entry" : "loading";
+      connection.mode = "enterprise";
+      connection.local_state = "ready";
+      connection.error = "初始化失败，请重试。";
+      connection.session = {
+        token: null, expires_at_ms: 0, instance_id: "fixture", mode: "enterprise", kind: "user",
+        identity: { center_id: "fixture", user_id: 1, username: "tester", display_name: "超级管理员" },
+        login_context: "fixture",
+      };
+    });
+    vi.spyOn(connection, "can_retry", "get").mockReturnValue(true);
+    const retry = vi.spyOn(connection, "retryInitialization").mockResolvedValue();
+    const view = render(entry === "desktop" ? <RuntimeConnectionForm connection={connection} /> : <WebLoginPage connection={connection} />);
+    expect(screen.queryByRole("button", { name: "账号与 Runtime" })).not.toBeInTheDocument();
+    expect(screen.queryByText("超级管理员")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重试初始化" }));
+    expect(retry).toHaveBeenCalledOnce();
+    view.unmount();
+    connection.dispose();
+  });
+
   it("offers a clear update action without connecting or upgrading on render", () => {
     const connection = new ApplicationConnectionStore(new RootStore());
     runInAction(() => {
@@ -74,7 +114,7 @@ describe("Runtime switch form", () => {
     connection.updates.receive({ ...connection.updates.snapshot, revision: 1, available, required: true, phase: available ? "available" : "idle" });
     const connect = vi.spyOn(connection, "connectDesktop").mockResolvedValue();
     const view = render(<RuntimeConnectionForm connection={connection} />);
-    expect(screen.getByText("需要更新后继续使用")).toBeInTheDocument();
+    expect(screen.queryByText("需要更新后继续使用")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("企业账号")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("账号密码")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /进入项目/ })).not.toBeInTheDocument();

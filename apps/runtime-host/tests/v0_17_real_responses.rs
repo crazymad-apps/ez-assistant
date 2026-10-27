@@ -59,9 +59,7 @@ fn run_deepseek_tool_case(source_model_key: &str) {
         json!({"session_id": session_id, "approval_mode": "auto"}),
     );
 
-    let submitted = client.runtime(
-        "submit_input",
-        json!({
+    let submitted = client.submit_started_input(json!({
             "session_id": session_id,
             "message": "Call list_pinned_memories exactly once. After its result, reply with exactly: DEEPSEEK_RESPONSES_OK",
             "variant": "build",
@@ -89,15 +87,12 @@ fn run_deepseek_tool_case(source_model_key: &str) {
         "DEEPSEEK_RESPONSES_OK"
     );
 
-    let submitted = client.runtime(
-        "submit_input",
-        json!({
-            "session_id": session_id,
-            "message": "Reply with exactly: DEEPSEEK_REPLAY_OK",
-            "variant": "build",
-            "idempotency_key": format!("real-{source_model_key}-responses-replay")
-        }),
-    );
+    let submitted = client.submit_started_input(json!({
+        "session_id": session_id,
+        "message": "Reply with exactly: DEEPSEEK_REPLAY_OK",
+        "variant": "build",
+        "idempotency_key": format!("real-{source_model_key}-responses-replay")
+    }));
     let run_id = text(&submitted["run"]["run_id"]);
     let run = wait_for_terminal(&mut client, &session_id, &run_id);
     assert_eq!(
@@ -145,9 +140,7 @@ fn run_read_image_case(source_model_key: &str) {
         json!({"session_id": session_id, "approval_mode": "auto"}),
     );
 
-    let submitted = client.runtime(
-        "submit_input",
-        json!({
+    let submitted = client.submit_started_input(json!({
             "session_id": session_id,
             "message": format!(
                 "Call read_image exactly once with path {:?}. Inspect its returned image, then reply with exactly: RED",

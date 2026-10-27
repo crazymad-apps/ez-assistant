@@ -18,8 +18,7 @@ pub(crate) use settlement::{
 pub(crate) use supervisor::observe_run_execution;
 
 use agent_types::{
-    AssistantPart, ConversationMessage, ConversationSnapshot, FileReference, FileReferencesPart,
-    MessageId, PartId, TextPart, UserMessage, UserPart,
+    FileReference, FileReferencesPart, MessageId, PartId, TextPart, UserMessage, UserPart,
 };
 use assistant_protocol::{
     AgentVariant, ApprovalMode, InputId, ReasoningEffortKey, RunId, RunSnapshot, RunStatus,
@@ -44,6 +43,7 @@ pub(crate) struct RunRecord {
     input_id: InputId,
     attempt: u32,
     created_at_ms: Option<i64>,
+    started_at_ms: Option<i64>,
     status: RunStatus,
     variant: AgentVariant,
     /// Run 接受时的审计基线；活动工具授权不读取该字段。
@@ -71,6 +71,7 @@ impl RunRecord {
             input_id: run.input_id.clone(),
             attempt: run.attempt,
             created_at_ms: Some(run.created_at_ms),
+            started_at_ms: run.started_at_ms,
             status: RunStatus::Accepted,
             variant: run.agent_variant,
             approval_mode: run.approval_mode,
@@ -96,6 +97,7 @@ impl RunRecord {
             input_id: run.input_id,
             attempt: run.attempt,
             created_at_ms: Some(run.created_at_ms),
+            started_at_ms: run.started_at_ms,
             status: run.status,
             variant: run.agent_variant,
             approval_mode: run.approval_mode,
@@ -111,36 +113,6 @@ impl RunRecord {
             message_ids: run.message_ids,
             message_steps: run.message_steps,
             finished_at_ms: run.finished_at_ms,
-        }
-    }
-
-    /// 从规范正文恢复可派生的终态文本；流式观察字段不单独持久化。
-    pub(crate) fn hydrate(&mut self, conversation: &ConversationSnapshot) {
-        let final_assistant = conversation.messages.iter().rev().find_map(|message| {
-            let ConversationMessage::Assistant(message) = message else {
-                return None;
-            };
-            if !message.purpose.is_model_response() {
-                return None;
-            }
-            self.message_ids
-                .iter()
-                .any(|message_id| message_id == &message.id)
-                .then_some(message)
-        });
-        let Some(message) = final_assistant else {
-            return;
-        };
-        self.reasoning.clear();
-        self.text.clear();
-        for part in &message.parts {
-            match part {
-                AssistantPart::Reasoning(part) => {
-                    self.reasoning.push(project_reasoning_part(part));
-                }
-                AssistantPart::Text(part) => self.text.push_str(&part.text),
-                AssistantPart::ToolCall(_) | AssistantPart::ProviderState(_) => {}
-            }
         }
     }
 
@@ -166,13 +138,18 @@ impl RunRecord {
             input_id: self.input_id.clone(),
             attempt: self.attempt,
             created_at_ms: self.created_at_ms,
+            started_at_ms: self.started_at_ms,
             finished_at_ms: self.finished_at_ms,
             status: self.status,
             variant: self.variant,
             approval_mode: self.approval_mode,
             reasoning_effort: self.reasoning_effort,
             cancel_requested: self.cancel_requested,
-            active_step: self.active_step,
+            active_step: if self.status.is_terminal() {
+                None
+            } else {
+                self.active_step
+            },
             model_request: self.model_diagnostics.as_ref().and_then(|diagnostics| {
                 (self.status == RunStatus::Running)
                     .then(|| diagnostics.request_snapshot())
@@ -198,10 +175,12 @@ impl RunRecord {
         &mut self,
         effort: Option<ReasoningEffortKey>,
         shell: Option<crate::FrozenShellEnvironment>,
+        started_at_ms: i64,
     ) {
         debug_assert_eq!(self.status, RunStatus::Accepted);
         self.reasoning_effort = effort;
         self.shell = shell;
+        self.started_at_ms = Some(started_at_ms);
     }
 
     pub(crate) fn shell(&self) -> Option<&crate::FrozenShellEnvironment> {
@@ -315,22 +294,115 @@ pub(crate) fn finished_event(snapshot: RunSnapshot, awaiting_feedback: bool) -> 
     }
 }
 
-/// 在当前 Session 的 Run Registry 中分配一个未占用标识。
-pub(crate) fn allocate_run_id(state: &SessionState) -> RuntimeResult<RunId> {
-    for _ in 0..id::GENERATION_ATTEMPTS {
-        let value = id::generate("r").map_err(|_| RuntimeError::InternalStateUnavailable {
-            component: "run id random source",
-        })?;
-        let id = RunId::new(value).map_err(|_| RuntimeError::InternalStateUnavailable {
-            component: "run id generator",
-        })?;
-        if !state.runs.contains_key(&id) {
-            return Ok(id);
-        }
-    }
-    Err(RuntimeError::InternalStateUnavailable {
-        component: "run id collision",
+/// 在当前 owner 的控制及可靠历史之外分配真实新 Run，不注册继承执行对象。
+///
+/// # Errors
+/// 随机源不可用、身份无法构造或碰撞耗尽预算时失败。
+pub(crate) fn allocate_run_id(
+    state: &SessionState,
+    history: &crate::StoredHistoryFacts,
+) -> RuntimeResult<RunId> {
+    let value = id::generate_unique("r", |id| {
+        state.runs.keys().any(|key| key.as_str() == id)
+            || history.runs.iter().any(|run| run.run_id.as_str() == id)
+            || history
+                .message_origins
+                .iter()
+                .any(|origin| origin.run_id.as_ref().is_some_and(|key| key.as_str() == id))
+            || history
+                .child_tasks
+                .iter()
+                .any(|child| child.parent_run_id.as_str() == id)
+    })?;
+    RunId::new(value).map_err(|_| RuntimeError::InternalStateUnavailable {
+        component: "run id generator",
     })
+}
+
+/// Input 和命令共用身份空间；历史只用于避让，不安装为可消费队列。
+///
+/// # Errors
+/// 随机源不可用、身份无法构造或碰撞耗尽预算时失败。
+pub(crate) fn allocate_input_id(
+    state: &SessionState,
+    history: &crate::StoredHistoryFacts,
+) -> RuntimeResult<InputId> {
+    let value = id::generate_unique("i", |id| {
+        state.inputs.keys().any(|key| key.as_str() == id)
+            || state.commands.keys().any(|key| key.as_str() == id)
+            || history
+                .inputs
+                .iter()
+                .any(|input| input.input_id.as_str() == id)
+            || history
+                .commands
+                .iter()
+                .any(|command| command.input_id.as_str() == id)
+            || history
+                .runs
+                .iter()
+                .any(|run| run.input_id.as_ref().is_some_and(|key| key.as_str() == id))
+            || history.message_origins.iter().any(|origin| {
+                origin
+                    .input_id
+                    .as_ref()
+                    .is_some_and(|key| key.as_str() == id)
+            })
+    })?;
+    InputId::new(value).map_err(|_| RuntimeError::InternalStateUnavailable {
+        component: "input id generator",
+    })
+}
+
+/// 只在本 Runtime 生成的新消息尚未冻结引用前调用；不重命名 Provider 输出或已有历史。
+/// 调用方持本 Session mutation，并在短 state 锁内核对排队身份；不执行 I/O 或修改历史。
+///
+/// # Errors
+/// 需要重新分配但随机源不可用、身份不合法或预算内仍有碰撞时失败。
+pub(crate) fn ensure_message_id_available(
+    message_id: &mut MessageId,
+    state: &SessionState,
+    history: &crate::StoredHistoryFacts,
+) -> RuntimeResult<()> {
+    let occupied = |id: &str| {
+        state
+            .inputs
+            .values()
+            .any(|input| input.stored.user_message_id.as_str() == id)
+            || state
+                .commands
+                .values()
+                .any(|command| command.user_message_id.as_str() == id)
+            || history
+                .message_origins
+                .iter()
+                .any(|origin| origin.message_id.as_str() == id)
+            || history
+                .commands
+                .iter()
+                .any(|command| command.user_message_id.as_str() == id)
+            || history
+                .inputs
+                .iter()
+                .any(|input| input.user_message_id.as_str() == id)
+            || history.runs.iter().any(|run| {
+                run.last_message_id
+                    .as_ref()
+                    .is_some_and(|key| key.as_str() == id)
+                    || run
+                        .user_message_id
+                        .as_ref()
+                        .is_some_and(|key| key.as_str() == id)
+            })
+    };
+    if occupied(message_id.as_str()) {
+        *message_id = MessageId::new(id::generate_unique("m", occupied)?).map_err(|_| {
+            RuntimeError::InternalStateUnavailable {
+                component: "message id generator",
+            }
+        })?;
+    }
+    Ok(())
 }
 
 /// 将已校验文本和已冻结文件引用封装为新的规范 UserMessage。
@@ -409,7 +481,7 @@ pub(crate) fn project_reasoning_source(
 }
 
 /// 两层 PartId 都由类型保证非空，转换不会扩展或丢失规范片段身份。
-fn project_reasoning_part(
+pub(crate) fn project_reasoning_part(
     part: &agent_types::ReasoningPart,
 ) -> assistant_protocol::ReasoningPartSnapshot {
     assistant_protocol::ReasoningPartSnapshot {

@@ -1,6 +1,58 @@
 use super::*;
 
+impl State {
+    pub(super) fn conversation_history(
+        &self,
+        owner: ConversationOwner,
+    ) -> Result<super::super::StoredConversationHistory, StoreError> {
+        let state = self;
+        let mut facts;
+        let generation = match owner {
+            ConversationOwner::MainSession { session_id } => {
+                let session = state
+                    .sessions
+                    .get(&session_id)
+                    .ok_or_else(|| conflict("session does not exist in runtime storage"))?;
+                facts = state
+                    .histories
+                    .get(&session_id)
+                    .cloned()
+                    .unwrap_or_default();
+                session.body_generation
+            }
+            ConversationOwner::ChildTask {
+                session_id,
+                child_task_id,
+            } => {
+                let task = state
+                    .child_history(&session_id, &child_task_id)
+                    .ok_or_else(|| conflict("child history does not exist in session"))?;
+                if task.body_unavailable {
+                    return Err(StoreError::new(
+                        StoreErrorKind::ResourceUnavailable,
+                        "child body is unavailable",
+                    ));
+                }
+                facts = state
+                    .child_histories
+                    .get(&(session_id, child_task_id))
+                    .cloned()
+                    .ok_or_else(|| conflict("child history facts are missing"))?;
+                task.body_generation
+            }
+        };
+        facts.normalize();
+        Ok(super::super::StoredConversationHistory { generation, facts })
+    }
+}
+
 impl VolatileRuntimeStore {
+    pub(super) fn load_conversation_history(
+        &self,
+        owner: ConversationOwner,
+    ) -> StoreFuture<'_, super::super::StoredConversationHistory> {
+        Box::pin(async move { self.lock()?.conversation_history(owner) })
+    }
     pub(super) fn load_conversation(
         &self,
         session_id: &SessionId,
@@ -56,21 +108,21 @@ impl VolatileRuntimeStore {
                     child_task_id,
                 } => {
                     let task = state
-                        .child_tasks
-                        .get(child_task_id)
-                        .filter(|task| task.session_id == *session_id)
+                        .child_history(session_id, child_task_id)
                         .ok_or_else(|| conflict("child task does not exist in session"))?;
                     if task.body_generation != request.generation {
                         return Err(conflict("conversation generation changed"));
                     }
                     state
                         .child_conversations
-                        .get(child_task_id)
+                        .get(&(session_id.clone(), child_task_id.clone()))
                         .cloned()
                         .ok_or_else(|| conflict("child conversation does not exist"))?
                 }
             };
-            Ok(conversation_window(snapshot, &request))
+            let mut window = conversation_window(snapshot, &request);
+            window.history = Some(state.conversation_history(request.owner)?.facts);
+            Ok(window)
         })
     }
 
@@ -100,16 +152,14 @@ impl VolatileRuntimeStore {
                     child_task_id,
                 } => {
                     let task = state
-                        .child_tasks
-                        .get(child_task_id)
-                        .filter(|task| task.session_id == *session_id)
+                        .child_history(session_id, child_task_id)
                         .ok_or_else(|| conflict("child task does not exist in session"))?;
                     if task.body_generation != request.generation {
                         return Err(conflict("conversation generation changed"));
                     }
                     state
                         .child_conversations
-                        .get(child_task_id)
+                        .get(&(session_id.clone(), child_task_id.clone()))
                         .cloned()
                         .ok_or_else(|| conflict("child conversation does not exist"))?
                 }
@@ -123,6 +173,7 @@ impl VolatileRuntimeStore {
                 end,
                 total,
                 conversation: ConversationSnapshot::new(snapshot.messages[start..end].to_vec()),
+                history: Some(state.conversation_history(request.owner)?.facts),
             })
         })
     }
@@ -150,13 +201,11 @@ impl VolatileRuntimeStore {
                     child_task_id,
                 } => {
                     let task = state
-                        .child_tasks
-                        .get(child_task_id)
-                        .filter(|task| task.session_id == *session_id)
+                        .child_history(session_id, child_task_id)
                         .ok_or_else(|| conflict("child task does not exist in session"))?;
                     let snapshot = state
                         .child_conversations
-                        .get(child_task_id)
+                        .get(&(session_id.clone(), child_task_id.clone()))
                         .ok_or_else(|| conflict("child conversation does not exist"))?;
                     (task.body_generation, snapshot)
                 }
@@ -217,12 +266,11 @@ impl VolatileRuntimeStore {
                     snapshot,
                     &query,
                 );
-                for task in state
-                    .child_tasks
-                    .values()
-                    .filter(|task| task.session_id == *session_id)
-                {
-                    if let Some(child) = state.child_conversations.get(&task.child_task_id) {
+                for (_, task) in state.recovered_child_history(Some(session_id)) {
+                    if let Some(child) = state
+                        .child_conversations
+                        .get(&(session_id.clone(), task.child_task_id.clone()))
+                    {
                         collect_volatile_hits(
                             &mut hits,
                             ConversationOwner::ChildTask {
@@ -238,10 +286,13 @@ impl VolatileRuntimeStore {
                 }
             }
             for hit in &mut hits {
-                if let ConversationOwner::ChildTask { child_task_id, .. } = &hit.owner {
+                if let ConversationOwner::ChildTask {
+                    session_id,
+                    child_task_id,
+                } = &hit.owner
+                {
                     hit.child_task_title = state
-                        .child_tasks
-                        .get(child_task_id)
+                        .child_history(session_id, child_task_id)
                         .map(|task| task.title.clone());
                 }
             }
@@ -269,12 +320,13 @@ impl VolatileRuntimeStore {
             if !state.sessions.contains_key(&change.session_id) {
                 return Err(conflict("feedback session does not exist"));
             }
-            let key = (change.session_id, change.message_id);
-            if let Some(feedback) = change.feedback {
-                state.message_feedback.insert(key, feedback);
-            } else {
-                state.message_feedback.remove(&key);
-            }
+            let history = state.histories.entry(change.session_id).or_default();
+            history.feedback.push(crate::StoredHistoryFeedback {
+                message_id: change.message_id,
+                feedback: change.feedback,
+                changed_at_ms: change.changed_at_ms,
+            });
+            history.normalize();
             Ok(())
         })
     }
@@ -287,12 +339,15 @@ impl VolatileRuntimeStore {
         Box::pin(async move {
             let state = self.lock()?;
             Ok(state
-                .message_feedback
-                .iter()
-                .filter(|((owner, _), _)| owner == &session_id)
-                .map(|((_, message_id), feedback)| StoredMessageFeedback {
-                    message_id: message_id.clone(),
-                    feedback: *feedback,
+                .histories
+                .get(&session_id)
+                .into_iter()
+                .flat_map(|history| &history.feedback)
+                .filter_map(|feedback| {
+                    Some(StoredMessageFeedback {
+                        message_id: feedback.message_id.clone(),
+                        feedback: feedback.feedback?,
+                    })
                 })
                 .collect())
         })
@@ -315,6 +370,12 @@ impl VolatileRuntimeStore {
                 })?;
             let mut state = self.lock()?;
             ensure_idle(&state, &rewrite.session_id)?;
+            state.ensure_new_input_identity(
+                &rewrite.session_id,
+                &rewrite.input.input_id,
+                Some(&rewrite.run_id),
+                &rewrite.input.message.id,
+            )?;
             if state
                 .sessions
                 .get(&rewrite.session_id)
@@ -323,11 +384,12 @@ impl VolatileRuntimeStore {
                 return Err(conflict("session is archived or missing"));
             }
             let target_order = state
-                .inputs
-                .values()
+                .histories
+                .get(&rewrite.session_id)
+                .into_iter()
+                .flat_map(|history| &history.inputs)
                 .find(|input| {
-                    input.session_id == rewrite.session_id
-                        && input.user_message_id == rewrite.target_user_message_id
+                    !input.inherited && input.user_message_id == rewrite.target_user_message_id
                 })
                 .map(|input| input.queue_order)
                 .ok_or_else(|| conflict("target user message does not belong to an input"))?;
@@ -369,7 +431,7 @@ impl VolatileRuntimeStore {
                 }
             }
 
-            let removed = state
+            let mut removed = state
                 .inputs
                 .values()
                 .filter(|input| {
@@ -377,6 +439,15 @@ impl VolatileRuntimeStore {
                 })
                 .map(|input| input.input_id.clone())
                 .collect::<std::collections::BTreeSet<_>>();
+            removed.extend(
+                state
+                    .histories
+                    .get(&rewrite.session_id)
+                    .into_iter()
+                    .flat_map(|history| &history.inputs)
+                    .filter(|input| !input.inherited && input.queue_order >= target_order)
+                    .map(|input| input.input_id.clone()),
+            );
             let retained_message_ids = rewrite
                 .conversation
                 .messages
@@ -384,14 +455,24 @@ impl VolatileRuntimeStore {
                 .map(message_id)
                 .cloned()
                 .collect::<BTreeSet<_>>();
+            state.retain_rewritten_history(&rewrite.session_id, &removed, &retained_message_ids);
             state
                 .inputs
                 .retain(|_, input| !removed.contains(&input.input_id));
+            state.input_identities.retain(|id, _| !removed.contains(id));
             state.runs.retain(|_, run| !removed.contains(&run.input_id));
-            let retained_runs = state.runs.keys().cloned().collect::<BTreeSet<_>>();
-            state
-                .feedback
-                .retain(|_, request| retained_runs.contains(&request.run_id));
+            // EndTurn 的父 Run 控制可能早已释放；只按被改写 owner 的可靠历史裁尾。
+            // 其他 Session 的待回答控制不参与这次历史替换。
+            let retained_runs = state
+                .histories
+                .get(&rewrite.session_id)
+                .into_iter()
+                .flat_map(|history| history.runs.iter())
+                .map(|run| run.run_id.clone())
+                .collect::<BTreeSet<_>>();
+            state.feedback.retain(|_, request| {
+                request.session_id != rewrite.session_id || retained_runs.contains(&request.run_id)
+            });
             state.skill_activations.retain(|_, activation| {
                 activation.session_id != rewrite.session_id
                     || retained_message_ids.contains(&activation.message_id)
@@ -403,6 +484,17 @@ impl VolatileRuntimeStore {
             state.session_commands.retain(|_, command| {
                 command.session_id != rewrite.session_id
                     || retained_message_ids.contains(&command.user_message_id)
+            });
+            let retained_commands = state
+                .histories
+                .get(&rewrite.session_id)
+                .into_iter()
+                .flat_map(|history| history.commands.iter())
+                .filter(|command| retained_message_ids.contains(&command.user_message_id))
+                .map(|command| command.input_id.clone())
+                .collect::<BTreeSet<_>>();
+            state.command_identities.retain(|id, identity| {
+                identity.session_id != rewrite.session_id || retained_commands.contains(id)
             });
             if let Some(effect) = rewrite.goal_effect.as_ref() {
                 state
@@ -429,13 +521,13 @@ impl VolatileRuntimeStore {
             };
             let run = StoredRun {
                 shell: None,
-                run_id: rewrite.input.run_id,
+                run_id: rewrite.run_id,
                 session_id: rewrite.session_id.clone(),
                 input_id: input.input_id.clone(),
                 attempt: 1,
                 status: RunStatus::Accepted,
                 agent_variant: rewrite.input.agent_variant,
-                approval_mode: rewrite.input.approval_mode,
+                approval_mode: rewrite.approval_mode,
                 reasoning_effort: None,
                 cancel_requested: false,
                 error: None,
@@ -464,7 +556,11 @@ impl VolatileRuntimeStore {
             session.message_count = count;
             session.current_variant = rewrite.input.agent_variant;
             state.inputs.insert(input.input_id.clone(), input.clone());
+            state
+                .input_identities
+                .insert(input.input_id.clone(), InputIdentity::from_input(&input));
             state.runs.insert(run.run_id.clone(), run.clone());
+            state.record_run_history(&run.run_id)?;
             Ok(RewriteResult {
                 input,
                 run,

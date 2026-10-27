@@ -71,6 +71,15 @@ impl HostSkillPackageSource {
     }
 }
 impl SkillPackageSource for HostSkillPackageSource {
+    fn read_reference(
+        &self,
+        request: assistant_runtime::SkillReferenceRequest,
+    ) -> assistant_runtime::SkillReferenceFuture<'_> {
+        Box::pin(async move {
+            crate::builtin::guide::read_reference(&request)
+                .map(|content| content.map(str::to_owned))
+        })
+    }
     fn scan(&self, request: SkillScanRequest) -> SkillScanFuture<'_> {
         let mut roots = skill_roots(None, None, &request.workspace_directories);
         roots.extend(self.roots.clone());
@@ -126,6 +135,17 @@ impl SkillPackageSource for HostSkillPackageSource {
                     if !result.complete {
                         break;
                     }
+                }
+                let mut builtin = crate::builtin::skills();
+                result.candidates.append(&mut builtin.candidates);
+                result.diagnostics.append(&mut builtin.diagnostics);
+                result.complete &= builtin.complete;
+                if result.candidates.len() > MAX_CANDIDATES {
+                    result.complete = false;
+                    result.diagnostics.push(SkillDiagnostic::error(
+                        SkillDiagnosticCode::CandidateLimitExceeded,
+                        "combined skill candidate limit was exceeded",
+                    ));
                 }
                 sort_diagnostics(&mut result.diagnostics);
                 result
@@ -486,11 +506,69 @@ fn scan_candidate(
         }
     };
 
+    Some(candidate_from_definition(
+        source,
+        workspace_root_order,
+        source_path,
+        &definition,
+        parsed,
+    ))
+}
+
+/// 内置正文沿原 frontmatter／内容摘要边界解析；来源标签仅进入诊断和投影，不执行文件 I/O。
+pub(crate) fn embedded_skill(name: &str, definition: &str) -> SkillScanResult {
+    let mut result = SkillScanResult {
+        complete: true,
+        ..SkillScanResult::default()
+    };
+    let label = format!("builtin:{name}");
+    if definition.len() as u64 > MAX_DEFINITION_BYTES {
+        result.complete = false;
+        result.diagnostics.push(SkillDiagnostic::error(
+            SkillDiagnosticCode::DefinitionTooLarge,
+            "embedded skill exceeds definition limit",
+        ));
+        return result;
+    }
+    match parse_definition(
+        SkillSource::Builtin,
+        Path::new(&label),
+        definition.as_bytes(),
+        MAX_FRONTMATTER_BYTES,
+        &mut result.diagnostics,
+    ) {
+        Some(parsed) if parsed.name.as_str() == name => {
+            result.candidates.push(candidate_from_definition(
+                SkillSource::Builtin,
+                None,
+                label,
+                definition.as_bytes(),
+                parsed,
+            ))
+        }
+        _ => {
+            result.complete = false;
+            result.diagnostics.push(SkillDiagnostic::error(
+                SkillDiagnosticCode::InvalidName,
+                "embedded skill definition is invalid",
+            ));
+        }
+    }
+    result
+}
+
+fn candidate_from_definition(
+    source: SkillSource,
+    workspace_root_order: Option<usize>,
+    source_path: String,
+    definition: &[u8],
+    parsed: ParsedDefinition,
+) -> SkillCandidate {
     // 候选身份只绑定 `SKILL.md`；普通资源留在共享目录，由既有工具按需访问。
     let mut hasher = Sha256::new();
     hasher.update(b"skill-definition-v1\0");
-    hasher.update(&definition);
-    Some(SkillCandidate {
+    hasher.update(definition);
+    SkillCandidate {
         name: parsed.name,
         description: parsed.description,
         source,
@@ -503,7 +581,7 @@ fn scan_candidate(
         metadata: parsed.metadata,
         model_invocable: parsed.model_invocable,
         user_invocable: parsed.user_invocable,
-    })
+    }
 }
 
 struct ParsedDefinition {
@@ -1146,7 +1224,8 @@ mod tests {
             std::sync::Arc::new(crate::user_paths::UserPaths::new(home.path(), Vec::new())),
         );
         let empty = source.scan(SkillScanRequest::default()).await.unwrap();
-        assert!(empty.candidates.is_empty());
+        assert_eq!(empty.candidates.len(), 2);
+        assert_eq!(empty.candidates[0].source, SkillSource::Builtin);
         let scanned = source
             .scan(SkillScanRequest {
                 workspace_directories: Vec::new(),
@@ -1158,11 +1237,12 @@ mod tests {
             .await
             .unwrap();
         assert!(scanned.complete, "{:?}", scanned.diagnostics);
-        assert_eq!(scanned.candidates.len(), 1);
-        assert_eq!(scanned.candidates[0].source, SkillSource::Plugin);
-        assert_eq!(
-            scanned.candidates[0].plugin_name.as_deref(),
-            Some("example-tools")
-        );
+        assert_eq!(scanned.candidates.len(), 3);
+        let plugin = scanned
+            .candidates
+            .iter()
+            .find(|candidate| candidate.source == SkillSource::Plugin)
+            .unwrap();
+        assert_eq!(plugin.plugin_name.as_deref(), Some("example-tools"));
     }
 }

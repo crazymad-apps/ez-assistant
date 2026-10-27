@@ -24,15 +24,12 @@ fn formal_host_projects_vllm_reasoning_into_run_and_conversation() {
         )["session"]["session_id"],
     );
     let run_id = text(
-        &client.runtime(
-            "submit_input",
-            json!({
-                "session_id":session_id,
-                "message":"VLLM_REASONING_CASE",
-                "variant":"build",
-                "idempotency_key":"vllm-reasoning"
-            }),
-        )["run"]["run_id"],
+        &client.submit_started_input(json!({
+            "session_id":session_id,
+            "message":"VLLM_REASONING_CASE",
+            "variant":"build",
+            "idempotency_key":"vllm-reasoning"
+        }))["run"]["run_id"],
     );
     let run = client.wait_for_status("vLLM reasoning", &session_id, &run_id, &["completed"]);
     assert_eq!(run["reasoning_parts"][0]["text"], "offline vLLM thought");

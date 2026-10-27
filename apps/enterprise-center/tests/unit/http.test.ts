@@ -20,8 +20,8 @@ it('GET /api/info 只暴露软件与协议兼容事实', async () => {
   expect(response.json()).toEqual({
     center_id: '11111111-1111-4111-8111-111111111111',
     software_version: '0.1.0',
-    protocol_version: 3,
-    min_protocol_version: 3,
+    protocol_version: 4,
+    min_protocol_version: 4,
     capabilities: ['managed_models', 'llm_proxy', 'plugin_market', 'managed_agents', 'feedback', 'host_registration'],
   });
   expect(response.headers['cache-control']).toBe('no-store');

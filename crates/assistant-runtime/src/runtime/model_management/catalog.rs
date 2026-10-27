@@ -64,10 +64,12 @@ impl AssistantRuntime {
             model_catalog_diagnostic: None,
             ..provider.as_ref().clone()
         });
-        self.managed_models_mut()?
-            .providers
-            .insert(id, refreshed.clone());
-        self.publish(RuntimeEvent::ConfigChanged);
+        self.event_sender.publish_transition(|| {
+            self.managed_models_mut()?
+                .providers
+                .insert(id, refreshed.clone());
+            Ok(((), Some(RuntimeEvent::ConfigChanged)))
+        })?;
         Ok(catalog_snapshot(&refreshed))
     }
 }

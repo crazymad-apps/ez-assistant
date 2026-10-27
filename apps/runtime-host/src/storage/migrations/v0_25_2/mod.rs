@@ -5,6 +5,7 @@ use rusqlite::Connection;
 
 pub(super) fn entry() -> Migration {
     Migration {
+        key: "release",
         version: "0.25.2",
         min_compatible_host_version: Some("0.25.2"),
         rebuilds_referenced_tables: false,

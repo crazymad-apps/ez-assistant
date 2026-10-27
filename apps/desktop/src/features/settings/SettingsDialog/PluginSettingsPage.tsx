@@ -1,3 +1,6 @@
+import { PluginSettingField } from "./PluginSettingField";
+import { ServerEditor } from "./McpSettingsPage/ServerEditor";
+import type { McpServerSnapshot } from "@ez-assistant/protocol";
 import { observer } from "mobx-react-lite";
 import { useEffect, useRef, useState } from "react";
 import type { InstalledPluginSnapshot, PluginMarketEntry, PluginOperationSnapshot, PluginSettingsMutation } from "@ez-assistant/protocol";
@@ -37,6 +40,8 @@ export const PluginSettingsPage = observer(function PluginSettingsPage(props: Re
   const [files, setFiles] = useState<readonly { path: string; revision: string; size_bytes: number }[]>([]);
   const [file_path, setFilePath] = useState("");
   const [file_value, setFileValue] = useState<File | null>(null);
+  const [parameter_dirty, setParameterDirty] = useState<ReadonlySet<string>>(new Set());
+  const [mcp_editing, setMcpEditing] = useState<McpServerSnapshot | null>(null);
   const selected = plugins.find((item) => item.name === selected_name) ?? null;
   const selected_identity = selected ? `${selected.name}:${selected.sha256 ?? ""}` : null;
   const selected_identity_ref = useRef(selected_identity);
@@ -65,6 +70,25 @@ export const PluginSettingsPage = observer(function PluginSettingsPage(props: Re
     }
   }
 
+  function parameterDirty(name: string, dirty: boolean) {
+    const next = new Set(parameter_dirty);
+    if (dirty) next.add(name); else next.delete(name);
+    setParameterDirty(next);
+  }
+
+  async function openMcp(server_key: string) {
+    if (parameter_dirty.size > 0 || file_path || file_value) { setError("请先保存或清空当前参数和文件草稿。"); return; }
+    const target = client;
+    const identity = selected_identity_ref.current;
+    const name = selected?.name;
+    if (!target || !name) return;
+    await root.settings.mcp.load();
+    if (owner.current !== target || selected_identity_ref.current !== identity) return;
+    const server = root.settings.mcp.configuration?.servers.find((server) => server.source.type === "plugin" && server.source.name === name && server.server_key === server_key);
+    if (server) { root.settings.mcp.clearMessages(); setMcpEditing(server); }
+    else setError("无法读取该 MCP 的当前定义，请重新读取插件配置。");
+  }
+
   async function loadMarket(target = client) {
     if (!target) return;
     try {
@@ -90,6 +114,7 @@ export const PluginSettingsPage = observer(function PluginSettingsPage(props: Re
   useEffect(() => {
     ++file_request.current;
     checked_updates.current.clear();
+    setMcpEditing(null); setParameterDirty(new Set());
     setPlugins([]); setOperations([]); setCleanupBlocked(false); setMarket(null); setMarketError(false); setSearch(""); setSelectedName(null); setOperation(null); setFiles([]);
     void reload(client);
     if (center_available) void loadMarket(client);
@@ -98,6 +123,7 @@ export const PluginSettingsPage = observer(function PluginSettingsPage(props: Re
   useEffect(() => {
     ++file_request.current;
     setFiles([]);
+    setParameterDirty(new Set());
     if (selected) void loadFiles(selected);
   }, [selected?.name, selected?.sha256, client]);
 
@@ -208,6 +234,8 @@ export const PluginSettingsPage = observer(function PluginSettingsPage(props: Re
     }
   }
 
+  if (mcp_editing) return <ServerEditor back_label="返回插件详情" key={`${mcp_editing.source.type}:${mcp_editing.server_key}`} server={mcp_editing} revision={root.settings.mcp.configuration?.revision ?? "absent"} onDirtyChange={props.onDirtyChange} onDelete={() => undefined} onDone={() => { setMcpEditing(null); void reload(); }} />;
+
   return <>
     <SettingsPageContainer title={selected?.display_name ?? selected_market?.display_name ?? "插件"} on_back={selected || selected_market ? () => { setSelectedName(null); setFiles([]); props.onDirtyChange(false); } : undefined}
       actions={<><Button disabled={!client || uploading || busy} onClick={() => void reload()}><Icon name="refresh" size={15} />刷新</Button><Button disabled={!client || uploading || busy} onClick={() => file_ref.current?.click()}><Icon name="plus" size={15} />{uploading ? "检查插件包…" : "上传插件"}</Button><input accept=".zip,.gz,.tgz" aria-label="选择插件包" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void inspect(file); }} ref={file_ref} type="file" /></>}>
@@ -221,9 +249,9 @@ export const PluginSettingsPage = observer(function PluginSettingsPage(props: Re
           {!selected.sha256 && <p className={styles.notice}>当前未安装插件包；原有配置与运行数据保留在用户域。重新上传同名包或从企业市场安装后即可继续使用。</p>}
           {selected.sha256 && <>
           <label className={styles.toggle}><input checked={selected.enabled} disabled={busy} onChange={(event) => void mutate(selected, { type: "set_enabled", enabled: event.target.checked })} type="checkbox" />整体启用</label>
-          <section><h4>包内能力</h4><p>技能：{selected.skills.join("、") || "无"}</p><p>MCP：{selected.mcp.join("、") || "无"}</p></section>
-          <section><h4>配置参数</h4>{selected.configuration.length === 0 && <p>无需参数</p>}{selected.configuration.map((field) => <SettingField key={field.name} label={field.label} is_set={field.is_set} secret={field.secret} busy={busy} onSave={(value) => mutate(selected, { type: "set_parameter", name: field.name, value })} />)}</section>
-          <section><h4>外部软件路径</h4>{selected.external_software.length === 0 && <p>无需外部软件</p>}{selected.external_software.map((field) => <SettingField key={field.name} label={field.display_name} is_set={field.is_set} busy={busy} onSave={(value) => mutate(selected, { type: "set_software_path", name: field.name, value })} />)}</section>
+          <section><h4>包内能力</h4><p>技能：{selected.skills.join("、") || "无"}</p><div>MCP：{selected.mcp.length === 0 ? "无" : selected.mcp.map((key) => <Button key={key} disabled={busy} onClick={() => void openMcp(key)}>{key}</Button>)}</div></section>
+          <section><h4>配置参数</h4>{selected.configuration.length === 0 && <p>无需参数</p>}{selected.configuration.map((field) => <PluginSettingField key={`${selected.name}:${field.name}`} label={field.label} is_set={field.is_set} secret={field.secret} busy={busy} onDirtyChange={dirty => parameterDirty(`parameter:${field.name}`, dirty)} onSave={(value) => mutate(selected, { type: "set_parameter", name: field.name, value })} />)}</section>
+          <section><h4>外部软件路径</h4>{selected.external_software.length === 0 && <p>无需外部软件</p>}{selected.external_software.map((field) => <PluginSettingField key={`${selected.name}:${field.name}`} label={field.display_name} is_set={field.is_set} busy={busy} onDirtyChange={dirty => parameterDirty(`software:${field.name}`, dirty)} onSave={(value) => mutate(selected, { type: "set_software_path", name: field.name, value })} />)}</section>
           <section><h4>原生配置文件</h4><p>按插件要求填写相对路径并上传原始文件，保留文件本身格式。</p><ul className={styles.files}>{files.map((file) => <li key={file.path}>{file.path} · {formatBytes(file.size_bytes)}</li>)}</ul><div className={styles.file_form}><input aria-label="配置文件相对路径" onChange={(event) => { setFilePath(event.target.value); props.onDirtyChange(true); }} placeholder="例如 settings/config.yaml" value={file_path} /><div className={styles.file_picker}><Button disabled={busy} onClick={() => config_file_ref.current?.click()}>选择文件</Button><span title={file_value?.name}>{file_value?.name ?? "未选择文件"}</span><input aria-label="选择原生配置文件" hidden onChange={(event) => { setFileValue(event.target.files?.[0] ?? null); props.onDirtyChange(true); }} ref={config_file_ref} type="file" /></div><Button disabled={busy || !file_path.trim() || !file_value} onClick={() => void uploadConfig()}>保存文件</Button></div></section>
           <section className={styles.danger}><h4>更新与卸载</h4>{market_plugins.some((item) => item.name === selected.name) && <Button disabled={busy} onClick={() => void prepareMarket(selected.name, selected.sha256)}>检查中心更新</Button>}<p>卸载默认保留插件配置与运行数据。项目中的产物始终保留。</p><label><input checked={clear_data} onChange={(event) => setClearData(event.target.checked)} type="checkbox" />同时清除插件配置与运行数据</label><Button disabled={busy} onClick={() => selected.sha256 && setOperation({ intent: { type: "uninstall", name: selected.name, sha256: selected.sha256, clear_data }, snapshot: null })} variant="danger">卸载插件</Button></section>
           </>}
@@ -274,10 +302,6 @@ export const PluginSettingsPage = observer(function PluginSettingsPage(props: Re
   </>;
 });
 
-function SettingField(props: Readonly<{ label: string; is_set: boolean; secret?: boolean; busy: boolean; onSave: (value: string | null) => Promise<boolean> }>) {
-  const [value, setValue] = useState("");
-  return <div className={styles.setting_field}><label>{props.label} <small>{props.is_set ? "已设置" : "未设置"}</small><input aria-label={props.label} onChange={(event) => setValue(event.target.value)} placeholder={props.secret && props.is_set ? "留空保持原值" : "输入新值"} type={props.secret ? "password" : "text"} value={value} /></label><Button disabled={props.busy || !value.trim()} onClick={() => void props.onSave(value).then((saved) => { if (saved) setValue(""); })}>保存</Button>{props.is_set && <Button disabled={props.busy} onClick={() => void props.onSave(null)}>清除</Button>}</div>;
-}
 
 function formatBytes(value: number): string { return value >= 1024 ** 2 ? `${(value / 1024 ** 2).toFixed(1)} MiB` : `${Math.round(value / 1024)} KiB`; }
 function isNewerVersion(candidate: string, installed: string): boolean {

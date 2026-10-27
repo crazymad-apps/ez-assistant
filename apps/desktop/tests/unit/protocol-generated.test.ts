@@ -23,6 +23,8 @@ describe("generated assistant protocol", () => {
 
   it("keeps assistant segments in runtime order", () => {
     const message = {
+      inherited: false,
+      partial: false,
       message_id: "message-1",
       run_id: null,
       attempt: null,

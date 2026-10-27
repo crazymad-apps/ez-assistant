@@ -1,6 +1,5 @@
 import { ResourceWorkspaceStore } from "../../src/features/resource-workspace/ResourceWorkspaceStore";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ApplicationSnapshot } from "@ez-assistant/protocol";
 import type {
   DesktopLifecycleIntent,
   NativeRuntimeMutationEvent,
@@ -42,19 +41,10 @@ beforeEach(() => {
 });
 
 describe("DesktopLifecycleStore", () => {
-  it("summarizes the exact runtime impact before confirming a lifecycle action", () => {
-    const store = createStore(applicationSnapshot());
-
-    expect(store.impact).toEqual({
-      active_runs: 1,
-      queued_inputs: 3,
-      pending_approvals: 2,
-    });
-  });
-
-  it("quits only the desktop client unless stopping Runtime is explicitly selected", async () => {
+  it("keeps Runtime in the background only when explicitly deselected", async () => {
     const store = createStore(null);
     store.request("quit_desktop");
+    store.setStopRuntimeOnQuit(false);
 
     await store.confirm();
 
@@ -155,33 +145,15 @@ describe("DesktopLifecycleStore", () => {
 
 type Overrides = Partial<ConstructorParameters<typeof DesktopLifecycleStore>[0]>;
 
-function createStore(application: ApplicationSnapshot | null, overrides: Overrides = {}) {
+function createStore(_application: null, overrides: Overrides = {}) {
   return new DesktopLifecycleStore({
     resources: new ResourceWorkspaceStore(),
-    get_application: () => application,
     prepare_runtime_mutation: () => undefined,
     reconnect_runtime: async () => undefined,
     mark_runtime_stopped: () => undefined,
     save_preferences: () => undefined,
     ...overrides,
   });
-}
-
-function applicationSnapshot(): ApplicationSnapshot {
-  return {
-    active_sessions: [
-      {
-        active_run_id: "run-1",
-        queued_input_count: 2,
-        pending_approval_count: 1,
-      },
-      {
-        active_run_id: null,
-        queued_input_count: 1,
-        pending_approval_count: 1,
-      },
-    ],
-  } as ApplicationSnapshot;
 }
 
 it("waits for terminal cleanup before stopping Runtime or exiting and aborts on cleanup failure", async () => {
@@ -243,4 +215,50 @@ it("waits for application preference saving before quit and keeps the dialog ope
   expect(native.quit).not.toHaveBeenCalled();
   expect(retry.error_message).toBe("配色尚未保存");
   expect(retry.intent).toBe("quit_desktop");
+});
+
+
+it("defaults each quit to stopping local Runtime and cancellation has no effects", async () => {
+  const store = createStore(null);
+  expect(store.close_behavior).toBe("quit_desktop");
+  store.request("quit_desktop");
+  expect(store.stop_runtime_on_quit).toBe(true);
+  store.setStopRuntimeOnQuit(false);
+  store.dismiss();
+  expect(native.stop).not.toHaveBeenCalled();
+  expect(native.quit).not.toHaveBeenCalled();
+  store.request("quit_desktop");
+  expect(store.stop_runtime_on_quit).toBe(true);
+  await store.confirm();
+  expect(native.stop).toHaveBeenCalledOnce();
+  expect(native.quit).toHaveBeenCalledOnce();
+  expect(native.stop.mock.invocationCallOrder[0]).toBeLessThan(native.quit.mock.invocationCallOrder[0]);
+});
+
+it("keeps Desktop open if stopping fails and allows cancelling", async () => {
+  const store = createStore(null);
+  native.stop.mockRejectedValueOnce(new Error("目标已改变"));
+  store.request("quit_desktop");
+  await store.confirm();
+  expect(native.quit).not.toHaveBeenCalled();
+  expect(store.pending).toBe(false);
+  expect(store.intent).toBe("quit_desktop");
+  expect(store.error_message).toBe("目标已改变");
+  store.dismiss();
+  expect(store.intent).toBeNull();
+});
+
+it("manages only local Runtime while viewing remote", async () => {
+  const prepare_runtime_mutation = vi.fn();
+  const mark_runtime_stopped = vi.fn();
+  const store = createStore(null, {
+    is_local_target: () => false, prepare_runtime_mutation, mark_runtime_stopped,
+  });
+  store.request("quit_desktop");
+  await store.confirm();
+  expect(native.stop).toHaveBeenCalledOnce();
+  expect(native.quit).toHaveBeenCalledOnce();
+  expect(prepare_runtime_mutation).not.toHaveBeenCalled();
+  expect(mark_runtime_stopped).not.toHaveBeenCalled();
+  expect(native.update).toHaveBeenCalledWith("stopping");
 });

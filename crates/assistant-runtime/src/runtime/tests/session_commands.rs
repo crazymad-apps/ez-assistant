@@ -81,7 +81,15 @@ async fn mcp_refresh_command_commits_without_run_and_next_model_reads_the_result
             "ready",
         )))],
     ));
-    let runtime = with_mcp(runtime(model.clone()));
+    let store = Arc::new(crate::storage::VolatileRuntimeStore::default());
+    let runtime = with_mcp(
+        runtime_with_store(
+            model.clone(),
+            store.clone(),
+            RuntimeConfig::new(NonZeroUsize::new(256).unwrap()),
+        )
+        .await,
+    );
     let session_id = runtime
         .create_session(CreateSessionRequest::default())
         .await
@@ -95,6 +103,10 @@ async fn mcp_refresh_command_commits_without_run_and_next_model_reads_the_result
         .expect("command")
         .accepted;
     let command = wait_for_command(&runtime, &session_id, &accepted.input_id).await;
+    assert!(
+        !store.contains_command_control(&accepted.input_id).unwrap(),
+        "committed command payload is file history, not an execution control"
+    );
     assert_eq!(
         match command.result.as_ref().expect("result") {
             crate::StoredSessionCommandResult::Mcp(result) => result.outcome,
@@ -108,6 +120,28 @@ async fn mcp_refresh_command_commits_without_run_and_next_model_reads_the_result
     let ConversationMessage::User(refresh_message) = &refreshed.messages[0] else {
         panic!("refresh must commit one user message");
     };
+    let repeated_commit = crate::SessionCommandCommit {
+        operation_id: "repeat-original-command".to_owned(),
+        input_id: accepted.input_id.clone(),
+        session_id: session_id.clone(),
+        result: command.result.clone().unwrap(),
+        message: refresh_message.clone(),
+        committed_at_ms: command.accepted_at_ms + 1,
+    };
+    assert_eq!(
+        store
+            .commit_session_command(repeated_commit.clone())
+            .await
+            .unwrap(),
+        command
+    );
+    let mut wrong_commit = repeated_commit;
+    wrong_commit.message.parts.clear();
+    assert!(store.commit_session_command(wrong_commit).await.is_err());
+    assert_eq!(
+        store.load_conversation(&session_id).await.unwrap(),
+        refreshed
+    );
     assert!(refresh_message.parts.iter().any(|part| matches!(
         part, UserPart::InternalContext(part) if part.kind == "mcp_server_directory"
     )));
@@ -145,10 +179,19 @@ async fn mcp_refresh_command_commits_without_run_and_next_model_reads_the_result
     };
     assert!(runtime.submit_session_command(conflicting).await.is_err());
     let input = runtime
-        .submit_input(input_request(&session_id, "continue"))
+        .submit_started_input(input_request(&session_id, "continue"))
         .await
         .expect("input");
-    wait_for_terminal(&runtime, &session_id, &input.run.run_id).await;
+    wait_for_terminal(
+        &runtime,
+        &session_id,
+        &runtime
+            .wait_for_input_claim(&session_id, &input.input_id)
+            .await
+            .unwrap()
+            .run_id,
+    )
+    .await;
     let requests = model.take_requests();
     assert_eq!(requests.len(), 1);
     let conversation = serde_json::to_string(&requests[0].conversation).expect("JSON");
@@ -156,12 +199,13 @@ async fn mcp_refresh_command_commits_without_run_and_next_model_reads_the_result
     assert!(!conversation.contains("/mcp refresh"));
     let recovered = runtime.store.load_runtime().await.expect("stored facts");
     assert_eq!(recovered.session_commands.len(), 1);
-    assert_eq!(recovered.runs.len(), 1);
+    assert!(recovered.runs.is_empty());
+    assert_eq!(recovered.run_history.len(), 1);
     assert!(
         recovered
-            .runs
+            .run_history
             .iter()
-            .all(|run| run.input_id != accepted.input_id)
+            .all(|(_, run)| run.input_id.as_ref() != Some(&accepted.input_id))
     );
     let forked = runtime
         .fork_session(assistant_protocol::ForkSessionRequest {
@@ -174,7 +218,7 @@ async fn mcp_refresh_command_commits_without_run_and_next_model_reads_the_result
         .expect("fork control result history");
     let fork_view = runtime
         .get_session_view(GetSessionViewRequest {
-            session_id: forked.session.session_id,
+            session_id: forked.session.session_id.clone(),
         })
         .await
         .expect("fork view")
@@ -185,6 +229,43 @@ async fn mcp_refresh_command_commits_without_run_and_next_model_reads_the_result
         if message_id.as_str() != command.user_message_id.as_str())
     );
     assert!(fork_view.runs.is_empty());
+    let inherited = store
+        .load_conversation_history(assistant_protocol::ConversationOwner::MainSession {
+            session_id: forked.session.session_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(inherited.facts.commands.len(), 1);
+    let inherited_command = &inherited.facts.commands[0];
+    assert!(inherited_command.idempotency_key.is_none());
+    assert!(
+        !store
+            .contains_command_control(&inherited_command.input_id)
+            .unwrap()
+    );
+    drop(runtime);
+    let restarted = with_mcp(
+        runtime_with_store(
+            model.clone(),
+            store.clone(),
+            RuntimeConfig::new(NonZeroUsize::new(256).unwrap()),
+        )
+        .await,
+    );
+    let before = store.load_conversation(&session_id).await.unwrap();
+    let duplicate = restarted
+        .submit_session_command(refresh_request(&session_id, "refresh-once"))
+        .await
+        .unwrap()
+        .accepted;
+    assert!(duplicate.is_duplicate);
+    assert_eq!(duplicate.input_id, accepted.input_id);
+    assert!(!store.contains_command_control(&accepted.input_id).unwrap());
+    assert_eq!(store.load_conversation(&session_id).await.unwrap(), before);
+    let mut collision = input_request(&session_id, "reuse command key");
+    collision.idempotency_key = Some(IdempotencyKey::new("refresh-once").unwrap());
+    assert!(restarted.submit_started_input(collision).await.is_err());
+    assert!(model.take_requests().is_empty());
 }
 
 #[tokio::test]
@@ -209,7 +290,7 @@ async fn mcp_refresh_command_does_not_bypass_pending_approval() {
         .session
         .session_id;
     let input = runtime
-        .submit_input(input_request(&session_id, "create issue"))
+        .submit_started_input(input_request(&session_id, "create issue"))
         .await
         .expect("input");
     let approval = wait_for_pending_approval(&runtime, &session_id).await;
@@ -249,7 +330,16 @@ async fn mcp_refresh_command_does_not_bypass_pending_approval() {
         })
         .await
         .expect("approve");
-    wait_for_terminal(&runtime, &session_id, &input.run.run_id).await;
+    wait_for_terminal(
+        &runtime,
+        &session_id,
+        &runtime
+            .wait_for_input_claim(&session_id, &input.input_id)
+            .await
+            .unwrap()
+            .run_id,
+    )
+    .await;
     wait_for_command(&runtime, &session_id, &command.input_id).await;
 }
 
@@ -330,7 +420,16 @@ async fn executing_mcp_refresh_keeps_new_input_acceptance_live_but_blocks_consum
     assert_eq!(stored.inputs.len(), 1);
     release.notify_one();
     wait_for_command(&runtime, &session_id, &command.input_id).await;
-    wait_for_terminal(&runtime, &session_id, &input.run.run_id).await;
+    wait_for_terminal(
+        &runtime,
+        &session_id,
+        &runtime
+            .wait_for_input_claim(&session_id, &input.input_id)
+            .await
+            .unwrap()
+            .run_id,
+    )
+    .await;
     assert_eq!(model.take_requests().len(), 1);
 }
 
@@ -374,6 +473,10 @@ async fn mixed_mcp_command_queue_recovers_paused_and_preserves_reordered_fifo() 
         .await
         .expect("command")
         .accepted;
+    assert!(
+        store.contains_command_control(&command.input_id).unwrap(),
+        "queued command retains executable payload"
+    );
     let input_two = first
         .submit_input(input_request(&session_id, "second"))
         .await
@@ -421,7 +524,16 @@ async fn mixed_mcp_command_queue_recovers_paused_and_preserves_reordered_fifo() 
         .await
         .expect("resume");
     wait_for_command(&recovered, &session_id, &command.input_id).await;
-    wait_for_terminal(&recovered, &session_id, &input_two.run.run_id).await;
+    wait_for_terminal(
+        &recovered,
+        &session_id,
+        &recovered
+            .wait_for_input_claim(&session_id, &input_two.input_id)
+            .await
+            .unwrap()
+            .run_id,
+    )
+    .await;
     let requests = model.take_requests();
     assert_eq!(requests.len(), 2);
     assert!(
@@ -558,7 +670,7 @@ async fn mcp_connection_test_and_refresh_share_schema_duplicates_and_size_valida
         let tested = runtime
             .test_mcp_server(TestMcpServerRequest {
                 test_id: IdempotencyKey::new("catalog-test").expect("id"),
-                server: McpServerDraft {
+                server: Some(McpServerDraft {
                     server_key: McpServerKey::new("github").expect("key"),
                     display_name: "GitHub".to_owned(),
                     description: String::new(),
@@ -571,7 +683,8 @@ async fn mcp_connection_test_and_refresh_share_schema_duplicates_and_size_valida
                     },
                     startup_timeout_ms: None,
                     tool_timeout_ms: None,
-                },
+                }),
+                managed: None,
             })
             .await
             .expect("test result");
@@ -666,7 +779,7 @@ async fn mcp_management_test_cancellation_closes_candidate_and_handles_early_can
     );
     let request = TestMcpServerRequest {
         test_id: IdempotencyKey::new("cancel-current-test").expect("id"),
-        server: McpServerDraft {
+        server: Some(McpServerDraft {
             server_key: McpServerKey::new("github").expect("key"),
             display_name: "GitHub".to_owned(),
             description: String::new(),
@@ -679,7 +792,8 @@ async fn mcp_management_test_cancellation_closes_candidate_and_handles_early_can
             },
             startup_timeout_ms: None,
             tool_timeout_ms: None,
-        },
+        }),
+        managed: None,
     };
     let testing = tokio::spawn({
         let runtime = runtime.clone();
@@ -860,7 +974,10 @@ async fn skill_refresh_preserves_prompt_and_history_while_new_inputs_read_curren
         .session_id;
     let mut before = input_request(&session_id, "old review");
     before.skill_name = Some("review".to_owned());
-    let accepted = runtime.submit_input(before).await.expect("old input");
+    let accepted = runtime
+        .submit_started_input(before)
+        .await
+        .expect("old input");
     wait_for_terminal(&runtime, &session_id, &accepted.run.run_id).await;
     source.version.store(1, Ordering::SeqCst);
     let request = SubmitSessionCommandRequest {
@@ -884,7 +1001,10 @@ async fn skill_refresh_preserves_prompt_and_history_while_new_inputs_read_curren
     );
     let mut after = input_request(&session_id, "new review");
     after.skill_name = Some("review".to_owned());
-    let accepted = runtime.submit_input(after).await.expect("new input");
+    let accepted = runtime
+        .submit_started_input(after)
+        .await
+        .expect("new input");
     wait_for_terminal(&runtime, &session_id, &accepted.run.run_id).await;
     let requests = model.take_requests();
     assert_eq!(requests.len(), 2);
@@ -1038,7 +1158,7 @@ async fn model_loads_current_definition_without_refresh_or_rewriting_prompt() {
             .version
             .store(usize::from(index == 1), Ordering::SeqCst);
         let submitted = runtime
-            .submit_input(input_request(&session_id, "use review skill"))
+            .submit_started_input(input_request(&session_id, "use review skill"))
             .await
             .expect("input");
         assert_eq!(

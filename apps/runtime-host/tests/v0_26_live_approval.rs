@@ -24,15 +24,12 @@ fn approval_mode_changes_affect_later_tools_in_the_same_formal_host_run() {
     let host = HostProcess::start(runtime_home.path());
     let mut client = host.connect();
     let session_id = create_session_without_implicit_permissions(&mut client, runtime_home.path());
-    let run_id = client.runtime(
-        "submit_input",
-        json!({
-            "session_id": session_id,
-            "message": "TOOL_TWICE_CASE",
-            "variant": "build",
-            "idempotency_key": "live-parent-approval"
-        }),
-    )["run"]["run_id"]
+    let run_id = client.submit_started_input(json!({
+        "session_id": session_id,
+        "message": "TOOL_TWICE_CASE",
+        "variant": "build",
+        "idempotency_key": "live-parent-approval"
+    }))["run"]["run_id"]
         .as_str()
         .expect("run id")
         .to_owned();
@@ -83,15 +80,12 @@ fn delegated_child_reads_the_parent_sessions_current_mode_in_the_formal_host() {
     let host = HostProcess::start(runtime_home.path());
     let mut client = host.connect();
     let session_id = create_session_without_implicit_permissions(&mut client, runtime_home.path());
-    let run_id = client.runtime(
-        "submit_input",
-        json!({
-            "session_id": session_id,
-            "message": "DELEGATE_PROBE_CASE",
-            "variant": "build",
-            "idempotency_key": "live-child-approval"
-        }),
-    )["run"]["run_id"]
+    let run_id = client.submit_started_input(json!({
+        "session_id": session_id,
+        "message": "DELEGATE_PROBE_CASE",
+        "variant": "build",
+        "idempotency_key": "live-child-approval"
+    }))["run"]["run_id"]
         .as_str()
         .expect("run id")
         .to_owned();

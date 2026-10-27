@@ -1,4 +1,4 @@
-//! F04 正式 Host/SQLite/重启验收；所有数据库均新建于 .runtime-test。
+//! 问答正式 Host／文件历史／SQL pending／重启验收；仅使用新建隔离 Home。
 #![cfg(unix)]
 mod support;
 use axum::{Json, Router, routing::post};
@@ -55,7 +55,7 @@ fn pending(client: &mut Client, session: &str) -> Value {
     }
 }
 fn submit(client: &mut Client, session: &str, text: &str) -> String {
-    client.runtime("submit_input",json!({"session_id":session,"message":text,"mode":"normal","variant":"build","attachment_ids":[],"quotes":[]}))["run"]["run_id"].as_str().unwrap().into()
+    client.submit_started_input(json!({"session_id":session,"message":text,"mode":"normal","variant":"build","attachment_ids":[],"quotes":[]}))["run"]["run_id"].as_str().unwrap().into()
 }
 fn create(client: &mut Client) -> String {
     client.runtime("create_session", json!({"title":"F04 isolated"}))["session"]["session_id"]
@@ -71,7 +71,7 @@ fn count(db: &Connection, table: &str) -> i64 {
         .unwrap()
 }
 #[test]
-fn sqlite_feedback_answers_are_durable_and_restart_never_replays_tools() {
+fn file_feedback_answers_are_durable_sql_keeps_only_pending_and_restart_never_replays_tools() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.runtime-test");
     fs::create_dir_all(&root).unwrap();
     let mut home = tempfile::Builder::new()
@@ -125,8 +125,18 @@ fn sqlite_feedback_answers_are_durable_and_restart_never_replays_tools() {
     let accepted = answer(&mut client, &end_request);
     assert_eq!(accepted["status"], "answered");
     assert_eq!(answer(&mut client, &end_request), accepted);
-    let runs = client.runtime("list_runs", json!({"session_id":ending}));
-    assert_eq!(runs["runs"].as_array().unwrap().len(), 2);
+    let deadline = Instant::now() + Duration::from_secs(12);
+    let runs = loop {
+        let runs = client.runtime("list_runs", json!({"session_id":ending}));
+        if runs["runs"].as_array().unwrap().len() == 2 {
+            break runs;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "feedback reply was not claimed: {runs}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
     let new_run = runs["runs"]
         .as_array()
         .unwrap()
@@ -146,23 +156,42 @@ fn sqlite_feedback_answers_are_durable_and_restart_never_replays_tools() {
     let invalid_run = client.runtime("get_run", json!({"session_id":waiting,"run_id":wait_run}));
     assert_eq!(invalid_run["run"]["status"], "interrupted");
     assert_eq!(CALLS.load(Ordering::SeqCst), 3);
+    let answered = client.runtime("list_feedback_requests", json!({"session_id":ending}));
+    assert_eq!(answered[0], accepted);
+    assert_eq!(
+        client.runtime("list_feedback_requests", json!({"session_id":waiting})),
+        invalid
+    );
     client.runtime("shutdown_runtime", json!({}));
     assert!(host.wait().status.success());
     let db = Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-    assert_eq!(count(&db, "session_feedback"), 2);
-    assert_eq!(db.query_row("SELECT COUNT(*) FROM session_feedback WHERE json_extract(snapshot_json,'$.status')='answered'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
-    assert_eq!(db.query_row("SELECT COUNT(*) FROM session_feedback WHERE json_extract(snapshot_json,'$.status')='invalidated'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+    assert_eq!(count(&db, "session_feedback"), 0);
     assert_eq!(
         db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
             .unwrap(),
         "ok"
     );
     eprintln!(
-        "F04 SQLite verified: database={}, backup={}, session_feedback=2 (answered=1, invalidated=1), sessions={}, runs={}, inputs={}",
+        "Feedback verified: database={}, backup={}, SQL pending=0, file answered=1/invalidated=1, sessions={}, runs={}, inputs={}",
         database.display(),
         backup.display(),
         count(&db, "sessions"),
         count(&db, "runs"),
         count(&db, "inputs")
     );
+    drop(db);
+    let host = HostProcess::start(home.path());
+    let mut client = host.connect();
+    assert_eq!(
+        client.runtime("list_feedback_requests", json!({"session_id":ending})),
+        answered
+    );
+    assert_eq!(
+        client.runtime("list_feedback_requests", json!({"session_id":waiting})),
+        invalid
+    );
+    assert_eq!(answer(&mut client, &end_request), accepted);
+    assert_eq!(CALLS.load(Ordering::SeqCst), 3);
+    client.runtime("shutdown_runtime", json!({}));
+    assert!(host.wait().status.success());
 }

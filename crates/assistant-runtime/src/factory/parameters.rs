@@ -22,7 +22,7 @@ pub struct ResolvedModelParameters {
     source: ModelParameterSource,
     parameters: ModelParameters,
     context_window_tokens: u64,
-    max_output_tokens: u32,
+    max_output_tokens: Option<u32>,
 }
 
 impl ResolvedModelParameters {
@@ -35,7 +35,7 @@ impl ResolvedModelParameters {
     pub fn context_window_tokens(&self) -> u64 {
         self.context_window_tokens
     }
-    pub fn max_output_tokens(&self) -> u32 {
+    pub fn max_output_tokens(&self) -> Option<u32> {
         self.max_output_tokens
     }
 }
@@ -108,11 +108,16 @@ fn validate(
         return Err(ModelParameterError::Invalid("server_compaction_support"));
     }
     let context = required(parameters.context_window_tokens, "context_window_tokens")?;
-    let output = required(parameters.max_output_tokens, "max_output_tokens")?;
-    // GenerationConfig 使用 u32；不能等构造请求时才截断已保存的输出限制。
-    let output =
-        u32::try_from(output).map_err(|_| ModelParameterError::Invalid("max_output_tokens"))?;
-    if context > 9_007_199_254_740_991 || u64::from(output) > context {
+    // 输出上限未知时交给上游默认值；明确非法值仍拒绝。
+    let output = match parameters.max_output_tokens {
+        ModelTokenLimit::Unknown => None,
+        ModelTokenLimit::Invalid => return Err(ModelParameterError::Invalid("max_output_tokens")),
+        ModelTokenLimit::Known(value) => Some(
+            u32::try_from(value.get())
+                .map_err(|_| ModelParameterError::Invalid("max_output_tokens"))?,
+        ),
+    };
+    if context > 9_007_199_254_740_991 || output.is_some_and(|output| u64::from(output) > context) {
         return Err(ModelParameterError::Invalid(
             "context_window_tokens/max_output_tokens",
         ));
@@ -251,7 +256,7 @@ mod tests {
             .expect("fixed");
         fixed.max_output_tokens = known(128);
         assert_eq!(frozen.source(), ModelParameterSource::Fixed);
-        assert_eq!(frozen.max_output_tokens(), 1024);
+        assert_eq!(frozen.max_output_tokens(), Some(1024));
         assert_eq!(
             frozen.parameters().image_input,
             ModelFeatureSupport::Unknown
@@ -261,7 +266,7 @@ mod tests {
                 .await
                 .expect("next run")
                 .max_output_tokens(),
-            128
+            Some(128)
         );
     }
 
@@ -293,7 +298,6 @@ mod tests {
     #[tokio::test]
     async fn invalid_fixed_limits_fail_without_network_fallback() {
         for output in [
-            ModelTokenLimit::Unknown,
             ModelTokenLimit::Invalid,
             known(8193),
             known(u64::from(u32::MAX) + 1),

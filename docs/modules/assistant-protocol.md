@@ -520,3 +520,42 @@ TS 继续由 Rust 导出；新增独立 HTTP 入口不修改既有 Runtime 命�
 ## v0.32.0 F05 M0 OpenCode 配置边界
 
 `ProviderType` 增加 `opencode`，仍由 Rust 导出 TS，Center DTO/OpenAPI 对齐同一 wire 值。新类型不是普通 OpenAI 的别名。旧 TS 客户端不校验未知 Provider，应用最低兼容版本因此统一为 0.32.0；不改变企业协议 3 或数据库下限。OpenCode 的 Responses 续接保持未知，Chat 不支持，能力覆盖不得提升为支持。TS 地址预设与 URL 派生仅投影连接事实，不持久化套餐、派生 URL 或 UI 状态。
+
+## v0.32.1 Sub2API 服务商
+
+`ProviderType` 与 `ModelDiscoveryFormat` 增加 `sub2api`，只决定模型发现适配；推理仍沿既有 OpenAI Responses／Chat Completions 契约。用户确认应用最低兼容版本为 `0.32.1`，企业协议范围为 `[4,4]`，旧版本须配套更新。先前同版本测试候选不包含该能力，不能以相同版本号推断构建一致；存储账本不回改已交付版本的迁移声明。
+
+## v0.32.1 F02 子任务继承阅读
+
+- `ChildTaskSnapshot` 的 `inherited` 表示只读继承，`body_unavailable` 表示可靠描述仍在而正文不可读；两者不改变原终态或时间。不可用正文的用量保持未知，不用空页面或来源会话链接代替。
+- Desktop 的 child 快照、正文分页、水位、实时输出和 generation 按完整 Session／child owner 隔离；继承记录不接受历史实时事件覆盖，也不显示原执行控制。
+- F02 M1 主会话 User／Assistant 消息以缺省 false 的 `inherited` 表达只读继承；Assistant 的 `partial` 表达截至分支点的截取，不能显示来源未来终态和完整耗时。继承 Run／Step 身份用于历史展示，不授予目标会话活动控制。child 的继承与正文不可用标记遵循同样的只读语义。
+- F02 M2：RunSnapshot／RunStarted 的 `started_at_ms`、Assistant 的 `run_started_at_ms` 及 child Started 的 `started_at_ms` 采用可选安全缺省；缺失表示未知。created 继续表示接纳，新增字段不改变原事件 tag、状态枚举或应用兼容版本。
+- F02 M3：`GetApplicationSnapshotRequest` 接收可选的 `active_sessions_limit`／`archived_sessions_limit`，缺省各 100，从列表起点一次返回指定数量的摘要；客户端按已加载数量刷新，不逐页补拉。下一偏移、排序及事件水位由同一快照返回。`ListSessionsRequest.limit` 同样支持大于 200 的前缀；不增加命令或持久化，不改变应用兼容下限。
+
+
+### F02 初始化阶段与进度（2026-10-22）
+
+RuntimeHostHealth 增加可选 progress（completed／total），既有启动阶段细分历史备份、备份校验和历史迁移；缺失进度表示总量尚未知，不推算比例。沿 Rust 导出的 TS 契约，阶段进度不持久化、不含身份或路径；本人初始化的 /health 查询仍经过原登录认证，不启动用户域或要求其就绪。
+
+## v0.32.1 F02 队列领取修正（2026-10-22）
+
+用户确认：入队仅暂存可撤销 Input，不创建 Run／attempt、不发送 RunAccepted、不生成正文处理过程。实际领取创建执行控制；准备期间仍允许队列调整，可靠领取后崩溃按执行中断收敛。新接纳及物化／Goal 恢复结果的 Run 可空，幂等请求保留原 Input；重启未领取队列仍需手动恢复。此约定取代上文历史版本中“入队即创建首次 Accepted Run”的描述。当前前端绑定实际活动轮次，未开始的空主轮次不生成处理过程。具体事务、协议及同版本旧队列收敛见 [F02 技术方案](../versions/v0.32.1/features/F02-分支历史与会话存储修正/技术方案.md#61-输入暂存与实际领取2026-10-22-用户确认修正)。
+
+
+## v0.32.1 F05 M0 受管 MCP 契约
+
+- MCP 管理目标为 McpServerSource＋server_key，来源包含 user、plugin(name)、builtin；旧独立形状缺省来源为 user，执行与权限仍沿原 key。管理快照只公开当前定义摘要、实际文件修订、字段绑定／是否设置及运行状态，不回读秘密或启动字段。
+- 受管修改／恢复默认是原 mutation 的明确分支；expected_revision 对插件取 managed.revision，对独立／内置取用户文件修订，不把不同文件误作一份 CAS。原插件参数修改继续使用包 SHA 与原设置 revision，不增加跨文件／SQL 原子事务。
+- TestMcpServerRequest 在独立 server 和受管 managed 间二选一，Runtime 拒绝混合／空目标；受管测试草稿不能指定命令／URL。RuntimeCommand 中对请求使用 Box 仅为枚举尺寸，不改变 JSON。RefreshMcpServer 只针对已核验来源刷新，不创建会话控制输入、Run 或历史。
+- Rust 与 TS 仍由同一导出器维护，应用／存储最低版本及企业协议保持当前 0.32.1／[4,4]。M0 未引入 Builtin Skill 持久值；该内容及 UI／Agent 接入属于后续里程碑。
+
+- F05 M1 继续使用上述配置、测试、目标刷新和原插件参数命令；Agent 工具输入 schema 属 Runtime 私有装配，不增加公共协议 DTO、用户域选择字段或权限文件格式。
+
+
+- F05 M2 的 SkillSourceSnapshot 增加 builtin，沿现有 Skill 管理投影展示；协议 TS 由 Rust 生成。来源同时用于 Runtime 文件事实，不能只作为 UI 文案处理；当前应用／存储最低兼容版本继续为 0.32.1。
+
+
+## v0.32.1 MCP 来源优先级投影
+
+`McpServerSnapshot.shadowed_by` 是可选的同名选用来源，只描述当前配置选择，保留原 enabled 意图及真实 runtime_state。由 Runtime 同次归并生成，Desktop 与 Agent 管理查询使用同一字段；不写入历史或 SQL。来源排序固定为用户、插件标识升序、内置，权限仍按 server_key。

@@ -454,9 +454,10 @@ fn closing_external_access_does_not_cancel_an_accepted_runtime_run() {
         accepted.text().unwrap()
     );
     let result = accepted.json::<Value>().unwrap();
-    let run_id = result["result"]["payload"]["payload"]["run"]["run_id"]
-        .as_str()
-        .unwrap();
+    let receipt = &result["result"]["payload"]["payload"];
+    assert!(receipt["run"].is_null());
+    let claimed = local.wait_for_input_run(session_id, receipt["input_id"].as_str().unwrap());
+    let run_id = claimed["run_id"].as_str().unwrap();
     local.wait_for_status(
         "running before closing listener",
         session_id,

@@ -19,14 +19,22 @@ impl ModelServiceFactory for ExternalFactory {
 }
 
 async fn fixture() -> AssistantRuntime {
-    let runtime = AssistantRuntime::new(
+    fixture_with_store(Arc::new(crate::storage::VolatileRuntimeStore::default())).await
+}
+
+async fn fixture_with_store(store: Arc<dyn RuntimeStore>) -> AssistantRuntime {
+    let runtime = AssistantRuntime::open(
         RuntimeConfig::new(NonZeroUsize::new(64).unwrap()),
         Arc::new(MissingConfigSource),
         Arc::new(ExternalFactory),
         Arc::new(StaticSystemPromptFactory),
         static_run_tool_factory(ToolRegistry::new().snapshot()),
         Arc::new(TestChildWorkspaceFactory::default()),
-    );
+        store,
+        Arc::new(crate::permission::VolatilePermissionFileStore::default()),
+    )
+    .await
+    .unwrap();
     // Store 刻意保留历史个人连接、默认与固定值，外部恢复必须忽略它们。
     model_fixture::seed(&runtime, "local-secret-must-not-be-used").await;
     runtime
@@ -52,6 +60,80 @@ async fn publish(runtime: &AssistantRuntime, value: Arc<ExternalModelConfigurati
     let mut gate = runtime.external_model_publication().await.unwrap();
     gate.publish(Some(value), "", 42).unwrap();
     gate.finish();
+}
+
+#[tokio::test]
+async fn application_read_keeps_its_frozen_model_inputs_during_deferred_external_notification() {
+    let store = Arc::new(super::store::FaultInjectingStore::healthy());
+    let runtime = fixture_with_store(store.clone()).await;
+    publish(&runtime, configuration("old-model")).await;
+    let before = runtime.event_sender.sequence();
+    store.block_next_summary_read();
+    let read_finished = tokio::sync::Notify::new();
+    let read = async {
+        let result = runtime.get_application_snapshot(Default::default()).await;
+        read_finished.notify_one();
+        result.unwrap().snapshot
+    };
+    let update = async {
+        store.wait_for_summary_read().await;
+        let mut connection = model_fixture::provider("").connection;
+        connection.display_name = "New managed provider".to_owned();
+        let next = Arc::new(
+            ExternalModelConfiguration::new(
+                connection,
+                "new-model".to_owned(),
+                model_fixture::parameters(),
+                43,
+                None,
+            )
+            .unwrap(),
+        );
+        let mut publication = runtime.external_model_publication().await.unwrap();
+        publication.publish(Some(next), "", 43).unwrap();
+        // 模拟 Host 在身份锁内提交后尚未 finish；快照不能持读门等通知而互锁，
+        // 也不能把已经复制的旧 Provider 与晚到的新默认选择重新拼接。
+        assert_eq!(runtime.event_sender.sequence(), before);
+        store.release_summary_read();
+        read_finished.notified().await;
+        publication.finish();
+    };
+    let (snapshot, ()) =
+        tokio::time::timeout(Duration::from_secs(1), async { tokio::join!(read, update) })
+            .await
+            .expect("snapshot and deferred publication do not wait on one another");
+    assert_eq!(snapshot.observed_sequence, before);
+    assert_ne!(
+        snapshot.value.providers[0].connection.display_name,
+        "New managed provider"
+    );
+    assert_eq!(
+        snapshot
+            .value
+            .model_settings
+            .default_model
+            .unwrap()
+            .model_id,
+        "old-model"
+    );
+    let next = runtime
+        .get_application_snapshot(Default::default())
+        .await
+        .unwrap()
+        .snapshot;
+    assert!(next.observed_sequence > before);
+    assert_eq!(
+        next.value.providers[0].connection.display_name,
+        "New managed provider"
+    );
+    assert_eq!(
+        next.value.model_settings.default_model.unwrap().model_id,
+        "new-model"
+    );
+    runtime
+        .shutdown(ShutdownRuntimeRequest::default())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

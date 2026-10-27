@@ -1,6 +1,8 @@
+import { McpSettingsStore } from "../../src/features/settings/SettingsDialog/McpSettingsPage/store";
+import type { RuntimeClient } from "../../src/runtime-client/RuntimeClient";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import type { InstalledPluginSnapshot, PluginMarketEntry, PluginOperationSnapshot } from "@ez-assistant/protocol";
+import type { McpServerSnapshot, InstalledPluginSnapshot, PluginMarketEntry, PluginOperationSnapshot } from "@ez-assistant/protocol";
 import { AppMessageProvider } from "../../src/components/AppMessage";
 import { PluginSettingsPage } from "../../src/features/settings/SettingsDialog/PluginSettingsPage";
 import type { RootStore } from "../../src/stores/RootStore";
@@ -31,8 +33,9 @@ const market: PluginMarketEntry = {
   versions: [{ version: "0.1.0", sha256: "a".repeat(64), size_bytes: 1024, archive_format: "zip", skills: [], mcp: [] }],
 };
 
-function renderPage(installed: InstalledPluginSnapshot | null, cleanup_blocked = false, operations: readonly PluginOperationSnapshot[] = []) {
+function renderPage(installed: InstalledPluginSnapshot | null, cleanup_blocked = false, operations: readonly PluginOperationSnapshot[] = [], mcp?: McpServerSnapshot) {
   const command = vi.fn(async (request: { type: string; payload?: { expected_active_sha256?: string | null } }) => {
+    if (request.type === "get_mcp_configuration") return { payload: { snapshot: { revision: "root", needs_refresh: false, servers: mcp ? [mcp] : [], diagnostics: [] } } };
     if (request.type === "list_plugins") return { payload: { plugins: installed ? [installed] : [], operations, cleanup_blocked } };
     if (request.type === "list_plugin_market") return { payload: { plugins: [market] } };
     if (request.type === "mutate_plugin_settings") return { payload: { plugin: { ...installed, enabled: false, settings_revision: "revision-2" } } };
@@ -44,7 +47,9 @@ function renderPage(installed: InstalledPluginSnapshot | null, cleanup_blocked =
     if (request.type === "get_plugin_operation") return { payload: { key: "plugin-auto-update", kind: "update", phase: "succeeded", committed_names: [market.name], cancel_requested: false, error_code: null, cleanup_required: false, received_bytes: null, total_bytes: null } };
     throw new Error(`Unexpected command: ${request.type}`);
   });
+  const runtime = { command, listPluginConfigFiles: vi.fn(async () => ({ files: [] })) } as unknown as RuntimeClient;
   const store = {
+    settings: { mcp: new McpSettingsStore(() => runtime) },
     local_runtime_client: { command, listPluginConfigFiles: vi.fn(async () => ({ files: [] })) },
     local_connection: { capabilities: { mode: "enterprise" } },
   } as unknown as RootStore;
@@ -129,4 +134,24 @@ it("automatically starts a center update when the catalog shows a newer package"
   await waitFor(() => expect(command).toHaveBeenCalledWith({ type: "resolve_plugin_package", payload: { name: market.name, expected_active_sha256: "b".repeat(64) } }));
   await waitFor(() => expect(command).toHaveBeenCalledWith(expect.objectContaining({ type: "begin_plugin_install" })));
   expect(screen.queryByRole("button", { name: "确认并开始更新" })).not.toBeInTheDocument();
+});
+
+it("opens plugin MCP in the shared managed detail even when disconnected", async () => {
+  const installed = { ...plugin("a".repeat(64)), mcp: ["search"], configuration: [{ name: "token", label: "Plugin token", required: true, secret: true, is_set: false }] };
+  renderPage(installed, false, [], {
+    source: { type: "plugin", name: installed.name }, server_key: "search", display_name: "Search service", description: "", transport: "streamable_http", enabled: false, runtime_state: "unavailable", tool_count: 0, needs_refresh: false, target_summary: "Managed HTTP", startup_timeout_ms: null, tool_timeout_ms: null, environment_keys: [], header_keys: ["X-Key"],
+    managed: { revision: "plugin-file", definition_digest: "digest", configured_enabled: false, source_enabled: true, source_available: true, configuration_ready: true, environment: {}, headers: { "X-Key": false }, parameters: [], parameter_bindings: {} },
+  });
+  fireEvent.click(await screen.findByRole("button", { name: "查看 库房 CAD 绘图资料 详情" }));
+  fireEvent.change(screen.getByLabelText("Plugin token"), { target: { value: "unsaved" } });
+  fireEvent.click(screen.getByRole("button", { name: "search" }));
+  expect(screen.getByText("请先保存或清空当前参数和文件草稿。")).toBeVisible();
+  fireEvent.change(screen.getByLabelText("Plugin token"), { target: { value: "" } });
+  fireEvent.click(screen.getByRole("button", { name: "search" }));
+  expect(await screen.findByRole("heading", { name: "Search service" })).toBeVisible();
+  expect(screen.queryByLabelText("服务 URL")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "删除服务…" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "返回插件详情" })).toBeVisible();
+  expect(screen.getByLabelText("请求头值 1")).toHaveValue("");
+  expect(screen.getByRole("button", { name: "刷新此服务" })).toBeEnabled();
 });

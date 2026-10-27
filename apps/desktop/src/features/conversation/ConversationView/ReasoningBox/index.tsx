@@ -1,3 +1,4 @@
+import { childKey } from "../../../../stores/liveExecutionProjection";
 import { observer } from "mobx-react-lite";
 import { useAppearance } from "../../../../stores/AppearanceContext";
 import { useId, useLayoutEffect, useRef } from 'react';
@@ -19,7 +20,7 @@ export const ReasoningBox = observer(function ReasoningBox(
   const session = store.navigation.selected_session_id;
   const child = store.navigation.selected_child_task_id;
   let history = session ? store.projection.conversation_histories.get(session) : undefined;
-  if (child) history = store.projection.child_conversation_histories.get(child);
+  if (child && session) history = store.projection.child_conversation_histories.get(childKey(session, child));
   const generation = history?.generation ?? 0;
   const open = !props.summary && props.is_open;
   useOutputFollow({

@@ -11,9 +11,8 @@ use agent_types::{
 };
 use assistant_protocol::{
     AttachmentId, ChildTaskId, ChildTaskStatus, CompactSessionOutcome, ConversationOwner,
-    IdempotencyKey, InputId, MessageFeedback, MessageId as ProtocolMessageId, RunId, RunStatus,
-    SessionHistoryCleanupStatus, SessionId, SessionTitleGenerationTriggerSnapshot,
-    SessionTitleOrigin, WorkspaceId,
+    IdempotencyKey, InputId, RunId, RunStatus, SessionHistoryCleanupStatus, SessionId,
+    SessionTitleGenerationTriggerSnapshot, SessionTitleOrigin, WorkspaceId,
 };
 
 use super::{
@@ -65,10 +64,12 @@ mod custom_agent;
 mod feedback;
 mod global_state;
 mod goal;
+mod history;
 mod input;
 mod lifecycle;
 mod model_management;
 mod plugin;
+mod recovery;
 mod run;
 mod session;
 mod session_history;
@@ -83,6 +84,7 @@ const VOLATILE_ROOT: &str = if cfg!(windows) {
     "/volatile"
 };
 
+#[derive(Clone)]
 struct VolatilePendingExchange {
     session_id: SessionId,
     run_id: RunId,
@@ -91,6 +93,7 @@ struct VolatilePendingExchange {
     started_calls: BTreeSet<String>,
 }
 
+#[derive(Clone)]
 struct VolatileChildPendingExchange {
     child_task_id: ChildTaskId,
     session_id: SessionId,
@@ -103,6 +106,31 @@ struct VolatileCompactionReceipt {
     session_id: SessionId,
     source_generation: u64,
     outcome: Option<CompactSessionOutcome>,
+}
+
+/// 原始接纳身份对应 Host inputs 的最小保留列；不包含正文、来源、时间或执行历史。
+/// order 是首次接纳的稳定行序，和临时队列优先级分开；控制释放后仍用于幂等及文件核对。
+struct InputIdentity {
+    session_id: SessionId,
+    idempotency_key: Option<IdempotencyKey>,
+    queue_order: u64,
+}
+
+impl InputIdentity {
+    fn from_command(command: &StoredSessionCommand) -> Self {
+        Self {
+            session_id: command.session_id.clone(),
+            idempotency_key: command.idempotency_key.clone(),
+            queue_order: command.queue_order,
+        }
+    }
+    fn from_input(input: &StoredInput) -> Self {
+        Self {
+            session_id: input.session_id.clone(),
+            idempotency_key: input.idempotency_key.clone(),
+            queue_order: input.queue_order,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -124,14 +152,20 @@ struct State {
     workspaces: BTreeMap<WorkspaceId, StoredWorkspace>,
     attachments: BTreeMap<AttachmentId, StoredAttachment>,
     sessions: BTreeMap<SessionId, StoredSession>,
+    // 最小幂等身份；原历史清空后仍保留，防止后续输入冒充原物化结果。
+    materialization_inputs: BTreeMap<SessionId, InputId>,
     conversations: BTreeMap<SessionId, ConversationSnapshot>,
+    // 对应 Host 会话文件中的可靠值，与待消费队列和执行控制独立拥有。
+    histories: BTreeMap<SessionId, super::StoredHistoryFacts>,
     inputs: BTreeMap<InputId, StoredInput>,
+    input_identities: BTreeMap<InputId, InputIdentity>,
     session_commands: BTreeMap<InputId, StoredSessionCommand>,
+    command_identities: BTreeMap<InputId, InputIdentity>,
     mcp_input_selections: BTreeMap<String, StoredMcpSelection>,
     runs: BTreeMap<RunId, StoredRun>,
     child_tasks: BTreeMap<ChildTaskId, StoredChildTask>,
-    child_conversations: BTreeMap<ChildTaskId, ConversationSnapshot>,
-    message_feedback: BTreeMap<(SessionId, ProtocolMessageId), MessageFeedback>,
+    child_conversations: BTreeMap<(SessionId, ChildTaskId), ConversationSnapshot>,
+    child_histories: BTreeMap<(SessionId, ChildTaskId), super::StoredHistoryFacts>,
     pending_tool_exchanges: BTreeMap<String, VolatilePendingExchange>,
     pending_child_tool_exchanges: BTreeMap<String, VolatileChildPendingExchange>,
     session_usage: BTreeMap<SessionId, StoredSessionUsage>,
@@ -159,6 +193,54 @@ impl VolatileRuntimeStore {
                 "volatile runtime storage is unavailable",
             )
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains_command_control(&self, input_id: &InputId) -> Result<bool, StoreError> {
+        Ok(self.lock()?.session_commands.contains_key(input_id))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains_feedback_control(&self, request_id: &str) -> Result<bool, StoreError> {
+        Ok(self.lock()?.feedback.contains_key(request_id))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn selection_control_counts(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(usize, usize), StoreError> {
+        let state = self.lock()?;
+        Ok((
+            state
+                .skill_activations
+                .values()
+                .filter(|row| &row.session_id == session_id)
+                .count(),
+            state
+                .mcp_input_selections
+                .values()
+                .filter(|row| &row.session_id == session_id)
+                .count(),
+        ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains_input_control(&self, input_id: &InputId) -> Result<bool, StoreError> {
+        Ok(self.lock()?.inputs.contains_key(input_id))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains_run_control(&self, run_id: &RunId) -> Result<bool, StoreError> {
+        Ok(self.lock()?.runs.contains_key(run_id))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains_child_control(
+        &self,
+        child_id: &ChildTaskId,
+    ) -> Result<bool, StoreError> {
+        Ok(self.lock()?.child_tasks.contains_key(child_id))
     }
 
     #[cfg(test)]
@@ -316,6 +398,20 @@ fn validate_volatile_proxy_report(
     let Some(report) = settlement.proxy_report.as_deref() else {
         return Ok(());
     };
+    state.ensure_new_input_identity(
+        &report.session_id,
+        &report.input_id,
+        None,
+        &report.message.id,
+    )?;
+    if report.idempotency_key.as_ref().is_some_and(|key| {
+        state.input_identities.values().any(|identity| {
+            identity.session_id == report.session_id
+                && identity.idempotency_key.as_ref() == Some(key)
+        })
+    }) {
+        return Err(conflict("proxy report acceptance key already exists"));
+    }
     validate_input_message_with_channel_source(
         report.origin,
         report.goal_binding.as_ref(),
@@ -390,7 +486,6 @@ fn validate_volatile_proxy_report(
             Some(StoredGoalSettlementEffect::Progress { .. })
         )
         || state.inputs.contains_key(&report.input_id)
-        || state.runs.contains_key(&report.run_id)
     {
         return Err(conflict("proxy report is not currently accepted"));
     }
@@ -419,33 +514,16 @@ fn insert_volatile_proxy_report(
         queued_message: Some(report.message),
         accepted_at_ms: report.accepted_at_ms,
     };
-    let stored_run = StoredRun {
-        shell: None,
-        run_id: report.run_id,
-        session_id: report.session_id,
-        input_id: report.input_id,
-        attempt: 1,
-        status: RunStatus::Accepted,
-        agent_variant: report.agent_variant,
-        approval_mode: report.approval_mode,
-        reasoning_effort: None,
-        cancel_requested: false,
-        error: None,
-        message_ids: Vec::new(),
-        message_steps: std::collections::HashMap::new(),
-        created_at_ms: report.accepted_at_ms,
-        started_at_ms: None,
-        finished_at_ms: None,
-    };
     state
         .inputs
         .insert(stored_input.input_id.clone(), stored_input.clone());
-    state
-        .runs
-        .insert(stored_run.run_id.clone(), stored_run.clone());
-    Ok(AcceptedInput {
-        input: stored_input,
-        run: stored_run,
+    state.input_identities.insert(
+        stored_input.input_id.clone(),
+        InputIdentity::from_input(&stored_input),
+    );
+    Ok(AcceptedInput::Control {
+        input: Box::new(stored_input),
+        run: None,
         is_duplicate: false,
     })
 }
@@ -487,6 +565,7 @@ fn apply_volatile_goal_effect(
 
 fn append_child(
     state: &mut State,
+    session_id: &SessionId,
     child_task_id: &ChildTaskId,
     messages: &[ConversationMessage],
 ) -> Result<(), StoreError> {
@@ -495,7 +574,7 @@ fn append_child(
     }
     let conversation = state
         .child_conversations
-        .get_mut(child_task_id)
+        .get_mut(&(session_id.clone(), child_task_id.clone()))
         .ok_or_else(|| conflict("child task conversation does not exist"))?;
     let mut candidate = conversation.messages.clone();
     candidate.extend_from_slice(messages);
@@ -528,13 +607,9 @@ fn ensure_child_owner(
     session_id: &SessionId,
     child_task_id: &ChildTaskId,
 ) -> Result<(), StoreError> {
-    let task = state
-        .child_tasks
-        .get(child_task_id)
-        .ok_or_else(|| conflict("child task does not exist"))?;
-    if task.session_id != *session_id {
-        return Err(conflict("child task belongs to a different session"));
-    }
+    state
+        .child_history(session_id, child_task_id)
+        .ok_or_else(|| conflict("child task does not exist in this session"))?;
     Ok(())
 }
 
@@ -544,11 +619,9 @@ fn ensure_child_running(
     child_task_id: &ChildTaskId,
 ) -> Result<(), StoreError> {
     ensure_child_owner(state, session_id, child_task_id)?;
-    if state
-        .child_tasks
-        .get(child_task_id)
-        .is_none_or(|task| task.status != ChildTaskStatus::Running)
-    {
+    if state.child_tasks.get(child_task_id).is_none_or(|task| {
+        &task.session_id != session_id || task.status != ChildTaskStatus::Running
+    }) {
         return Err(conflict("child task is not running"));
     }
     Ok(())
@@ -561,10 +634,11 @@ fn ensure_child_settleable(
 ) -> Result<(), StoreError> {
     ensure_child_owner(state, session_id, child_task_id)?;
     if state.child_tasks.get(child_task_id).is_none_or(|task| {
-        !matches!(
-            task.status,
-            ChildTaskStatus::Accepted | ChildTaskStatus::Running
-        )
+        &task.session_id != session_id
+            || !matches!(
+                task.status,
+                ChildTaskStatus::Accepted | ChildTaskStatus::Running
+            )
     }) {
         return Err(conflict("child task is not settleable"));
     }
@@ -688,6 +762,7 @@ fn conversation_window(
         end,
         total,
         conversation: ConversationSnapshot::new(snapshot.messages[raw_start..raw_end].to_vec()),
+        history: None,
     }
 }
 
@@ -825,13 +900,14 @@ fn validate_volatile_input_activation(
             Err(conflict("input has an unbound skill activation context"))
         };
     };
-    if state
-        .skill_activations
-        .contains_key(&activation.activation_id)
-        || input.origin != InputOrigin::User
+    if state.contains_skill_activation(
+        &input.session_id,
+        &activation.owner,
+        &activation.activation_id,
+    ) || input.origin != InputOrigin::User
         || activation.trigger != SkillActivationTrigger::User
         || activation.session_id != input.session_id
-        || activation.run_id.as_ref() != Some(&input.run_id)
+        || activation.run_id.is_some()
         || activation.input_id.as_ref() != Some(&input.input_id)
         || activation.message_id != input.message.id
         || !matches!(
@@ -1006,9 +1082,7 @@ fn validate_model_activations(
         || activation_ids.len() != activations.len()
         || names.len() != activations.len()
         || activations.iter().any(|activation| {
-            state
-                .skill_activations
-                .contains_key(&activation.activation_id)
+            state.contains_skill_activation(session_id, expected_owner, &activation.activation_id)
                 || activation.session_id != *session_id
                 || &activation.owner != expected_owner
                 || activation.trigger != SkillActivationTrigger::Model
@@ -1055,6 +1129,60 @@ fn pause_running_goals_for_recovery(
 }
 
 impl State {
+    /// 与 Host 的接纳返回契约一致：只交出真实未完成控制，终态幂等返回只读 owner 事实。
+    /// 调用方已持有 Store 锁；不再次加锁、创建 Run 或唤醒队列。
+    fn existing_input_acceptance(&self, input: StoredInput) -> Result<AcceptedInput, StoreError> {
+        if let Some(run) = self.runs.values().find(|run| {
+            run.session_id == input.session_id
+                && run.input_id == input.input_id
+                && run.attempt == 1
+                && !run.status.is_terminal()
+        }) {
+            return Ok(AcceptedInput::Control {
+                input: Box::new(input),
+                run: Some(run.clone()),
+                is_duplicate: true,
+            });
+        }
+        if input.state != StoredInputState::Committed {
+            return Ok(AcceptedInput::Control {
+                input: Box::new(input),
+                run: None,
+                is_duplicate: true,
+            });
+        }
+        let history = self
+            .conversation_history(ConversationOwner::MainSession {
+                session_id: input.session_id.clone(),
+            })?
+            .facts;
+        let fact = history
+            .inputs
+            .into_iter()
+            .find(|fact| {
+                fact.input_id == input.input_id
+                    && !fact.inherited
+                    && fact.user_message_id == input.user_message_id
+            })
+            .ok_or_else(|| conflict("accepted Input history is missing"))?;
+        let run = history
+            .runs
+            .into_iter()
+            .find(|run| {
+                run.input_id.as_ref() == Some(&input.input_id)
+                    && run.attempt == 1
+                    && !run.inherited
+                    && !run.partial
+                    && run.status.is_some_and(|status| status.is_terminal())
+            })
+            .ok_or_else(|| conflict("accepted first Run history is missing"))?;
+        Ok(AcceptedInput::Historical {
+            session_id: input.session_id,
+            input: fact,
+            run,
+        })
+    }
+
     fn provider_usage(
         &self,
         id: &assistant_protocol::ProviderInstanceId,

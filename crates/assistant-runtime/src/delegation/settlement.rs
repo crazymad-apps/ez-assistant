@@ -3,7 +3,9 @@
 use agent_core::{ExecutionError, ExecutionOutcome};
 use agent_tools::ToolError;
 use agent_types::{AssistantPart, ConversationMessage};
-use assistant_protocol::{ChildTaskStatus, RuntimeErrorCode, RuntimeErrorInfo};
+use assistant_protocol::{
+    ChildTaskEvent, ChildTaskStatus, RuntimeErrorCode, RuntimeErrorInfo, RuntimeEvent,
+};
 use serde_json::json;
 
 use super::{ChildTaskRecord, ChildTaskRegistry, cancellation::ChildCancellationReason};
@@ -107,8 +109,10 @@ pub(super) fn child_error(stored: &StoredChildTask, error: RuntimeErrorInfo) -> 
 
 /// 在初始 User Message 落盘前把 accepted 关系收敛为失败或取消终态。
 pub(super) async fn settle_accepted(
+    parent: &crate::session::SessionController,
     store: &dyn RuntimeStore,
     registry: &ChildTaskRegistry,
+    events: &crate::observation::ObservationCoordinator,
     stored: &mut StoredChildTask,
     status: ChildTaskStatus,
     error: Option<RuntimeErrorInfo>,
@@ -122,6 +126,10 @@ pub(super) async fn settle_accepted(
     let finished_at_ms = crate::runtime::now_ms()
         .map_err(|_| ToolError::execution("child pre-start settlement time is unavailable"))?;
     let cancel_requested = status == ChildTaskStatus::Cancelled;
+    let _parent = parent.mutation().await;
+    parent
+        .ensure_healthy()
+        .map_err(|_| ToolError::execution("child task owner is faulted"))?;
     store
         .settle_child_task(StoredChildTaskSettlement {
             operation_id,
@@ -140,8 +148,23 @@ pub(super) async fn settle_accepted(
     stored.cancel_requested |= cancel_requested;
     stored.error = error;
     stored.finished_at_ms = Some(finished_at_ms);
-    registry
-        .upsert(stored.clone())
+    events
+        .publish_transition(|| {
+            registry.upsert(stored.clone())?;
+            Ok((
+                (),
+                Some(RuntimeEvent::ChildTaskEvent {
+                    session_id: stored.session_id.clone(),
+                    parent_run_id: stored.parent_run_id.clone(),
+                    child_task_id: stored.child_task_id.clone(),
+                    event: ChildTaskEvent::Finished {
+                        finished_at_ms: stored.finished_at_ms,
+                        status: stored.status,
+                        error: stored.error.clone(),
+                    },
+                }),
+            ))
+        })
         .map_err(|_| ToolError::execution("child task runtime state is unavailable"))
 }
 

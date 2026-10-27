@@ -58,9 +58,7 @@ fn real_llm_pins_memory_and_recalls_an_isolated_historical_conversation() {
         json!({ "session_id": session_id, "approval_mode": "ask" }),
     );
 
-    let submitted = client.runtime(
-        "submit_input",
-        json!({
+    let submitted = client.submit_started_input(json!({
             "session_id": session_id,
             "message": format!(
                 "This is a strict tool integration test. First call pin_memory exactly once with category user_preference and content {pinned_marker:?}. Then call recall_memory with action search, scope global, query {recall_marker:?}, and limit 5. Do not finish before both tool calls complete. In the final answer, repeat both marker strings exactly."
@@ -133,15 +131,12 @@ fn seed_historical_conversation(runtime_home: &std::path::Path, marker: &str) {
             json!({ "title": "v0.15 isolated recall seed" }),
         )["session"]["session_id"],
     );
-    let submitted = client.runtime(
-        "submit_input",
-        json!({
-            "session_id": session_id,
-            "message": format!("Remember this historical test token: {marker}"),
-            "variant": "build",
-            "idempotency_key": "real-v015-recall-seed"
-        }),
-    );
+    let submitted = client.submit_started_input(json!({
+        "session_id": session_id,
+        "message": format!("Remember this historical test token: {marker}"),
+        "variant": "build",
+        "idempotency_key": "real-v015-recall-seed"
+    }));
     let run_id = text(&submitted["run"]["run_id"]);
     let run = wait_for_terminal(&mut client, &session_id, &run_id, Duration::from_secs(20));
     assert_eq!(run["status"], "completed");

@@ -287,11 +287,11 @@ mod tests {
             (0, 0, Err(CenterError::Unavailable)),
             (65536, 65536, Err(CenterError::Unavailable)),
             (1, u32::MAX, Err(CenterError::Unavailable)),
-            (4, 4, Err(CenterError::ProtocolIncompatible)),
+            (4, 4, Ok(())),
             (1, 1, Err(CenterError::ProtocolIncompatible)),
-            (1, 3, Ok(())),
+            (1, 3, Err(CenterError::ProtocolIncompatible)),
             (2, 2, Err(CenterError::ProtocolIncompatible)),
-            (3, 3, Ok(())),
+            (3, 3, Err(CenterError::ProtocolIncompatible)),
         ] {
             assert_eq!(check_protocol_range(minimum, current), expected);
         }

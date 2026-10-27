@@ -643,7 +643,13 @@ async fn user_skill_activation_is_frozen_with_queue_and_conversation_projections
             "done",
         )))],
     ));
-    let mut runtime = runtime(model);
+    let store = Arc::new(crate::storage::VolatileRuntimeStore::default());
+    let mut runtime = runtime_with_store(
+        model.clone(),
+        store.clone(),
+        RuntimeConfig::new(NonZeroUsize::new(32).unwrap()),
+    )
+    .await;
     runtime.skill_package_source = Arc::new(StaticSkillPackageSource);
     let session_id = runtime
         .create_session(CreateSessionRequest::default())
@@ -652,7 +658,7 @@ async fn user_skill_activation_is_frozen_with_queue_and_conversation_projections
         .session
         .session_id;
     let controller = runtime.session_for_test(&session_id).await;
-    controller.lock_state().expect("state").queue_paused_by_user = true;
+    controller.lock_state().expect("state").resume_required = true;
 
     let submitted = runtime
         .submit_input(SubmitInputRequest {
@@ -670,6 +676,7 @@ async fn user_skill_activation_is_frozen_with_queue_and_conversation_projections
         .expect("submit skill input");
     let queue =
         crate::runtime::product::queue_snapshot(&controller, &Default::default()).expect("queue");
+    assert_eq!(store.selection_control_counts(&session_id).unwrap(), (1, 0));
     assert_eq!(
         queue.items[0]
             .as_message()
@@ -719,6 +726,38 @@ async fn user_skill_activation_is_frozen_with_queue_and_conversation_projections
         Some("review")
     );
 
+    let queued_before = store
+        .load_session_state(&session_id)
+        .await
+        .unwrap()
+        .state
+        .inputs[0]
+        .clone();
+    runtime
+        .shutdown(assistant_protocol::ShutdownRuntimeRequest::default())
+        .await
+        .unwrap();
+    drop(controller);
+    drop(runtime);
+    let mut runtime = runtime_with_store(
+        model.clone(),
+        store.clone(),
+        RuntimeConfig::new(NonZeroUsize::new(32).unwrap()),
+    )
+    .await;
+    runtime.skill_package_source = Arc::new(StaticSkillPackageSource);
+    let controller = runtime.session_for_test(&session_id).await;
+    assert_eq!(
+        store
+            .load_session_state(&session_id)
+            .await
+            .unwrap()
+            .state
+            .inputs[0],
+        queued_before
+    );
+    assert_eq!(store.selection_control_counts(&session_id).unwrap(), (1, 0));
+    assert!(model.take_requests().is_empty());
     let revision = controller.lock_state().expect("state").queue_revision;
     runtime
         .resume_queued_input(assistant_protocol::ResumeQueuedInputRequest {
@@ -729,9 +768,17 @@ async fn user_skill_activation_is_frozen_with_queue_and_conversation_projections
         .await
         .expect("resume queue");
     assert_eq!(
-        wait_for_terminal(&runtime, &session_id, &submitted.run.run_id)
-            .await
-            .status,
+        wait_for_terminal(
+            &runtime,
+            &session_id,
+            &runtime
+                .wait_for_input_claim(&session_id, &submitted.input_id)
+                .await
+                .unwrap()
+                .run_id
+        )
+        .await
+        .status,
         assistant_protocol::RunStatus::Completed
     );
     let view = runtime
@@ -742,6 +789,7 @@ async fn user_skill_activation_is_frozen_with_queue_and_conversation_projections
         .expect("session view")
         .snapshot
         .value;
+    assert_eq!(store.selection_control_counts(&session_id).unwrap(), (0, 0));
     assert!(matches!(
         &view.conversation.items[0],
         assistant_protocol::ConversationItem::User(user)
@@ -761,7 +809,7 @@ async fn user_skill_activation_is_frozen_with_queue_and_conversation_projections
     );
     let forked = runtime
         .fork_session(assistant_protocol::ForkSessionRequest {
-            session_id,
+            session_id: session_id.clone(),
             fork_point: assistant_protocol::MessageId::new("skill-answer").expect("message id"),
             expected_generation: view.conversation.generation,
         })
@@ -769,7 +817,7 @@ async fn user_skill_activation_is_frozen_with_queue_and_conversation_projections
         .expect("fork activated prefix");
     let fork_view = runtime
         .get_session_view(assistant_protocol::GetSessionViewRequest {
-            session_id: forked.session.session_id,
+            session_id: forked.session.session_id.clone(),
         })
         .await
         .expect("fork view")
@@ -782,6 +830,47 @@ async fn user_skill_activation_is_frozen_with_queue_and_conversation_projections
         assistant_protocol::ConversationItem::User(user)
             if user.skill.as_ref().is_some_and(|tag| tag.name == "review")
     ));
+    assert_eq!(
+        store
+            .selection_control_counts(&forked.session.session_id)
+            .unwrap(),
+        (0, 0)
+    );
+    let loaded = store.load_session_state(&session_id).await.unwrap();
+    assert_eq!(loaded.state.skill_activations.len(), 1);
+    assert!(loaded.state.inputs[0].skill_activation.is_some());
+    let history = store
+        .load_conversation_history(assistant_protocol::ConversationOwner::MainSession {
+            session_id: session_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        history.facts.skill_activations,
+        loaded.state.skill_activations
+    );
+    assert_eq!(model.take_requests().len(), 1);
+    drop(runtime);
+    let restarted = runtime_with_store(
+        model.clone(),
+        store.clone(),
+        RuntimeConfig::new(NonZeroUsize::new(32).unwrap()),
+    )
+    .await;
+    for id in [session_id, forked.session.session_id] {
+        let view = restarted
+            .get_session_view(assistant_protocol::GetSessionViewRequest {
+                session_id: id.clone(),
+            })
+            .await
+            .unwrap()
+            .snapshot
+            .value;
+        assert_eq!(view.active_skills.len(), 1);
+        assert_eq!(view.active_skills[0].tag.name, "review");
+        assert_eq!(store.selection_control_counts(&id).unwrap(), (0, 0));
+    }
+    assert!(model.take_requests().is_empty());
 }
 
 #[tokio::test]
@@ -810,7 +899,13 @@ async fn model_load_skill_commits_hidden_activation_and_continues_at_the_next_ru
             ModelScript::Events(message_events(&final_message)),
         ],
     ));
-    let mut runtime = runtime(model.clone());
+    let store = Arc::new(crate::storage::VolatileRuntimeStore::default());
+    let mut runtime = runtime_with_store(
+        model.clone(),
+        store.clone(),
+        RuntimeConfig::new(NonZeroUsize::new(32).unwrap()),
+    )
+    .await;
     runtime.skill_package_source = Arc::new(StaticSkillPackageSource);
     let session_id = runtime
         .create_session(CreateSessionRequest::default())
@@ -819,7 +914,7 @@ async fn model_load_skill_commits_hidden_activation_and_continues_at_the_next_ru
         .session
         .session_id;
     let submitted = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "review with a skill".to_owned(),
@@ -873,16 +968,30 @@ async fn model_load_skill_commits_hidden_activation_and_continues_at_the_next_ru
         Some(ConversationMessage::Assistant(message)) if message.id == final_message.id
     ));
     let controller = runtime.session_for_test(&session_id).await;
-    let state = controller.lock_state().expect("state");
-    assert_eq!(state.skill_activations.len(), 1);
+    {
+        let state = controller.lock_state().expect("state");
+        assert_eq!(state.skill_activations.len(), 1);
+        assert_eq!(
+            state.skill_activations[0].trigger,
+            SkillActivationTrigger::Model
+        );
+        let run = state.runs.get(&submitted.run.run_id).expect("run");
+        assert_eq!(run.message_step(&activation_message.id), Some(1));
+        assert_eq!(run.message_step(&final_message.id), Some(2));
+    }
+    assert_eq!(store.selection_control_counts(&session_id).unwrap(), (0, 0));
+    let loaded = store.load_session_state(&session_id).await.unwrap();
+    let history = store
+        .load_conversation_history(assistant_protocol::ConversationOwner::MainSession {
+            session_id,
+        })
+        .await
+        .unwrap();
     assert_eq!(
-        state.skill_activations[0].trigger,
-        SkillActivationTrigger::Model
+        history.facts.skill_activations,
+        loaded.state.skill_activations
     );
-    let run = state.runs.get(&submitted.run.run_id).expect("run");
-    assert_eq!(run.message_step(&activation_message.id), Some(1));
-    assert_eq!(run.message_step(&final_message.id), Some(2));
-    drop(state);
+    assert_eq!(loaded.state.skill_activations.len(), 1);
 
     let requests = model.take_requests();
     assert_eq!(requests.len(), 2);
@@ -906,7 +1015,7 @@ async fn goal_and_skill_keep_objective_clean_and_internal_boundaries_ordered() {
         .session
         .session_id;
     let controller = runtime.session_for_test(&session_id).await;
-    controller.lock_state().expect("state").queue_paused_by_user = true;
+    controller.lock_state().expect("state").resume_required = true;
     let submitted = runtime
         .submit_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::StartGoal,
@@ -1010,7 +1119,7 @@ async fn model_factory_failure_atomically_commits_the_user_message_and_input() {
         .await
         .expect("session");
     let submitted = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),

@@ -13,6 +13,7 @@ import type {
 } from "@ez-assistant/protocol";
 import {
   hostClockAnchor,
+  childKey,
   appendTextDelta,
   appendTool,
   emptyRun,
@@ -37,8 +38,8 @@ export type {
 
 export class LiveExecutionStore {
   readonly runs = observable.map<string, LiveRunProjection>(undefined, { deep: false });
-  readonly child_runs = observable.map<ChildTaskId, LiveRunProjection>(undefined, { deep: false });
-  readonly child_tasks = observable.map<ChildTaskId, ChildTaskSnapshot>(undefined, { deep: false });
+  readonly child_runs = observable.map<string, LiveRunProjection>(undefined, { deep: false });
+  readonly child_tasks = observable.map<string, ChildTaskSnapshot>(undefined, { deep: false });
   clock_anchor: HostClockAnchor | null = null;
   #pending_clock_anchor: HostClockAnchor | null = null;
   // 只封住本 Run 已纳入快照的 reasoning，不能用页面水位吞掉其他 owner 的事件。
@@ -46,9 +47,9 @@ export class LiveExecutionStore {
   #pending: RuntimeEventEnvelope[] = [];
   #animation_frame: number | null = null;
   #sealed_run_steps = new Map<string, Set<number>>();
-  #sealed_child_steps = new Map<ChildTaskId, Set<number>>();
+  #sealed_child_steps = new Map<string, Set<number>>();
   #session_generations = new Map<SessionId, number>();
-  #child_generations = new Map<ChildTaskId, number>();
+  #child_generations = new Map<string, number>();
 
   constructor() {
     makeObservable(this, {
@@ -59,6 +60,8 @@ export class LiveExecutionStore {
       flush: action,
       reconcileSession: action,
       reconcileChildTask: action,
+      rebaseSession: action,
+      rebaseChildTask: action,
       invalidateForGap: action,
       clear: action,
     });
@@ -90,7 +93,47 @@ export class LiveExecutionStore {
     this.#animation_frame = null;
   }
 
-  reconcileSession(view: SessionViewSnapshot, observed_at_ms?: number | null, observed_sequence?: number): void {
+  /** 主快照含完整活动 Run 基线；仅重放该 owner 尚未包含的增量，不再次经过全局 SSE cursor。 */
+  rebaseSession(view: SessionViewSnapshot, observed_at_ms: number | null | undefined, observed_sequence: number, future: readonly RuntimeEventEnvelope[]): void {
+    this.flush();
+    const clock = this.clock_anchor;
+    const preserve_children = new Set<string>();
+    for (const { event } of future) {
+      if (event.type === "child_task_event") preserve_children.add(childKey(event.session_id, event.child_task_id));
+      else if ((event.type === "step_committed" || event.type === "conversation_committed") && event.owner.type === "child_task") {
+        preserve_children.add(childKey(event.owner.session_id, event.owner.child_task_id));
+      }
+    }
+    this.#invalidateMainOwner(view.session.session_id);
+    this.reconcileSession(view, observed_at_ms, observed_sequence, preserve_children);
+    for (const run of view.runs ?? []) {
+      if (run.status === "accepted" && run.run_id !== view.active_run?.run_id) {
+        this.#reconcileRunSnapshot(run, new Set(), observed_sequence);
+      }
+    }
+    for (const envelope of future) {
+      if (envelope.event.type !== "child_task_event"
+        && !((envelope.event.type === "step_committed" || envelope.event.type === "conversation_committed") && envelope.event.owner.type === "child_task")) {
+        this.#applyEvent(envelope);
+      }
+    }
+    if (clock && future.some(isLiveExecutionEvent)) this.clock_anchor = clock;
+  }
+
+  /** child 快照只覆盖可靠正文与任务属性；已显示的易失 Step 不属于它，不重复追加 delta。 */
+  rebaseChildTask(view: ChildTaskViewSnapshot, observed_at_ms: number | null | undefined, future: readonly RuntimeEventEnvelope[]): void {
+    this.flush();
+    const clock = this.clock_anchor;
+    this.reconcileChildTask(view, observed_at_ms);
+    for (const envelope of future) {
+      if (envelope.event.type === "child_task_event" && ["created", "started", "finished"].includes(envelope.event.event.type)) {
+        this.#applyEvent(envelope);
+      }
+    }
+    if (clock && future.some(isLiveExecutionEvent)) this.clock_anchor = clock;
+  }
+
+  reconcileSession(view: SessionViewSnapshot, observed_at_ms?: number | null, observed_sequence?: number, preserve_children: ReadonlySet<string> = new Set()): void {
     const received_at_ms = performance.now();
     // Apply events accepted before this snapshot first, so a delayed animation
     // frame cannot recreate a terminal live projection after reconciliation.
@@ -108,9 +151,10 @@ export class LiveExecutionStore {
       this.#session_generations.set(session_id, view.conversation.generation);
     }
     const authoritative_child_task_ids = new Set(
-      (view.child_tasks ?? []).map((item) => item.task.child_task_id),
+      (view.child_tasks ?? []).map((item) => childKey(session_id, item.task.child_task_id)),
     );
     for (const [child_task_id, task] of this.child_tasks) {
+      if (preserve_children.has(child_task_id)) continue;
       if (task.session_id === session_id && !authoritative_child_task_ids.has(child_task_id)) {
         this.child_tasks.delete(child_task_id);
         this.child_runs.delete(child_task_id);
@@ -119,6 +163,7 @@ export class LiveExecutionStore {
       }
     }
     for (const [child_task_id, run] of this.child_runs) {
+      if (preserve_children.has(child_task_id)) continue;
       if (run.session_id === session_id && !authoritative_child_task_ids.has(child_task_id)) {
         this.child_runs.delete(child_task_id);
         this.#sealed_child_steps.delete(child_task_id);
@@ -128,18 +173,22 @@ export class LiveExecutionStore {
     const latest_run = view.runs?.at(-1);
     const committed_steps = new Map<string, Set<number>>();
     for (const item of view.child_tasks ?? []) {
-      this.child_tasks.set(item.task.child_task_id, item.task);
-      const child_run = this.child_runs.get(item.task.child_task_id);
+      if (item.task.session_id !== session_id) continue;
+      if (!item.task.inherited && preserve_children.has(childKey(session_id, item.task.child_task_id))) continue;
+      if (item.task.inherited) this.#invalidateChildOwner(session_id, item.task.child_task_id);
+      this.child_tasks.set(childKey(session_id, item.task.child_task_id), item.task);
+      const child_run = this.child_runs.get(childKey(session_id, item.task.child_task_id));
       if (child_run) {
-        this.child_runs.set(item.task.child_task_id, {
+        this.child_runs.set(childKey(session_id, item.task.child_task_id), {
           ...child_run,
           created_at_ms: item.task.created_at_ms,
+          started_at_ms: item.task.started_at_ms ?? null,
           finished_at_ms: item.task.finished_at_ms,
         });
       }
     }
     for (const item of view.conversation.items) {
-      if (item.type !== "assistant" || !item.run_id) {
+      if (item.type !== "assistant" || !item.run_id || item.inherited || item.partial) {
         continue;
       }
       if (item.step !== undefined) {
@@ -188,12 +237,14 @@ export class LiveExecutionStore {
   }
 
   runForSession(session_id: SessionId): LiveRunProjection | null {
+    // accepted 仅是实际领取后的短暂控制状态；正文等待可靠 started，不能按入队顺序抢占运行轮次。
     const candidates = [...this.runs.values()].filter((run) => run.session_id === session_id);
-    return candidates.at(-1) ?? null;
+    return [...candidates].reverse().find((run) => run.status === "running" || run.status === "cancelling")
+      ?? candidates.at(-1) ?? null;
   }
 
-  runForChildTask(child_task_id: ChildTaskId): LiveRunProjection | null {
-    return this.child_runs.get(child_task_id) ?? null;
+  runForChildTask(session_id: SessionId, child_task_id: ChildTaskId): LiveRunProjection | null {
+    return this.child_runs.get(childKey(session_id, child_task_id)) ?? null;
   }
 
   childTasksForSession(session_id: SessionId): readonly ChildTaskSnapshot[] {
@@ -203,23 +254,32 @@ export class LiveExecutionStore {
   }
 
   reconcileChildTask(view: ChildTaskViewSnapshot, observed_at_ms?: number | null): void {
+    if (view.conversation.owner.type !== "child_task"
+      || view.conversation.owner.session_id !== view.task.task.session_id
+      || view.conversation.owner.child_task_id !== view.task.task.child_task_id) return;
     const received_at_ms = performance.now();
     if (this.#pending.length > 0) {
       this.flush();
     }
     this.clock_anchor = hostClockAnchor(observed_at_ms, received_at_ms) ?? this.clock_anchor;
+    const session_id = view.task.task.session_id;
     const child_task_id = view.task.task.child_task_id;
-    const previous_generation = this.#child_generations.get(child_task_id);
+    const previous_generation = this.#child_generations.get(childKey(session_id, child_task_id));
     if (previous_generation !== undefined && previous_generation !== view.conversation.generation) {
-      this.#invalidateChildOwner(child_task_id);
+      this.#invalidateChildOwner(session_id, child_task_id);
     }
-    this.#child_generations.set(child_task_id, view.conversation.generation);
-    this.child_tasks.set(child_task_id, view.task.task);
+    this.#child_generations.set(childKey(session_id, child_task_id), view.conversation.generation);
+    this.child_tasks.set(childKey(session_id, child_task_id), view.task.task);
+    const committed = this.#sealed_child_steps.get(childKey(session_id, child_task_id)) ?? new Set<number>();
+    for (const item of view.conversation.items) {
+      if (item.type === "assistant" && item.step !== undefined) committed.add(item.step);
+    }
+    this.#sealed_child_steps.set(childKey(session_id, child_task_id), committed);
     const status = childRunStatus(view.task.task.status);
-    const current = this.child_runs.get(child_task_id);
-    if (view.task.task.status === "completed" || view.task.task.status === "failed" || view.task.task.status === "cancelled" || view.task.task.status === "interrupted") {
-      this.child_runs.delete(child_task_id);
-      this.#sealed_child_steps.delete(child_task_id);
+    const current = this.child_runs.get(childKey(session_id, child_task_id));
+    if (view.task.task.inherited || view.task.task.status === "completed" || view.task.task.status === "failed" || view.task.task.status === "cancelled" || view.task.task.status === "interrupted") {
+      this.child_runs.delete(childKey(session_id, child_task_id));
+      this.#sealed_child_steps.delete(childKey(session_id, child_task_id));
       return;
     }
     const base = current ?? emptyRun(
@@ -227,13 +287,14 @@ export class LiveExecutionStore {
       `child:${child_task_id}`,
       view.task.task.created_at_ms,
     );
-    this.child_runs.set(child_task_id, {
+    this.child_runs.set(childKey(session_id, child_task_id), {
       ...base,
       created_at_ms: view.task.task.created_at_ms,
+      started_at_ms: view.task.task.started_at_ms ?? null,
       finished_at_ms: view.task.task.finished_at_ms,
       status,
       active_step: base.active_step,
-      steps: base.steps,
+      steps: base.steps.filter((step) => !committed.has(step.step)),
     });
   }
 
@@ -279,29 +340,33 @@ export class LiveExecutionStore {
   #applyEvent(envelope: RuntimeEventEnvelope): void {
     const event = envelope.event;
     if (event.type === "child_task_event") {
+      if (this.child_tasks.get(childKey(event.session_id, event.child_task_id))?.inherited) return;
       const child_event = event.event;
+      const task = this.child_tasks.get(childKey(event.session_id, event.child_task_id));
+      if ("step" in child_event && task && !isNonterminalRun(childRunStatus(task.status))) return;
       if ("step" in child_event
-        && this.#sealed_child_steps.get(event.child_task_id)?.has(child_event.step)) {
+        && this.#sealed_child_steps.get(childKey(event.session_id, event.child_task_id))?.has(child_event.step)) {
         return;
       }
-      const current = this.child_runs.get(event.child_task_id)
-        ?? emptyRun(event.session_id, `child:${event.child_task_id}`, this.child_tasks.get(event.child_task_id)?.created_at_ms ?? null);
+      const current = this.child_runs.get(childKey(event.session_id, event.child_task_id))
+        ?? emptyRun(event.session_id, `child:${event.child_task_id}`, this.child_tasks.get(childKey(event.session_id, event.child_task_id))?.created_at_ms ?? null);
       if ("step" in child_event && !isNonterminalRun(current.status)) {
         return;
       }
       let next = current;
       switch (child_event.type) {
         case "created":
-          this.child_tasks.set(event.child_task_id, child_event.task);
-          next = { ...current, status: childRunStatus(child_event.task.status), created_at_ms: child_event.task.created_at_ms, finished_at_ms: child_event.task.finished_at_ms };
+          if (child_event.task.session_id !== event.session_id
+            || child_event.task.child_task_id !== event.child_task_id) return;
+          this.child_tasks.set(childKey(event.session_id, event.child_task_id), child_event.task);
+          next = { ...current, status: childRunStatus(child_event.task.status), created_at_ms: child_event.task.created_at_ms, started_at_ms: child_event.task.started_at_ms ?? null, finished_at_ms: child_event.task.finished_at_ms };
           break;
         case "started":
-          this.#updateChildTask(event.child_task_id, {
+          this.#updateChildTask(event.session_id, event.child_task_id, {
             status: "running",
-            // Started 不携带可靠时刻；等待 child 快照补齐。
-            started_at_ms: this.child_tasks.get(event.child_task_id)?.started_at_ms ?? null,
+            started_at_ms: child_event.started_at_ms ?? current.started_at_ms,
           });
-          next = { ...current, status: "running" };
+          next = { ...current, status: "running", started_at_ms: child_event.started_at_ms ?? current.started_at_ms };
           break;
         case "step_started":
           next = { ...current, active_step: child_event.step, steps: restartStep(current.steps, child_event.step) };
@@ -339,7 +404,7 @@ export class LiveExecutionStore {
           next = { ...current, usage: child_event.usage };
           break;
         case "finished":
-          this.#updateChildTask(event.child_task_id, {
+          this.#updateChildTask(event.session_id, event.child_task_id, {
             status: child_event.status,
             error: child_event.error,
             finished_at_ms: child_event.finished_at_ms ?? null,
@@ -350,10 +415,10 @@ export class LiveExecutionStore {
             finished_at_ms: child_event.finished_at_ms ?? null,
             error_message: child_event.error?.message ?? current.error_message,
           };
-          this.#sealed_child_steps.delete(event.child_task_id);
+          this.#sealed_child_steps.delete(childKey(event.session_id, event.child_task_id));
           break;
       }
-      this.child_runs.set(event.child_task_id, next);
+      this.child_runs.set(childKey(event.session_id, event.child_task_id), next);
       return;
     }
     if (event.type === "step_committed") {
@@ -394,7 +459,7 @@ export class LiveExecutionStore {
         next = { ...current, status: "accepted", created_at_ms: event.created_at_ms ?? current.created_at_ms };
         break;
       case "run_started":
-        next = { ...current, status: "running" };
+        next = { ...current, status: "running", started_at_ms: event.started_at_ms ?? current.started_at_ms };
         break;
       case "run_cancelling":
         next = { ...current, status: "cancelling", model_request: null };
@@ -496,19 +561,19 @@ export class LiveExecutionStore {
       return;
     }
 
-    if (this.#child_generations.get(owner.child_task_id) !== generation) {
-      this.#invalidateChildOwner(owner.child_task_id);
+    if (this.#child_generations.get(childKey(owner.session_id, owner.child_task_id)) !== generation) {
+      this.#invalidateChildOwner(owner.session_id, owner.child_task_id);
       return;
     }
-    const run = this.child_runs.get(owner.child_task_id);
+    const run = this.child_runs.get(childKey(owner.session_id, owner.child_task_id));
     if (!run || run.session_id !== owner.session_id || !isNonterminalRun(run.status)) {
-      this.#invalidateChildOwner(owner.child_task_id);
+      this.#invalidateChildOwner(owner.session_id, owner.child_task_id);
       return;
     }
-    const sealed = this.#sealed_child_steps.get(owner.child_task_id) ?? new Set<number>();
+    const sealed = this.#sealed_child_steps.get(childKey(owner.session_id, owner.child_task_id)) ?? new Set<number>();
     sealed.add(step);
-    this.#sealed_child_steps.set(owner.child_task_id, sealed);
-    this.child_runs.set(owner.child_task_id, {
+    this.#sealed_child_steps.set(childKey(owner.session_id, owner.child_task_id), sealed);
+    this.child_runs.set(childKey(owner.session_id, owner.child_task_id), {
       ...run,
       steps: run.steps.filter((item) => item.step !== step),
     });
@@ -525,19 +590,20 @@ export class LiveExecutionStore {
     this.#session_generations.delete(session_id);
   }
 
-  #invalidateChildOwner(child_task_id: ChildTaskId): void {
-    this.child_runs.delete(child_task_id);
-    this.#sealed_child_steps.delete(child_task_id);
-    this.#child_generations.delete(child_task_id);
+  #invalidateChildOwner(session_id: SessionId, child_task_id: ChildTaskId): void {
+    this.child_runs.delete(childKey(session_id, child_task_id));
+    this.#sealed_child_steps.delete(childKey(session_id, child_task_id));
+    this.#child_generations.delete(childKey(session_id, child_task_id));
   }
 
   #updateChildTask(
+    session_id: SessionId,
     child_task_id: ChildTaskId,
     patch: Partial<ChildTaskSnapshot>,
   ): void {
-    const current = this.child_tasks.get(child_task_id);
+    const current = this.child_tasks.get(childKey(session_id, child_task_id));
     if (current) {
-      this.child_tasks.set(child_task_id, { ...current, ...patch });
+      this.child_tasks.set(childKey(session_id, child_task_id), { ...current, ...patch });
     }
   }
 
@@ -584,6 +650,7 @@ export class LiveExecutionStore {
         ...next,
         status: snapshot.status,
         created_at_ms: snapshot.created_at_ms,
+        started_at_ms: snapshot.started_at_ms ?? null,
         finished_at_ms: snapshot.finished_at_ms,
         model_request: snapshot.model_request ?? null,
         error_code: snapshot.error?.code ?? current.error_code,
@@ -613,6 +680,7 @@ export class LiveExecutionStore {
         ...emptyRun(snapshot.session_id, snapshot.run_id, snapshot.created_at_ms),
         status: snapshot.status,
         created_at_ms: snapshot.created_at_ms,
+        started_at_ms: snapshot.started_at_ms ?? null,
         finished_at_ms: snapshot.finished_at_ms,
         model_request: snapshot.model_request ?? null,
         active_step,
@@ -622,6 +690,7 @@ export class LiveExecutionStore {
       ...extra_steps,
       status: snapshot.status,
       created_at_ms: snapshot.created_at_ms,
+      started_at_ms: snapshot.started_at_ms ?? null,
       finished_at_ms: snapshot.finished_at_ms,
       model_request: snapshot.model_request ?? null,
       active_step,

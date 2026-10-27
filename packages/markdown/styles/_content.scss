@@ -1,0 +1,208 @@
+// Agent 消息与官网安全节点阅读器共用排版；主题语义变量由各宿主提供。
+@mixin content {
+  min-width: 0;
+  max-width: 100%;
+  color: inherit;
+  font: inherit;
+  line-height: 1.72;
+  overflow-wrap: anywhere;
+
+  > * { min-width: 0; max-width: 100%; }
+
+  > :first-child { margin-top: 0; }
+  > :last-child { margin-bottom: 0; }
+
+  p,
+  ul,
+  ol,
+  blockquote,
+  pre,
+  table { margin: 0.55em 0; }
+
+  ul { padding-inline-start: 1.5em; }
+  ol { list-style-position: outside; }
+  ol > li::marker { font-variant-numeric: tabular-nums; }
+
+  li + li { margin-top: 0.2em; }
+
+  :global([data-streamdown="strong"]) { font-weight: 600; }
+
+  hr {
+    height: 0;
+    border: 0;
+    border-top: 1px solid var(--ez-border);
+    background: transparent;
+  }
+
+  a {
+    color: var(--ez-primary);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  img {
+    display: block;
+    width: auto;
+    height: auto;
+    max-width: 100%;
+  }
+
+  blockquote {
+    padding-left: 11px;
+    border-left: 2px solid var(--ez-border-strong);
+    color: var(--ez-text-secondary);
+  }
+
+  code {
+    border-radius: 4px;
+    color: var(--ez-text-secondary);
+    background: var(--ez-surface-muted);
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    font-size: var(--ez-font-small);
+  }
+
+  :global([data-streamdown="inline-code"]) {
+    padding: 0.08em 0.3em;
+    overflow-wrap: anywhere;
+    white-space: normal;
+    word-break: break-word;
+  }
+
+  pre {
+    max-width: 100%;
+    overflow: auto;
+    border: 1px solid var(--ez-border);
+    border-radius: var(--ez-radius-small);
+    background: var(--ez-surface-muted);
+  }
+
+  :global([data-streamdown="code-block"]) {
+    position: relative;
+    display: flex;
+    min-width: 0;
+    margin: 0.75em 0;
+    flex-direction: column;
+    overflow: hidden;
+    border: 1px solid var(--ez-border);
+    border-radius: var(--ez-radius-small);
+    background: var(--ez-surface-muted);
+  }
+
+  :global([data-streamdown="code-block-header"]) {
+    display: flex;
+    min-height: 34px;
+    align-items: center;
+    padding: 0 42px 0 12px;
+    border-bottom: 1px solid var(--ez-border);
+    color: var(--ez-text-muted);
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    font-size: var(--ez-font-small);
+  }
+
+  :global([data-streamdown="code-block-actions"]) {
+    position: absolute;
+    z-index: 1;
+    top: 4px;
+    right: 6px;
+    display: flex;
+    align-items: center;
+  }
+
+  :global([data-streamdown="code-block-copy-button"]) {
+    --ez-control-default-height: var(--ez-control-height-small);
+    display: grid;
+    width: var(--ez-control-height);
+    height: var(--ez-control-height);
+    padding: 0;
+    place-items: center;
+    border: 0;
+    border-radius: 5px;
+    color: var(--ez-text-muted);
+    background: transparent;
+
+    &:hover { color: var(--ez-text-secondary); background: var(--ez-surface-muted); }
+  }
+
+  :global([data-streamdown="code-block-body"]) {
+    min-width: 0;
+    overflow-x: auto;
+
+    pre {
+      width: max-content;
+      min-width: 100%;
+      max-width: none;
+      margin: 0;
+      padding: 11px 13px;
+      overflow: visible;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      white-space: pre;
+    }
+
+    code {
+      display: block;
+      padding: 0;
+      border-radius: 0;
+      background: transparent;
+      color: var(--sdm-fg, var(--ez-text));
+      line-height: 1.55;
+      white-space: pre;
+
+      // Streamdown 输出 Shiki CSS 变量；本应用不使用 Tailwind，显式消费 token 样式。
+      span[style] {
+        color: var(--sdm-c, inherit);
+        font-style: var(--shiki-light-font-style, normal);
+        font-weight: var(--shiki-light-font-weight, normal);
+        text-decoration: var(--shiki-light-text-decoration, none);
+      }
+
+      > span {
+        display: block;
+        min-height: 1.55em;
+      }
+    }
+  }
+
+  table {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+    border-collapse: collapse;
+  }
+
+  :global([data-streamdown="table-wrapper"]) {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    margin: 0.75em 0;
+    overflow: hidden;
+    border: 1px solid var(--ez-border);
+    border-radius: var(--ez-radius-small);
+
+    > div:last-child {
+      width: 100%;
+      min-width: 0;
+      max-width: 100%;
+      overflow-x: auto;
+    }
+
+    :global([data-streamdown="table"]) {
+      display: table;
+      width: 100%;
+      min-width: 0;
+      max-width: none;
+      margin: 0;
+      table-layout: auto;
+    }
+  }
+
+  th,
+  td {
+    padding: 6px 9px;
+    border: 1px solid var(--ez-border);
+    overflow-wrap: anywhere;
+    text-align: left;
+    word-break: break-word;
+  }
+}

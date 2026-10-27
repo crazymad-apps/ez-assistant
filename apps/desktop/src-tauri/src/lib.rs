@@ -26,6 +26,15 @@ fn health() -> &'static str {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut context = tauri::generate_context!();
+    // MSI 临时 EXE 只执行同步进程交接；在任何插件、窗口及 Host 初始化之前分流。
+    #[cfg(windows)]
+    if let Some(code) = runtime_bootstrap::installation::run_if_requested(context.config()) {
+        std::process::exit(code);
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(code) = runtime_bootstrap::installation_macos::run_if_requested(context.config()) {
+        std::process::exit(code);
+    }
     desktop_preferences::appearance::defer_main_window(context.config_mut());
     let development = context.config().identifier == "com.ez-assistant.desktop.dev";
     let native_resources = native_resource::NativeResourceBridge::new();
@@ -197,6 +206,11 @@ pub fn run() {
     #[cfg(windows)]
     drop(startup);
     app.run(|app, event| {
+        // 系统重开只恢复现有窗口；不重建 WebView 或触发 Runtime bootstrap。
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Reopen { .. } = event {
+            let _ = desktop_lifecycle::show_desktop_window(app.clone());
+        }
         if let tauri::RunEvent::ExitRequested { api, .. } = event {
             let coordinator = app.state::<desktop_lifecycle::DesktopLifecycleCoordinator>();
             if coordinator.should_prevent_exit() {

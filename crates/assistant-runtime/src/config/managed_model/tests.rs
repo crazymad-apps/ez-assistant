@@ -1,7 +1,6 @@
 use super::*;
 use assistant_protocol::{
-    ModelDiscoveryFormat, ModelToolChoiceSupport, ProviderInstanceId, ReasoningEffortKey,
-    SecretValue,
+    ModelToolChoiceSupport, ProviderInstanceId, ReasoningEffortKey, SecretValue,
 };
 
 fn known_limit(value: u64) -> ModelTokenLimit {
@@ -17,7 +16,7 @@ fn provider(kind: ProviderType, preference: ProviderProtocolPreference) -> Store
             endpoint: "https://example.test/v1".into(),
             protocol_preference: preference,
             models_path: "/v1/models".into(),
-            discovery_format: ModelDiscoveryFormat::OpenAi,
+            discovery_format: kind.discovery_format(),
             server_history_enabled: false,
             server_history_support_override: None,
         },
@@ -48,7 +47,7 @@ fn parameters() -> ModelParameters {
 #[test]
 fn unknown_optional_capabilities_do_not_block_text_execution() {
     let provider = provider(ProviderType::Openai, ProviderProtocolPreference::Auto);
-    for field in ["image", "tools", "reasoning"] {
+    for field in ["image", "tools", "reasoning", "streaming"] {
         let mut values = parameters();
         match field {
             "streaming" => values.streaming = ModelFeatureSupport::Unknown,
@@ -116,7 +115,7 @@ fn reasoning_limits_replace_the_normal_mode_limits_and_request_budget_is_separat
     let resolved = compile_managed_model(&provider, &selection(), &values, &generation).unwrap();
     assert_eq!(resolved.context_window_tokens(), 32768);
     assert_eq!(resolved.max_input_tokens(), Some(16000));
-    assert_eq!(resolved.max_output_tokens(), 8192);
+    assert_eq!(resolved.max_output_tokens(), Some(8192));
     assert_eq!(resolved.generation().max_output_tokens, Some(6000));
     assert_eq!(
         resolved.capabilities().reasoning.as_ref().unwrap().mode,
@@ -136,6 +135,7 @@ fn reasoning_limits_replace_the_normal_mode_limits_and_request_budget_is_separat
 fn protocol_and_effort_encoding_do_not_depend_on_model_name() {
     for kind in [
         ProviderType::Openai,
+        ProviderType::Sub2api,
         ProviderType::Deepseek,
         ProviderType::DashscopeApi,
         ProviderType::Moonshot,
@@ -417,4 +417,71 @@ fn opencode_requires_explicit_protocol_and_preserves_provider_identity() {
     stored.connection.server_history_support_override = Some(ModelFeatureSupport::Supported);
     assert!(super::super::validation::validate_connection(&stored.connection).is_err());
     assert!(serde_json::from_str::<ProviderType>("\"future-provider\"").is_err());
+}
+
+#[test]
+fn unknown_output_and_default_streaming_keep_requests_unbounded_unless_user_sets_a_budget() {
+    let provider = provider(ProviderType::Sub2api, ProviderProtocolPreference::Auto);
+    let mut values = parameters();
+    values.max_output_tokens = ModelTokenLimit::Unknown;
+    values.streaming = ModelFeatureSupport::Unknown;
+    let model = compile_managed_model(
+        &provider,
+        &selection(),
+        &values,
+        &GenerationConfig::default(),
+    )
+    .unwrap();
+    assert_eq!(model.max_output_tokens(), None);
+    assert_eq!(model.generation().max_output_tokens, None);
+    assert!(model.capabilities().streaming);
+    let budget = GenerationConfig {
+        max_output_tokens: Some(512),
+        ..Default::default()
+    };
+    let model = compile_managed_model(&provider, &selection(), &values, &budget).unwrap();
+    assert_eq!(model.max_output_tokens(), None);
+    assert_eq!(model.generation().max_output_tokens, Some(512));
+    values.streaming = ModelFeatureSupport::Unsupported;
+    assert!(compile_managed_model(&provider, &selection(), &values, &budget).is_err());
+    values.streaming = ModelFeatureSupport::Unknown;
+    values.max_output_tokens = ModelTokenLimit::Invalid;
+    assert!(compile_managed_model(&provider, &selection(), &values, &budget).is_err());
+}
+
+#[test]
+fn default_basic_auto_tools_preserve_explicit_restrictions() {
+    let provider = provider(ProviderType::Sub2api, ProviderProtocolPreference::Auto);
+    let mut values = parameters();
+    values.tool_calls = ModelFeatureSupport::Unknown;
+    let model = compile_managed_model(
+        &provider,
+        &selection(),
+        &values,
+        &GenerationConfig::default(),
+    )
+    .unwrap();
+    assert!(model.capabilities().tool_calls);
+    assert!(model.capabilities().tool_choice.auto);
+    assert!(!model.capabilities().tool_choice.required);
+    assert!(!model.capabilities().tool_choice.named);
+    values.tool_calls = ModelFeatureSupport::Unsupported;
+    let model = compile_managed_model(
+        &provider,
+        &selection(),
+        &values,
+        &GenerationConfig::default(),
+    )
+    .unwrap();
+    assert!(!model.capabilities().tool_calls);
+    values.tool_calls = ModelFeatureSupport::Unknown;
+    values.tool_choice.auto = ModelFeatureSupport::Unsupported;
+    let model = compile_managed_model(
+        &provider,
+        &selection(),
+        &values,
+        &GenerationConfig::default(),
+    )
+    .unwrap();
+    assert!(!model.capabilities().tool_calls);
 }

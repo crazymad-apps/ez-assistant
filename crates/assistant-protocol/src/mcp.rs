@@ -20,6 +20,49 @@ pub enum McpTransportKind {
     StreamableHttp,
 }
 
+/// 配置所有权来源；排序同时定义同名启用项的优先级：用户、插件标识升序、内置。
+/// 运行与权限仍沿用 server_key，来源仅决定采用哪份配置。
+#[derive(Clone, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(tag = "type", content = "name", rename_all = "snake_case")]
+pub enum McpServerSource {
+    #[default]
+    User,
+    Plugin(String),
+    Builtin,
+}
+
+/// 管理目标的完整身份，避免修改另一个同名来源。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct McpServerTarget {
+    pub source: McpServerSource,
+    pub server_key: McpServerKey,
+}
+
+/// 受管详情仅传字段归属及是否设置，不回读包默认值或用户凭据。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct McpManagedConfigurationSnapshot {
+    /// 实际配置文件的内容修订；插件不复用用户级 mcp.json 的修订。
+    pub revision: String,
+    pub definition_digest: String,
+    /// 本服务保存的启停意图；插件整体关闭不会抹掉它。Server.enabled 仍投影有效启用状态。
+    pub configured_enabled: bool,
+    pub source_enabled: bool,
+    pub source_available: bool,
+    pub configuration_ready: bool,
+    pub environment: BTreeMap<String, bool>,
+    pub headers: BTreeMap<String, bool>,
+    /// env／header 键到原插件参数名；复合模板也不能保存第二份覆盖。
+    pub parameter_bindings: BTreeMap<String, Vec<String>>,
+    pub parameters: Vec<crate::PluginConfigurationFieldSnapshot>,
+    #[ts(optional)]
+    pub plugin_settings_revision: Option<String>,
+    #[ts(optional)]
+    pub plugin_sha256: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 #[serde(rename_all = "snake_case")]
@@ -65,6 +108,15 @@ pub struct McpDiagnosticSnapshot {
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct McpServerSnapshot {
     pub server_key: McpServerKey,
+    #[serde(default)]
+    pub source: McpServerSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub managed: Option<McpManagedConfigurationSnapshot>,
+    /// 当前配置选择了另一个更高优先级来源；不改变本条目的启停意图或实际连接状态。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub shadowed_by: Option<McpServerSource>,
     pub display_name: String,
     pub description: String,
     pub transport: McpTransportKind,
@@ -199,6 +251,28 @@ pub struct PreviewMcpImportResult {
 #[ts(export_to = "assistant-protocol.ts")]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum McpConfigurationMutation {
+    /// 只修改用户覆盖，不接受包拥有的命令／URL 或插件参数副本。
+    PatchManaged {
+        target: McpServerTarget,
+        expected_definition_digest: String,
+        #[serde(default)]
+        enabled: Option<bool>,
+        #[serde(default)]
+        environment: BTreeMap<String, McpSecretChange>,
+        #[serde(default)]
+        headers: BTreeMap<String, McpSecretChange>,
+    },
+    /// 删除用户覆盖以恢复定义默认值，与显式移除变量的 null 区分。
+    ResetManaged {
+        target: McpServerTarget,
+        expected_definition_digest: String,
+        #[serde(default)]
+        enabled: bool,
+        #[serde(default)]
+        environment: Vec<String>,
+        #[serde(default)]
+        headers: Vec<String>,
+    },
     Upsert {
         server: McpServerDraft,
     },
@@ -219,6 +293,7 @@ pub enum McpConfigurationMutation {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct MutateMcpConfigurationRequest {
+    /// 独立／内置取用户文件 revision；插件取 managed.revision，不做跨文件 CAS。
     pub expected_revision: String,
     pub mutation: McpConfigurationMutation,
 }
@@ -233,7 +308,34 @@ pub struct MutateMcpConfigurationResult {
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct TestMcpServerRequest {
     pub test_id: IdempotencyKey,
-    pub server: McpServerDraft,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub server: Option<McpServerDraft>,
+    /// 与 server 二选一；受管草稿无启动字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub managed: Option<McpManagedServerTestDraft>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct McpManagedServerTestDraft {
+    pub target: McpServerTarget,
+    pub expected_revision: String,
+    pub expected_definition_digest: String,
+    #[serde(default)]
+    pub environment: BTreeMap<String, McpSecretChange>,
+    #[serde(default)]
+    pub headers: BTreeMap<String, McpSecretChange>,
+}
+
+/// 无 Conversation 副作用的明确目标刷新；不复用会话控制输入伪造历史消息。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct RefreshMcpServerRequest {
+    pub target: McpServerTarget,
+    pub expected_revision: String,
+    pub expected_definition_digest: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -552,6 +654,9 @@ mod tests {
             revision: "sha256:test".to_owned(),
             needs_refresh: true,
             servers: vec![McpServerSnapshot {
+                source: McpServerSource::User,
+                managed: None,
+                shadowed_by: None,
                 server_key: McpServerKey::new("github").expect("server"),
                 display_name: "GitHub".to_owned(),
                 description: "Issues".to_owned(),

@@ -319,6 +319,10 @@ fn prepare_model_image(path: &Path) -> Result<Option<PreparedModelImage>, ImageR
 }
 
 fn decode_normalized(path: &Path) -> Result<Option<DynamicImage>, ImageResourceError> {
+    // 普通附件共用此入口；先有界嗅探类型，避免把图片限制施加给大型文档。
+    if !sniff_media_type(path)?.starts_with("image/") {
+        return Ok(None);
+    }
     if fs::metadata(path)
         .map_err(|_| ImageResourceError::Unavailable)?
         .len()
@@ -624,6 +628,53 @@ mod tests {
         let path = directory.path().join("notes.txt");
         fs::write(&path, b"hello").expect("write text");
         assert_eq!(prepare_model_image(&path).expect("prepare"), None);
+    }
+
+    #[test]
+    fn oversized_non_image_attachments_skip_image_preprocessing() {
+        let directory = image_regression_directory();
+        for name in ["catalog.xlsx", "disguised.png"] {
+            let path = directory.path().join(name);
+            fs::write(&path, b"PK\x03\x04spreadsheet fixture").expect("write zip header");
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .expect("open fixture")
+                .set_len(MAX_SOURCE_BYTES + 1)
+                .expect("extend sparse fixture");
+
+            assert_eq!(prepare_model_image(&path).expect("skip non-image"), None);
+        }
+    }
+
+    #[test]
+    fn image_source_limit_applies_even_with_a_spreadsheet_extension() {
+        let directory = image_regression_directory();
+        let path = directory.path().join("picture.xlsx");
+        DynamicImage::new_rgb8(8, 8)
+            .save_with_format(&path, ImageFormat::Png)
+            .expect("save image fixture");
+        assert!(prepare_model_image(&path).expect("prepare image").is_some());
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open image fixture")
+            .set_len(MAX_SOURCE_BYTES + 1)
+            .expect("extend sparse image");
+
+        assert!(matches!(
+            prepare_model_image(&path),
+            Err(ImageResourceError::Dimensions)
+        ));
+    }
+
+    fn image_regression_directory() -> tempfile::TempDir {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.runtime-test");
+        fs::create_dir_all(&root).expect("test root");
+        tempfile::Builder::new()
+            .prefix("image-attachment-")
+            .tempdir_in(root)
+            .expect("image regression directory")
     }
 
     #[test]

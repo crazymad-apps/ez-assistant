@@ -15,6 +15,9 @@ pub struct RewriteGoalEffect {
 /// 历史重新输入所需的完整新正文和结构化关联。
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConversationRewrite {
+    /// 空闲会话历史替换同时立即领取；身份不属于可撤销输入载荷。
+    pub run_id: RunId,
+    pub approval_mode: assistant_protocol::ApprovalMode,
     pub session_id: SessionId,
     pub target_user_message_id: MessageId,
     pub conversation: ConversationSnapshot,
@@ -114,6 +117,12 @@ pub fn execution_context_from_product_history(
                 ConversationMessage::User(user) if &user.id == reference
             )
         });
+        if matches.is_empty()
+            && matches!(history.messages.get(summary_index + 1), Some(ConversationMessage::User(user)) if &user.id == reference)
+        {
+            messages.extend_from_slice(&history.messages[summary_index..]);
+            return ConversationSnapshot::new(messages);
+        }
         if matches.len() != 1 || duplicated {
             // 损坏引用不能激活；完整原文仍在，移除摘要边界后按原文重建。
             return ConversationSnapshot::new(
@@ -374,6 +383,8 @@ pub struct StoredConversationWindow {
     pub end: usize,
     pub total: usize,
     pub conversation: ConversationSnapshot,
+    /// 当前窗口关联的只读文件事实；旧迁移源为 None，不代表存在另一份历史数据库。
+    pub history: Option<super::StoredHistoryFacts>,
 }
 
 /// Runtime 内部以权威 JSONL 原始消息序号读取的有限窗口。
@@ -395,6 +406,7 @@ pub struct StoredConversationRawWindow {
     pub end: usize,
     pub total: usize,
     pub conversation: ConversationSnapshot,
+    pub history: Option<super::StoredHistoryFacts>,
 }
 
 /// Runtime 请求按稳定 Message ID 在当前权威 generation 中重新定位消息。
@@ -829,10 +841,10 @@ pub struct ConversationSearchHit {
     pub text: String,
 }
 
-/// 一页派生检索结果。`partial` 表示仍有脏索引等待后续有界重建。
+/// 一页标题或正文检索结果。`partial` 表示 owner 读取失败或索引仍待有界重建。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ConversationSearchPage {
-    pub hits: Vec<ConversationSearchHit>,
+pub struct ConversationSearchPage<T = ConversationSearchHit> {
+    pub hits: Vec<T>,
     pub partial: bool,
     pub failed_owners: Vec<ConversationOwner>,
 }

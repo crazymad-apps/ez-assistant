@@ -20,6 +20,15 @@ pub(crate) fn project_tool_input(
     mcp_identity: Option<&McpToolIdentity>,
 ) -> ToolInputProjection {
     let mut flags = ProjectionFlags::default();
+    let safe_management =
+        (name == "configure_mcp").then(|| super::mcp::management_tools::safe_arguments(arguments));
+    if safe_management
+        .as_ref()
+        .is_some_and(|safe| safe != arguments)
+    {
+        flags.redacted = true;
+    }
+    let arguments = safe_management.as_ref().unwrap_or(arguments);
     let value = if let Some(identity) = mcp_identity {
         let arguments = arguments
             .get("arguments")
@@ -332,6 +341,18 @@ mod tests {
         };
         assert!(!arguments_json.contains("raw"));
         assert!(arguments_json.contains("safe"));
+    }
+
+    #[test]
+    fn mcp_management_projection_masks_values_even_for_nonsecret_variable_names() {
+        let arguments = json!({"expected":{"target":{"source":"user","server_key":"fixture"}},"change":{"type":"patch","environment":{"CUSTOM":{"mode":"replace","value":"do-not-show"}},"headers":{}}});
+        let projection = project_tool_input("configure_mcp", &arguments, None);
+        assert!(projection.redacted);
+        let encoded = serde_json::to_string(&projection).unwrap();
+        assert!(!encoded.contains("do-not-show"));
+        assert!(encoded.contains("CUSTOM"));
+        let safe = super::super::mcp::management_tools::safe_arguments(&arguments);
+        assert!(!project_json(&safe).0.contains("do-not-show"));
     }
 
     #[test]

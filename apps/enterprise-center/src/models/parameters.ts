@@ -132,7 +132,7 @@ export function parseParameters(value: unknown, partial = false, base = emptyPar
 export function validParameters(p: ModelParameters, complete: boolean): boolean {
   if (p.server_auto_compaction_enabled || (p.server_compaction_enabled && p.server_compaction_support !== 'supported')) return false;
   const context = p.context_window_tokens.value;
-  if (complete && (p.context_window_tokens.state !== 'known' || p.max_output_tokens.state !== 'known')) return false;
+  if (complete && p.context_window_tokens.state !== 'known') return false;
   for (const key of limits) {
     const limit = p[key];
     if (
@@ -170,7 +170,7 @@ export function validParameters(p: ModelParameters, complete: boolean): boolean 
 
 export function resolveProtocol(connection: ProviderConnection): Protocol {
   if (connection.provider_type === 'opencode' && connection.protocol_preference === 'auto') invalid();
-  const responses = ['opencode', 'openai', 'deepseek', 'dashscope_api', 'dashscope_plan', 'moonshot'].includes(
+  const responses = ['opencode', 'openai', 'sub2api', 'deepseek', 'dashscope_api', 'dashscope_plan', 'moonshot'].includes(
     connection.provider_type,
   );
   if (connection.protocol_preference === 'responses' && !responses) invalid();
@@ -184,7 +184,7 @@ export function executable(connection: ProviderConnection, parameters: ModelPara
     validParameters(parameters, true) &&
     !(connection.provider_type === 'opencode' && (parameters.server_compaction_enabled || parameters.input_token_count_support === 'supported')) &&
     !(parameters.server_compaction_enabled && resolveProtocol(connection) !== 'open_ai_responses') &&
-    parameters.streaming === 'supported' &&
+    parameters.streaming !== 'unsupported' &&
     !(
       resolveProtocol(connection) === 'open_ai_chat_completions' &&
       parameters.tool_image_projection === 'native_tool_result'
@@ -230,7 +230,7 @@ export function parseConnection(value: unknown): ProviderConnection {
     invalid();
   let discovery_format: ProviderConnection['discovery_format'] = 'openai';
   if (provider_type === 'dashscope_api') discovery_format = 'dashscope_native';
-  else if (provider_type === 'vllm' || provider_type === 'moonshot') discovery_format = provider_type;
+  else if (provider_type === 'vllm' || provider_type === 'moonshot' || provider_type === 'sub2api') discovery_format = provider_type;
   if (input.discovery_format !== discovery_format) invalid();
   if (typeof input.server_history_enabled !== 'boolean') invalid();
   const connection: ProviderConnection = {

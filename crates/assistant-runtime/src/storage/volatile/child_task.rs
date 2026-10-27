@@ -17,13 +17,24 @@ impl VolatileRuntimeStore {
             if parent.session_id != task.session_id {
                 return Err(conflict("child task parent belongs to a different session"));
             }
-            if state.child_tasks.values().any(|existing| {
-                existing.parent_run_id == task.parent_run_id
-                    && existing.parent_tool_call_id == task.parent_tool_call_id
-            }) {
+            if state
+                .recovered_child_history(Some(&task.session_id))
+                .iter()
+                .any(|(_, existing)| {
+                    existing.parent_run_id == task.parent_run_id
+                        && existing.parent_tool_call_id == task.parent_tool_call_id
+                })
+            {
                 return Err(conflict("parent tool call already owns a child task"));
             }
-            if state.child_tasks.contains_key(&task.child_task_id) {
+            if state.child_tasks.contains_key(&task.child_task_id)
+                || state
+                    .child_history(&task.session_id, &task.child_task_id)
+                    .is_some()
+                || state
+                    .child_conversations
+                    .contains_key(&(task.session_id.clone(), task.child_task_id.clone()))
+            {
                 return Err(conflict("child task already exists"));
             }
             let stored = StoredChildTask {
@@ -50,9 +61,11 @@ impl VolatileRuntimeStore {
             state
                 .child_tasks
                 .insert(task.child_task_id.clone(), stored.clone());
-            state
-                .child_conversations
-                .insert(task.child_task_id, ConversationSnapshot::new(Vec::new()));
+            state.child_conversations.insert(
+                (stored.session_id.clone(), task.child_task_id.clone()),
+                ConversationSnapshot::new(Vec::new()),
+            );
+            state.record_child_history(&task.child_task_id, &[], None)?;
             Ok(stored)
         })
     }
@@ -64,14 +77,18 @@ impl VolatileRuntimeStore {
             if state
                 .child_tasks
                 .get(&start.child_task_id)
-                .is_none_or(|task| task.status != ChildTaskStatus::Accepted)
+                .is_none_or(|task| {
+                    task.session_id != start.session_id || task.status != ChildTaskStatus::Accepted
+                })
             {
                 return Err(conflict("child task cannot be started"));
             }
+            let messages = [ConversationMessage::User(start.message)];
             append_child(
                 &mut state,
+                &start.session_id,
                 &start.child_task_id,
-                &[ConversationMessage::User(start.message)],
+                &messages,
             )?;
             let task = state
                 .child_tasks
@@ -79,6 +96,7 @@ impl VolatileRuntimeStore {
                 .expect("checked child task");
             task.status = ChildTaskStatus::Running;
             task.started_at_ms = Some(start.started_at_ms);
+            state.record_child_history(&start.child_task_id, &messages, None)?;
             Ok(())
         })
     }
@@ -211,15 +229,28 @@ impl VolatileRuntimeStore {
                 completed.activation_message.as_ref(),
                 &completed.skill_activations,
             )?;
-            append_child(&mut state, &completed.child_task_id, &messages)?;
-            for activation in completed.skill_activations {
-                state
-                    .skill_activations
-                    .insert(activation.activation_id.clone(), activation);
-            }
+            append_child(
+                &mut state,
+                &completed.session_id,
+                &completed.child_task_id,
+                &messages,
+            )?;
             state
                 .pending_child_tool_exchanges
                 .remove(completed.receipt.as_str());
+            state.record_child_history(
+                &completed.child_task_id,
+                &messages,
+                Some(completed.step),
+            )?;
+            let history = state
+                .child_histories
+                .entry((completed.session_id, completed.child_task_id))
+                .or_default();
+            history
+                .skill_activations
+                .extend(completed.skill_activations);
+            history.normalize();
             Ok(())
         })
     }
@@ -247,7 +278,10 @@ impl VolatileRuntimeStore {
             if let Some(final_message_id) = settlement.final_message_id.as_ref() {
                 let exists = state
                     .child_conversations
-                    .get(&settlement.child_task_id)
+                    .get(&(
+                        settlement.session_id.clone(),
+                        settlement.child_task_id.clone(),
+                    ))
                     .into_iter()
                     .flat_map(|conversation| &conversation.messages)
                     .chain(settlement.messages.iter())
@@ -259,7 +293,12 @@ impl VolatileRuntimeStore {
                     ));
                 }
             }
-            append_child(&mut state, &settlement.child_task_id, &settlement.messages)?;
+            append_child(
+                &mut state,
+                &settlement.session_id,
+                &settlement.child_task_id,
+                &settlement.messages,
+            )?;
             let task = state
                 .child_tasks
                 .get_mut(&settlement.child_task_id)
@@ -269,6 +308,8 @@ impl VolatileRuntimeStore {
             task.error = settlement.error;
             task.final_message_id = settlement.final_message_id;
             task.finished_at_ms = Some(settlement.finished_at_ms);
+            state.record_child_history(&settlement.child_task_id, &settlement.messages, None)?;
+            state.child_tasks.remove(&settlement.child_task_id);
             Ok(())
         })
     }
@@ -306,7 +347,7 @@ impl VolatileRuntimeStore {
             ensure_child_owner(&state, &session_id, &child_task_id)?;
             state
                 .child_conversations
-                .get(&child_task_id)
+                .get(&(session_id, child_task_id))
                 .cloned()
                 .ok_or_else(|| conflict("child task conversation does not exist"))
         })

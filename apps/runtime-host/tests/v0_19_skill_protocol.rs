@@ -70,16 +70,13 @@ fn formal_host_freezes_user_skill_activation_across_disable_fork_and_restart() {
             }),
         )["session"]["session_id"],
     );
-    let submitted = client.runtime(
-        "submit_input",
-        json!({
-            "session_id":session_id,
-            "message":"SKILL_FORMAL_CASE",
-            "variant":"build",
-            "skill_name":"review",
-            "idempotency_key":"skill-formal-input"
-        }),
-    );
+    let submitted = client.submit_started_input(json!({
+        "session_id":session_id,
+        "message":"SKILL_FORMAL_CASE",
+        "variant":"build",
+        "skill_name":"review",
+        "idempotency_key":"skill-formal-input"
+    }));
     let run_id = string(&submitted["run"]["run_id"]);
     assert_eq!(
         client.wait_for_status("Skill activation Run", &session_id, &run_id, &["completed"])["status"],
@@ -96,8 +93,8 @@ fn formal_host_freezes_user_skill_activation_across_disable_fork_and_restart() {
         .expect("current catalog");
     assert_eq!(
         catalog.len(),
-        2,
-        "only isolated fixture skills are discovered"
+        4,
+        "isolated fixture skills and both embedded builtins are discovered"
     );
     assert!(catalog.iter().any(|entry| entry["name"] == "review"));
     assert_eq!(view["active_skills"][0]["tag"]["name"], "review");
@@ -135,6 +132,19 @@ fn formal_host_freezes_user_skill_activation_across_disable_fork_and_restart() {
         session_view(&mut client, &forked_session_id)["active_skills"][0]["tag"]["name"],
         "review"
     );
+    let inherited = session_view(&mut client, &forked_session_id);
+    assert!(inherited["runs"].as_array().unwrap().is_empty());
+    let assistant = inherited["conversation"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "assistant")
+        .unwrap();
+    assert_eq!(assistant["message_id"], assistant_message_id);
+    assert_eq!(assistant["run_id"], run_id);
+    assert_eq!(assistant["inherited"], true);
+    assert!(assistant["run_started_at_ms"].as_i64().is_some());
+    assert_eq!(assistant["partial"], false);
 
     assert_eq!(
         client.runtime("shutdown_runtime", json!({}))["lifecycle"],
@@ -145,6 +155,11 @@ fn formal_host_freezes_user_skill_activation_across_disable_fork_and_restart() {
 
     let second_host = HostProcess::start(runtime_home.path());
     let mut client = second_host.connect();
+    let reloaded = session_view(&mut client, &forked_session_id);
+    assert_eq!(
+        reloaded["conversation"]["items"],
+        inherited["conversation"]["items"]
+    );
     assert_eq!(
         session_view(&mut client, &session_id)["active_skills"][0]["tag"]["name"],
         "review"
@@ -173,8 +188,8 @@ fn formal_host_freezes_user_skill_activation_across_disable_fork_and_restart() {
         })
         .expect("activation count");
     assert_eq!(
-        activation_count, 2,
-        "source and Fork each own one ledger fact"
+        activation_count, 0,
+        "source and Fork retain completed activations only in their files"
     );
     let frozen_input_count: i64 = connection
         .query_row(
@@ -183,7 +198,7 @@ fn formal_host_freezes_user_skill_activation_across_disable_fork_and_restart() {
             |row| row.get(0),
         )
         .expect("frozen input count");
-    assert_eq!(frozen_input_count, 1);
+    assert_eq!(frozen_input_count, 0);
 }
 
 #[test]
@@ -222,15 +237,12 @@ fn formal_host_loads_model_skill_and_continues_same_run_with_monotonic_steps() {
             }),
         )["session"]["session_id"],
     );
-    let submitted = client.runtime(
-        "submit_input",
-        json!({
-            "session_id":session_id,
-            "message":"SKILL_AGENT_CASE",
-            "variant":"build",
-            "idempotency_key":"skill-agent-input"
-        }),
-    );
+    let submitted = client.submit_started_input(json!({
+        "session_id":session_id,
+        "message":"SKILL_AGENT_CASE",
+        "variant":"build",
+        "idempotency_key":"skill-agent-input"
+    }));
     let run_id = string(&submitted["run"]["run_id"]);
     let run = client.wait_for_status("Agent Skill Run", &session_id, &run_id, &["completed"]);
     assert_eq!(run["text"], "agent skill applied");
@@ -246,6 +258,24 @@ fn formal_host_loads_model_skill_and_continues_same_run_with_monotonic_steps() {
     assert_eq!(view["active_skills"][0]["tag"]["name"], "review");
     assert_eq!(view["active_skills"][0]["trigger"], "model");
 
+    let before_restart = client.conversation(&session_id);
+    let feedback_message_id = string(
+        &before_restart["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|item| item["type"] == "assistant")
+            .unwrap()["message_id"],
+    );
+    assert_eq!(
+        client.runtime(
+            "set_message_feedback",
+            json!({"session_id":session_id,"message_id":feedback_message_id,"feedback":"negative"}),
+        )["feedback"],
+        "negative"
+    );
+
     assert_eq!(
         client.runtime("shutdown_runtime", json!({}))["lifecycle"],
         "stopped"
@@ -258,6 +288,41 @@ fn formal_host_loads_model_skill_and_continues_same_run_with_monotonic_steps() {
     let recovered = session_view(&mut client, &session_id);
     assert_eq!(recovered["active_skills"][0]["tag"]["name"], "review");
     assert_eq!(recovered["active_skills"][0]["trigger"], "model");
+    let conversation = client.conversation(&session_id);
+    let mut steps = std::collections::BTreeSet::new();
+    for item in conversation["items"].as_array().unwrap() {
+        if item["type"] == "assistant" {
+            assert_eq!(item["run_id"], run_id);
+            steps.insert(
+                item["step"]
+                    .as_u64()
+                    .expect("restarted native assistant retains its file Step"),
+            );
+        }
+    }
+    assert_eq!(steps.into_iter().collect::<Vec<_>>(), vec![1, 2]);
+    assert_eq!(
+        conversation["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["message_id"] == feedback_message_id)
+            .unwrap()["feedback"],
+        "negative"
+    );
+    client.runtime(
+        "set_message_feedback",
+        json!({"session_id":session_id,"message_id":feedback_message_id,"feedback":null}),
+    );
+    assert!(
+        client.conversation(&session_id)["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["message_id"] == feedback_message_id)
+            .unwrap()["feedback"]
+            .is_null()
+    );
     client.runtime("shutdown_runtime", json!({}));
     drop(client);
     assert!(second_host.wait().status.success());
@@ -269,25 +334,24 @@ fn formal_host_loads_model_skill_and_continues_same_run_with_monotonic_steps() {
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .expect("open database read-only");
-    let trigger: String = connection
+    let activation_count: i64 = connection
         .query_row(
-            "SELECT trigger FROM skill_activations WHERE session_id = ?1",
+            "SELECT COUNT(*) FROM skill_activations WHERE session_id = ?1",
             [&session_id],
             |row| row.get(0),
         )
-        .expect("model activation trigger");
-    assert_eq!(trigger, "model");
-    let steps = connection
-        .prepare(
-            "SELECT DISTINCT step FROM run_message_refs
-             WHERE run_id = ?1 AND step IS NOT NULL ORDER BY step",
-        )
-        .expect("prepare run step query")
-        .query_map([&run_id], |row| row.get::<_, u32>(0))
-        .expect("query run steps")
-        .collect::<Result<Vec<_>, _>>()
-        .expect("collect run steps");
-    assert_eq!(steps, vec![1, 2]);
+        .expect("model activation has no SQL history copy");
+    assert_eq!(activation_count, 0);
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('run_message_refs','message_feedback')",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
 }
 
 fn session_view(client: &mut Client, session_id: &str) -> Value {

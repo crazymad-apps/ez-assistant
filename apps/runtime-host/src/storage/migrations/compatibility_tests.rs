@@ -236,6 +236,7 @@ fn migration_callback_cannot_create_or_change_compatibility_metadata() {
         }
         migrate(home.path(), entries.last().unwrap().version, &entries).unwrap();
         entries.push(Migration {
+            key: "release",
             version: target,
             min_compatible_host_version: Some("0.25.2"),
             rebuilds_referenced_tables: false,

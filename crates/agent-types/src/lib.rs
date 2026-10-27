@@ -20,8 +20,8 @@ pub use conversation::{
     FileReference, FileReferencesPart, MAX_PROVIDER_STATE_ITEM_BYTES,
     MAX_PROVIDER_STATE_TURN_BYTES, OpaqueProviderState, ProviderContextEffect, ProviderStateError,
     QuotedTextPart, QuotedTextSourceOwner, QuotedTextSourceRole, ReasoningPart, ReasoningSource,
-    SystemMessage, TextPart, ToolCall, ToolMessage, TranscriptVisibility, UserMessage,
-    UserMessageOrigin, UserPart,
+    SystemMessage, TextPart, ToolCall, ToolExchangeValidator, ToolMessage, TranscriptVisibility,
+    UserMessage, UserMessageOrigin, UserPart,
 };
 pub use id::{IdentifierError, MessageId, PartId, ProtocolId, ProviderId, ToolCallId};
 pub use insertion::{

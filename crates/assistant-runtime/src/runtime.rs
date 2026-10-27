@@ -24,6 +24,7 @@ mod quote;
 mod recovery;
 mod resource;
 pub(crate) mod resource_reference;
+mod run_history;
 mod session_loading;
 mod session_management;
 mod shell;
@@ -108,7 +109,7 @@ pub struct AssistantRuntime {
     devices: RwLock<BTreeMap<DeviceId, crate::PairedDevice>>,
     delete_confirmations: Mutex<BTreeMap<DeleteConfirmationToken, PendingDeleteConfirmation>>,
     store: Arc<dyn RuntimeStore>,
-    operation_gate: AsyncRwLock<()>,
+    operation_gate: Arc<AsyncRwLock<()>>,
     model_binding_gate: Arc<AsyncRwLock<()>>,
     workspace_mutation_gate: AsyncMutex<()>,
     device_mutation_gate: AsyncMutex<()>,
@@ -293,7 +294,7 @@ impl AssistantRuntime {
             devices: RwLock::new(recovered.devices),
             delete_confirmations: Mutex::new(BTreeMap::new()),
             store,
-            operation_gate: AsyncRwLock::new(()),
+            operation_gate: Arc::new(AsyncRwLock::new(())),
             model_binding_gate: Arc::new(AsyncRwLock::new(())),
             workspace_mutation_gate: AsyncMutex::new(()),
             device_mutation_gate: AsyncMutex::new(()),
@@ -315,7 +316,7 @@ impl AssistantRuntime {
                 ContextWindowEvaluator::new(CONTEXT_WINDOW_THRESHOLD)
                     .expect("static context window threshold is valid"),
             ),
-            mcp_service: crate::mcp::McpService::unavailable(),
+            mcp_service: crate::mcp::McpService::unavailable(event_sender.clone()),
             event_sender,
             root_cancellation,
             tasks,
@@ -376,11 +377,8 @@ impl AssistantRuntime {
         &self,
         request: assistant_protocol::MutatePluginSettingsRequest,
     ) -> RuntimeResult<assistant_protocol::MutatePluginSettingsResult> {
-        let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
-        let result = self.plugin.mutate_settings(request).await?;
-        let _ = self.refresh_mcp_registry(None).await;
-        Ok(result)
+        self.mcp_management().mutate_plugin_settings(request).await
     }
 
     pub async fn begin_plugin_install(
@@ -486,9 +484,19 @@ impl AssistantRuntime {
             connection_factory,
             image_materializer,
             self.plugin.clone(),
+            self.event_sender.clone(),
         );
         self.plugin
             .bind_mcp_retirement(&self.mcp_service.registry, self.approval_registry.clone());
+        self
+    }
+
+    /// 在 MCP Adapter 装配后注入 Host 自带的只读定义；用户覆盖仍由原配置源读取。
+    pub fn with_builtin_mcp_definitions(
+        mut self,
+        definitions: Vec<crate::ManagedMcpServerDefinition>,
+    ) -> Self {
+        self.mcp_service.builtin_definitions = definitions.into();
         self
     }
 
@@ -532,7 +540,7 @@ impl AssistantRuntime {
         self.ensure_running()?;
         let snapshot = self
             .config_registry
-            .reload(|previous, next| {
+            .reload(&self.event_sender, |previous, next| {
                 // 初次装载（包括普通 Host 重启）不换代；其余请求参数变化在发布前可靠失效。
                 let changed = next.active().is_some_and(|next| {
                     previous
@@ -569,7 +577,6 @@ impl AssistantRuntime {
             .await?;
         drop(_binding);
         let _ = self.ensure_controller_session().await;
-        self.publish(RuntimeEvent::ConfigChanged);
         Ok(ReloadConfigResult {
             status: self.configuration_status(&snapshot),
         })
@@ -786,7 +793,8 @@ impl AssistantRuntime {
         &self,
         request: ListSessionsRequest,
     ) -> RuntimeResult<ListSessionsResult> {
-        let limit = request.limit.unwrap_or(100).clamp(1, 200);
+        // 不按原来的单页大小截断整段刷新；为 has_more 的一条前瞻保留数值空间。
+        let limit = request.limit.unwrap_or(100).clamp(1, u32::MAX - 1);
         let mut summaries = self
             .query_session_summaries(crate::SessionSummaryQuery {
                 filter: request.filter,
@@ -865,7 +873,15 @@ impl AssistantRuntime {
                 .await?;
         }
         Ok(GetRunResult {
-            run: session.run_snapshot(&request.run_id)?,
+            run: self
+                .product_run_snapshots(&session)
+                .await?
+                .into_iter()
+                .find(|run| run.run_id == request.run_id)
+                .ok_or_else(|| RuntimeError::RunNotFound {
+                    session_id: request.session_id,
+                    run_id: request.run_id,
+                })?,
         })
     }
 
@@ -875,6 +891,15 @@ impl AssistantRuntime {
         let _mutation = session.mutation().await;
         session.ensure_active()?;
         session.ensure_healthy()?;
+        // 终态只读返回在取消审批等副作用之前完成；重启后不要求保留执行 Registry。
+        if let Some(run) = self
+            .product_run_snapshots(&session)
+            .await?
+            .into_iter()
+            .find(|run| run.run_id == request.run_id && run.status.is_terminal())
+        {
+            return Ok(CancelRunResult { run });
+        }
         {
             let state = session.lock_state()?;
             if state
@@ -908,10 +933,9 @@ impl AssistantRuntime {
                         session_id: request.session_id.clone(),
                         run_id: request.run_id.clone(),
                     })?;
-            if existing.snapshot().status.is_terminal() {
-                return Ok(CancelRunResult {
-                    run: existing.snapshot(),
-                });
+            // 文件没有可靠终态时不把已结束的内存观察伪装成结算成功。
+            if existing.status().is_terminal() {
+                return Err(RuntimeError::SnapshotStale);
             }
             if state
                 .active_run
@@ -1070,5 +1094,30 @@ fn permission_scopes(recovered: &RecoveredRuntime) -> Vec<PermissionFileScope> {
     scopes
 }
 
+/// 为可靠接纳前的身份避让读取当前 owner 历史；不缓存、不恢复执行对象或写 Store。
+/// 输入准入调用方已持本 Session mutation；委派与跨会话报告准备仅做同代只读核对，
+/// 最终创建／接纳仍由 Store 再验身份，不能为了分配 ID 同时持源／目标两个 mutation。
+/// 短 state 锁不跨 I/O。
+///
+/// # Errors
+/// 当前文件不可读、Store 失败、state 不可用或读取代次已经变化时失败。
+pub(crate) async fn load_identity_history(
+    store: &dyn crate::RuntimeStore,
+    session: &crate::session::SessionController,
+) -> crate::RuntimeResult<crate::StoredHistoryFacts> {
+    let history = store
+        .load_conversation_history(assistant_protocol::ConversationOwner::MainSession {
+            session_id: session.id().clone(),
+        })
+        .await
+        .map_err(|source| crate::RuntimeError::from_store("load identity history", source))?;
+    if history.generation != session.lock_state()?.body_generation {
+        return Err(crate::RuntimeError::SnapshotStale);
+    }
+    Ok(history.facts)
+}
+
 #[cfg(test)]
 mod tests;
+
+pub(crate) use mcp::management_tools::McpManagementAuthorizationFacts;

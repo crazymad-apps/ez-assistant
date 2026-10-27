@@ -43,6 +43,7 @@ pub(crate) enum UpdateError {
     Unavailable,
     #[error("无法完成更新。请重新打开已安装的应用后重试。")]
     Install,
+    #[cfg(target_os = "macos")]
     #[error("请将应用移到可写的安装位置后重试。")]
     ReadOnly,
 }

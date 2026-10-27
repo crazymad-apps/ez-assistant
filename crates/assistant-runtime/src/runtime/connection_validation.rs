@@ -89,7 +89,9 @@ impl AssistantRuntime {
             &compiled.provider,
             compiled.protocol,
             &compiled.capabilities,
-            compiled.max_output_tokens,
+            compiled
+                .max_output_tokens
+                .unwrap_or(CONNECTION_VALIDATION_MAX_OUTPUT_TOKENS),
         )?;
         let validation =
             consume_validation_stream(compiled.model, model_request, cancellation.clone());

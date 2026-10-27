@@ -48,6 +48,14 @@
   `desktop_update/windows.rs::StartupGuard::acquire` 与 `Drop` 允许局部 FFI，
   仅同步获取/释放启动锁，`OwnedHandle` 关闭句柄，`!Send` 保证同线程释放；
   不新增通知或窗口消息 FFI，正式单实例及唤起仍由已锁定版本的插件承载。
+  2026-10-20 用户确认 v0.32.1 F01 技术方案：Desktop
+  `runtime_bootstrap/windows.rs` 中用于资源占用及临时卷／文件索引查询、进程映像／创建时间／Token owner
+  核对、目标终止和有界等待的私有平台函数，以及 `runtime_bootstrap/macos.rs` 中
+  只读进程／文件描述符身份查询的私有平台函数，允许对应函数级局部 FFI 例外。
+  范围仅为已确认本机目标：Windows 句柄由 OwnedHandle 回收，Restart Manager session
+  必须结束；macOS 查询缓冲区、长度及 SDK 布局逐项核验，信号优先用现有依赖安全封装。
+  不改 DACL、不启用调试权限、不注入其他进程；阻塞查询／等待不占用 UI 主线程，
+  StartupGuard 保持获取线程释放。该项为已批准实现边界；M0 已按此接入私有平台适配，不得模块级放宽 unsafe。
   其他代码不得借此增加 unsafe，其他 workspace 成员仍继承 `forbid`。
 
 ## 三、Workspace、package 与依赖

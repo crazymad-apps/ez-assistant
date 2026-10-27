@@ -227,6 +227,7 @@ function sourceLabel(source: SkillSourceSnapshot): string {
     host_supplement: "Host 公共补充",
     user_agents: "用户目录 .agents",
     plugin: "插件 Skill",
+    builtin: "内置 Skill",
   }[source];
 }
 

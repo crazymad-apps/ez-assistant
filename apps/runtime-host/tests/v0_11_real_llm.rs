@@ -82,9 +82,7 @@ fn configured_model_reads_a_real_attachment_through_the_formal_host() {
         json!({ "session_id": session_id, "approval_mode": "auto" }),
     );
     let attachment_id = upload(&host, &session_id, &source);
-    let submitted = client.runtime(
-        "submit_input",
-        json!({
+    let submitted = client.submit_started_input(json!({
             "session_id": session_id,
             "message": "Use the read_file tool to read the attached file. Do not guess. Reply with only the exact file content.",
             "variant": "build",

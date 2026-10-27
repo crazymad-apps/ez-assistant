@@ -592,11 +592,11 @@ async fn native_child_compacts_twice_with_its_own_scope_and_keeps_parent_history
     set_auto_approval(&runtime, &id).await;
     submit_completed_turn(&runtime, &id, "delegate child work").await;
     let recovered = runtime.store.load_runtime().await.unwrap();
-    assert_eq!(recovered.child_tasks.len(), 1);
-    let child = &recovered.child_tasks[0];
+    assert_eq!(recovered.child_history.len(), 1);
+    let child = &recovered.child_history[0].1;
     assert_eq!(
         child.status,
-        assistant_protocol::ChildTaskStatus::Completed,
+        Some(assistant_protocol::ChildTaskStatus::Completed),
         "{:?}",
         child.error
     );

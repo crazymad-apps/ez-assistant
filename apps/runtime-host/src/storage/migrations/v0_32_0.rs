@@ -3,6 +3,7 @@ use super::{Migration, v0_30_0};
 
 pub(super) fn entry() -> Migration {
     Migration {
+        key: "release",
         version: "0.32.0",
         min_compatible_host_version: Some("0.30.0"),
         rebuilds_referenced_tables: false,
@@ -85,7 +86,7 @@ mod tests {
         .unwrap();
         let registered: i64 = current
             .query_row(
-                "SELECT COUNT(*) FROM schema_migrations WHERE version=?1",
+                "SELECT COUNT(*) FROM schema_migrations WHERE version=?1 AND migration_key='release'",
                 [env!("CARGO_PKG_VERSION")],
                 |row| row.get(0),
             )

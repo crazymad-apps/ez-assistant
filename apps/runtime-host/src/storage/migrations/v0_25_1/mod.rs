@@ -4,6 +4,14 @@ use crate::storage::{StorageResult, internal_error};
 use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
 const SCHEMA: &str = include_str!("schema.sql");
+const LEGACY_RUN_REFS: &str = "SELECT run_id, message_id, step FROM run_message_refs LIMIT 0";
+const LEGACY_MESSAGE_FEEDBACK: &str =
+    "SELECT session_id, message_id, feedback, changed_at_ms FROM message_feedback LIMIT 0";
+const LEGACY_REQUEST_RUN: &str = "SELECT run_id FROM model_request_records LIMIT 0";
+const LEGACY_RUN_TERMINAL: &str =
+    "SELECT error_code,error_message,finished_at_ms FROM runs LIMIT 0";
+const LEGACY_CHILD_TERMINAL: &str =
+    "SELECT final_message_id,error_code,error_message,finished_at_ms FROM child_tasks LIMIT 0";
 const REQUIRED_PROJECTIONS: &[&str] = &[
     "SELECT session_id, title, model_provider_instance_id, model_id, reasoning_effort, system_prompt_json, skill_catalog_json, current_variant, approval_mode, lifecycle, body_generation, message_count, created_at_ms, updated_at_ms, archived_at_ms, is_pinned, title_origin, pc_output_device_id, materialization_key, automatic_title_pending FROM sessions LIMIT 0",
     "SELECT device_id, display_name, public_key, lifecycle, paired_at_ms, updated_at_ms, revoked_at_ms FROM devices LIMIT 0",
@@ -12,7 +20,7 @@ const REQUIRED_PROJECTIONS: &[&str] = &[
     "SELECT pinned_collection_revision FROM memory_state WHERE singleton_key = 1",
     "SELECT name, enabled, updated_at_ms FROM skill_name_states LIMIT 0",
     "SELECT id, category, content, attributes_json, created_by_kind, created_by_session_id, revision, created_at_ms, updated_at_ms FROM pinned_memories LIMIT 0",
-    "SELECT session_id, message_id, feedback, changed_at_ms FROM message_feedback LIMIT 0",
+    LEGACY_MESSAGE_FEEDBACK,
     "SELECT session_id, revision, objective, items_json, last_operation_id, updated_at_ms FROM session_work_plans LIMIT 0",
     "SELECT session_id, operation_id, revision, objective, items_json, updated_at_ms FROM work_plan_completion_receipts LIMIT 0",
     "SELECT goal_id, session_id, objective_message_id, objective_payload_json, objective_hash, mcp_server_key, state, pause_reason_json, generation, turn, max_runs, max_total_tokens, max_consecutive_failures, used_runs, used_total_tokens, usage_complete, consecutive_failures, created_at_ms, updated_at_ms, completed_at_ms FROM session_goals LIMIT 0",
@@ -23,11 +31,14 @@ const REQUIRED_PROJECTIONS: &[&str] = &[
     "SELECT COALESCE(priority_order, queue_order), input_id, session_id, idempotency_key, user_message_id, state, input_kind, command_json, command_result_json, queued_message_json, accepted_at_ms, agent_variant, origin, goal_id, goal_generation, goal_turn, goal_reply_route_json, skill_activation_json, cross_session_json, channel_source_json FROM inputs LIMIT 0",
     "SELECT selection_id, session_id, input_id, message_id, server_key, display_name, created_at_ms FROM mcp_input_selections LIMIT 0",
     "SELECT activation_id, session_id, owner_kind, owner_id, run_id, input_id, message_id, name, catalog_revision, definition_digest, trigger, created_at_ms FROM skill_activations LIMIT 0",
-    "SELECT run_id, session_id, input_id, attempt, status, cancel_requested, approval_mode, reasoning_effort, error_code, error_message, created_at_ms, started_at_ms, finished_at_ms FROM runs LIMIT 0",
-    "SELECT run_id, message_id, step FROM run_message_refs LIMIT 0",
+    "SELECT run_id, session_id, input_id, attempt, status, cancel_requested, approval_mode, reasoning_effort, created_at_ms, started_at_ms FROM runs LIMIT 0",
+    LEGACY_RUN_TERMINAL,
+    LEGACY_RUN_REFS,
     "SELECT session_id, request_count, input_tokens_sum, output_tokens_sum, total_tokens_sum, cached_input_tokens_sum, cached_request_count, reasoning_tokens_sum, reasoning_request_count, auxiliary_request_count, auxiliary_input_tokens_sum, auxiliary_output_tokens_sum, auxiliary_total_tokens_sum, latest_input_tokens, latest_output_tokens, latest_total_tokens, latest_cached_input_tokens, latest_reasoning_tokens, backfilled, updated_at_ms FROM session_usage LIMIT 0",
-    "SELECT session_id, owner_kind, owner_id, request_id, run_id, request_kind, provider, model_id, input_tokens, output_tokens, total_tokens, cached_input_tokens, reasoning_tokens, completed_at_ms FROM model_request_records LIMIT 0",
-    "SELECT child_task_id, session_id, parent_run_id, parent_tool_call_id, title, system_prompt_json, agent_variant, status, cancel_requested, body_generation, message_count, final_message_id, error_code, error_message, created_at_ms, started_at_ms, finished_at_ms FROM child_tasks LIMIT 0",
+    "SELECT session_id, owner_kind, owner_id, request_id, request_kind, provider, model_id, input_tokens, output_tokens, total_tokens, cached_input_tokens, reasoning_tokens, completed_at_ms FROM model_request_records LIMIT 0",
+    LEGACY_REQUEST_RUN,
+    "SELECT child_task_id, session_id, parent_run_id, parent_tool_call_id, title, system_prompt_json, agent_variant, status, cancel_requested, body_generation, message_count, created_at_ms, started_at_ms FROM child_tasks LIMIT 0",
+    LEGACY_CHILD_TERMINAL,
     "SELECT receipt_id, child_task_id, session_id, step, assistant_json, results_json, state, created_at_ms FROM child_pending_tool_exchanges LIMIT 0",
     "SELECT receipt_id, call_id, started_at_ms FROM child_pending_tool_starts LIMIT 0",
     "SELECT operation_id, child_task_id, session_id, body_generation, base_byte_length, kind, payload, message_count_delta, message_step, created_at_ms FROM child_body_appends LIMIT 0",
@@ -40,6 +51,7 @@ const REQUIRED_PROJECTIONS: &[&str] = &[
 
 pub(super) fn entry() -> Migration {
     Migration {
+        key: "release",
         version: "0.25.1",
         min_compatible_host_version: None,
         rebuilds_referenced_tables: false,
@@ -383,8 +395,30 @@ fn initialize_retained_schema(connection: &Connection) -> StorageResult<()> {
 }
 
 pub(super) fn validate(connection: &Connection) -> Result<()> {
+    connection.prepare(LEGACY_RUN_REFS)?;
+    connection.prepare(LEGACY_MESSAGE_FEEDBACK)?;
+    connection.prepare(LEGACY_REQUEST_RUN)?;
+    connection.prepare(LEGACY_RUN_TERMINAL)?;
+    connection.prepare(LEGACY_CHILD_TERMINAL)?;
+    validate_retained(connection)?;
+    validate_legacy_commands(connection)?;
+    Ok(())
+}
+
+/// F02 明确选择保留业务结构；旧源入口仍严格要求原 SQL 历史表，不按缺表猜版本。
+pub(super) fn validate_retained(connection: &Connection) -> Result<()> {
     for projection in REQUIRED_PROJECTIONS {
-        connection.prepare(projection)?;
+        if ![
+            LEGACY_RUN_REFS,
+            LEGACY_MESSAGE_FEEDBACK,
+            LEGACY_REQUEST_RUN,
+            LEGACY_RUN_TERMINAL,
+            LEGACY_CHILD_TERMINAL,
+        ]
+        .contains(projection)
+        {
+            connection.prepare(projection)?;
+        }
     }
     connection.prepare("SELECT provider_instance_id,display_name,provider_type,endpoint,api_key,protocol_preference,models_path,discovery_format FROM providers LIMIT 0")?;
     connection.prepare("SELECT default_provider_instance_id,default_model_id,vision_provider_instance_id,vision_model_id FROM model_settings LIMIT 0")?;
@@ -398,7 +432,7 @@ pub(super) fn validate(connection: &Connection) -> Result<()> {
     if old || invalid {
         return Err(MigrationError::Integrity);
     }
-    validate_queue_payloads(connection)?;
+    validate_retained_queue_payloads(connection)?;
     Ok(())
 }
 
@@ -446,6 +480,11 @@ fn ensure_column(
 /// fail closed。M0 尚不消费 Command；这项核验只保证旧 message 不被误解释为 Command，
 /// 也阻止半写入的 Command 在后续恢复阶段伪装成普通 Input/Run。
 fn validate_queue_payloads(transaction: &Connection) -> StorageResult<()> {
+    validate_legacy_commands(transaction)?;
+    validate_retained_queue_payloads(transaction)
+}
+
+fn validate_legacy_commands(transaction: &Connection) -> StorageResult<()> {
     let invalid = transaction
         .query_row(
             "SELECT 1 FROM inputs
@@ -482,6 +521,10 @@ fn validate_queue_payloads(transaction: &Connection) -> StorageResult<()> {
             rusqlite::Error::InvalidQuery,
         ));
     }
+    Ok(())
+}
+
+fn validate_retained_queue_payloads(transaction: &Connection) -> StorageResult<()> {
     let invalid_selection = transaction
         .query_row(
             "SELECT 1 FROM mcp_input_selections AS selections

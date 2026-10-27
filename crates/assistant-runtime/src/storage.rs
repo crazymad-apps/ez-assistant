@@ -10,10 +10,13 @@ mod custom_agent;
 mod error;
 mod execution;
 mod goal;
+mod history;
 mod model_management;
 mod plugin;
 mod session;
+mod usage;
 mod volatile;
+pub use usage::StoredConversationUsage;
 mod work_plan;
 mod workspace;
 
@@ -51,6 +54,10 @@ pub use goal::{
     GoalClear, GoalHeldInputResume, GoalHeldInputResumeResult, GoalStop, GoalStopResult,
     StoredGoal, StoredGoalBudget, StoredGoalObjective, StoredGoalObjectivePart,
     StoredGoalPauseReason, StoredGoalState,
+};
+pub use history::{
+    StoredChildTaskHistory, StoredConversationHistory, StoredHistoryAttachment, StoredHistoryFacts,
+    StoredHistoryFeedback, StoredInputHistory, StoredMessageOrigin, StoredRunHistory,
 };
 pub use plugin::{
     PluginOperationKind, PluginOperationPhase, PluginOperationUpdate, PluginRecordChange,

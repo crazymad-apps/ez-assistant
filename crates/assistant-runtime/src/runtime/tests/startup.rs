@@ -24,7 +24,7 @@ async fn skill_state_preparation_failure_atomically_commits_the_failed_input() {
         .expect("state")
         .queue_paused_by_user = true;
     let accepted = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_claimed_input(SubmitInputRequest {
             session_id: session.session_id.clone(),
             message: "skill state must not lose this input".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -89,7 +89,7 @@ async fn session_view_repairs_only_its_terminal_queued_input_once() {
         .expect("state")
         .queue_paused_by_user = true;
     let source = first
-        .submit_input(SubmitInputRequest {
+        .submit_claimed_input(SubmitInputRequest {
             session_id: session.session_id.clone(),
             message: "recover only this input".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -197,7 +197,7 @@ async fn unavailable_session_skips_settlement_and_cannot_resume_after_restart() 
     let session = first.session_for_test(&broken).await;
     session.lock_state().expect("state").queue_paused_by_user = true;
     let accepted = first
-        .submit_input(SubmitInputRequest {
+        .submit_claimed_input(SubmitInputRequest {
             session_id: broken.clone(),
             message: "persisted before restart".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,

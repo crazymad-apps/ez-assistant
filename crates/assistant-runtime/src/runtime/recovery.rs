@@ -48,7 +48,7 @@ pub(super) fn prepare_interrupted_run_settlements(
             return Err(invalid_recovery());
         }
         let interrupted = matches!(run.status, RunStatus::Running | RunStatus::Cancelling)
-            || run.status == RunStatus::Accepted && input.state == StoredInputState::Committed;
+            || run.status == RunStatus::Accepted;
         let reconcile_terminal_input =
             run.status.is_terminal() && input.state == StoredInputState::Queued;
         if !interrupted && !reconcile_terminal_input {
@@ -255,7 +255,14 @@ fn recover_registries_with_identities(
         input_messages.insert(input.input_id.clone(), input.user_message_id.clone());
         if let Some(activation) = input.skill_activation.as_ref()
             && input_activations
-                .insert(activation.activation_id.clone(), activation.clone())
+                .insert(
+                    (
+                        activation.session_id.clone(),
+                        None::<String>,
+                        activation.activation_id.clone(),
+                    ),
+                    activation.clone(),
+                )
                 .is_some()
         {
             return Err(invalid_recovery());
@@ -293,7 +300,7 @@ fn recover_registries_with_identities(
                 || !selected_inputs.insert(input_id.clone())
         });
         if !session_roles.contains_key(&selection.session_id)
-            || !selection_ids.insert(selection.selection_id.clone())
+            || !selection_ids.insert((selection.session_id.clone(), selection.selection_id.clone()))
             || input_invalid
         {
             return Err(invalid_recovery());
@@ -334,22 +341,62 @@ fn recover_registries_with_identities(
     }
     let mut referenced_inputs = std::collections::BTreeSet::new();
     let mut run_sessions = BTreeMap::<RunId, SessionId>::new();
+    let mut historical_identities = BTreeMap::new();
+    let mut input_attempts = BTreeMap::new();
+    let mut history_by_session = BTreeMap::<SessionId, Vec<_>>::new();
+    for (session_id, run) in recovered.run_history {
+        if !session_roles.contains_key(&session_id) {
+            return Err(invalid_recovery());
+        }
+        if run.inherited || run.partial {
+            continue;
+        }
+        let Some(input_id) = run.input_id.as_ref() else {
+            continue;
+        };
+        if input_sessions
+            .get(input_id)
+            .is_some_and(|owner| owner != &session_id)
+            || run_sessions
+                .insert(run.run_id.clone(), session_id.clone())
+                .is_some()
+            || input_attempts
+                .insert(
+                    (session_id.clone(), input_id.clone(), run.attempt),
+                    run.run_id.clone(),
+                )
+                .is_some()
+        {
+            return Err(invalid_recovery());
+        }
+        referenced_inputs.insert(input_id.clone());
+        historical_identities.insert(run.run_id.clone(), (input_id.clone(), run.attempt));
+        history_by_session.entry(session_id).or_default().push(run);
+    }
+    let mut control_ids = std::collections::BTreeSet::new();
     for run in &recovered.runs {
-        if input_sessions.get(&run.input_id) != Some(&run.session_id) {
+        if input_sessions.get(&run.input_id) != Some(&run.session_id)
+            || !control_ids.insert(run.run_id.clone())
+            || historical_identities
+                .get(&run.run_id)
+                .is_some_and(|identity| identity != &(run.input_id.clone(), run.attempt))
+            || input_attempts
+                .get(&(run.session_id.clone(), run.input_id.clone(), run.attempt))
+                .is_some_and(|id| id != &run.run_id)
+        {
             return Err(invalid_recovery());
         }
         referenced_inputs.insert(run.input_id.clone());
         if run_sessions
             .insert(run.run_id.clone(), run.session_id.clone())
-            .is_some()
+            .is_some_and(|owner| owner != run.session_id)
         {
             return Err(invalid_recovery());
         }
     }
-    if input_sessions
-        .keys()
-        .any(|input_id| !referenced_inputs.contains(input_id))
-    {
+    if recovered.inputs.iter().any(|input| {
+        input.state != StoredInputState::Queued && !referenced_inputs.contains(&input.input_id)
+    }) {
         return Err(invalid_recovery());
     }
     let mut runs_by_session = BTreeMap::<SessionId, Vec<_>>::new();
@@ -376,7 +423,17 @@ fn recover_registries_with_identities(
     let mut ledger_activation_ids = std::collections::BTreeSet::new();
     let mut activations_by_session = BTreeMap::<SessionId, Vec<_>>::new();
     for activation in recovered.skill_activations {
-        if !ledger_activation_ids.insert(activation.activation_id.clone())
+        // 文件事实的身份只在完整 owner 内唯一，不能沿用 SQL 历史全局主键约束。
+        let owner = match &activation.owner {
+            crate::SkillActivationOwner::Session(_) => None,
+            crate::SkillActivationOwner::ChildTask(id) => Some(id.clone()),
+        };
+        let key = (
+            activation.session_id.clone(),
+            owner,
+            activation.activation_id.clone(),
+        );
+        if !ledger_activation_ids.insert(key.clone())
             || activation.input_id.as_ref().is_some_and(|input_id| {
                 input_sessions.get(input_id) != Some(&activation.session_id)
             })
@@ -384,8 +441,7 @@ fn recover_registries_with_identities(
                 .run_id
                 .as_ref()
                 .is_some_and(|run_id| run_sessions.get(run_id) != Some(&activation.session_id))
-            || activation.input_id.is_some()
-                && input_activations.get(&activation.activation_id) != Some(&activation)
+            || activation.input_id.is_some() && input_activations.get(&key) != Some(&activation)
         {
             return Err(invalid_recovery());
         }
@@ -436,6 +492,19 @@ fn recover_registries_with_identities(
                 child.parent_run_id.clone(),
             )
         })
+        .chain(
+            recovered
+                .child_history
+                .iter()
+                .filter(|(_, child)| !child.inherited)
+                .map(|(session, child)| {
+                    (
+                        child.child_task_id.as_str().to_owned(),
+                        session.clone(),
+                        child.parent_run_id.clone(),
+                    )
+                }),
+        )
         .collect::<Vec<_>>();
     let mut sessions = BTreeMap::new();
     for stored in recovered.sessions {
@@ -466,6 +535,7 @@ fn recover_registries_with_identities(
         let controller = Arc::new(SessionController::recovered(
             stored,
             runs_by_session.remove(&session_id).unwrap_or_default(),
+            history_by_session.remove(&session_id).unwrap_or_default(),
             inputs_by_session.remove(&session_id).unwrap_or_default(),
             commands_by_session.remove(&session_id).unwrap_or_default(),
             selections_by_session
@@ -480,6 +550,7 @@ fn recover_registries_with_identities(
         }
     }
     if !runs_by_session.is_empty()
+        || !history_by_session.is_empty()
         || !inputs_by_session.is_empty()
         || !commands_by_session.is_empty()
         || !selections_by_session.is_empty()
@@ -490,7 +561,11 @@ fn recover_registries_with_identities(
         return Err(invalid_recovery());
     }
     let mut child_tasks = BTreeMap::new();
-    for mut child in recovered.child_tasks {
+    for mut child in recovered
+        .child_tasks
+        .into_iter()
+        .filter(|task| !task.status.is_terminal())
+    {
         if !child.status.is_terminal() {
             child.status = assistant_protocol::ChildTaskStatus::Interrupted;
         }

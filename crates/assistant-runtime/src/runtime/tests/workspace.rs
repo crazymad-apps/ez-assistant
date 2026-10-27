@@ -711,7 +711,7 @@ async fn every_run_compiles_tools_from_its_sessions_frozen_workspace() {
         (second_session.session_id, "second"),
     ] {
         let accepted = runtime
-            .submit_input(SubmitInputRequest {
+            .submit_started_input(SubmitInputRequest {
                 mode: assistant_protocol::SubmitInputMode::Normal,
                 variant: assistant_protocol::AgentVariant::Build,
                 session_id: session_id.clone(),
@@ -768,7 +768,7 @@ async fn missing_bound_workdir_is_reported_as_workspace_unavailable_before_start
         .expect("session")
         .session;
     let accepted = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session_id.clone(),

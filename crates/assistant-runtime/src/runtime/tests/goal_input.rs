@@ -76,7 +76,7 @@ async fn start_goal_is_idempotent_freezes_objective_and_clears_after_completion(
     let mut events = runtime.subscribe_events();
     let key = IdempotencyKey::new("start-goal-1").expect("key");
     let first = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: SubmitInputMode::StartGoal,
             session_id: session_id.clone(),
             message: "ship the complete release".to_owned(),
@@ -90,7 +90,7 @@ async fn start_goal_is_idempotent_freezes_objective_and_clears_after_completion(
         .await
         .expect("start Goal");
     let duplicate = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: SubmitInputMode::StartGoal,
             session_id: session_id.clone(),
             message: "this duplicate payload must be ignored".to_owned(),
@@ -249,7 +249,7 @@ async fn start_goal_rejects_a_model_without_tool_calls() {
         .session_id;
     assert!(matches!(
         runtime
-            .submit_input(SubmitInputRequest {
+            .submit_started_input(SubmitInputRequest {
                 mode: SubmitInputMode::StartGoal,
                 session_id,
                 message: "unsupported Goal".to_owned(),
@@ -280,7 +280,7 @@ async fn stop_goal_fences_late_run_settlement_then_clear_removes_only_the_contro
         .session
         .session_id;
     let started = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: SubmitInputMode::StartGoal,
             session_id: session_id.clone(),
             message: "keep running until stopped".to_owned(),
@@ -431,7 +431,7 @@ async fn blocked_goal_resumes_with_visible_user_guidance_and_a_new_generation() 
         .session
         .session_id;
     let first = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: SubmitInputMode::StartGoal,
             session_id: session_id.clone(),
             message: "ship release".to_owned(),
@@ -456,7 +456,7 @@ async fn blocked_goal_resumes_with_visible_user_guidance_and_a_new_generation() 
         assert_eq!(goal.generation, 2);
     }
     let resumed = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: SubmitInputMode::ResumeGoal,
             session_id: session_id.clone(),
             message: "Use the stable release channel".to_owned(),
@@ -557,7 +557,7 @@ async fn fork_copies_goal_only_when_the_objective_message_is_in_the_prefix() {
         .expect("source session")
         .session;
     let baseline = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: SubmitInputMode::Normal,
             session_id: source.session_id.clone(),
             message: "baseline turn".to_owned(),
@@ -572,7 +572,7 @@ async fn fork_copies_goal_only_when_the_objective_message_is_in_the_prefix() {
         .expect("baseline input");
     wait_for_terminal(&runtime, &source.session_id, &baseline.run.run_id).await;
     let goal_run = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: SubmitInputMode::StartGoal,
             session_id: source.session_id.clone(),
             message: "forkable Goal".to_owned(),
@@ -671,7 +671,7 @@ async fn goal_pauses_after_three_consecutive_run_failures_without_retrying_an_at
         .session
         .session_id;
     runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: SubmitInputMode::StartGoal,
             session_id: session_id.clone(),
             message: "retry across Goal Runs".to_owned(),
@@ -776,7 +776,7 @@ async fn paused_goal_can_resume_with_a_hidden_runtime_continuation() {
         .session
         .session_id;
     let first = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: SubmitInputMode::StartGoal,
             session_id: session_id.clone(),
             message: "resume without guidance".to_owned(),
@@ -800,7 +800,30 @@ async fn paused_goal_can_resume_with_a_hidden_runtime_continuation() {
         })
         .await
         .expect("resume without message");
-    wait_for_terminal(&runtime, &session_id, &resumed.run.run_id).await;
+    let resumed_input = runtime
+        .session(&session_id)
+        .await
+        .unwrap()
+        .lock_state()
+        .unwrap()
+        .inputs
+        .values()
+        .find(|input| {
+            input
+                .stored
+                .goal_binding
+                .as_ref()
+                .is_some_and(|binding| binding.generation == resumed.goal.generation)
+        })
+        .unwrap()
+        .stored
+        .input_id
+        .clone();
+    let resumed_run = runtime
+        .wait_for_input_claim(&session_id, &resumed_input)
+        .await
+        .unwrap();
+    wait_for_terminal(&runtime, &session_id, &resumed_run.run_id).await;
     let requests = model.take_requests();
     assert!(requests[2].conversation.messages.iter().any(|message| {
         matches!(message, ConversationMessage::User(user)
@@ -863,7 +886,7 @@ async fn held_user_input_can_be_bound_to_goal_resume_without_duplication() {
         .session
         .session_id;
     let first = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: SubmitInputMode::StartGoal,
             session_id: session_id.clone(),
             message: "wait for held guidance".to_owned(),
@@ -901,8 +924,31 @@ async fn held_user_input_can_be_bound_to_goal_resume_without_duplication() {
         })
         .await
         .expect("bind held guidance");
-    assert_eq!(resumed.run.run_id, held.run.run_id);
-    wait_for_terminal(&runtime, &session_id, &resumed.run.run_id).await;
+    assert!(resumed.run.is_none());
+    let resumed_input = runtime
+        .session(&session_id)
+        .await
+        .unwrap()
+        .lock_state()
+        .unwrap()
+        .inputs
+        .values()
+        .find(|input| {
+            input
+                .stored
+                .goal_binding
+                .as_ref()
+                .is_some_and(|binding| binding.generation == resumed.goal.generation)
+        })
+        .unwrap()
+        .stored
+        .input_id
+        .clone();
+    let resumed_run = runtime
+        .wait_for_input_claim(&session_id, &resumed_input)
+        .await
+        .unwrap();
+    wait_for_terminal(&runtime, &session_id, &resumed_run.run_id).await;
     let requests = model.take_requests();
     assert!(requests[2].conversation.messages.iter().any(|message| {
         matches!(message, ConversationMessage::User(user)
@@ -955,7 +1001,7 @@ async fn reported_usage_does_not_pause_goal_before_the_run_limit() {
         .session
         .session_id;
     let run = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: SubmitInputMode::StartGoal,
             session_id: session_id.clone(),
             message: "bounded Goal".to_owned(),

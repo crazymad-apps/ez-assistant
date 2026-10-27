@@ -58,7 +58,8 @@ pub struct SessionMaterializationManifest {
 pub struct SessionMaterializationResult {
     pub session: SessionSummary,
     pub input_id: InputId,
-    pub run: RunSnapshot,
+    /// 新入队时为空；只有已经实际领取的幂等结果才携带 Run。
+    pub run: Option<RunSnapshot>,
     pub attachments: Vec<AttachmentSummary>,
 }
 

@@ -16,6 +16,17 @@ pub struct RuntimeHostHealth {
     pub min_compatible_host_version: Option<String>,
     pub target_version: String,
     pub error: Option<RuntimeHostStartupError>,
+    /// 当前阶段已完成的工作项；未知总量时省略，不推算百分比或耗时。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub progress: Option<RuntimeHostStartupProgress>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct RuntimeHostStartupProgress {
+    pub completed: u64,
+    pub total: u64,
 }
 
 /// `/health` 的稳定就绪状态。
@@ -35,7 +46,10 @@ pub enum RuntimeHostHealthStatus {
 pub enum RuntimeHostStartupStage {
     DatabaseCheck,
     DatabaseBackup,
+    HistoryBackup,
+    BackupVerification,
     DatabaseMigration,
+    HistoryMigration,
     Configuration,
     Recovery,
 }
@@ -119,6 +133,7 @@ mod tests {
             min_compatible_host_version: None,
             target_version: "0.25.0".into(),
             error: None,
+            progress: None,
         };
         assert_eq!(
             serde_json::to_string(&health).expect("health JSON"),

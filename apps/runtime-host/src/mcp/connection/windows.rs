@@ -23,7 +23,7 @@ pub(super) fn resolve_program(
         .or_else(|| std::env::var_os("PATH"));
     resolve_path(program, cwd, path.as_deref()).ok_or_else(|| connection_error(
         McpConnectionFailureKind::Connect,
-        "MCP Windows executable was not found; configure an existing .exe, .cmd or .bat path, or add its directory to PATH",
+        "找不到 MCP Windows 启动程序，请配置已存在的 .exe、.cmd 或 .bat 路径，或将其目录加入 PATH",
     ))
 }
 

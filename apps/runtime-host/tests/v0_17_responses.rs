@@ -31,15 +31,12 @@ fn formal_host_uses_the_explicit_responses_protocol_without_chat_fallback() {
         .as_str()
         .expect("session id")
         .to_owned();
-    let submitted = client.runtime(
-        "submit_input",
-        json!({
-            "session_id": session_id,
-            "message": "RESPONSES_CASE",
-            "variant": "build",
-            "idempotency_key": "responses-offline"
-        }),
-    );
+    let submitted = client.submit_started_input(json!({
+        "session_id": session_id,
+        "message": "RESPONSES_CASE",
+        "variant": "build",
+        "idempotency_key": "responses-offline"
+    }));
     let run_id = submitted["run"]["run_id"]
         .as_str()
         .expect("run id")
@@ -47,15 +44,12 @@ fn formal_host_uses_the_explicit_responses_protocol_without_chat_fallback() {
     let run = client.wait_for_status("Responses run", &session_id, &run_id, &["completed"]);
     assert_eq!(run["text"], "responses offline answer");
 
-    let submitted = client.runtime(
-        "submit_input",
-        json!({
-            "session_id": session_id,
-            "message": "RESPONSES_TOOL_CASE",
-            "variant": "build",
-            "idempotency_key": "responses-offline-tool"
-        }),
-    );
+    let submitted = client.submit_started_input(json!({
+        "session_id": session_id,
+        "message": "RESPONSES_TOOL_CASE",
+        "variant": "build",
+        "idempotency_key": "responses-offline-tool"
+    }));
     let run_id = submitted["run"]["run_id"]
         .as_str()
         .expect("tool run id")
@@ -94,15 +88,12 @@ fn opaque_reasoning_survives_formal_host_restart_and_replays_on_the_exact_route(
         .as_str()
         .expect("session id")
         .to_owned();
-    let submitted = first.runtime(
-        "submit_input",
-        json!({
-            "session_id": session_id,
-            "message": "RESPONSES_OPAQUE_CASE",
-            "variant": "build",
-            "idempotency_key": "responses-opaque-store"
-        }),
-    );
+    let submitted = first.submit_started_input(json!({
+        "session_id": session_id,
+        "message": "RESPONSES_OPAQUE_CASE",
+        "variant": "build",
+        "idempotency_key": "responses-opaque-store"
+    }));
     let run_id = submitted["run"]["run_id"]
         .as_str()
         .expect("run id")
@@ -125,15 +116,12 @@ fn opaque_reasoning_survives_formal_host_restart_and_replays_on_the_exact_route(
     let second_host = HostProcess::start(runtime_home.path());
     let mut second = second_host.connect();
     second.runtime("get_session", json!({"session_id": session_id}));
-    let submitted = second.runtime(
-        "submit_input",
-        json!({
-            "session_id": session_id,
-            "message": "RESPONSES_OPAQUE_REPLAY_CASE",
-            "variant": "build",
-            "idempotency_key": "responses-opaque-replay"
-        }),
-    );
+    let submitted = second.submit_started_input(json!({
+        "session_id": session_id,
+        "message": "RESPONSES_OPAQUE_REPLAY_CASE",
+        "variant": "build",
+        "idempotency_key": "responses-opaque-replay"
+    }));
     let run_id = submitted["run"]["run_id"]
         .as_str()
         .expect("replay run id")

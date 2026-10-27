@@ -3,6 +3,7 @@ use super::{Migration, v0_30_0};
 
 pub(super) fn entry() -> Migration {
     Migration {
+        key: "release",
         version: "0.31.0",
         min_compatible_host_version: Some("0.30.0"),
         rebuilds_referenced_tables: false,

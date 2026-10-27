@@ -18,15 +18,18 @@ mod error;
 mod factory;
 mod feedback;
 pub use feedback::FeedbackMutation;
+mod execution_window;
 mod goal;
 mod id;
 mod internal_boundary;
 mod journal;
+pub use execution_window::ExecutionWindow;
 mod mcp;
 mod memory;
 mod observation;
 mod permission;
 mod plugin;
+pub mod request_diagnostics;
 mod run;
 mod runtime;
 mod session;
@@ -82,8 +85,8 @@ pub use factory::{
     validate_fixed_model_parameters,
 };
 pub use mcp::{
-    McpConfigSource, McpConnection, McpConnectionError, McpConnectionFactory,
-    McpConnectionFailureKind, McpConnectionFuture, McpConnectionOptions,
+    ManagedMcpServerDefinition, McpConfigSource, McpConnection, McpConnectionError,
+    McpConnectionFactory, McpConnectionFailureKind, McpConnectionFuture, McpConnectionOptions,
     McpImageMaterializationFailure, McpImageMaterializationFuture, McpImageMaterializer,
     McpRawCallResult, McpRawContent, McpSecret, McpServerConfig, McpServerTransportConfig,
     McpToolDefinition, McpToolPage,
@@ -106,14 +109,17 @@ pub use runtime::{
     StagedSessionAttachment,
 };
 pub use skill::{
-    MAX_CATALOG_SKILLS, PluginSkillPackage, SkillActivationOwner, SkillActivationResolveError,
-    SkillActivationTrigger, SkillCandidate, SkillCatalog, SkillCatalogStatus, SkillDefinition,
-    SkillDiagnostic, SkillDiagnosticCode, SkillDiagnosticSeverity, SkillDiscovery,
-    SkillDiscoveryStatus, SkillMetadata, SkillName, SkillNameError, SkillNameState,
-    SkillNameStateChange, SkillPackageSource, SkillPackageSourceError, SkillScanFuture,
-    SkillScanRequest, SkillScanResult, SkillSource, StoredSkillActivation, compile_skill_discovery,
-    explicit_skill_states, sort_diagnostics,
+    BUILTIN_GUIDE_REFERENCES, BUILTIN_GUIDE_SKILL_NAME, MAX_CATALOG_SKILLS,
+    MAX_SKILL_REFERENCE_BYTES, PluginSkillPackage, SkillActivationOwner,
+    SkillActivationResolveError, SkillActivationTrigger, SkillCandidate, SkillCatalog,
+    SkillCatalogStatus, SkillDefinition, SkillDiagnostic, SkillDiagnosticCode,
+    SkillDiagnosticSeverity, SkillDiscovery, SkillDiscoveryStatus, SkillMetadata, SkillName,
+    SkillNameError, SkillNameState, SkillNameStateChange, SkillPackageSource,
+    SkillPackageSourceError, SkillScanFuture, SkillScanRequest, SkillScanResult, SkillSource,
+    StoredSkillActivation, compile_skill_discovery, explicit_skill_states, sort_diagnostics,
 };
+pub use skill::{SkillReferenceFuture, SkillReferenceRequest};
+pub use storage::StoredConversationUsage;
 pub use storage::{
     AcceptedInput, AcceptedStoredSessionCommand, ApprovalModeChange, ArchiveChange, ChildTaskStart,
     ChildToolExecutionStart, CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
@@ -135,20 +141,22 @@ pub use storage::{
     SessionHistoryCompactionPreparationResult, SessionPinnedChange, SessionProxyChange,
     SessionProxyState, SessionRole, SessionSummaryQuery, SessionTitleChange,
     SessionTitleGenerationCommit, SessionTitleGenerationCommitResult, StoreError, StoreErrorKind,
-    StoreFuture, StoredAttachment, StoredAttachmentState, StoredChildTask,
-    StoredChildTaskSettlement, StoredConversationMessageLocation, StoredConversationRawWindow,
-    StoredConversationState, StoredConversationWindow, StoredCustomAgent, StoredGoal,
-    StoredGoalBudget, StoredGoalObjective, StoredGoalObjectivePart, StoredGoalPauseReason,
-    StoredGoalSettlementEffect, StoredGoalState, StoredInput, StoredInputState, StoredMcpSelection,
-    StoredMessageFeedback, StoredModelCatalog, StoredPlugin, StoredPluginOperation, StoredProvider,
-    StoredQueueItem, StoredRun, StoredRunContinuation, StoredRunContinuationResult,
-    StoredRunSettlement, StoredRunSettlementResult, StoredSession, StoredSessionCommand,
-    StoredSessionCommandResult, StoredSessionCommandState, StoredSessionFork,
-    StoredSessionLifecycle, StoredSessionMaterialization, StoredSessionUsage,
-    StoredTerminalRunInputReconciliation, StoredTodoItemStatus, StoredWorkPlan, StoredWorkPlanItem,
-    StoredWorkspace, StoredWorkspaceLifecycle, ToolExecutionStart, UserMessageCommit,
-    VariantChange, WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval,
-    WorkspaceRestoration, WorkspaceUpdate, attachment_stable_view_path, custom_agent_revision,
+    StoreFuture, StoredAttachment, StoredAttachmentState, StoredChildTask, StoredChildTaskHistory,
+    StoredChildTaskSettlement, StoredConversationHistory, StoredConversationMessageLocation,
+    StoredConversationRawWindow, StoredConversationState, StoredConversationWindow,
+    StoredCustomAgent, StoredGoal, StoredGoalBudget, StoredGoalObjective, StoredGoalObjectivePart,
+    StoredGoalPauseReason, StoredGoalSettlementEffect, StoredGoalState, StoredHistoryAttachment,
+    StoredHistoryFacts, StoredHistoryFeedback, StoredInput, StoredInputHistory, StoredInputState,
+    StoredMcpSelection, StoredMessageFeedback, StoredMessageOrigin, StoredModelCatalog,
+    StoredPlugin, StoredPluginOperation, StoredProvider, StoredQueueItem, StoredRun,
+    StoredRunContinuation, StoredRunContinuationResult, StoredRunHistory, StoredRunSettlement,
+    StoredRunSettlementResult, StoredSession, StoredSessionCommand, StoredSessionCommandResult,
+    StoredSessionCommandState, StoredSessionFork, StoredSessionLifecycle,
+    StoredSessionMaterialization, StoredSessionUsage, StoredTerminalRunInputReconciliation,
+    StoredTodoItemStatus, StoredWorkPlan, StoredWorkPlanItem, StoredWorkspace,
+    StoredWorkspaceLifecycle, ToolExecutionStart, UserMessageCommit, VariantChange, WorkPlanClear,
+    WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval, WorkspaceRestoration,
+    WorkspaceUpdate, attachment_stable_view_path, custom_agent_revision,
     execution_context_from_product_history, merge_context_replacement_with_product_history,
     normalize_context_usage_adjustments, stored_model_catalog_is_valid, valid_custom_agent_config,
     valid_custom_agent_name, validate_input_message, validate_input_message_with_channel_source,

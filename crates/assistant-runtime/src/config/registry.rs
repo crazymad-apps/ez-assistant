@@ -123,6 +123,7 @@ impl ConfigRegistry {
     /// 串行读取，完成宿主接纳动作后才发布快照；不在 Registry 内访问 Store。
     pub(crate) async fn reload<F, Fut>(
         &self,
+        events: &crate::observation::ObservationCoordinator,
         before_publish: F,
     ) -> RuntimeResult<Arc<ConfigSnapshot>>
     where
@@ -148,12 +149,15 @@ impl ConfigRegistry {
         }
         let next = Arc::new(next);
         before_publish(&previous, &next).await?;
-        *self
-            .snapshot
-            .write()
-            .map_err(|_| RuntimeError::InternalStateUnavailable {
-                component: "configuration registry",
-            })? = next.clone();
+        events.publish_transition(|| {
+            *self
+                .snapshot
+                .write()
+                .map_err(|_| RuntimeError::InternalStateUnavailable {
+                    component: "configuration registry",
+                })? = next.clone();
+            Ok(((), Some(assistant_protocol::RuntimeEvent::ConfigChanged)))
+        })?;
         Ok(next)
     }
 

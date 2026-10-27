@@ -16,6 +16,7 @@ export function serverHistorySupport(connection: ProviderConnection) {
     : 'unknown';
 }
 export const providerLabels: Record<ProviderConnection['provider_type'], string> = {
+  sub2api: 'Sub2API',
   opencode: 'OpenCode',
   openai: 'OpenAI',
   deepseek: 'DeepSeek',

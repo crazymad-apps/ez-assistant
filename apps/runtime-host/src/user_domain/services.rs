@@ -100,6 +100,7 @@ pub(super) async fn initialize(
     startup.stage(RuntimeHostStartupStage::DatabaseCheck);
     let (progress, mut stages) =
         tokio::sync::watch::channel(crate::storage::DatabaseStartupProgress {
+            progress: None,
             stage: RuntimeHostStartupStage::DatabaseCheck,
             database_version: None,
             min_compatible_host_version: None,
@@ -185,6 +186,7 @@ pub(super) async fn initialize(
     if let Some((credentials, key)) = &owner.plugin_center {
         plugin_files = plugin_files.with_center(credentials.clone(), key.clone());
     }
+    let builtin_mcp = crate::builtin::mcp_definitions().map_err(|_| ConfigurationInvalid)?;
     let runtime = match AssistantRuntime::open_with_recall_key(
         RuntimeConfig::new(event_capacity),
         source.clone(),
@@ -214,6 +216,7 @@ pub(super) async fn initialize(
                         mcp_factory.clone(),
                         Arc::new(HostMcpImageMaterializer),
                     )
+                    .with_builtin_mcp_definitions(builtin_mcp)
                     .with_channel_output_dispatcher(dispatcher.clone()),
             )
         }

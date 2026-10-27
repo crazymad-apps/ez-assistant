@@ -43,7 +43,7 @@ pub(crate) struct ChildTaskRecord {
     state: Mutex<ChildTaskJournalState>,
 }
 
-/// 进程内全部子任务的权威结构化索引。
+/// 当前进程真实 child 的执行观察与未完成控制索引；文件历史不安装进此 Registry。
 ///
 /// 正文仍只属于每个 [`ChildTaskRecord`]；Registry 不复制 Conversation。
 pub(crate) struct ChildTaskRegistry {
@@ -63,6 +63,14 @@ impl ChildTaskRegistry {
             tasks: RwLock::new(tasks),
             active: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn poison_projection_for_test(&self) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _write = self.tasks.write().unwrap();
+            panic!("injected child registry failure");
+        }));
     }
 
     pub(crate) fn contains(
@@ -119,33 +127,6 @@ impl ChildTaskRegistry {
                     .get(child_task_id)
                     .filter(|task| &task.session_id == session_id)
                     .cloned()
-            })
-    }
-
-    pub(crate) fn list(
-        &self,
-        session_id: &SessionId,
-        parent_run_id: &RunId,
-    ) -> Result<Vec<StoredChildTask>, crate::RuntimeError> {
-        self.tasks
-            .read()
-            .map_err(|_| crate::RuntimeError::InternalStateUnavailable {
-                component: "child task registry",
-            })
-            .map(|tasks| {
-                let mut listed = tasks
-                    .values()
-                    .filter(|task| {
-                        &task.session_id == session_id && &task.parent_run_id == parent_run_id
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                listed.sort_by(|left, right| {
-                    left.created_at_ms
-                        .cmp(&right.created_at_ms)
-                        .then_with(|| left.child_task_id.cmp(&right.child_task_id))
-                });
-                listed
             })
     }
 
@@ -281,6 +262,9 @@ impl ChildTaskRecord {
         stored: &StoredChildTask,
         conversation: Option<ConversationSnapshot>,
     ) -> Result<Self, crate::RuntimeError> {
+        let physical_count = conversation
+            .as_ref()
+            .map_or(0, |snapshot| snapshot.messages.len());
         let journal = if stored.conversation_state == StoredConversationState::Available {
             let snapshot = conversation.ok_or(crate::RuntimeError::InternalStateUnavailable {
                 component: "child task conversation",
@@ -294,7 +278,7 @@ impl ChildTaskRecord {
             None
         };
         let persisted_message_count = journal.as_ref().map_or(0, InMemoryJournal::message_count);
-        if u64::try_from(persisted_message_count).ok() != Some(stored.message_count) {
+        if u64::try_from(physical_count).ok() != Some(stored.message_count) {
             return Err(crate::RuntimeError::InternalStateUnavailable {
                 component: "child task message count",
             });
@@ -373,14 +357,14 @@ impl ChildTaskRecord {
     ) -> Result<(), crate::context_compaction::RuntimeCompactionError> {
         let mut state = self
             .lock_state()
-            .map_err(|_| crate::context_compaction::RuntimeCompactionError::Projection)?;
+            .map_err(|_| crate::context_compaction::RuntimeCompactionError::projection())?;
         let journal = state
             .journal
             .as_mut()
-            .ok_or(crate::context_compaction::RuntimeCompactionError::Projection)?;
+            .ok_or(crate::context_compaction::RuntimeCompactionError::projection())?;
         journal
             .replace_completed(replacement)
-            .map_err(|_| crate::context_compaction::RuntimeCompactionError::Projection)?;
+            .map_err(|_| crate::context_compaction::RuntimeCompactionError::projection())?;
         state.persisted_message_count = journal.message_count();
         state.body_generation = generation;
         Ok(())

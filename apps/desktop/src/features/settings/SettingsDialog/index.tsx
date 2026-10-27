@@ -23,6 +23,7 @@ const pages: ReadonlyArray<{ id: SettingsPage; label: string; icon: IconName }> 
   { id: "appearance", label: "外观", icon: "palette" },
   { id: "notifications", label: "系统通知", icon: "bell" },
   { id: "runtime", label: "Runtime", icon: "terminal" },
+  { id: "devices", label: "智能终端", icon: "device" },
   { id: "models", label: "模型", icon: "model" },
   { id: "memory", label: "记忆", icon: "pin" },
   { id: "permissions", label: "权限", icon: "shield" },

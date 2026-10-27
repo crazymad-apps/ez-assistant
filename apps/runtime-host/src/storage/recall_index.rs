@@ -1,11 +1,12 @@
 //! Conversation Recall 的可重建 FTS5 派生索引。
 //!
-//! Conversation JSONL 与 SQLite 中的 Conversation 元数据始终是权威数据；本模块只维护
+//! Conversation 文件与当前执行控制决定可搜索的 owner；本模块只维护
 //! 可丢弃、可重建的搜索投影。权威写入完成后会尽力增量更新索引，失败时只把对应 owner
 //! 标记为 dirty，不能反向使已经提交的 Conversation 失败。搜索时再按 owner 有界推进重建，
 //! 因而 Runtime 启动不需要扫描全部历史正文。
 
 use std::{
+    collections::{BTreeMap, HashMap},
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -36,6 +37,7 @@ struct RecallOwner {
     owner_id: String,
     session_id: SessionId,
     child_task_id: Option<ChildTaskId>,
+    child_task_title: Option<String>,
     generation: u64,
     message_count: u64,
     updated_at_ms: i64,
@@ -70,7 +72,7 @@ impl StorageEngine {
                     owner_kind, owner_id, session_id, child_task_id, body_generation,
                     indexed_message_count, state, updated_at_ms
                  ) VALUES (?1, ?2, ?3, ?4, ?5, 0, 'ready', ?6)
-                 ON CONFLICT(owner_kind, owner_id) DO NOTHING",
+                 ON CONFLICT(session_id, owner_kind, owner_id) DO NOTHING",
                 params![
                     kind,
                     owner_id,
@@ -101,7 +103,7 @@ impl StorageEngine {
                 owner_kind, owner_id, session_id, child_task_id, body_generation,
                 indexed_message_count, state, updated_at_ms
              ) VALUES (?1, ?2, ?3, ?4, ?5, 0, 'dirty', ?6)
-             ON CONFLICT(owner_kind, owner_id) DO UPDATE SET
+             ON CONFLICT(session_id, owner_kind, owner_id) DO UPDATE SET
                 session_id = excluded.session_id,
                 child_task_id = excluded.child_task_id,
                 body_generation = excluded.body_generation,
@@ -163,8 +165,8 @@ impl StorageEngine {
             .connection
             .query_row(
                 "SELECT body_generation, indexed_message_count, state
-                 FROM conversation_recall_heads WHERE owner_kind = ?1 AND owner_id = ?2",
-                params![kind, owner_id],
+                 FROM conversation_recall_heads WHERE owner_kind = ?1 AND owner_id = ?2 AND session_id = ?3",
+                params![kind, owner_id, session_id.as_str()],
                 |row| {
                     Ok((
                         row.get::<_, i64>(0)?,
@@ -240,7 +242,7 @@ impl StorageEngine {
                     owner_kind, owner_id, session_id, child_task_id, body_generation,
                     indexed_message_count, state, updated_at_ms
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'ready', ?7)
-                 ON CONFLICT(owner_kind, owner_id) DO UPDATE SET
+                 ON CONFLICT(session_id, owner_kind, owner_id) DO UPDATE SET
                     body_generation = excluded.body_generation,
                     indexed_message_count = excluded.indexed_message_count,
                     state = 'ready',
@@ -280,13 +282,32 @@ impl StorageEngine {
                 "conversation recall query is too short",
             ));
         }
-        let owners = self.recall_owners(&request.scope)?;
-        let mut partial = false;
-        let mut failed_owners = Vec::new();
+        let (owners, mut failed_owners) = self.recall_owners(&request.scope)?;
+        let mut partial = !failed_owners.is_empty();
         let mut rebuilt = 0_usize;
         // 搜索请求顺便推进 dirty/rebuilding owner，但一次只推进有限 owner，且每个 owner
         // 只处理一个批次。未达到 ready 的 owner 不参与本次查询，并通过 partial 告知上层。
         for owner in &owners {
+            // ready 索引也不能授权读取错置或待提交的正文；失败只隔离当前 owner。
+            if failed_owners.contains(&owner.owner)
+                || self
+                    .ensure_no_pending_history(&owner.owner)
+                    .and_then(|()| {
+                        self.conversation_indexes.validate_owner(
+                            &owner.path,
+                            &owner.owner,
+                            owner.generation,
+                        )
+                    })
+                    .is_err()
+            {
+                self.mark_recall_owner_unavailable(owner);
+                if !failed_owners.contains(&owner.owner) {
+                    failed_owners.push(owner.owner.clone());
+                }
+                partial = true;
+                continue;
+            }
             if !self.recall_owner_needs_work(owner)? {
                 continue;
             }
@@ -306,9 +327,10 @@ impl StorageEngine {
         }
 
         if !owners.is_empty()
-            && owners
-                .iter()
-                .all(|owner| self.recall_owner_is_unavailable(owner).unwrap_or(true))
+            && owners.iter().all(|owner| {
+                failed_owners.contains(&owner.owner)
+                    || self.recall_owner_is_unavailable(owner).unwrap_or(true)
+            })
         {
             // 局部失败允许返回其他 ready owner；只有范围内所有 owner 都不可用时，才把
             // 整次搜索提升为 Unavailable。
@@ -322,6 +344,7 @@ impl StorageEngine {
             &query,
             &request.scope,
             request.limit.clamp(1, MAX_SEARCH_LIMIT),
+            &owners,
         )?;
         Ok(ConversationSearchPage {
             hits,
@@ -335,8 +358,8 @@ impl StorageEngine {
             .connection
             .query_row(
                 "SELECT body_generation, indexed_message_count, state
-                 FROM conversation_recall_heads WHERE owner_kind = ?1 AND owner_id = ?2",
-                params![owner.owner_kind, owner.owner_id],
+                 FROM conversation_recall_heads WHERE owner_kind = ?1 AND owner_id = ?2 AND session_id = ?3",
+                params![owner.owner_kind, owner.owner_id, owner.session_id.as_str()],
                 |row| {
                     Ok((
                         row.get::<_, i64>(0)?,
@@ -364,11 +387,12 @@ impl StorageEngine {
         self.connection
             .query_row(
                 "SELECT state = 'unavailable' FROM conversation_recall_heads
-                 WHERE owner_kind = ?1 AND owner_id = ?2 AND body_generation = ?3",
+                 WHERE owner_kind = ?1 AND owner_id = ?2 AND body_generation = ?3 AND session_id = ?4",
                 params![
                     owner.owner_kind,
                     owner.owner_id,
                     to_i64(owner.generation, "recall generation exceeds SQLite range")?,
+                    owner.session_id.as_str(),
                 ],
                 |row| row.get(0),
             )
@@ -384,8 +408,8 @@ impl StorageEngine {
             .connection
             .query_row(
                 "SELECT body_generation, indexed_message_count, state
-                 FROM conversation_recall_heads WHERE owner_kind = ?1 AND owner_id = ?2",
-                params![owner.owner_kind, owner.owner_id],
+                 FROM conversation_recall_heads WHERE owner_kind = ?1 AND owner_id = ?2 AND session_id = ?3",
+                params![owner.owner_kind, owner.owner_id, owner.session_id.as_str()],
                 |row| {
                     Ok((
                         row.get::<_, i64>(0)?,
@@ -417,8 +441,8 @@ impl StorageEngine {
                 })?;
             transaction
                 .execute(
-                    "DELETE FROM conversation_recall_documents WHERE owner_kind = ?1 AND owner_id = ?2",
-                    params![owner.owner_kind, owner.owner_id],
+                    "DELETE FROM conversation_recall_documents WHERE owner_kind = ?1 AND owner_id = ?2 AND session_id = ?3",
+                    params![owner.owner_kind, owner.owner_id, owner.session_id.as_str()],
                 )
                 .map_err(|source| internal_error("stale recall documents could not be removed", source))?;
             transaction
@@ -427,7 +451,7 @@ impl StorageEngine {
                         owner_kind, owner_id, session_id, child_task_id, body_generation,
                         indexed_message_count, state, updated_at_ms
                      ) VALUES (?1, ?2, ?3, ?4, ?5, 0, 'rebuilding', ?6)
-                     ON CONFLICT(owner_kind, owner_id) DO UPDATE SET
+                     ON CONFLICT(session_id, owner_kind, owner_id) DO UPDATE SET
                         session_id = excluded.session_id,
                         child_task_id = excluded.child_task_id,
                         body_generation = excluded.body_generation,
@@ -501,7 +525,7 @@ impl StorageEngine {
             .execute(
                 "UPDATE conversation_recall_heads
                  SET indexed_message_count = ?1, state = ?2, updated_at_ms = ?3
-                 WHERE owner_kind = ?4 AND owner_id = ?5 AND body_generation = ?6",
+                 WHERE owner_kind = ?4 AND owner_id = ?5 AND body_generation = ?6 AND session_id = ?7",
                 params![
                     to_i64(
                         u64::try_from(end).map_err(|source| {
@@ -518,6 +542,7 @@ impl StorageEngine {
                     owner.owner_kind,
                     owner.owner_id,
                     to_i64(owner.generation, "recall generation exceeds SQLite range")?,
+                    owner.session_id.as_str(),
                 ],
             )
             .map_err(|source| {
@@ -535,9 +560,12 @@ impl StorageEngine {
         Ok(end == total)
     }
 
-    fn recall_owners(&self, scope: &ConversationSearchScope) -> StorageResult<Vec<RecallOwner>> {
+    fn recall_owners(
+        &mut self,
+        scope: &ConversationSearchScope,
+    ) -> StorageResult<(Vec<RecallOwner>, Vec<ConversationOwner>)> {
         // Scope 只决定纳入哪些主 Session；每个命中的 Session 还会带上其 child Conversation。
-        // owner 的 generation/message_count/path 均从权威元数据推导，不信任派生索引头。
+        // 历史 child 来自主文件目录，在途 child 来自未完成控制；不以搜索索引头发现历史。
         let session_filter = match scope {
             ConversationSearchScope::Session { .. } => "WHERE sessions.session_id = ?1",
             ConversationSearchScope::Workspace { .. } => {
@@ -572,6 +600,7 @@ impl StorageEngine {
         drop(statement);
 
         let mut owners = Vec::new();
+        let mut failed = Vec::new();
         for (session, generation, count, updated_at_ms) in sessions {
             let session_id = SessionId::new(session).map_err(|source| {
                 StoreError::with_source(
@@ -589,39 +618,68 @@ impl StorageEngine {
                 owner_id: session_id.as_str().to_owned(),
                 session_id: session_id.clone(),
                 child_task_id: None,
+                child_task_title: None,
                 generation,
                 message_count: non_negative_u64(count, "stored recall message count is invalid")?,
                 updated_at_ms,
                 path: body_path(&self.session_directory(&session_id)?, generation),
             });
-            let mut children = self
-                .connection
-                .prepare(
-                    "SELECT child_task_id, body_generation, message_count,
-                            COALESCE(finished_at_ms, started_at_ms, created_at_ms)
-                     FROM child_tasks WHERE session_id = ?1
-                     ORDER BY COALESCE(finished_at_ms, started_at_ms, created_at_ms) DESC,
-                              child_task_id",
-                )
-                .map_err(|source| {
-                    internal_error("child recall owners could not be queried", source)
-                })?;
-            let child_rows = children
+            let mut child_owners = BTreeMap::new();
+            match self.load_child_history_catalog(&session_id) {
+                Ok(children) => {
+                    for child in children {
+                        let owner = ConversationOwner::ChildTask {
+                            session_id: session_id.clone(),
+                            child_task_id: child.child_task_id.clone(),
+                        };
+                        child_owners.insert(
+                            child.child_task_id.clone(),
+                            RecallOwner {
+                                owner_id: owner_fields(&owner).1,
+                                owner,
+                                owner_kind: "child_task",
+                                session_id: session_id.clone(),
+                                child_task_id: Some(child.child_task_id.clone()),
+                                child_task_title: Some(child.title),
+                                generation: child.body_generation,
+                                message_count: child.message_count,
+                                updated_at_ms: child
+                                    .finished_at_ms
+                                    .or(child.started_at_ms)
+                                    .unwrap_or(child.created_at_ms),
+                                path: self.child_body(
+                                    &session_id,
+                                    &child.child_task_id,
+                                    child.body_generation,
+                                )?,
+                            },
+                        );
+                    }
+                }
+                Err(_) => failed.push(ConversationOwner::MainSession {
+                    session_id: session_id.clone(),
+                }),
+            }
+            // 未闭合的父交换还没有文件 child 目录；这里只读取真实未完成控制的最小定位字段。
+            let mut statement = self.connection.prepare(
+                "SELECT child_task_id,body_generation,message_count,COALESCE(started_at_ms,created_at_ms),title
+                 FROM child_tasks WHERE session_id=?1 AND status IN ('accepted','running')").map_err(|source| internal_error("child recall controls could not be queried", source))?;
+            let controls = statement
                 .query_map([session_id.as_str()], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, i64>(1)?,
                         row.get::<_, i64>(2)?,
                         row.get::<_, i64>(3)?,
+                        row.get::<_, String>(4)?,
                     ))
                 })
-                .map_err(|source| internal_error("child recall owners could not be read", source))?
-                .collect::<Result<Vec<_>, _>>()
                 .map_err(|source| {
-                    internal_error("child recall owner row could not be read", source)
-                })?;
-            drop(children);
-            for (child, generation, count, updated_at_ms) in child_rows {
+                    internal_error("child recall controls could not be read", source)
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|source| internal_error("child recall control row is invalid", source))?;
+            for (child, generation, count, updated_at_ms, title) in controls {
                 let child_task_id = ChildTaskId::new(child).map_err(|source| {
                     StoreError::with_source(
                         StoreErrorKind::InvalidData,
@@ -631,33 +689,48 @@ impl StorageEngine {
                 })?;
                 let generation =
                     non_negative_u64(generation, "stored child recall generation is invalid")?;
-                owners.push(RecallOwner {
-                    owner: ConversationOwner::ChildTask {
-                        session_id: session_id.clone(),
-                        child_task_id: child_task_id.clone(),
-                    },
-                    owner_kind: "child_task",
-                    owner_id: child_task_id.as_str().to_owned(),
+                let owner = ConversationOwner::ChildTask {
                     session_id: session_id.clone(),
-                    child_task_id: Some(child_task_id.clone()),
-                    generation,
-                    message_count: non_negative_u64(
-                        count,
-                        "stored child recall message count is invalid",
-                    )?,
-                    updated_at_ms,
-                    path: self.child_body(&session_id, &child_task_id, generation)?,
-                });
+                    child_task_id: child_task_id.clone(),
+                };
+                child_owners.insert(
+                    child_task_id.clone(),
+                    RecallOwner {
+                        owner_id: owner_fields(&owner).1,
+                        owner,
+                        owner_kind: "child_task",
+                        session_id: session_id.clone(),
+                        child_task_id: Some(child_task_id.clone()),
+                        child_task_title: Some(title),
+                        generation,
+                        message_count: non_negative_u64(
+                            count,
+                            "stored child recall message count is invalid",
+                        )?,
+                        updated_at_ms,
+                        path: self.child_body(&session_id, &child_task_id, generation)?,
+                    },
+                );
             }
+            let mut children: Vec<_> = child_owners.into_values().collect();
+            children.sort_by(|a, b| {
+                b.updated_at_ms
+                    .cmp(&a.updated_at_ms)
+                    .then_with(|| a.child_task_id.cmp(&b.child_task_id))
+            });
+            owners.extend(children);
         }
-        Ok(owners)
+        Ok((owners, failed))
     }
 
+    /// SQL 只筛词项与 ready head；命中的完整 owner、代次和标题必须匹配本次权威目录。
+    /// 先过滤再应用结果上限，旧索引命中不能挤掉后续有效结果；逐行消费，不收集全量匹配正文。
     fn query_ready_recall_documents(
         &self,
         query: &str,
         scope: &ConversationSearchScope,
         limit: usize,
+        owners: &[RecallOwner],
     ) -> StorageResult<Vec<ConversationSearchHit>> {
         let scope_clause = match scope {
             ConversationSearchScope::Session { .. } => "AND documents.session_id = ?2",
@@ -667,142 +740,102 @@ impl StorageEngine {
             ConversationSearchScope::Global => "",
         };
         let sql = format!(
-            "SELECT documents.owner_kind, documents.session_id, documents.child_task_id,
-                    documents.body_generation, documents.message_id, documents.message_ordinal,
-                    documents.created_at_ms, documents.normalized_text
+            "SELECT documents.owner_kind,documents.owner_id,documents.session_id,documents.child_task_id,
+                    documents.body_generation,documents.message_id,documents.message_ordinal,
+                    documents.created_at_ms,documents.normalized_text
              FROM conversation_recall_fts
-             JOIN conversation_recall_documents AS documents
-               ON documents.document_rowid = conversation_recall_fts.rowid
-             JOIN conversation_recall_heads AS heads
-               ON heads.owner_kind = documents.owner_kind AND heads.owner_id = documents.owner_id
-             WHERE conversation_recall_fts.normalized_text MATCH ?1
-               AND heads.state = 'ready'
-               AND heads.body_generation = documents.body_generation
-               AND (
-                    (documents.owner_kind = 'session' AND EXISTS (
-                        SELECT 1 FROM sessions AS current_session
-                        WHERE current_session.session_id = documents.session_id
-                          AND current_session.body_generation = documents.body_generation
-                    ))
-                    OR
-                    (documents.owner_kind = 'child_task' AND EXISTS (
-                        SELECT 1 FROM child_tasks AS current_child
-                        WHERE current_child.child_task_id = documents.child_task_id
-                          AND current_child.session_id = documents.session_id
-                          AND current_child.body_generation = documents.body_generation
-                    ))
-               )
+             JOIN conversation_recall_documents AS documents ON documents.document_rowid=conversation_recall_fts.rowid
+             JOIN conversation_recall_heads AS heads ON heads.owner_kind=documents.owner_kind AND heads.owner_id=documents.owner_id
+             WHERE conversation_recall_fts.normalized_text MATCH ?1 AND heads.state='ready'
+               AND heads.session_id=documents.session_id
+               AND heads.child_task_id IS documents.child_task_id
+               AND heads.body_generation=documents.body_generation
                {scope_clause}
-             ORDER BY bm25(conversation_recall_fts), documents.created_at_ms DESC,
-                      documents.session_id, COALESCE(documents.child_task_id, ''),
-                      documents.message_ordinal
-             LIMIT ?3"
+             ORDER BY bm25(conversation_recall_fts),documents.created_at_ms DESC,
+                      documents.session_id,COALESCE(documents.child_task_id,''),documents.message_ordinal"
         );
-        // 将归一化后的用户输入作为 FTS phrase 查询，并继续通过绑定参数交给 SQLite，避免
-        // 用户文本成为 FTS 查询语法。多词查询因此采用保守的连续短语语义。
         let match_query = format!("\"{}\"", query.replace('"', "\"\""));
         let scope_value = match scope {
             ConversationSearchScope::Session { session_id } => session_id.as_str(),
             ConversationSearchScope::Workspace { workspace_id } => workspace_id.as_str(),
             ConversationSearchScope::Global => "",
         };
+        let parameters = if matches!(scope, ConversationSearchScope::Global) {
+            vec![match_query.as_str()]
+        } else {
+            vec![match_query.as_str(), scope_value]
+        };
+        let current: HashMap<_, _> = owners
+            .iter()
+            .map(|owner| {
+                (
+                    (
+                        owner.owner_kind,
+                        owner.session_id.as_str(),
+                        owner.child_task_id.as_ref().map(ChildTaskId::as_str),
+                    ),
+                    owner,
+                )
+            })
+            .collect();
         let mut statement = self.connection.prepare(&sql).map_err(|source| {
             internal_error("conversation recall query could not be prepared", source)
         })?;
         let rows = statement
-            .query_map(
-                params![
-                    match_query,
-                    scope_value,
-                    i64::try_from(limit).unwrap_or(MAX_SEARCH_LIMIT as i64)
-                ],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, i64>(3)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, i64>(5)?,
-                        row.get::<_, i64>(6)?,
-                        row.get::<_, String>(7)?,
-                    ))
-                },
-            )
+            .query_map(rusqlite::params_from_iter(parameters), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, String>(8)?,
+                ))
+            })
             .map_err(|source| {
                 internal_error("conversation recall query could not be executed", source)
             })?;
-        let records = rows.collect::<Result<Vec<_>, _>>().map_err(|source| {
-            internal_error("conversation recall result could not be read", source)
-        })?;
-        records
-            .into_iter()
-            .map(
-                |(kind, session, child, generation, message, ordinal, created_at_ms, text)| {
-                    let session_id = SessionId::new(session).map_err(|source| {
-                        StoreError::with_source(
-                            StoreErrorKind::InvalidData,
-                            "stored session id is invalid",
-                            source,
-                        )
-                    })?;
-                    let owner = match (kind.as_str(), child) {
-                        ("session", None) => ConversationOwner::MainSession { session_id },
-                        ("child_task", Some(child)) => ConversationOwner::ChildTask {
-                            session_id,
-                            child_task_id: ChildTaskId::new(child).map_err(|source| {
-                                StoreError::with_source(
-                                    StoreErrorKind::InvalidData,
-                                    "stored child task id is invalid",
-                                    source,
-                                )
-                            })?,
-                        },
-                        _ => {
-                            return Err(StoreError::new(
-                                StoreErrorKind::InvalidData,
-                                "stored recall owner is invalid",
-                            ));
-                        }
-                    };
-                    let child_task_title = match &owner {
-                        ConversationOwner::MainSession { .. } => None,
-                        ConversationOwner::ChildTask { child_task_id, .. } => self
-                            .connection
-                            .query_row(
-                                "SELECT title FROM child_tasks WHERE child_task_id = ?1",
-                                [child_task_id.as_str()],
-                                |row| row.get::<_, String>(0),
-                            )
-                            .optional()
-                            .map_err(|e| {
-                                internal_error("recall child title could not be read", e)
-                            })?,
-                    };
-                    Ok(ConversationSearchHit {
-                        child_task_title,
-                        owner,
-                        generation: non_negative_u64(
-                            generation,
-                            "stored recall generation is invalid",
-                        )?,
-                        message_id: MessageId::new(message).map_err(|source| {
-                            StoreError::with_source(
-                                StoreErrorKind::InvalidData,
-                                "stored message id is invalid",
-                                source,
-                            )
-                        })?,
-                        message_ordinal: non_negative_u64(
-                            ordinal,
-                            "stored recall ordinal is invalid",
-                        )?,
-                        created_at_ms,
-                        text,
-                    })
-                },
-            )
-            .collect()
+        let mut hits = Vec::with_capacity(limit);
+        for row in rows {
+            let (kind, owner_id, session, child, generation, message, ordinal, created_at_ms, text) =
+                row.map_err(|source| {
+                    internal_error("conversation recall result could not be read", source)
+                })?;
+            let Some(owner) = current.get(&(kind.as_str(), session.as_str(), child.as_deref()))
+            else {
+                continue;
+            };
+            let generation = non_negative_u64(generation, "stored recall generation is invalid")?;
+            let ordinal = non_negative_u64(ordinal, "stored recall ordinal is invalid")?;
+            if owner.owner_id != owner_id
+                || owner.generation != generation
+                || ordinal >= owner.message_count
+            {
+                continue;
+            }
+            hits.push(ConversationSearchHit {
+                child_task_title: owner.child_task_title.clone(),
+                owner: owner.owner.clone(),
+                generation,
+                message_id: MessageId::new(message).map_err(|source| {
+                    StoreError::with_source(
+                        StoreErrorKind::InvalidData,
+                        "stored message id is invalid",
+                        source,
+                    )
+                })?,
+                message_ordinal: ordinal,
+                created_at_ms,
+                text,
+            });
+            if hits.len() == limit {
+                break;
+            }
+        }
+        Ok(hits)
     }
 
     fn mark_recall_owner_unavailable(&self, owner: &RecallOwner) {
@@ -810,8 +843,13 @@ impl StorageEngine {
         // 本次失败反馈给调用方，不能因为状态标记失败而影响其他 owner 的查询结果。
         let _ = self.connection.execute(
             "UPDATE conversation_recall_heads SET state = 'unavailable', updated_at_ms = ?1
-             WHERE owner_kind = ?2 AND owner_id = ?3",
-            params![now_ms(), owner.owner_kind, owner.owner_id],
+             WHERE owner_kind = ?2 AND owner_id = ?3 AND session_id = ?4",
+            params![
+                now_ms(),
+                owner.owner_kind,
+                owner.owner_id,
+                owner.session_id.as_str()
+            ],
         );
     }
 }
@@ -830,15 +868,16 @@ fn insert_document(
         return Ok(());
     }
     let content_hash = format!("{:x}", Sha256::digest(normalized.as_bytes()));
-    let document_id = format!(
-        "{}:{}:{}:{}",
+    let document_id = serde_json::json!([
+        context.session_id.as_str(),
         context.owner_kind,
         context.owner_id,
         context.generation,
         message_id.as_str()
-    );
-    // document_id 包含 generation，使新旧正文不会发生键碰撞。真正可见性仍由查询阶段的
-    // ready head 与权威 owner generation 双重约束，而不是仅依赖文档自身字段。
+    ])
+    .to_string();
+    // 完整 owner、generation 和 Message ID 以结构化数组编码，重复历史 ID 与分隔符不造成碰撞。
+    // 真正可见性仍由 ready head 与权威文件目录双重约束，不仅依赖文档自身字段。
     transaction
         .execute(
             "INSERT INTO conversation_recall_documents (

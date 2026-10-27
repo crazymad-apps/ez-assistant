@@ -1,3 +1,6 @@
+import { compatibilityHeaders, type McpConfigurationSnapshot } from "@ez-assistant/protocol";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { expect, type Page } from "@playwright/test";
 
 /** 正式 Host 浏览器回证；只使用全局 setup 创建的临时会话和安全 MCP fixture。 */
@@ -77,4 +80,63 @@ async function expectCleanPage(page: Page, secret: string): Promise<void> {
   }));
   expect(exposed).not.toContain(secret);
   expect(exposed).not.toContain("e2e-placeholder-not-a-real-secret");
+}
+
+/** F05 的两种客户端复用同一 UI；只连本地夹具，测试连接绝不调用搜索。 */
+export async function expectBuiltinMcpAcceptance(page: Page): Promise<void> {
+  await page.getByRole("button", { name: "账号与 Runtime" }).click();
+  await page.getByRole("menuitem", { name: "设置" }).click();
+  const settings=page.getByRole("dialog",{name:"设置"});
+  await settings.getByRole("button",{name:"MCP",exact:true}).click();
+  const open=async()=>settings.getByRole("button",{name:/DeepSeek 搜索 deepseek-search/}).click();
+  await open();
+  await expect(settings.getByRole("checkbox",{name:"启用此服务"})).not.toBeChecked();
+  await settings.getByLabel("环境变量值 1",{exact:true}).fill("e2e-builtin-fake-key");
+  await settings.getByLabel("环境变量值 2",{exact:true}).fill(process.env.EZ_ASSISTANT_E2E_SEARCH_BASE_URL!);
+  await settings.getByRole("button",{name:"保存",exact:true}).click();
+  await open();
+  await expect(settings.getByRole("checkbox",{name:"启用此服务"})).not.toBeChecked();
+  await expect(settings.getByLabel("环境变量值 1",{exact:true})).toHaveValue("");
+  await settings.getByRole("button",{name:"测试连接",exact:true}).click();
+  await expect(settings.getByText(/连接测试成功.*1 个工具/)).toBeVisible();
+  await expect(settings.getByRole("checkbox",{name:"启用此服务"})).not.toBeChecked();
+  // 另一客户端先提交；SSE 更新不能覆盖已打开的旧草稿，旧 revision 也不能覆盖文件。
+  await settings.getByLabel("环境变量值 1",{exact:true}).fill("f05-unsaved-draft");
+  const current=await builtinCommand("get_mcp_configuration",{});
+  const server=current.snapshot.servers.find((entry)=>entry.source.type==="builtin")!;
+  await builtinCommand("mutate_mcp_configuration",{
+    expected_revision:server.managed!.revision,
+    mutation:{type:"patch_managed",payload:{target:{source:server.source,server_key:server.server_key},expected_definition_digest:server.managed!.definition_digest,environment:{DEEPSEEK_API_KEY:{mode:"replace",value:"f05-other-client-key"}}}},
+  });
+  await settings.getByRole("button",{name:"保存",exact:true}).click();
+  await expect(settings.getByText(/来源或配置已经改变/)).toBeVisible();
+  await expect(settings.getByLabel("环境变量值 1",{exact:true})).toHaveValue("f05-unsaved-draft");
+  const file=JSON.parse(await readFile(join(process.env.EZ_ASSISTANT_E2E_RUNTIME_HOME!,"users/_personal/mcp.json"),"utf8"));
+  expect(file.managedServers.builtin["deepseek-search"].env.DEEPSEEK_API_KEY).toBe("f05-other-client-key");
+  await settings.getByRole("button",{name:"重新载入",exact:true}).click();
+  await open();
+  await expect(settings.getByLabel("环境变量值 1",{exact:true})).toHaveValue("");
+  await expectCleanPage(page,"f05-other-client-key");
+  await settings.getByRole("checkbox",{name:"启用此服务"}).check();
+  await settings.getByRole("button",{name:"保存",exact:true}).click();
+  await open();
+  await settings.getByRole("button",{name:"刷新此服务",exact:true}).click();
+  await expect(settings.getByText(/本地 stdio.*已连接/)).toBeVisible();
+  await settings.getByRole("checkbox",{name:"启用此服务"}).uncheck();
+  await settings.getByRole("button",{name:"保存",exact:true}).click();
+  await open();
+  await settings.getByRole("button",{name:"刷新此服务",exact:true}).click();
+  await expect(settings.getByText(/本地 stdio.*已禁用/)).toBeVisible();
+  await settings.getByRole("button",{name:"返回 MCP 列表"}).click();
+  await settings.getByRole("button",{name:"技能",exact:true}).click();
+  await expect(settings.getByText("skill-creator",{exact:true})).toBeVisible();
+  await expect(settings.getByText("内置 Skill",{exact:false}).first()).toBeVisible();
+  await settings.getByRole("button",{name:"关闭设置"}).click();
+}
+
+async function builtinCommand(type:string,payload:object):Promise<{snapshot:McpConfigurationSnapshot}> {
+  const host=JSON.parse(process.env.EZ_ASSISTANT_E2E_BOOTSTRAP!);
+  const response=await fetch(`${host.base_url}/commands`,{method:"POST",headers:{...compatibilityHeaders(),Authorization:`Bearer ${host.access_token}`,"Content-Type":"application/json"},body:JSON.stringify({request_id:crypto.randomUUID(),command:{scope:"runtime",payload:{type,payload}}})});
+  expect(response.ok).toBe(true);
+  return (await response.json()).result.payload.payload;
 }

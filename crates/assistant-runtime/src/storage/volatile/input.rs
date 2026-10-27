@@ -1,11 +1,64 @@
 use super::*;
 
 impl VolatileRuntimeStore {
+    /// 持有 Store 唯一锁核对并领取暂存输入；此处才创建 Run，不写会话历史。
+    pub(super) fn claim_input(&self, run: StoredRun) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            let input = state
+                .inputs
+                .get(&run.input_id)
+                .ok_or_else(|| conflict("claim Input missing"))?;
+            if input.session_id != run.session_id
+                || input.state != StoredInputState::Queued
+                || input.agent_variant != run.agent_variant
+                || run.status != RunStatus::Accepted
+                || run.attempt != 1
+                || run.started_at_ms.is_some()
+                || run.finished_at_ms.is_some()
+                || !run.message_ids.is_empty()
+                || run.cancel_requested
+                || !state
+                    .sessions
+                    .get(&run.session_id)
+                    .is_some_and(|session| session.lifecycle == StoredSessionLifecycle::Active)
+                || state.runs.values().any(|existing| {
+                    existing.run_id == run.run_id
+                        || existing.input_id == run.input_id
+                        || (existing.session_id == run.session_id && !existing.status.is_terminal())
+                })
+                || state.histories.get(&run.session_id).is_some_and(|history| {
+                    history.runs.iter().any(|fact| {
+                        fact.run_id == run.run_id || fact.input_id.as_ref() == Some(&run.input_id)
+                    })
+                })
+            {
+                return Err(conflict("Input already claimed or invalid Run"));
+            }
+            if let Some(activation) = state
+                .inputs
+                .get_mut(&run.input_id)
+                .and_then(|input| input.skill_activation.as_mut())
+            {
+                activation.run_id = Some(run.run_id.clone());
+            }
+            for activation in state
+                .skill_activations
+                .values_mut()
+                .filter(|activation| activation.input_id.as_ref() == Some(&run.input_id))
+            {
+                activation.run_id = Some(run.run_id.clone());
+            }
+            state.runs.insert(run.run_id.clone(), run);
+            Ok(())
+        })
+    }
+
     pub(super) fn accept_input(&self, input: NewStoredInput) -> StoreFuture<'_, AcceptedInput> {
         Box::pin(async move {
             let mut state = self.lock()?;
             if input.idempotency_key.as_ref().is_some_and(|key| {
-                state.session_commands.values().any(|command| {
+                state.command_identities.values().any(|command| {
                     command.session_id == input.session_id
                         && command.idempotency_key.as_ref() == Some(key)
                 })
@@ -15,24 +68,21 @@ impl VolatileRuntimeStore {
                 ));
             }
             if let Some(key) = input.idempotency_key.as_ref()
-                && let Some(existing) = state.inputs.values().find(|candidate| {
-                    candidate.session_id == input.session_id
-                        && candidate.idempotency_key.as_ref() == Some(key)
-                })
+                && let Some((id, identity)) =
+                    state.input_identities.iter().find(|(_, candidate)| {
+                        candidate.session_id == input.session_id
+                            && candidate.idempotency_key.as_ref() == Some(key)
+                    })
             {
-                let existing = existing.clone();
-                let run = state
-                    .runs
-                    .values()
-                    .find(|run| run.input_id == existing.input_id && run.attempt == 1)
-                    .cloned()
-                    .ok_or_else(|| conflict("accepted input has no first run"))?;
-                return Ok(AcceptedInput {
-                    input: existing,
-                    run,
-                    is_duplicate: true,
-                });
+                let existing = state.input_projection(&identity.session_id, id)?;
+                return state.existing_input_acceptance(existing);
             }
+            state.ensure_new_input_identity(
+                &input.session_id,
+                &input.input_id,
+                None,
+                &input.message.id,
+            )?;
             if let Some(request) = &input.feedback_answer {
                 if request.session_id != input.session_id
                     || request.mode != assistant_protocol::FeedbackMode::EndTurn
@@ -41,7 +91,7 @@ impl VolatileRuntimeStore {
                     return Err(conflict("feedback input ownership mismatch"));
                 }
                 super::feedback::validate_feedback_mutation(
-                    &state.feedback,
+                    &state.feedback_projection(&input.session_id),
                     &crate::FeedbackMutation {
                         request: request.clone(),
                         expected_status: Some(assistant_protocol::FeedbackStatus::Pending),
@@ -72,6 +122,7 @@ impl VolatileRuntimeStore {
             validate_volatile_input_activation(&state, &input)?;
             if let Some(selection) = input.mcp_selection.as_ref()
                 && (input.origin != InputOrigin::User
+                    || state.contains_mcp_selection(&input.session_id, &selection.selection_id)
                     || selection.session_id != input.session_id
                     || selection.input_id.as_ref() != Some(&input.input_id)
                     || selection.message_id != input.message.id
@@ -225,6 +276,7 @@ impl VolatileRuntimeStore {
                     state
                         .inputs
                         .retain(|input_id, _| !removed.contains(input_id));
+                    state.input_identities.retain(|id, _| !removed.contains(id));
                     state.runs.retain(|_, run| !removed.contains(&run.input_id));
                     state.skill_activations.retain(|_, activation| {
                         !activation
@@ -278,24 +330,6 @@ impl VolatileRuntimeStore {
                 queued_message: Some(input.message),
                 accepted_at_ms: input.accepted_at_ms,
             };
-            let run = StoredRun {
-                shell: None,
-                run_id: input.run_id,
-                session_id: input.session_id,
-                input_id: input.input_id.clone(),
-                attempt: 1,
-                status: RunStatus::Accepted,
-                agent_variant: input.agent_variant,
-                approval_mode: input.approval_mode,
-                reasoning_effort: None,
-                cancel_requested: false,
-                error: None,
-                message_ids: Vec::new(),
-                message_steps: std::collections::HashMap::new(),
-                created_at_ms: input.accepted_at_ms,
-                started_at_ms: None,
-                finished_at_ms: None,
-            };
             let session = state
                 .sessions
                 .get_mut(&stored.session_id)
@@ -316,12 +350,12 @@ impl VolatileRuntimeStore {
                 state.goals.insert(goal.session_id.clone(), goal);
             }
             if let Some(request) = &input.feedback_answer {
-                state
-                    .feedback
-                    .insert(request.request_id.clone(), request.clone());
+                state.record_feedback_request(request.clone());
             }
+            state
+                .input_identities
+                .insert(stored.input_id.clone(), InputIdentity::from_input(&stored));
             state.inputs.insert(input.input_id, stored.clone());
-            state.runs.insert(run.run_id.clone(), run.clone());
             if let Some(activation) = input.skill_activation {
                 let previous = state
                     .skill_activations
@@ -333,9 +367,9 @@ impl VolatileRuntimeStore {
                     .mcp_input_selections
                     .insert(selection.selection_id.clone(), selection);
             }
-            Ok(AcceptedInput {
-                input: stored,
-                run,
+            Ok(AcceptedInput::Control {
+                input: Box::new(stored),
+                run: None,
                 is_duplicate: false,
             })
         })
@@ -348,7 +382,7 @@ impl VolatileRuntimeStore {
         Box::pin(async move {
             let mut state = self.lock()?;
             if let Some(key) = command.idempotency_key.as_ref() {
-                if state.inputs.values().any(|input| {
+                if state.input_identities.values().any(|input| {
                     input.session_id == command.session_id
                         && input.idempotency_key.as_ref() == Some(key)
                 }) {
@@ -356,21 +390,30 @@ impl VolatileRuntimeStore {
                         "session command idempotency key belongs to a message input",
                     ));
                 }
-                if let Some(existing) = state.session_commands.values().find(|candidate| {
-                    candidate.session_id == command.session_id
-                        && candidate.idempotency_key.as_ref() == Some(key)
-                }) {
+                if let Some((id, identity)) =
+                    state.command_identities.iter().find(|(_, candidate)| {
+                        candidate.session_id == command.session_id
+                            && candidate.idempotency_key.as_ref() == Some(key)
+                    })
+                {
+                    let existing = state.command_projection(&identity.session_id, id)?;
                     if existing.command != command.command {
                         return Err(conflict(
                             "session command idempotency key was reused with different content",
                         ));
                     }
                     return Ok(AcceptedStoredSessionCommand {
-                        command: existing.clone(),
+                        command: existing,
                         is_duplicate: true,
                     });
                 }
             }
+            state.ensure_new_input_identity(
+                &command.session_id,
+                &command.input_id,
+                None,
+                &command.user_message_id,
+            )?;
             let session = state
                 .sessions
                 .get(&command.session_id)
@@ -408,6 +451,10 @@ impl VolatileRuntimeStore {
                 state: StoredSessionCommandState::Queued,
                 accepted_at_ms: command.accepted_at_ms,
             };
+            state.command_identities.insert(
+                stored.input_id.clone(),
+                InputIdentity::from_command(&stored),
+            );
             state
                 .session_commands
                 .insert(stored.input_id.clone(), stored.clone());
@@ -443,11 +490,12 @@ impl VolatileRuntimeStore {
                         && input.cross_session.is_none()
                         && input.channel_source.is_none())
                 || input.goal_binding.is_some()
+                || state.runs.values().any(|run| run.input_id == input_id)
             {
                 return Err(conflict("input is not queued"));
             }
             state.inputs.remove(&input_id);
-            state.runs.retain(|_, run| run.input_id != input_id);
+            state.input_identities.remove(&input_id);
             state
                 .skill_activations
                 .retain(|_, activation| activation.input_id.as_ref() != Some(&input_id));
@@ -475,6 +523,10 @@ impl VolatileRuntimeStore {
                                 && input.cross_session.is_none()
                                 && input.channel_source.is_none())
                         && input.goal_binding.is_none()
+                        && !state
+                            .runs
+                            .values()
+                            .any(|run| run.input_id == input.input_id)
                 })
                 .map(|input| (input.queue_order, input.input_id.clone()))
                 .collect::<Vec<_>>();
@@ -517,29 +569,53 @@ impl VolatileRuntimeStore {
         Box::pin(async move {
             let mut state = self.lock()?;
             let source = state
-                .runs
-                .get(&attempt.source_run_id)
+                .histories
+                .get(&attempt.session_id)
+                .and_then(|history| {
+                    history.runs.iter().find(|run| {
+                        run.run_id == attempt.source_run_id && !run.inherited && !run.partial
+                    })
+                })
                 .cloned()
                 .ok_or_else(|| conflict("source run does not exist"))?;
-            if !matches!(source.status, RunStatus::Failed | RunStatus::Interrupted) {
+            if !matches!(
+                source.status,
+                Some(RunStatus::Failed | RunStatus::Interrupted)
+            ) {
                 return Err(conflict("run is not retryable"));
             }
-            let next = state
+            let input_id = source
+                .input_id
+                .clone()
+                .ok_or_else(|| conflict("source input identity is unknown"))?;
+            if state
                 .runs
                 .values()
-                .filter(|run| run.input_id == source.input_id)
+                .any(|run| run.session_id == attempt.session_id && run.input_id == input_id)
+            {
+                return Err(conflict("input already has an unfinished attempt"));
+            }
+            let next = state
+                .histories
+                .get(&attempt.session_id)
+                .into_iter()
+                .flat_map(|history| &history.runs)
+                .filter(|run| run.input_id.as_ref() == Some(&input_id) && !run.inherited)
                 .map(|run| run.attempt)
                 .max()
                 .unwrap_or(0)
-                + 1;
+                .checked_add(1)
+                .ok_or_else(|| conflict("Run attempt is exhausted"))?;
             if next != source.attempt + 1 {
                 return Err(conflict("only the latest run can be retried"));
             }
+            state.ensure_new_run_identity(&attempt.session_id, &attempt.run_id)?;
+            let input = state.input_projection(&attempt.session_id, &input_id)?;
             let run = StoredRun {
                 shell: None,
                 run_id: attempt.run_id,
                 session_id: attempt.session_id,
-                input_id: source.input_id,
+                input_id,
                 attempt: next,
                 status: RunStatus::Accepted,
                 agent_variant: source.agent_variant,
@@ -553,6 +629,7 @@ impl VolatileRuntimeStore {
                 started_at_ms: None,
                 finished_at_ms: None,
             };
+            state.inputs.insert(input.input_id.clone(), input);
             state.runs.insert(run.run_id.clone(), run.clone());
             Ok(run)
         })

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use agent_types::ConversationSnapshot;
 use assistant_protocol::{
     CancelSessionCompactionRequest, CancelSessionCompactionResult, CompactSessionOutcome,
-    CompactSessionRequest, CompactSessionResult, RuntimeEvent, SessionCompactionFinishedOutcome,
+    CompactSessionRequest, CompactSessionResult, SessionCompactionFinishedOutcome,
     SessionCompactionSnapshot, SessionCompactionTriggerSnapshot,
 };
 use tokio::sync::oneshot;
@@ -17,7 +17,9 @@ use crate::{
     SessionHistoryCompactionFinish, SessionHistoryCompactionFinishKind,
     SessionHistoryCompactionPreparation, SessionHistoryCompactionPreparationResult, StoreErrorKind,
     context_compaction::{
-        ManualCompactionCandidate, RuntimeContextCompactor, SessionCompactionGuard,
+        ManualCompactionCandidate, RuntimeCompactionError, RuntimeContextCompactor,
+        SessionCompactionGuard, commit_context_replacement, install_session_replacement,
+        validate_session_replacement,
     },
     observation::ObservationCoordinator,
     session::SessionController,
@@ -292,14 +294,18 @@ async fn run_manual_compaction(
 ) -> RuntimeResult<CompactSessionResult> {
     let outcome = execute_manual_compaction(&mut context).await;
     if let Err(error) = &outcome {
+        let committed = matches!(error, RuntimeError::ContextCompactionFailed { source }
+            if source.downcast_ref::<RuntimeCompactionError>().is_some_and(RuntimeCompactionError::is_committed));
+        if !committed {
+            let _ = context
+                .store
+                .finish_session_compaction(finish_request(
+                    &context,
+                    SessionHistoryCompactionFinishKind::Interrupted,
+                ))
+                .await;
+        }
         let _ = context
-            .store
-            .finish_session_compaction(finish_request(
-                &context,
-                SessionHistoryCompactionFinishKind::Interrupted,
-            ))
-            .await;
-        context
             .guard
             .finish(SessionCompactionFinishedOutcome::Failed {
                 code: error.to_protocol_info().code,
@@ -365,7 +371,7 @@ async fn finish_without_replacement(
         .finish_session_compaction(finish_request(context, kind))
         .await
         .map_err(|source| RuntimeError::from_store("finish session compaction", source))?;
-    context.guard.finish(event_outcome);
+    context.guard.finish(event_outcome)?;
     Ok(())
 }
 
@@ -386,88 +392,66 @@ async fn commit_manual_replacement(
         .await?;
         return result(&context.session, CompactSessionOutcome::Cancelled);
     }
-    {
-        let state = context.session.lock_state()?;
-        let current = state
-            .journal
-            .as_ref()
-            .ok_or(RuntimeError::InternalStateUnavailable {
-                component: "manual compaction conversation",
-            })?;
-        if state.body_generation != context.source_generation
-            || current.has_pending()
-            || current.snapshot() != context.source
-            || !state.active_compaction.as_ref().is_some_and(|active| {
-                active.snapshot.compaction_id == context.operation_id.as_str()
-            })
-        {
-            return Err(RuntimeError::SnapshotStale);
-        }
-    }
-    if context.prepared_model.model.context_management_mode()
-        == agent_model::ContextManagementMode::ServerCompaction
-    {
-        context
-            .prepared_model
-            .ensure_current(&context.config_registry)?;
-    }
-    let committed = context
-        .store
-        .replace_context(ContextReplacement {
-            target: ContextReplacementTarget::IdleSession {
-                session_id: context.session.id().clone(),
-                expected_generation: context.source_generation,
-                operation_id: context.operation_id.clone(),
-                compacted_message_count,
-                retained_message_count,
-            },
+    let target = ContextReplacementTarget::IdleSession {
+        session_id: session.id().clone(),
+        expected_generation: context.source_generation,
+        operation_id: context.operation_id.clone(),
+        compacted_message_count,
+        retained_message_count,
+    };
+    let committed = commit_context_replacement(
+        context.store.as_ref(),
+        ContextReplacement {
+            target: target.clone(),
             conversation: conversation.clone(),
             changed_at_ms: super::now_ms()?,
-        })
-        .await
-        .map_err(|source| {
-            if source.kind() == StoreErrorKind::Conflict {
-                RuntimeError::SnapshotStale
-            } else {
-                RuntimeError::from_store("commit session compaction", source)
-            }
-        })?;
-    let projection = (|| -> RuntimeResult<()> {
-        let mut state = context.session.lock_state()?;
-        let journal = state
-            .journal
-            .as_mut()
-            .ok_or(RuntimeError::InternalStateUnavailable {
-                component: "manual compaction projection",
-            })?;
-        journal.replace_completed(conversation).map_err(|_| {
-            RuntimeError::InternalStateUnavailable {
-                component: "manual compaction projection",
-            }
-        })?;
-        state.persisted_message_count = journal.message_count();
-        state.message_count = committed.product_message_count;
-        state.body_generation = committed.result_generation;
-        Ok(())
-    })();
-    if let Err(error) = projection {
-        let _ = context.session.mark_faulted();
-        return Err(error);
-    }
-    let _ = context.events.send(RuntimeEvent::ConversationCommitted {
-        owner: assistant_protocol::ConversationOwner::MainSession {
-            session_id: context.session.id().clone(),
         },
-        generation: committed.result_generation,
-    });
-    context
-        .guard
-        .finish(SessionCompactionFinishedOutcome::Compacted {
-            source_generation: committed.source_generation,
-            result_generation: committed.result_generation,
-        });
+        context.source_generation,
+        &context.cancellation,
+        &session,
+        || {
+            validate_session_replacement(
+                &session,
+                &context.source,
+                context.source_generation,
+                &target,
+                context.operation_id.as_str(),
+            )?;
+            if context.prepared_model.model.context_management_mode()
+                == agent_model::ContextManagementMode::ServerCompaction
+            {
+                context
+                    .prepared_model
+                    .ensure_current(&context.config_registry)?;
+            }
+            Ok(())
+        },
+        |committed| {
+            install_session_replacement(&session, conversation, committed, &context.events)?;
+            context
+                .guard
+                .finish(SessionCompactionFinishedOutcome::Compacted {
+                    source_generation: committed.source_generation,
+                    result_generation: committed.result_generation,
+                })
+        },
+    )
+    .await;
+    let committed = match committed {
+        Ok(committed) => committed,
+        Err(error) if error.is_cancelled() => {
+            finish_without_replacement(
+                context,
+                SessionHistoryCompactionFinishKind::Cancelled,
+                SessionCompactionFinishedOutcome::Cancelled,
+            )
+            .await?;
+            return result(&session, CompactSessionOutcome::Cancelled);
+        }
+        Err(error) => return Err(error.into_runtime_error()),
+    };
     result(
-        &context.session,
+        &session,
         CompactSessionOutcome::Compacted {
             source_generation: committed.source_generation,
             result_generation: committed.result_generation,
@@ -475,6 +459,10 @@ async fn commit_manual_replacement(
             retained_message_count,
         },
     )
+    .map_err(|source| {
+        let _ = session.mark_faulted();
+        RuntimeCompactionError::after_commit(committed, source).into_runtime_error()
+    })
 }
 
 fn finish_request(

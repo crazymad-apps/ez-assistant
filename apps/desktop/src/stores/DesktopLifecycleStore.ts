@@ -1,6 +1,5 @@
 import type { ResourceWorkspaceStore } from "../features/resource-workspace/ResourceWorkspaceStore";
 import { action, computed, makeObservable, observable, runInAction } from "mobx";
-import type { ApplicationSnapshot } from "@ez-assistant/protocol";
 import {
   listenDesktopLifecycleIntents,
   listenNativeRuntimeMutations,
@@ -20,7 +19,6 @@ import type { RuntimeConnectionState } from "./ConnectionStore";
 type Dependencies = Readonly<{
   resources: ResourceWorkspaceStore;
   is_local_target?: () => boolean;
-  get_application: () => ApplicationSnapshot | null;
   prepare_runtime_mutation: (kind: "stop" | "restart") => void;
   reconnect_runtime: (bootstrap?: RuntimeBootstrap) => Promise<void>;
   mark_runtime_stopped: () => void;
@@ -28,18 +26,12 @@ type Dependencies = Readonly<{
   flush_preferences?: () => Promise<void>;
 }>;
 
-export type RuntimeImpact = Readonly<{
-  active_runs: number;
-  queued_inputs: number;
-  pending_approvals: number;
-}>;
-
 export class DesktopLifecycleStore {
   intent: DesktopLifecycleIntent | null = null;
   pending = false;
-  stop_runtime_on_quit = false;
+  stop_runtime_on_quit = true;
   error_message: string | null = null;
-  close_behavior: DesktopCloseBehavior = "hide_to_tray";
+  close_behavior: DesktopCloseBehavior = "quit_desktop";
   #disposed = false;
   #unlisten: (() => void) | null = null;
   #unlisten_runtime_mutation: (() => void) | null = null;
@@ -69,7 +61,6 @@ export class DesktopLifecycleStore {
       stop_runtime_on_quit: observable,
       error_message: observable,
       close_behavior: observable,
-      impact: computed,
       local_impact_known: computed,
       terminal_count: computed,
       applyPreferences: action,
@@ -85,15 +76,6 @@ export class DesktopLifecycleStore {
   get local_impact_known(): boolean { return this.dependencies.is_local_target?.() !== false; }
 
   get terminal_count(): number { return this.dependencies.resources.runningTerminalCount(); }
-
-  get impact(): RuntimeImpact {
-    const sessions = this.dependencies.get_application()?.active_sessions ?? [];
-    return {
-      active_runs: sessions.filter((session) => session.active_run_id !== null).length,
-      queued_inputs: sessions.reduce((count, session) => count + session.queued_input_count, 0),
-      pending_approvals: sessions.reduce((count, session) => count + session.pending_approval_count, 0),
-    };
-  }
 
   start(): void {
     this.#disposed = false;
@@ -122,14 +104,15 @@ export class DesktopLifecycleStore {
   request(intent: DesktopLifecycleIntent): void {
     if (this.pending) return;
     this.intent = intent;
-    this.stop_runtime_on_quit = false;
+    // 每次退出意图重新采用初始化主操作；上次临时保留后台不写入偏好。
+    this.stop_runtime_on_quit = true;
     this.error_message = null;
   }
 
   dismiss(): void {
     if (this.pending) return;
     this.intent = null;
-    this.stop_runtime_on_quit = false;
+    this.stop_runtime_on_quit = true;
     this.error_message = null;
   }
 
@@ -161,15 +144,15 @@ export class DesktopLifecycleStore {
       const local = this.dependencies.is_local_target?.() !== false;
       if (intent === "restart_runtime") {
         if (local) this.dependencies.prepare_runtime_mutation("restart");
-        await updateNativeRuntimeState("restarting", this.impact);
+        await updateNativeRuntimeState("restarting");
         const bootstrap = await restartNativeRuntime();
         if (local) await this.dependencies.reconnect_runtime(bootstrap ?? undefined);
       } else {
         if (local) this.dependencies.prepare_runtime_mutation("stop");
-        await updateNativeRuntimeState("stopping", this.impact);
+        await updateNativeRuntimeState("stopping");
         await stopNativeRuntime();
         if (local) this.dependencies.mark_runtime_stopped();
-        await updateNativeRuntimeState("stopped", this.impact);
+        await updateNativeRuntimeState("stopped");
       }
       if (intent === "quit_desktop") {
         await quitDesktopClient();
@@ -192,7 +175,7 @@ export class DesktopLifecycleStore {
         this.pending = false;
         this.error_message = message;
       });
-      if (runtime_mutating) await updateNativeRuntimeState("disconnected", this.impact).catch(() => undefined);
+      if (runtime_mutating) await updateNativeRuntimeState("disconnected").catch(() => undefined);
     }
   }
 
@@ -210,7 +193,7 @@ export class DesktopLifecycleStore {
       restarting_runtime: "restarting",
       runtime_stopped: "stopped",
     } as const)[state];
-    void updateNativeRuntimeState(native_state, this.impact).catch(() => undefined);
+    void updateNativeRuntimeState(native_state).catch(() => undefined);
   }
 
   dispose(): void {

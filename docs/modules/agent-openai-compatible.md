@@ -31,6 +31,9 @@ Codec、流状态机和 Service，不能通过单次请求失败后互相回退�
 - `OpenAiChatCompletionsService::new` 与 `with_transport` 都是可失败构造，统一返回
   `OpenAiChatCompletionsServiceError`；无效 URL 错误不得回显可能包含 credential 的原始 URL。
 - Chat Provider 差异通过显式 `ChatProtocolAdapter` 表达，不在 Core 中按名称分支。
+- Chat 响应始终接收上游返回的字符串 `reasoning`／`reasoning_content`，不依赖思考模式已配置。
+  优先使用方言声明的字段，其后按上述顺序兼容；单条消息／增量只读首个非 null 字段，不重复追加。
+  该兼容仅处理响应，不开启请求端思考、不推断模型能力，也不改变原有历史回放字段和策略。
 - `ChatProtocolAdapter::vllm()` 承担 vLLM Chat Completions 方言：响应优先读取当前
   `reasoning`，缺失或为 null 时兼容旧版 `reasoning_content`；历史回放只写当前字段
   `reasoning`。响应读取字段与请求回放字段必须分离，不能为了兼容别名把同一 reasoning

@@ -34,6 +34,9 @@ pub(crate) fn fact_kind(invocation: &ResolvedToolInvocation) -> InvocationFactKi
         InvocationFactKind::Mcp
     } else if invocation.facts::<GeneralAuthorizationFacts>().is_some()
         || invocation.facts::<DelegationAuthorizationFacts>().is_some()
+        || invocation
+            .facts::<crate::runtime::McpManagementAuthorizationFacts>()
+            .is_some()
     {
         InvocationFactKind::General
     } else {
@@ -61,6 +64,9 @@ pub(crate) fn matches_rule_with_paths(
                 invocation
                     .facts::<GeneralAuthorizationFacts>()
                     .is_some_and(|facts| facts.tool_name.as_str() == matcher.tool_name)
+                    || invocation
+                        .facts::<crate::runtime::McpManagementAuthorizationFacts>()
+                        .is_some_and(|_| invocation.tool_name().as_str() == matcher.tool_name)
                     || invocation
                         .facts::<DelegationAuthorizationFacts>()
                         .is_some_and(|_| invocation.tool_name().as_str() == matcher.tool_name)

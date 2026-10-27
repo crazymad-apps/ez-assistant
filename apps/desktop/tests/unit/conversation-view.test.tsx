@@ -6,6 +6,8 @@ import { RootStore } from "../../src/stores/RootStore";
 import { RootStoreProvider } from "../../src/stores/RootStoreContext";
 import { ConversationView } from "../../src/features/conversation/ConversationView";
 import { ChildTaskSubheader } from "../../src/app/AppShell/ChildTaskSubheader";
+import { ChildTaskTree } from "../../src/features/conversation/ConversationView/ChildTaskTree";
+import { mergeChildTaskItems } from "../../src/features/conversation/childTaskPresentation";
 import { UserMessage } from "../../src/features/conversation/ConversationView/MessageViews";
 import { thumbnailAttachment } from "../../src/native-bridge/nativeResource";
 
@@ -21,28 +23,60 @@ afterEach(() => {
 });
 
 describe("ConversationView scroll anchoring", () => {
+  it("shows unavailable inherited child history without an executable or source link", () => {
+    const base = childTaskItem();
+    const task = { ...base.task, status: "completed" as const, inherited: true, body_unavailable: true };
+    const item = { ...base, task, can_cancel: false };
+    const open = vi.fn();
+    render(<ChildTaskTree items={[item]} on_open={open} />);
+    expect(screen.getByText(/继承.*正文不可用/)).toBeVisible();
+    const button = screen.getByRole("button", { name: "查看子任务：检查恢复一致性" });
+    expect(button).toBeDisabled();
+    fireEvent.click(button);
+    expect(open).not.toHaveBeenCalled();
+    const merged = mergeChildTaskItems([item], [{ ...task, inherited: false, status: "running", final_text: "late source" }]);
+    expect(merged[0]?.task).toEqual(task);
+    expect(merged[0]?.can_cancel).toBe(false);
+    expect(mergeChildTaskItems([item], [{ ...task, session_id: "other", inherited: false }])).toHaveLength(2);
+  });
+
   it("shows history loading failures with a retry instead of an indefinite loading screen", () => {
     const store = new RootStore();
     store.navigation.selectSession("session-1");
-    store.interaction_error = "无法读取历史记录";
-    const retry = vi.spyOn(store, "selectSession").mockResolvedValue();
+    store.projection.setConversationLoadState("session-1", null, { status: "error", error: "无法读取历史记录" });
+    const retry = vi.spyOn(store, "reloadSelectedConversation").mockResolvedValue();
     render(<RootStoreProvider store={store}><ConversationView /></RootStoreProvider>);
     expect(screen.getByText("读取会话失败")).toBeVisible();
     expect(screen.getByText("无法读取历史记录")).toBeVisible();
     expect(screen.queryByText("正在读取会话")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "重新读取" }));
-    expect(retry).toHaveBeenCalledWith("session-1");
+    expect(retry).toHaveBeenCalledOnce();
+    store.dispose();
+  });
+
+  it("keeps the child selected when retrying its failed body read", () => {
+    const store = new RootStore();
+    store.navigation.selectSession("session-1");
+    store.navigation.openChildTask("child-1");
+    store.projection.setConversationLoadState("session-1", "child-1", { status: "error", error: "读取会话超时，请重试" });
+    const retry = vi.spyOn(store, "reloadSelectedConversation").mockResolvedValue();
+    render(<RootStoreProvider store={store}><ConversationView /></RootStoreProvider>);
+    expect(screen.getByText("读取会话超时，请重试")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "重新读取" }));
+    expect(retry).toHaveBeenCalledOnce();
+    expect(store.navigation.selected_child_task_id).toBe("child-1");
     store.dispose();
   });
 
   it("renders frozen MCP labels in history and inherited fork messages without parsing text", () => {
     render(<UserMessage
       attachments={[]}
-      message={{ message_id: "inherited-message", input_id: null, text: "正常正文", attachment_ids: [], created_at_ms: 1,
+      message={{ inherited: true, message_id: "inherited-message", input_id: null, text: "正常正文", attachment_ids: [], created_at_ms: 1,
         quotes: [], source: { type: "user" },
         mcp_selection: { server_key: "github", display_name: "提交时的名字" } }}
       on_attachment_click={vi.fn()} on_source_open={vi.fn()}
     />);
+    expect(screen.getByText("继承")).toBeVisible();
     expect(screen.getByText("MCP · 提交时的名字")).toHaveAttribute("title", "github");
     expect(screen.getByText("正常正文")).toBeVisible();
   });
@@ -58,6 +92,7 @@ describe("ConversationView scroll anchoring", () => {
       <UserMessage
         attachments={[]}
         message={{
+          inherited: false,
           message_id: "delivery-1",
           input_id: null,
           text: "继续检查构建",
@@ -79,6 +114,7 @@ describe("ConversationView scroll anchoring", () => {
       <UserMessage
         attachments={[]}
         message={{
+          inherited: false,
           message_id: "report-1",
           input_id: null,
           text: "任务已完成",
@@ -99,6 +135,7 @@ describe("ConversationView scroll anchoring", () => {
       <UserMessage
         attachments={[]}
         message={{
+          inherited: false,
           message_id: "device-1",
           input_id: "input-1",
           text: "从终端发起的问题",
@@ -141,6 +178,7 @@ describe("ConversationView scroll anchoring", () => {
       <UserMessage
         attachments={[]}
         message={{
+          inherited: false,
           message_id: "long-report",
           input_id: null,
           text: "较长的会话报告",
@@ -942,6 +980,8 @@ describe("ConversationView scroll anchoring", () => {
       event: {
         type: "created",
         task: {
+          inherited: false,
+          body_unavailable: false,
           child_task_id: "child-live",
           session_id: "session-1",
           parent_run_id: "run-live-parent",
@@ -1076,6 +1116,8 @@ describe("ConversationView scroll anchoring", () => {
 function childTaskItem() {
   return {
     task: {
+      inherited: false,
+      body_unavailable: false,
       child_task_id: "child-1",
       session_id: "session-1",
       parent_run_id: "run-parent",
@@ -1144,4 +1186,35 @@ function unavailableToolInput() {
 vi.mock("../../src/runtime-client/ClientResources", async (original) => {
   const actual = await original<typeof import("../../src/runtime-client/ClientResources")>();
   return {...actual, ClientResources: class extends actual.ClientResources { override readonly desktop = true; override get native_target() { return { binding: null, device: null }; } }};
+});
+
+
+it("keeps the current output visible when another input is waiting", () => {
+  let frame: FrameRequestCallback | null = null;
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => { frame = callback; return 1; });
+  vi.stubGlobal("cancelAnimationFrame", vi.fn());
+  const store = conversationStore();
+  emitLive(store, [
+    { type: "run_started", session_id: "session-1", run_id: "active", started_at_ms: 2 },
+    { type: "text_delta", session_id: "session-1", run_id: "active", step: 1, part_id: "active-text", delta: "当前轮次继续输出" },
+    { type: "run_accepted", session_id: "session-1", run_id: "next", created_at_ms: 3 },
+  ], () => frame);
+  const { container } = render(<RootStoreProvider store={store}><ConversationView /></RootStoreProvider>);
+  expect(screen.getByText("当前轮次继续输出")).toBeVisible();
+  expect(container.querySelectorAll('[data-processing-turn="true"]')).toHaveLength(1);
+  expect(screen.queryByText("等待执行")).not.toBeInTheDocument();
+  expect(screen.queryByText("正在准备…")).not.toBeInTheDocument();
+  store.dispose();
+});
+
+it("does not render a processing turn before a main Run actually starts", () => {
+  let frame: FrameRequestCallback | null = null;
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => { frame = callback; return 1; });
+  vi.stubGlobal("cancelAnimationFrame", vi.fn());
+  const store = conversationStore();
+  emitLive(store, [{ type: "run_accepted", session_id: "session-1", run_id: "next", created_at_ms: 3 }], () => frame);
+  const { container } = render(<RootStoreProvider store={store}><ConversationView /></RootStoreProvider>);
+  expect(container.querySelector('[data-processing-turn="true"]')).not.toBeInTheDocument();
+  expect(screen.queryByText("正在准备…")).not.toBeInTheDocument();
+  store.dispose();
 });

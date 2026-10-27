@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type {
   ApplicationSnapshot,
+  ChildTaskViewSnapshot,
   ConversationItem,
   ConversationPage,
   RuntimeEventEnvelope,
   SessionViewSnapshot,
 } from "@ez-assistant/protocol";
 import { conversationItemId, RuntimeProjectionStore } from "../../src/stores/RuntimeProjectionStore";
+import { childKey } from "../../src/stores/liveExecutionProjection";
 
 const application: ApplicationSnapshot = {
   runtime_lifecycle: "running",
@@ -36,6 +38,39 @@ const application: ApplicationSnapshot = {
 };
 
 describe("RuntimeProjectionStore", () => {
+  it("isolates identical child IDs, watermarks and pagination by the complete owner", () => {
+    const store = new RuntimeProjectionStore();
+    const view = (session_id: string, generation: number): ChildTaskViewSnapshot => ({
+      task: {
+        task: {
+          session_id, child_task_id: "shared-child", parent_run_id: "shared-run",
+          parent_tool_call_id: "shared-call", title: session_id, status: "completed",
+          variant: "build", cancel_requested: false, final_text: session_id, error: null,
+          created_at_ms: 1, started_at_ms: 2, finished_at_ms: 3,
+          inherited: true, body_unavailable: false,
+        },
+        usage: { accumulated: null }, pending_approval_count: 0, can_cancel: false,
+      },
+      approval_ids: [],
+      conversation: { owner: { type: "child_task", session_id, child_task_id: "shared-child" },
+        generation, items: [assistant("shared-message")], previous_cursor: "previous", has_more: true },
+    });
+    expect(store.applyChildTaskSnapshot({ observed_sequence: 100, value: view("source", 1) })).toBe(true);
+    expect(store.applyChildTaskSnapshot({ observed_sequence: 2, value: view("branch", 1) })).toBe(true);
+    expect(store.child_task_views.get(childKey("source", "shared-child"))?.task.task.title).toBe("source");
+    expect(store.child_task_views.get(childKey("branch", "shared-child"))?.task.task.title).toBe("branch");
+    expect(store.beginLoadingPreviousChild("source", "shared-child")).toBe(true);
+    expect(store.beginLoadingPreviousChild("branch", "shared-child")).toBe(true);
+    store.failLoadingPreviousChild("source", "shared-child", "source failure");
+    expect(store.child_conversation_histories.get(childKey("branch", "shared-child"))?.is_loading_previous).toBe(true);
+    expect(store.applyPreviousChildConversationPage("branch", "shared-child", {
+      observed_sequence: 101, value: view("source", 1).conversation,
+    })).toBe(false);
+    expect(store.applyChildTaskSnapshot({ observed_sequence: 3, value: view("branch", 2) })).toBe(true);
+    expect(store.child_conversation_histories.get(childKey("source", "shared-child"))?.generation).toBe(1);
+    expect(childKey("a:b", "c")).not.toBe(childKey("a", "b:c"));
+  });
+
   it("preserves a single pending previous request across a streaming tail refresh", () => {
     const store = new RuntimeProjectionStore();
     store.applySessionSnapshot({ observed_sequence: 4, value: sessionView(page(1, [assistant("m3"), assistant("m4")], "c2", true)) });
@@ -251,6 +286,8 @@ function sessionView(conversation: ConversationPage): SessionViewSnapshot {
 function assistant(message_id: string): ConversationItem {
   return {
     type: "assistant",
+    inherited: false,
+    partial: false,
     message_id,
     run_id: null,
     attempt: null,

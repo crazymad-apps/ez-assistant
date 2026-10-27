@@ -14,6 +14,7 @@ use ts_rs::TS;
 pub enum ModelDiscoveryFormat {
     #[serde(rename = "openai")]
     OpenAi,
+    Sub2api,
     Vllm,
     Moonshot,
     #[serde(rename = "dashscope_native")]
@@ -78,13 +79,16 @@ pub struct ModelParameters {
     pub input_token_count_support: ModelFeatureSupport,
     pub context_window_tokens: ModelTokenLimit,
     pub max_input_tokens: ModelTokenLimit,
+    /// 未知时不限制请求输出；上游或用户请求预算决定实际上限。
     pub max_output_tokens: ModelTokenLimit,
     pub reasoning_max_input_tokens: ModelTokenLimit,
     pub reasoning_max_output_tokens: ModelTokenLimit,
+    /// Unknown 使用流式缺省支持；Unsupported 仍禁止当前流式执行。
     pub streaming: ModelFeatureSupport,
     pub tool_choice: ModelToolChoiceSupport,
     pub tool_image_projection: ModelToolImageProjection,
     pub image_input: ModelFeatureSupport,
+    /// Unknown 使用基础工具调用缺省支持，明确 Unsupported 保留。
     pub tool_calls: ModelFeatureSupport,
     pub reasoning: ModelFeatureSupport,
     pub reasoning_mode: ModelReasoningMode,
@@ -146,6 +150,7 @@ pub enum ProviderProtocolPreference {
 #[ts(export_to = "assistant-protocol.ts")]
 pub enum ProviderType {
     Openai,
+    Sub2api,
     Opencode,
     Deepseek,
     DashscopeApi,
@@ -160,6 +165,7 @@ impl ProviderType {
     /// 类型确定发现格式；自定义路径不改变返回数据的解析约定。
     pub const fn discovery_format(self) -> ModelDiscoveryFormat {
         match self {
+            Self::Sub2api => ModelDiscoveryFormat::Sub2api,
             Self::DashscopeApi => ModelDiscoveryFormat::DashScope,
             Self::Moonshot => ModelDiscoveryFormat::Moonshot,
             Self::Vllm => ModelDiscoveryFormat::Vllm,
@@ -193,6 +199,7 @@ impl ProviderConnection {
         let responses = matches!(
             self.provider_type,
             ProviderType::Openai
+                | ProviderType::Sub2api
                 | ProviderType::Deepseek
                 | ProviderType::DashscopeApi
                 | ProviderType::DashscopePlan

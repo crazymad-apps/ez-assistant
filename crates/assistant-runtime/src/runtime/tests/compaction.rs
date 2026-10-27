@@ -690,7 +690,7 @@ async fn manual_compaction_rejects_a_session_with_an_active_run() {
         .expect("session");
     let session_id = session.session.session_id;
     let accepted = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session_id.clone(),
@@ -777,13 +777,13 @@ async fn manual_compaction_failure_preserves_history_and_clears_volatile_state()
         .expect_err("summary failure rejects compact");
     assert!(matches!(
         &error,
-        RuntimeError::ModelExecutionFailed {
-            source: ModelError::Config(message),
-        } if message == "summary unavailable"
+        RuntimeError::ContextCompactionFailed { source }
+            if matches!(source.downcast_ref::<crate::context_compaction::RuntimeCompactionError>(),
+                Some(crate::context_compaction::RuntimeCompactionError::Strategy(agent_context::CompactionError::Model(ModelError::Config(message)))) if message == "summary unavailable")
     ));
     assert_eq!(
         error.to_protocol_info().code,
-        assistant_protocol::RuntimeErrorCode::ModelExecutionFailed
+        assistant_protocol::RuntimeErrorCode::ContextCompactionFailed
     );
     assert!(
         error
@@ -816,7 +816,7 @@ async fn manual_compaction_failure_preserves_history_and_clears_volatile_state()
             assistant_protocol::RuntimeEvent::SessionCompactionFinished {
                 session_id: observed,
                 outcome: assistant_protocol::SessionCompactionFinishedOutcome::Failed {
-                    code: assistant_protocol::RuntimeErrorCode::ModelExecutionFailed,
+                    code: assistant_protocol::RuntimeErrorCode::ContextCompactionFailed,
                 },
                 ..
             } if observed == session_id
@@ -879,7 +879,7 @@ async fn manual_compaction_can_be_cancelled_and_rejects_new_input_while_active()
         .expect("active compaction");
     assert!(active.cancellable);
     let busy = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session_id.clone(),
@@ -966,4 +966,443 @@ async fn manual_compaction_can_be_cancelled_and_rejects_new_input_while_active()
         missing.to_protocol_info().code,
         assistant_protocol::RuntimeErrorCode::SessionCompactionNotFound
     );
+}
+
+async fn prepared_compaction_case(
+    summary: ModelScript,
+) -> (
+    Arc<AssistantRuntime>,
+    Arc<ScriptedModelService>,
+    Arc<super::store::FaultInjectingStore>,
+    SessionId,
+) {
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(false),
+        8_192,
+        [
+            ModelScript::Events(message_events(&assistant_text("m1-first", "first answer"))),
+            ModelScript::Events(message_events(&assistant_text(
+                "m1-second",
+                "second answer",
+            ))),
+            summary,
+        ],
+    ));
+    let store = Arc::new(super::store::FaultInjectingStore::healthy());
+    let runtime = Arc::new(
+        runtime_with_store(
+            model.clone(),
+            store.clone(),
+            RuntimeConfig::new(NonZeroUsize::new(128).unwrap()),
+        )
+        .await,
+    );
+    runtime.config_registry.replace_document_for_test("schema_version=1\n[runtime.model_retry]\nretry_on=['unavailable']\ndelays_ms=[1]\nmax_retry_after_ms=10\n");
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    submit_completed_turn(&runtime, &session_id, &"old detail ".repeat(200)).await;
+    submit_completed_turn(&runtime, &session_id, "current task").await;
+    (runtime, model, store, session_id)
+}
+
+fn m1_summary() -> ModelScript {
+    ModelScript::Events(message_events(&assistant_text(
+        "m1-summary",
+        "short summary",
+    )))
+}
+
+async fn compact_case(
+    runtime: &AssistantRuntime,
+    session_id: &SessionId,
+) -> RuntimeResult<assistant_protocol::CompactSessionResult> {
+    let generation = runtime
+        .session(session_id)
+        .await?
+        .lock_state()?
+        .body_generation;
+    runtime
+        .compact_session(assistant_protocol::CompactSessionRequest {
+            session_id: session_id.clone(),
+            operation_id: assistant_protocol::IdempotencyKey::new("m1-compact").unwrap(),
+            expected_generation: generation,
+        })
+        .await
+}
+
+#[tokio::test]
+async fn manual_compaction_committed_projection_failure_preserves_receipt_and_faults_owner() {
+    let (runtime, model, store, session_id) = prepared_compaction_case(m1_summary()).await;
+    let session = runtime.session(&session_id).await.unwrap();
+    let original_generation = session.lock_state().unwrap().body_generation;
+    let damaged = session.clone();
+    *store.context_write_hook.lock().unwrap() = Some(Box::new(move |_, committed| {
+        if committed.is_some() {
+            damaged.lock_state().unwrap().journal = None;
+        }
+    }));
+    let mut events = runtime.subscribe_events();
+    let error = compact_case(&runtime, &session_id).await.unwrap_err();
+    assert_eq!(
+        error.to_protocol_info().code,
+        assistant_protocol::RuntimeErrorCode::Internal
+    );
+    assert!(error.to_protocol_info().message.contains("was committed"));
+    assert!(session.lock_state().unwrap().is_faulted);
+    assert_eq!(
+        store.compaction_finishes.load(Ordering::SeqCst),
+        0,
+        "committed receipt must not be interrupted"
+    );
+    let receipt = store
+        .prepare_session_compaction(crate::SessionHistoryCompactionPreparation {
+            operation_id: assistant_protocol::IdempotencyKey::new("m1-compact").unwrap(),
+            session_id: session_id.clone(),
+            expected_generation: original_generation,
+            created_at_ms: 10,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        receipt,
+        crate::SessionHistoryCompactionPreparationResult::Completed(
+            assistant_protocol::CompactSessionOutcome::Compacted { .. }
+        )
+    ));
+    assert!(
+        store
+            .load_conversation(&session_id)
+            .await
+            .unwrap()
+            .messages
+            .iter()
+            .any(|m| matches!(m, ConversationMessage::ContextSummary(_)))
+    );
+    assert_eq!(model.take_requests().len(), 3);
+    while let Ok(event) = events.try_recv() {
+        assert!(!matches!(
+            event,
+            assistant_protocol::RuntimeEvent::SessionCompactionFinished {
+                outcome: assistant_protocol::SessionCompactionFinishedOutcome::Compacted { .. },
+                ..
+            }
+        ));
+    }
+}
+
+#[tokio::test]
+async fn manual_compaction_commit_wins_over_late_cancel() {
+    let (runtime, model, store, session_id) = prepared_compaction_case(m1_summary()).await;
+    let session = runtime.session(&session_id).await.unwrap();
+    let cancelling = session.clone();
+    *store.context_write_hook.lock().unwrap() = Some(Box::new(move |_, committed| {
+        if committed.is_some() {
+            cancelling
+                .lock_state()
+                .unwrap()
+                .active_compaction
+                .as_ref()
+                .unwrap()
+                .cancellation
+                .as_ref()
+                .unwrap()
+                .cancel();
+        }
+    }));
+    assert!(matches!(
+        compact_case(&runtime, &session_id).await.unwrap().outcome,
+        assistant_protocol::CompactSessionOutcome::Compacted { .. }
+    ));
+    assert!(!session.lock_state().unwrap().is_faulted);
+    assert_eq!(store.compaction_finishes.load(Ordering::SeqCst), 0);
+    assert_eq!(model.take_requests().len(), 3);
+}
+
+#[tokio::test]
+async fn manual_compaction_store_failures_keep_source_and_safe_classification() {
+    for (kind, code) in [
+        (
+            crate::StoreErrorKind::Conflict,
+            assistant_protocol::RuntimeErrorCode::SnapshotStale,
+        ),
+        (
+            crate::StoreErrorKind::Unavailable,
+            assistant_protocol::RuntimeErrorCode::StorageUnavailable,
+        ),
+    ] {
+        let (runtime, model, store, session_id) = prepared_compaction_case(m1_summary()).await;
+        let source = store.load_conversation(&session_id).await.unwrap();
+        *store.compaction_error.lock().unwrap() = Some(crate::StoreError::with_source(
+            kind,
+            "private-path-marker",
+            std::io::Error::other("private-sql-marker"),
+        ));
+        let error = compact_case(&runtime, &session_id).await.unwrap_err();
+        assert_eq!(error.to_protocol_info().code, code);
+        assert!(!error.to_protocol_info().message.contains("private"));
+        assert_eq!(store.load_conversation(&session_id).await.unwrap(), source);
+        assert_eq!(model.take_requests().len(), 3);
+        assert_eq!(store.compaction_finishes.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn manual_compaction_model_failure_preserves_status_without_retry_or_private_text() {
+    for failure in [
+        ModelError::Provider {
+            message: "private-provider-marker".into(),
+            status: Some(400),
+        },
+        ModelError::Transport {
+            kind: ModelTransportErrorKind::Timeout,
+            message: "private-timeout-marker".into(),
+        },
+    ] {
+        let (runtime, model, store, session_id) =
+            prepared_compaction_case(ModelScript::FailEstablishment(failure.clone())).await;
+        let error = compact_case(&runtime, &session_id).await.unwrap_err();
+        let info = error.to_protocol_info();
+        assert_eq!(
+            info.code,
+            assistant_protocol::RuntimeErrorCode::ContextCompactionFailed
+        );
+        assert!(!info.message.contains("private"));
+        if matches!(failure, ModelError::Provider { .. }) {
+            assert!(info.message.contains("status=400"));
+        } else {
+            assert!(info.message.contains("timeout"));
+        }
+        let RuntimeError::ContextCompactionFailed { source } = error else {
+            panic!("compaction source")
+        };
+        assert!(
+            matches!(source.downcast_ref::<crate::context_compaction::RuntimeCompactionError>(),
+            Some(crate::context_compaction::RuntimeCompactionError::Strategy(agent_context::CompactionError::Model(actual))) if actual == &failure)
+        );
+        assert_eq!(store.compaction_finishes.load(Ordering::SeqCst), 1);
+        assert_eq!(model.take_requests().len(), 3);
+    }
+}
+
+#[tokio::test]
+async fn manual_compaction_rechecks_generation_owner_and_source_but_keeps_frozen_model() {
+    for change in ["generation", "owner", "source", "reload"] {
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let model = Arc::new(CallGatedModel {
+            capabilities: model_capabilities(false),
+            scripts: Mutex::new(VecDeque::from([
+                message_events(&assistant_text("m1-first", "first answer")),
+                message_events(&assistant_text("m1-second", "second answer")),
+                message_events(&assistant_text("m1-summary", "short summary")),
+            ])),
+            calls: AtomicUsize::new(0),
+            gate_call: 2,
+            entered: entered.clone(),
+            release: release.clone(),
+        });
+        let store = Arc::new(super::store::FaultInjectingStore::healthy());
+        let runtime = Arc::new(
+            runtime_with_store(
+                model,
+                store.clone(),
+                RuntimeConfig::new(NonZeroUsize::new(128).unwrap()),
+            )
+            .await,
+        );
+        let session_id = runtime
+            .create_session(CreateSessionRequest::default())
+            .await
+            .unwrap()
+            .session
+            .session_id;
+        submit_completed_turn(&runtime, &session_id, &"old detail ".repeat(200)).await;
+        submit_completed_turn(&runtime, &session_id, "current task").await;
+        let source = store.load_conversation(&session_id).await.unwrap();
+        let runner = runtime.clone();
+        let target = session_id.clone();
+        let operation = tokio::spawn(async move { compact_case(&runner, &target).await });
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+        let session = runtime.session(&session_id).await.unwrap();
+        match change {
+            "generation" => session.lock_state().unwrap().body_generation += 1,
+            "owner" => {
+                session
+                    .lock_state()
+                    .unwrap()
+                    .active_compaction
+                    .as_mut()
+                    .unwrap()
+                    .snapshot
+                    .compaction_id = "another-operation".into()
+            }
+            "source" => session
+                .lock_state()
+                .unwrap()
+                .journal
+                .as_mut()
+                .unwrap()
+                .append_completed(ConversationMessage::Assistant(assistant_text(
+                    "unexpected",
+                    "new fact",
+                )))
+                .unwrap(),
+            "reload" => {
+                runtime.config_registry.replace_document_for_test(
+                    "schema_version=1\n[runtime.model_retry]\ndelays_ms=[1]\n",
+                );
+            }
+            _ => unreachable!(),
+        }
+        release.notify_one();
+        let result = operation.await.unwrap();
+        if change == "reload" {
+            assert!(result.is_ok());
+        } else {
+            assert_eq!(
+                result.unwrap_err().to_protocol_info().code,
+                assistant_protocol::RuntimeErrorCode::SnapshotStale
+            );
+            assert_eq!(store.load_conversation(&session_id).await.unwrap(), source);
+        }
+    }
+}
+
+#[tokio::test]
+async fn compaction_commit_core_tracks_child_journal_failure_panic_boundary_and_precommit_cancel() {
+    for failure in ["journal", "panic", "boundary", "cancel"] {
+        let (runtime, model, store, session_id) = prepared_compaction_case(m1_summary()).await;
+        let session = runtime.session(&session_id).await.unwrap();
+        let source = store.load_conversation(&session_id).await.unwrap();
+        let generation = session.lock_state().unwrap().body_generation;
+        let operation_id = assistant_protocol::IdempotencyKey::new("direct-commit").unwrap();
+        store
+            .prepare_session_compaction(crate::SessionHistoryCompactionPreparation {
+                operation_id: operation_id.clone(),
+                session_id: session_id.clone(),
+                expected_generation: generation,
+                created_at_ms: 1,
+            })
+            .await
+            .unwrap();
+        let mut messages = vec![ConversationMessage::ContextSummary(
+            agent_types::ContextSummaryMessage {
+                id: MessageId::new("direct-summary").unwrap(),
+                text: "short summary".into(),
+                model: None,
+                usage: None,
+                compacted_usage: None,
+                usage_adjustment: None,
+                programmatic_context: None,
+                retained_user_message_id: None,
+            },
+        )];
+        messages.extend_from_slice(&source.messages[2..]);
+        let replacement = ConversationSnapshot::new(messages);
+        let stored_child = crate::StoredChildTask {
+            context_management_mode: agent_model::ContextManagementMode::LocalSummary,
+            context_window_tokens: Some(8192),
+            child_task_id: assistant_protocol::ChildTaskId::new("projection-child").unwrap(),
+            session_id: session_id.clone(),
+            parent_run_id: RunId::new("projection-parent").unwrap(),
+            parent_tool_call_id: assistant_protocol::ToolCallId::new("projection-call").unwrap(),
+            title: "projection fixture".into(),
+            system_prompt: SystemPromptSnapshot::default(),
+            agent_variant: assistant_protocol::AgentVariant::Build,
+            status: assistant_protocol::ChildTaskStatus::Running,
+            cancel_requested: false,
+            body_generation: generation,
+            message_count: source.messages.len() as u64,
+            final_message_id: None,
+            error: None,
+            created_at_ms: 1,
+            started_at_ms: Some(1),
+            finished_at_ms: None,
+            conversation_state: crate::StoredConversationState::Available,
+        };
+        let child =
+            crate::delegation::ChildTaskRecord::recovered(&stored_child, Some(source.clone()))
+                .unwrap();
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        if failure == "cancel" {
+            cancellation.cancel();
+        }
+        let install_called = AtomicBool::new(false);
+        // 用真实 IdleSession 提交测试共享内核的临界点；child 安装使用真实 ChildTaskRecord，
+        // owner/child 生产适配另由实际委派的成功及 registry 故障测试覆盖。
+        let _mutation = session.mutation().await;
+        let error = crate::context_compaction::commit_context_replacement(
+            store.as_ref(),
+            crate::ContextReplacement {
+                target: crate::ContextReplacementTarget::IdleSession {
+                    session_id: session_id.clone(),
+                    expected_generation: generation,
+                    operation_id,
+                    compacted_message_count: 2,
+                    retained_message_count: 2,
+                },
+                conversation: replacement.clone(),
+                changed_at_ms: 2,
+            },
+            generation + u64::from(failure == "boundary"),
+            &cancellation,
+            &session,
+            || Ok(()),
+            |committed| {
+                install_called.store(true, Ordering::SeqCst);
+                if failure == "panic" {
+                    panic!("private-panic-marker");
+                }
+                child.lock_state().unwrap().journal = None;
+                child
+                    .replace_conversation(replacement, committed.result_generation)
+                    .map_err(crate::context_compaction::RuntimeCompactionError::into_runtime_error)
+            },
+        )
+        .await
+        .unwrap_err();
+        if failure == "cancel" {
+            assert!(error.is_cancelled());
+            assert!(!error.is_committed());
+            assert!(!session.lock_state().unwrap().is_faulted);
+            assert_eq!(store.load_conversation(&session_id).await.unwrap(), source);
+        } else {
+            assert!(error.is_committed());
+            assert!(session.lock_state().unwrap().is_faulted);
+            assert_eq!(
+                error.to_protocol_info().code,
+                assistant_protocol::RuntimeErrorCode::Internal
+            );
+            assert!(
+                !error
+                    .to_protocol_info()
+                    .message
+                    .contains("private-panic-marker")
+            );
+            assert!(
+                store
+                    .load_conversation(&session_id)
+                    .await
+                    .unwrap()
+                    .messages
+                    .iter()
+                    .any(|m| matches!(m, ConversationMessage::ContextSummary(_)))
+            );
+        }
+        assert_eq!(
+            install_called.load(Ordering::SeqCst),
+            matches!(failure, "journal" | "panic")
+        );
+        assert_eq!(
+            model.take_requests().len(),
+            2,
+            "commit never re-generates the summary"
+        );
+    }
 }

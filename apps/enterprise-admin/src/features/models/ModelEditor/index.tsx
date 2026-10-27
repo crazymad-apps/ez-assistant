@@ -46,7 +46,7 @@ const ModelEditorForm = observer(function ModelEditorForm() {
   const responses = Boolean(
     connection &&
     connection.protocol_preference !== 'chat_completions' &&
-    ['opencode', 'openai', 'deepseek', 'dashscope_api', 'dashscope_plan', 'moonshot'].includes(
+    ['opencode', 'openai', 'sub2api', 'deepseek', 'dashscope_api', 'dashscope_plan', 'moonshot'].includes(
       connection.provider_type,
     ),
   );

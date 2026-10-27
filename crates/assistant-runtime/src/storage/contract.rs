@@ -44,7 +44,11 @@ pub struct RecoveredRuntime {
     pub session_commands: Vec<super::StoredSessionCommand>,
     pub mcp_input_selections: Vec<StoredMcpSelection>,
     pub runs: Vec<StoredRun>,
+    /// 文件中的本会话只读轮次，仅用于核对恢复引用；不得装配成执行记录。
+    pub run_history: Vec<(SessionId, super::StoredRunHistory)>,
     pub child_tasks: Vec<StoredChildTask>,
+    /// 文件 child 只用于阅读／引用校验，不进入任务 Registry 或恢复执行。
+    pub child_history: Vec<(SessionId, super::StoredChildTaskHistory)>,
     pub work_plans: Vec<StoredWorkPlan>,
     pub goals: Vec<StoredGoal>,
     pub skill_activations: Vec<StoredSkillActivation>,
@@ -64,6 +68,8 @@ pub struct SessionSummaryQuery {
 /// 单会话装配及其跨会话身份引用；引用只有角色与生命周期，不带历史正文。
 #[derive(Clone, Debug, Default)]
 pub struct LoadedSession {
+    /// 首次执行恢复得到的有效窗口；由 Runtime 接管，Store 不缓存正文。
+    pub execution_window: Option<crate::ExecutionWindow>,
     pub state: RecoveredRuntime,
     pub identities: Vec<(SessionId, crate::SessionRole, crate::StoredSessionLifecycle)>,
 }
@@ -72,6 +78,11 @@ pub struct LoadedSession {
 ///
 /// 该端口以业务原子操作表达 Runtime 对持久化的需求，禁止退化为通用 SQL 或键值接口。
 pub trait RuntimeStore: Send + Sync {
+    /// 只读当前 owner 的历史值；不恢复为可执行 Run，也不以 SQL 控制行补造历史。
+    fn load_conversation_history(
+        &self,
+        owner: assistant_protocol::ConversationOwner,
+    ) -> StoreFuture<'_, super::StoredConversationHistory>;
     /// 只读取指定会话的问答事实；不恢复或重放执行。
     fn load_feedback(
         &self,
@@ -146,12 +157,13 @@ pub trait RuntimeStore: Send + Sync {
         server_history_key: Option<String>,
     ) -> StoreFuture<'_, ()>;
 
-    /// 启动只读取全局设备与工作区事实，不恢复或加载历史会话。
+    /// 只查询标题；文件目录局部失败通过同一分页契约报告，不创建或恢复执行。
     fn search_conversation_titles(
         &self,
         request: ConversationSearchRequest,
-    ) -> StoreFuture<'_, Vec<assistant_protocol::ConversationHistoryHit>>;
+    ) -> StoreFuture<'_, ConversationSearchPage<assistant_protocol::ConversationHistoryHit>>;
 
+    /// 启动只读取全局设备与工作区事实，不恢复或加载历史会话。
     fn load_runtime_globals(&self) -> StoreFuture<'_, RecoveredRuntime>;
 
     /// 读取目标会话结构状态；不启动执行，不修复历史写操作。
@@ -265,7 +277,7 @@ pub trait RuntimeStore: Send + Sync {
     /// 创建 Session 稳定事实及其空 Conversation。
     fn create_session(&self, session: NewStoredSession) -> StoreFuture<'_, StoredSession>;
 
-    /// 原子物化新 Session、附件、首个 Input/Run 及其 Goal/Skill 伴随事实。
+    /// 原子物化新 Session、附件、首个 Input 及其 Goal/Skill 伴随事实。
     fn materialize_session(
         &self,
         materialization: NewStoredSessionMaterialization,
@@ -354,8 +366,15 @@ pub trait RuntimeStore: Send + Sync {
         replacement: ContextReplacement,
     ) -> StoreFuture<'_, ContextReplacementResult>;
 
-    /// 原子创建 Input 与首次 Accepted Run，或返回同 Session 幂等 key 的首次结果。
+    /// 只暂存可撤销 Input；幂等命中返回原输入及已经存在的首次 Run（未领取时为空）。
     fn accept_input(&self, input: NewStoredInput) -> StoreFuture<'_, AcceptedInput>;
+
+    /// 实际领取时创建首次 Run；同 Session mutation 内调用，成功后才安装内存执行投影。
+    /// 输入必须仍未领取且会话可执行，失败不得生成历史或消费正文。
+    ///
+    /// # Errors
+    /// 输入已领取、会话不具备执行条件、身份冲突或可靠提交失败时返回错误，保留原暂存输入。
+    fn claim_input(&self, run: StoredRun) -> StoreFuture<'_, ()>;
 
     /// 原子接受一个不创建 Run 的结构化 Session Command。
     fn accept_session_command(
@@ -363,7 +382,7 @@ pub trait RuntimeStore: Send + Sync {
         command: NewStoredSessionCommand,
     ) -> StoreFuture<'_, AcceptedStoredSessionCommand>;
 
-    /// 删除尚未进入规范 Conversation 的排队 Input 及其 Run。
+    /// 删除尚未实际领取的暂存 Input 及其选择。
     fn cancel_queued_input(
         &self,
         session_id: &SessionId,
@@ -427,8 +446,57 @@ pub trait RuntimeStore: Send + Sync {
     /// 按当前权威 generation 加载并校验完整规范 Conversation。
     fn load_conversation(&self, session_id: &SessionId) -> StoreFuture<'_, ConversationSnapshot>;
 
+    /// 顺序恢复当前有效上下文；正式文件实现边扫描边裁剪，扫描结束前不执行业务。
+    fn load_execution_window(
+        &self,
+        session_id: &SessionId,
+    ) -> StoreFuture<'_, crate::ExecutionWindow> {
+        let session_id = session_id.clone();
+        Box::pin(async move {
+            crate::ExecutionWindow::from_snapshot(self.load_conversation(&session_id).await?)
+        })
+    }
+
     /// 读取 Session 已可靠提交的模型请求用量汇总。
     fn get_session_usage(&self, session_id: &SessionId) -> StoreFuture<'_, StoredSessionUsage>;
+
+    /// 当前上下文及累计统计快照；正式 Store 直接读统计表，不读取历史正文。
+    fn get_conversation_usage(
+        &self,
+        owner: assistant_protocol::ConversationOwner,
+    ) -> StoreFuture<'_, super::StoredConversationUsage> {
+        Box::pin(async move {
+            let snapshot = match owner {
+                assistant_protocol::ConversationOwner::MainSession { session_id } => {
+                    self.load_conversation(&session_id).await?
+                }
+                assistant_protocol::ConversationOwner::ChildTask {
+                    session_id,
+                    child_task_id,
+                } => {
+                    self.load_child_conversation(&session_id, &child_task_id)
+                        .await?
+                }
+            };
+            let mut usage = super::StoredConversationUsage::default();
+            for message in &snapshot.messages {
+                let tokens = match message {
+                    agent_types::ConversationMessage::Assistant(message) => message.usage.as_ref(),
+                    agent_types::ConversationMessage::ContextSummary(message) => {
+                        message.usage.as_ref()
+                    }
+                    _ => None,
+                };
+                if let Some(tokens) = tokens {
+                    usage.accumulate(tokens);
+                }
+            }
+            usage.replace_context(&snapshot.project_provider_context().map_err(|_| {
+                super::StoreError::new(super::StoreErrorKind::InvalidData, "invalid usage context")
+            })?);
+            Ok(usage)
+        })
+    }
 
     /// 按可显示 User/Assistant 消息边界读取历史窗口；实现可使用可重建的私有索引。
     fn load_conversation_window(
@@ -495,7 +563,7 @@ pub trait RuntimeStore: Send + Sync {
     /// 原子切换 Session 当前审批模式。
     fn set_session_approval_mode(&self, change: ApprovalModeChange) -> StoreFuture<'_, ()>;
 
-    /// 原子切换正文 generation、销毁目标及尾段关联，并创建新的 committed Input/Run。
+    /// 原子切换正文 generation、销毁目标及尾段关联，并创建新的 committed Input。
     fn rewrite_from_user(&self, rewrite: ConversationRewrite) -> StoreFuture<'_, RewriteResult>;
 
     /// 停止接收新命令，flush 已接受操作并等待基础设施 worker 退出。

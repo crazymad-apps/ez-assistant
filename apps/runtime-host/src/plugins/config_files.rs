@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 
 pub(crate) const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_FILES: usize = 256;
+pub(crate) const MCP_OVERRIDES_FILE: &str = "mcp-overrides.json";
 
 pub(crate) fn config_root(user_root: &Path, name: &str) -> io::Result<PathBuf> {
     if !super::plugin_name(name) || name.len() > 64 {
@@ -28,6 +29,10 @@ pub(crate) fn config_root(user_root: &Path, name: &str) -> io::Result<PathBuf> {
 }
 
 pub(crate) fn target(root: &Path, relative: &str, create_parents: bool) -> io::Result<PathBuf> {
+    // MCP 用户覆盖由正式管理命令解释、校验及 CAS，原生上传不能绕过它。
+    if relative.eq_ignore_ascii_case(MCP_OVERRIDES_FILE) {
+        return Err(invalid());
+    }
     if relative.is_empty()
         || relative.len() > 512
         || relative.contains('\\')
@@ -115,6 +120,13 @@ fn visit(
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
         let path = entry.path();
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(MCP_OVERRIDES_FILE)
+        {
+            continue;
+        }
         let metadata = fs::symlink_metadata(&path)?;
         if metadata.file_type().is_dir() {
             visit(root, &path, depth + 1, files)?;

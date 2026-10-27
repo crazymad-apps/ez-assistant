@@ -7,7 +7,7 @@
       "webviewInstallMode": { "type": "downloadBootstrapper", "silent": true },
       "wix": {
         "template": "wix/main.wxs",
-        "language": "en-US"
+        "language": { "en-US": { "localePath": "wix/en-US.wxl" } }
       }
     },
     "icon": ["icons/windows/icon.ico", "icons/windows/32x32.png", "icons/windows/128x128.png", "icons/windows/128x128@2x.png"]

@@ -1,3 +1,4 @@
+import { childKey } from "../../../stores/liveExecutionProjection";
 import { revealFileLabel } from "../../../platform/fileManager";
 import { observer } from "mobx-react-lite";
 import { McpControlResult } from "../McpControlResult";
@@ -42,12 +43,19 @@ export const ConversationView = observer(function ConversationView() {
   const store = useRootStore();
   const session_id = store.navigation.selected_session_id;
   const child_task_id = store.navigation.selected_child_task_id;
-  const history = child_task_id
-    ? store.projection.child_conversation_histories.get(child_task_id)
+  const history = child_task_id && session_id
+    ? store.projection.child_conversation_histories.get(childKey(session_id, child_task_id))
     : session_id ? store.projection.conversation_histories.get(session_id) : undefined;
-  const child_view = child_task_id ? store.projection.child_task_views.get(child_task_id) : undefined;
-  const live_run = child_task_id
-    ? store.live_execution.runForChildTask(child_task_id)
+  const child_view = child_task_id && session_id ? store.projection.child_task_views.get(childKey(session_id, child_task_id)) : undefined;
+  const load_state = session_id ? store.projection.conversationLoadState(session_id, child_task_id) : undefined;
+  const load_failure = load_state?.status === "error" ? (
+    <div role="alert" className={styles.load_error}>
+      {load_state.error}
+      <button onClick={() => { void store.reloadSelectedConversation(); }} type="button">重试</button>
+    </div>
+  ) : null;
+  const live_run = child_task_id && session_id
+    ? store.live_execution.runForChildTask(session_id, child_task_id)
     : session_id ? store.live_execution.runForSession(session_id) : null;
   const scroll_ref = useRef<HTMLDivElement>(null);
   const message_list_ref = useRef<HTMLDivElement>(null);
@@ -523,8 +531,10 @@ export const ConversationView = observer(function ConversationView() {
             <div className={styles.scroll}>
               <div className={styles.message_list}>
                 {live_run
-                  ? <ProcessingTurn messages={[]} live_run={live_run} child_tasks={[]} onFork={setForkPoint} show_fork={false} onLiveToolClick={openLiveToolDetail} onToolClick={openToolDetail} />
-                  : <EmptyConversation title="正在读取子任务" detail="正在从运行时获取可靠消息投影。" />}
+                  ? <>{load_failure}<ProcessingTurn messages={[]} live_run={live_run} child_tasks={[]} onFork={setForkPoint} show_fork={false} onLiveToolClick={openLiveToolDetail} onToolClick={openToolDetail} /></>
+                  : <EmptyConversation title={load_state?.error ? "读取子任务失败" : "正在读取子任务"}
+                    detail={load_state?.error ?? "正在从运行时获取可靠消息投影。"}
+                    on_retry={load_state?.error ? () => { void store.reloadSelectedConversation(); } : undefined} />}
               </div>
             </div>
           </div>
@@ -547,10 +557,13 @@ export const ConversationView = observer(function ConversationView() {
       );
     }
     return <EmptyConversation
-      title={store.interaction_error ? "读取会话失败" : "正在读取会话"}
-      detail={store.interaction_error ?? "正在从运行时获取可靠消息投影。"}
-      on_retry={store.interaction_error && session_id ? () => { void store.selectSession(session_id); } : undefined}
+      title={load_state?.error ? "读取会话失败" : "正在读取会话"}
+      detail={load_state?.error ?? "正在从运行时获取可靠消息投影。"}
+      on_retry={load_state?.error && session_id ? () => { void store.reloadSelectedConversation(); } : undefined}
     />;
+  }
+  if (load_state?.status === "error" && history.items.length === 0 && !live_run) {
+    return <EmptyConversation title="读取会话失败" detail={load_state.error ?? "请重试。"} on_retry={() => { void store.reloadSelectedConversation(); }} />;
   }
   if (history.items.length === 0 && !live_run) {
     if (!child_view) {
@@ -574,6 +587,7 @@ export const ConversationView = observer(function ConversationView() {
         ref={scroll_ref}
       >
         <div className={styles.message_list} ref={message_list_ref}>
+          {load_failure}
           {child_view && history.items.length === 0 && !live_run && (
             <EmptyConversation title={child_view.task.task.title} detail="子智能体尚未产生可展示的消息。" />
           )}

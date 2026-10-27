@@ -1,6 +1,12 @@
 # 只改标准路径片段；已转义的 %%、主题函数和其他提示符片段原样保留。
 __ez_terminal_prompt() {
     local previous=$?
+    if [ -n "${EZ_ASSISTANT_TOOL_BIN-}" ]; then
+        case ":$PATH:" in
+            *":$EZ_ASSISTANT_TOOL_BIN:"*) ;;
+            *) export PATH="$EZ_ASSISTANT_TOOL_BIN${PATH:+:$PATH}" ;;
+        esac
+    fi
     [[ -o promptpercent ]] || return $previous
     emulate -L zsh
     local text=$PROMPT output='' char next digits

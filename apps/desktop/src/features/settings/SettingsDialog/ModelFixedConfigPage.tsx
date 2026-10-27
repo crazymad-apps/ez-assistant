@@ -214,7 +214,7 @@ export const ModelFixedConfigPage = observer(function ModelFixedConfigPage(
                     inputMode="numeric"
                     required={field.required}
                     value={tokens[field.key]}
-                    placeholder="待配置，请核对文档"
+                    placeholder={field.key === 'max_output_tokens' ? '留空使用上游默认值' : '待配置，请核对文档'}
                     onChange={(event) => {
                       setTokens({ ...tokens, [field.key]: event.target.value });
                       setDirty(true);
@@ -223,8 +223,13 @@ export const ModelFixedConfigPage = observer(function ModelFixedConfigPage(
                 </label>
               ))}
             </div>
-            <ModelCompactionFields parameters={parameters} connection={props.provider.connection}
-              disabled={busy || read_only} read_only={read_only} on_change={change} />
+            <ModelCompactionFields
+              parameters={parameters}
+              connection={props.provider.connection}
+              disabled={busy || read_only}
+              read_only={read_only}
+              on_change={change}
+            />
             <h4>模型能力</h4>
             <div className={styles.model_form}>
               {(
@@ -240,7 +245,13 @@ export const ModelFixedConfigPage = observer(function ModelFixedConfigPage(
                   key={key}
                   label={label}
                   value={parameters[key]}
-                  options={support_options}
+                  options={
+                    key === 'streaming' || key === 'tool_calls'
+                      ? support_options.map((option) =>
+                          option.value === 'unknown' ? { ...option, label: '缺省（支持）' } : option,
+                        )
+                      : support_options
+                  }
                   onChange={(value) => change({ [key]: value })}
                 />
               ))}
@@ -308,7 +319,13 @@ export const ModelFixedConfigPage = observer(function ModelFixedConfigPage(
                     key={key}
                     label={`工具选择 ${key}`}
                     value={parameters.tool_choice[key]}
-                    options={support_options}
+                    options={
+                      key === 'auto'
+                        ? support_options.map((option) =>
+                            option.value === 'unknown' ? { ...option, label: '缺省（支持）' } : option,
+                          )
+                        : support_options
+                    }
                     onChange={(value) => change({ tool_choice: { ...parameters.tool_choice, [key]: value } })}
                   />
                 ))}

@@ -1,7 +1,14 @@
 //! 受信任桌面进程中的 Runtime discovery、启动与 bootstrap。
 
 mod desktop_update;
+#[cfg(windows)]
+pub(crate) mod installation;
+#[cfg(target_os = "macos")]
+pub(crate) mod installation_macos;
+#[cfg(target_os = "macos")]
+mod macos;
 mod management;
+mod native_stop;
 pub(crate) use management::{ExpectedHostConfiguration, LocalHostStatus};
 pub(crate) mod upgrade;
 #[cfg(windows)]
@@ -25,7 +32,7 @@ use std::process::Command;
 
 use assistant_protocol::{
     GetSessionViewRequest, GetWorkspaceRequest, RuntimeCommand, RuntimeCommandResult,
-    RuntimeHostCapabilities, RuntimeHostFeature, SessionId, ShutdownRuntimeRequest, WorkspaceId,
+    RuntimeHostCapabilities, RuntimeHostFeature, SessionId, WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -281,74 +288,70 @@ impl RuntimeBootstrapCoordinator {
     }
 
     pub(crate) async fn shutdown(&self) -> Result<(), RuntimeBootstrapError> {
-        let _operation = self.lifecycle_gate.lock().await;
-        let (bootstrap, original) = self.discover_target(false).await?;
-        self.send_command_to(
-            &bootstrap,
-            "desktop-stop-runtime",
-            RuntimeCommand::ShutdownRuntime(ShutdownRuntimeRequest::default()),
-        )
-        .await?;
-        self.wait_for_instance_to_stop(&original).await
+        let operation = self.lifecycle_gate.clone().lock_owned().await;
+        self.stop_native(operation, None).await.map(|_| ())
     }
 
     pub(crate) async fn restart(&self) -> Result<RuntimeBootstrap, RuntimeBootstrapError> {
         self.restart_checked(None).await
     }
 
-    /// 保存成功后可按已有实例与修订核对再停止；不保存配置、不恢复旧配置。
-    /// 调用方先持有 updater permit，此方法只获取一次 lifecycle gate。
+    /// 保存后的专用重启仍核对实例／revision；普通停止与重启不要求旧 Host HTTP 可用。
     pub(crate) async fn restart_checked(
         &self,
         expected: Option<&ExpectedHostConfiguration>,
     ) -> Result<RuntimeBootstrap, RuntimeBootstrapError> {
-        let _operation = self.lifecycle_gate.lock().await;
-        let (previous, original) = self.discover_target(false).await?;
-        if let Some(expected) = expected {
-            expected.verify_instance(&previous)?;
-        }
-        let source = original
-            .executable_path
-            .as_ref()
-            .ok_or_else(source_unavailable)?;
-        let digest = original
-            .executable_sha256
-            .as_ref()
-            .ok_or_else(source_unavailable)?;
-        let version = assistant_protocol::ClientCompatibility {
-            version: previous.capabilities.runtime_version.clone(),
-            min_compatible_version: previous.capabilities.min_compatible_version.clone(),
+        let operation = self.lifecycle_gate.clone().lock_owned().await;
+        let target = if let Some(expected) = expected {
+            let target = self.inspect_target(false).await?;
+            expected.verify_instance(&target.0)?;
+            Some(target)
+        } else {
+            None
         };
-        crate::runtime_source::verify(source, digest, &version)
+        let source = tokio::fs::canonicalize(&self.runtime_executable)
             .await
             .map_err(|_| source_unavailable())?;
-        // 来源检查可能耗时；在发出停止前重新核对保存快照及 discovery，避免停止另一个实例。
-        if let Some(expected) = expected {
+        let hash_source = source.clone();
+        let digest =
+            tokio::task::spawn_blocking(move || crate::runtime_source::digest(&hash_source))
+                .await
+                .map_err(|_| source_unavailable())?
+                .map_err(|_| source_unavailable())?;
+        let version = assistant_protocol::ClientCompatibility::current();
+        crate::runtime_source::verify(&source, &digest, &version)
+            .await
+            .map_err(|_| source_unavailable())?;
+        let original = if let (Some(expected), Some((previous, discovery))) = (expected, target) {
             self.verify_saved_configuration(&previous, expected).await?;
-        }
-        self.send_command_to(
-            &previous,
-            "desktop-restart-runtime",
-            RuntimeCommand::ShutdownRuntime(ShutdownRuntimeRequest::default()),
-        )
-        .await?;
-        self.wait_for_instance_to_stop(&original).await?;
-        crate::runtime_source::verify(source, digest, &version)
+            Some(discovery)
+        } else {
+            None
+        };
+        let (_operation, previous_instance) = self.stop_native(operation, original).await?;
+        crate::runtime_source::verify(&source, &digest, &version)
             .await
             .map_err(|_| {
                 bootstrap_error(
                     RuntimeBootstrapErrorCode::RuntimeStartFailed,
-                    "原 Host 已停止，但原启动来源已变化或不可用；未改用其他版本。",
+                    "原 Host 已停止，但当前随包 Host 已变化或不可用；未启动其他来源。",
                 )
             })?;
-        self.launch_from(source).await?;
+        self.launch_from(&source).await.map_err(|error| {
+            bootstrap_error(
+                RuntimeBootstrapErrorCode::RuntimeStartFailed,
+                format!("原 Host 已停止，当前随包 Host 启动失败：{}", error.message),
+            )
+        })?;
         let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
         let mut delay = POLL_INTERVAL;
         loop {
             match self.discover_target(true).await {
-                Ok((current, discovery)) if current.instance_id != previous.instance_id => {
-                    if discovery.executable_path.as_ref() != Some(source)
-                        || discovery.executable_sha256.as_ref() != Some(digest)
+                Ok((current, discovery))
+                    if previous_instance.as_ref() != Some(&current.instance_id) =>
+                {
+                    if discovery.executable_path.as_ref() != Some(&source)
+                        || discovery.executable_sha256.as_ref() != Some(&digest)
                     {
                         return Err(instance_changed());
                     }
@@ -358,7 +361,11 @@ impl RuntimeBootstrapCoordinator {
                     return Ok(current);
                 }
                 Err(error)
-                    if matches!(error.code, RuntimeBootstrapErrorCode::ComponentMismatch) =>
+                    if matches!(
+                        error.code,
+                        RuntimeBootstrapErrorCode::ComponentMismatch
+                            | RuntimeBootstrapErrorCode::RuntimeUpgradeRequired
+                    ) =>
                 {
                     return Err(error);
                 }
@@ -367,12 +374,34 @@ impl RuntimeBootstrapCoordinator {
             if tokio::time::Instant::now() >= deadline {
                 return Err(bootstrap_error(
                     RuntimeBootstrapErrorCode::RuntimeUnavailable,
-                    "Runtime 重启后未能在限定时间内就绪。",
+                    "原 Host 已停止，当前随包 Host 未能在限定时间内就绪。",
                 ));
             }
             tokio::time::sleep(delay).await;
             delay = (delay * 2).min(Duration::from_secs(1));
         }
+    }
+
+    /// 阻塞查询及退出等待持有同一个 gate；即使调用方取消等待，也不能并发结束另一个目标。
+    async fn stop_native(
+        &self,
+        operation: tokio::sync::OwnedMutexGuard<()>,
+        expected: Option<RuntimeDiscovery>,
+    ) -> Result<(tokio::sync::OwnedMutexGuard<()>, Option<String>), RuntimeBootstrapError> {
+        let home = self.runtime_home.clone();
+        let executable = self.runtime_executable.clone();
+        let (operation, result) = tokio::task::spawn_blocking(move || {
+            let result = native_stop::stop(&home, &executable, expected.as_ref());
+            (operation, result)
+        })
+        .await
+        .map_err(|_| {
+            bootstrap_error(
+                RuntimeBootstrapErrorCode::RuntimeStopFailed,
+                "本机 Runtime 进程管理任务未正常完成，请重新查询。",
+            )
+        })?;
+        Ok((operation, result?))
     }
 
     fn runtime_home(&self) -> Result<&Path, RuntimeBootstrapError> {
@@ -540,45 +569,6 @@ impl RuntimeBootstrapCoordinator {
         }
     }
 
-    async fn wait_for_instance_to_stop(
-        &self,
-        original: &RuntimeDiscovery,
-    ) -> Result<(), RuntimeBootstrapError> {
-        let deadline = tokio::time::Instant::now() + SHUTDOWN_TIMEOUT;
-        let mut delay = POLL_INTERVAL;
-        loop {
-            match read_discovery(&self.runtime_home) {
-                Ok(discovery)
-                    if discovery.instance_id != original.instance_id
-                        || discovery.access_token != original.access_token
-                        || discovery.pid != original.pid =>
-                {
-                    return Err(instance_changed());
-                }
-                Err(error)
-                    if !std::fs::symlink_metadata(
-                        self.runtime_home.join(DISCOVERY_RELATIVE_PATH),
-                    )
-                    .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
-                {
-                    return Err(error);
-                }
-                _ => {}
-            }
-            if !process_is_alive(original.pid) && instance_lock_released(&self.runtime_home)? {
-                return Ok(());
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(bootstrap_error(
-                    RuntimeBootstrapErrorCode::RuntimeStopFailed,
-                    "Runtime 未能在限定时间内受控停止，未强制结束或启动其他实例。",
-                ));
-            }
-            tokio::time::sleep(delay).await;
-            delay = (delay * 2).min(Duration::from_secs(1));
-        }
-    }
-
     async fn discover(
         &self,
         started_runtime: bool,
@@ -594,6 +584,14 @@ impl RuntimeBootstrapCoordinator {
     ) -> Result<(RuntimeBootstrap, RuntimeDiscovery), RuntimeBootstrapError> {
         let (bootstrap, discovery) = self.inspect_target(started_runtime).await?;
         let capabilities = &bootstrap.capabilities;
+        // Finder 覆盖后即使旧 Host 业务版本仍兼容，也先说明影响并等待显式换代。
+        // 相同安装来源且内容已替换才提示，不将普通 Dock／Finder 重开变为自动停止。
+        if self.upgrade_source(&discovery, capabilities).await.is_ok() {
+            return Err(bootstrap_error(
+                RuntimeBootstrapErrorCode::RuntimeUpgradeRequired,
+                "需要完成本机更新。更新将重启后台服务并中断正在运行的会话，随后自动备份和升级数据。",
+            ));
+        }
         let missing = REQUIRED_FEATURES
             .iter()
             .find(|feature| !capabilities.features.contains(feature));
@@ -608,12 +606,6 @@ impl RuntimeBootstrapCoordinator {
             )
             .is_err()
         {
-            if self.upgrade_source(&discovery, capabilities).await.is_ok() {
-                return Err(bootstrap_error(
-                    RuntimeBootstrapErrorCode::RuntimeUpgradeRequired,
-                    "需要完成本机更新。更新将重启 Runtime 并中断其正在执行的任务，随后自动备份和升级数据。",
-                ));
-            }
             return Err(bootstrap_error(
                 RuntimeBootstrapErrorCode::ComponentMismatch,
                 "Host 与 Desktop 软件版本不兼容或缺少所需能力，请更新对应应用。",
@@ -908,6 +900,12 @@ fn resolve_runtime_executable() -> Result<PathBuf, RuntimeBootstrapError> {
 }
 
 fn read_discovery(runtime_home: &Path) -> Result<RuntimeDiscovery, RuntimeBootstrapError> {
+    read_discovery_with_modified(runtime_home).map(|(discovery, _)| discovery)
+}
+
+fn read_discovery_with_modified(
+    runtime_home: &Path,
+) -> Result<(RuntimeDiscovery, std::time::SystemTime), RuntimeBootstrapError> {
     if !runtime_home.is_absolute() {
         return Err(bootstrap_error(
             RuntimeBootstrapErrorCode::RuntimeHomeUnavailable,
@@ -946,7 +944,6 @@ fn read_discovery(runtime_home: &Path) -> Result<RuntimeDiscovery, RuntimeBootst
     #[cfg(windows)]
     let file =
         windows::open_private_file(runtime_home, &path, false).map_err(|_| invalid_discovery())?;
-    #[cfg(unix)]
     let opened = file.metadata().map_err(|_| invalid_discovery())?;
     #[cfg(unix)]
     if metadata.dev() != opened.dev()
@@ -957,13 +954,22 @@ fn read_discovery(runtime_home: &Path) -> Result<RuntimeDiscovery, RuntimeBootst
         return Err(invalid_discovery());
     }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take(MAX_DISCOVERY_BYTES + 1)
+    (&file)
+        .take(MAX_DISCOVERY_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| invalid_discovery())?;
     if bytes.len() as u64 > MAX_DISCOVERY_BYTES {
         return Err(invalid_discovery());
     }
-    serde_json::from_slice(&bytes).map_err(|_| invalid_discovery())
+    let modified = opened.modified().map_err(|_| invalid_discovery())?;
+    let after = file.metadata().map_err(|_| invalid_discovery())?;
+    if after.len() != opened.len() || after.modified().map_err(|_| invalid_discovery())? != modified
+    {
+        return Err(invalid_discovery());
+    }
+    serde_json::from_slice(&bytes)
+        .map(|discovery| (discovery, modified))
+        .map_err(|_| invalid_discovery())
 }
 
 fn validate_discovery(discovery: &RuntimeDiscovery) -> Result<(), RuntimeBootstrapError> {
@@ -1036,7 +1042,7 @@ fn process_is_alive(_pid: u32) -> bool {
 fn source_unavailable() -> RuntimeBootstrapError {
     bootstrap_error(
         RuntimeBootstrapErrorCode::RuntimeExecutableUnavailable,
-        "原 Host 启动来源缺失、已改变或版本不符；未停止当前 Host。",
+        "当前随包 Host 启动来源缺失、已改变或版本不符。",
     )
 }
 
@@ -1109,6 +1115,7 @@ fn bootstrap_error(
 
 #[cfg(test)]
 mod tests {
+    use assistant_protocol::ShutdownRuntimeRequest;
     use std::io::Write as _;
 
     #[cfg(unix)]
@@ -1490,162 +1497,6 @@ mod tests {
             RuntimeCommandResult::ShutdownRuntime(_)
         ));
         server.join().unwrap();
-    }
-
-    #[tokio::test]
-    async fn missing_discovery_is_not_proof_of_exit_and_successor_is_preserved() {
-        let home = tempdir().unwrap();
-        let run = home.path().join("run");
-        fs::create_dir(&run).unwrap();
-        #[cfg(unix)]
-        fs::set_permissions(&run, fs::Permissions::from_mode(0o700)).unwrap();
-        let coordinator =
-            RuntimeBootstrapCoordinator::new(home.path().to_owned(), home.path().join("absent"))
-                .unwrap();
-        let original = RuntimeDiscovery {
-            address: "http://127.0.0.1:7240".into(),
-            instance_id: "original".into(),
-            access_token: "a".repeat(43),
-            pid: std::process::id(),
-            executable_path: None,
-            executable_sha256: None,
-        };
-        assert!(
-            tokio::time::timeout(
-                Duration::from_millis(50),
-                coordinator.wait_for_instance_to_stop(&original)
-            )
-            .await
-            .is_err()
-        );
-        let mut successor = original.clone();
-        successor.instance_id = "successor".into();
-        let path = run.join("runtime.json");
-        let content = serde_json::to_vec(&serde_json::json!({
-            "address": successor.address, "instance_id": successor.instance_id,
-            "access_token": successor.access_token, "pid": successor.pid,
-        }))
-        .unwrap();
-        fs::write(&path, &content).unwrap();
-        #[cfg(unix)]
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(matches!(
-            coordinator
-                .wait_for_instance_to_stop(&original)
-                .await
-                .unwrap_err()
-                .code,
-            RuntimeBootstrapErrorCode::RuntimeStopFailed
-        ));
-        assert_eq!(fs::read(path).unwrap(), content);
-    }
-
-    /// Explicit entry for an already prepared, marked non-production M3 fixture.
-    #[tokio::test]
-    #[ignore = "显式连接带 M3 标记的临时 Host；不启动 Desktop GUI"]
-    async fn isolated_native_restart_preserves_the_running_host_source() {
-        let home =
-            PathBuf::from(std::env::var_os("EZ_ASSISTANT_TEST_RUNTIME_HOME").expect("M3 fixture"))
-                .canonicalize()
-                .unwrap();
-        assert!(home.starts_with(std::env::temp_dir().canonicalize().unwrap()));
-        assert_eq!(
-            fs::read_to_string(home.join("m3-isolated-validation")).unwrap(),
-            "v0.25.2"
-        );
-        let before = read_discovery(&home).unwrap();
-        let source = before
-            .executable_path
-            .as_ref()
-            .unwrap()
-            .canonicalize()
-            .unwrap();
-        assert!(
-            source.starts_with(home.parent().unwrap()),
-            "source must be this fixture's private copy"
-        );
-        let coordinator =
-            RuntimeBootstrapCoordinator::new(home.clone(), home.join("not-the-original-host"))
-                .unwrap();
-        let restarted = coordinator.restart().await.unwrap();
-        let after = read_discovery(&home).unwrap();
-        assert_ne!(after.instance_id, before.instance_id);
-        assert_eq!(after.executable_path, before.executable_path);
-        assert_eq!(after.executable_sha256, before.executable_sha256);
-        assert_eq!(restarted.instance_id, after.instance_id);
-        // The native bootstrap hands Starting/Unavailable to the existing UI lifecycle; do not
-        // infer business readiness from discovery. Require actual health for this acceptance test.
-        let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
-        loop {
-            let response = coordinator
-                .http
-                .get(format!("{}/health", restarted.base_url))
-                .bearer_auth(&restarted.access_token)
-                .headers(crate::runtime_compatibility::headers())
-                .send()
-                .await
-                .unwrap();
-            let health = response
-                .error_for_status()
-                .unwrap()
-                .json::<assistant_protocol::RuntimeHostHealth>()
-                .await
-                .unwrap();
-            assert_ne!(
-                health.status,
-                assistant_protocol::RuntimeHostHealthStatus::Unavailable,
-                "restarted Host reported an initialization failure"
-            );
-            if health.status == assistant_protocol::RuntimeHostHealthStatus::Ready {
-                break;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "restarted Host did not become Ready"
-            );
-            tokio::time::sleep(POLL_INTERVAL).await;
-        }
-        coordinator.shutdown().await.unwrap();
-        assert!(!process_is_alive(after.pid));
-        assert!(instance_lock_released(&home).unwrap());
-    }
-
-    #[tokio::test]
-    #[ignore = "显式连接原来源已移走或替换的 M3 临时 Host"]
-    async fn isolated_native_restart_rejects_unavailable_source_without_stopping() {
-        let home =
-            PathBuf::from(std::env::var_os("EZ_ASSISTANT_TEST_RUNTIME_HOME").expect("M3 fixture"))
-                .canonicalize()
-                .unwrap();
-        assert!(home.starts_with(std::env::temp_dir().canonicalize().unwrap()));
-        assert_eq!(
-            fs::read_to_string(home.join("m3-isolated-validation")).unwrap(),
-            "v0.25.2"
-        );
-        let before_bytes = fs::read(home.join(DISCOVERY_RELATIVE_PATH)).unwrap();
-        let before = read_discovery(&home).unwrap();
-        assert!(
-            before
-                .executable_path
-                .as_ref()
-                .unwrap()
-                .starts_with(home.parent().unwrap())
-        );
-        let coordinator =
-            RuntimeBootstrapCoordinator::new(home.clone(), home.join("not-a-fallback")).unwrap();
-        assert!(matches!(
-            coordinator.restart().await.unwrap_err().code,
-            RuntimeBootstrapErrorCode::RuntimeExecutableUnavailable
-        ));
-        assert!(process_is_alive(before.pid));
-        assert_eq!(
-            fs::read(home.join(DISCOVERY_RELATIVE_PATH)).unwrap(),
-            before_bytes
-        );
-        assert_eq!(
-            coordinator.discover(false).await.unwrap().instance_id,
-            before.instance_id
-        );
     }
 
     #[test]

@@ -24,7 +24,21 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 type Key = Option<UserKey>;
-type Slot = Arc<AsyncMutex<Option<Arc<LoadedDomain>>>>;
+type Slot = Arc<DomainSlot>;
+
+/// 同一用户的加载锁和启动投影共用槽位；健康查询不取得初始化锁，不打开第二个 Runtime。
+struct DomainSlot {
+    loaded: Arc<AsyncMutex<Option<Arc<LoadedDomain>>>>,
+    startup: StartupStateHandle,
+}
+impl DomainSlot {
+    fn new(startup: StartupStateHandle) -> Self {
+        Self {
+            loaded: Arc::new(AsyncMutex::new(None)),
+            startup,
+        }
+    }
+}
 
 struct LoadedDomain {
     services: Arc<ReadyServices>,
@@ -70,6 +84,7 @@ pub(crate) enum DomainError {
 }
 
 pub(crate) struct UserDomains {
+    startup: StartupStateHandle,
     slots: Mutex<HashMap<Key, Slot>>,
     open: mpsc::UnboundedSender<DomainRequest>,
     stopping: CancellationToken,
@@ -77,6 +92,19 @@ pub(crate) struct UserDomains {
 }
 
 impl UserDomains {
+    /// 只读取本人已有槽位；登录预热／ensure 仍是初始化的唯一入口。
+    pub(crate) fn health(
+        &self,
+        permit: &AccessPermit,
+    ) -> Result<Option<assistant_protocol::RuntimeHostHealth>, AccessError> {
+        permit.check()?;
+        Ok(self
+            .slots
+            .lock()
+            .expect("user domains poisoned")
+            .get(&permit.user_key().cloned())
+            .map(|slot| slot.startup.health()))
+    }
     /// 登录只排队预热，不等待存储或中心网络；初始化仍由用户域 owner 收尾。
     pub(crate) fn warm_up(&self, permit: &AccessPermit) {
         if !self.stopping.is_cancelled() && permit.check().is_ok() {
@@ -101,7 +129,7 @@ impl UserDomains {
         let Some(slot) = slot else {
             return Ok(());
         };
-        let guard = slot.lock().await;
+        let guard = slot.loaded.lock().await;
         let Some(domain) = guard.as_ref().filter(|domain| domain.access.is_cancelled()) else {
             return Ok(());
         };
@@ -124,14 +152,20 @@ impl UserDomains {
             .lock()
             .expect("user domains poisoned")
             .entry(key.clone())
-            .or_insert_with(|| Arc::new(AsyncMutex::new(None)))
+            .or_insert_with(|| {
+                Arc::new(DomainSlot::new(if key.is_none() {
+                    self.startup.clone()
+                } else {
+                    StartupStateHandle::new()
+                }))
+            })
             .clone();
         loop {
             let guard = tokio::select! {
                 biased;
                 () = self.stopping.cancelled() => return Err(DomainError::Shutdown),
                 () = permit.ended() => return Err(permit.check().err().unwrap_or(AccessError::Unauthorized).into()),
-                guard = slot.clone().lock_owned() => guard,
+                guard = slot.loaded.clone().lock_owned() => guard,
             };
             permit.check()?;
             if let Some(loaded) = guard.as_ref() {
@@ -203,6 +237,7 @@ impl UserDomainService {
         let (open, requests) = mpsc::unbounded_channel();
         let (stopped, completion) = watch::channel(None);
         let domains = Arc::new(UserDomains {
+            startup: startup.clone(),
             slots: Mutex::new(HashMap::new()),
             open,
             stopping: CancellationToken::new(),
@@ -238,9 +273,9 @@ impl UserDomainService {
                 .lock()
                 .expect("user domains poisoned")
                 .entry(None)
-                .or_insert_with(|| Arc::new(AsyncMutex::new(None)))
+                .or_insert_with(|| Arc::new(DomainSlot::new(self.startup.clone())))
                 .clone();
-            if let Ok(guard) = slot.clone().try_lock_owned() {
+            if let Ok(guard) = slot.loaded.clone().try_lock_owned() {
                 let (reply, _) = oneshot::channel();
                 let request = OpenDomain {
                     key: None,
@@ -320,7 +355,7 @@ impl UserDomainService {
                 .cloned();
             let unused = slot
                 .as_ref()
-                .is_none_or(|slot| slot.try_lock().is_ok_and(|guard| guard.is_none()));
+                .is_none_or(|slot| slot.loaded.try_lock().is_ok_and(|guard| guard.is_none()));
             if unused {
                 self.credentials.end_unused_user(&key);
             }
@@ -331,11 +366,7 @@ impl UserDomainService {
         let config = self.config.clone();
         let shared = self.shared.clone();
         let credentials = self.credentials.clone();
-        let startup = if request.key.is_none() {
-            self.startup.clone()
-        } else {
-            StartupStateHandle::new()
-        };
+        let startup = request.slot.startup.clone();
         #[cfg(test)]
         let model = self.model.clone();
         tasks.spawn(async move {
@@ -499,11 +530,13 @@ async fn run_domain(
     .await;
     access.cancel();
     let _ = services.runtime.request_shutdown();
-    let mut guard = slot.lock().await;
+    let mut guard = slot.loaded.lock().await;
     let stopped = resources.shutdown().await;
     let success = matches!(observed, Ok(Ok(()))) && stopped;
     if success {
         *guard = None;
+        // 健康投影的 Ready 也持有服务 Arc；关闭后释放，不能让槽位残留整套 Runtime。
+        startup.restart();
     } else {
         eprintln!("runtime-host: user domain cleanup failed; replacement is blocked");
     }

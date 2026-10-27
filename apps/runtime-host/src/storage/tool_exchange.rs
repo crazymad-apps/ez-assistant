@@ -3,6 +3,9 @@
 //! `PendingTarget` 只适配所有权、表名与最终 Conversation 目标；begin/started/ready/commit 和
 //! 重启补偿算法只有这一份，避免两个执行层产生不同的副作用边界。
 
+mod delegation;
+pub(super) use delegation::{freeze_child_for_pending, release_parent_child_controls};
+
 use std::collections::HashSet;
 
 use agent_core::ExchangeReceipt;
@@ -198,17 +201,18 @@ impl StorageEngine {
         scope: Option<&assistant_protocol::SessionId>,
     ) -> StorageResult<HashSet<String>> {
         self.recover_pending_exchanges(PendingTable::Run, scope)
+            .map(|owners| owners.into_iter().map(|(session, _)| session).collect())
     }
 
     pub(super) fn recover_pending_child_tool_exchanges(
         &mut self,
-    ) -> StorageResult<HashSet<String>> {
+    ) -> StorageResult<HashSet<(String, String)>> {
         self.recover_pending_child_tool_exchanges_scoped(None)
     }
     pub(super) fn recover_pending_child_tool_exchanges_scoped(
         &mut self,
         scope: Option<&assistant_protocol::SessionId>,
-    ) -> StorageResult<HashSet<String>> {
+    ) -> StorageResult<HashSet<(String, String)>> {
         self.recover_pending_exchanges(PendingTable::ChildTask, scope)
     }
 
@@ -325,14 +329,14 @@ impl StorageEngine {
         &mut self,
         table: PendingTable,
         scope: Option<&assistant_protocol::SessionId>,
-    ) -> StorageResult<HashSet<String>> {
+    ) -> StorageResult<HashSet<(String, String)>> {
         let query = match table {
             PendingTable::Run => {
-                "SELECT receipt_id, session_id FROM pending_tool_exchanges WHERE (?1 IS NULL OR session_id = ?1)
+                "SELECT receipt_id, session_id, session_id FROM pending_tool_exchanges WHERE (?1 IS NULL OR session_id = ?1)
                  ORDER BY created_at_ms, receipt_id"
             }
             PendingTable::ChildTask => {
-                "SELECT receipt_id, child_task_id FROM child_pending_tool_exchanges WHERE (?1 IS NULL OR session_id = ?1)
+                "SELECT receipt_id, session_id, child_task_id FROM child_pending_tool_exchanges WHERE (?1 IS NULL OR session_id = ?1)
                  ORDER BY created_at_ms, receipt_id"
             }
         };
@@ -342,7 +346,11 @@ impl StorageEngine {
             })?;
             let rows = statement
                 .query_map([scope.map(assistant_protocol::SessionId::as_str)], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
                 })
                 .map_err(|source| {
                     internal_error("pending tool exchanges could not be read", source)
@@ -352,9 +360,9 @@ impl StorageEngine {
             })?
         };
         let mut unavailable = HashSet::new();
-        for (receipt_id, owner_id) in pending {
+        for (receipt_id, session_id, owner_id) in pending {
             if self.recover_pending_exchange(&receipt_id, table).is_err() {
-                unavailable.insert(owner_id);
+                unavailable.insert((session_id, owner_id));
             }
         }
         Ok(unavailable)
@@ -402,7 +410,7 @@ impl StorageEngine {
     }
 
     fn recovered_results(
-        &self,
+        &mut self,
         pending: &StoredPendingExchange,
     ) -> StorageResult<Vec<ToolMessage>> {
         pending
@@ -438,13 +446,18 @@ impl StorageEngine {
     }
 
     fn recovered_delegate_result(
-        &self,
+        &mut self,
         receipt_id: &str,
         index: usize,
         session_id: &SessionId,
         run_id: &RunId,
         call: &agent_types::ToolCall,
     ) -> StorageResult<ToolMessage> {
+        if !self.allow_legacy_history {
+            return self
+                .recovered_file_delegate_result(receipt_id, index, session_id, run_id, call);
+        }
+        // 只有独立备份后的旧源收敛仍读原 SQL；正常恢复从 pending 位置核对 child 文件。
         let row = self
             .connection
             .query_row(
@@ -882,6 +895,9 @@ fn validate_model_activations(
     }
     let message =
         message.ok_or_else(|| invalid_data("model skill activation message is missing"))?;
+    for activation in activations {
+        super::skill::validate_activation(activation)?;
+    }
     let activation_ids = activations
         .iter()
         .map(|activation| activation.activation_id.as_str())

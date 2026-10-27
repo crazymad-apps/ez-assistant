@@ -46,7 +46,8 @@ rand_core.workspace = true
 rcgen.workspace = true
 reqwest.workspace = true
 sse-stream = "0.2.5"
-rmcp.workspace = true
+rmcp = { workspace = true, features = ["server", "transport-io"] }
+httpdate = "1.0.3"
 process-wrap.workspace = true
 rustls = { version = "0.23.42", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 rustls-pki-types = { version = "1.14.0", features = ["std"] }

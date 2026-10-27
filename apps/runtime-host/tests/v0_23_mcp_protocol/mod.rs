@@ -103,7 +103,7 @@ fn roundtrip(protocol: &str, transport: &str, selected: bool, decision: &str) {
     if selected {
         input["mcp_server_key"] = json!("target");
     }
-    let submitted = client.runtime("submit_input", input);
+    let submitted = client.submit_started_input(input);
     let run_id = submitted["run"]["run_id"].as_str().expect("run id");
     let approval = wait_approval(&mut client, session_id);
     assert_eq!(approval["subject"]["type"], "mcp");
@@ -203,6 +203,37 @@ fn roundtrip(protocol: &str, transport: &str, selected: bool, decision: &str) {
             "stdio must not replay a call"
         );
     }
+    if selected && transport == "http" && protocol == "openai_responses" {
+        let original_tag = &conversation["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["type"] == "user")
+            .unwrap()["mcp_selection"];
+        assert_eq!(original_tag["server_key"], "target");
+        let restarted = HostProcess::start(runtime_home.path());
+        let mut reader = restarted.connect();
+        let restored = reader.conversation(session_id);
+        let restored_tag = &restored["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["type"] == "user")
+            .unwrap()["mcp_selection"];
+        assert_eq!(restored_tag, original_tag);
+        assert_eq!(
+            fixture.state.requests.lock().unwrap().len(),
+            requests.len(),
+            "reading the file selection must not invoke the model"
+        );
+        assert_eq!(
+            fixture.state.calls.load(Ordering::SeqCst),
+            usize::from(decision == "allow_once")
+        );
+        reader.runtime("shutdown_runtime", json!({}));
+        drop(reader);
+        assert!(restarted.wait().status.success());
+    }
     scan_data(&runtime_home.path().join("users/_personal/data"));
     let connection = Connection::open_with_flags(
         runtime_home
@@ -212,7 +243,16 @@ fn roundtrip(protocol: &str, transport: &str, selected: bool, decision: &str) {
     )
     .expect("read isolated database");
     let counts: (i64, i64, i64) = connection.query_row("SELECT (SELECT COUNT(*) FROM inputs), (SELECT COUNT(*) FROM runs), (SELECT COUNT(*) FROM pending_tool_exchanges)", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).expect("exact completed counts");
-    assert_eq!(counts, (1, 1, 0));
+    assert_eq!(counts, (1, 0, 0));
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM mcp_input_selections", [], |row| row
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+        0
+    );
     eprintln!("MCP wire verified: {protocol}, {transport}, selected={selected}, {decision}");
 }
 

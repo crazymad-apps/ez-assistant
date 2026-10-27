@@ -19,8 +19,10 @@
   `Debug` 只能展示类型、边界和字节数，不能展示
   payload 或路由指纹。
 - 公共不变量使用受控构造并覆盖序列化 round-trip 测试。
-- `ConversationSnapshot` 是 ToolCallId 唯一性、Tool Call/Result 双向一一配对和结果
-  顺序的唯一校验入口；Context、Provider 和 Harness 只能复用，不能各自实现。
+- `ConversationSnapshot` 的工具交换校验与增量 `ToolExchangeValidator` 共用唯一实现，统一约束
+  ToolCallId 唯一性、Tool Call/Result 双向一一配对和结果顺序；Context、Provider、Host 和 Harness
+  只能复用，不能各自实现。增量校验只保留调用 ID，不持有消息正文；调用者必须保持顺序、首次
+  错误后停止，并在完整输入结束时调用 `finish`，不得因分批读取重置 ID 作用域或略过缺失结果。
   `validate_response_tool_call_ids` 在响应接纳前与本次请求快照比较，同时拒绝响应批内重复。
   完整产品历史的调用 ID 唯一性以 ContextSummary 为边界，压缩前的调用不占用后续上下文的 ID；
   边界不能截断未完成的 Tool Call/Result 配对，消息自身的 MessageId 唯一性不变。

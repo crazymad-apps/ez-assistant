@@ -66,6 +66,8 @@ for (const argument of hostArguments) {
     await cp(capture, join(directory, "host/ez-assistant-desktop-capture"));
     await chmod(join(directory, "host/ez-assistant-desktop-capture"), 0o755);
   }
+  // 与 Host 一起保留私有工具及许可证，不依赖 npm/Node 的 PATH。
+  await cp(join(dirname(host), "runtime-tools"), join(directory, "host/runtime-tools"), { recursive: true });
   await writeFile(join(directory, "host/manifest.json"), JSON.stringify({ version, min_compatible_version: minimum, platform: os, arch: cpu, sha256: createHash("sha256").update(bytes).digest("hex") }, null, 2) + "\n");
   await writeFile(join(directory, "package.json"), JSON.stringify({ name, version: hostPackageVersion, os: [os], cpu: [cpu], ...(os === "linux" ? { libc: ["glibc"] } : {}), files: ["host"], license: "UNLICENSED", description: "EZ Assistant Client platform payload (Host with embedded Web)" }, null, 2));
   const packed = JSON.parse(runNpm(["pack", "--ignore-scripts", "--json", "--pack-destination", output], directory))[0];

@@ -34,6 +34,11 @@ use crate::{
     storage::{ToolExecutionStart, VolatileRuntimeStore},
 };
 
+type ContextWriteHook =
+    Box<dyn Fn(&crate::ContextReplacementTarget, Option<&ContextReplacementResult>) + Send + Sync>;
+
+type ChildWriteHook = Box<dyn Fn(&'static str) + Send + Sync>;
+
 pub(super) struct FaultInjectingStore {
     inner: VolatileRuntimeStore,
     panic_next_settlement: AtomicBool,
@@ -50,12 +55,33 @@ pub(super) struct FaultInjectingStore {
     model_config_load_entered: Notify,
     release_model_config_load: Notify,
     conversation_loads: AtomicUsize,
+    pub(super) main_history_loads: AtomicUsize,
+    pub(super) child_history_loads: AtomicUsize,
     session_loads: Mutex<Vec<SessionId>>,
     full_loads: AtomicUsize,
     pub(super) window_read_hook: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    pub(super) summary_read_hook: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    block_next_summary: AtomicBool,
+    summary_entered: Notify,
+    release_summary: Notify,
+    pub(super) child_write_hook: Mutex<Option<ChildWriteHook>>,
+    pub(super) context_write_hook: Mutex<Option<ContextWriteHook>>,
+    pub(super) compaction_error: Mutex<Option<StoreError>>,
+    pub(super) compaction_finishes: AtomicUsize,
 }
 
 impl FaultInjectingStore {
+    pub(super) fn contains_child_control(&self, id: &ChildTaskId) -> Result<bool, StoreError> {
+        self.inner.contains_child_control(id)
+    }
+
+    pub(super) fn selection_control_counts(
+        &self,
+        id: &SessionId,
+    ) -> Result<(usize, usize), StoreError> {
+        self.inner.selection_control_counts(id)
+    }
+
     pub(super) fn healthy() -> Self {
         Self {
             inner: VolatileRuntimeStore::default(),
@@ -73,9 +99,19 @@ impl FaultInjectingStore {
             model_config_load_entered: Notify::new(),
             release_model_config_load: Notify::new(),
             conversation_loads: AtomicUsize::new(0),
+            main_history_loads: AtomicUsize::new(0),
+            child_history_loads: AtomicUsize::new(0),
             session_loads: Mutex::new(Vec::new()),
             full_loads: AtomicUsize::new(0),
             window_read_hook: Mutex::new(None),
+            summary_read_hook: Mutex::new(None),
+            block_next_summary: AtomicBool::new(false),
+            summary_entered: Notify::new(),
+            release_summary: Notify::new(),
+            child_write_hook: Mutex::new(None),
+            context_write_hook: Mutex::new(None),
+            compaction_error: Mutex::new(None),
+            compaction_finishes: AtomicUsize::new(0),
         }
     }
 
@@ -96,9 +132,19 @@ impl FaultInjectingStore {
             model_config_load_entered: Notify::new(),
             release_model_config_load: Notify::new(),
             conversation_loads: AtomicUsize::new(0),
+            main_history_loads: AtomicUsize::new(0),
+            child_history_loads: AtomicUsize::new(0),
             session_loads: Mutex::new(Vec::new()),
             full_loads: AtomicUsize::new(0),
             window_read_hook: Mutex::new(None),
+            summary_read_hook: Mutex::new(None),
+            block_next_summary: AtomicBool::new(false),
+            summary_entered: Notify::new(),
+            release_summary: Notify::new(),
+            child_write_hook: Mutex::new(None),
+            context_write_hook: Mutex::new(None),
+            compaction_error: Mutex::new(None),
+            compaction_finishes: AtomicUsize::new(0),
         }
     }
 
@@ -119,9 +165,19 @@ impl FaultInjectingStore {
             model_config_load_entered: Notify::new(),
             release_model_config_load: Notify::new(),
             conversation_loads: AtomicUsize::new(0),
+            main_history_loads: AtomicUsize::new(0),
+            child_history_loads: AtomicUsize::new(0),
             session_loads: Mutex::new(Vec::new()),
             full_loads: AtomicUsize::new(0),
             window_read_hook: Mutex::new(None),
+            summary_read_hook: Mutex::new(None),
+            block_next_summary: AtomicBool::new(false),
+            summary_entered: Notify::new(),
+            release_summary: Notify::new(),
+            child_write_hook: Mutex::new(None),
+            context_write_hook: Mutex::new(None),
+            compaction_error: Mutex::new(None),
+            compaction_finishes: AtomicUsize::new(0),
         }
     }
 
@@ -142,9 +198,19 @@ impl FaultInjectingStore {
             model_config_load_entered: Notify::new(),
             release_model_config_load: Notify::new(),
             conversation_loads: AtomicUsize::new(0),
+            main_history_loads: AtomicUsize::new(0),
+            child_history_loads: AtomicUsize::new(0),
             session_loads: Mutex::new(Vec::new()),
             full_loads: AtomicUsize::new(0),
             window_read_hook: Mutex::new(None),
+            summary_read_hook: Mutex::new(None),
+            block_next_summary: AtomicBool::new(false),
+            summary_entered: Notify::new(),
+            release_summary: Notify::new(),
+            child_write_hook: Mutex::new(None),
+            context_write_hook: Mutex::new(None),
+            compaction_error: Mutex::new(None),
+            compaction_finishes: AtomicUsize::new(0),
         }
     }
 
@@ -156,6 +222,18 @@ impl FaultInjectingStore {
     pub(super) fn fail_next_skill_state_load(&self) {
         self.fail_next_skill_state_load
             .store(true, Ordering::Release);
+    }
+
+    pub(super) fn block_next_summary_read(&self) {
+        self.block_next_summary.store(true, Ordering::Release);
+    }
+
+    pub(super) async fn wait_for_summary_read(&self) {
+        self.summary_entered.notified().await;
+    }
+
+    pub(super) fn release_summary_read(&self) {
+        self.release_summary.notify_one();
     }
 
     pub(super) fn block_next_model_config_load(&self) {
@@ -203,6 +281,20 @@ impl FaultInjectingStore {
 }
 
 impl RuntimeStore for FaultInjectingStore {
+    fn load_conversation_history(
+        &self,
+        owner: assistant_protocol::ConversationOwner,
+    ) -> StoreFuture<'_, crate::StoredConversationHistory> {
+        if matches!(
+            owner,
+            assistant_protocol::ConversationOwner::MainSession { .. }
+        ) {
+            self.main_history_loads.fetch_add(1, Ordering::SeqCst);
+        } else {
+            self.child_history_loads.fetch_add(1, Ordering::SeqCst);
+        }
+        self.inner.load_conversation_history(owner)
+    }
     fn load_feedback(
         &self,
         session_id: &SessionId,
@@ -325,7 +417,7 @@ impl RuntimeStore for FaultInjectingStore {
     fn search_conversation_titles(
         &self,
         request: ConversationSearchRequest,
-    ) -> StoreFuture<'_, Vec<assistant_protocol::ConversationHistoryHit>> {
+    ) -> StoreFuture<'_, ConversationSearchPage<assistant_protocol::ConversationHistoryHit>> {
         self.inner.search_conversation_titles(request)
     }
     fn load_runtime_globals(&self) -> StoreFuture<'_, RecoveredRuntime> {
@@ -335,7 +427,17 @@ impl RuntimeStore for FaultInjectingStore {
         &self,
         query: crate::SessionSummaryQuery,
     ) -> StoreFuture<'_, Vec<assistant_protocol::SessionSummary>> {
-        self.inner.query_session_summaries(query)
+        Box::pin(async move {
+            let summaries = self.inner.query_session_summaries(query).await?;
+            if self.block_next_summary.swap(false, Ordering::AcqRel) {
+                self.summary_entered.notify_one();
+                self.release_summary.notified().await;
+            }
+            if let Some(hook) = self.summary_read_hook.lock().unwrap().as_ref() {
+                hook();
+            }
+            Ok(summaries)
+        })
     }
     fn prepare_session_execution(
         &self,
@@ -601,6 +703,7 @@ impl RuntimeStore for FaultInjectingStore {
         &self,
         finish: SessionHistoryCompactionFinish,
     ) -> StoreFuture<'_, ()> {
+        self.compaction_finishes.fetch_add(1, Ordering::SeqCst);
         self.inner.finish_session_compaction(finish)
     }
 
@@ -609,11 +712,21 @@ impl RuntimeStore for FaultInjectingStore {
     }
 
     fn create_child_task(&self, task: NewStoredChildTask) -> StoreFuture<'_, StoredChildTask> {
-        self.inner.create_child_task(task)
+        Box::pin(async move {
+            if let Some(hook) = self.child_write_hook.lock().unwrap().as_ref() {
+                hook("create");
+            }
+            self.inner.create_child_task(task).await
+        })
     }
 
     fn start_child_task(&self, start: ChildTaskStart) -> StoreFuture<'_, ()> {
-        self.inner.start_child_task(start)
+        Box::pin(async move {
+            if let Some(hook) = self.child_write_hook.lock().unwrap().as_ref() {
+                hook("start");
+            }
+            self.inner.start_child_task(start).await
+        })
     }
 
     fn begin_child_tool_exchange(&self, pending: PendingChildToolExchange) -> StoreFuture<'_, ()> {
@@ -635,7 +748,12 @@ impl RuntimeStore for FaultInjectingStore {
     }
 
     fn settle_child_task(&self, settlement: StoredChildTaskSettlement) -> StoreFuture<'_, ()> {
-        self.inner.settle_child_task(settlement)
+        Box::pin(async move {
+            if let Some(hook) = self.child_write_hook.lock().unwrap().as_ref() {
+                hook("settle");
+            }
+            self.inner.settle_child_task(settlement).await
+        })
     }
 
     fn request_child_task_cancellation(
@@ -660,7 +778,31 @@ impl RuntimeStore for FaultInjectingStore {
         &self,
         replacement: ContextReplacement,
     ) -> StoreFuture<'_, ContextReplacementResult> {
-        self.inner.replace_context(replacement)
+        Box::pin(async move {
+            if let Some(error) = self.compaction_error.lock().unwrap().take() {
+                return Err(error);
+            }
+            let target = replacement.target.clone();
+            if let Some(hook) = self.context_write_hook.lock().unwrap().as_ref() {
+                hook(&target, None);
+            }
+            if matches!(
+                &replacement.target,
+                crate::ContextReplacementTarget::ChildTask { .. }
+            ) && let Some(hook) = self.child_write_hook.lock().unwrap().as_ref()
+            {
+                hook("replace");
+            }
+            let committed = self.inner.replace_context(replacement).await?;
+            if let Some(hook) = self.context_write_hook.lock().unwrap().as_ref() {
+                hook(&target, Some(&committed));
+            }
+            Ok(committed)
+        })
+    }
+
+    fn claim_input(&self, run: StoredRun) -> StoreFuture<'_, ()> {
+        self.inner.claim_input(run)
     }
 
     fn accept_input(&self, input: NewStoredInput) -> StoreFuture<'_, AcceptedInput> {
@@ -782,6 +924,13 @@ impl RuntimeStore for FaultInjectingStore {
     fn load_conversation(&self, session_id: &SessionId) -> StoreFuture<'_, ConversationSnapshot> {
         self.conversation_loads.fetch_add(1, Ordering::AcqRel);
         self.inner.load_conversation(session_id)
+    }
+
+    fn get_conversation_usage(
+        &self,
+        owner: assistant_protocol::ConversationOwner,
+    ) -> StoreFuture<'_, crate::StoredConversationUsage> {
+        self.inner.get_conversation_usage(owner)
     }
 
     fn get_session_usage(&self, session_id: &SessionId) -> StoreFuture<'_, StoredSessionUsage> {

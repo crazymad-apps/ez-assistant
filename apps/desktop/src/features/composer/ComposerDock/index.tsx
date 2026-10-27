@@ -774,7 +774,7 @@ const SessionComposerDock = observer(function SessionComposerDock({
                     ? 'stop'
                     : 'arrow-down'
                 }
-                size={16}
+                size={compaction_cancels_from_primary || goal_stops_from_primary || run_interrupts_from_primary ? 28 : 20}
               />
             </button>
           </footer>
@@ -1419,7 +1419,7 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
             onClick={() => void submitNewDraft()}
             type="button"
           >
-            <Icon name="arrow-down" size={16} />
+            <Icon name="arrow-down" size={20} />
           </button>
         </footer>
       </section>

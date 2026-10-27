@@ -539,7 +539,7 @@ pub struct ListSessionsRequest {
     pub filter: SessionListFilter,
     #[serde(default)]
     pub offset: u32,
-    /// 缺省 100，最大 200。
+    /// 缺省 100，最小 1；支持按客户端已加载数量一次刷新。
     #[serde(default)]
     pub limit: Option<u32>,
     #[serde(default)]
@@ -696,7 +696,8 @@ pub struct SetSkillEnabledResult {
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct SubmitInputResult {
     pub input_id: InputId,
-    pub run: RunSnapshot,
+    /// 新入队时为空；只有已经实际领取的幂等结果才携带 Run。
+    pub run: Option<RunSnapshot>,
 }
 
 /// 以 revision CAS 清除 Session WorkPlan；Goal 和 Conversation 保持不变。
@@ -744,7 +745,8 @@ pub struct ResumeGoalRequest {
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ResumeGoalResult {
     pub goal: GoalSnapshot,
-    pub run: RunSnapshot,
+    /// 新入队时为空；只有已经实际领取的幂等结果才携带 Run。
+    pub run: Option<RunSnapshot>,
 }
 
 /// 清除已暂停或完成的 Goal 控制器，不删除 WorkPlan、Conversation 或 held queue。
@@ -1248,7 +1250,8 @@ pub enum RuntimeCommand {
     /// 使用 revision CAS 修改 MCP 配置。
     MutateMcpConfiguration(crate::MutateMcpConfigurationRequest),
     /// 使用未保存草稿建立并关闭一次临时候选连接。
-    TestMcpServer(crate::TestMcpServerRequest),
+    TestMcpServer(Box<crate::TestMcpServerRequest>),
+    RefreshMcpServer(crate::RefreshMcpServerRequest),
     CancelMcpServerTest(crate::CancelMcpServerTestRequest),
     /// 查询指定会话范围下可手选的 MCP Server。
     ListMcpServerOptions(crate::ListMcpServerOptionsRequest),
@@ -1439,6 +1442,7 @@ pub enum RuntimeCommandResult {
     PreviewMcpImport(crate::PreviewMcpImportResult),
     MutateMcpConfiguration(crate::MutateMcpConfigurationResult),
     TestMcpServer(crate::TestMcpServerResult),
+    RefreshMcpServer(crate::McpRefreshControlResultSnapshot),
     CancelMcpServerTest(crate::CancelMcpServerTestResult),
     ListMcpServerOptions(crate::ListMcpServerOptionsResult),
     SubmitSessionCommand(crate::SubmitSessionCommandResult),
@@ -1595,6 +1599,7 @@ mod tests {
             input_id: InputId::new("input-1").expect("input id"),
             attempt: 1,
             created_at_ms: Some(1),
+            started_at_ms: None,
             finished_at_ms: None,
             status: crate::RunStatus::Accepted,
             variant: AgentVariant::Build,
@@ -1637,6 +1642,8 @@ mod tests {
 
     fn child_task_snapshot() -> ChildTaskSnapshot {
         ChildTaskSnapshot {
+            inherited: false,
+            body_unavailable: false,
             child_task_id: ChildTaskId::new("child-1").expect("child id"),
             session_id: SessionId::new("session-1").expect("session id"),
             parent_run_id: RunId::new("run-1").expect("run id"),
@@ -2399,7 +2406,7 @@ mod tests {
             (
                 RuntimeCommandResult::SubmitInput(SubmitInputResult {
                     input_id: InputId::new("input-1").expect("input id"),
-                    run: run_snapshot(),
+                    run: Some(run_snapshot()),
                 }),
                 "submit_input",
             ),
@@ -2417,7 +2424,7 @@ mod tests {
             (
                 RuntimeCommandResult::ResumeGoal(ResumeGoalResult {
                     goal: goal_snapshot(),
-                    run: run_snapshot(),
+                    run: Some(run_snapshot()),
                 }),
                 "resume_goal",
             ),

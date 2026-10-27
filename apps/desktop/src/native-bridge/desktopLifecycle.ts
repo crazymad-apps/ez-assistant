@@ -12,11 +12,6 @@ export type NativeRuntimeState =
   | "stopping"
   | "restarting"
   | "stopped";
-export type NativeRuntimeImpact = Readonly<{
-  active_runs: number;
-  queued_inputs: number;
-  pending_approvals: number;
-}>;
 export type NativeRuntimeMutationEvent =
   | Readonly<{ phase: "preparing"; kind: "stop" | "restart" }>
   | Readonly<{ phase: "finished"; kind: "stop" | "restart"; succeeded: boolean }>;
@@ -49,10 +44,9 @@ export async function takePendingDesktopLifecycleIntent(): Promise<DesktopLifecy
 
 export async function updateNativeRuntimeState(
   state: NativeRuntimeState,
-  impact?: NativeRuntimeImpact,
 ): Promise<void> {
   if (!isTauri()) return;
-  await invoke("update_native_runtime_state", { state, impact });
+  await invoke("update_native_runtime_state", { state });
 }
 
 export async function stopNativeRuntime(): Promise<void> {

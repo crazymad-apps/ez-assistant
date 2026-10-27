@@ -11,7 +11,7 @@ type Discovery = {
   readonly access_token: string;
 };
 
-const STARTUP_TIMEOUT_MS = 10_000;
+const STARTUP_TIMEOUT_MS = 30_000;
 
 export default async function setupRuntimeHost(_config: FullConfig): Promise<() => Promise<void>> {
   const test_root = resolve(process.env.EZ_ASSISTANT_E2E_TEST_ROOT ?? "../../.runtime-test/c02-m4");
@@ -109,6 +109,7 @@ server_names = []
     process.env.EZ_ASSISTANT_E2E_NEW_WORKSPACE = additional_workspace;
     process.env.EZ_ASSISTANT_E2E_RUNTIME_HOME = runtime_home;
     process.env.EZ_ASSISTANT_E2E_MCP_SECRET = mcp_secret;
+    process.env.EZ_ASSISTANT_E2E_SEARCH_BASE_URL = provider.endpoint;
     process.env.EZ_ASSISTANT_E2E_SKILL_ROOT = join(user_directory, ".agents", "skills");
   } catch (error) {
     child.kill("SIGTERM");
@@ -146,6 +147,7 @@ server_names = []
     delete process.env.EZ_ASSISTANT_E2E_NEW_WORKSPACE;
     delete process.env.EZ_ASSISTANT_E2E_RUNTIME_HOME;
     delete process.env.EZ_ASSISTANT_E2E_MCP_SECRET;
+    delete process.env.EZ_ASSISTANT_E2E_SEARCH_BASE_URL;
     if (stderr.includes(mcp_secret)) throw new Error("MCP credential leaked to Host stderr");
   };
 }
@@ -205,6 +207,11 @@ async function startFakeProvider(): Promise<FakeProvider> {
         { id: response_id, model: "offline-model", choices: [{ index: 0, delta: { role: "assistant", tool_calls: [{ index: 0, id: `feedback-${response_id}`, type: "function", function: { name: "ask_user", arguments: arguments_text } }] }, finish_reason: null }] },
         { id: response_id, model: "offline-model", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] },
       ];
+    } else if (marker === "F02_STREAM") {
+      frames = [
+        ...Array.from({ length: 120 }, (_, index) => ({ id: response_id, model: "offline-model", choices: [{ index: 0, delta: { content: `F02 streaming ${index}\n` }, finish_reason: null }] })),
+        ...textFrames(response_id, "F02 stream completed"),
+      ];
     } else if (marker === "C05_STREAM") {
       frames = [
         ...Array.from({ length: 180 }, (_, i) => ({ id: response_id, model: "offline-model", choices: [{ index: 0, delta: { reasoning_content: `推理 ${i}\n`.repeat(6) }, finish_reason: null }] })),
@@ -259,7 +266,7 @@ type ProviderMessage = Readonly<{ role?: string; content?: unknown }>;
 type ProviderRequest = Readonly<{ messages?: readonly ProviderMessage[] }>;
 
 function latestMarker(body: string): string {
-  const markers = ["FIRST_CASE", "BLOCK_FOR_QUEUE", "QUEUED_CASE", "TOOL_CASE", "DELEGATE_CASE", "MCP_CASE", "PRIVATE_CASE", "C05_STREAM"];
+  const markers = ["FIRST_CASE", "BLOCK_FOR_QUEUE", "QUEUED_CASE", "TOOL_CASE", "DELEGATE_CASE", "MCP_CASE", "PRIVATE_CASE", "C05_STREAM", "F02_STREAM"];
   return markers
     .flatMap((marker) => {
       const position = body.lastIndexOf(marker);

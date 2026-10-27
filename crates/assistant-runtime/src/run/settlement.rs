@@ -16,7 +16,6 @@ use crate::{
     StoredGoalSettlementEffect, StoredInputState, StoredRunContinuation, StoredRunSettlement,
     goal::{GoalControl, GoalState},
     id,
-    journal::InMemoryJournal,
     runtime::{
         MAX_SPEAK_SEGMENTS_PER_OUTPUT_CYCLE, MAX_SPEAK_TEXT_CHARS,
         controller::{ControllerToolCoordinator, ProxyReportDraft, reply_route_for_input},
@@ -128,12 +127,7 @@ pub(crate) async fn continue_run_if_required(
             });
         }
         let journal_snapshot = journal.snapshot();
-        let mut candidate =
-            InMemoryJournal::from_snapshot(journal_snapshot.clone()).map_err(|_| {
-                RuntimeError::InternalStateUnavailable {
-                    component: "run continuation conversation",
-                }
-            })?;
+        let mut candidate = journal.clone();
         let settlement = match outcome {
             ExecutionOutcome::Completed { message, .. } => {
                 candidate
@@ -181,7 +175,15 @@ pub(crate) async fn continue_run_if_required(
     };
 
     let (goal_effect, speech_reminder) = match goal_decision {
-        crate::runtime::goal::GoalRunDecision::Continue { effect, message } => {
+        crate::runtime::goal::GoalRunDecision::Continue {
+            effect,
+            mut message,
+        } => {
+            let history = crate::runtime::load_identity_history(store, session).await?;
+            {
+                let state = session.lock_state()?;
+                super::ensure_message_id_available(&mut message.id, &state, &history)?;
+            }
             candidate
                 .append_completed(ConversationMessage::User(message))
                 .map_err(|_| RuntimeError::InternalStateUnavailable {
@@ -198,7 +200,7 @@ pub(crate) async fn continue_run_if_required(
             if !requires_speech {
                 return Ok(None);
             }
-            let (message, _) =
+            let (mut message, _) =
                 crate::internal_boundary::InternalBoundaryCoordinator::hidden_message(
                     crate::internal_boundary::InternalBoundaryRequest {
                         source:
@@ -206,6 +208,11 @@ pub(crate) async fn continue_run_if_required(
                         text: speech_delivery_reminder_text(),
                     },
                 )?;
+            let history = crate::runtime::load_identity_history(store, session).await?;
+            {
+                let state = session.lock_state()?;
+                super::ensure_message_id_available(&mut message.id, &state, &history)?;
+            }
             candidate
                 .append_completed(ConversationMessage::User(message))
                 .map_err(|_| RuntimeError::InternalStateUnavailable {
@@ -401,12 +408,7 @@ async fn settle_run_inner(
         };
         let (journal_snapshot, has_pending) = (journal.snapshot(), journal.has_pending());
         // 在 Journal 副本上追加最终 Assistant Message，Store 成功前不触碰权威内存 Journal。
-        let mut candidate =
-            InMemoryJournal::from_snapshot(journal_snapshot.clone()).map_err(|_| {
-                RuntimeError::InternalStateUnavailable {
-                    component: "run settlement conversation",
-                }
-            })?;
+        let mut candidate = journal.clone();
         let mut settlement = if let Some(error) = forced_error {
             RunSettlement {
                 status: RunStatus::Failed,

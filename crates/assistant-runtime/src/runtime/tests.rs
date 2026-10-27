@@ -51,6 +51,7 @@ const TEST_CONFIG: &str = "schema_version = 1\n";
 
 mod external_model;
 mod feedback;
+mod mcp_management;
 mod model_fixture;
 
 struct MissingConfigSource;
@@ -814,7 +815,7 @@ async fn submit_completed_turn(
     text: &str,
 ) -> RunId {
     let accepted = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session_id.clone(),
@@ -974,6 +975,7 @@ mod controller;
 mod delegation;
 mod device;
 mod failures;
+mod fork_history;
 mod goal_input;
 mod input;
 mod materialization;
@@ -993,6 +995,7 @@ mod store;
 mod work_plan;
 mod workspace;
 
+mod interrupted_storage;
 mod startup;
 
 mod model_management;
@@ -1003,5 +1006,131 @@ fn test_model_selection(model_id: &str) -> assistant_protocol::ModelSelection {
         provider_instance_id: assistant_protocol::ProviderInstanceId::new("provider-fixture")
             .unwrap(),
         model_id: model_id.to_owned(),
+    }
+}
+
+/// 执行测试的便利结果，只能由实际已领取的 Run 构造；队列测试使用 submit_input 原返回。
+#[derive(Debug)]
+pub(crate) struct StartedInputResult {
+    pub(crate) input_id: assistant_protocol::InputId,
+    pub(crate) run: assistant_protocol::RunSnapshot,
+}
+
+impl AssistantRuntime {
+    /// 执行测试显式等待领取；不能用它测试暂停或排队接纳。
+    pub(crate) async fn submit_started_input(
+        &self,
+        request: SubmitInputRequest,
+    ) -> RuntimeResult<StartedInputResult> {
+        let session_id = request.session_id.clone();
+        let submitted = self.submit_input(request).await?;
+        let input_id = submitted.input_id;
+        let run = self.wait_for_input_claim(&session_id, &input_id).await?;
+        Ok(StartedInputResult { input_id, run })
+    }
+
+    pub(crate) async fn wait_for_input_claim(
+        &self,
+        session_id: &assistant_protocol::SessionId,
+        input_id: &assistant_protocol::InputId,
+    ) -> RuntimeResult<assistant_protocol::RunSnapshot> {
+        let session = self.session(session_id).await?;
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if let Some(run) = self
+                    .product_run_snapshots(&session)
+                    .await?
+                    .into_iter()
+                    .find(|run| &run.input_id == input_id)
+                {
+                    return Ok(run);
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| RuntimeError::InternalStateUnavailable {
+            component: "test input was not claimed",
+        })?
+    }
+
+    pub(crate) async fn submit_started_session_input(
+        &self,
+        request: crate::SubmitSessionInputRequest,
+    ) -> RuntimeResult<StartedInputResult> {
+        let session_id = request.input.session_id.clone();
+        let submitted = self.submit_session_input(request).await?;
+        let run = self
+            .wait_for_input_claim(&session_id, &submitted.input_id)
+            .await?;
+        Ok(StartedInputResult {
+            input_id: submitted.input_id,
+            run,
+        })
+    }
+
+    /// 恢复/故障夹具显式领取，但暂不提交正文；调用方必须事先暂停队列，随后自行构造中断现场。
+    pub(crate) async fn submit_claimed_input(
+        &self,
+        request: SubmitInputRequest,
+    ) -> RuntimeResult<StartedInputResult> {
+        let session_id = request.session_id.clone();
+        let submitted = self.submit_input(request).await?;
+        let session = self.session(&session_id).await?;
+        let _mutation = session.mutation().await;
+        let history = crate::runtime::load_identity_history(self.store.as_ref(), &session).await?;
+        let stored = {
+            let state = session.lock_state()?;
+            let input = &state.inputs[&submitted.input_id].stored;
+            crate::StoredRun {
+                shell: None,
+                run_id: crate::run::allocate_run_id(&state, &history)?,
+                session_id,
+                input_id: submitted.input_id.clone(),
+                attempt: 1,
+                status: assistant_protocol::RunStatus::Accepted,
+                agent_variant: input.agent_variant,
+                approval_mode: state.approval_mode,
+                reasoning_effort: None,
+                cancel_requested: false,
+                error: None,
+                message_ids: Vec::new(),
+                message_steps: Default::default(),
+                created_at_ms: crate::runtime::now_ms()?,
+                started_at_ms: None,
+                finished_at_ms: None,
+            }
+        };
+        self.store
+            .claim_input(stored.clone())
+            .await
+            .map_err(|source| RuntimeError::from_store("test claim", source))?;
+        let record = crate::run::RunRecord::accepted(&stored, Vec::new());
+        let run = record.snapshot();
+        let mut state = session.lock_state()?;
+        state.runs.insert(stored.run_id.clone(), record);
+        let input = state
+            .inputs
+            .get_mut(&submitted.input_id)
+            .expect("queued input");
+        input.first_run_id = Some(stored.run_id.clone());
+        input.latest_run_id = Some(stored.run_id);
+        Ok(StartedInputResult {
+            input_id: submitted.input_id,
+            run,
+        })
+    }
+
+    pub(crate) async fn materialize_started_session(
+        &self,
+        manifest: assistant_protocol::SessionMaterializationManifest,
+        staged: Vec<crate::StagedSessionAttachment>,
+    ) -> RuntimeResult<assistant_protocol::SessionMaterializationResult> {
+        let mut result = self.materialize_session(manifest, staged).await?;
+        result.run = Some(
+            self.wait_for_input_claim(&result.session.session_id, &result.input_id)
+                .await?,
+        );
+        Ok(result)
     }
 }

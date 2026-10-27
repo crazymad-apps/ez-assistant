@@ -135,15 +135,12 @@ fn modes_permission_reload_and_product_conversation_survive_formal_host_restart(
         true
     );
 
-    let submitted = second.runtime(
-        "submit_input",
-        json!({
-            "session_id": session_id,
-            "message": "DEFAULT_CASE",
-            "variant": "build",
-            "idempotency_key": "build-overrides-recovered-plan"
-        }),
-    );
+    let submitted = second.submit_started_input(json!({
+        "session_id": session_id,
+        "message": "DEFAULT_CASE",
+        "variant": "build",
+        "idempotency_key": "build-overrides-recovered-plan"
+    }));
     let run_id = submitted["run"]["run_id"].as_str().expect("run id");
     assert_eq!(submitted["run"]["variant"], "build");
     assert_eq!(
@@ -206,15 +203,12 @@ fn implicit_workspace_permissions_apply_to_plan_and_build_in_the_formal_host() {
         .expect("session id")
         .to_owned();
 
-    let build = client.runtime(
-        "submit_input",
-        json!({
-            "session_id": session_id,
-            "message": "TOOL_CASE",
-            "variant": "build",
-            "idempotency_key": "workspace-build"
-        }),
-    );
+    let build = client.submit_started_input(json!({
+        "session_id": session_id,
+        "message": "TOOL_CASE",
+        "variant": "build",
+        "idempotency_key": "workspace-build"
+    }));
     let build_run = build["run"]["run_id"].as_str().expect("build run id");
     assert_eq!(
         client.wait_for_status("Build tool", &session_id, build_run, &["completed"])["status"],
@@ -235,15 +229,12 @@ fn implicit_workspace_permissions_apply_to_plan_and_build_in_the_formal_host() {
         "implicit Workspace defaults must not create a permission file"
     );
 
-    let plan = client.runtime(
-        "submit_input",
-        json!({
-            "session_id": session_id,
-            "message": "TOOL_CASE",
-            "variant": "plan",
-            "idempotency_key": "workspace-plan"
-        }),
-    );
+    let plan = client.submit_started_input(json!({
+        "session_id": session_id,
+        "message": "TOOL_CASE",
+        "variant": "plan",
+        "idempotency_key": "workspace-plan"
+    }));
     let plan_run = plan["run"]["run_id"].as_str().expect("plan run id");
     assert_eq!(
         client.wait_for_status("Plan tool", &session_id, plan_run, &["completed"])["status"],
@@ -266,15 +257,12 @@ fn implicit_workspace_permissions_apply_to_plan_and_build_in_the_formal_host() {
     let write_path = workspace_directory
         .path()
         .join("default-permission-write.txt");
-    let build_write = client.runtime(
-        "submit_input",
-        json!({
-            "session_id": session_id,
-            "message": "WRITE_CASE",
-            "variant": "build",
-            "idempotency_key": "workspace-build-write"
-        }),
-    );
+    let build_write = client.submit_started_input(json!({
+        "session_id": session_id,
+        "message": "WRITE_CASE",
+        "variant": "build",
+        "idempotency_key": "workspace-build-write"
+    }));
     let build_write_run = build_write["run"]["run_id"]
         .as_str()
         .expect("Build write run id");
@@ -293,15 +281,12 @@ fn implicit_workspace_permissions_apply_to_plan_and_build_in_the_formal_host() {
     );
     fs::remove_file(&write_path).expect("reset write target for Plan boundary");
 
-    let plan_write = client.runtime(
-        "submit_input",
-        json!({
-            "session_id": session_id,
-            "message": "WRITE_CASE",
-            "variant": "plan",
-            "idempotency_key": "workspace-plan-write"
-        }),
-    );
+    let plan_write = client.submit_started_input(json!({
+        "session_id": session_id,
+        "message": "WRITE_CASE",
+        "variant": "plan",
+        "idempotency_key": "workspace-plan-write"
+    }));
     let plan_write_run = plan_write["run"]["run_id"]
         .as_str()
         .expect("Plan write run id");
@@ -391,15 +376,12 @@ fn default_session_permissions_apply_immediately_in_the_formal_host() {
         ("build", "session-default-build-read"),
         ("plan", "session-default-plan-read"),
     ] {
-        let submitted = client.runtime(
-            "submit_input",
-            json!({
-                "session_id": session_id,
-                "message": "TOOL_CASE",
-                "variant": variant,
-                "idempotency_key": idempotency_key,
-            }),
-        );
+        let submitted = client.submit_started_input(json!({
+            "session_id": session_id,
+            "message": "TOOL_CASE",
+            "variant": variant,
+            "idempotency_key": idempotency_key,
+        }));
         let run_id = submitted["run"]["run_id"].as_str().expect("run id");
         assert_eq!(
             client.wait_for_status(
@@ -421,15 +403,12 @@ fn default_session_permissions_apply_immediately_in_the_formal_host() {
         );
     }
 
-    let submitted = client.runtime(
-        "submit_input",
-        json!({
-            "session_id": session_id,
-            "message": "WRITE_CASE",
-            "variant": "build",
-            "idempotency_key": "session-default-build-write",
-        }),
-    );
+    let submitted = client.submit_started_input(json!({
+        "session_id": session_id,
+        "message": "WRITE_CASE",
+        "variant": "build",
+        "idempotency_key": "session-default-build-write",
+    }));
     let run_id = submitted["run"]["run_id"].as_str().expect("run id");
     assert_eq!(
         client.wait_for_status(
@@ -483,15 +462,12 @@ fn pending_approval_is_queryable_but_is_not_restored_after_host_restart() {
         client.runtime("reload_permissions", json!({ "session_id": session_id }))["applied"],
         true
     );
-    let run_id = client.runtime(
-        "submit_input",
-        json!({
-            "session_id": session_id,
-            "message": "TOOL_CASE",
-            "variant": "build",
-            "idempotency_key": "approval-before-restart"
-        }),
-    )["run"]["run_id"]
+    let run_id = client.submit_started_input(json!({
+        "session_id": session_id,
+        "message": "TOOL_CASE",
+        "variant": "build",
+        "idempotency_key": "approval-before-restart"
+    }))["run"]["run_id"]
         .as_str()
         .expect("run id")
         .to_owned();

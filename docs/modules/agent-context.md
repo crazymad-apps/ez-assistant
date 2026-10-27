@@ -50,14 +50,18 @@
   标记 `unavailable`，不得借用旧 usage。replacement 中没有旧 Assistant usage 时不写 adjustment，
   首次预检自然保持 usage unavailable；新的完整 Assistant Result 到达后重新成为权威基数。
 - 压缩策略只生成候选或 NoOp 报告，不提交 Checkpoint，也不决定是否续跑。
-- `RollingSummarySameModel` 只调用一次 `CompactionInput` 中的当前 ModelService；
-  Strategy 克隆 Runtime/Core 交来的完整正常 `ModelRequest`，在其完整 conversation 末尾追加临时摘要
-  指令。System、原 conversation、工具定义及顺序、generation 其余字段、reasoning 和 Provider Options
-  均保持不变，只把 `tool_choice` 改为 `None` 并覆盖摘要输出上限。
+- `RollingSummarySameModel` 使用 `CompactionInput` 中的当前 ModelService；Strategy 在完整有效
+  conversation 末尾追加临时摘要指令。System、原 conversation 及顺序、generation 其余字段、
+  reasoning 和 Provider Options 保持，只覆盖摘要输出上限并将当前摘要请求的 tools 清空、
+  `tool_choice` 设为 `None`。清空定义不删除历史 ToolCall／结果或影响正常生成工具。
+  此无工具规则为 2026-10-22 已确认的 [F04 功能设计](../versions/v0.32.1/features/F04-本地压缩链路统一/功能设计.md)方向，
+  取代早期为缓存复用保留定义的约束；F04 M0 已实现该规则并通过策略与两协议 HTTP 回归，
+  M0 已于 2026-10-23 获用户确认，M1 共用提交及错误收口已获用户确认，M2 正式 Host 联合验证完成、待确认；
+  末里程碑确认及完整 Feature 验收仍沿所属计划推进。
 - 临时摘要指令使用 request-only `InternalContext` 计划，只存在于 compression request，不写入原始
   History、Layout、Candidate 或 Checkpoint。
-- 正常请求含工具时，当前模型必须显式支持 `ToolChoice::None`；否则在模型调用前失败，不能清空工具
-  定义来伪造另一份请求。
+- 无工具摘要不要求模型支持显式禁止工具调用；Adapter 对空工具请求省略不适用的工具选择字段。
+  正常生成的工具能力校验仍按其真实请求执行，不能因摘要归一而放宽。
 - 无 ToolCall 且至少包含一段非空 Text 的完整响应才能形成
   Candidate；Reasoning 不进入摘要正文，取消、Overflow 和普通模型错误原样受控返回。
 - Candidate 的紧凑 JSON 字节数必须小于压缩前权威快照，否则以 ineffective 错误拒绝提交；该效果

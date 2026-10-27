@@ -66,21 +66,10 @@ impl AssistantRuntime {
 
     pub async fn get_mcp_configuration(
         &self,
-        _request: GetMcpConfigurationRequest,
+        request: GetMcpConfigurationRequest,
     ) -> RuntimeResult<GetMcpConfigurationResult> {
         self.ensure_running()?;
-        self.mcp_service.ensure_available()?;
-        let runtime = self.mcp_service.registry.projections()?;
-        let mut snapshot = self
-            .mcp_service
-            .config_store
-            .snapshot_with_runtime(&runtime)
-            .await?;
-        merge_registry_diagnostics(
-            &mut snapshot.diagnostics,
-            self.mcp_service.registry.diagnostics()?,
-        );
-        Ok(GetMcpConfigurationResult { snapshot })
+        self.mcp_management().get_mcp_configuration(request).await
     }
 
     pub async fn preview_mcp_import(
@@ -89,64 +78,31 @@ impl AssistantRuntime {
     ) -> RuntimeResult<PreviewMcpImportResult> {
         self.ensure_running()?;
         self.mcp_service.ensure_available()?;
-        let mut result = self
-            .mcp_service
+        self.mcp_service
             .config_store
             .preview_import(&request.document)
-            .await?;
-        let plugin_keys = self.plugin.declared_mcp_keys().await?;
-        for entry in &mut result.entries {
-            if plugin_keys.contains(&entry.server_key) {
-                entry.conflicts_with_existing = true;
-            }
-        }
-        Ok(result)
+            .await
     }
 
     pub async fn mutate_mcp_configuration(
         &self,
         request: MutateMcpConfigurationRequest,
     ) -> RuntimeResult<MutateMcpConfigurationResult> {
-        let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
-        self.mcp_service.ensure_available()?;
-        let plugin_keys = self.plugin.declared_mcp_keys().await?;
-        let touches_plugin = match &request.mutation {
-            assistant_protocol::McpConfigurationMutation::Upsert { server } => {
-                plugin_keys.contains(&server.server_key)
-            }
-            assistant_protocol::McpConfigurationMutation::SetEnabled { server_key, .. }
-            | assistant_protocol::McpConfigurationMutation::Remove { server_key } => {
-                plugin_keys.contains(server_key)
-            }
-            assistant_protocol::McpConfigurationMutation::Import { document, .. } => {
-                serde_json::from_str::<serde_json::Value>(document)
-                    .ok()
-                    .and_then(|value| value.get("mcpServers")?.as_object().cloned())
-                    .is_some_and(|servers| {
-                        servers.keys().any(|name| {
-                            assistant_protocol::McpServerKey::new(name.clone())
-                                .is_ok_and(|key| plugin_keys.contains(&key))
-                        })
-                    })
-            }
-        };
-        if touches_plugin {
-            return Err(RuntimeError::InvalidRequest {
-                reason: "plugin MCP server cannot be changed through independent MCP settings",
-            });
-        }
-        let runtime = self.mcp_service.registry.projections()?;
-        let mut snapshot = self
-            .mcp_service
-            .config_store
-            .mutate_with_runtime(&request.expected_revision, request.mutation, &runtime)
-            .await?;
-        merge_registry_diagnostics(
-            &mut snapshot.diagnostics,
-            self.mcp_service.registry.diagnostics()?,
-        );
-        Ok(MutateMcpConfigurationResult { snapshot })
+        self.mcp_management()
+            .mutate_mcp_configuration(request)
+            .await
+    }
+
+    /// 配置页和 Agent 共用的单目标刷新；不创建输入、Run 或 Conversation。
+    pub async fn refresh_mcp_server(
+        &self,
+        request: assistant_protocol::RefreshMcpServerRequest,
+    ) -> RuntimeResult<McpRefreshControlResultSnapshot> {
+        self.ensure_running()?;
+        self.mcp_management()
+            .refresh_mcp_server(request, self.root_cancellation.child_token())
+            .await
     }
 
     /// 从最新 `mcp.json` 建立一次无 Conversation 副作用的活动目录；不阻塞 Host 监听。
@@ -163,12 +119,14 @@ impl AssistantRuntime {
         refresh_mcp_registry_with(
             self.mcp_service.config_store.as_ref(),
             self.plugin.as_ref(),
+            &self.mcp_service.builtin_definitions,
             self.mcp_service.registry.as_ref(),
             self.config_registry.as_ref(),
             self.approval_registry.as_ref(),
             &self.event_sender,
             &self.root_cancellation,
             target,
+            None,
         )
         .await
     }
@@ -237,12 +195,43 @@ impl AssistantRuntime {
             _ = cancellation.cancelled() => return Ok(cancelled_test(started)),
             guard = self.mcp_service.test_gate.lock() => guard,
         };
-        let server_key = request.server.server_key.clone();
-        let server = self
-            .mcp_service
-            .config_store
-            .resolve_draft(&request.server)
-            .await?;
+        let (server_key, server) = match (&request.server, &request.managed) {
+            (Some(draft), None) => (
+                draft.server_key.clone(),
+                self.mcp_service.config_store.resolve_draft(draft).await?,
+            ),
+            (None, Some(draft)) => {
+                let discovery =
+                    discover_mcp(&self.plugin, &self.mcp_service.builtin_definitions).await?;
+                let definition = find_definition(
+                    &discovery.definitions,
+                    &draft.target,
+                    &draft.expected_definition_digest,
+                )?;
+                let _lease = definition_lease(self.plugin.as_ref(), definition).await?;
+                let fresh =
+                    discover_mcp(&self.plugin, &self.mcp_service.builtin_definitions).await?;
+                let definition = find_definition(
+                    &fresh.definitions,
+                    &draft.target,
+                    &draft.expected_definition_digest,
+                )?;
+                if !definition.source_enabled {
+                    return Err(RuntimeError::PluginPackageUnavailable);
+                }
+                let server = self
+                    .mcp_service
+                    .config_store
+                    .managed_test_config(draft, definition)
+                    .await?;
+                (server.server_key().clone(), server)
+            }
+            _ => {
+                return Err(RuntimeError::InvalidRequest {
+                    reason: "exactly one MCP test source is required",
+                });
+            }
+        };
         let snapshot = self.config_registry.snapshot()?;
         let runtime_config = snapshot
             .active()
@@ -278,7 +267,7 @@ impl AssistantRuntime {
                     server_key,
                     McpConnectionTestStage::Connect,
                     McpDiagnosticCode::ConnectFailed,
-                    "MCP connection timed out",
+                    "MCP 连接超时，请检查服务启动状态和连接配置",
                     started,
                 ));
             }
@@ -330,6 +319,30 @@ impl AssistantRuntime {
         if cancellation.is_cancelled() {
             return Ok(cancelled_test(started));
         }
+        if let Some(draft) = &request.managed {
+            // 测试候选已关闭；不能把旧文件／参数的成功当作当前草稿已验证。
+            let fresh = discover_mcp(&self.plugin, &self.mcp_service.builtin_definitions).await?;
+            let definition = find_definition(
+                &fresh.definitions,
+                &draft.target,
+                &draft.expected_definition_digest,
+            )?;
+            let _lease = definition_lease(self.plugin.as_ref(), definition).await?;
+            let fresh = discover_mcp(&self.plugin, &self.mcp_service.builtin_definitions).await?;
+            let definition = find_definition(
+                &fresh.definitions,
+                &draft.target,
+                &draft.expected_definition_digest,
+            )?;
+            let current = self
+                .mcp_service
+                .config_store
+                .managed_test_config(draft, definition)
+                .await?;
+            if current.fingerprint() != server.fingerprint() {
+                return Err(RuntimeError::McpConfigConflict);
+            }
+        }
         match close_result {
             Ok(Ok(())) => Ok(TestMcpServerResult {
                 outcome: McpConnectionTestOutcome::Success,
@@ -378,54 +391,28 @@ fn cancelled_test(started: Instant) -> TestMcpServerResult {
 pub(super) async fn refresh_mcp_registry_with(
     config_store: &crate::mcp::McpConfigStore,
     plugin: &crate::plugin::PluginManager,
+    builtin_definitions: &[crate::ManagedMcpServerDefinition],
     registry: &crate::mcp::McpRegistry,
     config_registry: &crate::config::ConfigRegistry,
     approval_registry: &crate::permission::ApprovalRegistry,
     events: &crate::observation::ObservationCoordinator,
     root_cancellation: &tokio_util::sync::CancellationToken,
     target: Option<&assistant_protocol::McpServerKey>,
+    expected: Option<&assistant_protocol::RefreshMcpServerRequest>,
 ) -> RuntimeResult<McpRefreshControlResultSnapshot> {
-    let mut candidate = config_store.registry_candidate().await?;
-    let plugin_candidates = plugin.mcp_candidates().await?;
+    let discovery = discover_mcp(plugin, builtin_definitions).await?;
+    let (frozen, mut candidate) = config_store
+        .resolve_managed(
+            &discovery.definitions,
+            &discovery.configuration_sources,
+            &registry.projections()?,
+        )
+        .await?;
     candidate
         .supplemental_diagnostics
-        .extend(plugin_candidates.diagnostics);
-    let mut by_key = std::collections::BTreeMap::<_, Vec<_>>::new();
-    for server in plugin_candidates.servers {
-        by_key
-            .entry(server.server_key().clone())
-            .or_default()
-            .push(server);
-    }
-    for (key, servers) in by_key {
-        if candidate.configured_keys.contains(&key) {
-            candidate
-                .supplemental_diagnostics
-                .push(McpDiagnosticSnapshot {
-                    server_key: Some(key),
-                    code: McpDiagnosticCode::InvalidConfig,
-                    field_path: None,
-                    message: "plugin MCP server name conflicts with an independent server"
-                        .to_owned(),
-                });
-            continue;
-        }
-        if servers.len() > 1 {
-            candidate.servers.remove(&key);
-            candidate.blocked_keys.insert(key.clone());
-            candidate.diagnostics.push(McpDiagnosticSnapshot {
-                server_key: Some(key.clone()),
-                code: McpDiagnosticCode::InvalidConfig,
-                field_path: None,
-                message: "plugin MCP server name conflicts with another source".to_owned(),
-            });
-            candidate.configured_keys.insert(key);
-            continue;
-        }
-        candidate.configured_keys.insert(key.clone());
-        candidate
-            .servers
-            .insert(key, servers.into_iter().next().expect("nonempty group"));
+        .extend(discovery.diagnostics);
+    if let Some(expected) = expected {
+        check_refresh_identity(&frozen, expected)?;
     }
     let snapshot = config_registry.snapshot()?;
     let runtime_config = snapshot
@@ -433,44 +420,75 @@ pub(super) async fn refresh_mcp_registry_with(
         .ok_or(RuntimeError::ConfigurationUnavailable)?
         .mcp();
     let result = registry
-        .refresh(
+        .refresh_checked(
             candidate,
             target,
             runtime_config,
             root_cancellation.child_token(),
+            || async {
+                // Registry 写门已拥有刷新；来源门仅在候选准备结束后取得，失败即关闭候选。
+                // try_write 避免插件更新已持包门、等待 Registry 时形成锁环。
+                let mut leases = Vec::new();
+                let mut names = std::collections::BTreeSet::new();
+                for definition in &discovery.definitions {
+                    if let assistant_protocol::McpServerSource::Plugin(name) = &definition.source
+                        && definition.source_available
+                        && names.insert(name.clone())
+                        && let Some(lease) = definition_lease(plugin, definition).await?
+                    {
+                        leases.push(lease);
+                    }
+                }
+                let file_gate = config_store.gate.clone().lock_owned().await;
+                let fresh = discover_mcp(plugin, builtin_definitions).await?;
+                let (current, _) = config_store
+                    .resolve_managed_locked(
+                        &fresh.definitions,
+                        &fresh.configuration_sources,
+                        &registry.projections()?,
+                    )
+                    .await?;
+                if configuration_stamp(&frozen) != configuration_stamp(&current) {
+                    return Err(RuntimeError::McpConfigConflict);
+                }
+                Ok((leases, file_gate))
+            },
         )
         .await?;
-    let mut invalidation_error = None;
-    for server in &result.result.servers {
-        if matches!(
-            server.outcome,
-            assistant_protocol::McpServerRefreshOutcome::Refreshed
-                | assistant_protocol::McpServerRefreshOutcome::ConnectedWithoutTools
-                | assistant_protocol::McpServerRefreshOutcome::Removed
-                | assistant_protocol::McpServerRefreshOutcome::Disabled
-                | assistant_protocol::McpServerRefreshOutcome::BlockedByConflict
-        ) {
-            let approvals =
-                match approval_registry.invalidate_pending_mcp_server(&server.server_key) {
-                    Ok(approvals) => approvals,
-                    Err(error) => {
-                        invalidation_error = Some(error);
-                        continue;
-                    }
-                };
-            for approval in approvals {
-                let _ = events.send(assistant_protocol::RuntimeEvent::ApprovalCancelled {
-                    session_id: approval.session_id,
-                    run_id: approval.run_id,
-                    child_task_id: approval.child_task_id,
-                    approval_id: approval.approval_id,
-                });
+    let invalidation_error = events.publish_batch_transition(|| {
+        let mut invalidation_error = None;
+        let mut notifications = Vec::new();
+        for server in &result.result.servers {
+            if matches!(
+                server.outcome,
+                assistant_protocol::McpServerRefreshOutcome::Refreshed
+                    | assistant_protocol::McpServerRefreshOutcome::ConnectedWithoutTools
+                    | assistant_protocol::McpServerRefreshOutcome::Removed
+                    | assistant_protocol::McpServerRefreshOutcome::Disabled
+                    | assistant_protocol::McpServerRefreshOutcome::BlockedByConflict
+            ) {
+                let approvals =
+                    match approval_registry.invalidate_pending_mcp_server(&server.server_key) {
+                        Ok(approvals) => approvals,
+                        Err(error) => {
+                            invalidation_error = Some(error);
+                            continue;
+                        }
+                    };
+                for approval in approvals {
+                    notifications.push(assistant_protocol::RuntimeEvent::ApprovalCancelled {
+                        session_id: approval.session_id,
+                        run_id: approval.run_id,
+                        child_task_id: approval.child_task_id,
+                        approval_id: approval.approval_id,
+                    });
+                }
             }
         }
-    }
+        Ok((invalidation_error, notifications))
+    })?;
     // 发布已经完成；即使审批状态写入失败，也必须完成旧连接的显式回收。
     let result = result.finish().await;
-    let _ = events.send(assistant_protocol::RuntimeEvent::McpRegistryChanged);
     if let Some(error) = invalidation_error {
         return Err(error);
     }
@@ -481,7 +499,7 @@ fn test_failure(
     server_key: assistant_protocol::McpServerKey,
     stage: McpConnectionTestStage,
     code: McpDiagnosticCode,
-    message: &'static str,
+    message: &str,
     started: Instant,
 ) -> TestMcpServerResult {
     TestMcpServerResult {
@@ -570,4 +588,357 @@ fn merge_registry_diagnostics(
             .then_with(|| format!("{:?}", left.code).cmp(&format!("{:?}", right.code)))
             .then_with(|| left.field_path.cmp(&right.field_path))
     });
+}
+
+/// 来源摘要只保护定义换代，插件参数与文件修订在各自实际来源复核。
+fn find_definition<'a>(
+    definitions: &'a [crate::ManagedMcpServerDefinition],
+    target: &assistant_protocol::McpServerTarget,
+    digest: &str,
+) -> RuntimeResult<&'a crate::ManagedMcpServerDefinition> {
+    let definition = definitions
+        .iter()
+        .find(|definition| {
+            definition.source == target.source && definition.server_key == target.server_key
+        })
+        .ok_or(RuntimeError::McpServerUnavailable)?;
+    if definition.definition_digest != digest {
+        return Err(RuntimeError::McpConfigConflict);
+    }
+    Ok(definition)
+}
+
+fn managed_mutation_target(
+    mutation: &assistant_protocol::McpConfigurationMutation,
+) -> Option<(&assistant_protocol::McpServerTarget, &str)> {
+    match mutation {
+        assistant_protocol::McpConfigurationMutation::PatchManaged {
+            target,
+            expected_definition_digest,
+            ..
+        }
+        | assistant_protocol::McpConfigurationMutation::ResetManaged {
+            target,
+            expected_definition_digest,
+            ..
+        } => Some((target, expected_definition_digest)),
+        _ => None,
+    }
+}
+
+async fn definition_lease(
+    plugin: &crate::plugin::PluginManager,
+    definition: &crate::ManagedMcpServerDefinition,
+) -> RuntimeResult<Option<crate::PluginConfigLease>> {
+    match &definition.source {
+        assistant_protocol::McpServerSource::Plugin(name) => Ok(Some(
+            plugin
+                .config_lease(
+                    name,
+                    definition
+                        .plugin_sha256
+                        .as_deref()
+                        .ok_or(RuntimeError::PluginPackageUnavailable)?,
+                )
+                .await?,
+        )),
+        assistant_protocol::McpServerSource::Builtin => Ok(None),
+        assistant_protocol::McpServerSource::User => Err(RuntimeError::McpConfigInvalid),
+    }
+}
+
+/// 不比较活动连接易失状态，避免一次无关调用故障让来源校验误报冲突。
+fn configuration_stamp(snapshot: &assistant_protocol::McpConfigurationSnapshot) -> String {
+    serde_json::to_string(&(
+        snapshot.revision.as_str(),
+        snapshot
+            .servers
+            .iter()
+            .map(|server| {
+                (
+                    &server.source,
+                    &server.server_key,
+                    server.enabled,
+                    &server.managed,
+                )
+            })
+            .collect::<Vec<_>>(),
+    ))
+    .expect("safe MCP configuration identity serializes")
+}
+
+fn check_refresh_identity(
+    snapshot: &assistant_protocol::McpConfigurationSnapshot,
+    request: &assistant_protocol::RefreshMcpServerRequest,
+) -> RuntimeResult<()> {
+    let server = snapshot
+        .servers
+        .iter()
+        .find(|server| {
+            server.source == request.target.source && server.server_key == request.target.server_key
+        })
+        .ok_or(RuntimeError::McpServerUnavailable)?;
+    let (revision, digest) =
+        server
+            .managed
+            .as_ref()
+            .map_or((snapshot.revision.as_str(), ""), |managed| {
+                (
+                    managed.revision.as_str(),
+                    managed.definition_digest.as_str(),
+                )
+            });
+    if revision != request.expected_revision || digest != request.expected_definition_digest {
+        return Err(RuntimeError::McpConfigConflict);
+    }
+    Ok(())
+}
+
+/// 请求断开不丢失已经进入提交的文件写入及包租约。先在调用方等待文件门，
+/// 再由现有 RuntimeTasks 拥有有限提交任务；没有无主写任务或额外配置队列。
+async fn commit_managed_configuration(
+    tasks: &super::tasks::RuntimeTasks,
+    store: std::sync::Arc<crate::mcp::McpConfigStore>,
+    definition: crate::ManagedMcpServerDefinition,
+    request: MutateMcpConfigurationRequest,
+    lease: Option<crate::PluginConfigLease>,
+    events: crate::observation::ObservationCoordinator,
+) -> RuntimeResult<()> {
+    let file_gate = store.gate.clone().lock_owned().await;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    tasks.spawn(
+        async move {
+            let _source = lease;
+            let _file = file_gate;
+            let result = store
+                .mutate_managed_locked(&request.expected_revision, &request.mutation, &definition)
+                .await;
+            if result.is_ok() {
+                let _ = events.send(assistant_protocol::RuntimeEvent::McpRegistryChanged);
+            }
+            let _ = sender.send(result);
+        },
+        async {},
+    );
+    receiver
+        .await
+        .map_err(|_| RuntimeError::InternalStateUnavailable {
+            component: "MCP configuration commit",
+        })?
+}
+
+#[cfg(test)]
+#[path = "mcp/tests.rs"]
+mod tests;
+
+/// 当前用户域的 MCP 管理句柄，仅共享既有 owner，不持有 AssistantRuntime、Session 集合或第二份配置。
+/// UI 命令与父 Run 工具共用这些方法；operation gate 保护提交准入，文件／包门不跨网络等待。
+#[derive(Clone)]
+pub(super) struct McpManagement {
+    config_store: std::sync::Arc<crate::mcp::McpConfigStore>,
+    registry: std::sync::Arc<crate::mcp::McpRegistry>,
+    plugin: std::sync::Arc<crate::plugin::PluginManager>,
+    config_registry: std::sync::Arc<crate::config::ConfigRegistry>,
+    approval_registry: std::sync::Arc<crate::permission::ApprovalRegistry>,
+    event_sender: crate::observation::ObservationCoordinator,
+    root_cancellation: tokio_util::sync::CancellationToken,
+    tasks: std::sync::Arc<super::tasks::RuntimeTasks>,
+    operation_gate: std::sync::Arc<tokio::sync::RwLock<()>>,
+    available: bool,
+    builtin_definitions: std::sync::Arc<[crate::ManagedMcpServerDefinition]>,
+}
+
+impl AssistantRuntime {
+    pub(super) fn mcp_management(&self) -> McpManagement {
+        McpManagement {
+            config_store: self.mcp_service.config_store.clone(),
+            registry: self.mcp_service.registry.clone(),
+            plugin: self.plugin.clone(),
+            config_registry: self.config_registry.clone(),
+            approval_registry: self.approval_registry.clone(),
+            event_sender: self.event_sender.clone(),
+            root_cancellation: self.root_cancellation.clone(),
+            tasks: self.tasks.clone(),
+            operation_gate: self.operation_gate.clone(),
+            available: self.mcp_service.management_available(),
+            builtin_definitions: self.mcp_service.builtin_definitions.clone(),
+        }
+    }
+}
+
+impl McpManagement {
+    pub(super) fn builtin_definitions(&self) -> &[crate::ManagedMcpServerDefinition] {
+        &self.builtin_definitions
+    }
+
+    pub(super) fn available(&self) -> bool {
+        self.available
+    }
+
+    fn ensure_available(&self) -> RuntimeResult<()> {
+        if self.root_cancellation.is_cancelled() {
+            return Err(RuntimeError::RuntimeNotRunning {
+                lifecycle: assistant_protocol::RuntimeLifecycle::ShuttingDown,
+            });
+        }
+        if !self.available {
+            return Err(RuntimeError::McpServerUnavailable);
+        }
+        Ok(())
+    }
+    pub(super) async fn get_mcp_configuration(
+        &self,
+        _request: GetMcpConfigurationRequest,
+    ) -> RuntimeResult<GetMcpConfigurationResult> {
+        self.ensure_available()?;
+
+        let runtime = self.registry.projections()?;
+        let definitions = discover_mcp(&self.plugin, &self.builtin_definitions).await?;
+        let (mut snapshot, _) = self
+            .config_store
+            .resolve_managed(
+                &definitions.definitions,
+                &definitions.configuration_sources,
+                &runtime,
+            )
+            .await?;
+        merge_registry_diagnostics(&mut snapshot.diagnostics, definitions.diagnostics);
+        merge_registry_diagnostics(&mut snapshot.diagnostics, self.registry.diagnostics()?);
+        Ok(GetMcpConfigurationResult { snapshot })
+    }
+
+    pub(super) async fn mutate_mcp_configuration(
+        &self,
+        request: MutateMcpConfigurationRequest,
+    ) -> RuntimeResult<MutateMcpConfigurationResult> {
+        let _operation = self.operation_gate.read().await;
+        self.ensure_available()?;
+
+        if let Some((target, digest)) = managed_mutation_target(&request.mutation) {
+            let discovery = discover_mcp(&self.plugin, &self.builtin_definitions).await?;
+            let definition = find_definition(&discovery.definitions, target, digest)?;
+            // 直接文件修改持包配置租约；参数修改另走原插件命令，禁止读租约升级。
+            let _lease = definition_lease(self.plugin.as_ref(), definition).await?;
+            let fresh = discover_mcp(&self.plugin, &self.builtin_definitions).await?;
+            let definition = find_definition(&fresh.definitions, target, digest)?;
+            commit_managed_configuration(
+                self.tasks.as_ref(),
+                self.config_store.clone(),
+                definition.clone(),
+                request,
+                _lease,
+                self.event_sender.clone(),
+            )
+            .await?;
+            let snapshot = self
+                .get_mcp_configuration(GetMcpConfigurationRequest::default())
+                .await?
+                .snapshot;
+            return Ok(MutateMcpConfigurationResult { snapshot });
+        }
+        // 用户写入只修改用户配置文件；同名受管定义由加载优先级选择，不限制保存或导入。
+        let runtime = self.registry.projections()?;
+        self.config_store
+            .mutate_with_runtime(&request.expected_revision, request.mutation, &runtime)
+            .await?;
+        let snapshot = self
+            .get_mcp_configuration(GetMcpConfigurationRequest::default())
+            .await?
+            .snapshot;
+        Ok(MutateMcpConfigurationResult { snapshot })
+    }
+
+    pub(super) async fn refresh_mcp_server(
+        &self,
+        request: assistant_protocol::RefreshMcpServerRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> RuntimeResult<McpRefreshControlResultSnapshot> {
+        self.ensure_available()?;
+        let view = self
+            .get_mcp_configuration(GetMcpConfigurationRequest::default())
+            .await?
+            .snapshot;
+        let server = view
+            .servers
+            .iter()
+            .find(|server| {
+                server.source == request.target.source
+                    && server.server_key == request.target.server_key
+            })
+            .ok_or(RuntimeError::McpServerUnavailable)?;
+        let (revision, digest) =
+            server
+                .managed
+                .as_ref()
+                .map_or((view.revision.as_str(), ""), |managed| {
+                    (
+                        managed.revision.as_str(),
+                        managed.definition_digest.as_str(),
+                    )
+                });
+        if revision != request.expected_revision || digest != request.expected_definition_digest {
+            return Err(RuntimeError::McpConfigConflict);
+        }
+        // 完整目标仍核验编辑版本；同一执行 key 始终按全局优先级刷新，不能借低优先级入口抢占。
+        refresh_mcp_registry_with(
+            self.config_store.as_ref(),
+            self.plugin.as_ref(),
+            &self.builtin_definitions,
+            self.registry.as_ref(),
+            self.config_registry.as_ref(),
+            self.approval_registry.as_ref(),
+            &self.event_sender,
+            &cancellation,
+            Some(&request.target.server_key),
+            Some(&request),
+        )
+        .await
+    }
+
+    /// 原插件设置提交后才刷新该插件的服务；连接失败不撤销已提交参数，不刷新其他来源。
+    pub(super) async fn mutate_plugin_settings(
+        &self,
+        request: assistant_protocol::MutatePluginSettingsRequest,
+    ) -> RuntimeResult<assistant_protocol::MutatePluginSettingsResult> {
+        let _operation = self.operation_gate.read().await;
+        if self.root_cancellation.is_cancelled() {
+            return Err(RuntimeError::RuntimeNotRunning {
+                lifecycle: assistant_protocol::RuntimeLifecycle::ShuttingDown,
+            });
+        }
+        let result = self.plugin.mutate_settings(request).await?;
+        if self.available {
+            for name in &result.plugin.mcp {
+                if let Ok(key) = assistant_protocol::McpServerKey::new(name.clone()) {
+                    let _ = refresh_mcp_registry_with(
+                        self.config_store.as_ref(),
+                        self.plugin.as_ref(),
+                        &self.builtin_definitions,
+                        self.registry.as_ref(),
+                        self.config_registry.as_ref(),
+                        self.approval_registry.as_ref(),
+                        &self.event_sender,
+                        &self.root_cancellation,
+                        Some(&key),
+                        None,
+                    )
+                    .await;
+                }
+            }
+        }
+        Ok(result)
+    }
+}
+
+#[path = "mcp/management_tools.rs"]
+pub(super) mod management_tools;
+
+/// 一次命令的来源事实归并，不新增目录缓存；相同内置定义用于查询、写前校验、测试及刷新。
+async fn discover_mcp(
+    plugin: &crate::plugin::PluginManager,
+    builtin: &[crate::ManagedMcpServerDefinition],
+) -> RuntimeResult<crate::plugin::PluginMcpDiscovery> {
+    let mut discovery = plugin.mcp_candidates().await?;
+    discovery.definitions.extend_from_slice(builtin);
+    Ok(discovery)
 }

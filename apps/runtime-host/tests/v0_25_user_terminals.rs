@@ -459,7 +459,7 @@ fn session_deletion_reclaims_its_terminal_and_tcp_loss_does_not_cancel_a_run() {
         &format!("echo $$ > '{}'; sleep 60\n", marker.display()),
     );
     let shell_pid = pid(&marker);
-    let submitted = api.runtime("submit_input",json!({"session_id":id,"message":"BLOCK_FOR_RESTART","variant":"build","idempotency_key":"m4-run"}));
+    let submitted = api.submit_started_input(json!({"session_id":id,"message":"BLOCK_FOR_RESTART","variant":"build","idempotency_key":"m4-run"}));
     let run_id = submitted["run"]["run_id"].as_str().unwrap();
     api.wait_for_status("running alongside PTY", id, run_id, &["running"]);
     drop(terminal); // TCP 断开，没有 close 控制帧或页面通知。

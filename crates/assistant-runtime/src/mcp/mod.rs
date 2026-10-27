@@ -5,11 +5,14 @@
 
 mod config;
 mod discovery;
+mod managed;
 mod registry;
 mod schema;
 mod tool;
 
-use std::{collections::BTreeMap, fmt, future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    borrow::Cow, collections::BTreeMap, fmt, future::Future, pin::Pin, sync::Arc, time::Duration,
+};
 
 use agent_types::ToolImageReference;
 use assistant_protocol::{McpServerKey, McpTransportKind};
@@ -22,6 +25,7 @@ pub(crate) use discovery::{
     DiscoverMcpTools, McpDiscoveryAuthorizationFacts, McpRunDisclosure, needs_initial_disclosure,
     refresh_directory,
 };
+pub use managed::ManagedMcpServerDefinition;
 #[cfg(test)]
 pub(crate) use registry::ResolvedMcpInvocation;
 pub(crate) use registry::{McpCatalogServer, McpRegistry, McpRegistryServerProjection};
@@ -89,6 +93,7 @@ impl fmt::Debug for McpSecret {
 /// 已经完成纯业务校验、可交给 Host 建立候选连接的单 Server 配置。
 #[derive(Clone)]
 pub struct McpServerConfig {
+    pub(crate) source: assistant_protocol::McpServerSource,
     pub(crate) server_key: McpServerKey,
     pub(crate) plugin_name: Option<String>,
     pub(crate) plugin_sha256: Option<String>,
@@ -99,9 +104,17 @@ pub struct McpServerConfig {
     pub(crate) startup_timeout: Option<Duration>,
     pub(crate) tool_timeout: Option<Duration>,
     pub(crate) fingerprint: [u8; 32],
+    /// 用户明确移除的变量也不得从宿主白名单环境重新继承。
+    pub(crate) removed_environment: std::collections::BTreeSet<String>,
 }
 
 impl McpServerConfig {
+    pub fn source(&self) -> &assistant_protocol::McpServerSource {
+        &self.source
+    }
+    pub fn removed_environment(&self) -> &std::collections::BTreeSet<String> {
+        &self.removed_environment
+    }
     /// Host 已完成包校验和路径替换后，沿用独立 MCP 的同一规范化规则。
     pub fn from_plugin_descriptor(
         plugin_name: String,
@@ -210,30 +223,34 @@ pub enum McpConnectionFailureKind {
     Close,
 }
 
-/// Host Adapter 的稳定脱敏错误；底层 URL、command、stderr 和协议正文不越过边界。
+/// Host Adapter 的稳定脱敏错误；允许附带已知来源及配置项名称，
+/// 底层 URL、command、stderr 和协议正文不越过边界。
 #[derive(Debug)]
 pub struct McpConnectionError {
     kind: McpConnectionFailureKind,
-    message: &'static str,
+    message: Cow<'static, str>,
 }
 
 impl McpConnectionError {
-    pub fn new(kind: McpConnectionFailureKind, message: &'static str) -> Self {
-        Self { kind, message }
+    pub fn new(kind: McpConnectionFailureKind, message: impl Into<Cow<'static, str>>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
     }
 
     pub fn kind(&self) -> McpConnectionFailureKind {
         self.kind
     }
 
-    pub fn message(&self) -> &'static str {
-        self.message
+    pub fn message(&self) -> &str {
+        &self.message
     }
 }
 
 impl fmt::Display for McpConnectionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.message)
+        formatter.write_str(&self.message)
     }
 }
 
@@ -368,6 +385,8 @@ pub(crate) struct McpService {
     pub(crate) image_materializer: Arc<dyn McpImageMaterializer>,
     pub(crate) registry: Arc<McpRegistry>,
     pub(crate) management_available: bool,
+    /// Host 在启动时注入的只读定义；不保存用户配置或活动连接。
+    pub(crate) builtin_definitions: Arc<[ManagedMcpServerDefinition]>,
     pub(crate) test_gate: Mutex<()>,
     pub(crate) tests: std::sync::Mutex<
         std::collections::BTreeMap<
@@ -378,15 +397,16 @@ pub(crate) struct McpService {
 }
 
 impl McpService {
-    pub(crate) fn unavailable() -> Self {
+    pub(crate) fn unavailable(events: crate::observation::ObservationCoordinator) -> Self {
         let connection_factory: Arc<dyn McpConnectionFactory> =
             Arc::new(UnavailableMcpConnectionFactory);
         Self {
             config_store: Arc::new(McpConfigStore::new(Arc::new(MissingMcpConfigSource))),
-            registry: Arc::new(McpRegistry::new(connection_factory.clone())),
+            registry: Arc::new(McpRegistry::new(connection_factory.clone(), events)),
             connection_factory,
             image_materializer: Arc::new(UnavailableMcpImageMaterializer),
             management_available: false,
+            builtin_definitions: Arc::from([]),
             test_gate: Mutex::new(()),
             tests: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         }
@@ -397,13 +417,17 @@ impl McpService {
         connection_factory: Arc<dyn McpConnectionFactory>,
         image_materializer: Arc<dyn McpImageMaterializer>,
         plugin: Arc<crate::plugin::PluginManager>,
+        events: crate::observation::ObservationCoordinator,
     ) -> Self {
         Self {
             config_store: Arc::new(McpConfigStore::new(source)),
-            registry: Arc::new(McpRegistry::new(connection_factory.clone()).with_plugins(plugin)),
+            registry: Arc::new(
+                McpRegistry::new(connection_factory.clone(), events).with_plugins(plugin),
+            ),
             connection_factory,
             image_materializer,
             management_available: true,
+            builtin_definitions: Arc::from([]),
             test_gate: Mutex::new(()),
             tests: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         }

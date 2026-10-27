@@ -14,6 +14,11 @@ pub(crate) struct LocalMcpConfigSource {
 }
 
 impl LocalMcpConfigSource {
+    pub(crate) fn plugin(path: PathBuf, gate: std::sync::Arc<tokio::sync::Mutex<()>>) -> Self {
+        Self {
+            inner: LocalConfigSource::new(path).with_write_gate(gate),
+        }
+    }
     pub(crate) fn new(runtime_home: PathBuf) -> Self {
         Self {
             inner: LocalConfigSource::new(runtime_home.join("mcp.json")),

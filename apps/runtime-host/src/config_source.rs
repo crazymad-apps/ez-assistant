@@ -85,6 +85,11 @@ pub(crate) struct LocalConfigSource {
 }
 
 impl LocalConfigSource {
+    /// 同一个插件目录来源即使重新装配，也共享阻塞替换任务持有的写门。
+    pub(crate) fn with_write_gate(mut self, gate: std::sync::Arc<tokio::sync::Mutex<()>>) -> Self {
+        self.write_gate = gate;
+        self
+    }
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }

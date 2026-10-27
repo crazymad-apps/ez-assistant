@@ -8,6 +8,7 @@ use rusqlite::Connection;
 
 pub(super) fn entry() -> Migration {
     Migration {
+        key: "release",
         version: "0.27.0",
         min_compatible_host_version: Some("0.27.0"),
         rebuilds_referenced_tables: false,
@@ -26,6 +27,10 @@ fn apply(connection: &Connection) -> Result<()> {
 
 pub(super) fn validate(connection: &Connection) -> Result<()> {
     v0_26_0::validate(connection)?;
+    validate_additions(connection)
+}
+
+pub(super) fn validate_additions(connection: &Connection) -> Result<()> {
     let invalid: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM child_tasks WHERE context_window_tokens IS NOT NULL AND (typeof(context_window_tokens)!='integer' OR context_window_tokens<=0))",
         [], |row| row.get(0),

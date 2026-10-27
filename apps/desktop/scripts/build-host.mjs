@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
+import { nativeTarget, prepareRuntimeTools } from "../../runtime-host/scripts/prepare-runtime-tools.mjs";
 import { selectMacDeveloperDirectory } from "./mac-developer-directory.mjs";
 
 selectMacDeveloperDirectory("desktop-capture");
@@ -31,6 +32,13 @@ if (process.platform === "darwin" || process.platform === "win32") {
     child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`Desktop capture build exited with ${code}`)));
   });
 }
+
+const hostArgs = process.argv.slice(2);
+const targetIndex = hostArgs.indexOf("--target");
+const selectedTarget = targetIndex < 0 ? hostArgs.find((value) => value.startsWith("--target="))?.slice(9) : hostArgs[targetIndex + 1];
+const targetRoot = resolve(desktop, "../..", process.env.CARGO_TARGET_DIR ?? "target");
+await prepareRuntimeTools(resolve(targetRoot, selectedTarget ?? "", hostArgs.includes("--release") ? "release" : "debug"),
+  selectedTarget ?? nativeTarget(), resolve(targetRoot, "runtime-tools-cache"));
 
 function run(arguments_) {
   return new Promise((resolve, reject) => {

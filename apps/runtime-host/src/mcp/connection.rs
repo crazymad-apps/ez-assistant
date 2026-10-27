@@ -2,6 +2,7 @@
 
 #[cfg(test)]
 mod handshake_tests;
+mod startup_diagnostic;
 #[cfg(windows)]
 mod windows;
 
@@ -60,7 +61,7 @@ use super::cleanup::McpProcessCleanup;
 
 use crate::config_source::prepare_private_directory;
 
-pub(super) const MAX_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
 const MCP_WORK_DIRECTORY: &str = "mcp";
 const INHERITED_ENVIRONMENT: &[&str] = &[
     "PATH",
@@ -114,12 +115,13 @@ impl McpConnectionFactory for HostMcpConnectionFactory {
         Box::pin(async move {
             let service = match server.transport() {
                 McpServerTransportConfig::Stdio { .. } => {
-                    connect_stdio(&runtime_home, &server, cancellation.clone(), cleanup).await?
+                    connect_stdio(&runtime_home, &server, cancellation.clone(), cleanup).await
                 }
                 McpServerTransportConfig::StreamableHttp { .. } => {
-                    connect_http(&server, options, cancellation.clone()).await?
+                    connect_http(&server, options, cancellation.clone()).await
                 }
-            };
+            }
+            .map_err(|error| startup_diagnostic::with_source(server.source(), error))?;
             service
                 .peer()
                 .set_response_cache_config(ClientCacheConfig::disabled())
@@ -146,7 +148,7 @@ impl McpConnection for HostMcpConnection {
             let Some(service) = service.as_ref() else {
                 return Err(connection_error(
                     McpConnectionFailureKind::Catalog,
-                    "MCP connection is closed",
+                    "MCP 连接已关闭",
                 ));
             };
             let params =
@@ -160,21 +162,21 @@ impl McpConnection for HostMcpConnection {
             .map_err(|_| {
                 connection_error(
                     McpConnectionFailureKind::Catalog,
-                    "MCP tool catalog request failed",
+                    "读取 MCP 工具列表失败，请检查服务是否正常运行",
                 )
             })?;
             let encoded_size = serde_json::to_vec(&result)
                 .map_err(|_| {
                     connection_error(
                         McpConnectionFailureKind::Catalog,
-                        "MCP tool catalog response is invalid",
+                        "MCP 工具列表返回格式无效",
                     )
                 })?
                 .len();
             if encoded_size > MAX_MESSAGE_BYTES {
                 return Err(connection_error(
                     McpConnectionFailureKind::Catalog,
-                    "MCP tool catalog response exceeds the size limit",
+                    "MCP 工具列表超过大小限制",
                 ));
             }
             Ok(McpToolPage {
@@ -195,7 +197,7 @@ impl McpConnection for HostMcpConnection {
             let Some(service) = service.as_ref() else {
                 return Err(connection_error(
                     McpConnectionFailureKind::Connect,
-                    "MCP connection is closed",
+                    "MCP 连接已关闭",
                 ));
             };
             let request = CallToolRequestParams::new(tool_name).with_arguments(arguments);
@@ -209,28 +211,25 @@ impl McpConnection for HostMcpConnection {
                 CallToolResponse::InputRequired(_) | CallToolResponse::Task(_) => {
                     return Err(connection_error(
                         McpConnectionFailureKind::UnsupportedExtension,
-                        "MCP tool requested an unsupported continuation",
+                        "MCP 工具要求继续交互，当前版本暂不支持",
                     ));
                 }
                 _ => {
                     return Err(connection_error(
                         McpConnectionFailureKind::UnsupportedExtension,
-                        "MCP tool returned an unsupported response",
+                        "MCP 工具返回了当前版本不支持的响应",
                     ));
                 }
             };
             let encoded_size = serde_json::to_vec(&result)
                 .map_err(|_| {
-                    connection_error(
-                        McpConnectionFailureKind::ToolCall,
-                        "MCP tool result is invalid",
-                    )
+                    connection_error(McpConnectionFailureKind::ToolCall, "MCP 工具结果格式无效")
                 })?
                 .len();
             if encoded_size > MAX_MESSAGE_BYTES {
                 return Err(connection_error(
                     McpConnectionFailureKind::ToolCall,
-                    "MCP tool result exceeds the size limit",
+                    "MCP 工具结果超过大小限制",
                 ));
             }
             Ok(convert_call_result(result))
@@ -248,13 +247,13 @@ impl McpConnection for HostMcpConnection {
                     service.cancellation_token().cancel();
                     service.close().await.map_err(|_| connection_error(
                         McpConnectionFailureKind::Close,
-                        "MCP connection cleanup failed",
+                        "MCP 连接清理失败",
                     ))?;
                 }
                 result = service.close() => {
                     result.map_err(|_| connection_error(
                         McpConnectionFailureKind::Close,
-                        "MCP connection cleanup failed",
+                        "MCP 连接清理失败",
                     ))?;
                 }
             }
@@ -278,11 +277,14 @@ async fn connect_stdio(
     else {
         return Err(connection_error(
             McpConnectionFailureKind::InvalidConfig,
-            "MCP stdio configuration is unavailable",
+            "MCP 本地进程配置不可用，请检查 command 和 args",
         ));
     };
     let cwd = resolve_working_directory(runtime_home, server, configured_cwd.as_deref())?;
-    let environment = resolve_secret_map(environment)?;
+    let environment = resolve_secret_map(
+        environment,
+        matches!(server.source(), assistant_protocol::McpServerSource::User),
+    )?;
     #[cfg(windows)]
     let program = windows::resolve_program(program, &cwd, &environment)?;
     let mut command = Command::new(program);
@@ -294,43 +296,106 @@ async fn connect_stdio(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     for name in INHERITED_ENVIRONMENT {
+        if server.removed_environment().iter().any(|removed| {
+            if cfg!(windows) {
+                removed.eq_ignore_ascii_case(name)
+            } else {
+                removed == name
+            }
+        }) {
+            continue;
+        }
         if let Some(value) = std::env::var_os(name) {
             command.env(name, value);
         }
     }
-    command.envs(environment);
+    let configured_path = environment
+        .iter()
+        .find(|(name, _)| {
+            if cfg!(windows) {
+                name.eq_ignore_ascii_case("PATH")
+            } else {
+                name.as_str() == "PATH"
+            }
+        })
+        .map(|(_, value)| std::ffi::OsStr::new(value));
+    let inherited_path = if server.removed_environment().iter().any(|name| {
+        if cfg!(windows) {
+            name.eq_ignore_ascii_case("PATH")
+        } else {
+            name == "PATH"
+        }
+    }) {
+        None
+    } else {
+        std::env::var_os("PATH")
+    };
+    if let Some(path) = crate::runtime_tools::prepend_path(
+        configured_path.or(inherited_path.as_deref()),
+    )
+    .map_err(|_| {
+        connection_error(
+            McpConnectionFailureKind::InvalidConfig,
+            "内置工具的 PATH 配置无效",
+        )
+    })? {
+        command.env("PATH", path);
+    } else if let Some(path) = configured_path {
+        command.env("PATH", path);
+    }
+    command.envs(environment.iter().filter(|(name, _)| {
+        if cfg!(windows) {
+            !name.eq_ignore_ascii_case("PATH")
+        } else {
+            name.as_str() != "PATH"
+        }
+    }));
+
+    for name in server.removed_environment() {
+        command.env_remove(name);
+    }
 
     let mut child = spawn_managed(command).map_err(|error| {
         connection_error(
             McpConnectionFailureKind::Connect,
             match error.kind() {
-                io::ErrorKind::NotFound => "MCP stdio executable or interpreter was not found; check the configured command and PATH",
-                io::ErrorKind::PermissionDenied => "MCP stdio executable access was denied",
-                io::ErrorKind::InvalidInput => "MCP stdio arguments cannot be represented safely by the configured launcher",
-                _ => "MCP stdio process could not be started",
+                io::ErrorKind::NotFound => {
+                    "找不到 MCP 启动程序或解释器，请检查 command 和 PATH 配置"
+                }
+                io::ErrorKind::PermissionDenied => "没有权限执行 MCP 启动程序，请检查文件执行权限",
+                io::ErrorKind::InvalidInput => "MCP 启动参数无效，请检查 args 配置",
+                _ => "MCP 进程启动失败，请检查启动程序和运行环境",
             },
         )
     })?;
     let stdin = child.stdin().take().ok_or_else(|| {
         connection_error(
             McpConnectionFailureKind::Connect,
-            "MCP stdio input pipe is unavailable",
+            "无法建立 MCP 标准输入管道",
         )
     })?;
     let stdout = child.stdout().take().ok_or_else(|| {
         connection_error(
             McpConnectionFailureKind::Connect,
-            "MCP stdio output pipe is unavailable",
+            "无法建立 MCP 标准输出管道",
         )
     })?;
     let stderr = child.stderr().take().ok_or_else(|| {
         connection_error(
             McpConnectionFailureKind::Connect,
-            "MCP stdio diagnostic pipe is unavailable",
+            "无法建立 MCP 诊断输出管道",
         )
     })?;
     let transport = ManagedStdioTransport::new(stdout, stdin, stderr, child, cleanup);
-    serve(transport, cancellation).await
+    let diagnostic = transport.startup_diagnostic.clone();
+    serve(transport, cancellation).await.map_err(|error| {
+        if error.kind() == McpConnectionFailureKind::Protocol
+            && let Some(message) = diagnostic.borrow().as_ref()
+        {
+            return connection_error(McpConnectionFailureKind::InvalidConfig, message);
+        }
+        error
+    })
 }
 
 async fn connect_http(
@@ -345,22 +410,25 @@ async fn connect_http(
     else {
         return Err(connection_error(
             McpConnectionFailureKind::InvalidConfig,
-            "MCP HTTP configuration is unavailable",
+            "MCP HTTP 配置不可用，请检查服务地址",
         ));
     };
-    let resolved = resolve_secret_map(configured_headers)?;
+    let resolved = resolve_secret_map(
+        configured_headers,
+        matches!(server.source(), assistant_protocol::McpServerSource::User),
+    )?;
     let mut headers = HashMap::new();
     for (name, value) in resolved {
         let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
             connection_error(
                 McpConnectionFailureKind::InvalidConfig,
-                "MCP HTTP header name is invalid",
+                "MCP HTTP 请求头名称无效",
             )
         })?;
         let value = HeaderValue::from_str(&value).map_err(|_| {
             connection_error(
                 McpConnectionFailureKind::InvalidConfig,
-                "MCP HTTP header value is invalid",
+                "MCP HTTP 请求头值无效",
             )
         })?;
         headers.insert(name, value);
@@ -369,10 +437,7 @@ async fn connect_http(
         .redirect(Policy::none())
         .build()
         .map_err(|_| {
-            connection_error(
-                McpConnectionFailureKind::Connect,
-                "MCP HTTP client could not be created",
-            )
+            connection_error(McpConnectionFailureKind::Connect, "无法创建 MCP HTTP 连接")
         })?;
     let mut config = StreamableHttpClientTransportConfig::with_uri(url.to_owned())
         .max_concurrent_requests(options.max_concurrent_requests)
@@ -402,7 +467,7 @@ where
         result = ().serve_with_lifecycle(transport, lifecycle()) => result.map_err(|_| {
             connection_error(
                 McpConnectionFailureKind::Protocol,
-                "MCP protocol negotiation failed",
+                "MCP 连接初始化失败：服务未完成协议握手，请检查服务配置、启动环境及协议兼容性",
             )
         }),
     }
@@ -425,7 +490,7 @@ fn resolve_working_directory(
         if !path.is_absolute() || !path.is_dir() {
             return Err(connection_error(
                 McpConnectionFailureKind::InvalidConfig,
-                "MCP working directory is unavailable",
+                "MCP 工作目录不可用，请检查 cwd 是否为已存在的绝对路径",
             ));
         }
         return Ok(path);
@@ -436,7 +501,7 @@ fn resolve_working_directory(
     prepare_private_directory(&path).map_err(|_| {
         connection_error(
             McpConnectionFailureKind::Connect,
-            "MCP working directory could not be prepared",
+            "无法创建 MCP 工作目录，请检查目录权限",
         )
     })?;
     Ok(path)
@@ -444,18 +509,24 @@ fn resolve_working_directory(
 
 fn resolve_secret_map(
     configured: &BTreeMap<String, McpSecret>,
+    allow_environment_reference: bool,
 ) -> Result<BTreeMap<String, String>, McpConnectionError> {
     configured
         .iter()
         .map(|(name, value)| {
-            resolve_secret(value)
-                .map(|value| (name.clone(), value))
-                .ok_or_else(|| {
-                    connection_error(
-                        McpConnectionFailureKind::InvalidConfig,
-                        "MCP environment reference is unavailable",
-                    )
-                })
+            // 受管参数已经过来源解析，不再把用户值解释为宿主环境引用。
+            (if allow_environment_reference {
+                resolve_secret(value)
+            } else {
+                Some(value.expose().to_owned())
+            })
+            .map(|value| (name.clone(), value))
+            .ok_or_else(|| {
+                McpConnectionError::new(
+                    McpConnectionFailureKind::InvalidConfig,
+                    format!("配置项 {name} 引用的环境变量未设置或无效，请检查 env 或 headers 配置"),
+                )
+            })
         })
         .collect()
 }
@@ -555,6 +626,7 @@ struct ManagedStdioTransport {
     inner: AsyncRwTransport<RoleClient, BoundedLineReader<ChildStdout>, ChildStdin>,
     child: Option<Box<dyn ChildWrapper>>,
     stderr_task: Option<JoinHandle<()>>,
+    startup_diagnostic: tokio::sync::watch::Receiver<Option<&'static str>>,
     cleanup: Arc<McpProcessCleanup>,
     // Transport 尚未 Drop 时也占有 Tracker token，防止 Host 在回收任务登记前误判全部完成。
     _cleanup_lease: tokio_util::task::task_tracker::TaskTrackerToken,
@@ -568,11 +640,13 @@ impl ManagedStdioTransport {
         child: Box<dyn ChildWrapper>,
         cleanup: Arc<McpProcessCleanup>,
     ) -> Self {
-        let stderr_task = tokio::spawn(drain_stderr(stderr));
+        let (diagnostic, startup_diagnostic) = tokio::sync::watch::channel(None);
+        let stderr_task = tokio::spawn(startup_diagnostic::drain(stderr, diagnostic));
         Self {
             inner: AsyncRwTransport::new_client(BoundedLineReader::new(stdout), stdin),
             child: Some(child),
             stderr_task: Some(stderr_task),
+            startup_diagnostic,
             _cleanup_lease: cleanup.lease(),
             cleanup,
         }
@@ -593,8 +667,24 @@ impl Transport<RoleClient> for ManagedStdioTransport {
         self.inner.send(item)
     }
 
-    fn receive(&mut self) -> impl Future<Output = Option<RxJsonRpcMessage<RoleClient>>> + Send {
-        self.inner.receive()
+    async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleClient>> {
+        let message = self.inner.receive().await;
+        if message.is_none()
+            && let Some(task) = self.stderr_task.as_mut()
+        {
+            // stdout EOF 常早于 stderr reader 获得调度；有界排空后再交付握手失败。
+            // 未完成的任务仍由原 Transport/cleanup owner 负责，取消不会脱离任务树。
+            if let Ok(result) =
+                tokio::time::timeout(std::time::Duration::from_millis(100), task).await
+            {
+                self.stderr_task.take();
+                if result.is_err() {
+                    // 不记录可能含 secret 的 panic payload；EOF 仍作为连接失败交付。
+                    eprintln!("runtime-host: MCP diagnostic reader failed");
+                }
+            }
+        }
+        message
     }
 
     async fn close(&mut self) -> Result<(), Self::Error> {
@@ -633,28 +723,31 @@ impl Drop for ManagedStdioTransport {
     }
 }
 
-async fn drain_stderr(mut stderr: ChildStderr) {
-    use tokio::io::AsyncReadExt as _;
+pub(crate) struct BoundedLineReader<R> {
+    inner: R,
+    current_line_bytes: usize,
+    eof_cancellation: Option<CancellationToken>,
+}
 
-    let mut buffer = [0_u8; 8192];
-    loop {
-        match stderr.read(&mut buffer).await {
-            Ok(0) | Err(_) => return,
-            Ok(_) => {}
+impl<R> BoundedLineReader<R> {
+    pub(crate) fn new(inner: R) -> Self {
+        Self {
+            inner,
+            current_line_bytes: 0,
+            eof_cancellation: None,
         }
     }
 }
 
-struct BoundedLineReader<R> {
-    inner: R,
-    current_line_bytes: usize,
-}
-
 impl<R> BoundedLineReader<R> {
-    fn new(inner: R) -> Self {
-        Self {
-            inner,
-            current_line_bytes: 0,
+    pub(crate) fn cancel_on_eof(mut self, cancellation: CancellationToken) -> Self {
+        self.eof_cancellation = Some(cancellation);
+        self
+    }
+
+    fn cancel_owner(&self) {
+        if let Some(cancellation) = &self.eof_cancellation {
+            cancellation.cancel();
         }
     }
 }
@@ -673,15 +766,22 @@ impl<R: AsyncRead + Unpin> AsyncRead for BoundedLineReader<R> {
         let mut temporary = ReadBuf::new(&mut bytes[..capacity]);
         match Pin::new(&mut self.inner).poll_read(context, &mut temporary) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Ready(Err(error)) => {
+                self.cancel_owner();
+                Poll::Ready(Err(error))
+            }
             Poll::Ready(Ok(())) => {
                 let filled = temporary.filled();
+                if filled.is_empty() {
+                    self.cancel_owner();
+                }
                 for byte in filled {
                     if *byte == b'\n' {
                         self.current_line_bytes = 0;
                     } else {
                         self.current_line_bytes = self.current_line_bytes.saturating_add(1);
                         if self.current_line_bytes > MAX_MESSAGE_BYTES {
+                            self.cancel_owner();
                             return Poll::Ready(Err(io::Error::new(
                                 io::ErrorKind::InvalidData,
                                 "MCP stdio message exceeds the size limit",
@@ -699,31 +799,25 @@ impl<R: AsyncRead + Unpin> AsyncRead for BoundedLineReader<R> {
 fn tool_request_error(error: ServiceError) -> McpConnectionError {
     // SDK 错误正文可能包含凭据或远端数据；只投影静态分类。
     match error {
-        ServiceError::McpError(_) => connection_error(
-            McpConnectionFailureKind::ToolCall,
-            "MCP server rejected the tool request",
-        ),
+        ServiceError::McpError(_) => {
+            connection_error(McpConnectionFailureKind::ToolCall, "MCP 服务拒绝了工具请求")
+        }
         ServiceError::Cancelled { .. } => cancelled_error(),
-        ServiceError::Timeout { .. } => connection_error(
-            McpConnectionFailureKind::ToolCall,
-            "MCP tool request timed out",
-        ),
+        ServiceError::Timeout { .. } => {
+            connection_error(McpConnectionFailureKind::ToolCall, "MCP 工具请求超时")
+        }
         ServiceError::SubscriptionLagged { .. } => connection_error(
             McpConnectionFailureKind::ToolCall,
-            "MCP tool response buffer was exceeded",
+            "MCP 工具响应超过缓冲区限制",
         ),
-        ServiceError::TransportSend(_) | ServiceError::TransportClosed => connection_error(
-            McpConnectionFailureKind::Connect,
-            "MCP tool connection was lost",
-        ),
+        ServiceError::TransportSend(_) | ServiceError::TransportClosed => {
+            connection_error(McpConnectionFailureKind::Connect, "MCP 工具连接已断开")
+        }
         ServiceError::InputRequiredRoundsExceeded { .. } => connection_error(
             McpConnectionFailureKind::UnsupportedExtension,
-            "MCP tool requested an unsupported continuation",
+            "MCP 工具要求继续交互，当前版本暂不支持",
         ),
-        _ => connection_error(
-            McpConnectionFailureKind::Protocol,
-            "MCP tool response protocol is invalid",
-        ),
+        _ => connection_error(McpConnectionFailureKind::Protocol, "MCP 工具响应不符合协议"),
     }
 }
 
@@ -732,10 +826,7 @@ fn connection_error(kind: McpConnectionFailureKind, message: &'static str) -> Mc
 }
 
 fn cancelled_error() -> McpConnectionError {
-    connection_error(
-        McpConnectionFailureKind::Cancelled,
-        "MCP connection operation was cancelled",
-    )
+    connection_error(McpConnectionFailureKind::Cancelled, "MCP 连接操作已取消")
 }
 
 #[cfg(test)]
@@ -752,6 +843,53 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[tokio::test]
+    async fn startup_failure_names_plugin_and_missing_configuration_without_secrets() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.runtime-test");
+        std::fs::create_dir_all(&root).unwrap();
+        let home = tempfile::tempdir_in(root).unwrap();
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp_stdio_server.py");
+        let server = McpServerConfig::from_plugin_descriptor(
+            "general-assistant".to_owned(),
+            "a".repeat(64),
+            assistant_protocol::McpServerKey::new("deepseek-search").unwrap(),
+            json!({"command": if cfg!(windows) { "python.exe" } else { "python3" },
+                "args": [fixture, "missing-config"]})
+            .as_object()
+            .unwrap()
+            .clone(),
+        )
+        .unwrap();
+        let factory = HostMcpConnectionFactory::new(home.path().to_owned());
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            factory.connect(
+                server,
+                McpConnectionOptions {
+                    max_concurrent_requests: 1,
+                    control_timeout: std::time::Duration::from_secs(2),
+                },
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .unwrap();
+        let Err(error) = result else {
+            panic!("missing configuration must fail")
+        };
+        assert_eq!(error.kind(), McpConnectionFailureKind::InvalidConfig);
+        assert!(error.message().contains("来源：插件 · general-assistant"));
+        assert!(
+            error
+                .message()
+                .contains("缺少插件原生配置文件 deepseek-search.json")
+        );
+        assert!(error.message().contains("api_key"));
+        assert!(!error.message().contains("private-token"));
+        factory.shutdown().await.unwrap();
+    }
 
     #[tokio::test]
     async fn bounded_reader_rejects_oversized_line() {
@@ -878,6 +1016,19 @@ mod tests {
             tool_request_error(ServiceError::UnexpectedResponse).kind(),
             McpConnectionFailureKind::Protocol
         );
+    }
+
+    #[test]
+    fn managed_environment_values_are_not_reinterpreted_as_host_secret_references() {
+        let server = McpServerConfig::from_plugin_descriptor(
+            "fixture".to_owned(), "a".repeat(64), assistant_protocol::McpServerKey::new("fixture").unwrap(),
+            serde_json::json!({"command":"fixture", "env":{"TOKEN":"${MCP_TEST_LITERAL_REFERENCE}"}}).as_object().unwrap().clone(),
+        ).unwrap();
+        let McpServerTransportConfig::Stdio { environment, .. } = server.transport() else {
+            panic!("stdio")
+        };
+        let resolved = resolve_secret_map(environment, false).unwrap();
+        assert_eq!(resolved["TOKEN"], "${MCP_TEST_LITERAL_REFERENCE}");
     }
 
     async fn start_stdio_fixture(mode: Option<&str>) -> ClientService {

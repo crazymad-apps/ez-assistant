@@ -29,8 +29,9 @@ pub struct ChatProtocolAdapter {
     pub(crate) protocol: ProtocolId,
     /// 响应中按优先级接受的 reasoning 文本字段。
     ///
-    /// 第一个字段是当前方言的规范字段，后续字段只承担旧版本兼容；空列表表示不支持
-    /// reasoning。解码器只读取第一个存在且非 null 的字段，避免同一内容被重复追加。
+    /// 第一个字段是当前方言的规范字段，后续字段承担版本兼容；空列表表示未声明
+    /// 请求端思考能力。响应仍接收 reasoning/reasoning_content，只读取第一个存在且
+    /// 非 null 的字段，避免同一内容被重复追加。
     pub(crate) reasoning_response_fields: Vec<String>,
     /// 历史 Assistant reasoning 在线上请求中回放时使用的字段；`None` 表示不回放。
     pub(crate) reasoning_replay_field: Option<String>,
@@ -82,7 +83,7 @@ impl ChatProtocolAdapter {
         Self::openai_compatible(ProviderId::new("opencode").expect("static OpenCode provider id"))
     }
 
-    /// 构造 OpenAI 基础方言：不支持 reasoning 字段，标准 generation 参数全部支持，
+    /// 构造 OpenAI 基础方言：不声明请求端思考能力，标准 generation 参数全部支持，
     /// max tokens 参数使用 `max_tokens` 字段名。
     ///
     /// 具体 Provider 的具名方言见 [`ChatProtocolAdapter::deepseek`]；调用方也可以用字面量
@@ -190,7 +191,7 @@ impl ChatProtocolAdapter {
         }
     }
 
-    /// Adapter 是否声明可解码 reasoning 内容。
+    /// Adapter 是否显式声明思考方言；不限制被动接收上游返回的 reasoning 内容。
     pub fn supports_reasoning(&self) -> bool {
         !self.reasoning_response_fields.is_empty()
     }

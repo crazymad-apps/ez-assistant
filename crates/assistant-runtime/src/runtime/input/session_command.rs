@@ -38,7 +38,8 @@ impl AssistantRuntime {
         session.ensure_active()?;
         session.ensure_healthy()?;
         session.ensure_not_compacting()?;
-        let (input_id, agent_variant) = {
+        let history = crate::runtime::load_identity_history(self.store.as_ref(), &session).await?;
+        let (input_id, message_id, agent_variant) = {
             let state = session.lock_state()?;
             if let Some(key) = request.idempotency_key.as_ref()
                 && state
@@ -70,7 +71,13 @@ impl AssistantRuntime {
                     },
                 });
             }
-            (self.allocate_input_id(&state)?, state.current_variant)
+            let mut message_id = crate::run::allocate_message_id()?;
+            crate::run::ensure_message_id_available(&mut message_id, &state, &history)?;
+            (
+                crate::run::allocate_input_id(&state, &history)?,
+                message_id,
+                state.current_variant,
+            )
         };
         let accepted_at_ms = super::super::now_ms()?;
         let accepted = self
@@ -79,7 +86,7 @@ impl AssistantRuntime {
                 input_id,
                 session_id: request.session_id.clone(),
                 idempotency_key: request.idempotency_key,
-                user_message_id: crate::run::allocate_message_id()?,
+                user_message_id: message_id,
                 agent_variant,
                 command: request.command,
                 accepted_at_ms,
@@ -169,12 +176,14 @@ pub(super) async fn execute_session_command(
             let result = match super::super::mcp::refresh_mcp_registry_with(
                 context.mcp_config_store.as_ref(),
                 context.plugin.as_ref(),
+                context.mcp_management.builtin_definitions(),
                 context.mcp_registry.as_ref(),
                 context.config_registry.as_ref(),
                 context.approval_registry.as_ref(),
                 &context.events,
                 &context.root_cancellation,
                 server.as_ref(),
+                None,
             )
             .await
             {

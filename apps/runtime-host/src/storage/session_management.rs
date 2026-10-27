@@ -37,9 +37,7 @@ impl StorageEngine {
             return Err(invalid_data("session command result message is invalid"));
         }
         let existing = self
-            .load_session_commands()?
-            .into_iter()
-            .find(|command| command.input_id == commit.input_id)
+            .load_session_command(&commit.session_id, &commit.input_id)?
             .ok_or_else(|| conflict("session command does not exist"))?;
         if !commit.result.matches_command(&existing.command)
             || existing.session_id != commit.session_id
@@ -94,17 +92,33 @@ impl StorageEngine {
             .ok_or_else(|| conflict("session command target is not active"))?;
         let source_generation = u64::try_from(source_generation)
             .map_err(|source| invalid_data_with_source("session generation is invalid", source))?;
-        let result_generation = source_generation
+        let mut result_generation = source_generation
             .checked_add(1)
             .ok_or_else(|| conflict("session generation is exhausted"))?;
-        let payload = conversation::encode_messages(&replacement.messages)?;
         let session_directory = self.session_directory(&commit.session_id)?;
+        while body_path(&session_directory, result_generation).exists() {
+            result_generation = result_generation
+                .checked_add(1)
+                .ok_or_else(|| conflict("session generation is exhausted"))?;
+        }
         let new_body = body_path(&session_directory, result_generation);
-        conversation::write_replacement(&new_body, &payload)?;
+        let owner = assistant_protocol::ConversationOwner::MainSession {
+            session_id: commit.session_id.clone(),
+        };
+        let mut history = self.history_for_replacement(&owner, &replacement)?;
+        let mut command = existing.clone();
+        command.state = StoredSessionCommandState::Committed;
+        command.result = Some(commit.result.clone());
+        history.commands.push(command);
+        history.normalize();
+        conversation::write_generation(
+            &new_body,
+            &owner,
+            result_generation,
+            &replacement,
+            &history,
+        )?;
         sync_directory(&session_directory)?;
-        let result_json = serde_json::to_string(&commit.result).map_err(|source| {
-            internal_error("session command result could not be encoded", source)
-        })?;
         let message_count = u64::try_from(replacement.messages.len()).map_err(|source| {
             assistant_runtime::StoreError::with_source(
                 assistant_runtime::StoreErrorKind::InvalidInput,
@@ -121,11 +135,12 @@ impl StorageEngine {
                 })?;
             let changed = transaction
                 .execute(
-                    "UPDATE inputs SET state = 'committed', command_result_json = ?1
-                     WHERE input_id = ?2 AND session_id = ?3 AND input_kind = 'command'
+                    "UPDATE inputs SET state='committed', priority_order=NULL, user_message_id=NULL,
+                         command_json=NULL, command_result_json=NULL, accepted_at_ms=NULL,
+                         agent_variant=NULL, origin=NULL
+                     WHERE input_id = ?1 AND session_id = ?2 AND input_kind = 'command'
                        AND state = 'queued' AND command_result_json IS NULL",
                     params![
-                        result_json,
                         commit.input_id.as_str(),
                         commit.session_id.as_str(),
                     ],
@@ -171,7 +186,13 @@ impl StorageEngine {
             })
         })();
         if let Err(error) = committed {
-            let _ = fs::remove_file(&new_body);
+            // 提交结果不明时不能删除可能已发布的新代次；原 SQL 身份仍用于精确幂等回读。
+            if self.connection.is_autocommit()
+                && self.session_generation(&commit.session_id).ok() == Some(source_generation)
+            {
+                self.conversation_indexes.remove_under(&new_body);
+                let _ = fs::remove_file(&new_body);
+            }
             return Err(error);
         }
         let _ = fs::remove_file(body_path(&session_directory, source_generation));
@@ -445,51 +466,65 @@ impl StorageEngine {
         &mut self,
         change: MessageFeedbackChange,
     ) -> StorageResult<()> {
-        let exists = self
-            .connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sessions WHERE session_id = ?1)",
-                [change.session_id.as_str()],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(|source| internal_error("feedback session could not be queried", source))?;
-        if exists != 1 {
-            return Err(conflict("feedback session does not exist"));
+        let generation = self.session_generation(&change.session_id)?;
+        let path = body_path(&self.session_directory(&change.session_id)?, generation);
+        self.conversation_indexes.validate_owner(
+            &path,
+            &assistant_protocol::ConversationOwner::MainSession {
+                session_id: change.session_id.clone(),
+            },
+            generation,
+        )?;
+        let location = self.conversation_indexes.locate_message(
+            &path,
+            &agent_types::MessageId::new(change.message_id.as_str())
+                .map_err(|_| invalid_data("feedback Message ID is invalid"))?,
+        )?;
+        if location.is_none() {
+            return Err(conflict("feedback message does not exist"));
         }
-        if let Some(feedback) = change.feedback {
-            self.connection
-                .execute(
-                    "INSERT INTO message_feedback (session_id, message_id, feedback, changed_at_ms)
-                 VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(session_id, message_id) DO UPDATE SET
-                    feedback = excluded.feedback, changed_at_ms = excluded.changed_at_ms",
-                    params![
-                        change.session_id.as_str(),
-                        change.message_id.as_str(),
-                        feedback_value(feedback),
-                        change.changed_at_ms,
-                    ],
-                )
-                .map_err(|source| {
-                    database_write_error("message feedback could not be saved", source)
-                })?;
-        } else {
-            self.connection
-                .execute(
-                    "DELETE FROM message_feedback WHERE session_id = ?1 AND message_id = ?2",
-                    params![change.session_id.as_str(), change.message_id.as_str()],
-                )
-                .map_err(|source| {
-                    database_write_error("message feedback could not be cleared", source)
-                })?;
-        }
-        Ok(())
+        self.append_message_feedback(
+            change.session_id,
+            assistant_runtime::StoredHistoryFeedback {
+                message_id: change.message_id,
+                feedback: change.feedback,
+                changed_at_ms: change.changed_at_ms,
+            },
+        )
     }
 
     pub(super) fn load_message_feedback(
+        &mut self,
+        session_id: &assistant_protocol::SessionId,
+    ) -> StorageResult<Vec<StoredMessageFeedback>> {
+        let facts = self
+            .load_conversation_history(assistant_protocol::ConversationOwner::MainSession {
+                session_id: session_id.clone(),
+            })?
+            .facts;
+        let mut values: Vec<_> = facts
+            .feedback
+            .into_iter()
+            .filter_map(|change| {
+                change.feedback.map(|feedback| StoredMessageFeedback {
+                    message_id: change.message_id,
+                    feedback,
+                })
+            })
+            .collect();
+        values.sort_by(|left, right| left.message_id.cmp(&right.message_id));
+        Ok(values)
+    }
+
+    pub(super) fn legacy_message_feedback(
         &self,
         session_id: &assistant_protocol::SessionId,
     ) -> StorageResult<Vec<StoredMessageFeedback>> {
+        if !self.allow_legacy_history {
+            return Err(invalid_data(
+                "legacy message feedback is only available during verified history upgrade",
+            ));
+        }
         let mut statement = self
             .connection
             .prepare(
@@ -574,6 +609,8 @@ impl StorageEngine {
         Ok(())
     }
 
+    /// 调用者持目标 Session gate；只准备未发布 generation 并原子替换历史，不运行新 attempt。
+    /// 队列及未完成交换须保持空闲，失败只在确认旧指针仍权威时清理准备件，不补写历史控制。
     pub(super) fn rewrite_from_user(
         &mut self,
         rewrite: ConversationRewrite,
@@ -592,15 +629,43 @@ impl StorageEngine {
                 "replacement input does not match conversation",
             ));
         }
+        self.ensure_new_input_identity(
+            &rewrite.session_id,
+            &rewrite.input.input_id,
+            Some(&rewrite.run_id),
+            &new_message.id,
+        )?;
+        let owner = assistant_protocol::ConversationOwner::MainSession {
+            session_id: rewrite.session_id.clone(),
+        };
+        let location = self
+            .locate_conversation_message(assistant_runtime::ConversationMessageLocationRequest {
+                owner: owner.clone(),
+                message_id: rewrite.target_user_message_id.clone(),
+            })?
+            .ok_or_else(|| conflict("rewrite User message is missing"))?;
+        let window =
+            self.load_conversation_raw_window(assistant_runtime::ConversationRawWindowRequest {
+                owner,
+                generation: location.generation,
+                start: usize::try_from(location.message_ordinal)
+                    .map_err(|source| internal_error("rewrite ordinal exceeds range", source))?,
+                limit: 1,
+            })?;
+        let fact = window
+            .history
+            .and_then(|facts| {
+                facts.inputs.into_iter().find(|input| {
+                    input.user_message_id == rewrite.target_user_message_id && !input.inherited
+                })
+            })
+            .ok_or_else(|| conflict("target User has no local Input history"))?;
         let target_order = self
             .connection
             .query_row(
                 "SELECT queue_order FROM inputs
-                 WHERE session_id = ?1 AND user_message_id = ?2 AND state = 'committed'",
-                params![
-                    rewrite.session_id.as_str(),
-                    rewrite.target_user_message_id.as_str()
-                ],
+                 WHERE session_id = ?1 AND input_id = ?2 AND state = 'committed'",
+                params![rewrite.session_id.as_str(), fact.input_id.as_str()],
                 |row| row.get::<_, i64>(0),
             )
             .optional()
@@ -615,14 +680,24 @@ impl StorageEngine {
         match self.commit_rewrite(&plan, &rewrite, target_order, &new_message.id) {
             Ok(result) => Ok(result),
             Err(error) => {
-                if let Ok(directory) = self.session_directory(&rewrite.session_id) {
-                    let _ = fs::remove_file(body_path(&directory, plan.new_generation));
+                // 只有连接已退出事务且旧指针仍可确认时才能删除准备件。提交结果不明时保留两份
+                // 文件，不能把可能已发布的新代次当临时文件清掉；此处不自动补写数据库。
+                if self.connection.is_autocommit()
+                    && self.session_generation(&rewrite.session_id).ok()
+                        == Some(plan.previous_generation)
+                    && let Ok(directory) = self.session_directory(&rewrite.session_id)
+                {
+                    let path = body_path(&directory, plan.new_generation);
+                    self.conversation_indexes.remove_under(&path);
+                    let _ = fs::remove_file(path);
                 }
                 Err(error)
             }
         }
     }
 
+    /// begin_replacement 已同步并核验新正文。单 worker 内比较文件目录后进入 SQLite 事务，
+    /// 新输入归属随同一准备件同步；提交指针后才清理被裁掉的资源，内存与事件由 Runtime 更新。
     fn commit_rewrite(
         &mut self,
         plan: &ReplacementPlan,
@@ -640,6 +715,44 @@ impl StorageEngine {
             .map_err(|source| {
                 internal_error("replacement channel source could not be encoded", source)
             })?;
+        let owner = assistant_protocol::ConversationOwner::MainSession {
+            session_id: rewrite.session_id.clone(),
+        };
+        let old_path = body_path(&session_directory, plan.previous_generation);
+        let new_path = body_path(&session_directory, plan.new_generation);
+        // 两份文件均尚在所属 worker／gate 内，发布前比较可靠目录；不依赖已释放的 child／Run 行。
+        let old_children = self.conversation_indexes.read_child_history(
+            &old_path,
+            &owner,
+            plan.previous_generation,
+            None,
+        )?;
+        let retained: BTreeSet<ChildTaskId> = self
+            .conversation_indexes
+            .read_child_history(&new_path, &owner, plan.new_generation, None)?
+            .into_iter()
+            .map(|child| child.child_task_id)
+            .collect();
+        for child in old_children
+            .iter()
+            .map(|child| &child.child_task_id)
+            .chain(retained.iter())
+        {
+            super::filesystem::validate_child_task_component(child)?;
+        }
+        let removed_child_task_ids: Vec<_> = old_children
+            .into_iter()
+            .map(|child| child.child_task_id)
+            .filter(|child| !retained.contains(child))
+            .collect();
+        let retained_commands: BTreeSet<String> = self
+            .conversation_indexes
+            .read_history(&new_path, &owner, plan.new_generation)?
+            .facts
+            .commands
+            .into_iter()
+            .map(|command| command.input_id.as_str().to_owned())
+            .collect();
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -651,7 +764,11 @@ impl StorageEngine {
                  WHERE session_id = ?4 AND body_generation = ?5 AND lifecycle = 'active'
                    AND NOT EXISTS (SELECT 1 FROM inputs WHERE session_id = ?4 AND state = 'queued')
                    AND NOT EXISTS (SELECT 1 FROM runs WHERE session_id = ?4 AND status IN ('accepted', 'running', 'cancelling'))
-                   AND NOT EXISTS (SELECT 1 FROM pending_tool_exchanges WHERE session_id = ?4)",
+                   AND NOT EXISTS (SELECT 1 FROM pending_tool_exchanges WHERE session_id = ?4)
+                   AND NOT EXISTS (SELECT 1 FROM body_appends WHERE session_id = ?4)
+                   AND NOT EXISTS (SELECT 1 FROM child_tasks WHERE session_id = ?4 AND status IN ('accepted','running'))
+                   AND NOT EXISTS (SELECT 1 FROM child_pending_tool_exchanges WHERE session_id = ?4)
+                   AND NOT EXISTS (SELECT 1 FROM child_body_appends WHERE session_id = ?4)",
                 params![
                     to_i64(plan.new_generation, "body generation exceeds SQLite range")?,
                     to_i64(plan.message_count, "message count exceeds SQLite range")?,
@@ -667,34 +784,12 @@ impl StorageEngine {
         if let Some(effect) = rewrite.goal_effect.as_ref() {
             apply_goal_rewrite_pause(&transaction, effect, rewrite.changed_at_ms)?;
         }
-        let removed_child_task_ids = {
-            let mut statement = transaction
-                .prepare(
-                    "SELECT child_tasks.child_task_id
-                     FROM child_tasks
-                     JOIN runs ON runs.run_id = child_tasks.parent_run_id
-                     JOIN inputs ON inputs.input_id = runs.input_id
-                     WHERE inputs.session_id = ?1 AND inputs.queue_order >= ?2",
-                )
-                .map_err(|source| {
-                    internal_error("replaced child tasks could not be queried", source)
-                })?;
-            let rows = statement
-                .query_map(params![rewrite.session_id.as_str(), target_order], |row| {
-                    row.get::<_, String>(0)
-                })
-                .map_err(|source| {
-                    internal_error("replaced child tasks could not be queried", source)
-                })?;
-            rows.map(|row| {
-                let value = row.map_err(|source| {
-                    internal_error("replaced child task id could not be read", source)
-                })?;
-                ChildTaskId::new(value)
-                    .map_err(|_| invalid_data("replaced child task id is invalid"))
-            })
-            .collect::<StorageResult<Vec<_>>>()?
-        };
+        for child in &removed_child_task_ids {
+            transaction.execute("DELETE FROM conversation_recall_documents WHERE session_id=?1 AND child_task_id=?2",params![rewrite.session_id.as_str(),child.as_str()])
+                .map_err(|source| database_write_error("replaced child search documents could not be removed",source))?;
+            transaction.execute("DELETE FROM conversation_recall_heads WHERE session_id=?1 AND child_task_id=?2",params![rewrite.session_id.as_str(),child.as_str()])
+                .map_err(|source| database_write_error("replaced child search head could not be removed",source))?;
+        }
         let retained_message_ids = rewrite
             .conversation
             .messages
@@ -785,23 +880,17 @@ impl StorageEngine {
         let removed_command_ids = {
             let mut statement = transaction
                 .prepare(
-                    "SELECT input_id, user_message_id FROM inputs
+                    "SELECT input_id FROM inputs
                      WHERE session_id = ?1 AND input_kind = 'command'",
                 )
                 .map_err(|source| {
                     internal_error("replaced commands could not be queried", source)
                 })?;
             let rows = statement
-                .query_map([rewrite.session_id.as_str()], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })
+                .query_map([rewrite.session_id.as_str()], |row| row.get::<_, String>(0))
                 .map_err(|source| internal_error("replaced commands could not be read", source))?;
             rows.filter_map(|row| match row {
-                Ok((input_id, message_id))
-                    if !retained_message_ids.contains(message_id.as_str()) =>
-                {
-                    Some(Ok(input_id))
-                }
+                Ok(input_id) if !retained_commands.contains(&input_id) => Some(Ok(input_id)),
                 Ok(_) => None,
                 Err(source) => Some(Err(internal_error(
                     "replaced command row is invalid",
@@ -841,24 +930,16 @@ impl StorageEngine {
         let queue_order = u64::try_from(transaction.last_insert_rowid())
             .map_err(|source| internal_error("queue order exceeds runtime range", source))?;
         transaction.execute(
-            "INSERT INTO runs (run_id, session_id, input_id, attempt, status, cancel_requested, approval_mode, error_code, error_message, created_at_ms, started_at_ms, finished_at_ms)
-             VALUES (?1, ?2, ?3, 1, 'accepted', 0, ?4, NULL, NULL, ?5, NULL, NULL)",
+            "INSERT INTO runs (run_id, session_id, input_id, attempt, status, cancel_requested, approval_mode, created_at_ms, started_at_ms)
+             VALUES (?1, ?2, ?3, 1, 'accepted', 0, ?4, ?5, NULL)",
             params![
-                rewrite.input.run_id.as_str(),
+                rewrite.run_id.as_str(),
                 rewrite.session_id.as_str(),
                 rewrite.input.input_id.as_str(),
-                approval_mode_value(rewrite.input.approval_mode),
+                approval_mode_value(rewrite.approval_mode),
                 rewrite.input.accepted_at_ms,
             ],
         ).map_err(|source| database_write_error("replacement run could not be created", source))?;
-        transaction
-            .execute(
-                "INSERT INTO run_message_refs (run_id, message_id) VALUES (?1, ?2)",
-                params![rewrite.input.run_id.as_str(), new_message_id.as_str()],
-            )
-            .map_err(|source| {
-                database_write_error("replacement message reference could not be created", source)
-            })?;
         let input = StoredInput {
             agent_shell_target: None,
             queue_order,
@@ -878,13 +959,13 @@ impl StorageEngine {
         };
         let run = StoredRun {
             shell: None,
-            run_id: rewrite.input.run_id.clone(),
+            run_id: rewrite.run_id.clone(),
             session_id: rewrite.session_id.clone(),
             input_id: rewrite.input.input_id.clone(),
             attempt: 1,
             status: assistant_protocol::RunStatus::Accepted,
             agent_variant: rewrite.input.agent_variant,
-            approval_mode: rewrite.input.approval_mode,
+            approval_mode: rewrite.approval_mode,
             reasoning_effort: None,
             cancel_requested: false,
             error: None,
@@ -894,6 +975,15 @@ impl StorageEngine {
             started_at_ms: None,
             finished_at_ms: None,
         };
+        // Input 的真实顺序由当前事务分配后，补齐尚未发布的新 generation。崩溃或失败回滚 SQL，
+        // 旧指针仍权威；调用方清理准备件。文件同步及回读成功前，不提交指针或发布 Runtime 事件。
+        freeze_rewrite_input(
+            &new_path,
+            plan.new_generation,
+            plan.message_count,
+            &input,
+            &run,
+        )?;
         transaction.commit().map_err(|source| {
             database_write_error("conversation rewrite could not be committed", source)
         })?;
@@ -905,7 +995,9 @@ impl StorageEngine {
         }
         let child_tasks_directory = child_tasks_directory(&session_directory);
         for child_task_id in removed_child_task_ids {
-            let _ = fs::remove_dir_all(child_task_directory(&session_directory, &child_task_id));
+            let path = child_task_directory(&session_directory, &child_task_id);
+            self.conversation_indexes.remove_under(&path);
+            let _ = fs::remove_dir_all(path);
         }
         let _ = sync_directory(&child_tasks_directory);
         Ok(RewriteResult {
@@ -916,17 +1008,67 @@ impl StorageEngine {
     }
 }
 
-fn feedback_value(feedback: MessageFeedback) -> &'static str {
-    match feedback {
-        MessageFeedback::Positive => "positive",
-        MessageFeedback::Negative => "negative",
-    }
-}
-
 fn parse_feedback(value: &str) -> StorageResult<MessageFeedback> {
     match value {
         "positive" => Ok(MessageFeedback::Positive),
         "negative" => Ok(MessageFeedback::Negative),
         _ => Err(invalid_data("stored message feedback is invalid")),
     }
+}
+
+/// 只向未发布的准备件追加本次新输入事实，复用现有追加同步原语，不创建第二份提交回执。
+/// 文件正文已完整回读；此处再核对新身份、顺序与消息归属，SQL 回滚时它不会成为可读历史。
+fn freeze_rewrite_input(
+    path: &std::path::Path,
+    generation: u64,
+    message_count: u64,
+    input: &StoredInput,
+    run: &StoredRun,
+) -> StorageResult<()> {
+    let expected = assistant_runtime::StoredHistoryFacts {
+        inputs: vec![assistant_runtime::StoredInputHistory::from_input(input)],
+        runs: vec![assistant_runtime::StoredRunHistory::from_run(
+            run,
+            Some(input.user_message_id.clone()),
+        )],
+        message_origins: vec![assistant_runtime::StoredMessageOrigin {
+            message_id: input.user_message_id.clone(),
+            run_id: Some(run.run_id.clone()),
+            input_id: Some(input.input_id.clone()),
+            attempt: Some(run.attempt),
+            step: None,
+            inherited: false,
+        }],
+        ..Default::default()
+    };
+    let payload = conversation::encode_history_append(
+        &format!("rewrite:{}", run.run_id),
+        &[],
+        expected.clone(),
+    )?;
+    let base = fs::metadata(path)
+        .map_err(|source| internal_error("rewrite file could not be inspected", source))?
+        .len();
+    conversation::reconcile_append(path, base, &payload)?;
+    let owner = assistant_protocol::ConversationOwner::MainSession {
+        session_id: input.session_id.clone(),
+    };
+    let (keys, history) = conversation::scan_document(path, &owner, generation)?;
+    let history = history.ok_or_else(|| invalid_data("rewrite history header is missing"))?;
+    if u64::try_from(keys.messages.len()).ok() != Some(message_count)
+        || history
+            .inputs
+            .iter()
+            .find(|fact| fact.input_id == input.input_id)
+            != expected.inputs.first()
+        || history.runs.iter().find(|fact| fact.run_id == run.run_id) != expected.runs.first()
+        || history
+            .message_origins
+            .iter()
+            .find(|fact| fact.message_id == input.user_message_id)
+            != expected.message_origins.first()
+    {
+        return Err(invalid_data("rewrite input history verification failed"));
+    }
+    Ok(())
 }

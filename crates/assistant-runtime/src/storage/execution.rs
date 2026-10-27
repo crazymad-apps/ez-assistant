@@ -217,7 +217,7 @@ pub enum StoredSessionCommandResult {
     },
 }
 
-/// 同一可靠队列中的互斥载荷；Message 有首次 Run，Command 永远没有 Run。
+/// 同一可靠队列中的互斥载荷；Message 仅在实际领取后创建 Run，Command 不创建 Run。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StoredQueueItem {
     Message(Box<StoredInput>),
@@ -282,15 +282,14 @@ impl StoredSessionCommandResult {
     }
 }
 
-/// 原子接受 Input 及其首次 Run 所需的完整事实。
+/// 原子暂存可撤销 Input 所需的完整事实。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct NewStoredInput {
-    /// 轮后答案与新 Input/Run 同事务提交；普通输入为空。
+    /// 轮后答案与新 Input 同事务提交；普通输入为空。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feedback_answer: Option<assistant_protocol::FeedbackRequestSnapshot>,
     pub agent_shell_target: Option<assistant_protocol::ShellKind>,
     pub input_id: InputId,
-    pub run_id: RunId,
     pub session_id: SessionId,
     pub idempotency_key: Option<IdempotencyKey>,
     pub agent_variant: AgentVariant,
@@ -299,17 +298,15 @@ pub struct NewStoredInput {
     pub cross_session: Option<CrossSessionInputEnvelope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_source: Option<InputChannelSource>,
-    /// 与 Input、首次 Run 和 queued message 同事务写入的用户 Skill Activation。
+    /// 与 Input 和 queued message 同事务写入的用户 Skill Activation。
     pub skill_activation: Option<StoredSkillActivation>,
-    /// 与 Input、首次 Run 同事务写入的单 Server 手选事实。
+    /// 与 Input 同事务写入的单 Server 手选事实。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_selection: Option<StoredMcpSelection>,
-    /// Input 与首次 Run 接受时的审计基线，不是活动工具授权策略。
-    pub approval_mode: ApprovalMode,
     pub message: UserMessage,
-    /// 仅首次 start_goal 提供；Store 必须与 Input/Run 在同一事务中创建。
+    /// 仅首次 start_goal 提供；Store 必须与 Input 在同一事务中创建。
     pub new_goal: Option<StoredGoal>,
-    /// 仅 resume_goal 提供；Store 必须 CAS 暂停 Goal 并与 Input/Run 原子提交。
+    /// 仅 resume_goal 提供；Store 必须 CAS 暂停 Goal 并与 Input 原子提交。
     pub resumed_goal: Option<StoredGoal>,
     /// 首条输入可提供的有界自动标题；Store 仅在标题来源仍为系统生成时采用。
     pub generated_title: Option<String>,
@@ -433,12 +430,55 @@ pub fn validate_input_message_with_channel_source(
     Ok(())
 }
 
-/// Store 接受结果；幂等命中时返回首次持久化事实。
+/// Store 接受结果；幂等命中固定首次 attempt，可靠历史不能重新成为执行控制。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AcceptedInput {
-    pub input: StoredInput,
-    pub run: StoredRun,
-    pub is_duplicate: bool,
+pub enum AcceptedInput {
+    /// 暂存输入或已领取的未完成控制；新接纳的 run 必须为空，幂等查询可带真实首次 Run。
+    Control {
+        input: Box<StoredInput>,
+        run: Option<StoredRun>,
+        is_duplicate: bool,
+    },
+    /// 已结束的首次 Run 从当前 owner 文件读取；不含队列载荷、Shell 环境或恢复句柄。
+    Historical {
+        session_id: SessionId,
+        input: super::StoredInputHistory,
+        run: super::StoredRunHistory,
+    },
+}
+
+impl AcceptedInput {
+    /// 历史命中始终为重复请求；不能作为新的接纳发布或入队。
+    pub fn is_duplicate(&self) -> bool {
+        match self {
+            Self::Control { is_duplicate, .. } => *is_duplicate,
+            Self::Historical { .. } => true,
+        }
+    }
+
+    /// 原接纳 Input 的稳定身份，不表示当前仍有排队控制。
+    pub fn input_id(&self) -> &InputId {
+        match self {
+            Self::Control { input, .. } => &input.input_id,
+            Self::Historical { input, .. } => &input.input_id,
+        }
+    }
+
+    /// 实际领取后的首次 Run；尚未领取为空，不随后续 retry 改为最近 attempt。
+    pub fn run_id(&self) -> Option<&RunId> {
+        match self {
+            Self::Control { run, .. } => run.as_ref().map(|run| &run.run_id),
+            Self::Historical { run, .. } => Some(&run.run_id),
+        }
+    }
+
+    /// 返回事实的 owner；调用方仍须按请求 Session 核对，不能仅比较历史 ID。
+    pub fn session_id(&self) -> &SessionId {
+        match self {
+            Self::Control { input, .. } => &input.session_id,
+            Self::Historical { session_id, .. } => session_id,
+        }
+    }
 }
 
 /// 把一条仍在排队的 Input 提升为当前持久队列的下一项。

@@ -89,7 +89,7 @@ async fn verify_queued_shell_change(target: ShellKind) {
         mcp_server_key: None,
         idempotency_key: None,
     };
-    let before = runtime.submit_input(request.clone()).await.unwrap();
+    let before = runtime.submit_started_input(request.clone()).await.unwrap();
     tokio::time::timeout(Duration::from_secs(2), model.entered.notified())
         .await
         .unwrap();
@@ -146,7 +146,11 @@ async fn verify_queued_shell_change(target: ShellKind) {
     );
     model.release.notify_one();
     assert!(switch.accepted.run_id.is_none());
-    for run_id in [&before.run.run_id, &after.run.run_id] {
+    let after_run = runtime
+        .wait_for_input_claim(&session_id, &after.input_id)
+        .await
+        .unwrap();
+    for run_id in [&before.run.run_id, &after_run.run_id] {
         assert_eq!(
             wait_for_terminal(&runtime, &session_id, run_id)
                 .await
@@ -177,23 +181,22 @@ async fn verify_queued_shell_change(target: ShellKind) {
     assert_eq!(snapshots[0].program, "fixture-shell.exe");
     assert_eq!(snapshots[1].program, "refreshed-shell.exe");
     assert_eq!(model.inner.take_requests().len(), 2);
-    assert_eq!(stored.state.runs.len(), 2);
+    assert!(stored.state.runs.is_empty());
+    assert_eq!(stored.state.run_history.len(), 2);
     for (id, expected) in [
         (&before.run.run_id, ShellKind::WindowsPowershell51),
-        (&after.run.run_id, target),
+        (&after_run.run_id, target),
     ] {
         assert_eq!(
             stored
                 .state
-                .runs
+                .run_history
                 .iter()
-                .find(|run| &run.run_id == id)
+                .find(|(_, run)| &run.run_id == id)
                 .unwrap()
-                .shell
-                .as_ref()
-                .unwrap()
-                .kind,
-            expected
+                .1
+                .agent_shell_kind,
+            Some(expected)
         );
     }
     assert_eq!(
@@ -316,7 +319,7 @@ async fn shell_control_failure_retry_and_forks_never_call_the_model() {
     ));
     assert!(model.take_requests().is_empty());
     let ordinary = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             session_id: session_id.clone(),
             message: "after controls".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -453,7 +456,7 @@ async fn shell_preparation_failure_atomically_commits_the_failed_input() {
         state.agent_shell_environment = None;
     }
     let accepted = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             session_id: session.session_id.clone(),
             message: "shell failure must preserve this input".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -654,7 +657,7 @@ async fn shell_binding_survives_archive_restore_and_clear_after_default_changes(
             );
         }
         let accepted = runtime
-            .submit_input(SubmitInputRequest {
+            .submit_started_input(SubmitInputRequest {
                 session_id: session_id.clone(),
                 message: format!("shell lifecycle stage {stage}"),
                 variant: assistant_protocol::AgentVariant::Build,
@@ -680,11 +683,12 @@ async fn shell_binding_survives_archive_restore_and_clear_after_default_changes(
         );
         let run = stored
             .state
-            .runs
+            .run_history
             .iter()
-            .find(|run| run.run_id == accepted.run.run_id)
+            .find(|(_, run)| run.run_id == accepted.run.run_id)
             .unwrap();
-        assert_eq!(run.shell.as_ref().unwrap().kind, ShellKind::Powershell7);
+        assert!(stored.state.runs.is_empty());
+        assert_eq!(run.1.agent_shell_kind, Some(ShellKind::Powershell7));
     }
     let compiled = factory.compiled.lock().unwrap().clone();
     assert_eq!(compiled.len(), 3);
@@ -747,20 +751,21 @@ async fn run_persists_the_exact_shell_used_to_compile_tools() {
         idempotency_key: None,
     };
     let probes_before_input = factory.probes.load(Ordering::SeqCst);
-    let accepted = runtime.submit_input(request.clone()).await.unwrap();
+    let accepted = runtime.submit_started_input(request.clone()).await.unwrap();
     let terminal = wait_for_terminal(&runtime, &session_id, &accepted.run.run_id).await;
     assert_eq!(terminal.status, assistant_protocol::RunStatus::Completed);
     let restored = runtime.store.load_session_state(&session_id).await.unwrap();
     let run = restored
         .state
-        .runs
+        .run_history
         .iter()
-        .find(|run| run.run_id == accepted.run.run_id)
+        .find(|(_, run)| run.run_id == accepted.run.run_id)
         .unwrap();
     let compiled = factory.compiled.lock().unwrap().clone();
     assert_eq!(compiled.len(), 1);
     assert_eq!(compiled[0].kind, ShellKind::WindowsPowershell51);
-    assert_eq!(run.shell.as_ref(), Some(&compiled[0]));
+    assert!(restored.state.runs.is_empty());
+    assert_eq!(run.1.agent_shell_kind, Some(compiled[0].kind));
     let conversation = runtime.store.load_conversation(&session_id).await.unwrap();
     let expected = compiled[0]
         .context_message(
@@ -774,7 +779,7 @@ async fn run_persists_the_exact_shell_used_to_compile_tools() {
         .unwrap();
     assert!(crate::shell::context_is_current(&conversation, &expected));
     factory.environment_changed.store(true, Ordering::SeqCst);
-    let second = runtime.submit_input(request.clone()).await.unwrap();
+    let second = runtime.submit_started_input(request.clone()).await.unwrap();
     assert_eq!(
         wait_for_terminal(&runtime, &session_id, &second.run.run_id)
             .await
@@ -837,7 +842,7 @@ async fn shell_context_returns_after_real_compaction_without_changing_the_bindin
         idempotency_key: None,
     };
     for _ in 0..2 {
-        let accepted = runtime.submit_input(request.clone()).await.unwrap();
+        let accepted = runtime.submit_started_input(request.clone()).await.unwrap();
         assert_eq!(
             wait_for_terminal(&runtime, &session_id, &accepted.run.run_id)
                 .await
@@ -882,7 +887,7 @@ async fn shell_context_returns_after_real_compaction_without_changing_the_bindin
         crate::shell::context_is_current(&conversation, &expected),
         "compaction must persist the restored environment before any new Run"
     );
-    let accepted = runtime.submit_input(request).await.unwrap();
+    let accepted = runtime.submit_started_input(request).await.unwrap();
     assert_eq!(
         wait_for_terminal(&runtime, &session_id, &accepted.run.run_id)
             .await
@@ -961,7 +966,7 @@ async fn verify_shell_after_automatic_compaction(provider_overflow: bool) {
     let mut events = runtime.subscribe_events();
     for message in ["first turn", "continue after automatic compaction"] {
         let accepted = runtime
-            .submit_input(SubmitInputRequest {
+            .submit_started_input(SubmitInputRequest {
                 session_id: session_id.clone(),
                 message: message.into(),
                 variant: assistant_protocol::AgentVariant::Build,
@@ -1001,7 +1006,8 @@ async fn verify_shell_after_automatic_compaction(provider_overflow: bool) {
     ));
     if provider_overflow {
         assert_eq!(requests[2].system, requests[1].system);
-        assert_eq!(requests[2].tools, requests[1].tools);
+        assert!(requests[2].tools.is_empty());
+        assert_eq!(requests[3].tools, requests[1].tools);
         assert_eq!(requests[2].reasoning, requests[1].reasoning);
         assert_eq!(requests[2].provider_options, requests[1].provider_options);
         assert_eq!(
@@ -1035,17 +1041,18 @@ async fn verify_shell_after_automatic_compaction(provider_overflow: bool) {
         Some(ShellKind::Powershell7)
     );
     assert_eq!(
-        stored.state.runs.len(),
+        stored.state.run_history.len(),
         2,
         "compaction resumes the existing Run"
     );
     assert!(
         stored
             .state
-            .runs
+            .run_history
             .iter()
-            .all(|run| run.shell.as_ref() == Some(&frozen))
+            .all(|(_, run)| run.agent_shell_kind == Some(frozen.kind))
     );
+    assert!(stored.state.runs.is_empty());
     assert!(
         factory
             .compiled
@@ -1095,7 +1102,7 @@ async fn delegated_model_receives_the_parent_run_shell_and_execution_directory()
         .session_id;
     set_auto_approval(&runtime, &session_id).await;
     let accepted = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             session_id: session_id.clone(),
             message: "delegate environment inspection".into(),
             variant: assistant_protocol::AgentVariant::Build,

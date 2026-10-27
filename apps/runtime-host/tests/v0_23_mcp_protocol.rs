@@ -47,7 +47,8 @@ fn formal_host_manages_mcp_and_persists_refresh_without_creating_runs() {
     assert_eq!(tested["outcome"], "success");
     assert_eq!(tested["tool_count"], 2);
     let initial = configuration(&mut client);
-    assert_eq!(initial["servers"], json!([]));
+    assert_eq!(initial["servers"].as_array().unwrap().len(), 1);
+    assert_eq!(initial["servers"][0]["source"], json!({"type":"builtin"}));
     assert_eq!(initial["needs_refresh"], false);
 
     let document = json!({"mcpServers":{"local_fixture":{
@@ -130,12 +131,23 @@ fn formal_host_manages_mcp_and_persists_refresh_without_creating_runs() {
         }),
     )["snapshot"]
         .clone();
-    assert_eq!(removed["servers"], json!([]));
+    assert!(
+        removed["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|server| server["source"] == json!({"type":"builtin"}))
+    );
     assert_eq!(removed["needs_refresh"], true);
     submit_refresh(&mut client, &session_id, "apply-delete");
     let settled = wait_for_refreshes(&mut client, &session_id, 2);
     assert_eq!(
-        settled["conversation"]["items"][1]["result"]["servers"][0]["outcome"],
+        settled["conversation"]["items"][1]["result"]["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|server| server["server_key"] == "local_fixture")
+            .unwrap()["outcome"],
         "removed"
     );
     assert_eq!(configuration(&mut client)["needs_refresh"], false);
@@ -210,7 +222,14 @@ fn formal_host_tests_public_microsoft_learn_connection() {
     assert_eq!(result["outcome"], "success");
     let count = result["tool_count"].as_u64().expect("tool count");
     assert!(count > 0);
-    assert_eq!(saved["servers"], json!([]), "test must not save the draft");
+    assert!(
+        saved["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|server| server["source"] == json!({"type":"builtin"})),
+        "test must not save the draft"
+    );
     eprintln!("Microsoft Learn connection test: success, {count} tools");
 }
 

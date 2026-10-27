@@ -27,12 +27,20 @@ use crate::{
     internal_boundary::{
         InternalBoundaryCoordinator, InternalBoundaryRequest, InternalBoundarySource,
     },
-    run::{allocate_run_id, create_user_message},
+    run::create_user_message,
     session::{SessionController, allocate_session_id},
     skill::render_user_activation,
 };
 
 const MAX_MATERIALIZATION_ATTACHMENTS: usize = 32;
+
+fn materialization_lookup_error(source: crate::StoreError) -> RuntimeError {
+    if source.kind() == crate::StoreErrorKind::Conflict {
+        RuntimeError::SnapshotStale
+    } else {
+        RuntimeError::from_store("get session materialization", source)
+    }
+}
 
 impl AssistantRuntime {
     /// 按原 key 只读查询已提交事实；未命中不取消可能仍在进行的首次上传。
@@ -50,21 +58,25 @@ impl AssistantRuntime {
             .store
             .get_session_materialization(&request.idempotency_key)
             .await
-            .map_err(|source| RuntimeError::from_store("get session materialization", source))?
+            .map_err(materialization_lookup_error)?
         else {
             return Ok(GetSessionMaterializationResult {
                 materialization: None,
             });
         };
         let session_id = stored.session.session_id;
-        let run_id = stored.accepted.run.run_id;
-        let run = self
-            .get_run(GetRunRequest {
-                session_id: session_id.clone(),
-                run_id,
-            })
-            .await?
-            .run;
+        let run = if let Some(run_id) = stored.accepted.run_id() {
+            Some(
+                self.get_run(GetRunRequest {
+                    session_id: session_id.clone(),
+                    run_id: run_id.clone(),
+                })
+                .await?
+                .run,
+            )
+        } else {
+            None
+        };
         let session = self
             .get_session(GetSessionRequest { session_id })
             .await?
@@ -72,14 +84,14 @@ impl AssistantRuntime {
         Ok(GetSessionMaterializationResult {
             materialization: Some(SessionMaterializationResult {
                 session,
-                input_id: stored.accepted.input.input_id,
+                input_id: stored.accepted.input_id().clone(),
                 run,
                 attachments: stored.attachments.iter().map(attachment_summary).collect(),
             }),
         })
     }
 
-    /// 将草稿首次发送一次性落实为正式 Session、附件、Input 和首次 Run。
+    /// 将草稿首次发送一次性落实为正式 Session、附件和暂存 Input。
     pub async fn materialize_session(
         &self,
         manifest: SessionMaterializationManifest,
@@ -92,7 +104,7 @@ impl AssistantRuntime {
             .store
             .get_session_materialization(&manifest.idempotency_key)
             .await
-            .map_err(|source| RuntimeError::from_store("get session materialization", source))?;
+            .map_err(materialization_lookup_error)?;
         let selected_agent = match (&manifest.custom_agent, existing.as_ref()) {
             (None, None) => None,
             (Some(selection), None) => {
@@ -256,9 +268,11 @@ impl AssistantRuntime {
         let provisional = Arc::new(SessionController::new(stored_session_preview(&new_session)));
         let goal_submission = self.goal_submission(&provisional, manifest.mode).await?;
 
-        let (input_id, run_id) = {
+        let input_id = {
             let state = provisional.lock_state()?;
-            (self.allocate_input_id(&state)?, allocate_run_id(&state)?)
+            // 原物化幂等返回已在上方处理；这个 owner 尚未创建，没有继承历史。
+            let history = crate::StoredHistoryFacts::default();
+            crate::run::allocate_input_id(&state, &history)?
         };
         let mut uploads = Vec::with_capacity(staged_attachments.len());
         let mut file_references = Vec::with_capacity(staged_attachments.len());
@@ -362,7 +376,7 @@ impl AssistantRuntime {
                     })?,
                     session_id: session_id.clone(),
                     owner: SkillActivationOwner::Session(session_id.clone()),
-                    run_id: Some(run_id.clone()),
+                    run_id: None,
                     input_id: Some(input_id.clone()),
                     message_id: message.id.clone(),
                     name: definition.name.clone(),
@@ -382,7 +396,6 @@ impl AssistantRuntime {
             feedback_answer: None,
             agent_shell_target: None,
             input_id,
-            run_id,
             session_id: session_id.clone(),
             idempotency_key: None,
             agent_variant: manifest.variant,
@@ -392,7 +405,6 @@ impl AssistantRuntime {
             channel_source: Some(InputChannelSource::desktop_text()),
             skill_activation,
             mcp_selection: mcp_selection.clone(),
-            approval_mode: manifest.approval_mode,
             message,
             new_goal,
             resumed_goal: None,
@@ -415,21 +427,26 @@ impl AssistantRuntime {
                 }
             })?;
 
-        if stored.accepted.is_duplicate
-            && let Ok(existing) = self.session(&stored.session.session_id).await
-        {
-            let state = existing.lock_state()?;
-            let run = state
-                .runs
-                .get(&stored.accepted.run.run_id)
-                .map(crate::run::RunRecord::snapshot)
-                .unwrap_or_else(|| {
-                    crate::run::RunRecord::accepted(&stored.accepted.run, Vec::new()).snapshot()
-                });
-            drop(state);
+        if stored.accepted.is_duplicate() {
+            let existing = self.session(&stored.session.session_id).await?;
+            let run = if let Some(run_id) = stored.accepted.run_id() {
+                Some(
+                    self.product_run_snapshots(&existing)
+                        .await?
+                        .into_iter()
+                        .find(|run| {
+                            &run.run_id == run_id && &run.input_id == stored.accepted.input_id()
+                        })
+                        .ok_or(RuntimeError::InternalStateUnavailable {
+                            component: "materialized Run history",
+                        })?,
+                )
+            } else {
+                None
+            };
             return Ok(SessionMaterializationResult {
                 session: existing.summary()?,
-                input_id: stored.accepted.input.input_id,
+                input_id: stored.accepted.input_id().clone(),
                 run,
                 attachments: stored.attachments.iter().map(attachment_summary).collect(),
             });
@@ -448,12 +465,11 @@ impl AssistantRuntime {
             .map_err(|_| RuntimeError::InternalStateUnavailable {
                 component: "materialized Goal projection",
             })?;
-        let mut accepted = stored.accepted;
-        accepted.is_duplicate = false;
+        let accepted = stored.accepted;
         let projection = {
             let mut state = controller.lock_state()?;
             state.goal = goal_snapshot.clone();
-            project_accepted_input(&mut state, accepted, mcp_selection)
+            project_accepted_input(&mut state, accepted, mcp_selection)?
         };
         {
             let mut attachments =
@@ -476,11 +492,6 @@ impl AssistantRuntime {
         self.publish(assistant_protocol::RuntimeEvent::SessionCreated {
             session: session.clone(),
         });
-        self.publish(assistant_protocol::RuntimeEvent::RunAccepted {
-            created_at_ms: projection.run.created_at_ms,
-            session_id: session_id.clone(),
-            run_id: projection.run.run_id.clone(),
-        });
         if let Some(goal) = goal_snapshot.as_ref() {
             let goal = super::product::project_goal(goal)?;
             self.publish(assistant_protocol::RuntimeEvent::GoalChanged {
@@ -499,7 +510,7 @@ impl AssistantRuntime {
         Ok(SessionMaterializationResult {
             session,
             input_id: projection.input_id,
-            run: projection.run,
+            run: None,
             attachments: stored.attachments.iter().map(attachment_summary).collect(),
         })
     }

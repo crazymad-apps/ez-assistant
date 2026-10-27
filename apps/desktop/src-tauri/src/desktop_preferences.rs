@@ -84,8 +84,8 @@ where
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum DesktopCloseBehavior {
-    #[default]
     HideToTray,
+    #[default]
     QuitDesktop,
 }
 
@@ -97,7 +97,7 @@ impl Default for DesktopPreferences {
             left_sidebar_width: LEFT_SIDEBAR_DEFAULT_WIDTH,
             right_sidebar_width: RIGHT_SIDEBAR_DEFAULT_WIDTH,
             expanded_workspace_ids: None,
-            close_behavior: DesktopCloseBehavior::HideToTray,
+            close_behavior: DesktopCloseBehavior::default(),
             default_approval_mode: default_approval_mode(),
             last_model_selection: None,
             resource_workspace: None,
@@ -310,6 +310,9 @@ fn save_namespace(
         if document.hosts.len() >= 64 && !document.hosts.contains_key(namespace) {
             return Err(DesktopPreferencesError::Invalid);
         }
+        // 登录后的布局按账号分区保存，原生关闭事件却没有账号上下文。把当前界面已保存的
+        // 关闭选择同时交给设备入口，在同一写锁和原子替换内提交；其他本机布局和账号不变。
+        document.local.close_behavior = preferences.close_behavior;
         document.hosts.insert(namespace.to_owned(), preferences);
     } else {
         document.local = preferences;

@@ -229,7 +229,11 @@ async fn begin_title_generation(
             reason: "session model does not support the title output contract",
         });
     }
-    let max_output_tokens = compiled.max_output_tokens.min(MAX_TITLE_OUTPUT_TOKENS);
+    let max_output_tokens = compiled
+        .max_output_tokens
+        .map_or(MAX_TITLE_OUTPUT_TOKENS, |limit| {
+            limit.min(MAX_TITLE_OUTPUT_TOKENS)
+        });
     let tool_choice = title_tool_choice(compiled.model.capabilities());
     let cancellation = context.root_cancellation.child_token();
     let started_at_ms = super::now_ms()?;

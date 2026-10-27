@@ -235,7 +235,7 @@ pub struct ResolvedModelConfig {
     pub(super) api_key: ModelSecret,
     pub(super) context_window_tokens: u64,
     pub(super) max_input_tokens: Option<u64>,
-    pub(super) max_output_tokens: u32,
+    pub(super) max_output_tokens: Option<u32>,
     pub(super) generation: GenerationConfig,
     pub(super) capabilities: super::capabilities::ResolvedModelCapabilities,
 }
@@ -285,8 +285,8 @@ impl ResolvedModelConfig {
         self.max_input_tokens
     }
 
-    /// 模型声明的单轮最大输出上限。
-    pub fn max_output_tokens(&self) -> u32 {
+    /// 模型声明的单轮最大输出上限；未知时不制造限制。
+    pub fn max_output_tokens(&self) -> Option<u32> {
         self.max_output_tokens
     }
 

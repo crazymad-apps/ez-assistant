@@ -1,6 +1,6 @@
 //! SQLite Run 行、Message 引用与领域投影之间的严格转换。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use agent_types::MessageId;
 use assistant_protocol::{
@@ -14,32 +14,90 @@ use super::{
 };
 
 impl StorageEngine {
-    /// 加载全部 Run，并在进入 Runtime 恢复投影前校验数据库原始值。
-    pub(super) fn load_runs(&self) -> StorageResult<Vec<StoredRun>> {
-        self.load_runs_scoped(None)
+    /// 隔离测试核对实际控制行；正常恢复只读取未完成控制，旧历史迁出另有显式入口。
+    #[cfg(test)]
+    pub(super) fn load_runs(&mut self) -> StorageResult<Vec<StoredRun>> {
+        self.load_runs_with_relations(None, self.allow_legacy_history, None, false)
     }
 
-    pub(super) fn load_runs_scoped(
-        &self,
+    /// 恢复仅需要未完成控制；旧终态 queued Input 在收敛前暂留，不能遗漏原输入正文。
+    pub(super) fn load_unfinished_runs_scoped(
+        &mut self,
+        session_id: Option<&SessionId>,
+    ) -> StorageResult<Vec<StoredRun>> {
+        self.load_runs_with_relations(session_id, self.allow_legacy_history, None, true)
+    }
+
+    pub(super) fn load_run_control(
+        &mut self,
+        session_id: &SessionId,
+        run_id: &RunId,
+    ) -> StorageResult<Option<StoredRun>> {
+        Ok(self
+            .load_runs_with_relations(
+                Some(session_id),
+                self.allow_legacy_history,
+                Some(run_id),
+                false,
+            )?
+            .pop())
+    }
+
+    /// 只供升级前迁出旧关系；正常执行绝不读取旧 SQL 消息关联。
+    pub(super) fn load_legacy_runs_scoped(
+        &mut self,
         session_id: Option<&assistant_protocol::SessionId>,
+    ) -> StorageResult<Vec<StoredRun>> {
+        if !self.allow_legacy_history {
+            return Err(invalid_data(
+                "legacy Run relations require the verified history upgrade context",
+            ));
+        }
+        self.load_runs_with_relations(session_id, true, None, false)
+    }
+
+    fn load_runs_with_relations(
+        &mut self,
+        session_id: Option<&assistant_protocol::SessionId>,
+        legacy: bool,
+        run_id: Option<&RunId>,
+        unfinished_only: bool,
     ) -> StorageResult<Vec<StoredRun>> {
         let predicate = if session_id.is_some() {
             "runs.session_id = ?1"
         } else {
             "?1 IS NULL"
         };
+        let errors = if legacy {
+            "runs.error_code, runs.error_message"
+        } else {
+            "NULL, NULL"
+        };
+        let finish = if legacy {
+            "runs.finished_at_ms"
+        } else {
+            "NULL"
+        };
         let mut statement = self
             .connection
             .prepare(&format!("SELECT runs.run_id, runs.session_id, runs.input_id, runs.attempt, runs.status,
                         runs.cancel_requested, inputs.agent_variant, runs.approval_mode, runs.reasoning_effort,
-                        runs.error_code, runs.error_message, runs.created_at_ms,
-                        runs.started_at_ms, runs.finished_at_ms, runs.shell_snapshot_json
+                        {errors}, runs.created_at_ms,
+                        runs.started_at_ms, {finish}, runs.shell_snapshot_json
                  FROM runs JOIN inputs ON inputs.input_id = runs.input_id
-                 WHERE {predicate} ORDER BY runs.created_at_ms, runs.run_id"))
+                 WHERE {predicate} AND (?2 IS NULL OR runs.run_id=?2)
+                   AND (?3=0 OR runs.status IN ('accepted','running','cancelling') OR inputs.state='queued')
+                   AND (?4 OR runs.status IN ('accepted','running','cancelling'))
+                 ORDER BY runs.created_at_ms, runs.run_id"))
             .map_err(|source| internal_error("runtime runs could not be queried", source))?;
         let rows = statement
             .query_map(
-                [session_id.map(assistant_protocol::SessionId::as_str)],
+                rusqlite::params![
+                    session_id.map(assistant_protocol::SessionId::as_str),
+                    run_id.map(RunId::as_str),
+                    unfinished_only,
+                    legacy,
+                ],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -61,7 +119,20 @@ impl StorageEngine {
                 },
             )
             .map_err(|source| internal_error("runtime runs could not be read", source))?;
+        let rows = rows
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|source| internal_error("runtime run row could not be read", source))?;
+        drop(statement);
+        let mut requested: HashMap<String, HashSet<RunId>> = HashMap::new();
+        for row in &rows {
+            requested.entry(row.1.clone()).or_default().insert(
+                RunId::new(&row.0).map_err(|source| {
+                    invalid_data_with_source("stored run id is invalid", source)
+                })?,
+            );
+        }
         let mut runs = Vec::new();
+        let mut histories = HashMap::new();
         for row in rows {
             let (
                 run_id,
@@ -79,8 +150,7 @@ impl StorageEngine {
                 started_at_ms,
                 finished_at_ms,
                 shell_json,
-            ) =
-                row.map_err(|source| internal_error("runtime run row could not be read", source))?;
+            ) = row;
             if !matches!(cancel_requested, 0 | 1) {
                 return Err(invalid_data("stored run cancellation flag is invalid"));
             }
@@ -96,7 +166,80 @@ impl StorageEngine {
                 }
                 _ => return Err(invalid_data("stored run error is incomplete")),
             };
-            let (message_ids, message_steps) = self.load_run_message_refs(&run_id)?;
+            let (message_ids, message_steps) = if legacy {
+                self.load_legacy_message_refs(&run_id)?
+            } else {
+                if let std::collections::hash_map::Entry::Vacant(entry) =
+                    histories.entry(session_id.clone())
+                {
+                    let pending: bool = self
+                        .connection
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM body_appends WHERE session_id=?1)",
+                            [session_id.as_str()],
+                            |row| row.get(0),
+                        )
+                        .map_err(|source| {
+                            internal_error("Run pending history could not be checked", source)
+                        })?;
+                    let facts =
+                        if pending || self.unavailable_sessions.contains(session_id.as_str()) {
+                            None
+                        } else {
+                            let generation = self.session_generation(&session_id)?;
+                            let path =
+                                super::body_path(&self.session_directory(&session_id)?, generation);
+                            Some(self.conversation_indexes.read_run_origins(
+                                &path,
+                                &assistant_protocol::ConversationOwner::MainSession {
+                                    session_id: session_id.clone(),
+                                },
+                                generation,
+                                &requested[session_id.as_str()],
+                            )?)
+                        };
+                    entry.insert(facts);
+                }
+                let mut ids = Vec::new();
+                let mut steps = HashMap::new();
+                if let Some(origins) = &histories[&session_id] {
+                    for origin in origins.iter().filter(|origin| {
+                        origin.run_id.as_ref() == Some(&run_id) && !origin.inherited
+                    }) {
+                        ids.push(origin.message_id.clone());
+                        if let Some(step) = origin.step {
+                            steps.insert(origin.message_id.clone(), step);
+                        }
+                    }
+                    // rewrite 已可靠提交 User Message，但首次 Run 尚未开始；以仍存在的真实
+                    // Input/Run 控制及精确文件 ID 核实归属，不向 SQL 另写关联。
+                    if ids.is_empty() && attempt == 1 {
+                        let user: Option<String> = self.connection.query_row(
+                            "SELECT CASE WHEN state='committed' THEN user_message_id ELSE NULL END FROM inputs WHERE input_id=?1 AND session_id=?2",
+                            rusqlite::params![&input_id, session_id.as_str()], |row| row.get(0)
+                        ).map_err(|source| internal_error("Run initial message could not be checked", source))?;
+                        if let Some(user) = user {
+                            let id = MessageId::new(user).map_err(|source| {
+                                invalid_data_with_source(
+                                    "Run initial Message ID is invalid",
+                                    source,
+                                )
+                            })?;
+                            let generation = self.session_generation(&session_id)?;
+                            let path =
+                                super::body_path(&self.session_directory(&session_id)?, generation);
+                            if self
+                                .conversation_indexes
+                                .locate_message(&path, &id)?
+                                .is_some()
+                            {
+                                ids.push(id);
+                            }
+                        }
+                    }
+                }
+                (ids, steps)
+            };
             runs.push(StoredRun {
                 shell: shell_json
                     .map(|json| {
@@ -130,7 +273,7 @@ impl StorageEngine {
     }
 
     /// 按持久插入顺序恢复某次 Run 对规范消息的引用。
-    fn load_run_message_refs(
+    fn load_legacy_message_refs(
         &self,
         run_id: &RunId,
     ) -> StorageResult<(Vec<MessageId>, HashMap<MessageId, u32>)> {

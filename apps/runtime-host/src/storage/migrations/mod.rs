@@ -7,9 +7,13 @@ mod compatibility;
 #[cfg(test)]
 mod compatibility_tests;
 pub(crate) mod config_cleanup;
+mod f02_history;
+#[cfg(test)]
+mod keyed_ledger_tests;
 pub(crate) mod layout;
 #[cfg(test)]
 mod tests;
+mod usage_snapshots;
 mod v0_25_1;
 mod v0_25_2;
 mod v0_25_3;
@@ -21,6 +25,7 @@ mod v0_29_0;
 mod v0_30_0;
 mod v0_31_0;
 mod v0_32_0;
+mod v0_32_1;
 
 #[cfg(test)]
 use std::fs;
@@ -94,7 +99,10 @@ pub(crate) enum MigrationError {
 
 /// 只允许编译进二进制的入口；apply 拥有结构分支，事务与账本始终由执行器所有。
 /// validate 必须核对本版本的目标投影、保留数据与业务字段，不得在其中修补异常。
+#[derive(Clone, Copy)]
 struct Migration {
+    /// 同一发布版本内编译期确定的有序身份，原版本入口固定为 release。
+    key: &'static str,
     version: &'static str,
     /// None 仅用于引入兼容表之前的历史基线；后续版本显式声明且不得下降。
     min_compatible_host_version: Option<&'static str>,
@@ -115,7 +123,7 @@ struct MigrationReport {
 }
 
 // 启动与布局迁移共用版本链，避免新入口遗漏于只读准入/目标投影。
-fn manifest() -> [Migration; 11] {
+fn manifest() -> [Migration; 12] {
     [
         v0_25_1::entry(),
         v0_25_2::entry(),
@@ -128,7 +136,16 @@ fn manifest() -> [Migration; 11] {
         v0_30_0::entry(),
         v0_31_0::entry(),
         v0_32_0::entry(),
+        v0_32_1::entry(),
     ]
+}
+
+fn product_manifest() -> Vec<Migration> {
+    let mut entries = manifest().to_vec();
+    entries.push(f02_history::entry());
+    entries.push(f02_history::queue_claim_entry());
+    entries.push(usage_snapshots::entry());
+    entries
 }
 
 /// 唯一生产 manifest；软件发版必须同时声明该版本入口，包括没有 DDL 的版本。
@@ -136,7 +153,20 @@ pub(super) fn align(
     home: &Path,
     progress: impl FnMut(super::DatabaseStartupProgress),
 ) -> Result<()> {
-    migrate_with_progress(home, env!("CARGO_PKG_VERSION"), &manifest(), progress).map(|_| ())
+    let report = migrate_with_progress(
+        home,
+        env!("CARGO_PKG_VERSION"),
+        &product_manifest(),
+        progress,
+    )?;
+    // 只有整轮迁移及目标校验成功才释放本轮恢复副本；失败经上方 ? 返回并保留现场。
+    // 清理不扫描旧备份，也不能将清理失败误报为已提交数据库的迁移失败。
+    if let Some(directory) = report.backup
+        && let Err(error) = backup::remove_after_upgrade(home, &directory)
+    {
+        eprintln!("event=database_upgrade_backup_cleanup_failed error={error}");
+    }
+    Ok(())
 }
 
 /// 只映射脱敏诊断；底层 SQLite、路径和 SQL 不进入协议。
@@ -188,6 +218,7 @@ fn migrate_layout_with_progress(
 ) -> Result<MigrationReport> {
     use assistant_protocol::RuntimeHostStartupStage::*;
     let mut current = super::DatabaseStartupProgress {
+        progress: None,
         stage: DatabaseCheck,
         database_version: None,
         min_compatible_host_version: None,
@@ -271,16 +302,49 @@ fn migrate_layout_with_progress(
         progress(current.clone());
         let snapshot = connection.transaction()?;
         report.backup = Some(
-            backup::create(&snapshot, home, &path, target).map_err(|source| {
-                MigrationError::BackupFailed {
-                    source: Box::new(source),
-                }
+            backup::create_with_progress(&snapshot, home, &path, target, |stage, detail| {
+                current.stage = stage;
+                current.progress = detail;
+                progress(current.clone());
+            })
+            .map_err(|source| MigrationError::BackupFailed {
+                source: Box::new(source),
             })?,
         );
         snapshot.commit()?;
     }
     for (index, migration) in manifest.iter().enumerate().skip(completed) {
         current.stage = DatabaseMigration;
+        current.progress = Some(assistant_protocol::RuntimeHostStartupProgress {
+            completed: (index - completed) as u64,
+            total: (manifest.len() - completed) as u64,
+        });
+        progress(current.clone());
+        let prepared = if migration.key == f02_history::KEY {
+            let (returned, prepared) =
+                f02_history::prepare_with_progress(connection, home, |done, total| {
+                    current.stage = HistoryMigration;
+                    current.progress = Some(assistant_protocol::RuntimeHostStartupProgress {
+                        completed: done,
+                        total,
+                    });
+                    progress(current.clone());
+                })
+                .map_err(|source| MigrationError::VersionFailed {
+                    version: migration.version.into(),
+                    backup: report.backup.clone(),
+                    source: Box::new(source),
+                })?;
+            connection = returned;
+            Some(prepared)
+        } else {
+            None
+        };
+        current.stage = DatabaseMigration;
+        current.progress = Some(assistant_protocol::RuntimeHostStartupProgress {
+            completed: (index - completed) as u64,
+            total: (manifest.len() - completed) as u64,
+        });
         progress(current.clone());
         apply_version(
             &mut connection,
@@ -289,6 +353,7 @@ fn migrate_layout_with_progress(
             manifest,
             index,
             relocation,
+            prepared.as_ref(),
         )
         .map_err(|source| MigrationError::VersionFailed {
             version: migration.version.into(),
@@ -296,6 +361,10 @@ fn migrate_layout_with_progress(
             source: Box::new(source),
         })?;
         report.applied.push(migration.version.into());
+        current.progress = Some(assistant_protocol::RuntimeHostStartupProgress {
+            completed: (index - completed + 1) as u64,
+            total: (manifest.len() - completed) as u64,
+        });
         current.database_version = Some(migration.version.into());
         current.min_compatible_host_version =
             migration.min_compatible_host_version.map(str::to_owned);
@@ -312,12 +381,23 @@ fn validate_manifest(target: &str, manifest: &[Migration]) -> Result<Vec<Version
         .collect::<Result<Vec<_>>>()?;
     if manifest.first().map(|entry| entry.version) != Some(BASELINE)
         || versions.last() != Some(&target)
-        || versions.windows(2).any(|pair| pair[0] >= pair[1])
+        || versions.windows(2).any(|pair| pair[0] > pair[1])
     {
         return Err(MigrationError::InvalidManifest);
     }
     let mut previous = None;
+    let mut identities = std::collections::BTreeSet::new();
     for (index, entry) in manifest.iter().enumerate() {
+        if entry.key.is_empty()
+            || !entry
+                .key
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+            || !identities.insert((entry.version, entry.key))
+            || ((index == 0 || versions[index] != versions[index - 1]) && entry.key != "release")
+        {
+            return Err(MigrationError::InvalidManifest);
+        }
         let minimum = entry
             .min_compatible_host_version
             .map(parse_version)
@@ -350,7 +430,7 @@ fn inspect_state(
     minimum: Option<&Version>,
     new_database: bool,
 ) -> Result<usize> {
-    let completed = completed_prefix(connection, versions)?;
+    let completed = completed_prefix(connection, versions, manifest)?;
     compatibility::validate_committed(minimum, manifest, completed)?;
     if completed > 0 {
         validate_read_only(connection, manifest[completed - 1].validate)?;
@@ -360,7 +440,11 @@ fn inspect_state(
     Ok(completed)
 }
 
-fn completed_prefix(connection: &Connection, versions: &[Version]) -> Result<usize> {
+fn completed_prefix(
+    connection: &Connection,
+    versions: &[Version],
+    manifest: &[Migration],
+) -> Result<usize> {
     let exists: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = 'schema_migrations')",
         [],
@@ -369,37 +453,82 @@ fn completed_prefix(connection: &Connection, versions: &[Version]) -> Result<usi
     if !exists {
         return Ok(0);
     }
-    let columns: Vec<(String, String, i64)> = connection
-        .prepare("SELECT name, type, pk FROM pragma_table_info('schema_migrations')")?
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-        .collect::<rusqlite::Result<_>>()?;
-    if columns
-        != [
-            ("version".into(), "TEXT".into(), 1),
-            ("applied_at_ms".into(), "INTEGER".into(), 0),
-        ]
-    {
-        return Err(MigrationError::InvalidLedger);
-    }
+    let keyed = ledger_is_keyed(connection)?;
     let mut applied = vec![];
-    let mut statement =
-        connection.prepare("SELECT version, applied_at_ms FROM schema_migrations")?;
+    let sql = if keyed {
+        "SELECT version, migration_key, applied_at_ms FROM schema_migrations"
+    } else {
+        "SELECT version, 'release', applied_at_ms FROM schema_migrations"
+    };
+    let mut statement = connection.prepare(sql)?;
     let mut rows = statement.query([])?;
     while let Some(row) = rows.next()? {
         let version = parse_version(&row.get::<_, String>(0)?)?;
-        if row.get::<_, i64>(1)? < 0 {
+        let key: String = row.get(1)?;
+        if row.get::<_, i64>(2)? < 0 {
             return Err(MigrationError::InvalidLedger);
         }
         if versions.last().is_some_and(|target| &version > target) {
             return Err(MigrationError::NewerDatabase);
         }
-        applied.push(version);
+        let position = manifest
+            .iter()
+            .zip(versions)
+            .position(|(entry, candidate)| candidate == &version && entry.key == key)
+            .ok_or(MigrationError::InvalidLedger)?;
+        applied.push(position);
     }
-    applied.sort();
-    if applied.len() > versions.len() || applied != versions[..applied.len()] {
+    // 相同版本的 key 按编译 manifest 定义顺序，不以字符串排序或数据库返回顺序推断。
+    applied.sort_unstable();
+    if applied.iter().copied().ne(0..applied.len()) {
         return Err(MigrationError::InvalidLedger);
     }
     Ok(applied.len())
+}
+
+fn ledger_is_keyed(connection: &Connection) -> Result<bool> {
+    let columns: Vec<(String, String, i64)> = connection
+        .prepare("SELECT name, type, pk FROM pragma_table_info('schema_migrations')")?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    if columns
+        == [
+            ("version".into(), "TEXT".into(), 1),
+            ("applied_at_ms".into(), "INTEGER".into(), 0),
+        ]
+    {
+        return Ok(false);
+    }
+    if columns
+        == [
+            ("version".into(), "TEXT".into(), 1),
+            ("migration_key".into(), "TEXT".into(), 2),
+            ("applied_at_ms".into(), "INTEGER".into(), 0),
+        ]
+    {
+        return Ok(true);
+    }
+    Err(MigrationError::InvalidLedger)
+}
+
+/// 与追加迁移的业务切换同一事务执行；失败时恢复旧表及原始时间，不先发布新账本。
+fn prepare_ledger(connection: &Connection, migration: &Migration) -> Result<()> {
+    connection.execute_batch(LEDGER)?;
+    if migration.key != "release" && !ledger_is_keyed(connection)? {
+        connection.execute_batch(
+            "CREATE TABLE schema_migrations_keyed (
+                version TEXT NOT NULL,
+                migration_key TEXT NOT NULL,
+                applied_at_ms INTEGER NOT NULL CHECK(typeof(applied_at_ms)='integer' AND applied_at_ms>=0),
+                PRIMARY KEY(version, migration_key)
+            );
+            INSERT INTO schema_migrations_keyed(version,migration_key,applied_at_ms)
+                SELECT version,'release',applied_at_ms FROM schema_migrations;
+            DROP TABLE schema_migrations;
+            ALTER TABLE schema_migrations_keyed RENAME TO schema_migrations;"
+        )?;
+    }
+    Ok(())
 }
 
 /// 事务锁内重新检查账本，避免使用锁外快照执行已完成或跳过的迁移。
@@ -411,6 +540,7 @@ fn apply_version(
     manifest: &[Migration],
     expected: usize,
     relocation: Option<&crate::host_layout::paths::Relocation>,
+    history: Option<&f02_history::Prepared>,
 ) -> Result<()> {
     if migration.rebuilds_referenced_tables {
         connection.pragma_update(None, "foreign_keys", false)?;
@@ -423,7 +553,7 @@ fn apply_version(
 
     let outcome = (|| -> Result<()> {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if completed_prefix(&transaction, versions)? != expected {
+        if completed_prefix(&transaction, versions, manifest)? != expected {
             return Err(MigrationError::InvalidLedger);
         }
         let minimum = compatibility::read(&transaction)?;
@@ -432,16 +562,26 @@ fn apply_version(
             versions.last().ok_or(MigrationError::InvalidManifest)?,
         )?;
         compatibility::validate_committed(minimum.as_ref(), manifest, expected)?;
-        transaction.execute_batch(LEDGER)?;
+        if let Some(history) = history {
+            history.verify(&transaction)?;
+        }
+        prepare_ledger(&transaction, migration)?;
         transaction.authorizer(Some(migration_authorizer))?;
-        let outcome = (migration.apply)(&transaction).and_then(|()| {
+        let outcome = (|| {
+            if let Some(history) = history {
+                history.switch(&transaction)?;
+            }
+            (migration.apply)(&transaction)?;
+            if let Some(history) = history {
+                history.bind_materialization_inputs(&transaction)?;
+            }
             if migration.version == "0.27.0"
                 && let Some(paths) = relocation
             {
                 v0_27_0::relocate(&transaction, paths)?;
             }
             Ok(())
-        });
+        })();
         transaction.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
         // 显式回滚当前版本，避免把失败版本当作成功；后继入口不会得到执行机会。
         if let Err(error) = outcome {
@@ -456,11 +596,18 @@ fn apply_version(
             .ok()
             .and_then(|d| i64::try_from(d.as_millis()).ok())
             .ok_or(MigrationError::InvalidLedger)?;
-        transaction.execute(
-            "INSERT INTO schema_migrations(version, applied_at_ms) VALUES (?1, ?2)",
-            rusqlite::params![migration.version, timestamp],
-        )?;
-        if completed_prefix(&transaction, versions)? != expected + 1 {
+        if ledger_is_keyed(&transaction)? {
+            transaction.execute(
+                "INSERT INTO schema_migrations(version,migration_key,applied_at_ms) VALUES (?1,?2,?3)",
+                rusqlite::params![migration.version, migration.key, timestamp],
+            )?;
+        } else {
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, applied_at_ms) VALUES (?1, ?2)",
+                rusqlite::params![migration.version, timestamp],
+            )?;
+        }
+        if completed_prefix(&transaction, versions, manifest)? != expected + 1 {
             return Err(MigrationError::InvalidLedger);
         }
         compatibility::validate_committed(

@@ -66,9 +66,7 @@ fn real_llm_completes_plan_then_approved_build_shell_in_the_formal_host() {
         "set_session_approval_mode",
         json!({ "session_id": session_id, "approval_mode": "auto" }),
     );
-    let planned = client.runtime(
-        "submit_input",
-        json!({
+    let planned = client.submit_started_input(json!({
             "session_id": session_id,
             "message": "Inspect the current workspace with file tools if useful. Produce a short implementation plan only; do not implement or modify the user workspace.",
             "variant": "plan",
@@ -85,9 +83,7 @@ fn real_llm_completes_plan_then_approved_build_shell_in_the_formal_host() {
     );
     let output_path = workspace.path().join("v012-shell-smoke.txt");
     let command = format!("printf '%s' '{}' > '{}'", marker, output_path.display());
-    let built = client.runtime(
-        "submit_input",
-        json!({
+    let built = client.submit_started_input(json!({
             "session_id": session_id,
             "message": format!(
                 "Start implementation. You must use the shell tool to run exactly this command, then report completion: {command}"

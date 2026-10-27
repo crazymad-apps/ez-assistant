@@ -728,7 +728,7 @@ MCP 单次工具请求失败、取消或返回不支持的扩展只结束该次�
   复用会话已解析的模型参数；进程重启或参数失效后只读取固定配置，无可用值时提示用户重新选择。
 - Session 的 model_binding 只引用当前进程已接纳的 PreparedModel，不序列化、不保存列表；
   新选择或 Run 接纳时替换，引用和服务商配置失效时不能继续使用旧参数。
-- 图片、工具、思考及工具选择子能力未知只限制相应功能，不阻止无关文本用途；原始参数保持未知。
+- 图片、思考及高级工具选择子能力未知只限制相应功能，不阻止无关文本用途；基础工具调用与 auto 未声明时缺省支持，原始参数保持未知。
 - 独立输入限制仍传至模型服务，自动压缩只使用原有上下文窗口策略。
 
 ### v0.25.1 M3 模板与强度映射
@@ -826,7 +826,7 @@ MCP 单次工具请求失败、取消或返回不支持的扩展只结束该次�
 ## v0.27.0 C05 长任务观察
 
 - 历史分页和 around 定位以目标 Session 的既有异步 mutation gate 及 Store owner/generation 窗口为一致性边界，不要求全局事件 sequence 静止。历史页返回读取起点水位，不能据此吞掉未消费的实时事件。子任务读取继续核验其独立 generation。
-- 子任务创建时冻结实际装配模型的 `context_window_tokens`；公开 context 由完整产品历史派生有效上下文后复用 `agent-context::context_token_usage`，累计消耗仍从完整历史求和。压缩提交使用既有 `ConversationCommitted` 通知刷新，旧任务窗口缺失则保持未知。
+- 子任务创建时冻结实际装配模型的 `context_window_tokens`；主会话与子任务的当前占用、待校准状态及累计消耗由持久化统计快照提供；提交时增量推进，冷恢复和显式上下文替换用有效窗口校准，不在列表读取时遍历全文。压缩提交使用既有 `ConversationCommitted` 通知刷新，旧任务窗口缺失则保持未知。
 
 ## v0.27.0 C06 默认文件权限规则
 
@@ -936,7 +936,7 @@ ModelServiceFactoryRequest 显式传入已解析机制，装配结果必须与�
 
 父/子自动与主会话手动复用当前模型的 compact；成功候选只含受保护前缀与唯一替代状态，Store 校验源快照后提交。自动追加保留 generation 及全部原始事实；手动沿用既有互斥、回执和 generation 切换。网络调用不持配置锁，取消或配置失效不得激活候选。
 
-新原生结果的归属校验包含 owner、持久 Session 周期和 Provider 配置周期，与是否启用响应 ID 独立；不使用临时默认周期。已提交完整窗口的回放不以模型、入口地址或续接周期判断资格，换模和重建仍从最近可靠压缩点继续；临时响应 ID 继续严格校验绑定。手动换代使旧响应 ID 不可续接，不丢弃完整窗口。请求准备从完整历史复用图片并重申当前 Pinned Memory、最新 MCP/Shell 事实；计量仅保存当前 owner 的一个内存样本，不新增持久流水。工具详情按 Assistant 消息 ID 与 call ID 联合匹配，避免压缩边界后重复 call ID 串值。
+新原生结果的归属校验包含 owner、持久 Session 周期和 Provider 配置周期，与是否启用响应 ID 独立；不使用临时默认周期。已提交完整窗口的回放不以模型、入口地址或续接周期判断资格，换模和重建仍从最近可靠压缩点继续；临时响应 ID 继续严格校验绑定。手动换代使旧响应 ID 不可续接，不丢弃完整窗口。请求准备从内存有效窗口复用图片，并使用冷扫描及可靠提交时归并的净 Pinned Memory、最新 MCP/Shell 状态；计量仅保存当前 owner 的一个内存样本，不新增持久流水。工具详情按 Assistant 消息 ID 与 call ID 联合匹配，避免压缩边界后重复 call ID 串值。
 
 ## v0.30.0 Goal 预算读取
 
@@ -949,3 +949,103 @@ OpenCode 复用连接与固定参数，保留身份且必须显式选择 Chat／
 模型工厂接收通用 `conversation_routing_id`。Runtime 用固定域及 Session／ChildTask 的稳定 owner 派生不透明哈希；不依赖 Run、Trace、正文 generation、续接周期、配置或软件版本，不保存额外映射。跨 Run、恢复、摘要和清空沿用原 owner，Fork 和独立 child 使用新 owner；连接测试每次生成临时身份，重试复用冻结服务。
 
 主模型、摘要、标题和辅助识图遵守同一归属。子任务模型总是独立装配；共同工具快照派生时移除父识图句柄，子任务启动后按自身 owner 加入标准识图工具。Core、Journal 和业务协议不引入 Provider 专属路由字段。既有企业受管来源只发布一个默认模型，独立辅助模型配置仍不在该契约范围内。
+
+## v0.32.1 模型缺省参数
+
+用户确认输出上限可以未知：执行配置保留可选硬上限，未知时不向普通生成请求注入输出限制，用户显式预算仍生效；标题、摘要、视觉检查和连接验证等任务已有独立预算保持。流式能力 Unknown 按缺省支持解释，明确 Unsupported 仍拒绝流式执行。上下文窗口仍必需，非法限制与能力矛盾仍拒绝；不回写模型目录或固定配置。
+
+用户进一步确认工具调用能力缺省支持：编译时 tool_calls 与 tool_choice.auto 的 Unknown 均按支持解释，明确 Unsupported 保留；required、named 等高级能力仍需肯定声明。企业模型回归使用真实 Host 工厂与 Agent 装配执行，覆盖目录未知能力、工具请求、流式完成及输出限制省略，防止仅验证模型服务构造而遗漏 AgentBuilder 拒绝。
+
+## v0.32.1 F02 不可执行历史事实（M0 已完成）
+
+- `storage/history` 定义文件历史所需的 Run、消息归属、child 描述、反馈及资源绑定值，复用已有命令、Skill／MCP 事实；这些值不含任务、取消或执行恢复能力，不得安装为可执行 `RunRecord`。
+- 选择的恢复唯一性遵循文件归属：MCP Selection 按 Session、Skill Activation 按完整 Session／主会话或 child owner 核对；不同会话可保留相同历史选择 ID，同一 owner 的重复仍拒绝。该校验不据此创建 Input／Run，也不回写数据库或重放选择对应的工具。
+- 可靠历史和必要未完成控制按已确认 F02 技术方案分工。Conversation window／raw window 携带相关文件事实，Conversation 投影直接展示 Run／Step、Input 来源和历史标签。`load_conversation_history` 只返回当前 owner 的 generation 和历史值；SessionView／ListRuns／GetRun 直接投影本会话真实历史，around Run 从文件归属定位，均不把读取结果安装为 RunRecord。继承轮次只参与 Conversation，不进入可控制 Run 列表。
+- 按需恢复携带只读文件轮次核对首次／最近 attempt，并只将未完成控制装配为 RunRecord；终态幂等返回与重试资格读取文件，不创建执行句柄。待消费队列继续从 Store 临时控制恢复，不因历史迁出丢弃。问答的读取由 Store 合并文件终态与未回答控制；EndTurn 回答和下一条排队输入共用可靠提交，成功后才更新内存、发布事件与调度，新正文实际消费前仍属于队列。Volatile Store 的控制释放和中断恢复遵循同一可靠提交语义；M1—M4 的分支及联合能力继续按计划推进。
+- 物化查询固定原 Input 的最小身份，原历史清空或重新输入后，未知／已移除身份按 `snapshot_stale` 返回；不能从当前最早输入推断或重新接纳原 key。Host 与 Volatile Store 均保存独立的幂等身份，Session 整体删除后释放；这不是历史结果副本，也不保留原正文或执行控制。
+- `AcceptedInput` 区分 `Control` 与 `Historical`，终态幂等结果携带当前 owner 的只读 Input／首次 Run，不能再构造终态执行记录。统一接纳投影只接受非重复且状态为 accepted 的真实控制；物化重试直接查询既有产品快照，不再用 `RunRecord::accepted` 补造缺失终态。Host 与 Volatile 的接纳返回遵循同一表示。
+- Volatile Store 在同一独占提交中冻结主会话的 Input／Run／消息归属，历史读取与恢复摘要不再从保留的 `StoredRun` 反推；终态提交后实际移除 Run 控制，活动 child 阻止父结算。真正的新 retry 从只读历史验证来源与最近 attempt 后才创建新控制。重入裁尾、清空、删除及删除影响统计维护同份事实；消息评价只保留可靠历史值及清除语义。待消费队列仍是临时控制；Volatile 的附件继续使用独立 owner 的虚拟资源绑定，不模拟磁盘文件；真实附件、图片复制和删除后的可读性由 Host 验证，新增继承资源范围归 M1。
+- Volatile 消息 Input 将最小接纳身份与临时控制分开：原 Session／Input、幂等 key 和稳定行序保留，正文、来源、时间、Goal／渠道／Shell 等字段在最后一个实际 Run 可靠完成后随控制释放。临时优先级不改写原行序，文件冻结及只读恢复均沿原序核对；读取仅构造进程内投影，不写回控制。只有真正的新 retry 才从文件恢复当前执行所需的 Input 控制，完成后再次释放。物化原身份在清空、裁尾后继续防重绑，新消息及命令不能复用；新接纳同时核对本 owner 历史身份，原幂等命中保持只读。
+- Volatile 命令在正文与结果可靠冻结后实际释放完整控制，只保留最小原接纳身份；幂等接纳、重复结算与恢复回读所属历史，Fork 仅复制历史结果。问答只在 pending 阶段持有控制；回答、取消及 Run 终结导致的失效将终态冻结到独立历史并释放控制，读取合并本 owner 历史与未回答控制。EndTurn 回答与新 Input 同一独占提交，未消费正文仍保留。重入按本 Session 的历史裁尾清理问题，不能因父 Run 控制已释放而误删其他会话的 pending。
+- Volatile 用户 Skill／MCP 选择只在排队期间保存控制；User 可靠提交或启动前终结时冻结历史并释放选择及 Input 激活载荷，其他队列原件保持。模型激活直接随工具交换冻结到完整 owner 的历史，Fork 只继承阅读事实。恢复与物化重试合并主／child 历史和 queued 选择，已消费 Input 的 Skill 由文件事实只读补齐，不恢复选择控制；历史去重按完整 owner，队列仍遵循实际控制身份。
+- Volatile child 的 accepted、开始、工具提交、换代及终态在同一 Store 独占锁中冻结自身历史与父目录；自身归属不伪造父 Run／Input／attempt。终态可靠提交后实际释放 child 控制，分页、定位、正文／标题检索与删除影响直接读历史，清空、删除和重入裁尾维护其正文及目录。历史按完整 Session／child owner 核对，不恢复执行。
+- Volatile 首次执行准备先闭合本 Session 的 child pending，再可靠保存未完成 child 的 interrupted 终态，最后从 child 自身历史与正文闭合父 pending；父 Run 仍由既有 Runtime 准备流程结算。只复用既有完整提交入口，不跨 await 持状态锁、不创建恢复日志或工具执行。started／未开始工具分别保留结果未知／尚未开始的错误事实，已完成 child 只回读原最终 Assistant。缺失、冲突、继承绑定或不可证明的终态不能被普通 unknown 结果掩盖，保留父 pending 及控制并报错；已完成提交再次准备不重复。队列载荷和顺序不因该恢复消费。
+- Run 查询、幂等返回与重复取消共用只读历史投影；可靠文件终态优先于旧执行缓存，Conversation 同样不允许旧状态／错误／结束时间覆盖文件终态。工具列表从完整产品历史按原 Assistant／call ID 配对并沿统一参数脱敏；当前进程仅按明确 Step／call ID／名称补充易失 stdout／stderr，重启不猜造输出。投影不安装 Journal 或执行对象，不重入调用方 mutation gate。未 prepare 的旧活动控制保留 interrupted 诊断，首次执行准备才可靠结算，不据此改写已存在的终态。
+- child 查询与树节点直接投影 `StoredChildTaskHistory`，不把文件事实还原为 `StoredChildTask`、Journal 或取消句柄；终态记录不进入恢复 Registry。可靠文件终态优先于旧执行观察，包括列表、详情及重复取消；继承目录不被同 ID 控制覆盖，不能取消继承任务。尚未开始的 accepted child 可只有文件头，旧进程未 prepare 的中断及不可读 owner 保留既有诊断，不能借此覆盖已有可靠终态。最终正文用既有消息定位和单条 raw window 读取，完整 owner 与 generation 仍须核对。执行准备会移除同会话旧进程的只读诊断缓存，再装配实际未完成控制；已准备会话提前返回，不清理活动 child。Host 父 pending 通过临时位置核对文件结果，Volatile 通过本 owner 的可靠目录与 child 历史核对；均不能重建终态执行对象。必要未完成控制继续保留，可靠完成后释放。
+- 标题及正文检索共用 `ConversationSearchPage` 的局部失败语义，Runtime 合并两者的 partial 与去重后的失败 owner；短查询也保留标题读取诊断。FTS 不可用而仍有可靠标题时返回标题及 partial，数据错误不因此自动修复或重放。该调整只改变 Store 的进程内返回，不增加应用协议字段或持久标题副本，Volatile Store 遵循同一历史／控制边界。
+
+- F02 M1 的 Fork 在既有 Store 操作内裁切只读 Run／Input／消息归属，半轮不借用未来终态，重复 Fork 保持继承。child 仅由可靠 delegate_task 结构化结果与父目录共同选择；Volatile 正文键为 `(Session, child)`，复制只读正文与激活，不创建控制。正文不可复制时保留原描述与真实数量并标记 `body_unavailable`；列表和快照允许读取该描述，正文读取明确失败、用量未知，不重建空正文或执行对象。继承消息重新输入明确拒绝。
+- F02 M1 的主消息投影携带 `inherited`／`partial`；工具详情从同 owner／generation 的文件消息归属取得原 Run 身份。新 Input、Run、消息与 child ID 在本 owner 的可靠历史中核对，有界重采样只适用于 Runtime 新建身份，不重命名模型输出或既有历史。无输出 attempt 的结束位置使用文件内 `finished_after_message_id`，不能以接纳消息、时间或 ID 顺序猜测；Fork 与重写共同排除截点后的结束事实。
+- F02 M2：Run 的可靠开始时刻沿既有 UserMessageCommit（含 retry 零消息提交）保存，提交成功后才以同值安装到 RunRecord；ExecutionStarted 只发布该值。Run／Assistant 历史直接读取文件 started，不从 created、事件发送时间或模型 attempt 推算。child Started 使用取得执行许可后已保存的自身时间。
+
+## v0.32.1 F02 快照屏障
+
+- ObservationCoordinator 的作用域水位派生自现有全局 sequence；只为在途读取登记 Session／Workspace 依赖并在最后一个读取释放时回收。application 不因普通流式正文／工具输出失效，历史页在既有 owner gate 下只核对真正使用的共享目录；返回水位仍为安全的全局发布序号，不建立持久 revision、旁路事件库或全库 Session map。
+- 主 Core 事件和模型 attempt 的易失值安装与事件发布使用同一个短同步边界；锁顺序为观察协调器 → state／registry，不跨 await、Store、Provider 或审批等待。主视图取得 parent mutation，可靠文件读取与实时捕获分别按该边界协调；执行正文使用内存有效窗口，历史分页按位置读取；文件引用与交付声明只保留归并后的轻量展示元数据，不创建完整正文缓存。
+- ApprovalRegistry 的列表与 revision 共用单一状态锁；组合快照原子复制并在结束前复核 revision。登记、等待取消、决定占用／失败恢复、用户／规则放行、Run 批量取消和 MCP 失效的安装与事件在同一短观察边界完成；receiver 已关闭但条目已移除时仍发布队列变化。权限文件写入与审批等待保持锁外。
+- child 创建／开始／启动前终结取得 parent mutation；Recorder、运行终态和压缩可靠提交按 parent → child → Store，释放按 child → parent。注册取消句柄后才发布创建；终态的正文提交、Step 和 Finished 按同一观察边界顺序发布。压缩模型调用先完成，再取得短提交屏障并安装 generation／registry；模型、工具、permit、目录准备与用户等待均保持锁外。child 开始时刻在取得 parent 后冻结，不累计等待屏障的时间。
+- 本地配置 reload、Provider／模型选择／固定配置接纳及 Workspace 内存安装与通知沿观察边界发布。MCP 候选连接与目录准备在锁外，目录切换／退役／故障移除同步发布，旧连接清理不阻塞目录生效通知。外部模型仍遵守既有身份锁内提交、释放后通知的约束；application 同锁复制 Provider 与默认设置，composer 派生前后沿 PreparedModel 核对接纳身份，配置冲突在原读取预算内重试。延迟通知交错回归证明已捕获旧配置保持自洽，finish 后才沿新水位读取新配置，不持共享读门阻塞外部发布。
+- 主视图在可靠读取前冻结本次配置 Arc、Workspace 投影与设备名称；队列和正文使用相同设备名称。历史 around／Recall 窗口及工具详情使用目标 parent 屏障与实际 MCP 依赖，不因无关流式输出反复失效；工具正文基线完成后先释放 caller 屏障，再解析可能跨会话的 Recall 导航，不形成多 owner 锁嵌套。实现与联合验证不替代用户的 Feature 验收。
+
+- F02 M3 的 `request_diagnostics` 仅是宿主显式开启的临时请求诊断边界；按 task-local 关联固定阶段及耗时，Session mutation 只量等待，Store 排队与回包由 Host Adapter 量测。没有宿主作用域时为空操作；不新增业务状态、协议 DTO、文件／SQL 历史、全局请求表或后台任务归属。
+
+- 长会话视图构建在同一 Session 观察屏障内复用已核验的 child 历史事实，不为每个 child 再完整读取两次主历史。正文与最终消息继续校验精确 owner／generation；child 变化导致水位失效或 generation 冲突时，整轮快照沿原预算重试，不发布混合视图。
+
+## v0.32.1 F02 队列领取修正（2026-10-22）
+
+用户确认：入队仅暂存可撤销 Input，不创建 Run／attempt、不发送 RunAccepted、不生成正文处理过程。实际领取创建执行控制；准备期间仍允许队列调整，可靠领取后崩溃按执行中断收敛。新接纳及物化／Goal 恢复结果的 Run 可空，幂等请求保留原 Input；重启未领取队列仍需手动恢复。此约定取代上文历史版本中“入队即创建首次 Accepted Run”的描述。当前前端绑定实际活动轮次，未开始的空主轮次不生成处理过程。具体事务、协议及同版本旧队列收敛见 [F02 技术方案](../versions/v0.32.1/features/F02-分支历史与会话存储修正/技术方案.md#61-输入暂存与实际领取2026-10-22-用户确认修正)。
+
+
+## v0.32.1 F04 M1 压缩提交与错误边界（2026-10-23）
+
+- 手动、父 Run 和 child 继续使用既有触发及执行身份；共享提交内核只负责提交前取消／来源核验、Store 替换和同步安装，不另建服务或持久状态。手动／主 Run 共用 Session 投影；child 的 Journal、registry 和通知沿原子观察边界安装。
+- 提交必须核对源 generation、快照、pending 与真实 owner；只安装 Store 返回的 generation 和产品计数。模型等待不持 mutation，可靠提交沿 Session 或 parent → child → Store，观察协调器只覆盖同步状态和事件。
+- 可靠提交先于投影。提交成功后不因较晚取消丢弃事实；安装失败／panic 或返回边界异常保留提交结果，不重发摘要、不把手动成功回执写成 Interrupted、不从旧状态写终态。沿已有 Session fault 隔离并撤销易失 active_run、级联取消 child，Store 未完成控制留给既有进程级恢复。普通未提交 Recorder 失败仍允许用可靠前缀结算，不把故障标记一概当作所有历史均已失效。
+- `RuntimeCompactionError` 保留模型／Store 来源及提交阶段；三入口使用同一安全映射，将既有错误类别、可得 HTTP 状态写入已有 `RuntimeErrorInfo`。不公开原始上游正文、prompt、路径或 panic payload，不增加协议字段。取消／NoOp 保留专用结果，原生机制与重试边界不变。
+- M0 已获用户确认，M1 已获用户确认；M2 正式 Host 联合验证已通过，待末里程碑确认及 Feature 验收，结论见 [F04 开发计划](../versions/v0.32.1/features/F04-本地压缩链路统一/开发计划.md)，不将本段当作已获用户验收。
+
+
+## v0.32.1 F05 M0 受管 MCP 配置与生效边界
+
+- PluginFilePort 的单次发现结果提供声明、诊断及文件来源句柄；没有常驻定义 Registry 或配置缓存。缺参数、禁用和损坏的包仍保留管理身份，执行候选仅由可验证定义与当前用户覆盖归并。管理以来源＋server_key 定位；同名启用项按用户添加、插件标识升序、内置资源选择一份配置，执行及权限仍使用原 server_key。
+- 用户条目的启停／删除只操作 `mcp.json.mcpServers` 中已存在的条目，沿文件门核验内容 CAS 与存在性；同名插件声明不能阻止用户停用或删除以解除冲突，也不能让用户命令修改仅存的插件条目。用户同名新增、编辑和导入亦只写用户文件，不修改插件原件；保存不隐式刷新，刷新按来源优先级选择。
+- 独立及内置覆盖留用户 mcp.json；插件 MCP 覆盖按用户修订放原插件 config/mcp-overrides.json。文件各自内容 CAS，已声明参数仍经原插件 Store；绑定键、Host 保留变量及启动字段不可另存覆盖，Remove 的 null 与恢复默认区分，无 SQL 历史或配置镜像。无声明的旧覆盖只诊断、保留，不自动迁移或清理。
+- 同名本身不产生错误或封锁操作。McpServerSnapshot.shadowed_by 由同次 Runtime 归并生成，UI／Agent 仅展示该事实；被覆盖条目保留启停意图、配置及真实活动状态，不复制另一来源的连接。禁用项不参与选择，刷新可选中下一来源；最高优先级配置损坏仍报实际错误，不静默改用不同凭据。
+- 建连错误通过既有 diagnostic.message 保留 Host 生成的中文来源及安全配置原因，刷新列表、测试连接与 Agent 共用该投影。内部 McpConnectionError 可拥有该安全说明，不新增 wire 字段、诊断持久化或原始 stderr 通道。
+- 直接覆盖只标记待刷新；已有插件参数保存保持原生效入口，刷新限该插件服务。连接投影保留真实来源和实际状态，不能把保存禁用意图说成已经关闭连接，不能让同名其他来源的活动状态冒充本服务。
+- 直接覆盖提交先取得来源短租约和文件门，再由既有 RuntimeTasks 拥有有限提交任务，调用方断开不丢弃在途写入或租约。写入成功后通知，不回滚可靠文件；文件门和来源门不跨网络握手。
+- 刷新复用 Registry 门和连接退役；候选准备后以 try 方式取得包门，避免与插件更新的包门→Registry 顺序死锁，再持文件门复验实际修订／包定义／参数，短观察边界安装。过期候选有界关闭且不替换旧连接；临时测试不写文件，结束后复验来源，其他服务及历史不重放。
+- 本节仅描述 M0 后端边界；详情页、Agent 管理工具和首批实际内置资源仍按 F05 后续里程碑推进，不将本节当作 Feature 已验收。
+
+
+## v0.32.1 F05 M1 用户与 Agent 管理边界
+
+- 配置查询／修改、原插件参数修改及目标刷新由同一个窄 MCP 管理句柄承接 UI 命令与父 Run 工具；只共享原配置源、插件管理、Registry、权限、事件与生命周期 owner，不持整个 Runtime、自建配置缓存或回环 HTTP。
+- 父 Run 在现有装配边界注入 get_mcp_configuration、configure_mcp、refresh_mcp，不依赖当前 MCP scope 或连接成功；child 的 base tools 不继承这些管理工具。查询可用于 Plan／Build；写与刷新在 Plan 硬拒绝，在 Build 沿原 General 规则和 Ask／Auto，Auto 不覆盖显式 Deny。
+- resolve 冻结真实来源、目标、操作与预期修订；授权前、审批等待结束后及执行前核验来源与内容。直接覆盖、恢复默认及原插件参数分别提交，不能改受管启动字段、用户域、权限或安装信息。
+- 管理值不读回；审批、活动事件和工具详情按变更字段统一掩去新值，工具结果只反馈安全状态。原始用户消息／ToolCall 仍属现有可靠历史，不能承诺追溯清除秘密。取消前未提交不写入，已进入可靠文件提交仍沿 M0 的任务所有权收口。
+
+
+## v0.32.1 F05 M2 内置来源
+
+- Host 启动装配的只读 MCP 定义是 McpService 的不可变输入，查询、配置校验、临时测试、目标及队列刷新共用原来源归并；不增加常驻定义 Registry、连接状态或配置镜像。Builtin 默认禁用意图由定义提供，保存秘密不改变 enabled，显式握手与实际工具调用分别处理。
+- SkillSource::Builtin 参与现有发现、Catalog、用户／模型激活与可靠历史，优先级低于全部既有来源；原名称禁用和插件／自定义规则保持。Builtin 的 source_path 只接受 builtin:<name> 标签，激活明确正文内嵌、没有资源目录，不伪造 shared_skill_root；已激活历史不因后续自定义覆盖或升级改写。
+
+
+- F05 M3 沿用每轮冻结的 MCP 业务工具范围；无连接时父 Run 仍有管理工具，完成配置／刷新不会动态扩展本轮工具集合，新服务业务调用从下一轮起生效。管理工具说明同步该边界，保持既有权限及装配模型。
+
+## v0.32.1 F06 内置手册参考页
+
+- `SkillPackageSource` 的可选参考页读取方法是 Host 内容边界，默认不可用；请求中的名称和定义摘要由 Runtime 的冻结目录产生，模型只提供名称与封闭主题键。沿现有来源句柄传递，不引入第二个资源服务或正文缓存。
+- 父 Run 与 child 各自在装配 `load_skill` 的位置，只有当前可被模型调用的 `ez-assistant-guide` Winner 属于 Builtin 时才安装 `read_skill_reference`。禁用、遮蔽或不可用时不回退隐藏内置来源；child 不因此继承父 MCP 管理工具。
+- 精确键解析后产生私有只读授权事实；普通 dispatcher 保持串行、取消及完整工具交换提交。单页超过 64 KiB 明确失败，不截断成功；读取不形成 Skill 激活，也不授予后续写入或调用权限。正文沿原会话文件保留，恢复不重新读取或覆盖历史，无 SQL 历史副本。
+
+## v0.32.1 长会话阅读复用
+
+冷启动由 Store 顺序扫描一次可靠历史，每遇到有效压缩点立即释放已覆盖的临时正文；扫描到 EOF 并完成 owner、generation、身份及工具配对校验后才安装 Journal、执行恢复业务。主会话后续输入和模型步骤只增量维护有效窗口，旧历史仍留在文件，阅读分页不覆盖执行状态。
+
+`get_session_view` 在原有 Session mutation gate 内组合有效窗口、历史分页和统计快照。实时 Run 字段在发布屏障内最后捕获，Text/Reasoning/ToolOutput 增量不再迫使正文读取整轮重试；可靠提交、配置和目录变化仍触发一致性复核。主视图不为展示子任务用量或最终回复读取全部 child 正文；打开指定 child 后才定位其回复及页面。
+
+用户于 2026-10-27 确认：主会话和子任务用量均保存统计快照。快照只含累计数值、当前上下文占用和待校准状态，不保存消息、Step 或工具正文。Host 随可靠提交同事务更新，沿现有请求身份去重累计；压缩替换校准当前值而不重算累计费用，清空和删除同步释放统计。已有调用账本初始化快照，不为此重扫全部历史。精确输入计量样本仍受当前模型与会话绑定约束，不能将重启前样本无条件当成当前精确值。
+
+主视图中的已结束子任务直接使用主文件目录冻结的终态和 SQL 用量快照，不逐个打开 child 文件；打开子任务详情时仍核对其 owner／generation 并读取最终回复。活跃子任务保持既有控制与观察边界。

@@ -1,4 +1,4 @@
-//! 在线发现只持有本次响应；分页任一步失败丢弃全部结果，不缓存、不重试、不改变调用方选择。
+//! 在线发现只持有本次响应；分页任一步失败丢弃全部结果，Sub2API 仅对不支持的增强入口回退。
 
 #[cfg(test)]
 mod live_tests;
@@ -75,7 +75,10 @@ fn endpoint(
     if path.is_empty() {
         let default_path = match request.format {
             DiscoveryFormat::DashScope => "/api/v1/models".to_owned(),
-            DiscoveryFormat::OpenAi | DiscoveryFormat::Vllm | DiscoveryFormat::Moonshot => {
+            DiscoveryFormat::OpenAi
+            | DiscoveryFormat::Sub2api
+            | DiscoveryFormat::Vllm
+            | DiscoveryFormat::Moonshot => {
                 format!("{}/models", url.path().trim_end_matches('/'))
             }
         };
@@ -98,6 +101,13 @@ async fn fetch_all(
     let mut expected_total = None;
     for page_no in 1..=MAX_PAGES {
         let mut page_url = endpoint.clone();
+        let enhanced = matches!(format, DiscoveryFormat::Sub2api);
+        if enhanced {
+            // 非空值是增强目录开关，不参与产品兼容版本判断。
+            page_url
+                .query_pairs_mut()
+                .append_pair("client_version", "ez-assistant");
+        }
         if matches!(format, DiscoveryFormat::DashScope) {
             page_url
                 .query_pairs_mut()
@@ -108,9 +118,28 @@ async fn fetch_all(
         if !api_key.is_empty() {
             request = request.bearer_auth(api_key);
         }
-        let response = request.send().await.map_err(transport_error)?;
+        let mut response = request.send().await.map_err(transport_error)?;
+        let mut response_limit = if enhanced {
+            MAX_TOTAL_BYTES
+        } else {
+            MAX_RESPONSE_BYTES
+        };
+        if enhanced
+            && matches!(
+                response.status(),
+                StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+            )
+        {
+            drop(response);
+            let mut fallback = client.get(endpoint.clone());
+            if !api_key.is_empty() {
+                fallback = fallback.bearer_auth(api_key);
+            }
+            response = fallback.send().await.map_err(transport_error)?;
+            response_limit = MAX_RESPONSE_BYTES;
+        }
         check_status(response.status())?;
-        let bytes = read_body(response, &mut total_bytes).await?;
+        let bytes = read_body(response, &mut total_bytes, response_limit).await?;
         let page = parse::page(&bytes, format, page_no)?;
         if let Some(total) = page.total {
             if expected_total.is_some_and(|expected| expected != total) {
@@ -142,16 +171,17 @@ async fn fetch_all(
 async fn read_body(
     mut response: reqwest::Response,
     total_bytes: &mut usize,
+    response_limit: usize,
 ) -> Result<Vec<u8>, ModelDiscoveryError> {
     if response
         .content_length()
-        .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+        .is_some_and(|length| length > response_limit as u64)
     {
         return Err(ModelDiscoveryError::new(ErrorKind::ResponseTooLarge));
     }
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(transport_error)? {
-        if chunk.len() > MAX_RESPONSE_BYTES - bytes.len()
+        if chunk.len() > response_limit - bytes.len()
             || chunk.len() > MAX_TOTAL_BYTES - *total_bytes
         {
             return Err(ModelDiscoveryError::new(ErrorKind::ResponseTooLarge));

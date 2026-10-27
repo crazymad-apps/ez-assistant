@@ -31,7 +31,7 @@ async fn mcp_directory_is_persisted_once_and_restored_by_compaction() {
         .session_id;
     for text in ["first", "second"] {
         let input = runtime
-            .submit_input(input_request(&session_id, text))
+            .submit_started_input(input_request(&session_id, text))
             .await
             .unwrap();
         assert_eq!(
@@ -73,7 +73,7 @@ async fn mcp_directory_is_persisted_once_and_restored_by_compaction() {
         1
     );
     let input = runtime
-        .submit_input(input_request(&session_id, "third"))
+        .submit_started_input(input_request(&session_id, "third"))
         .await
         .unwrap();
     assert_eq!(
@@ -191,7 +191,7 @@ async fn mcp_runtime_uses_previous_response_id_and_sends_only_the_next_input() {
         .session_id;
     for text in ["first", "next", "third"] {
         let accepted = runtime
-            .submit_input(input_request(&session_id, text))
+            .submit_started_input(input_request(&session_id, text))
             .await
             .unwrap();
         assert_eq!(
@@ -253,7 +253,7 @@ async fn mcp_directory_survives_automatic_compaction_and_overflow_without_new_ru
             .session_id;
         for text in ["first", "second", "third"] {
             let accepted = runtime
-                .submit_input(input_request(&session_id, text))
+                .submit_started_input(input_request(&session_id, text))
                 .await
                 .unwrap();
             assert_eq!(
@@ -336,7 +336,7 @@ async fn mcp_refresh_persists_empty_directory_after_the_last_server_is_removed()
         .session
         .session_id;
     let accepted = runtime
-        .submit_input(input_request(&session_id, "before"))
+        .submit_started_input(input_request(&session_id, "before"))
         .await
         .unwrap();
     wait_for_terminal(&runtime, &session_id, &accepted.run.run_id).await;
@@ -370,7 +370,7 @@ async fn mcp_refresh_persists_empty_directory_after_the_last_server_is_removed()
     assert!(directory.ends_with("[]"));
     assert!(!directory.contains("github"));
     let accepted = runtime
-        .submit_input(input_request(&session_id, "after"))
+        .submit_started_input(input_request(&session_id, "after"))
         .await
         .unwrap();
     wait_for_terminal(&runtime, &session_id, &accepted.run.run_id).await;
@@ -396,7 +396,7 @@ async fn mcp_reentered_input_gets_persistent_context_before_the_model_call() {
         .session
         .session_id;
     let accepted = runtime
-        .submit_input(input_request(&session_id, "original"))
+        .submit_started_input(input_request(&session_id, "original"))
         .await
         .unwrap();
     wait_for_terminal(&runtime, &session_id, &accepted.run.run_id).await;

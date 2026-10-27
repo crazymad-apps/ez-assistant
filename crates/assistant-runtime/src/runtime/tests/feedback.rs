@@ -80,11 +80,16 @@ async fn wait_answer_is_tool_result_and_duplicate_reply_is_idempotent() {
         .session
         .session_id;
     let run = runtime
-        .submit_input(input(&session, "生成文档"))
+        .submit_started_input(input(&session, "生成文档"))
         .await
         .unwrap()
         .run;
     let request = pending(&runtime, &session).await;
+    assert!(
+        store
+            .contains_feedback_control(&request.request_id)
+            .unwrap()
+    );
     assert_eq!(model.take_requests().len(), 1);
     let answer = reply(&request);
     let first = runtime.answer_feedback(answer.clone()).await.unwrap();
@@ -127,6 +132,157 @@ async fn wait_answer_is_tool_result_and_duplicate_reply_is_idempotent() {
         store.load_feedback(&session).await.unwrap()[0].status,
         FeedbackStatus::Answered
     );
+    assert!(
+        !store
+            .contains_feedback_control(&request.request_id)
+            .unwrap()
+    );
+    let saved = store.load_feedback(&session).await.unwrap()[0].clone();
+    let history = store
+        .load_conversation_history(assistant_protocol::ConversationOwner::MainSession {
+            session_id: session.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.facts.questions, vec![saved.clone()]);
+    store
+        .mutate_feedback(crate::FeedbackMutation {
+            request: saved.clone(),
+            expected_status: Some(FeedbackStatus::Pending),
+        })
+        .await
+        .unwrap();
+    let mut changed = saved;
+    changed.answers.as_mut().unwrap()[0].text = "changed terminal answer".into();
+    assert!(
+        store
+            .mutate_feedback(crate::FeedbackMutation {
+                request: changed,
+                expected_status: Some(FeedbackStatus::Pending),
+            })
+            .await
+            .is_err()
+    );
+    drop(runtime);
+    let restarted = runtime_with_store(
+        model.clone(),
+        store.clone(),
+        RuntimeConfig::new(NonZeroUsize::new(32).unwrap()),
+    )
+    .await;
+    assert_eq!(
+        restarted.answer_feedback(reply(&request)).await.unwrap(),
+        first
+    );
+    assert_eq!(
+        store
+            .load_conversation_history(assistant_protocol::ConversationOwner::MainSession {
+                session_id: session,
+            })
+            .await
+            .unwrap(),
+        history
+    );
+    assert!(
+        !store
+            .contains_feedback_control(&request.request_id)
+            .unwrap()
+    );
+    assert!(model.take_requests().is_empty());
+}
+
+#[tokio::test]
+async fn rewriting_another_session_keeps_pending_end_turn_control_after_parent_released() {
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(true),
+        8192,
+        [
+            ModelScript::Events(message_events(&question("end_turn"))),
+            ModelScript::Events(message_events(&assistant_text("other-first", "old"))),
+            ModelScript::Events(message_events(&assistant_text("other-rewritten", "new"))),
+        ],
+    ));
+    let store = Arc::new(crate::storage::VolatileRuntimeStore::default());
+    let config = RuntimeConfig::new(NonZeroUsize::new(32).unwrap());
+    let runtime = runtime_with_store(model.clone(), store.clone(), config).await;
+    let owner = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    let first = runtime
+        .submit_started_input(input(&owner, "question"))
+        .await
+        .unwrap();
+    let request = pending(&runtime, &owner).await;
+    wait_for_terminal(&runtime, &owner, &first.run.run_id).await;
+    assert!(!store.contains_run_control(&first.run.run_id).unwrap());
+    let other = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    let original = runtime
+        .submit_started_input(input(&other, "old"))
+        .await
+        .unwrap();
+    wait_for_terminal(&runtime, &other, &original.run.run_id).await;
+    let body = store.load_conversation(&other).await.unwrap();
+    let ConversationMessage::User(user) = &body.messages[0] else {
+        panic!("User")
+    };
+    let rewritten = runtime
+        .reenter_from_user_message(assistant_protocol::ReenterFromUserMessageRequest {
+            session_id: other.clone(),
+            message_id: assistant_protocol::MessageId::new(user.id.as_str()).unwrap(),
+            message: "new".into(),
+            attachment_ids: vec![],
+            idempotency_key: None,
+            variant: assistant_protocol::AgentVariant::Build,
+        })
+        .await
+        .unwrap();
+    wait_for_terminal(&runtime, &other, &rewritten.run.run_id).await;
+    assert!(
+        store
+            .contains_feedback_control(&request.request_id)
+            .unwrap()
+    );
+    assert_eq!(
+        store.load_feedback(&owner).await.unwrap(),
+        vec![request.clone()]
+    );
+    assert_eq!(model.take_requests().len(), 3);
+    drop(runtime);
+    let restarted = runtime_with_store(model.clone(), store.clone(), config).await;
+    assert_eq!(
+        restarted
+            .list_feedback_requests(ListFeedbackRequestsRequest {
+                session_id: owner.clone()
+            })
+            .await
+            .unwrap(),
+        vec![request.clone()]
+    );
+    restarted
+        .cancel_feedback(CancelFeedbackRequest {
+            session_id: owner.clone(),
+            request_id: request.request_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        !store
+            .contains_feedback_control(&request.request_id)
+            .unwrap()
+    );
+    assert_eq!(
+        store.load_feedback(&owner).await.unwrap()[0].status,
+        FeedbackStatus::Cancelled
+    );
+    assert!(model.take_requests().is_empty());
 }
 
 #[tokio::test]
@@ -153,7 +309,7 @@ async fn end_turn_does_not_call_model_again_until_new_user_reply() {
         .session
         .session_id;
     let first = runtime
-        .submit_input(input(&session, "审阅初稿"))
+        .submit_started_input(input(&session, "审阅初稿"))
         .await
         .unwrap()
         .run;
@@ -167,18 +323,28 @@ async fn end_turn_does_not_call_model_again_until_new_user_reply() {
     assert_eq!(model.take_requests().len(), 1);
     assert!(
         runtime
-            .submit_input(input(&session, "未明确取消的新指令"))
+            .submit_started_input(input(&session, "未明确取消的新指令"))
             .await
             .is_err()
     );
     runtime.answer_feedback(reply(&request)).await.unwrap();
-    let runs = runtime
-        .list_runs(assistant_protocol::ListRunsRequest {
-            session_id: session.clone(),
-        })
-        .await
-        .unwrap()
-        .runs;
+    let runs = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let runs = runtime
+                .list_runs(assistant_protocol::ListRunsRequest {
+                    session_id: session.clone(),
+                })
+                .await
+                .unwrap()
+                .runs;
+            if runs.len() == 2 {
+                break runs;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     assert_eq!(runs.len(), 2);
     let second = runs.iter().find(|r| r.run_id != first.run_id).unwrap();
     assert_eq!(
@@ -229,7 +395,7 @@ async fn cancellation_rejects_late_answers_and_stops_waiting_run() {
         .session
         .session_id;
     let run = runtime
-        .submit_input(input(&session, "提问"))
+        .submit_started_input(input(&session, "提问"))
         .await
         .unwrap()
         .run;
@@ -284,7 +450,7 @@ async fn schema_defaults_and_invalid_arguments_never_publish_partial_requests() 
             .session
             .session_id;
         let run = runtime
-            .submit_input(input(&session, "test"))
+            .submit_started_input(input(&session, "test"))
             .await
             .unwrap()
             .run;
@@ -329,7 +495,7 @@ async fn schema_defaults_and_invalid_arguments_never_publish_partial_requests() 
         .session
         .session_id;
     let run = runtime
-        .submit_input(input(&session, "text"))
+        .submit_started_input(input(&session, "text"))
         .await
         .unwrap()
         .run;
@@ -377,7 +543,7 @@ async fn mixed_and_duplicate_batches_reject_all_calls_before_side_effects() {
             .session
             .session_id;
         let run = runtime
-            .submit_input(input(&session, "mixed"))
+            .submit_started_input(input(&session, "mixed"))
             .await
             .unwrap()
             .run;
@@ -420,7 +586,7 @@ async fn feedback_failures_leave_retryable_state_without_fake_user_messages() {
             .session
             .session_id;
         let run = runtime
-            .submit_input(input(&session, "failure"))
+            .submit_started_input(input(&session, "failure"))
             .await
             .unwrap()
             .run;
@@ -480,7 +646,7 @@ async fn end_turn_survives_restart_without_auto_execution_and_wait_is_invalidate
             .session
             .session_id;
         let run = runtime
-            .submit_input(input(&session, "restart"))
+            .submit_started_input(input(&session, "restart"))
             .await
             .unwrap()
             .run;
@@ -543,7 +709,7 @@ async fn goal_end_turn_pauses_and_wait_cancel_does_not_leave_running_goal() {
             .session_id;
         let mut goal_input = input(&session, "finish goal");
         goal_input.mode = SubmitInputMode::StartGoal;
-        let run = runtime.submit_input(goal_input).await.unwrap().run;
+        let run = runtime.submit_started_input(goal_input).await.unwrap().run;
         let request = pending(&runtime, &session).await;
         if mode == "wait" {
             runtime

@@ -16,7 +16,8 @@ use super::{ChatProtocolAdapter, schema::ChatUsage};
 
 /// 把原生 assistant 消息解码为规范 parts。
 ///
-/// 按 ChatProtocolAdapter 的有序字段从 extra map 读取 reasoning 文本。
+/// 优先按方言字段读取，再兼容上游主动返回的 reasoning 文本。
+/// 接收响应不启用请求端思考能力，也不改变历史回放策略。
 ///
 /// 显式 `null` 等价于字段缺席：DeepSeek 会在没有 reasoning 增量的 chunk 里下发
 /// `"reasoning_content": null`。vLLM 当前字段 `reasoning` 优先于旧版
@@ -26,7 +27,11 @@ fn reasoning_field_text<'a>(
     fields: &[String],
     context: &str,
 ) -> Result<Option<&'a str>, ModelError> {
-    for field in fields {
+    for field in fields
+        .iter()
+        .map(String::as_str)
+        .chain(["reasoning", "reasoning_content"])
+    {
         match extra.get(field) {
             None | Some(Value::Null) => {}
             Some(value) => {

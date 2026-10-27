@@ -1,5 +1,9 @@
 //! Desktop 使用的组合快照、分页 Conversation 与安全工具详情投影。
 
+#[cfg(test)]
+#[path = "product/history_tests.rs"]
+mod history_tests;
+
 use std::collections::HashMap;
 
 use agent_memory::{MemoryPropertyValue, MemoryRecallResponse};
@@ -25,7 +29,7 @@ use assistant_protocol::{
     QueueExecutionState, QueueSnapshot, QueuedInputSnapshot, QueuedSessionCommandSnapshot,
     QueuedSessionItemSnapshot, ReasoningEffortKey, ReasoningEffortOptionSnapshot,
     RecallNavigationTarget, RecallToolDetailFailure, RecallToolDetailItem,
-    RecallToolDetailSnapshot, ResourceRefId, RunId, RunSnapshot, SearchConversationHistoryRequest,
+    RecallToolDetailSnapshot, ResourceRefId, RunId, SearchConversationHistoryRequest,
     SearchConversationHistoryResult, SessionId, SessionListFilter, SessionUsageSnapshot,
     SessionViewSnapshot, SkillActivationTagSnapshot, SkillActivationTriggerSnapshot,
     SkillDiagnosticSeveritySnapshot, SkillDiagnosticSnapshot, SkillHealthSnapshot,
@@ -39,11 +43,12 @@ use serde::{Deserialize, Serialize};
 
 use super::AssistantRuntime;
 use super::tool_input_projection::{project_json, project_tool_input};
+use crate::observation::SharedSnapshotSources;
 use crate::{
     ConversationMessageLocationRequest, ConversationRawWindowRequest, ConversationSearchRequest,
     ConversationSearchScope, ConversationWindowRequest, CrossSessionInputBinding,
     InputChannelSource, InputModality, OutputPreference, RuntimeError, RuntimeResult,
-    StoreErrorKind, StoredConversationWindow, StoredInput,
+    StoreErrorKind, StoredConversationWindow,
 };
 
 const DEFAULT_PAGE_SIZE: usize = 30;
@@ -58,7 +63,9 @@ struct ConversationCursor {
     end: usize,
 }
 
+#[derive(Clone)]
 pub(super) struct ProjectionContext {
+    device_names: HashMap<assistant_protocol::DeviceId, String>,
     run_by_message: HashMap<String, MessageRunProjection>,
     input_by_message: HashMap<String, assistant_protocol::InputId>,
     source_by_message: HashMap<String, ConversationInputSourceSnapshot>,
@@ -71,9 +78,17 @@ pub(super) struct ProjectionContext {
     can_fork: bool,
 }
 
+#[derive(Clone)]
 struct MessageRunProjection {
+    inherited: bool,
+    partial: bool,
     shell_switch: Option<(assistant_protocol::ShellKind, bool)>,
-    snapshot: RunSnapshot,
+    run_id: Option<RunId>,
+    attempt: Option<u32>,
+    created_at_ms: Option<i64>,
+    started_at_ms: Option<i64>,
+    status: Option<assistant_protocol::RunStatus>,
+    error: Option<assistant_protocol::RuntimeErrorInfo>,
     finished_at_ms: Option<i64>,
     step: Option<u32>,
 }
@@ -167,30 +182,39 @@ impl AssistantRuntime {
 
     pub async fn get_application_snapshot(
         &self,
-        _request: GetApplicationSnapshotRequest,
+        request: GetApplicationSnapshotRequest,
     ) -> RuntimeResult<GetApplicationSnapshotResult> {
+        let _projection = crate::request_diagnostics::request_phase(
+            crate::request_diagnostics::RequestPhase::Projection,
+        );
         for _ in 0..SNAPSHOT_ATTEMPTS {
-            let start = self.event_sender.sequence();
+            let observation = self.event_sender.read_application();
             let configuration = self.get_config_status(Default::default())?.status;
-            let providers = self.list_providers()?;
-            let model_settings = self.get_model_settings()?;
+            let (providers, model_settings) = self.model_management_snapshot()?;
             let workspaces = self
                 .list_workspaces(ListWorkspacesRequest::default())?
                 .workspaces;
             let active_page = self
                 .list_sessions(ListSessionsRequest {
                     filter: SessionListFilter::Active,
+                    limit: request.active_sessions_limit,
                     ..Default::default()
                 })
                 .await?;
             let archived_page = self
                 .list_sessions(ListSessionsRequest {
                     filter: SessionListFilter::Archived,
+                    limit: request.archived_sessions_limit,
                     ..Default::default()
                 })
                 .await?;
-            let active_sessions_next_offset = active_page.has_more.then_some(100);
-            let archived_sessions_next_offset = archived_page.has_more.then_some(100);
+            // 分页位置按实际查询前缀计算，先于可见工作区过滤和固定主控入口补入。
+            let active_sessions_next_offset = active_page
+                .has_more
+                .then_some(active_page.sessions.len() as u32);
+            let archived_sessions_next_offset = archived_page
+                .has_more
+                .then_some(archived_page.sessions.len() as u32);
             let mut active_sessions = active_page.sessions;
             let mut archived_sessions = archived_page.sessions;
             let active_workspace_ids = workspaces
@@ -205,16 +229,6 @@ impl AssistantRuntime {
             };
             active_sessions.retain(&belongs_to_visible_workspace);
             archived_sessions.retain(belongs_to_visible_workspace);
-            for session in active_sessions
-                .iter_mut()
-                .chain(archived_sessions.iter_mut())
-            {
-                session.pending_approval_count =
-                    self.approval_registry.list(&session.session_id)?.len() as u64;
-                session.active_child_count = self
-                    .child_tasks
-                    .active_count_for_session(&session.session_id)?;
-            }
             let runtime_lifecycle = self.lifecycle()?;
             let controllers = self.controller_summaries().await?;
             // 主控是固定入口，不受普通会话首页分页截断。
@@ -234,8 +248,30 @@ impl AssistantRuntime {
                 )
                 .unwrap_or_default();
             let additional_controller_count = controllers.len().saturating_sub(1) as u64;
-            let end = self.event_sender.sequence();
-            if start == end {
+            let mut approval_revisions = Vec::new();
+            for session in active_sessions
+                .iter_mut()
+                .chain(archived_sessions.iter_mut())
+            {
+                let (approvals, revision) = self
+                    .approval_registry
+                    .list_with_revision(&session.session_id)?;
+                session.pending_approval_count = approvals.len() as u64;
+                approval_revisions.push((session.session_id.clone(), revision));
+                session.active_child_count = self
+                    .child_tasks
+                    .active_count_for_session(&session.session_id)?;
+            }
+            let mcp_tools = !self.mcp_service.registry.server_keys()?.is_empty();
+            if let Some((end, approvals_unchanged)) = observation.capture(|| {
+                for (session_id, revision) in &approval_revisions {
+                    if self.approval_registry.revision(session_id)? != *revision {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            })? && approvals_unchanged
+            {
                 return Ok(GetApplicationSnapshotResult {
                     snapshot: ObservedSnapshot {
                         observed_at_ms: super::now_ms().ok(),
@@ -259,7 +295,7 @@ impl AssistantRuntime {
                                 queue_control: true,
                                 approval_queue: true,
                                 child_task_view: true,
-                                mcp_tools: !self.mcp_service.registry.server_keys()?.is_empty(),
+                                mcp_tools,
                                 mcp_management: self.mcp_service.management_available(),
                                 session_commands: true,
                             },
@@ -275,25 +311,56 @@ impl AssistantRuntime {
         &self,
         request: GetSessionViewRequest,
     ) -> RuntimeResult<GetSessionViewResult> {
-        for _ in 0..SNAPSHOT_ATTEMPTS {
-            let start = self.event_sender.sequence();
-            let session = self.prepared_session(&request.session_id).await?;
-            session
-                .ensure_conversation_loaded(self.store.as_ref())
-                .await?;
+        let _projection = crate::request_diagnostics::request_phase(
+            crate::request_diagnostics::RequestPhase::Projection,
+        );
+        let session = self.prepared_session(&request.session_id).await?;
+        session
+            .ensure_conversation_loaded(self.store.as_ref())
+            .await?;
+        let _mutation = session.mutation().await;
+        {
+            let state = session.lock_state()?;
+            if state.journal.is_none() && !state.is_conversation_available {
+                return Err(RuntimeError::StorageUnavailable {
+                    operation: "load session conversation",
+                    source: None,
+                });
+            }
+        }
+        'snapshot: for _ in 0..SNAPSHOT_ATTEMPTS {
+            let observation = self.event_sender.read_session_view(
+                &request.session_id,
+                session.environment().workspace_id.clone(),
+            );
+            let configuration = self.config_registry.snapshot()?;
+            let device_names = self.device_names()?;
+            let workspace = self.session_workspace_snapshot(&session)?;
             let mut summary = session.summary()?;
             let approvals = self.approval_queue(&request.session_id)?;
             summary.pending_approval_count = approvals.items.len() as u64;
             summary.active_child_count = self
                 .child_tasks
                 .active_count_for_session(&request.session_id)?;
-            let runs = session.run_snapshots()?;
-            let active_run = summary
-                .active_run_id
+            let conversation_snapshot = session
+                .lock_state()?
+                .journal
                 .as_ref()
-                .and_then(|run_id| runs.iter().find(|run| &run.run_id == run_id))
-                .cloned();
-            let queue = queue_snapshot(&session, &self.device_names()?)?;
+                .ok_or(RuntimeError::InternalStateUnavailable {
+                    component: "session execution window",
+                })?
+                .snapshot();
+
+            let run_history = self
+                .store
+                .load_conversation_history(ConversationOwner::MainSession {
+                    session_id: request.session_id.clone(),
+                })
+                .await
+                .map_err(|source| RuntimeError::from_store("load session Run history", source))?;
+            let mut runs =
+                self.project_product_run_snapshots(&session, &run_history, &conversation_snapshot)?;
+            let queue = queue_snapshot(&session, &device_names)?;
             let mut attachments = self
                 .list_attachments(ListAttachmentsRequest {
                     session_id: request.session_id.clone(),
@@ -301,7 +368,9 @@ impl AssistantRuntime {
                 .await?
                 .attachments;
             let generation = session.lock_state()?.body_generation;
-            let projection = self.projection_context(&session, &attachments).await?;
+            let projection = self
+                .projection_context_with_devices(&session, &attachments, device_names)
+                .await?;
             for attachment in &mut attachments {
                 attachment.agent_readable_path.clear();
             }
@@ -321,26 +390,37 @@ impl AssistantRuntime {
                 Err(RuntimeError::SnapshotStale) => continue,
                 Err(error) => return Err(error),
             };
-            let conversation_snapshot = self
-                .store
-                .load_conversation(&request.session_id)
-                .await
-                .map_err(|source| {
-                    RuntimeError::from_store("load session resource conversation", source)
-                })?;
             let conversation = page_from_window(
                 owner,
                 &window,
-                project_conversation(&window.conversation, &projection)?,
+                project_conversation_with_history(
+                    &window.conversation,
+                    window.history.as_ref(),
+                    &projection,
+                )?,
             )?;
             let stored_usage = self
                 .store
                 .get_session_usage(&request.session_id)
                 .await
                 .map_err(|source| RuntimeError::from_store("load session usage", source))?;
-            let (composer_capabilities, context_window) = self
-                .composer_capabilities(summary.model_selection.as_ref())
-                .await?;
+            let usage_snapshot = self
+                .store
+                .get_conversation_usage(ConversationOwner::MainSession {
+                    session_id: request.session_id.clone(),
+                })
+                .await
+                .map_err(|source| {
+                    RuntimeError::from_store("load context usage snapshot", source)
+                })?;
+            let (composer_capabilities, context_window) = match self
+                .composer_capabilities(&configuration, summary.model_selection.as_ref())
+                .await
+            {
+                Ok(value) => value,
+                Err(RuntimeError::SnapshotStale) => continue,
+                Err(error) => return Err(error),
+            };
             let mode = session
                 .lock_state()?
                 .context_management_mode
@@ -348,17 +428,26 @@ impl AssistantRuntime {
             let mut usage = project_usage(
                 &stored_usage,
                 context_window,
-                context_usage_from_product_history(&conversation_snapshot, mode),
+                usage_snapshot.used_tokens(),
                 mode,
             );
+            if let Some(context) = &mut usage.context {
+                context.calibration_pending = usage_snapshot.calibration_pending.then_some(true);
+            }
             apply_current_context_measurement(
                 &mut usage.context,
                 &session,
                 "",
                 &conversation_snapshot,
             )?;
-            let file_references = project_conversation_file_references(&conversation_snapshot)?;
-            let workspace = self.session_workspace_snapshot(&session)?;
+            let (file_references, artifacts) = session
+                .lock_state()?
+                .journal
+                .as_ref()
+                .ok_or(RuntimeError::InternalStateUnavailable {
+                    component: "session display metadata",
+                })?
+                .display_metadata();
             let (work_plan, goal, active_skills, agent_shell_kind) = {
                 let state = session.lock_state()?;
                 (
@@ -373,13 +462,48 @@ impl AssistantRuntime {
                 .active_title_generation
                 .as_ref()
                 .map(|active| active.snapshot.clone());
-            let child_tasks = self.child_tasks.list_for_session(&request.session_id)?;
+            let child_tasks = self.product_child_tasks(&request.session_id).await?;
             let mut child_task_items = Vec::with_capacity(child_tasks.len());
             for task in child_tasks {
-                child_task_items.push(self.child_task_tree_item(task, &approvals.items).await?);
+                match self
+                    .child_task_tree_summary(&request.session_id, task, &approvals.items)
+                    .await
+                {
+                    Ok(item) => child_task_items.push(item),
+                    Err(RuntimeError::SnapshotStale) => continue 'snapshot,
+                    Err(error) => return Err(error),
+                }
             }
-            let end = self.event_sender.sequence();
-            if start == end {
+            if let Some((end, (approval_revision, mut summary, observed_runs))) = observation
+                .capture(|| {
+                    Ok((
+                        self.approval_registry.revision(&request.session_id)?,
+                        session.summary()?,
+                        session.run_snapshots()?,
+                    ))
+                })?
+                && approval_revision == approvals.revision
+            {
+                summary.pending_approval_count = approvals.items.len() as u64;
+                summary.active_child_count = self
+                    .child_tasks
+                    .active_count_for_session(&request.session_id)?;
+                let mut observed_runs: HashMap<_, _> = observed_runs
+                    .into_iter()
+                    .map(|run| (run.run_id.clone(), run))
+                    .collect();
+                for run in &mut runs {
+                    if !run.status.is_terminal()
+                        && let Some(observed) = observed_runs.remove(&run.run_id)
+                    {
+                        *run = observed;
+                    }
+                }
+                let active_run = summary
+                    .active_run_id
+                    .as_ref()
+                    .and_then(|id| runs.iter().find(|run| &run.run_id == id))
+                    .cloned();
                 return Ok(GetSessionViewResult {
                     snapshot: ObservedSnapshot {
                         observed_at_ms: super::now_ms().ok(),
@@ -398,7 +522,7 @@ impl AssistantRuntime {
                             approvals,
                             attachments,
                             file_references,
-                            artifacts: crate::artifact::project_artifacts(&conversation_snapshot),
+                            artifacts,
                             runs,
                             usage,
                             child_tasks: child_task_items,
@@ -416,20 +540,47 @@ impl AssistantRuntime {
         &self,
         request: GetChildTaskViewRequest,
     ) -> RuntimeResult<GetChildTaskViewResult> {
+        let _projection = crate::request_diagnostics::request_phase(
+            crate::request_diagnostics::RequestPhase::Projection,
+        );
+        let session = self.session(&request.session_id).await?;
+        session
+            .ensure_conversation_loaded(self.store.as_ref())
+            .await?;
+        let _mutation = session.mutation().await;
         for _ in 0..SNAPSHOT_ATTEMPTS {
-            let start = self.event_sender.sequence();
-            self.session(&request.session_id).await?;
+            let observation = self.event_sender.read_session(
+                &request.session_id,
+                session.environment().workspace_id.clone(),
+                SharedSnapshotSources::Configuration,
+            );
             let stored = self
-                .child_tasks
-                .get(&request.session_id, &request.child_task_id)?
+                .product_child_task(&request.session_id, &request.child_task_id)
+                .await?
                 .ok_or_else(|| RuntimeError::ChildTaskNotFound {
                     session_id: request.session_id.clone(),
                     child_task_id: request.child_task_id.clone(),
                 })?;
-            let approvals = self.approval_registry.list(&request.session_id)?;
-            let task = self
-                .child_task_tree_item(stored.clone(), &approvals)
-                .await?;
+            let (approvals, approval_revision) = self
+                .approval_registry
+                .list_with_revision(&request.session_id)?;
+            if stored.body_unavailable {
+                return Err(RuntimeError::from_store(
+                    "load inherited child body",
+                    crate::StoreError::new(
+                        StoreErrorKind::ResourceUnavailable,
+                        "inherited child body is unavailable",
+                    ),
+                ));
+            }
+            let task = match self
+                .child_task_tree_item(&request.session_id, stored.clone(), &approvals)
+                .await
+            {
+                Ok(task) => task,
+                Err(RuntimeError::SnapshotStale) => continue,
+                Err(error) => return Err(error),
+            };
             let owner = ConversationOwner::ChildTask {
                 session_id: request.session_id.clone(),
                 child_task_id: request.child_task_id.clone(),
@@ -451,15 +602,21 @@ impl AssistantRuntime {
             let conversation = page_from_window(
                 owner,
                 &window,
-                project_conversation(&window.conversation, &projection)?,
+                project_conversation_with_history(
+                    &window.conversation,
+                    window.history.as_ref(),
+                    &projection,
+                )?,
             )?;
             let approval_ids = approvals
                 .iter()
                 .filter(|approval| approval.child_task_id.as_ref() == Some(&request.child_task_id))
                 .map(|approval| approval.approval_id.clone())
                 .collect();
-            let end = self.event_sender.sequence();
-            if start == end {
+            if let Some((end, current_approval_revision)) =
+                observation.capture(|| self.approval_registry.revision(&request.session_id))?
+                && current_approval_revision == approval_revision
+            {
                 return Ok(GetChildTaskViewResult {
                     snapshot: ObservedSnapshot {
                         observed_at_ms: super::now_ms().ok(),
@@ -492,7 +649,7 @@ impl AssistantRuntime {
         // 只保护当前 owner 的本地组合读取，不要求全局事件静止。
         let _mutation = session.mutation().await;
         for _ in 0..SNAPSHOT_ATTEMPTS {
-            let start = self.event_sender.sequence();
+            let observation = self.event_sender.read_history();
             let (generation, projection) = match &request.owner {
                 ConversationOwner::MainSession { session_id } => {
                     let attachments = self
@@ -510,8 +667,8 @@ impl AssistantRuntime {
                     child_task_id,
                 } => {
                     let task = self
-                        .child_tasks
-                        .get(session_id, child_task_id)?
+                        .product_child_task(session_id, child_task_id)
+                        .await?
                         .ok_or_else(|| RuntimeError::ChildTaskNotFound {
                             session_id: session_id.clone(),
                             child_task_id: child_task_id.clone(),
@@ -547,7 +704,11 @@ impl AssistantRuntime {
             let page = page_from_window(
                 request.owner.clone(),
                 &window,
-                project_conversation(&window.conversation, &projection)?,
+                project_conversation_with_history(
+                    &window.conversation,
+                    window.history.as_ref(),
+                    &projection,
+                )?,
             )?;
             if let ConversationOwner::ChildTask {
                 session_id,
@@ -555,8 +716,8 @@ impl AssistantRuntime {
             } = &request.owner
             {
                 let current = self
-                    .child_tasks
-                    .get(session_id, child_task_id)?
+                    .product_child_task(session_id, child_task_id)
+                    .await?
                     .ok_or_else(|| RuntimeError::ChildTaskNotFound {
                         session_id: session_id.clone(),
                         child_task_id: child_task_id.clone(),
@@ -568,10 +729,13 @@ impl AssistantRuntime {
                     return Err(RuntimeError::SnapshotStale);
                 }
             }
+            let Some((end, ())) = observation.capture(|| Ok(()))? else {
+                continue;
+            };
             return Ok(ListConversationPageResult {
                 snapshot: ObservedSnapshot {
                     observed_at_ms: super::now_ms().ok(),
-                    observed_sequence: start,
+                    observed_sequence: end,
                     value: page,
                 },
             });
@@ -621,25 +785,57 @@ impl AssistantRuntime {
             .await?;
         let _mutation = session.mutation().await;
         for _ in 0..SNAPSHOT_ATTEMPTS {
-            let start = self.event_sender.sequence();
-            session.run_snapshot(&request.run_id)?;
+            let observation = self.event_sender.read_history();
             let attachments = self
                 .list_attachments(ListAttachmentsRequest {
                     session_id: request.session_id.clone(),
                 })
                 .await?
                 .attachments;
-            let (generation, message_ids) =
-                {
-                    let state = session.lock_state()?;
-                    let record = state.runs.get(&request.run_id).ok_or_else(|| {
-                        RuntimeError::RunNotFound {
+            let history = self
+                .store
+                .load_conversation_history(ConversationOwner::MainSession {
+                    session_id: request.session_id.clone(),
+                })
+                .await
+                .map_err(|source| RuntimeError::from_store("load Run message history", source))?;
+            let (generation, message_ids) = {
+                let state = session.lock_state()?;
+                if history.generation != state.body_generation {
+                    continue;
+                }
+                let fact = history
+                    .facts
+                    .runs
+                    .iter()
+                    .find(|run| run.run_id == request.run_id);
+                if fact.is_some_and(|run| run.inherited) {
+                    return Err(RuntimeError::RunNotFound {
+                        session_id: request.session_id.clone(),
+                        run_id: request.run_id.clone(),
+                    });
+                }
+                let mut ids: Vec<_> = history
+                    .facts
+                    .message_origins
+                    .iter()
+                    .filter(|origin| {
+                        origin.run_id.as_ref() == Some(&request.run_id) && !origin.inherited
+                    })
+                    .map(|origin| origin.message_id.clone())
+                    .collect();
+                if ids.is_empty() {
+                    if let Some(record) = state.runs.get(&request.run_id) {
+                        ids = record.message_ids().to_vec();
+                    } else if fact.is_none() {
+                        return Err(RuntimeError::RunNotFound {
                             session_id: request.session_id.clone(),
                             run_id: request.run_id.clone(),
-                        }
-                    })?;
-                    (state.body_generation, record.message_ids().to_vec())
-                };
+                        });
+                    }
+                }
+                (state.body_generation, ids)
+            };
             let owner = ConversationOwner::MainSession {
                 session_id: request.session_id.clone(),
             };
@@ -697,15 +893,19 @@ impl AssistantRuntime {
             let page = page_from_window(
                 owner,
                 &window,
-                project_conversation(
+                project_conversation_with_history(
                     &window.conversation,
+                    window.history.as_ref(),
                     &self.projection_context(&session, &attachments).await?,
                 )?,
             )?;
+            let Some((observed_sequence, ())) = observation.capture(|| Ok(()))? else {
+                continue;
+            };
             return Ok(GetConversationPageAroundRunResult {
                 snapshot: ObservedSnapshot {
                     observed_at_ms: super::now_ms().ok(),
-                    observed_sequence: start,
+                    observed_sequence,
                     value: page,
                 },
                 anchor_message_id,
@@ -744,7 +944,7 @@ impl AssistantRuntime {
             },
             ConversationHistoryScope::Global => ConversationSearchScope::Global,
         };
-        let mut items = self
+        let titles = self
             .store
             .search_conversation_titles(ConversationSearchRequest {
                 query: query.to_owned(),
@@ -757,8 +957,9 @@ impl AssistantRuntime {
             .await
             .map_err(|e| RuntimeError::from_store("search conversation titles", e))?;
 
-        let mut partial = false;
-        let mut failed_owners = Vec::new();
+        let mut items = titles.hits;
+        let mut partial = titles.partial;
+        let mut failed_owners = titles.failed_owners;
         if query.chars().count() >= 3 {
             let search_limit = offset
                 .saturating_add(limit)
@@ -771,12 +972,32 @@ impl AssistantRuntime {
                     scope: store_scope,
                     limit: search_limit,
                 })
-                .await
-                .map_err(|source| {
-                    RuntimeError::from_store("search conversation history", source)
-                })?;
-            partial = page.partial;
-            failed_owners = page.failed_owners;
+                .await;
+            let page = match page {
+                Ok(page) => page,
+                // 标题事实仍可用时，FTS 不可用不应抹掉标题命中；返回既有 partial 提示。
+                Err(source)
+                    if source.kind() == crate::StoreErrorKind::Unavailable && !items.is_empty() =>
+                {
+                    crate::ConversationSearchPage {
+                        hits: Vec::new(),
+                        partial: true,
+                        failed_owners: Vec::new(),
+                    }
+                }
+                Err(source) => {
+                    return Err(RuntimeError::from_store(
+                        "search conversation history",
+                        source,
+                    ));
+                }
+            };
+            partial |= page.partial;
+            for owner in page.failed_owners {
+                if !failed_owners.contains(&owner) {
+                    failed_owners.push(owner);
+                }
+            }
             for hit in page.hits {
                 let session_id = owner_session_id(&hit.owner);
                 let session = self
@@ -820,7 +1041,11 @@ impl AssistantRuntime {
         let (window, projection) = self
             .load_raw_window_around_message(&request.owner, &request.message_id, before, after)
             .await?;
-        let items = project_conversation(&window.conversation, &projection)?;
+        let items = project_conversation_with_history(
+            &window.conversation,
+            window.history.as_ref(),
+            &projection,
+        )?;
         Ok(GetConversationRecallWindowResult {
             owner: request.owner,
             generation: window.generation,
@@ -846,42 +1071,52 @@ impl AssistantRuntime {
             .ensure_conversation_loaded(self.store.as_ref())
             .await?;
         let _mutation = session.mutation().await;
-        let observed_sequence = self.event_sender.sequence();
-        let location = self
-            .locate_conversation_message(&request.owner, &request.message_id)
-            .await?;
-        let display_ordinal = location
-            .display_ordinal
-            .ok_or(RuntimeError::InvalidRequest {
-                reason: "conversation message is not visible in the product conversation",
-            })?;
-        let requested_end = usize::try_from(display_ordinal)
-            .map_err(|_| RuntimeError::InvalidRequest {
-                reason: "conversation display position is outside the supported range",
-            })?
-            .saturating_add(1);
-        let projection = self.projection_context_for_owner(&request.owner).await?;
-        let window = self
-            .load_product_conversation_window(
+        for _ in 0..SNAPSHOT_ATTEMPTS {
+            let observation = self.event_sender.read_history();
+            let location = self
+                .locate_conversation_message(&request.owner, &request.message_id)
+                .await?;
+            let display_ordinal = location
+                .display_ordinal
+                .ok_or(RuntimeError::InvalidRequest {
+                    reason: "conversation message is not visible in the product conversation",
+                })?;
+            let requested_end = usize::try_from(display_ordinal)
+                .map_err(|_| RuntimeError::InvalidRequest {
+                    reason: "conversation display position is outside the supported range",
+                })?
+                .saturating_add(1);
+            let projection = self.projection_context_for_owner(&request.owner).await?;
+            let window = self
+                .load_product_conversation_window(
+                    request.owner.clone(),
+                    location.generation,
+                    Some(requested_end),
+                    limit,
+                )
+                .await?;
+            let page = page_from_window(
                 request.owner.clone(),
-                location.generation,
-                Some(requested_end),
-                limit,
-            )
-            .await?;
-        let page = page_from_window(
-            request.owner.clone(),
-            &window,
-            project_conversation(&window.conversation, &projection)?,
-        )?;
-        Ok(GetConversationPageAroundMessageResult {
-            snapshot: ObservedSnapshot {
-                observed_at_ms: super::now_ms().ok(),
-                observed_sequence,
-                value: page,
-            },
-            anchor_message_id: request.message_id,
-        })
+                &window,
+                project_conversation_with_history(
+                    &window.conversation,
+                    window.history.as_ref(),
+                    &projection,
+                )?,
+            )?;
+            let Some((observed_sequence, ())) = observation.capture(|| Ok(()))? else {
+                continue;
+            };
+            return Ok(GetConversationPageAroundMessageResult {
+                snapshot: ObservedSnapshot {
+                    observed_at_ms: super::now_ms().ok(),
+                    observed_sequence,
+                    value: page,
+                },
+                anchor_message_id: request.message_id,
+            });
+        }
+        Err(RuntimeError::SnapshotBusy)
     }
 
     async fn load_raw_window_around_message(
@@ -891,28 +1126,39 @@ impl AssistantRuntime {
         before: usize,
         after: usize,
     ) -> RuntimeResult<(crate::StoredConversationRawWindow, ProjectionContext)> {
-        let location = self.locate_conversation_message(owner, message_id).await?;
-        let ordinal = usize::try_from(location.message_ordinal).map_err(|_| {
-            RuntimeError::InvalidRequest {
-                reason: "conversation message position is outside the supported range",
-            }
-        })?;
-        let start = ordinal.saturating_sub(before);
-        let limit = before.saturating_add(after).saturating_add(1).max(1);
-        let window = self
-            .store
-            .load_conversation_raw_window(ConversationRawWindowRequest {
-                owner: owner.clone(),
-                generation: location.generation,
-                start,
-                limit,
-            })
-            .await
-            .map_err(|source| {
-                RuntimeError::from_store("load conversation recall window", source)
+        let session = self.session(owner_session_id(owner)).await?;
+        session
+            .ensure_conversation_loaded(self.store.as_ref())
+            .await?;
+        let _mutation = session.mutation().await;
+        for _ in 0..SNAPSHOT_ATTEMPTS {
+            let observation = self.event_sender.read_history();
+            let location = self.locate_conversation_message(owner, message_id).await?;
+            let ordinal = usize::try_from(location.message_ordinal).map_err(|_| {
+                RuntimeError::InvalidRequest {
+                    reason: "conversation message position is outside the supported range",
+                }
             })?;
-        let projection = self.projection_context_for_owner(owner).await?;
-        Ok((window, projection))
+            let start = ordinal.saturating_sub(before);
+            let limit = before.saturating_add(after).saturating_add(1).max(1);
+            let window = self
+                .store
+                .load_conversation_raw_window(ConversationRawWindowRequest {
+                    owner: owner.clone(),
+                    generation: location.generation,
+                    start,
+                    limit,
+                })
+                .await
+                .map_err(|source| {
+                    RuntimeError::from_store("load conversation recall window", source)
+                })?;
+            let projection = self.projection_context_for_owner(owner).await?;
+            if observation.capture(|| Ok(()))?.is_some() {
+                return Ok((window, projection));
+            }
+        }
+        Err(RuntimeError::SnapshotBusy)
     }
 
     async fn locate_conversation_message(
@@ -959,24 +1205,32 @@ impl AssistantRuntime {
         &self,
         request: GetToolDetailRequest,
     ) -> RuntimeResult<GetToolDetailResult> {
+        let session = self.session(owner_session_id(&request.owner)).await?;
+        session
+            .ensure_conversation_loaded(self.store.as_ref())
+            .await?;
         for _ in 0..SNAPSHOT_ATTEMPTS {
-            let start = self.event_sender.sequence();
+            let mutation = session.mutation().await;
+            let observation = self.event_sender.read_history();
             let (snapshot, run_id) = match &request.owner {
                 ConversationOwner::MainSession { session_id } => {
-                    let session = self.session(session_id).await?;
-                    session
-                        .ensure_conversation_loaded(self.store.as_ref())
-                        .await?;
-                    let run_id = session
-                        .lock_state()?
-                        .runs
-                        .values()
-                        .find(|run| {
-                            run.message_ids()
-                                .iter()
-                                .any(|id| id.as_str() == request.message_id.as_str())
-                        })
-                        .map(|run| run.snapshot().run_id);
+                    // 工具详情是当前 owner 的阅读查询；冷加载和继承历史不能借执行 Registry 找归属。
+                    let history = self
+                        .store
+                        .load_conversation_history(request.owner.clone())
+                        .await
+                        .map_err(|source| {
+                            RuntimeError::from_store("load tool detail history", source)
+                        })?;
+                    if history.generation != session.lock_state()?.body_generation {
+                        continue;
+                    }
+                    let run_id = history
+                        .facts
+                        .message_origins
+                        .iter()
+                        .find(|origin| origin.message_id.as_str() == request.message_id.as_str())
+                        .and_then(|origin| origin.run_id.clone());
                     let snapshot =
                         self.store
                             .load_conversation(session_id)
@@ -1004,21 +1258,24 @@ impl AssistantRuntime {
                 run_id,
                 &mcp_identities,
             )?;
+            let Some((end, ())) = observation.capture(|| Ok(()))? else {
+                continue;
+            };
+            // 工具正文基线已冻结。导航引用可以指向其他 Session，先释放 caller 屏障，
+            // 避免 A 的工具详情等 B，而 B 又反等 A。目标导航仍按实际当前归属校验。
+            drop(mutation);
             if detail.tool_name == "recall_memory" {
                 detail.recall = self
                     .project_recall_tool_detail(&request.owner, detail.result_json.as_deref())
                     .await;
             }
-            let end = self.event_sender.sequence();
-            if start == end {
-                return Ok(GetToolDetailResult {
-                    snapshot: ObservedSnapshot {
-                        observed_at_ms: super::now_ms().ok(),
-                        observed_sequence: end,
-                        value: detail,
-                    },
-                });
-            }
+            return Ok(GetToolDetailResult {
+                snapshot: ObservedSnapshot {
+                    observed_at_ms: super::now_ms().ok(),
+                    observed_sequence: end,
+                    value: detail,
+                },
+            });
         }
         Err(RuntimeError::SnapshotBusy)
     }
@@ -1246,13 +1503,13 @@ impl AssistantRuntime {
         &self,
         session_id: &SessionId,
     ) -> RuntimeResult<ApprovalQueueSnapshot> {
-        let items = self.approval_registry.list(session_id)?;
+        let (items, revision) = self.approval_registry.list_with_revision(session_id)?;
         let resolving_approval_id = items
             .iter()
             .find(|item| item.status == assistant_protocol::ApprovalStatus::Resolving)
             .map(|item| item.approval_id.clone());
         Ok(ApprovalQueueSnapshot {
-            revision: self.approval_registry.revision(session_id)?,
+            revision,
             items,
             resolving_approval_id,
         })
@@ -1264,6 +1521,16 @@ impl AssistantRuntime {
         attachments: &[assistant_protocol::AttachmentSummary],
     ) -> RuntimeResult<ProjectionContext> {
         let device_names = self.device_names()?;
+        self.projection_context_with_devices(session, attachments, device_names)
+            .await
+    }
+
+    async fn projection_context_with_devices(
+        &self,
+        session: &crate::session::SessionController,
+        attachments: &[assistant_protocol::AttachmentSummary],
+        device_names: HashMap<assistant_protocol::DeviceId, String>,
+    ) -> RuntimeResult<ProjectionContext> {
         let (
             run_by_message,
             input_by_message,
@@ -1294,13 +1561,20 @@ impl AssistantRuntime {
                     run_by_message.insert(
                         message_id.as_str().to_owned(),
                         MessageRunProjection {
+                            inherited: false,
+                            partial: false,
                             shell_switch: target.map(|target| {
                                 (
                                     target,
                                     run.shell().is_some_and(|shell| shell.kind == target),
                                 )
                             }),
-                            snapshot: snapshot.clone(),
+                            run_id: Some(snapshot.run_id.clone()),
+                            attempt: Some(snapshot.attempt),
+                            created_at_ms: snapshot.created_at_ms,
+                            started_at_ms: snapshot.started_at_ms,
+                            status: Some(snapshot.status),
+                            error: snapshot.error.clone(),
                             finished_at_ms: run.finished_at_ms(),
                             step: run.message_step(message_id),
                         },
@@ -1323,7 +1597,11 @@ impl AssistantRuntime {
                 .map(|input| {
                     (
                         input.stored.user_message_id.as_str().to_owned(),
-                        project_input_source(&input.stored, &device_names),
+                        project_input_source(
+                            input.stored.cross_session.as_ref(),
+                            input.stored.channel_source.as_ref(),
+                            &device_names,
+                        ),
                     )
                 })
                 .collect();
@@ -1384,6 +1662,7 @@ impl AssistantRuntime {
             .map(|item| (item.message_id.as_str().to_owned(), item.feedback))
             .collect();
         Ok(ProjectionContext {
+            device_names,
             run_by_message,
             input_by_message,
             source_by_message,
@@ -1397,7 +1676,7 @@ impl AssistantRuntime {
         })
     }
 
-    fn current_mcp_tool_identities(
+    pub(super) fn current_mcp_tool_identities(
         &self,
     ) -> RuntimeResult<HashMap<(String, String), McpToolIdentity>> {
         Ok(self
@@ -1417,76 +1696,95 @@ impl AssistantRuntime {
             .collect())
     }
 
-    async fn child_task_tree_item(
+    async fn child_usage_snapshot(
         &self,
-        task: crate::StoredChildTask,
+        session_id: &SessionId,
+        task: &crate::StoredChildTaskHistory,
+    ) -> RuntimeResult<ChildTaskUsageSnapshot> {
+        let usage = self
+            .store
+            .get_conversation_usage(ConversationOwner::ChildTask {
+                session_id: session_id.clone(),
+                child_task_id: task.child_task_id.clone(),
+            })
+            .await
+            .map_err(|source| RuntimeError::from_store("load child usage snapshot", source))?;
+        let mut context = project_context_usage(
+            usage.used_tokens(),
+            task.context_window_tokens,
+            task.context_management_mode,
+        );
+        if let Some(context) = &mut context {
+            context.calibration_pending = usage.calibration_pending.then_some(true);
+        }
+        Ok(ChildTaskUsageSnapshot {
+            context,
+            accumulated: usage.accumulated.as_ref().map(usage_totals),
+        })
+    }
+
+    /// 主会话列表读取 child 目录和 SQL 用量快照；最终回复正文在打开该 child 时读取。
+    async fn child_task_tree_summary(
+        &self,
+        session_id: &SessionId,
+        mut task: crate::StoredChildTaskHistory,
         approvals: &[assistant_protocol::ApprovalSnapshot],
     ) -> RuntimeResult<ChildTaskTreeItemSnapshot> {
-        for _ in 0..SNAPSHOT_ATTEMPTS {
-            let current = self
-                .child_tasks
-                .get(&task.session_id, &task.child_task_id)?
-                .ok_or_else(|| RuntimeError::ChildTaskNotFound {
-                    session_id: task.session_id.clone(),
-                    child_task_id: task.child_task_id.clone(),
-                })?;
-            // 当前用量与累计用量需要同一份完整历史；复用带 generation 校验的原始读取端口。
-            let window = match self
-                .store
-                .load_conversation_raw_window(crate::ConversationRawWindowRequest {
-                    owner: ConversationOwner::ChildTask {
-                        session_id: current.session_id.clone(),
-                        child_task_id: current.child_task_id.clone(),
-                    },
-                    generation: current.body_generation,
-                    start: 0,
-                    limit: usize::MAX,
-                })
-                .await
-            {
-                Ok(window) => window,
-                Err(source) if source.kind() == StoreErrorKind::Conflict => continue,
-                Err(source) => {
-                    return Err(RuntimeError::from_store("load child usage history", source));
-                }
-            };
-            let context_window = current.context_window_tokens;
-            let generation = current.body_generation;
-            let context_mode = current.context_management_mode;
-            let snapshot = self.child_snapshot(current).await?;
-            if self
-                .child_tasks
-                .get(&task.session_id, &task.child_task_id)?
-                .is_none_or(|current| current.body_generation != generation)
-            {
-                continue;
-            }
-            let pending_approval_count = approvals
-                .iter()
-                .filter(|approval| approval.child_task_id.as_ref() == Some(&snapshot.child_task_id))
-                .count();
-            let mut usage = project_child_usage(&window.conversation, context_window, context_mode);
-            let session = self.session(&task.session_id).await?;
-            apply_current_context_measurement(
-                &mut usage.context,
-                &session,
-                task.child_task_id.as_str(),
-                &window.conversation,
-            )?;
+        let usage = self.child_usage_snapshot(session_id, &task).await?;
+        task.final_message_id = None;
+        let snapshot = self.child_history_snapshot(session_id, task).await?;
+        let pending_approval_count = approvals
+            .iter()
+            .filter(|approval| approval.child_task_id.as_ref() == Some(&snapshot.child_task_id))
+            .count();
+        Ok(ChildTaskTreeItemSnapshot {
+            can_cancel: !snapshot.inherited && !snapshot.status.is_terminal(),
+            task: snapshot,
+            usage,
+            pending_approval_count: pending_approval_count as u64,
+        })
+    }
+
+    /// 调用方已在同一 Session 观察屏障内核验主文件目录并取得 child 阅读事实。
+    /// 本函数复用该事实，正文／最终消息读取仍核验 generation；完成前由调用方复核
+    /// Session 水位（含 child 提交事件），避免每个 child 再完整读取两次主历史。
+    async fn child_task_tree_item(
+        &self,
+        session_id: &SessionId,
+        task: crate::StoredChildTaskHistory,
+        approvals: &[assistant_protocol::ApprovalSnapshot],
+    ) -> RuntimeResult<ChildTaskTreeItemSnapshot> {
+        let current = task.clone();
+        if current.inherited && current.body_unavailable {
             return Ok(ChildTaskTreeItemSnapshot {
-                can_cancel: !snapshot.status.is_terminal(),
-                task: snapshot,
-                usage,
-                pending_approval_count: u64::try_from(pending_approval_count).unwrap_or(u64::MAX),
+                task: self.child_history_snapshot(session_id, current).await?,
+                usage: ChildTaskUsageSnapshot {
+                    context: None,
+                    accumulated: None,
+                },
+                pending_approval_count: 0,
+                can_cancel: false,
             });
         }
-        Err(RuntimeError::SnapshotBusy)
+        let usage = self.child_usage_snapshot(session_id, &current).await?;
+        let snapshot = self.child_history_snapshot(session_id, current).await?;
+        let pending_approval_count = approvals
+            .iter()
+            .filter(|approval| approval.child_task_id.as_ref() == Some(&snapshot.child_task_id))
+            .count();
+        Ok(ChildTaskTreeItemSnapshot {
+            can_cancel: !snapshot.inherited && !snapshot.status.is_terminal(),
+            task: snapshot,
+            usage,
+            pending_approval_count: u64::try_from(pending_approval_count).unwrap_or(u64::MAX),
+        })
     }
 }
 
 impl AssistantRuntime {
     async fn composer_capabilities(
         &self,
+        snapshot: &crate::config::ConfigSnapshot,
         model_selection: Option<&assistant_protocol::ModelSelection>,
     ) -> RuntimeResult<(ComposerCapabilitiesSnapshot, Option<u64>)> {
         if let Err(error) = self.model_factory.ensure_available() {
@@ -1495,13 +1793,13 @@ impl AssistantRuntime {
                 None,
             ));
         }
-        let snapshot = self.config_registry.snapshot()?;
         let prepared = match self
             .config_registry
-            .prepare_model(&snapshot, model_selection, self.store.as_ref())
+            .prepare_model(snapshot, model_selection, self.store.as_ref())
             .await
         {
             Ok(prepared) => prepared,
+            Err(RuntimeError::ConfigurationConflict) => return Err(RuntimeError::SnapshotStale),
             Err(error) => {
                 let selected = self
                     .config_registry
@@ -1542,6 +1840,12 @@ impl AssistantRuntime {
         } else {
             ImageHandlingMode::Unavailable
         };
+        prepared
+            .ensure_current(&self.config_registry)
+            .map_err(|error| match error {
+                RuntimeError::ConfigurationConflict => RuntimeError::SnapshotStale,
+                error => error,
+            })?;
         Ok((
             ComposerCapabilitiesSnapshot {
                 selected_model: Some(prepared.selection.clone()),
@@ -1715,6 +2019,7 @@ fn project_skill_source(source: crate::SkillSource) -> SkillSourceSnapshot {
         crate::SkillSource::HostSupplement => SkillSourceSnapshot::HostSupplement,
         crate::SkillSource::UserAgents => SkillSourceSnapshot::UserAgents,
         crate::SkillSource::Plugin => SkillSourceSnapshot::Plugin,
+        crate::SkillSource::Builtin => SkillSourceSnapshot::Builtin,
     }
 }
 
@@ -1761,6 +2066,7 @@ fn skill_diagnostic_code(code: crate::SkillDiagnosticCode) -> &'static str {
 
 pub(super) fn empty_child_projection() -> ProjectionContext {
     ProjectionContext {
+        device_names: HashMap::new(),
         run_by_message: HashMap::new(),
         input_by_message: HashMap::new(),
         source_by_message: HashMap::new(),
@@ -1800,7 +2106,11 @@ pub(super) fn queue_snapshot(
                     submitted_at_ms: input.stored.accepted_at_ms,
                     position,
                     is_prioritized: position == 0,
-                    source: project_input_source(&input.stored, device_names),
+                    source: project_input_source(
+                        input.stored.cross_session.as_ref(),
+                        input.stored.channel_source.as_ref(),
+                        device_names,
+                    ),
                     held_by_goal,
                     skill: input
                         .stored
@@ -1957,6 +2267,172 @@ fn scoped_tool_results(
     results
 }
 
+/// 将可靠 Assistant/Tool 及其文件归属投影为 Run 工具列表；不恢复任何执行或流式输出。
+/// 输入已由调用方按 owner/generation 读取，本函数不取锁、不访问 Store，可重复投影。
+/// 结果以原 Assistant 和 call ID 配对，避免不同 Step 复用 call ID 时串用结果。
+pub(super) fn project_run_tool_activities(
+    snapshot: &ConversationSnapshot,
+    origins: &[crate::StoredMessageOrigin],
+    identities: &HashMap<(String, String), McpToolIdentity>,
+) -> RuntimeResult<HashMap<RunId, Vec<assistant_protocol::ToolActivitySnapshot>>> {
+    let origins: HashMap<_, _> = origins
+        .iter()
+        .map(|origin| (&origin.message_id, origin))
+        .collect();
+    let results = scoped_tool_results(snapshot);
+    let mut tools = HashMap::<_, Vec<_>>::new();
+    for message in &snapshot.messages {
+        let ConversationMessage::Assistant(assistant) = message else {
+            continue;
+        };
+        let Some(origin) = origins.get(&assistant.id) else {
+            continue;
+        };
+        let Some(run_id) = &origin.run_id else {
+            continue;
+        };
+        for part in &assistant.parts {
+            let AssistantPart::ToolCall(call) = part else {
+                continue;
+            };
+            let identity = project_mcp_identity(call.name.as_str(), &call.arguments, identities);
+            tools.entry(run_id.clone()).or_default().push(
+                assistant_protocol::ToolActivitySnapshot {
+                    step: origin.step,
+                    call_id: protocol_tool_call_id(call.id.as_str())?,
+                    tool_name: call.name.as_str().to_owned(),
+                    input: project_tool_input(
+                        call.name.as_str(),
+                        &call.arguments,
+                        identity.as_ref(),
+                    ),
+                    mcp_identity: identity,
+                    status: tool_status(
+                        results
+                            .get(&(assistant.id.as_str(), call.id.as_str()))
+                            .copied(),
+                    ),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                },
+            );
+        }
+    }
+    Ok(tools)
+}
+
+/// 文件窗口中的历史值只参与展示，不创建或恢复 RunRecord。
+pub(super) fn project_conversation_with_history(
+    snapshot: &ConversationSnapshot,
+    history: Option<&crate::StoredHistoryFacts>,
+    context: &ProjectionContext,
+) -> RuntimeResult<Vec<ConversationItem>> {
+    let Some(history) = history else {
+        return project_conversation(snapshot, context);
+    };
+    let mut projection = context.clone();
+    let inputs: HashMap<_, _> = history
+        .inputs
+        .iter()
+        .map(|input| (&input.input_id, input))
+        .collect();
+    for input in &history.inputs {
+        projection.input_by_message.insert(
+            input.user_message_id.as_str().to_owned(),
+            input.input_id.clone(),
+        );
+        projection.source_by_message.insert(
+            input.user_message_id.as_str().to_owned(),
+            project_input_source(
+                input.cross_session.as_ref(),
+                input.channel_source.as_ref(),
+                &context.device_names,
+            ),
+        );
+    }
+    let runs: HashMap<_, _> = history.runs.iter().map(|run| (&run.run_id, run)).collect();
+    for origin in &history.message_origins {
+        let run = origin.run_id.as_ref().and_then(|id| runs.get(id)).copied();
+        let existing = context.run_by_message.get(origin.message_id.as_str());
+        let input = origin
+            .input_id
+            .as_ref()
+            .or_else(|| run.and_then(|run| run.input_id.as_ref()))
+            .and_then(|id| inputs.get(id).copied());
+        let shell_switch = input
+            .and_then(|input| input.agent_shell_target)
+            .map(|target| {
+                (
+                    target,
+                    run.and_then(|run| run.agent_shell_kind) == Some(target),
+                )
+            })
+            .or_else(|| existing.and_then(|record| record.shell_switch));
+        let mut record = MessageRunProjection {
+            inherited: origin.inherited || run.is_some_and(|run| run.inherited),
+            partial: run.is_some_and(|run| run.partial),
+            shell_switch,
+            run_id: origin.run_id.clone(),
+            attempt: origin.attempt,
+            created_at_ms: run.map(|run| run.created_at_ms),
+            started_at_ms: run.and_then(|run| run.started_at_ms),
+            status: run.and_then(|run| run.status),
+            error: run.and_then(|run| run.error.clone()),
+            finished_at_ms: run.and_then(|run| run.finished_at_ms),
+            step: origin.step,
+        };
+        // 执行 Registry 只覆盖当前实际执行的实时值；文件历史本身不安装为执行对象。
+        if let Some(existing) = existing
+            && existing.run_id == record.run_id
+            && !origin.inherited
+            && !run.is_some_and(|run| run.inherited || run.partial)
+            && !record.status.is_some_and(|status| status.is_terminal())
+            && existing.status.is_some_and(|status| !status.is_terminal())
+        {
+            record.status = existing.status;
+            record.finished_at_ms = existing.finished_at_ms;
+            record.error = existing.error.clone();
+        }
+        projection
+            .run_by_message
+            .insert(origin.message_id.as_str().to_owned(), record);
+        if let Some(input) = &origin.input_id {
+            projection
+                .input_by_message
+                .insert(origin.message_id.as_str().to_owned(), input.clone());
+        }
+    }
+    for command in &history.commands {
+        if let Some(result) = &command.result {
+            projection
+                .control_result_by_message
+                .insert(command.user_message_id.as_str().to_owned(), result.clone());
+        }
+    }
+    for activation in &history.skill_activations {
+        projection
+            .skill_by_message
+            .insert(activation.message_id.as_str().to_owned(), activation.tag());
+    }
+    for selection in &history.mcp_selections {
+        projection
+            .mcp_selection_by_message
+            .insert(selection.message_id.as_str().to_owned(), selection.tag());
+    }
+    for feedback in &history.feedback {
+        if let Some(value) = feedback.feedback {
+            projection
+                .feedback_by_message
+                .insert(feedback.message_id.as_str().to_owned(), value);
+        } else {
+            projection
+                .feedback_by_message
+                .remove(feedback.message_id.as_str());
+        }
+    }
+    project_conversation(snapshot, &projection)
+}
+
 pub(super) fn project_conversation(
     snapshot: &ConversationSnapshot,
     context: &ProjectionContext,
@@ -1984,14 +2460,10 @@ pub(super) fn project_conversation(
                     items.push(ConversationItem::ShellSwitchResult {
                         message_id: protocol_message_id(user.id.as_str())?,
                         previous_shell: crate::shell::switch_previous(user)?,
-                        run_id: Some(run.snapshot.run_id.clone()),
+                        run_id: run.run_id.clone(),
                         shell,
                         success,
-                        error: if success {
-                            None
-                        } else {
-                            run.snapshot.error.clone()
-                        },
+                        error: if success { None } else { run.error.clone() },
                     });
                     continue;
                 }
@@ -2095,6 +2567,10 @@ pub(super) fn project_conversation(
                     })
                     .collect();
                 items.push(ConversationItem::User(UserMessageSnapshot {
+                    inherited: context
+                        .run_by_message
+                        .get(user.id.as_str())
+                        .is_some_and(|origin| origin.inherited),
                     message_id: protocol_message_id(user.id.as_str())?,
                     input_id: context.input_by_message.get(user.id.as_str()).cloned(),
                     text: user_text(user),
@@ -2168,14 +2644,17 @@ pub(super) fn project_conversation(
                 flush_tools(&mut segments, &mut pending_tools);
                 let run = context.run_by_message.get(assistant.id.as_str());
                 items.push(ConversationItem::Assistant(AssistantMessageSnapshot {
-                    run_created_at_ms: run.and_then(|run| run.snapshot.created_at_ms),
+                    inherited: run.is_some_and(|run| run.inherited),
+                    partial: run.is_some_and(|run| run.partial),
+                    run_created_at_ms: run.and_then(|run| run.created_at_ms),
+                    run_started_at_ms: run.and_then(|run| run.started_at_ms),
                     message_id: protocol_message_id(assistant.id.as_str())?,
-                    run_id: run.map(|run| run.snapshot.run_id.clone()),
-                    attempt: run.map(|run| run.snapshot.attempt),
+                    run_id: run.and_then(|run| run.run_id.clone()),
+                    attempt: run.and_then(|run| run.attempt),
                     step: run.and_then(|run| run.step),
                     created_at_ms: None,
                     finished_at_ms: run.and_then(|run| run.finished_at_ms),
-                    status: run.map(|run| run.snapshot.status),
+                    status: run.and_then(|run| run.status),
                     segments,
                     usage: assistant.usage.as_ref().map(token_usage),
                     can_fork: context.can_fork,
@@ -2241,7 +2720,10 @@ fn project_tool_detail(
         result,
         workspace_resources_available,
     )?;
-    let (request_json, request_redacted, request_truncated) = project_json(&call.arguments);
+    let safe_management = (call.name.as_str() == "configure_mcp")
+        .then(|| super::mcp::management_tools::safe_arguments(&call.arguments));
+    let (request_json, request_redacted, request_truncated) =
+        project_json(safe_management.as_ref().unwrap_or(&call.arguments));
     input.redacted |= request_redacted;
     input.truncated |= request_truncated;
     let (result_json, result_truncated) =
@@ -2275,7 +2757,7 @@ fn project_tool_detail(
     })
 }
 
-fn project_conversation_file_references(
+pub(crate) fn project_conversation_file_references(
     snapshot: &ConversationSnapshot,
 ) -> RuntimeResult<Vec<ConversationFileReference>> {
     let results = scoped_tool_results(snapshot);
@@ -2552,6 +3034,7 @@ fn project_usage(
     }
 }
 
+#[cfg(test)]
 fn context_usage_from_product_history(
     history: &ConversationSnapshot,
     mode: agent_model::ContextManagementMode,
@@ -2639,6 +3122,7 @@ fn project_context_usage(
     })
 }
 
+#[cfg(test)]
 pub(super) fn project_child_usage(
     snapshot: &ConversationSnapshot,
     context_window: Option<u64>,
@@ -2657,6 +3141,7 @@ pub(super) fn project_child_usage(
     }
 }
 
+#[cfg(test)]
 fn sum_usage<'a>(usages: impl Iterator<Item = &'a agent_types::TokenUsage>) -> Option<UsageTotals> {
     let mut found = false;
     let mut total = UsageTotals {
@@ -2777,11 +3262,12 @@ fn decode_cursor(cursor: &str) -> RuntimeResult<ConversationCursor> {
 }
 
 fn project_input_source(
-    input: &StoredInput,
+    cross_session: Option<&crate::CrossSessionInputEnvelope>,
+    channel_source: Option<&InputChannelSource>,
     device_names: &HashMap<assistant_protocol::DeviceId, String>,
 ) -> ConversationInputSourceSnapshot {
-    match input.cross_session.as_ref() {
-        None => match input.channel_source.as_ref() {
+    match cross_session {
+        None => match channel_source {
             Some(InputChannelSource::Desktop(source)) => ConversationInputSourceSnapshot::Desktop {
                 modality: project_input_modality(source.modality),
                 requested_output: project_output_preference(source.requested_output),

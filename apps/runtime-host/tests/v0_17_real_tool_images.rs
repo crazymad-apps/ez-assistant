@@ -72,18 +72,15 @@ fn run_read_image_case(model_key: &str) {
         json!({ "session_id": session_id, "approval_mode": "auto" }),
     );
 
-    let submitted = client.runtime(
-        "submit_input",
-        json!({
-            "session_id": session_id,
-            "message": format!(
-                "You must call read_image exactly once with path {:?}. Then reply with exactly: RED",
-                image_path
-            ),
-            "variant": "build",
-            "idempotency_key": format!("real-{model_key}-read-image")
-        }),
-    );
+    let submitted = client.submit_started_input(json!({
+        "session_id": session_id,
+        "message": format!(
+            "You must call read_image exactly once with path {:?}. Then reply with exactly: RED",
+            image_path
+        ),
+        "variant": "build",
+        "idempotency_key": format!("real-{model_key}-read-image")
+    }));
     let run_id = text(&submitted["run"]["run_id"]);
     let run = wait_for_terminal(&mut client, &session_id, &run_id);
     assert_eq!(run["status"], "completed", "real image Run failed: {run}");

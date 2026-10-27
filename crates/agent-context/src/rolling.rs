@@ -139,14 +139,14 @@ impl CompressionStrategy for RollingSummarySameModel {
                 });
             }
 
-            if !normal_request.tools.is_empty() && !model.capabilities().tool_choice.none {
-                return Err(CompactionError::UnsupportedToolSuppression);
-            }
             let mut request = normal_request;
             request
                 .conversation
                 .messages
                 .push(compression_instruction_message(head, tail));
+            // 摘要不声明可用工具；只设 None 仍会让部分上游拒绝工具参数组合。
+            // 历史调用／结果保持，正常生成的冻结工具快照不受影响。
+            request.tools.clear();
             request.tool_choice = ToolChoice::None;
             request.generation.max_output_tokens = Some(policy.summary_output_tokens());
             let message = collect_model_turn(
@@ -444,8 +444,8 @@ mod tests {
     use agent_types::{
         AssistantPart, FinishReason, MessageId, ModelIdentity, OpaqueProviderState, PartId,
         ProtocolId, ProviderId, ReasoningPart, SystemMessage, TextPart, TokenUsage, ToolCall,
-        ToolCallId, ToolDefinition, ToolMessage, ToolName, ToolResult, ToolResultContent,
-        ToolResultStatus, UserMessage,
+        ToolCallId, ToolDefinition, ToolImageReference, ToolMessage, ToolName, ToolResult,
+        ToolResultContent, ToolResultPart, ToolResultStatus, UserMessage,
     };
 
     use super::*;
@@ -958,7 +958,14 @@ mod tests {
                 result: ToolResult {
                     call_id: call_1,
                     status: ToolResultStatus::Success,
-                    content: ToolResultContent::text("one".to_owned()),
+                    content: ToolResultContent::parts(vec![
+                        ToolResultPart::text("one"),
+                        ToolResultPart::image(
+                            ToolImageReference::new(format!("{}.png", "a".repeat(64)), "image/png")
+                                .expect("valid tool image"),
+                        ),
+                    ])
+                    .expect("nonempty result"),
                     metadata: None,
                 },
             }),
@@ -1171,7 +1178,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compression_clones_the_normal_request_and_overrides_only_control_fields() {
+    async fn compression_removes_available_tools_and_preserves_other_frozen_fields() {
         let mut old_assistant = assistant("assistant_1", Some(usage(20)));
         let ConversationMessage::Assistant(message) = &mut old_assistant else {
             unreachable!();
@@ -1229,6 +1236,7 @@ mod tests {
         );
         let mut expected = compaction_input.normal_request.clone();
         expected.conversation.messages.push(instruction);
+        expected.tools.clear();
         expected.tool_choice = ToolChoice::None;
         expected.generation.max_output_tokens = Some(512);
 
@@ -1244,14 +1252,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compression_fails_before_model_call_when_tools_cannot_be_suppressed() {
+    async fn compression_does_not_require_explicit_tool_suppression_capability() {
+        let mut old_user = user("user_1");
+        let ConversationMessage::User(message) = &mut old_user else {
+            unreachable!();
+        };
+        message.parts.push(UserPart::Text(TextPart {
+            id: part_id("old_detail"),
+            text: "old detail ".repeat(200),
+        }));
         let snapshot = ConversationSnapshot::new(vec![
-            user("user_1"),
+            old_user,
             assistant("assistant_1", Some(usage(20))),
             user("user_2"),
             assistant("assistant_2", Some(usage(30))),
         ]);
-        let model = Arc::new(ScriptedModel::new([]));
+        let summary = summary_message(
+            "summary_without_tools",
+            vec![AssistantPart::Text(TextPart {
+                id: part_id("summary_text"),
+                text: "short summary".to_owned(),
+            })],
+            FinishReason::Stop,
+        );
+        let model = Arc::new(
+            ScriptedModel::new([Script::Events(message_events(&summary))]).with_capabilities(
+                ModelCapabilities {
+                    tool_calls: true,
+                    tool_choice: ToolChoiceCapabilities::auto_only(),
+                    ..ModelCapabilities::default()
+                },
+            ),
+        );
         let mut compaction_input = input(model.clone(), &snapshot);
         compaction_input.normal_request.tools = vec![ToolDefinition {
             name: ToolName::new("lookup").expect("tool name"),
@@ -1261,13 +1293,16 @@ mod tests {
         let strategy =
             RollingSummarySameModel::new(RollingSummaryPolicy::new(64, 1).expect("valid policy"));
 
-        assert_eq!(
+        assert!(matches!(
             strategy
                 .compact(compaction_input, CancellationToken::new())
                 .await,
-            Err(CompactionError::UnsupportedToolSuppression)
-        );
-        assert!(model.take_requests().is_empty());
+            Ok(StrategyOutcome::Candidate(_))
+        ));
+        let requests = model.take_requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].tools.is_empty());
+        assert_eq!(requests[0].tool_choice, ToolChoice::None);
     }
 
     #[tokio::test]

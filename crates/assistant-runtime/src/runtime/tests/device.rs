@@ -199,7 +199,7 @@ async fn controller_speak_dispatches_every_segment_in_tool_call_order() {
         .await
         .expect("paired device");
     let accepted = runtime
-        .submit_session_input(device_session_input(
+        .submit_started_session_input(device_session_input(
             controller.session.session_id.clone(),
             DeviceInputSource {
                 device_id: device.device_id.clone(),
@@ -268,7 +268,7 @@ async fn interrupted_speak_is_a_successful_takeover_instead_of_a_tool_failure() 
         .await
         .expect("paired device");
     let accepted = runtime
-        .submit_session_input(device_session_input(
+        .submit_started_session_input(device_session_input(
             controller.session.session_id.clone(),
             DeviceInputSource {
                 device_id: device.device_id,
@@ -331,7 +331,7 @@ async fn twenty_first_speak_is_rejected_before_channel_dispatch() {
         .await
         .expect("paired device");
     let accepted = runtime
-        .submit_session_input(device_session_input(
+        .submit_started_session_input(device_session_input(
             controller.session.session_id.clone(),
             DeviceInputSource {
                 device_id: device.device_id,
@@ -397,7 +397,7 @@ async fn missing_speak_creates_one_hidden_delivery_reminder_in_the_same_output_c
         .await
         .expect("paired device");
     let accepted = runtime
-        .submit_session_input(device_session_input(
+        .submit_started_session_input(device_session_input(
             controller.session.session_id.clone(),
             DeviceInputSource {
                 device_id: device.device_id,
@@ -482,7 +482,7 @@ async fn speech_delivery_reminder_is_not_repeated_when_the_model_still_omits_spe
         .await
         .expect("paired device");
     runtime
-        .submit_session_input(device_session_input(
+        .submit_started_session_input(device_session_input(
             controller.session.session_id,
             DeviceInputSource {
                 device_id: device.device_id,
@@ -530,7 +530,7 @@ async fn failed_run_does_not_retract_an_already_dispatched_speech_segment() {
         .await
         .expect("paired device");
     let accepted = runtime
-        .submit_session_input(device_session_input(
+        .submit_started_session_input(device_session_input(
             controller.session.session_id.clone(),
             DeviceInputSource {
                 device_id: device.device_id,
@@ -611,11 +611,11 @@ async fn device_input_is_idempotent_and_keeps_its_frozen_output_preference() {
     );
 
     let first = runtime
-        .submit_session_input(request.clone())
+        .submit_started_session_input(request.clone())
         .await
         .expect("first device input");
     let repeated = runtime
-        .submit_session_input(request)
+        .submit_started_session_input(request)
         .await
         .expect("idempotent device input");
     assert_eq!(repeated.input_id, first.input_id);
@@ -711,7 +711,7 @@ async fn trusted_device_input_can_target_a_standard_session() {
         .await
         .expect("paired device");
     let accepted = runtime
-        .submit_session_input(device_session_input(
+        .submit_started_session_input(device_session_input(
             session.session.session_id.clone(),
             DeviceInputSource {
                 device_id: device.device_id,
@@ -869,7 +869,7 @@ async fn channel_dispatch_failure_does_not_rewrite_the_completed_conversation() 
         .expect("set hosting");
 
     let submitted = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             session_id: controller.session.session_id.clone(),
             message: "desktop input".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -950,7 +950,7 @@ async fn device_controller_delivery_report_returns_to_the_source_instead_of_pc_h
         .expect("set PC hosting");
 
     let source = runtime
-        .submit_session_input(device_session_input(
+        .submit_started_session_input(device_session_input(
             controller.session.session_id.clone(),
             DeviceInputSource {
                 device_id: source_device.device_id.clone(),
@@ -1004,7 +1004,14 @@ async fn device_controller_delivery_report_returns_to_the_source_instead_of_pc_h
     runtime
         .wake_queue(target_controller)
         .expect("wake target queue");
-    let target_run_id = assistant_protocol::RunId::new(receipt.run_id).expect("target run id");
+    let target_run_id = runtime
+        .wait_for_input_claim(
+            &target.session.session_id,
+            &assistant_protocol::InputId::new(receipt.input_id).unwrap(),
+        )
+        .await
+        .unwrap()
+        .run_id;
     assert_eq!(
         wait_for_terminal(&runtime, &target.session.session_id, &target_run_id)
             .await
@@ -1028,9 +1035,7 @@ async fn device_controller_delivery_report_returns_to_the_source_instead_of_pc_h
                         (
                             crate::CrossSessionInputBinding::ProxyReport { .. },
                             crate::ReplyRoute::Device { device_id, .. },
-                        ) if device_id == &source_device.device_id => {
-                            Some(input.latest_run_id.clone())
-                        }
+                        ) if device_id == &source_device.device_id => input.latest_run_id.clone(),
                         _ => None,
                     }
                 })

@@ -1,7 +1,7 @@
 //! 普通与 Goal 用户输入共享的准备、原子接受和 Session 投影。
 //!
 //! 本模块把 Desktop 与受信任 Channel 输入归一到同一个 Session Input 用例。规范 UserMessage、
-//! Input、首次 Run、可选 Goal/Skill 事实先由 Store 原子接受，成功后才更新 Session 内存投影、
+//! Input、可选 Goal/Skill 事实先由 Store 原子接受，成功后才更新 Session 内存投影、
 //! 发布观察事件并唤醒执行队列；Channel 不会因此形成第二套会话或消息存储。
 
 use assistant_protocol::{
@@ -21,7 +21,7 @@ use crate::{
     internal_boundary::{
         InternalBoundaryCoordinator, InternalBoundaryRequest, InternalBoundarySource,
     },
-    run::{RunRecord, allocate_run_id, create_user_message},
+    run::create_user_message,
     skill::render_user_activation,
 };
 
@@ -155,7 +155,7 @@ impl AssistantRuntime {
         }
         // 先命中 Session 内已恢复的幂等事实，使合法重试不受当前配置、附件或 Skill 变化影响。
         if let Some(key) = request.idempotency_key.as_ref()
-            && let Some((input_id, run)) = session.find_idempotent(key)?
+            && let Some((input_id, run)) = self.find_idempotent_run(&session, key).await?
         {
             if session
                 .lock_state()?
@@ -210,7 +210,12 @@ impl AssistantRuntime {
         let goal_submission = self.goal_submission(session.as_ref(), request.mode).await?;
         let generated_title = automatic_session_title(&request.message);
         let files = self.resolve_file_references(&request.session_id, &request.attachment_ids)?;
+        let history = crate::runtime::load_identity_history(self.store.as_ref(), &session).await?;
         let mut message = create_user_message(request.message, files, request.variant)?;
+        {
+            let state = session.lock_state()?;
+            crate::run::ensure_message_id_available(&mut message.id, &state, &history)?;
+        }
         insert_quotes(&mut message, &quotes)?;
         // 结构化 channel_source 才是授权和回复路由事实；此 InternalContext 只提示模型本轮交互形态。
         if let Some(text) = channel_input_context(&channel_source) {
@@ -223,12 +228,10 @@ impl AssistantRuntime {
                 },
             )?;
         }
-        let (input_id, run_id, approval_mode, should_generate_title) = {
+        let (input_id, should_generate_title) = {
             let state = session.lock_state()?;
             (
-                self.allocate_input_id(&state)?,
-                allocate_run_id(&state)?,
-                state.approval_mode,
+                crate::run::allocate_input_id(&state, &history)?,
                 state.title_origin == SessionTitleOrigin::Generated
                     && state.inputs.is_empty()
                     && state.message_count == 0,
@@ -295,7 +298,7 @@ impl AssistantRuntime {
                     })?,
                     session_id: session.id().clone(),
                     owner: SkillActivationOwner::Session(session.id().clone()),
-                    run_id: Some(run_id.clone()),
+                    run_id: None,
                     input_id: Some(input_id.clone()),
                     message_id: message.id.clone(),
                     name: definition.name.clone(),
@@ -317,7 +320,7 @@ impl AssistantRuntime {
             .map(|goal| goal.control.to_stored(session.id().clone()));
         let generated_title = should_generate_title.then_some(generated_title);
         let was_proxied = session.lock_state()?.proxy.is_some();
-        // Store 在一个业务操作中提交正文、Input、首次 Run，以及可选 Goal/Skill/标题事实；
+        // Store 在一个业务操作中提交正文、Input，以及可选 Goal/Skill/标题事实；
         // 对普通用户输入，它还会原子解除 proxy 并移除尚未领取的 ControllerDelivery。
         let accepted = self
             .store
@@ -325,7 +328,6 @@ impl AssistantRuntime {
                 feedback_answer: feedback_answer.clone(),
                 agent_shell_target,
                 input_id: input_id.clone(),
-                run_id: run_id.clone(),
                 session_id: session.id().clone(),
                 idempotency_key: request.idempotency_key,
                 agent_variant: request.variant,
@@ -335,7 +337,6 @@ impl AssistantRuntime {
                 channel_source: Some(channel_source),
                 skill_activation: skill_activation.clone(),
                 mcp_selection: mcp_selection.clone(),
-                approval_mode,
                 message,
                 new_goal,
                 resumed_goal,
@@ -344,19 +345,29 @@ impl AssistantRuntime {
             })
             .await
             .map_err(|source| RuntimeError::from_store("accept input", source))?;
-        if accepted.is_duplicate {
+        if accepted.session_id() != session.id() {
+            return Err(RuntimeError::InternalStateUnavailable {
+                component: "accepted input owner",
+            });
+        }
+        if accepted.is_duplicate() {
             // Store 级幂等是跨进程重启的最终防线；重复请求不得再次附加消息或修改队列投影。
-            let state = session.lock_state()?;
-            let run = state
-                .runs
-                .get(&accepted.run.run_id)
-                .map(RunRecord::snapshot)
-                .ok_or(RuntimeError::InternalStateUnavailable {
-                    component: "idempotent run projection",
-                })?;
+            let run = if let Some(run_id) = accepted.run_id() {
+                Some(
+                    self.product_run_snapshots(&session)
+                        .await?
+                        .into_iter()
+                        .find(|run| &run.run_id == run_id && &run.input_id == accepted.input_id())
+                        .ok_or(RuntimeError::InternalStateUnavailable {
+                            component: "idempotent run projection",
+                        })?,
+                )
+            } else {
+                None
+            };
             return Ok((
                 SubmitInputResult {
-                    input_id: accepted.input.input_id,
+                    input_id: accepted.input_id().clone(),
                     run,
                 },
                 true,
@@ -411,12 +422,17 @@ impl AssistantRuntime {
                 if let Some(title) = generated_title {
                     state.title = title;
                 }
-                let changes_session_queue = accepted.input.goal_binding.is_none();
+                let crate::AcceptedInput::Control { input, .. } = &accepted else {
+                    return Err(RuntimeError::InternalStateUnavailable {
+                        component: "new input execution control",
+                    });
+                };
+                let changes_session_queue = input.goal_binding.is_none();
                 if let Some(PreparedGoalSubmission { control, .. }) = prepared_goal {
                     state.goal = Some(control);
                 }
                 state.queue_paused_by_user = false;
-                let projection = project_accepted_input(&mut state, accepted, mcp_selection);
+                let projection = project_accepted_input(&mut state, accepted, mcp_selection)?;
                 if feedback_reply.is_some() && changes_session_queue {
                     state.queue_item_ids.retain(|id| id != &projection.input_id);
                     state.queue_item_ids.push_front(projection.input_id.clone());
@@ -428,11 +444,6 @@ impl AssistantRuntime {
                     .then_some(state.queue_revision);
                 (projection, queue_revision)
             };
-        self.publish(assistant_protocol::RuntimeEvent::RunAccepted {
-            created_at_ms: projection.run.created_at_ms,
-            session_id: session.id().clone(),
-            run_id: projection.run.run_id.clone(),
-        });
         if let Some(goal) = goal_snapshot {
             self.publish(assistant_protocol::RuntimeEvent::GoalChanged {
                 session_id: session.id().clone(),
@@ -455,7 +466,7 @@ impl AssistantRuntime {
         Ok((
             SubmitInputResult {
                 input_id: projection.input_id,
-                run: projection.run,
+                run: None,
             },
             false,
         ))

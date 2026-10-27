@@ -53,18 +53,15 @@ impl VolatileRuntimeStore {
                 cleared.proxy = None;
             }
 
-            let child_ids = state
-                .child_tasks
-                .values()
-                .filter(|task| task.session_id == clear.session_id)
-                .map(|task| task.child_task_id.clone())
-                .collect::<BTreeSet<_>>();
             state
                 .inputs
                 .retain(|_, input| input.session_id != clear.session_id);
             state
                 .session_commands
                 .retain(|_, command| command.session_id != clear.session_id);
+            state
+                .command_identities
+                .retain(|_, identity| identity.session_id != clear.session_id);
             state
                 .runs
                 .retain(|_, run| run.session_id != clear.session_id);
@@ -73,10 +70,7 @@ impl VolatileRuntimeStore {
                 .retain(|_, task| task.session_id != clear.session_id);
             state
                 .child_conversations
-                .retain(|child_id, _| !child_ids.contains(child_id));
-            state
-                .message_feedback
-                .retain(|(session_id, _), _| session_id != &clear.session_id);
+                .retain(|(owner, _), _| owner != &clear.session_id);
             state
                 .pending_tool_exchanges
                 .retain(|_, exchange| exchange.session_id != clear.session_id);
@@ -107,6 +101,13 @@ impl VolatileRuntimeStore {
                 clear.session_id.clone(),
                 ConversationSnapshot::new(Vec::new()),
             );
+            state.histories.remove(&clear.session_id);
+            state
+                .input_identities
+                .retain(|_, identity| identity.session_id != clear.session_id);
+            state
+                .child_histories
+                .retain(|(owner, _), _| owner != &clear.session_id);
             state
                 .session_usage
                 .insert(clear.session_id.clone(), StoredSessionUsage::default());

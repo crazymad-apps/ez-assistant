@@ -3,6 +3,9 @@ import type { RuntimeHostHealth, RuntimeHostStartupStage, RuntimeHostStartupErro
 const stages: Record<RuntimeHostStartupStage, string> = {
   database_check: "正在检查数据库…",
   database_backup: "正在备份数据库…",
+  history_backup: "正在备份会话历史…",
+  backup_verification: "正在校验升级备份…",
+  history_migration: "正在迁移会话历史…",
   database_migration: "正在升级数据库，请稍候…",
   configuration: "正在检查配置…",
   recovery: "正在恢复 Runtime…",
@@ -22,6 +25,14 @@ export function startupMessage(health: RuntimeHostHealth): string {
     return `数据库要求 Host 至少为 ${health.min_compatible_host_version}，当前为 ${health.target_version}。未继续初始化，请使用兼容版本。`;
   }
   if (health.status === "unavailable") return health.error ? errors[health.error] ?? errors.initialization_failed : errors.initialization_failed;
-  if (health.status === "starting") return health.stage ? stages[health.stage] ?? "Host 正在初始化…" : "Host 正在初始化…";
+  if (health.status === "starting") {
+    const message = health.stage ? stages[health.stage] ?? "Host 正在初始化…" : "Host 正在初始化…";
+    const progress = health.progress;
+    if (!progress || !Number.isSafeInteger(progress.completed) || !Number.isSafeInteger(progress.total)
+      || progress.completed < 0 || progress.completed > progress.total) return message;
+    const unit = health.stage === "database_backup" ? "页" : health.stage === "history_backup" ? "个文件"
+      : health.stage === "history_migration" ? "个会话／子任务" : "项";
+    return `${message.replace(/…$/, "")}（${progress.completed} / ${progress.total} ${unit}）…`;
+  }
   return "Host 已就绪";
 }

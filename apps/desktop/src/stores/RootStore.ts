@@ -1,3 +1,4 @@
+import { childKey } from "./liveExecutionProjection";
 import { DesktopPinsStore, pinReference, type DesktopPins, type DesktopPin } from "./DesktopPinsStore";
 import { parseDesktopWorkspace, type DesktopWorkspaceSnapshot } from "../features/resource-workspace/desktopWorkspaceSnapshot";
 import { ClientResources } from "../runtime-client/ClientResources";
@@ -268,7 +269,6 @@ export class RootStore {
     });
     this.desktop_lifecycle = new DesktopLifecycleStore({
       resources: this.local_resource_workspace,
-      get_application: () => this.target_options.target_kind === "remote" ? null : this.local_projection.application,
       is_local_target: () => this.target_options.target_kind !== "remote",
       prepare_runtime_mutation: (kind) => this.#local_runtime.prepareForNativeRuntimeMutation(kind),
       reconnect_runtime: (bootstrap) => this.#local_runtime.reconnectAfterNativeRuntimeMutation(bootstrap),
@@ -1454,13 +1454,13 @@ export class RootStore {
     if (!client) return false;
     const instance_id = client.instance_id;
     const currentHistory = () => child_task_id
-      ? this.projection.child_conversation_histories.get(child_task_id)
+      ? this.projection.child_conversation_histories.get(childKey(session_id, child_task_id))
       : this.projection.conversation_histories.get(session_id);
     const history = child_task_id
-      ? this.projection.child_conversation_histories.get(child_task_id)
+      ? this.projection.child_conversation_histories.get(childKey(session_id, child_task_id))
       : this.projection.conversation_histories.get(session_id);
     const began = child_task_id
-      ? this.projection.beginLoadingPreviousChild(child_task_id)
+      ? this.projection.beginLoadingPreviousChild(session_id, child_task_id)
       : this.projection.beginLoadingPrevious(session_id);
     if (!client || !history || !began) {
       return false;
@@ -1488,14 +1488,14 @@ export class RootStore {
         throw new RuntimeClientError("snapshot_stale", "历史已更新，请重新加载。");
       }
       return runInAction(() => child_task_id
-        ? this.projection.applyPreviousChildConversationPage(child_task_id, result.payload.snapshot)
+        ? this.projection.applyPreviousChildConversationPage(session_id, child_task_id, result.payload.snapshot)
         : this.projection.applyPreviousConversationPage(session_id, result.payload.snapshot));
     } catch (error: unknown) {
       if (!is_current()) return false;
       const message = error instanceof RuntimeClientError && error.code === "snapshot_busy"
         ? "历史正在更新，请重试。" : "历史加载失败，请重试。";
       runInAction(() => child_task_id
-        ? this.projection.failLoadingPreviousChild(child_task_id, message)
+        ? this.projection.failLoadingPreviousChild(session_id, child_task_id, message)
         : this.projection.failLoadingPrevious(session_id, message));
       if (error instanceof RuntimeClientError && error.code === "snapshot_stale") {
         if (child_task_id) {
@@ -1667,7 +1667,7 @@ export class RootStore {
 
   #conversationHistoryForLocation(location: ConversationLocation) {
     return location.child_task_id
-      ? this.projection.child_conversation_histories.get(location.child_task_id)
+      ? this.projection.child_conversation_histories.get(childKey(location.session_id, location.child_task_id))
       : this.projection.conversation_histories.get(location.session_id);
   }
 

@@ -100,7 +100,7 @@ impl StorageEngine {
         })
     }
 
-    /// 按规范 Conversation 顺序恢复全部 Session Activation 事实。
+    /// 正常库只读待消费选择；已备份的升级源才读取原 SQL 历史。
     pub(super) fn load_skill_activations(&self) -> StorageResult<Vec<StoredSkillActivation>> {
         self.load_skill_activations_scoped(None)
     }
@@ -121,14 +121,20 @@ impl StorageEngine {
                         message_id, name, catalog_revision, definition_digest, trigger,
                         created_at_ms
                  FROM skill_activations
-                 WHERE {predicate} ORDER BY created_at_ms, activation_id"
+                 WHERE ({predicate}) AND (?2 OR EXISTS(
+                    SELECT 1 FROM inputs i WHERE i.input_id=skill_activations.input_id
+                    AND i.session_id=skill_activations.session_id AND i.state='queued'))
+                 ORDER BY created_at_ms, activation_id"
             ))
             .map_err(|source| {
                 invalid_data_with_source("skill activations could not be loaded", source)
             })?;
         let rows = statement
             .query_map(
-                [session_id.map(assistant_protocol::SessionId::as_str)],
+                params![
+                    session_id.map(assistant_protocol::SessionId::as_str),
+                    self.allow_legacy_history
+                ],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -245,7 +251,7 @@ pub(super) fn insert_skill_activation(
     Ok(())
 }
 
-fn validate_activation(activation: &StoredSkillActivation) -> StorageResult<()> {
+pub(super) fn validate_activation(activation: &StoredSkillActivation) -> StorageResult<()> {
     let owner_matches = match &activation.owner {
         SkillActivationOwner::Session(session_id) => session_id == &activation.session_id,
         SkillActivationOwner::ChildTask(child_task_id) => !child_task_id.is_empty(),

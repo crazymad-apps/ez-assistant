@@ -1,6 +1,6 @@
 use super::*;
-use std::io::{Read as _, Write as _};
 
+#[cfg(unix)]
 fn capabilities(version: &str) -> RuntimeHostCapabilities {
     serde_json::from_value(serde_json::json!({
         "runtime_version": version, "min_compatible_version": version,
@@ -10,89 +10,9 @@ fn capabilities(version: &str) -> RuntimeHostCapabilities {
     .unwrap()
 }
 
-fn read_request(stream: &mut std::net::TcpStream) -> String {
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    let mut bytes = Vec::new();
-    loop {
-        let mut chunk = [0; 4096];
-        let count = stream.read(&mut chunk).unwrap();
-        assert!(count > 0);
-        bytes.extend_from_slice(&chunk[..count]);
-        if let Some(end) = bytes.windows(4).position(|p| p == b"\r\n\r\n") {
-            let headers = String::from_utf8_lossy(&bytes[..end]).to_ascii_lowercase();
-            let length = headers
-                .lines()
-                .find_map(|l| l.strip_prefix("content-length: "))
-                .map(|n| n.parse::<usize>().unwrap())
-                .unwrap_or(0);
-            if bytes.len() >= end + 4 + length {
-                return String::from_utf8(bytes).unwrap();
-            }
-        }
-    }
-}
-
-#[tokio::test]
-async fn upgrade_shutdown_keeps_real_client_version_and_only_accepts_shutdown_ack() {
-    for (status, body, accepted) in [
-        (
-            "200 OK",
-            r#"{"result":{"scope":"runtime","payload":{"type":"shutdown_runtime","payload":{"lifecycle":"shutting_down"}}}}"#,
-            true,
-        ),
-        (
-            "200 OK",
-            r#"{"result":{"scope":"runtime","payload":{"type":"shutdown_runtime","payload":{"lifecycle":"running"}}}}"#,
-            false,
-        ),
-        ("409 Conflict", "{}", false),
-        ("200 OK", "{}", false),
-    ] {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = format!("http://{}", listener.local_addr().unwrap());
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let request = read_request(&mut stream);
-            let (headers, request_body) = request.split_once("\r\n\r\n").unwrap();
-            let headers = headers.to_ascii_lowercase();
-            assert!(headers.starts_with("post /commands "));
-            assert!(headers.contains(&format!(
-                "x-ez-client-version: {}\r\n",
-                assistant_protocol::SOFTWARE_VERSION
-            )));
-            assert!(headers.contains("x-ez-min-compatible-version: 0.26.0"));
-            assert!(headers.contains("authorization: bearer fixed-instance-token"));
-            let json: serde_json::Value = serde_json::from_str(request_body).unwrap();
-            assert_eq!(
-                json["command"],
-                serde_json::json!({"scope":"runtime","payload":{"type":"shutdown_runtime","payload":{}}})
-            );
-            write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
-        });
-        let home = tempfile::tempdir().unwrap();
-        let coordinator =
-            RuntimeBootstrapCoordinator::new(home.path().to_owned(), home.path().join("absent"))
-                .unwrap();
-        let previous = RuntimeBootstrap {
-            base_url: address,
-            instance_id: "fixed".into(),
-            access_token: "fixed-instance-token".into(),
-            capabilities: capabilities("0.26.0"),
-            started_runtime: false,
-        };
-        assert_eq!(
-            coordinator.stop_for_upgrade(&previous).await.is_ok(),
-            accepted
-        );
-        server.join().unwrap();
-    }
-}
-
 #[cfg(unix)]
 #[tokio::test]
-async fn upgrade_requires_same_installed_source_known_predecessor_and_current_candidate() {
+async fn upgrade_requires_replaced_same_installation_and_current_candidate() {
     use std::os::unix::fs::PermissionsExt as _;
     let home = tempfile::tempdir().unwrap();
     let source = home.path().canonicalize().unwrap().join("host");
@@ -117,7 +37,7 @@ async fn upgrade_requires_same_installed_source_known_predecessor_and_current_ca
     };
     let old = capabilities("0.26.0");
     assert!(coordinator.upgrade_source(&original, &old).await.is_ok());
-    for version in ["0.25.3", "0.27.0", "0.28.0", "invalid"] {
+    for version in ["99.0.0", "invalid"] {
         assert!(
             coordinator
                 .upgrade_source(&original, &capabilities(version))
@@ -125,6 +45,32 @@ async fn upgrade_requires_same_installed_source_known_predecessor_and_current_ca
                 .is_err()
         );
     }
+    for version in [
+        "0.26.0",
+        "0.27.0",
+        "0.32.0",
+        assistant_protocol::SOFTWARE_VERSION,
+    ] {
+        let mut previous = capabilities(version);
+        previous.mode = assistant_protocol::HostMode::Enterprise;
+        assert!(
+            coordinator
+                .upgrade_source(&original, &previous)
+                .await
+                .is_ok()
+        );
+    }
+    let mut identical = original.clone();
+    identical.executable_sha256 = Some(crate::runtime_source::digest(&source).unwrap());
+    assert!(
+        coordinator
+            .upgrade_source(
+                &identical,
+                &capabilities(assistant_protocol::SOFTWARE_VERSION)
+            )
+            .await
+            .is_err()
+    );
     let mut unrelated = original.clone();
     unrelated.executable_path = Some(home.path().join("other-installation"));
     assert!(coordinator.upgrade_source(&unrelated, &old).await.is_err());

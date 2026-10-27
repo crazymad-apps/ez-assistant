@@ -10,8 +10,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-// v0.32.0 显式登记发布入口；新库、升级与重启必须保持同一完整账本。
-const CURRENT_MIGRATION_COUNT: i64 = 11;
+// 保留发布链，并追加同版本 F02；新库、升级与重启必须保持同一完整账本。
+const CURRENT_MIGRATION_COUNT: i64 = 14;
 
 struct Host(Child);
 impl Drop for Host {
@@ -52,15 +52,30 @@ fn start_binary(home: &Path, binary: &Path) -> Host {
         )
         .unwrap();
     }
+    spawn_binary(home, binary)
+}
+fn spawn_binary(home: &Path, binary: &Path) -> Host {
     Host(
         Command::new(binary)
             .args(["serve", "--runtime-home"])
             .arg(home)
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::inherit())
             .spawn()
             .unwrap(),
     )
+}
+fn files(directory: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    let mut result = std::collections::BTreeMap::new();
+    for entry in fs::read_dir(directory).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            result.extend(files(&path));
+        } else {
+            result.insert(path.clone(), fs::read(path).unwrap());
+        }
+    }
+    result
 }
 fn http() -> Client {
     Client::builder()
@@ -85,6 +100,7 @@ fn http() -> Client {
 }
 fn wait_health(home: &Path, host: &mut Host, status: &str) -> Value {
     let deadline = Instant::now() + Duration::from_secs(10);
+    let mut observed = json!({"status":"not_observed"});
     loop {
         assert!(
             host.0.try_wait().unwrap().is_none(),
@@ -97,13 +113,15 @@ fn wait_health(home: &Path, host: &mut Host, status: &str) -> Value {
                 .bearer_auth(discovery["access_token"].as_str().unwrap())
                 .send()
             && let Ok(health) = response.json::<Value>()
-            && health["status"] == status
         {
-            return discovery;
+            if health["status"] == status {
+                return discovery;
+            }
+            observed = json!({"status":health["status"],"error":health["error"]});
         }
         assert!(
             Instant::now() < deadline,
-            "startup status {status} timed out"
+            "startup status {status} timed out: {observed}"
         );
         thread::sleep(Duration::from_millis(20));
     }
@@ -316,7 +334,7 @@ fn released_v0251_host_refuses_upgraded_database_without_changing_data_files() {
                 |r| r.get::<_, String>(0)
             )
             .unwrap(),
-        "0.30.0"
+        "0.32.1"
     );
     let backup_dir = fs::read_dir(home.path().join("backups/host-layout"))
         .unwrap()
@@ -339,18 +357,6 @@ fn released_v0251_host_refuses_upgraded_database_without_changing_data_files() {
     assert_eq!(count(&backup, "sessions"), 1);
     drop(backup);
     drop(upgraded);
-    fn files(directory: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
-        let mut result = std::collections::BTreeMap::new();
-        for entry in fs::read_dir(directory).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                result.extend(files(&path));
-            } else {
-                result.insert(path.clone(), fs::read(path).unwrap());
-            }
-        }
-        result
-    }
     // Old binaries do not recognize host.toml. Test DB admission directly in the new
     // personal root; replacing the old executable at the Host root is not supported.
     let preserved = files(&personal.join("data"));
@@ -368,6 +374,111 @@ fn released_v0251_host_refuses_upgraded_database_without_changing_data_files() {
     stop(&discovery, &mut old);
     assert_eq!(files(&personal.join("data")), preserved);
 }
+#[test]
+#[ignore = "requires verified EZ_ASSISTANT_PRE_F02_V0321_HOST; real same-version write admission"]
+fn pre_f02_v0321_host_refuses_keyed_history_database_before_writing_user_files() {
+    let binary = std::env::var_os("EZ_ASSISTANT_PRE_F02_V0321_HOST")
+        .expect("set a verified pre-F02 v0.32.1 Host path");
+    let binary = Path::new(&binary);
+    assert!(binary.is_absolute() && binary.is_file());
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.runtime-test");
+    let home = tempfile::Builder::new()
+        .prefix("f02-real-old-host-")
+        .tempdir_in(base)
+        .unwrap();
+    let personal = home.path().join("users/_personal");
+    fs::create_dir_all(&personal).unwrap();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    fs::write(
+        home.path().join("host.toml"),
+        format!("version='0.27.0'\nmode='personal'\n[host_access]\nport={port}\n"),
+    )
+    .unwrap();
+    fs::write(
+        personal.join("config.toml"),
+        "schema_version=1\ndefault_model=''\n",
+    )
+    .unwrap();
+    // 真实旧程序先在全新 Home 就绪；版本号和原账本共同证明没有拿新程序冒充旧候选。
+    let mut old = spawn_binary(home.path(), binary);
+    let discovery = wait_health(home.path(), &mut old, "ready");
+    let health: Value = http()
+        .get(format!("{}/health", discovery["address"].as_str().unwrap()))
+        .bearer_auth(discovery["access_token"].as_str().unwrap())
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(health["target_version"], "0.32.1");
+    stop(&discovery, &mut old);
+    let database = personal.join("data/runtime.sqlite3");
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    assert_eq!(connection.query_row("SELECT COUNT(*) FROM pragma_table_info('schema_migrations') WHERE name='migration_key'", [], |row| row.get::<_,i64>(0)).unwrap(), 0);
+    let release_time: i64 = connection
+        .query_row(
+            "SELECT applied_at_ms FROM schema_migrations WHERE version='0.32.1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection.execute("INSERT INTO sessions(session_id,title,system_prompt_json,skill_catalog_json,lifecycle,body_generation,message_count,created_at_ms,updated_at_ms) VALUES('old-v0321-session','keep same-version history','[]','[]','active',1,0,1,1)", []).unwrap();
+    let body = personal.join("data/sessions/old-v0321-session/conversation.1.jsonl");
+    fs::create_dir_all(body.parent().unwrap()).unwrap();
+    fs::write(&body, b"").unwrap();
+    drop(connection);
+    let mut current = start(home.path());
+    let discovery = wait_health(home.path(), &mut current, "ready");
+    stop(&discovery, &mut current);
+    let readonly = |path: &Path| {
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap()
+    };
+    let connection = readonly(&database);
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version='0.32.1'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        3
+    );
+    assert_eq!(connection.query_row("SELECT applied_at_ms FROM schema_migrations WHERE version='0.32.1' AND migration_key='release'", [], |row| row.get::<_,i64>(0)).unwrap(), release_time);
+    assert_eq!(connection.query_row("SELECT COUNT(*) FROM sessions WHERE session_id='old-v0321-session' AND title='keep same-version history' AND body_generation=2", [], |row| row.get::<_,i64>(0)).unwrap(), 1);
+    drop(connection);
+    assert_eq!(
+        fs::read_dir(personal.join("backups/database"))
+            .unwrap()
+            .count(),
+        0
+    );
+    let preserved = files(&personal);
+    // 使用同一现代 Host 布局直接启动，不通过测试 helper 改写配置。
+    let mut old = spawn_binary(home.path(), binary);
+    let discovery = wait_health(home.path(), &mut old, "unavailable");
+    let health: Value = http()
+        .get(format!("{}/health", discovery["address"].as_str().unwrap()))
+        .bearer_auth(discovery["access_token"].as_str().unwrap())
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    // 同 SemVer 的旧程序将未知账本形状诊断为迁移失败；关键门禁是拒绝业务且写前停止。
+    assert_eq!(health["error"], "migration_failed");
+    gated(&discovery);
+    stop(&discovery, &mut old);
+    assert_eq!(files(&personal), preserved);
+    eprintln!(
+        "F02 real old-host verification: SQLite={}, successful upgrade backup removed, sessions=1 retained, same-version ledger rows=1→3, old Host rejected without changing personal files",
+        database.display()
+    );
+}
+
 #[test]
 fn invalid_database_keeps_authenticated_diagnostics_without_retry_or_recreation() {
     let home = tempfile::tempdir().unwrap();
@@ -447,8 +558,8 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
         .json()
         .unwrap();
     assert_eq!(health["database_version"], env!("CARGO_PKG_VERSION"));
-    // 数据库最低 Host 与应用协议 minimum 独立；v0.30.0 的冻结压缩机制要求提升数据库下限。
-    assert_eq!(health["min_compatible_host_version"], "0.30.0");
+    // 数据库最低 Host 与应用协议 minimum 独立；F02 文件历史切换要求新的存储下限。
+    assert_eq!(health["min_compatible_host_version"], "0.32.1");
     let configuration =
         fs::read_to_string(home.path().join("users/_personal/config.toml")).unwrap();
     assert!(!configuration.contains("default_model"));
@@ -482,7 +593,7 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
     .unwrap();
     let ledger: (String, i64) = database
         .query_row(
-            "SELECT version, applied_at_ms FROM schema_migrations ORDER BY version DESC LIMIT 1",
+            "SELECT version, applied_at_ms FROM schema_migrations WHERE migration_key='release' ORDER BY version DESC LIMIT 1",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -523,7 +634,7 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
             .args(["serve", "--runtime-home"])
             .arg(home.path())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::inherit())
             .spawn()
             .unwrap(),
     );
@@ -540,7 +651,7 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
     assert_eq!(
         database
             .query_row(
-                "SELECT version, applied_at_ms FROM schema_migrations ORDER BY version DESC LIMIT 1",
+                "SELECT version, applied_at_ms FROM schema_migrations WHERE migration_key='release' ORDER BY version DESC LIMIT 1",
                 [],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
             )
@@ -564,7 +675,7 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
 }
 
 #[test]
-fn legacy_invalid_model_reference_is_discarded_after_verified_backup() {
+fn legacy_invalid_model_reference_is_discarded_and_successful_backup_is_removed() {
     let home = tempfile::tempdir().unwrap();
     fs::create_dir_all(home.path().join("users/_personal/data")).unwrap();
     let database_path = home.path().join("users/_personal/data/runtime.sqlite3");
@@ -581,6 +692,10 @@ fn legacy_invalid_model_reference_is_discarded_after_verified_backup() {
         1
     );
     drop(old);
+    // 正常旧产品为空会话也创建文件；SQL 人工夹具须包含这份配套原件。
+    let directory = home.path().join("users/_personal/data/sessions/legacy");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("conversation.1.jsonl"), b"").unwrap();
     let mut host = start(home.path());
     let discovery = wait_health(home.path(), &mut host, "ready");
     let upgraded = rusqlite::Connection::open_with_flags(
@@ -588,40 +703,16 @@ fn legacy_invalid_model_reference_is_discarded_after_verified_backup() {
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
-    assert_eq!(upgraded.query_row("SELECT COUNT(*) FROM sessions WHERE session_id='legacy' AND title='history preserved' AND lifecycle='archived' AND body_generation=1 AND message_count=0 AND model_provider_instance_id IS NULL AND model_id IS NULL", [], |row| row.get::<_,i64>(0)).unwrap(), 1);
-    let backup_dir = fs::read_dir(home.path().join("users/_personal/backups/database"))
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
-    let backup = rusqlite::Connection::open_with_flags(
-        backup_dir.join("runtime.sqlite3"),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .unwrap();
+    assert_eq!(upgraded.query_row("SELECT COUNT(*) FROM sessions WHERE session_id='legacy' AND title='history preserved' AND lifecycle='archived' AND body_generation=2 AND message_count=0 AND model_provider_instance_id IS NULL AND model_id IS NULL", [], |row| row.get::<_,i64>(0)).unwrap(), 1);
+    let framed = fs::read_to_string(directory.join("conversation.2.jsonl")).unwrap();
+    let header: Value = serde_json::from_str(framed.lines().next().unwrap()).unwrap();
+    assert_eq!(header["format"], "ez_assistant_history");
+    assert_eq!(header["generation"], 2);
     assert_eq!(
-        backup
-            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row
-                .get::<_, i64>(0))
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        backup
-            .query_row(
-                "SELECT model_key FROM sessions WHERE session_id='legacy'",
-                [],
-                |row| row.get::<_, String>(0)
-            )
-            .unwrap(),
-        "invalid model !"
-    );
-    assert_eq!(
-        backup
-            .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
-            .unwrap(),
-        "ok"
+        fs::read_dir(home.path().join("users/_personal/backups/database"))
+            .unwrap()
+            .count(),
+        0
     );
     let response = http().post(format!("{}/commands", discovery["address"].as_str().unwrap()))
         .bearer_auth(discovery["access_token"].as_str().unwrap())

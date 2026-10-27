@@ -1,5 +1,6 @@
 import "./check-version.mjs";
 import { createReleaseManifest, requireUpdateSigning } from "./release-manifest.mjs";
+import { createMacosInstaller } from "./package-macos.mjs";
 import { access, readFile, stat } from "node:fs/promises";
 import { constants } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
@@ -12,6 +13,7 @@ const desktopRoot = resolve(scriptDirectory, "..");
 const workspaceRoot = resolve(desktopRoot, "../..");
 requireUpdateSigning();
 const signingIdentity = requiredEnvironment("APPLE_SIGNING_IDENTITY");
+const installerIdentity = requiredEnvironment("APPLE_INSTALLER_SIGNING_IDENTITY");
 const teamId = requiredEnvironment("APPLE_TEAM_ID");
 const apiIssuer = requiredEnvironment("APPLE_API_ISSUER");
 const apiKey = requiredEnvironment("APPLE_API_KEY");
@@ -28,6 +30,9 @@ if (!/^[A-Z0-9]{10}$/.test(teamId)) {
 }
 if (!signingIdentity.endsWith(`(${teamId})`)) {
   throw new Error("APPLE_SIGNING_IDENTITY and APPLE_TEAM_ID refer to different teams");
+}
+if (!/^Developer ID Installer: .+ \([A-Z0-9]{10}\)$/.test(installerIdentity) || !installerIdentity.endsWith(`(${teamId})`)) {
+  throw new Error("APPLE_INSTALLER_SIGNING_IDENTITY must name a Developer ID Installer identity for APPLE_TEAM_ID");
 }
 if (!/^[0-9a-fA-F-]{36}$/.test(apiIssuer)) {
   throw new Error("APPLE_API_ISSUER must be the UUID shown for the App Store Connect Team Key");
@@ -52,6 +57,8 @@ const identities = await capture("security", ["find-identity", "-v", "-p", "code
 if (!identities.includes(`"${signingIdentity}"`)) {
   throw new Error("APPLE_SIGNING_IDENTITY is not a valid identity in the current Keychain");
 }
+const installerIdentities = await capture("security", ["find-identity", "-v"]);
+if (!installerIdentities.includes(`"${installerIdentity}"`)) throw new Error("Developer ID Installer identity is unavailable");
 
 const tauriConfig = JSON.parse(
   await readFile(resolve(desktopRoot, "src-tauri/tauri.conf.json"), "utf8"),
@@ -85,7 +92,7 @@ await run("npm", [
   "--target",
   "aarch64-apple-darwin",
   "--bundles",
-  "app,dmg",
+  "app",
 ], desktopRoot);
 
 const bundleRoot = resolve(
@@ -94,6 +101,8 @@ const bundleRoot = resolve(
 );
 const appPath = resolve(bundleRoot, "macos", `${productName}.app`);
 const dmgPath = resolve(bundleRoot, "dmg", `${productName}_${version}_aarch64.dmg`);
+
+await createMacosInstaller({ app: appPath, output: dmgPath, installerIdentity, signingIdentity, replace: true });
 
 const dmgSubmissionId = await notarizeDmg(dmgPath);
 console.log(`DMG notarization accepted: ${dmgSubmissionId}`);

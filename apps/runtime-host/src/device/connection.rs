@@ -1422,7 +1422,10 @@ async fn process_voice_turn(
                 timestamp_ms(),
                 correlation_id(device_id.as_str()),
                 correlation_id(&completed.logical_client_input_id),
-                correlation_id(accepted.run_id.as_str()),
+                accepted.run_id.as_ref().map_or_else(
+                    || "none".to_owned(),
+                    |run_id| correlation_id(run_id.as_str())
+                ),
                 submission_started.elapsed().as_millis()
             );
             send_payload(socket, "input_accepted", &accepted).await?;
@@ -1609,12 +1612,10 @@ async fn submit_speech_input(
             }),
         })
         .await?;
-    Ok(InputAccepted {
-        client_input_id: client_input_id.to_owned(),
-        input_id: result.input_id,
-        run_id: result.run.run_id,
-        queue_state: result.run.status,
-    })
+    Ok(InputAccepted::from_submission(
+        client_input_id.to_owned(),
+        result,
+    ))
 }
 
 fn validate_listen_start(request: &ListenStart) -> Result<(), ConnectionError> {
@@ -1719,12 +1720,10 @@ async fn submit_text_input(
             }),
         })
         .await?;
-    Ok(InputAccepted {
-        client_input_id: request.client_input_id,
-        input_id: result.input_id,
-        run_id: result.run.run_id,
-        queue_state: result.run.status,
-    })
+    Ok(InputAccepted::from_submission(
+        request.client_input_id,
+        result,
+    ))
 }
 
 /// 本版本 Device Channel 的 Host 路由策略：选择当前活动 Controller Session。

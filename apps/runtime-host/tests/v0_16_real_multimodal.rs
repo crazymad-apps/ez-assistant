@@ -102,9 +102,7 @@ fn run_two_image_case(
     }
     let red_id = upload(&host, &session_id, &red);
     let blue_id = upload(&host, &session_id, &blue);
-    let submitted = client.runtime(
-        "submit_input",
-        json!({
+    let submitted = client.submit_started_input(json!({
             "session_id": session_id,
             "message": if expected_native_image_input {
                 "Inspect the two attached solid-color images directly without calling any tools. Reply with exactly: RED BLUE"

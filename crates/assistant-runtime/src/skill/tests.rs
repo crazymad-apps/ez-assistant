@@ -2,6 +2,9 @@ use super::*;
 use agent_tools::{Tool, ToolContext};
 use agent_types::ToolCallId;
 
+#[path = "reference_tests.rs"]
+mod reference_tests;
+
 fn catalog_with(mut skill: SkillCandidate) -> SkillCatalog {
     skill.definition_digest = format!("sha256-v1:{}", "1".repeat(64));
     SkillCatalog::from_discovery(SkillDiscovery {
@@ -42,6 +45,59 @@ fn name_validation_matches_stable_agent_skills_subset() {
     for invalid in ["", "Review", "-review", "review-", "review--pr", "审查"] {
         assert!(SkillName::parse(invalid).is_err(), "{invalid}");
     }
+}
+
+#[test]
+fn builtin_skill_has_lowest_priority_and_a_non_filesystem_activation_source() {
+    let builtin = candidate(
+        "skill-creator",
+        SkillSource::Builtin,
+        "builtin:skill-creator",
+    );
+    let scan = |candidates| SkillScanResult {
+        candidates,
+        diagnostics: vec![],
+        complete: true,
+    };
+    for source in [
+        SkillSource::UserAgents,
+        SkillSource::UserEzAssistant,
+        SkillSource::WorkspaceEzAssistant,
+    ] {
+        let custom = candidate("skill-creator", source, "/fixture/custom");
+        let discovery = compile_skill_discovery(scan(vec![builtin.clone(), custom]), &[]);
+        assert_eq!(discovery.winners[0].source, source);
+    }
+    let disabled = compile_skill_discovery(
+        scan(vec![builtin.clone()]),
+        &[SkillNameState {
+            name: builtin.name.clone(),
+            enabled: false,
+            updated_at_ms: 1,
+        }],
+    );
+    assert!(disabled.winners.is_empty());
+    let catalog = catalog_with(builtin);
+    let definition = &catalog.definitions[0];
+    let activation = super::activation::render_user_activation(&catalog.revision, definition);
+    assert!(activation.contains("builtin_skill: skill-creator"));
+    assert!(activation.contains("no filesystem resource directory"));
+    assert!(!activation.contains("shared_skill_root"));
+    assert!(
+        super::activation::render_model_activation(&catalog.revision, definition)
+            .contains("builtin_skill: skill-creator")
+    );
+    let frozen = activation.clone();
+    let restored: SkillCatalog =
+        serde_json::from_str(&serde_json::to_string(&catalog).unwrap()).unwrap();
+    restored.validate_structure().unwrap();
+    assert_eq!(
+        super::activation::render_user_activation(&restored.revision, &restored.definitions[0]),
+        frozen
+    );
+    let mut invalid = restored;
+    invalid.definitions[0].source_path = "/pretend/builtin".into();
+    assert!(invalid.validate_structure().is_err());
 }
 
 #[test]

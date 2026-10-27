@@ -1,6 +1,10 @@
 //! 已提交模型请求事实与 Session 用量滚动汇总。
 
-use agent_types::{ConversationMessage, ModelIdentity, TokenUsage};
+pub(crate) mod snapshot;
+
+use std::collections::HashSet;
+
+use agent_types::{ConversationMessage, ConversationSnapshot, ModelIdentity, TokenUsage};
 use assistant_protocol::{ConversationOwner, SessionId};
 use assistant_runtime::StoredSessionUsage;
 use rusqlite::{OptionalExtension, Transaction, params};
@@ -15,6 +19,40 @@ struct UsageRecord<'a> {
 }
 
 impl StorageEngine {
+    /// 换代保留的消息已经属于既有正文，不能借换代给继承调用补记目标费用。
+    /// 只借用新增请求，不复制正文；当前 owner 的位置索引核对身份与文件完整性。
+    pub(super) fn new_replacement_usage_messages<'a>(
+        &mut self,
+        owner: &ConversationOwner,
+        source_generation: u64,
+        replacement: &'a ConversationSnapshot,
+    ) -> StorageResult<Vec<&'a ConversationMessage>> {
+        let mut added = Vec::new();
+        for message in &replacement.messages {
+            if !matches!(message,
+                ConversationMessage::Assistant(message) if message.usage.is_some())
+                && !matches!(message,
+                    ConversationMessage::ContextSummary(message) if message.usage.is_some())
+            {
+                continue;
+            }
+            let location = self.locate_conversation_message(
+                assistant_runtime::ConversationMessageLocationRequest {
+                    owner: owner.clone(),
+                    message_id: super::conversation::message_id(message).clone(),
+                },
+            )?;
+            match location {
+                Some(location) if location.generation != source_generation => {
+                    return Err(super::conflict("usage source generation changed"));
+                }
+                Some(_) => {}
+                None => added.push(message),
+            }
+        }
+        Ok(added)
+    }
+
     pub(super) fn get_session_usage(
         &self,
         session_id: &SessionId,
@@ -89,14 +127,28 @@ impl StorageEngine {
             let owner = ConversationOwner::MainSession {
                 session_id: session_id.clone(),
             };
+            let facts = if self.allow_legacy_history {
+                self.legacy_history_facts(&owner, &snapshot)?
+            } else {
+                self.load_conversation_history(owner.clone())?.facts
+            };
+            // 正文里的 usage 不是本地调用凭据。旧分支归属缺失保持未知；既有独立账本不变。
+            let local: HashSet<_> = facts
+                .message_origins
+                .iter()
+                .filter(|origin| !origin.inherited)
+                .map(|origin| &origin.message_id)
+                .collect();
             let transaction = self.connection.transaction().map_err(|source| {
                 internal_error("session usage backfill could not begin", source)
             })?;
             record_usage_messages(
                 &transaction,
                 &owner,
-                None,
-                &snapshot.messages,
+                snapshot
+                    .messages
+                    .iter()
+                    .filter(|message| local.contains(super::conversation::message_id(message))),
                 completed_at_ms,
             )?;
             transaction
@@ -115,21 +167,20 @@ impl StorageEngine {
     }
 }
 
-pub(super) fn record_usage_messages(
+pub(super) fn record_usage_messages<'a>(
     transaction: &Transaction<'_>,
     owner: &ConversationOwner,
-    run_id: Option<&str>,
-    messages: &[ConversationMessage],
+    messages: impl IntoIterator<Item = &'a ConversationMessage>,
     completed_at_ms: i64,
 ) -> StorageResult<()> {
-    for message in messages {
+    let messages: Vec<_> = messages.into_iter().collect();
+    for message in &messages {
         match message {
             ConversationMessage::Assistant(message) => {
                 if let Some(usage) = message.usage.as_ref() {
                     record_usage(
                         transaction,
                         owner,
-                        run_id,
                         UsageRecord {
                             request_id: message.id.as_str().to_owned(),
                             request_kind: if message.purpose.is_model_response() {
@@ -149,7 +200,6 @@ pub(super) fn record_usage_messages(
                     record_usage(
                         transaction,
                         owner,
-                        run_id,
                         UsageRecord {
                             request_id: message.id.as_str().to_owned(),
                             request_kind: "context_summary",
@@ -163,13 +213,13 @@ pub(super) fn record_usage_messages(
             _ => {}
         }
     }
+    snapshot::append_context(transaction, owner, &messages)?;
     Ok(())
 }
 
 fn record_usage(
     transaction: &Transaction<'_>,
     owner: &ConversationOwner,
-    run_id: Option<&str>,
     record: UsageRecord<'_>,
     completed_at_ms: i64,
 ) -> StorageResult<()> {
@@ -185,16 +235,15 @@ fn record_usage(
     let inserted = transaction
         .execute(
             "INSERT OR IGNORE INTO model_request_records (
-                session_id, owner_kind, owner_id, request_id, run_id, request_kind,
+                session_id, owner_kind, owner_id, request_id, request_kind,
                 provider, model_id, input_tokens, output_tokens, total_tokens,
                 cached_input_tokens, reasoning_tokens, completed_at_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 session_id,
                 owner_kind,
                 owner_id,
                 record.request_id,
-                run_id,
                 record.request_kind,
                 record.model.map(|model| model.provider.as_str()),
                 record.model.map(|model| model.model.as_str()),
@@ -224,6 +273,9 @@ fn record_usage(
             ],
         )
         .map_err(|source| internal_error("model request usage could not be recorded", source))?;
+    if inserted != 0 {
+        snapshot::accumulate(transaction, owner, record.usage)?;
+    }
     if inserted == 0 || owner_kind != "session" {
         return Ok(());
     }

@@ -1,7 +1,7 @@
 //! 用户 Queue 控制、Session 恢复与失败 Run 重试命令。
 
 use assistant_protocol::{
-    CancelQueuedInputRequest, CancelQueuedInputResult, InputId, PrioritizeQueuedInputRequest,
+    CancelQueuedInputRequest, CancelQueuedInputResult, PrioritizeQueuedInputRequest,
     PrioritizeQueuedInputResult, ResumeQueuedInputRequest, ResumeQueuedInputResult,
     ResumeSessionRequest, ResumeSessionResult, RetryRunRequest, RetryRunResult, RunStatus,
 };
@@ -254,39 +254,77 @@ impl AssistantRuntime {
         let _mutation = session.mutation().await;
         session.ensure_active()?;
         session.ensure_healthy()?;
+        let history = self
+            .store
+            .load_conversation_history(assistant_protocol::ConversationOwner::MainSession {
+                session_id: request.session_id.clone(),
+            })
+            .await
+            .map_err(|source| RuntimeError::from_store("load retry history", source))?;
         let (input_id, new_run_id, approval_mode) = {
             let state = session.lock_state()?;
-            let source =
-                state
-                    .runs
-                    .get(&request.run_id)
-                    .ok_or_else(|| RuntimeError::RunNotFound {
-                        session_id: request.session_id.clone(),
-                        run_id: request.run_id.clone(),
-                    })?;
-            if !matches!(source.status(), RunStatus::Failed | RunStatus::Interrupted) {
-                return Err(RuntimeError::RunNotRetryable {
-                    session_id: request.session_id.clone(),
-                    run_id: request.run_id.clone(),
-                });
+            if state.body_generation != history.generation {
+                return Err(RuntimeError::SnapshotStale);
             }
-            let Some(input) = state.inputs.get(source.input_id()) else {
-                return Err(RuntimeError::RunNotRetryable {
-                    session_id: request.session_id.clone(),
-                    run_id: request.run_id.clone(),
-                });
+            let source = history
+                .facts
+                .runs
+                .iter()
+                .find(|run| run.run_id == request.run_id)
+                .ok_or_else(|| {
+                    if state.runs.contains_key(&request.run_id) {
+                        RuntimeError::RunNotRetryable {
+                            session_id: request.session_id.clone(),
+                            run_id: request.run_id.clone(),
+                        }
+                    } else {
+                        RuntimeError::RunNotFound {
+                            session_id: request.session_id.clone(),
+                            run_id: request.run_id.clone(),
+                        }
+                    }
+                })?;
+            let not_retryable = || RuntimeError::RunNotRetryable {
+                session_id: request.session_id.clone(),
+                run_id: request.run_id.clone(),
             };
-            if input.stored.goal_binding.is_some() {
+            if source.inherited
+                || source.partial
+                || !matches!(
+                    source.status,
+                    Some(RunStatus::Failed | RunStatus::Interrupted)
+                )
+            {
+                return Err(not_retryable());
+            }
+            let input_id = source.input_id.as_ref().ok_or_else(not_retryable)?;
+            let input = history
+                .facts
+                .inputs
+                .iter()
+                .find(|input| &input.input_id == input_id && !input.inherited)
+                .ok_or_else(not_retryable)?;
+            if input.goal_binding.is_some() {
                 return Err(RuntimeError::GoalRunRequiresResume {
                     session_id: request.session_id.clone(),
                     run_id: request.run_id.clone(),
                 });
             }
-            if input.latest_run_id != request.run_id {
-                return Err(RuntimeError::RunNotRetryable {
-                    session_id: request.session_id.clone(),
-                    run_id: request.run_id.clone(),
-                });
+            let latest = history
+                .facts
+                .runs
+                .iter()
+                .filter(|run| run.input_id.as_ref() == Some(input_id) && !run.inherited)
+                .map(|run| run.attempt)
+                .max();
+            if latest != Some(source.attempt)
+                || !state.inputs.contains_key(input_id)
+                || state
+                    .runs
+                    .values()
+                    .any(|run| run.input_id() == input_id && !run.status().is_terminal())
+            {
+                return Err(not_retryable());
             }
             if state.active_run.is_some() {
                 return Err(RuntimeError::SessionBusy {
@@ -294,8 +332,8 @@ impl AssistantRuntime {
                 });
             }
             (
-                source.input_id().clone(),
-                allocate_run_id(&state)?,
+                input_id.clone(),
+                allocate_run_id(&state, &history.facts)?,
                 state.approval_mode,
             )
         };
@@ -327,7 +365,7 @@ impl AssistantRuntime {
                 .inputs
                 .get_mut(&input_id)
                 .expect("checked input")
-                .latest_run_id = stored.run_id.clone();
+                .latest_run_id = Some(stored.run_id.clone());
             let position = state
                 .queue_item_ids
                 .iter()
@@ -359,28 +397,6 @@ impl AssistantRuntime {
         });
         self.wake_queue(session.clone())?;
         Ok(RetryRunResult { run: snapshot })
-    }
-
-    pub(crate) fn allocate_input_id(
-        &self,
-        state: &crate::session::SessionState,
-    ) -> RuntimeResult<InputId> {
-        for _ in 0..crate::id::GENERATION_ATTEMPTS {
-            let id = InputId::new(crate::id::generate("i").map_err(|_| {
-                RuntimeError::InternalStateUnavailable {
-                    component: "input id random source",
-                }
-            })?)
-            .map_err(|_| RuntimeError::InternalStateUnavailable {
-                component: "input id generator",
-            })?;
-            if !state.inputs.contains_key(&id) && !state.commands.contains_key(&id) {
-                return Ok(id);
-            }
-        }
-        Err(RuntimeError::InternalStateUnavailable {
-            component: "input id collision",
-        })
     }
 }
 

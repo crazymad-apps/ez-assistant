@@ -42,6 +42,12 @@ pub(super) enum RecorderTarget {
     },
 }
 
+/// 字段声明顺序保证先释放 child，再释放 parent；只覆盖可靠提交，不覆盖工具执行。
+pub(super) struct RecorderMutationGuard<'a> {
+    _child: Option<tokio::sync::MutexGuard<'a, ()>>,
+    _parent: tokio::sync::MutexGuard<'a, ()>,
+}
+
 impl RecorderTarget {
     pub(super) fn parent(session: Arc<SessionController>, run_id: RunId) -> Self {
         Self::Parent { session, run_id }
@@ -51,10 +57,20 @@ impl RecorderTarget {
         Self::Child { task, session }
     }
 
-    pub(super) async fn mutation(&self) -> tokio::sync::MutexGuard<'_, ()> {
+    pub(super) async fn mutation(&self) -> RecorderMutationGuard<'_> {
         match self {
-            Self::Parent { session, .. } => session.mutation().await,
-            Self::Child { task, .. } => task.mutation().await,
+            Self::Parent { session, .. } => RecorderMutationGuard {
+                _child: None,
+                _parent: session.mutation().await,
+            },
+            Self::Child { task, session } => {
+                let parent = session.mutation().await;
+                let child = task.mutation().await;
+                RecorderMutationGuard {
+                    _child: Some(child),
+                    _parent: parent,
+                }
+            }
         }
     }
 
@@ -240,6 +256,16 @@ impl RecorderTarget {
         assistant: AssistantMessage,
         created_at_ms: i64,
     ) -> Result<(), crate::StoreError> {
+        let session = match self {
+            Self::Parent { session, .. } | Self::Child { session, .. } => session,
+        };
+        session.ensure_healthy().map_err(|source| {
+            crate::StoreError::with_source(
+                crate::StoreErrorKind::Unavailable,
+                "recorder owner is faulted",
+                source,
+            )
+        })?;
         match self {
             Self::Parent { session, run_id } => {
                 store
@@ -275,6 +301,16 @@ impl RecorderTarget {
         call_id: ProtocolToolCallId,
         started_at_ms: i64,
     ) -> Result<(), crate::StoreError> {
+        let session = match self {
+            Self::Parent { session, .. } | Self::Child { session, .. } => session,
+        };
+        session.ensure_healthy().map_err(|source| {
+            crate::StoreError::with_source(
+                crate::StoreErrorKind::Unavailable,
+                "recorder owner is faulted",
+                source,
+            )
+        })?;
         match self {
             Self::Parent { session, run_id } => {
                 store
@@ -306,6 +342,16 @@ impl RecorderTarget {
         store: &dyn RuntimeStore,
         completion: PersistedToolExchangeCompletion,
     ) -> Result<(), crate::StoreError> {
+        let session = match self {
+            Self::Parent { session, .. } | Self::Child { session, .. } => session,
+        };
+        session.ensure_healthy().map_err(|source| {
+            crate::StoreError::with_source(
+                crate::StoreErrorKind::Unavailable,
+                "recorder owner is faulted",
+                source,
+            )
+        })?;
         match self {
             Self::Parent { session, run_id } => {
                 store

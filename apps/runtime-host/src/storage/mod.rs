@@ -19,6 +19,7 @@ mod engine;
 mod feedback;
 mod filesystem;
 mod goal;
+mod history;
 mod history_titles;
 mod input_state;
 mod materialization;
@@ -77,6 +78,7 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// 存储线程发布的启动进度；版本只来自已核验账本或已提交迁移，不是预期目标。
 #[derive(Clone)]
 pub(crate) struct DatabaseStartupProgress {
+    pub(crate) progress: Option<assistant_protocol::RuntimeHostStartupProgress>,
     pub(crate) stage: assistant_protocol::RuntimeHostStartupStage,
     pub(crate) database_version: Option<String>,
     pub(crate) min_compatible_host_version: Option<String>,

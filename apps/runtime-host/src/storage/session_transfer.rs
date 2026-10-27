@@ -22,12 +22,14 @@ use super::{
     internal_error, invalid_data,
     mode::{agent_variant_value, approval_mode_value, reasoning_effort_value},
     session_resources::remove_created_session_directories,
-    skill::insert_skill_activation,
     sync_directory, to_i64,
 };
 
 impl StorageEngine {
     pub(super) fn fork_session(&mut self, fork: SessionFork) -> StorageResult<StoredSessionFork> {
+        self.ensure_no_pending_history(&ConversationOwner::MainSession {
+            session_id: fork.source_session_id.clone(),
+        })?;
         super::filesystem::validate_session_component(&fork.source_session_id)?;
         super::filesystem::validate_session_component(&fork.session.session_id)?;
         fork.conversation
@@ -59,6 +61,18 @@ impl StorageEngine {
         {
             return Err(conflict("session role cannot be forked"));
         }
+        // 当前 worker 操作内核对同一源代次，裁切只读事实；不创建任何继承执行控制。
+        let source_history = self.load_conversation_history(ConversationOwner::MainSession {
+            session_id: fork.source_session_id.clone(),
+        })?;
+        if source_history.generation != fork.source_generation {
+            return Err(conflict("fork source history generation changed"));
+        }
+        let mut inherited = source_history.facts.fork_lineage(
+            &fork.session.session_id,
+            &fork.conversation,
+            &fork.session_commands,
+        )?;
         if fork
             .work_plan
             .as_ref()
@@ -109,7 +123,7 @@ impl StorageEngine {
                 return Err(conflict("fork skill activation is invalid"));
             }
         }
-        let stored_selections = self.load_mcp_input_selections()?;
+        let stored_selections = &source_history.facts.mcp_selections;
         let mut selection_ids = BTreeSet::new();
         for selection in &fork.mcp_selections {
             let source_selection = stored_selections.iter().find(|candidate| {
@@ -117,9 +131,6 @@ impl StorageEngine {
                     && candidate.message_id == selection.message_id
             });
             if !selection_ids.insert(selection.selection_id.clone())
-                || stored_selections
-                    .iter()
-                    .any(|candidate| candidate.selection_id == selection.selection_id)
                 || selection.session_id != fork.session.session_id
                 || selection.input_id.is_some()
                 || !message_ids.contains(selection.message_id.as_str())
@@ -132,7 +143,7 @@ impl StorageEngine {
                 return Err(conflict("fork MCP selection is invalid"));
             }
         }
-        let stored_commands = self.load_session_commands()?;
+        let stored_commands = &source_history.facts.commands;
         let mut command_ids = BTreeSet::new();
         let mut command_message_ids = BTreeSet::new();
         for copied in &fork.session_commands {
@@ -238,10 +249,140 @@ impl StorageEngine {
             }
             let mut forked_conversation = fork.conversation;
             rewrite_file_reference_paths(&mut forked_conversation, &rewrites)?;
-            let payload = conversation::encode_messages(&forked_conversation.messages)?;
-            conversation::decode(std::io::BufReader::new(payload.as_slice()))?;
+            // child 的目录、正文和图片同属目标 Session；全部文件先准备，再由下方
+            // 既有事务发布 Session。来源正文损坏仅保留明确不可用的可靠父描述。
+            for child in &mut inherited.child_tasks {
+                if child.body_unavailable {
+                    continue;
+                }
+                super::filesystem::validate_child_task_component(&child.child_task_id)?;
+                let source_child = source_history
+                    .facts
+                    .child_tasks
+                    .iter()
+                    .find(|source| source.child_task_id == child.child_task_id)
+                    .ok_or_else(|| invalid_data("fork child source directory is missing"))?;
+                let source_owner = ConversationOwner::ChildTask {
+                    session_id: fork.source_session_id.clone(),
+                    child_task_id: child.child_task_id.clone(),
+                };
+                self.ensure_no_pending_history(&source_owner)?;
+                let source_body = self.child_body(
+                    &fork.source_session_id,
+                    &child.child_task_id,
+                    source_child.body_generation,
+                )?;
+                let document = match self.read_owner_document(
+                    &source_body,
+                    &source_owner,
+                    source_child.body_generation,
+                ) {
+                    Ok(document) => document,
+                    Err(_) => {
+                        child.body_unavailable = true;
+                        continue;
+                    }
+                };
+                let source_facts = document
+                    .history
+                    .ok_or_else(|| invalid_data("fork child history is missing"))?;
+                if !source_facts
+                    .child_tasks
+                    .iter()
+                    .any(|fact| fact == source_child)
+                {
+                    return Err(conflict("fork child source binding changed"));
+                }
+                let mut child_body = document.conversation;
+                let mut child_facts =
+                    source_facts.fork_lineage(&fork.session.session_id, &child_body, &[])?;
+                if rewrite_file_reference_paths(&mut child_body, &rewrites).is_err() {
+                    child.body_unavailable = true;
+                    continue;
+                }
+                child_facts.attachments =
+                    fork_attachment_history(&child_body, &attachments, &paths.session_directory)?;
+                child_facts.child_tasks = vec![child.clone()];
+                child_facts.skill_activations = source_facts
+                    .skill_activations
+                    .into_iter()
+                    .map(|mut activation| {
+                        activation.session_id = fork.session.session_id.clone();
+                        activation.run_id = None;
+                        activation.input_id = None;
+                        activation
+                    })
+                    .collect();
+                let mut images = BTreeSet::new();
+                super::tool_images::collect_tool_images(&child_body, &mut images);
+                for image in images {
+                    // 丢失图片由目标图片端点明确报告 unavailable；不能为了继续分支
+                    // 链接来源目录，也不能忽略已核实图片的目标写入失败。
+                    if crate::image::validate_tool_image_file(&source_tool_images, &image).is_err()
+                    {
+                        continue;
+                    }
+                    crate::image::copy_tool_image(
+                        &source_tool_images,
+                        &paths.tool_image_directory,
+                        &image,
+                    )
+                    .map_err(|source| {
+                        StoreError::with_source(
+                            StoreErrorKind::ResourceUnavailable,
+                            "fork child image could not be copied",
+                            source,
+                        )
+                    })?;
+                }
+                let child_directory =
+                    super::child_task_directory(&paths.session_directory, &child.child_task_id);
+                let tasks_directory = super::child_tasks_directory(&paths.session_directory);
+                crate::config_source::prepare_private_directory(&tasks_directory)
+                    .and_then(|()| {
+                        crate::config_source::prepare_private_directory(&child_directory)
+                    })
+                    .map_err(|source| {
+                        internal_error("fork child directory could not be prepared", source)
+                    })?;
+                conversation::write_generation(
+                    &super::child_body_path(&child_directory, 1),
+                    &ConversationOwner::ChildTask {
+                        session_id: fork.session.session_id.clone(),
+                        child_task_id: child.child_task_id.clone(),
+                    },
+                    1,
+                    &child_body,
+                    &child_facts,
+                )?;
+                sync_directory(&child_directory)?;
+                sync_directory(&tasks_directory)?;
+            }
             let body = body_path(&paths.session_directory, 1);
-            conversation::write_replacement(&body, &payload)?;
+            let history = assistant_runtime::StoredHistoryFacts {
+                commands: fork
+                    .session_commands
+                    .iter()
+                    .map(|copied| copied.command.clone())
+                    .collect(),
+                skill_activations: fork.skill_activations.clone(),
+                mcp_selections: fork.mcp_selections.clone(),
+                attachments: fork_attachment_history(
+                    &forked_conversation,
+                    &attachments,
+                    &paths.session_directory,
+                )?,
+                ..inherited
+            };
+            conversation::write_generation(
+                &body,
+                &ConversationOwner::MainSession {
+                    session_id: fork.session.session_id.clone(),
+                },
+                1,
+                &forked_conversation,
+                &history,
+            )?;
             sync_directory(&paths.session_directory)?;
             let prompt_json =
                 serde_json::to_string(&fork.session.system_prompt).map_err(|source| {
@@ -354,57 +495,8 @@ super::agent_shell::encode_environment(fork.session.agent_shell_environment.as_r
             if let Some(goal) = fork.goal.as_ref() {
                 insert_forked_goal(&transaction, goal)?;
             }
-            for activation in &fork.skill_activations {
-                insert_skill_activation(&transaction, activation)?;
-            }
-            for selection in &fork.mcp_selections {
-                transaction
-                    .execute(
-                        "INSERT INTO mcp_input_selections (
-                            selection_id, session_id, input_id, message_id, server_key,
-                            display_name, created_at_ms
-                         ) VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6)",
-                        params![
-                            selection.selection_id,
-                            selection.session_id.as_str(),
-                            selection.message_id.as_str(),
-                            selection.server_key.as_str(),
-                            selection.display_name,
-                            selection.created_at_ms,
-                        ],
-                    )
-                    .map_err(|source| {
-                        database_write_error("fork MCP selection could not be created", source)
-                    })?;
-            }
-            for copied in &fork.session_commands {
-                let command = &copied.command;
-                let command_json = serde_json::to_string(&command.command).map_err(|source| {
-                    internal_error("fork session command could not be encoded", source)
-                })?;
-                let result_json = serde_json::to_string(&command.result).map_err(|source| {
-                    internal_error("fork command result could not be encoded", source)
-                })?;
-                transaction
-                    .execute(
-                        "INSERT INTO inputs (
-                            priority_order, input_id, session_id, user_message_id,
-                            state, accepted_at_ms, agent_variant, origin, input_kind,
-                            command_json, command_result_json
-                         ) VALUES (?1, ?2, ?3, ?4, 'committed', ?5, ?6, 'runtime', 'command', ?7, ?8)",
-                        params![
-                            to_i64(command.queue_order, "fork command order exceeds range")?,
-                            command.input_id.as_str(),
-                            command.session_id.as_str(),
-                            command.user_message_id.as_str(),
-                            command.accepted_at_ms,
-                            agent_variant_value(command.agent_variant),
-                            command_json,
-                            result_json,
-                        ],
-                    )
-                    .map_err(|source| database_write_error("fork session command could not be created", source))?;
-            }
+            // 继承选择已经写入目标文件，不创建可执行队列或 SQL 历史副本。
+            // 继承控制结果已在目标文件，不创建已完成命令的 SQL 身份或队列。
             for attachment in &attachments {
                 transaction
                     .execute(
@@ -492,40 +584,75 @@ super::agent_shell::encode_environment(fork.session.agent_shell_environment.as_r
         Ok(stored)
     }
 
+    /// 删除确认读取可靠文件及当前控制／上传身份的并集。终态控制释放不减少历史影响数，
+    /// 同一身份在两边出现只计一次；有待提交尾帧或文件损坏时不签发猜测的影响数量。
     pub(super) fn inspect_session_deletion(
-        &self,
+        &mut self,
         session_id: &SessionId,
     ) -> StorageResult<DeleteSessionImpact> {
         super::filesystem::validate_session_component(session_id)?;
-        self.connection
-            .query_row(
-                "SELECT message_count,
-                        (SELECT COUNT(*) FROM runs WHERE session_id = ?1),
-                        (SELECT COUNT(*) FROM child_tasks WHERE session_id = ?1),
-                        (SELECT COUNT(*) FROM attachments WHERE session_id = ?1)
-                 FROM sessions WHERE session_id = ?1",
-                [session_id.as_str()],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, i64>(3)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(|source| internal_error("delete impact could not be queried", source))?
-            .map(|row| {
-                Ok(DeleteSessionImpact {
-                    message_count: non_negative(row.0, "delete message count is invalid")?,
-                    run_count: non_negative(row.1, "delete run count is invalid")?,
-                    child_task_count: non_negative(row.2, "delete child count is invalid")?,
-                    attachment_count: non_negative(row.3, "delete attachment count is invalid")?,
+        let owner = ConversationOwner::MainSession {
+            session_id: session_id.clone(),
+        };
+        self.ensure_no_pending_history(&owner)?;
+        let generation = self.session_generation(session_id)?;
+        let mut runs = std::collections::HashSet::new();
+        let mut children = std::collections::HashSet::new();
+        let mut attachments = std::collections::HashSet::new();
+        {
+            let mut statement = self.connection.prepare(
+                "SELECT 'run',run_id FROM runs WHERE session_id=?1 AND status IN ('accepted','running','cancelling')
+                 UNION ALL SELECT 'child',child_task_id FROM child_tasks WHERE session_id=?1 AND status IN ('accepted','running')
+                 UNION ALL SELECT 'attachment',attachment_id FROM attachments WHERE session_id=?1",
+            ).map_err(|source| internal_error("delete impact controls could not be queried",source))?;
+            let rows = statement
+                .query_map([session_id.as_str()], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
                 })
-            })
-            .transpose()?
-            .ok_or_else(|| conflict("delete session does not exist"))
+                .map_err(|source| {
+                    internal_error("delete impact controls could not be read", source)
+                })?;
+            for row in rows {
+                let (kind, id) = row.map_err(|source| {
+                    internal_error("delete impact control row is invalid", source)
+                })?;
+                match kind.as_str() {
+                    "run" => {
+                        runs.insert(
+                            assistant_protocol::RunId::new(id)
+                                .map_err(|_| invalid_data("delete run ID is invalid"))?,
+                        );
+                    }
+                    "child" => {
+                        children.insert(
+                            assistant_protocol::ChildTaskId::new(id)
+                                .map_err(|_| invalid_data("delete child ID is invalid"))?,
+                        );
+                    }
+                    "attachment" => {
+                        attachments.insert(
+                            assistant_protocol::AttachmentId::new(id)
+                                .map_err(|_| invalid_data("delete attachment ID is invalid"))?,
+                        );
+                    }
+                    _ => return Err(invalid_data("delete impact control kind is invalid")),
+                }
+            }
+        }
+        if !self.allow_legacy_history {
+            for child in self.pending_child_catalog(session_id)? {
+                children.insert(child.child_task_id);
+            }
+        }
+        let path = body_path(&self.session_directory(session_id)?, generation);
+        self.conversation_indexes.deletion_impact(
+            &path,
+            &owner,
+            generation,
+            &runs,
+            &children,
+            &attachments,
+        )
     }
 
     pub(super) fn delete_session(&mut self, deletion: SessionDeletion) -> StorageResult<()> {
@@ -704,12 +831,57 @@ fn rewrite_file_reference_paths(
     Ok(())
 }
 
+/// 目标正文已经完成结构化路径改绑；只冻结本 owner 实际引用的附件，不保留来源路径。
+fn fork_attachment_history(
+    conversation: &ConversationSnapshot,
+    attachments: &[StoredAttachment],
+    directory: &Path,
+) -> StorageResult<Vec<assistant_runtime::StoredHistoryAttachment>> {
+    let paths: BTreeSet<_> = conversation
+        .messages
+        .iter()
+        .filter_map(|message| {
+            if let ConversationMessage::User(user) = message {
+                Some(&user.parts)
+            } else {
+                None
+            }
+        })
+        .flatten()
+        .filter_map(|part| {
+            if let UserPart::FileReferences(references) = part {
+                Some(&references.files)
+            } else {
+                None
+            }
+        })
+        .flatten()
+        .map(|file| file.readable_path.as_str())
+        .collect();
+    attachments
+        .iter()
+        .filter(|attachment| paths.contains(attachment.agent_readable_path.as_str()))
+        .map(|attachment| {
+            let relative = Path::new(&attachment.agent_readable_path)
+                .strip_prefix(directory)
+                .map_err(|_| invalid_data("fork attachment escapes its managed owner"))?;
+            Ok(assistant_runtime::StoredHistoryAttachment {
+                attachment_id: attachment.attachment_id.clone(),
+                blob_hash: attachment.blob_hash.clone(),
+                original_name: attachment.original_name.clone(),
+                size_bytes: attachment.size_bytes,
+                media_type: attachment.media_type.clone(),
+                relative_path: relative
+                    .to_str()
+                    .ok_or_else(|| invalid_data("fork attachment path is not UTF-8"))?
+                    .replace('\\', "/"),
+            })
+        })
+        .collect()
+}
+
 fn path_text(path: &Path) -> StorageResult<String> {
     path.to_str()
         .map(str::to_owned)
         .ok_or_else(|| StoreError::new(StoreErrorKind::InvalidInput, "path must be UTF-8"))
-}
-
-fn non_negative(value: i64, message: &'static str) -> StorageResult<u64> {
-    u64::try_from(value).map_err(|_| invalid_data(message))
 }

@@ -38,15 +38,15 @@ pub(crate) async fn observe_run_execution(
             event = events.next(), if events_open => {
                 match event {
                     Some(event) => {
-                        if let Ok(Some(event)) = project_agent_event(
-                            &session,
-                            &run_id,
-                            event,
-                            model_diagnostics.as_ref(),
-                            mcp_registry.as_ref(),
-                        ) {
-                            let _ = event_sender.send(event);
-                        }
+                        let _ = event_sender.publish_transition(|| {
+                            project_agent_event(
+                                &session,
+                                &run_id,
+                                event,
+                                model_diagnostics.as_ref(),
+                                mcp_registry.as_ref(),
+                            ).map(|event| ((), event))
+                        });
                     }
                     None => events_open = false,
                 }
@@ -76,8 +76,11 @@ fn project_agent_event(
     let session_id = session.id().clone();
     match event {
         AgentEvent::ExecutionStarted => {
-            let transitioned = with_active_record(session, run_id, RunRecord::mark_running)?;
+            let (transitioned, started_at_ms) = with_active_record(session, run_id, |record| {
+                (record.mark_running(), record.started_at_ms)
+            })?;
             Ok(transitioned.then(|| RuntimeEvent::RunStarted {
+                started_at_ms,
                 session_id,
                 run_id: run_id.clone(),
             }))

@@ -111,9 +111,35 @@ export class RuntimeClient {
     if (this.target_device) return;
     const incompatible = hostCompatibilityError(this.capabilities);
     if (incompatible) throw new RuntimeClientError("component_mismatch", compatibilityMessage(incompatible.code));
-    await this.resource("/runtime/ensure-ready", { method: "POST" }, async () => undefined);
-    receive({ status: "ready", stage: null, error: null, database_version: null,
-      target_version: this.capabilities.runtime_version, min_compatible_host_version: undefined });
+    // 就绪仍只有一个有副作用的等待入口；只读健康查询仅观察本人已有初始化。
+    const observation = new AbortController();
+    const signal = AbortSignal.any([observation.signal, this.#abort.signal]);
+    const observing = (async () => {
+      while (!signal.aborted) {
+        await new Promise<void>((resolve) => {
+          const finish = () => { clearTimeout(timer); signal.removeEventListener("abort", finish); resolve(); };
+          const timer = setTimeout(finish, 500);
+          signal.addEventListener("abort", finish, { once: true });
+          if (signal.aborted) finish();
+        });
+        if (signal.aborted) return;
+        try {
+          const health = await this.resource<RuntimeHostHealth>("/health", { method: "GET", cache: "no-store", signal }, (response) => response.json());
+          if (!signal.aborted && health.status !== "ready") receive(health);
+        } catch {
+          // 进度观察失败不重试初始化，也不替代 ensure-ready 的最终业务结果。
+          return;
+        }
+      }
+    })();
+    try {
+      await this.resource("/runtime/ensure-ready", { method: "POST" }, async () => undefined);
+      receive({ status: "ready", stage: null, error: null, database_version: null,
+        target_version: this.capabilities.runtime_version, min_compatible_host_version: undefined });
+    } finally {
+      observation.abort();
+      await observing;
+    }
   }
 
   session(): Promise<HostLoginResult> {

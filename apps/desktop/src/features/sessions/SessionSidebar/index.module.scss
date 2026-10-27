@@ -389,8 +389,8 @@
 
 .session_row[data-has-actions="true"]:hover .session_time,
 .session_row[data-has-actions="true"]:focus-within .session_time,
-.session_row[data-has-actions="true"]:hover .loading_ring,
-.session_row[data-has-actions="true"]:focus-within .loading_ring { opacity: 0; }
+.session_row[data-has-actions="true"]:not([data-variant="pinned"]):hover .loading_ring,
+.session_row[data-has-actions="true"]:not([data-variant="pinned"]):focus-within .loading_ring { opacity: 0; }
 
 .loading_ring {
   display: block;
@@ -404,6 +404,11 @@
   animation: session-loading-spin 900ms linear infinite;
   transform-origin: center;
   will-change: transform;
+}
+
+// 置顶只有一个操作按钮，运行指示使用旁边已有轨道，保持悬停和焦点期间可见。
+.session_row[data-variant="pinned"] .loading_ring {
+  grid-column: 2;
 }
 
 .loading_ring_track,

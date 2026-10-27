@@ -183,7 +183,11 @@ pub(crate) fn router(state: HttpState) -> Router {
             )),
         )
         .layer(from_fn_with_state(state.clone(), super::proxy::route))
-        .layer(from_fn_with_state(state.clone(), auth::authorize));
+        .layer(from_fn_with_state(state.clone(), auth::authorize))
+        .layer(from_fn_with_state(
+            state.clone(),
+            super::diagnostics::observe,
+        ));
 
     let pages = Router::new()
         .fallback(web::serve)

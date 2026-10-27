@@ -4537,6 +4537,7 @@
             "type": "string",
             "enum": [
               "openai",
+              "sub2api",
               "opencode",
               "deepseek",
               "dashscope_api",
@@ -4565,6 +4566,7 @@
             "type": "string",
             "enum": [
               "openai",
+              "sub2api",
               "vllm",
               "moonshot",
               "dashscope_native"
@@ -5198,6 +5200,7 @@
             "type": "string",
             "enum": [
               "openai",
+              "sub2api",
               "opencode",
               "deepseek",
               "dashscope_api",
@@ -7483,6 +7486,10 @@
           },
           "text": {
             "type": "string"
+          },
+          "language": {
+            "type": "string",
+            "maxLength": 64
           },
           "href": {
             "type": "string"

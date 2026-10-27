@@ -111,5 +111,5 @@ pub struct GoalHeldInputResume {
 pub struct GoalHeldInputResumeResult {
     pub goal: StoredGoal,
     pub input: crate::StoredInput,
-    pub run: crate::StoredRun,
+    pub run: Option<crate::StoredRun>,
 }

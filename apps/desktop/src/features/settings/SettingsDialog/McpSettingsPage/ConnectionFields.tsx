@@ -45,18 +45,25 @@ export function ArgsFields(props: Readonly<{ change: McpFieldChange<string[]>; o
 
 export type SecretRow = { id: string; name: string; change: McpSecretChange; existing: boolean };
 
-export function SecretFields(props: Readonly<{ rows: readonly SecretRow[]; onChange: (rows: SecretRow[]) => void; label: string }>) {
+export function SecretFields(props: Readonly<{ rows: readonly SecretRow[]; onChange: (rows: SecretRow[]) => void; label: string; managed?: { states: Readonly<Record<string, boolean>>; canReset: boolean; onReset: (name: string) => void } }>) {
   function update(id: string, patch: Partial<SecretRow>) { props.onChange(props.rows.map((row) => row.id === id ? { ...row, ...patch } : row)); }
   return <fieldset><legend>{props.label}</legend>
-    <p>已有值不回显；留空保持，可填写新值或明确移除。支持 ${"{VAR}"} 引用。</p>
+    <p>{props.managed ? "已有值不回显；新值按原文保存。移除会禁用该变量，恢复默认会重新使用定义值。" : <>已有值不回显；留空保持，可填写新值或明确移除。支持 ${"{VAR}"} 引用。</>}</p>
     {props.rows.map((row, index) => <div className={styles.secret_row} key={row.id}>
       <input aria-label={`${props.label}名称 ${index + 1}`} disabled={row.existing} onChange={(event) => update(row.id, { name: event.target.value })} placeholder="名称" value={row.name} />
-      <input aria-label={`${props.label}值 ${index + 1}`} autoComplete="off" disabled={row.change.mode === "remove"} onChange={(event) => update(row.id, { change: event.target.value || !row.existing ? { mode: "replace", value: event.target.value } : { mode: "keep" } })} placeholder={row.existing ? "已配置，留空保持" : "值"} type="password" value={row.change.mode === "replace" ? row.change.value : ""} />
+      <input aria-label={`${props.label}值 ${index + 1}`} autoComplete="off" disabled={row.change.mode === "remove"} onChange={(event) => update(row.id, { change: event.target.value || !row.existing ? { mode: "replace", value: event.target.value } : { mode: "keep" } })} placeholder={secretPlaceholder(row, props.managed?.states)} type="password" value={row.change.mode === "replace" ? row.change.value : ""} />
       <button onClick={() => {
         if (!row.existing) props.onChange(props.rows.filter((candidate) => candidate.id !== row.id));
         else update(row.id, { change: { mode: row.change.mode === "remove" ? "keep" : "remove" } });
       }} type="button">{row.change.mode === "remove" ? "恢复保持" : "移除"}</button>
+      {props.managed && row.existing && <button disabled={!props.managed.canReset} onClick={() => props.managed?.onReset(row.name)} type="button">恢复默认 {row.name}</button>}
     </div>)}
     <button onClick={() => props.onChange([...props.rows, { id: crypto.randomUUID(), name: "", change: { mode: "replace", value: "" }, existing: false }])} type="button">添加{props.label}</button>
   </fieldset>;
+}
+
+function secretPlaceholder(row: SecretRow, states?: Readonly<Record<string, boolean>>): string {
+  if (!row.existing) return "值";
+  if (states?.[row.name] === false) return "未设置，留空保持";
+  return "已配置，留空保持";
 }

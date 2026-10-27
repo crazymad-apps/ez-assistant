@@ -23,7 +23,7 @@ export function ProcessingTurn(
     messages: readonly AssistantMessageSnapshot[];
     live_run: LiveRunProjection | null;
     child_tasks: readonly ChildTaskTreeItemSnapshot[];
-    task?: { status: RunStatus; created_at_ms: number; finished_at_ms: number | null };
+    task?: { status: RunStatus; created_at_ms: number; started_at_ms?: number | null; finished_at_ms: number | null };
     awaiting_feedback?: boolean;
     awaiting_approval?: boolean;
     reveal_message_id?: string | null;
@@ -35,9 +35,11 @@ export function ProcessingTurn(
   }>,
 ) {
   const last = props.messages.at(-1);
-  const run = props.live_run;
-  const status = run?.status ?? props.task?.status ?? last?.status ?? null;
-  const active = isRunActive(status);
+  const inherited = props.messages.some((message) => message.inherited);
+  const partial = props.messages.some((message) => message.partial);
+  const run = inherited ? null : props.live_run;
+  const status = partial ? null : run?.status ?? props.task?.status ?? last?.status ?? null;
+  const active = !inherited && isRunActive(status);
   const { process, reply } = presentTurn(props.messages, run, status);
   const newest_step = Math.max(0, ...process.map((entry) => entry.step));
   const reveal =
@@ -70,17 +72,20 @@ export function ProcessingTurn(
   const clock = {
     status: status ?? 'completed',
     created_at_ms: run?.created_at_ms ?? props.task?.created_at_ms ?? last?.run_created_at_ms ?? null,
+    started_at_ms: run?.started_at_ms ?? props.task?.started_at_ms ?? last?.run_started_at_ms ?? null,
     finished_at_ms: run?.finished_at_ms ?? props.task?.finished_at_ms ?? last?.finished_at_ms ?? null,
   };
   let label = '历史记录';
-  if (props.awaiting_approval) label = '等待审批';
-  else if (props.awaiting_feedback) label = '等待回复';
+  if (partial) label = '截至分支点';
+  else if (!inherited && props.awaiting_approval) label = '等待审批';
+  else if (!inherited && props.awaiting_feedback) label = '等待回复';
   else if (run) label = liveRunStatusLabel(run);
   else if (status) label = runStatusLabel(status);
+  if (inherited) label = `继承 · ${label}`;
   let error: string | null = null;
-  if (status === 'failed')
+  if (!inherited && status === 'failed')
     error = runFailureMessage(run?.model_failure_kind ?? null, run?.error_code ?? null, run?.error_message ?? null);
-  else if (status === 'interrupted') error = '本轮已中断，请检查已有结果后继续。';
+  else if (!inherited && status === 'interrupted') error = '本轮已中断，请检查已有结果后继续。';
   const renderEntry = (entry: TurnEntry) => (
     <div key={entry.key} data-message-id={entry.message_id ?? undefined}>
       {entry.live ? (
@@ -127,9 +132,9 @@ export function ProcessingTurn(
         <span role="status" className={styles.status} data-error={!!error || status === 'cancelled' || undefined}>
           {label}
         </span>
-        <span className={styles.elapsed}>
+        {!partial && <span className={styles.elapsed}>
           <ElapsedTime run={clock} />
-        </span>
+        </span>}
       </button>
       {/* 显式引用定位需在父级 layout effect 前拿到正文 DOM；仅该动作重新挂载 Collapse，正常增量保持身份。 */}
       <Collapse key={state.reveal_key} open={open} id={id}>
@@ -202,7 +207,7 @@ export function ProcessingTurn(
               <Icon name="fork" size={15} />
             </button>
           )}
-          <time>{formatDateTime(clock.finished_at_ms)}</time>
+          {!partial && <time>{formatDateTime(clock.finished_at_ms)}</time>}
         </div>
       )}
     </article>

@@ -12,7 +12,7 @@ fn unavailable() -> ModelScript {
 
 async fn submit(runtime: &AssistantRuntime, session_id: &SessionId) -> RunId {
     runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session_id.clone(),

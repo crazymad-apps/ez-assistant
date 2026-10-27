@@ -3,7 +3,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_types::ConversationMessage;
-use assistant_protocol::{InputId, RunStatus};
+use assistant_protocol::RunStatus;
 use assistant_runtime::{
     NewStoredRunAttempt, StoredRun, StoredRunContinuation, StoredRunContinuationResult,
     StoredRunSettlement, StoredTerminalRunInputReconciliation, UserMessageCommit,
@@ -13,59 +13,262 @@ use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use super::{
     StorageEngine, StorageResult,
     append_effect::{AppendPurpose, apply_run_continuation, apply_run_settlement},
-    conflict, database_write_error, internal_error, invalid_data_with_source,
-    mode::{approval_mode_value, parse_agent_variant},
+    conflict, database_write_error, internal_error,
+    mode::approval_mode_value,
     recovery::AppendRequest,
 };
 
+/// 终态帧已 fsync，原提交回执已在同一事务中精确删除；只释放当前 Run 的执行控制。
+/// 引用尚未闭合或删除失败会回滚本事务，原回执和控制留给正常恢复，不级联丢弃依赖。
+pub(super) fn release_terminal_run_control(
+    transaction: &rusqlite::Transaction<'_>,
+    session_id: &assistant_protocol::SessionId,
+    run_id: &assistant_protocol::RunId,
+) -> StorageResult<()> {
+    let input_id: Option<String> = transaction
+        .query_row(
+            "DELETE FROM runs WHERE run_id=?1 AND session_id=?2
+         AND status IN ('completed','failed','cancelled','interrupted')
+         AND NOT EXISTS(SELECT 1 FROM body_appends WHERE run_id=?1)
+         AND NOT EXISTS(SELECT 1 FROM pending_tool_exchanges WHERE run_id=?1)
+         AND NOT EXISTS(SELECT 1 FROM child_tasks WHERE parent_run_id=?1)
+         AND NOT EXISTS(SELECT 1 FROM skill_activations WHERE run_id=?1)
+         RETURNING input_id",
+            params![run_id.as_str(), session_id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|source| internal_error("terminal Run control could not be released", source))?;
+    let Some(input_id) = input_id else {
+        return Err(conflict(
+            "terminal Run still has dependent controls or changed before release",
+        ));
+    };
+    let shared_control: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runs WHERE input_id=?1 AND session_id=?2 AND status IN ('accepted','running','cancelling'))",
+        params![input_id,session_id.as_str()],|row|row.get(0),
+    ).map_err(|source| internal_error("remaining Input control could not be checked",source))?;
+    if shared_control {
+        return Ok(());
+    }
+    let changed = transaction
+        .execute(
+            "UPDATE inputs SET priority_order=NULL,user_message_id=NULL,accepted_at_ms=NULL,
+            agent_variant=NULL,origin=NULL,goal_id=NULL,goal_generation=NULL,goal_turn=NULL,
+            goal_reply_route_json=NULL,skill_activation_json=NULL,cross_session_json=NULL,
+            channel_source_json=NULL,agent_shell_target=NULL
+         WHERE input_id=?1 AND session_id=?2 AND input_kind='message' AND state='committed'
+            AND queued_message_json IS NULL
+            AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.input_id=inputs.input_id)",
+            params![input_id, session_id.as_str()],
+        )
+        .map_err(|source| internal_error("finished Input fields could not be released", source))?;
+    if changed != 1 {
+        return Err(conflict("finished Input still has unfinished control"));
+    }
+    Ok(())
+}
+
 impl StorageEngine {
+    /// 目标 Session mutation 内完成队列领取；此提交前输入可撤销，提交后才存在 Run。
+    /// 独立事务只保存未完成控制；后续正文/开始提交沿已有 staged append 恢复，不提前写历史。
+    pub(super) fn claim_input(&mut self, run: StoredRun) -> StorageResult<()> {
+        if run.status != RunStatus::Accepted
+            || run.attempt != 1
+            || run.started_at_ms.is_some()
+            || run.finished_at_ms.is_some()
+            || !run.message_ids.is_empty()
+            || run.cancel_requested
+        {
+            return Err(conflict("invalid first Run claim"));
+        }
+        let input = self
+            .load_input_for_id(&run.session_id, &run.input_id)?
+            .ok_or_else(|| conflict("claim Input is missing"))?;
+        if input.state != assistant_runtime::StoredInputState::Queued
+            || input.agent_variant != run.agent_variant
+        {
+            return Err(conflict("claim Input is not queued"));
+        }
+        let history =
+            self.load_conversation_history(assistant_protocol::ConversationOwner::MainSession {
+                session_id: run.session_id.clone(),
+            })?;
+        if history
+            .facts
+            .runs
+            .iter()
+            .any(|fact| fact.run_id == run.run_id || fact.input_id.as_ref() == Some(&run.input_id))
+        {
+            return Err(conflict("claim Input already has Run history"));
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|source| internal_error("input claim could not begin", source))?;
+        let admitted: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM inputs JOIN sessions USING(session_id)
+             WHERE input_id=?1 AND inputs.session_id=?2 AND state='queued' AND lifecycle='active')
+             AND NOT EXISTS(SELECT 1 FROM runs WHERE input_id=?1 OR (session_id=?2 AND status IN ('accepted','running','cancelling')))",
+            params![run.input_id.as_str(),run.session_id.as_str()], |row|row.get(0)
+        ).map_err(|source| internal_error("input claim admission could not be checked",source))?;
+        if !admitted {
+            return Err(conflict("Input already claimed or Session busy"));
+        }
+        transaction.execute("INSERT INTO runs(run_id,session_id,input_id,attempt,status,cancel_requested,approval_mode,created_at_ms,started_at_ms) VALUES(?1,?2,?3,1,'accepted',0,?4,?5,NULL)",
+            params![run.run_id.as_str(),run.session_id.as_str(),run.input_id.as_str(),approval_mode_value(run.approval_mode),run.created_at_ms]
+        ).map_err(|source|database_write_error("first Run could not be claimed",source))?;
+        if let Some(mut activation) = input.skill_activation {
+            activation.run_id = Some(run.run_id.clone());
+            let bound = transaction.execute("UPDATE skill_activations SET run_id=?1 WHERE input_id=?2 AND session_id=?3 AND run_id IS NULL",params![run.run_id.as_str(),run.input_id.as_str(),run.session_id.as_str()])
+                .map_err(|source|database_write_error("claimed Skill could not be bound",source))?;
+            if bound != 1 {
+                return Err(conflict(
+                    "claimed Skill identity is missing or already bound",
+                ));
+            }
+            let json = serde_json::to_string(&activation)
+                .map_err(|source| internal_error("claimed Skill could not be encoded", source))?;
+            let bound = transaction.execute("UPDATE inputs SET skill_activation_json=?1 WHERE input_id=?2 AND session_id=?3",params![json,run.input_id.as_str(),run.session_id.as_str()])
+                .map_err(|source|database_write_error("claimed Input Skill could not be bound",source))?;
+            if bound != 1 {
+                return Err(conflict("claimed Input identity changed"));
+            }
+        }
+        transaction
+            .commit()
+            .map_err(|source| database_write_error("input claim could not commit", source))
+    }
+
     /// 为最新的 Failed/Interrupted Run 创建同一 Input 的下一次执行尝试。
     pub(super) fn create_run_attempt(
         &mut self,
         attempt: NewStoredRunAttempt,
     ) -> StorageResult<StoredRun> {
-        let (input_id, source_attempt, source_status): (String, i64, String) = self
-            .connection
-            .query_row(
-                "SELECT input_id, attempt, status FROM runs WHERE run_id = ?1 AND session_id = ?2",
-                params![attempt.source_run_id.as_str(), attempt.session_id.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        let history =
+            self.load_conversation_history(assistant_protocol::ConversationOwner::MainSession {
+                session_id: attempt.session_id.clone(),
+            })?;
+        let source = history
+            .facts
+            .runs
+            .iter()
+            .find(|run| run.run_id == attempt.source_run_id)
+            .ok_or_else(|| conflict("source Run history does not exist"))?;
+        if source.inherited
+            || source.partial
+            || !matches!(
+                source.status,
+                Some(RunStatus::Failed | RunStatus::Interrupted)
             )
-            .optional()
-            .map_err(|source| internal_error("source run could not be queried", source))?
-            .ok_or_else(|| conflict("source run does not exist"))?;
-        if !matches!(source_status.as_str(), "failed" | "interrupted") {
-            return Err(conflict("run is not retryable"));
+        {
+            return Err(conflict("Run history is not retryable"));
         }
-        let next: i64 = self
-            .connection
-            .query_row(
-                "SELECT COALESCE(MAX(attempt), 0) + 1 FROM runs WHERE input_id = ?1",
-                [&input_id],
-                |row| row.get(0),
-            )
-            .map_err(|source| internal_error("run attempt could not be allocated", source))?;
-        if next != source_attempt + 1 {
-            return Err(conflict("only the latest run can be retried"));
+        let input_id = source
+            .input_id
+            .as_ref()
+            .ok_or_else(|| conflict("retry Input identity is unknown"))?;
+        let input = history
+            .facts
+            .inputs
+            .iter()
+            .find(|input| &input.input_id == input_id && !input.inherited)
+            .ok_or_else(|| conflict("retry Input history does not exist"))?;
+        if input.goal_binding.is_some() {
+            return Err(conflict("Goal Run requires resume"));
         }
-        let agent_variant = self
+        let latest = history
+            .facts
+            .runs
+            .iter()
+            .filter(|run| run.input_id.as_ref() == Some(input_id) && !run.inherited)
+            .map(|run| run.attempt)
+            .max()
+            .ok_or_else(|| conflict("retry history is incomplete"))?;
+        if source.attempt != latest
+            || history
+                .facts
+                .runs
+                .iter()
+                .any(|run| run.run_id == attempt.run_id)
+        {
+            return Err(conflict(
+                "retry history is stale or Run identity is already used",
+            ));
+        }
+        let next = latest
+            .checked_add(1)
+            .ok_or_else(|| conflict("Run attempt exceeds runtime range"))?;
+        let input_id = input_id.clone();
+        let agent_variant = input.agent_variant;
+        let transaction = self
             .connection
-            .query_row(
-                "SELECT agent_variant FROM inputs WHERE input_id = ?1",
-                [&input_id],
-                |row| row.get::<_, String>(0),
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|source| internal_error("retry admission could not begin", source))?;
+        let admitted: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM inputs JOIN sessions USING(session_id)
+                WHERE input_id=?1 AND inputs.session_id=?2 AND state='committed' AND lifecycle='active' AND body_generation=?3)
+             AND NOT EXISTS(SELECT 1 FROM runs WHERE input_id=?1 AND session_id=?2 AND status IN ('accepted','running','cancelling'))",
+            params![input_id.as_str(), attempt.session_id.as_str(), super::to_i64(history.generation, "history generation exceeds SQLite range")?], |row| row.get(0)
+        ).map_err(|source| internal_error("retry admission could not be checked", source))?;
+        if !admitted {
+            return Err(conflict(
+                "retry Input is not committed or already has unfinished work",
+            ));
+        }
+        // 真正的新 retry 才恢复其未完成控制所需的 Input 值；普通阅读和幂等命中不写 SQL。
+        // 与 accepted Run 同事务，终结后再次释放，不将历史装配成可自行恢复的执行。
+        let restored = transaction
+            .execute(
+                "UPDATE inputs SET user_message_id=?1,accepted_at_ms=?2,agent_variant=?3,origin=?4,
+                cross_session_json=?5,channel_source_json=?6,agent_shell_target=?7,
+                priority_order=NULL,goal_id=NULL,goal_generation=NULL,goal_turn=NULL,
+                goal_reply_route_json=NULL,skill_activation_json=NULL
+             WHERE input_id=?8 AND session_id=?9 AND state='committed' AND input_kind='message'",
+                params![
+                    input.user_message_id.as_str(),
+                    input.accepted_at_ms,
+                    super::mode::agent_variant_value(input.agent_variant),
+                    super::input_state::input_origin_value(input.origin),
+                    input
+                        .cross_session
+                        .as_ref()
+                        .map(serde_json::to_string)
+                        .transpose()
+                        .map_err(|source| internal_error(
+                            "retry Input binding could not be encoded",
+                            source
+                        ))?,
+                    input
+                        .channel_source
+                        .as_ref()
+                        .map(serde_json::to_string)
+                        .transpose()
+                        .map_err(|source| internal_error(
+                            "retry Input channel could not be encoded",
+                            source
+                        ))?,
+                    input.agent_shell_target.map(super::mode::shell_kind_value),
+                    input_id.as_str(),
+                    attempt.session_id.as_str()
+                ],
             )
-            .map_err(|source| internal_error("run input variant could not be queried", source))?;
-        let agent_variant = parse_agent_variant(&agent_variant)?;
-        self.connection.execute("INSERT INTO runs (run_id, session_id, input_id, attempt, status, cancel_requested, approval_mode, error_code, error_message, created_at_ms, started_at_ms, finished_at_ms) VALUES (?1, ?2, ?3, ?4, 'accepted', 0, ?5, NULL, NULL, ?6, NULL, NULL)", params![attempt.run_id.as_str(), attempt.session_id.as_str(), input_id, next, approval_mode_value(attempt.approval_mode), attempt.created_at_ms]).map_err(|source| database_write_error("run attempt could not be created", source))?;
+            .map_err(|source| {
+                database_write_error("retry Input control could not be restored", source)
+            })?;
+        if restored != 1 {
+            return Err(conflict("retry Input identity changed"));
+        }
+        transaction.execute("INSERT INTO runs (run_id, session_id, input_id, attempt, status, cancel_requested, approval_mode, created_at_ms, started_at_ms) VALUES (?1, ?2, ?3, ?4, 'accepted', 0, ?5, ?6, NULL)", params![attempt.run_id.as_str(), attempt.session_id.as_str(), input_id.as_str(), next, approval_mode_value(attempt.approval_mode), attempt.created_at_ms]).map_err(|source| database_write_error("run attempt could not be created", source))?;
+        transaction
+            .commit()
+            .map_err(|source| database_write_error("retry admission could not commit", source))?;
         Ok(StoredRun {
             shell: None,
             run_id: attempt.run_id,
             session_id: attempt.session_id,
-            input_id: InputId::new(input_id)
-                .map_err(|source| invalid_data_with_source("stored input id is invalid", source))?,
-            attempt: u32::try_from(next)
-                .map_err(|source| internal_error("run attempt exceeds runtime range", source))?,
+            input_id,
+            attempt: next,
             status: RunStatus::Accepted,
             agent_variant,
             approval_mode: attempt.approval_mode,
@@ -82,39 +285,19 @@ impl StorageEngine {
 
     /// 首次领取提交 User Message；后续 attempt 只把新的 Run 转为 Running。
     pub(super) fn commit_user_message(&mut self, commit: UserMessageCommit) -> StorageResult<()> {
-        if commit.message.is_none() {
-            let shell = commit
-                .shell
-                .as_ref()
-                .map(serde_json::to_string)
-                .transpose()
-                .map_err(|source| internal_error("shell snapshot could not be encoded", source))?;
-            let transaction = self
-                .connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(|source| internal_error("run start could not begin", source))?;
-            let changed = transaction.execute("UPDATE runs SET status = 'running', started_at_ms = ?1, reasoning_effort = ?2, shell_snapshot_json = ?6 WHERE run_id = ?3 AND session_id = ?4 AND input_id = ?5 AND status = 'accepted' AND EXISTS (SELECT 1 FROM inputs WHERE input_id = ?5 AND state = 'committed') AND EXISTS(SELECT 1 FROM sessions WHERE session_id=?4 AND lifecycle='active')", params![commit.created_at_ms, commit.reasoning_effort.map(super::mode::reasoning_effort_value), commit.run_id.as_str(), commit.session_id.as_str(), commit.input_id.as_str(), shell]).map_err(|source| database_write_error("run could not be started", source))?;
-            if changed != 1 {
-                return Err(conflict("run cannot be started"));
-            }
-            transaction
-                .execute(
-                    "UPDATE sessions SET context_management_mode=?1 WHERE session_id=?2",
-                    params![
-                        super::mode::context_management_mode_value(commit.context_management_mode),
-                        commit.session_id.as_str()
-                    ],
-                )
-                .map_err(|source| {
-                    database_write_error("run context mode could not be saved", source)
-                })?;
-            transaction
-                .commit()
-                .map_err(|source| database_write_error("run start could not commit", source))?;
-            return Ok(());
-        }
-        let message = commit.message.expect("checked message");
-
+        let reuse_committed_input = commit.message.is_none();
+        let messages = commit
+            .message
+            .into_iter()
+            .map(ConversationMessage::User)
+            .collect();
+        let purpose = AppendPurpose::UserMessage {
+            context_management_mode: commit.context_management_mode,
+            shell: commit.shell,
+            reasoning_effort: commit.reasoning_effort,
+            reuse_committed_input,
+            input_id: Some(commit.input_id),
+        };
         // 在正文写入前核验切换目标与冻结快照，避免可预知的冲突留下不可完成的 staged append。
         let preflight = self
             .connection
@@ -124,10 +307,9 @@ impl StorageEngine {
             &preflight,
             &commit.run_id,
             &commit.session_id,
-            commit.reasoning_effort,
-            commit.context_management_mode,
-            commit.shell.as_ref(),
+            &purpose,
             commit.created_at_ms,
+            self.allow_legacy_history,
         )?;
         preflight
             .rollback()
@@ -139,15 +321,11 @@ impl StorageEngine {
                 operation_id,
                 session_id: commit.session_id,
                 run_id: commit.run_id,
-                messages: vec![ConversationMessage::User(message)],
+                messages,
                 message_step: None,
                 created_at_ms: commit.created_at_ms,
             },
-            AppendPurpose::UserMessage {
-                context_management_mode: commit.context_management_mode,
-                shell: commit.shell,
-                reasoning_effort: commit.reasoning_effort,
-            },
+            purpose,
         )?;
         self.complete_staged_append(&commit.operation_id)
     }
@@ -190,24 +368,6 @@ impl StorageEngine {
             goal_effect: settlement.goal_effect.map(Box::new),
             proxy_report: settlement.proxy_report,
         };
-        if messages.is_empty() {
-            let transaction = self
-                .connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(|source| internal_error("run settlement could not begin", source))?;
-            apply_run_settlement(
-                &transaction,
-                &settlement.run_id,
-                &settlement.session_id,
-                &purpose,
-                settlement.finished_at_ms,
-            )?;
-            transaction.commit().map_err(|source| {
-                database_write_error("run settlement could not be committed", source)
-            })?;
-            return self.run_settlement_result(goal_effect.as_ref(), proxy_report.as_deref());
-        }
-
         // JSONL 先写、SQLite 后提交的 staged append 只能承受进程崩溃，不能承受一个
         // 可预知的业务 effect 校验失败。单 worker 内先在回滚事务中执行同一 effect，
         // 确认 Run/Goal CAS 与 continuation 形状均有效后才允许正文落盘。
@@ -221,6 +381,7 @@ impl StorageEngine {
             &settlement.session_id,
             &purpose,
             settlement.finished_at_ms,
+            self.allow_legacy_history,
         )?;
         preflight.rollback().map_err(|source| {
             internal_error("run settlement preflight could not roll back", source)
@@ -246,6 +407,11 @@ impl StorageEngine {
         &mut self,
         reconciliation: StoredTerminalRunInputReconciliation,
     ) -> StorageResult<()> {
+        if !self.allow_legacy_history {
+            return Err(conflict(
+                "legacy terminal Input reconciliation requires verified upgrade context",
+            ));
+        }
         let (run_input_id, status, input_session_id, user_message_id, state, queued_message_json): (
             String,
             String,
@@ -314,6 +480,7 @@ impl StorageEngine {
             &reconciliation.run_id,
             &reconciliation.session_id,
             &purpose,
+            self.allow_legacy_history,
         )?;
         preflight.rollback().map_err(|source| {
             internal_error(
@@ -409,7 +576,7 @@ impl StorageEngine {
     }
 
     fn run_settlement_result(
-        &self,
+        &mut self,
         effect: Option<&assistant_runtime::StoredGoalSettlementEffect>,
         proxy_report: Option<&assistant_runtime::NewStoredInput>,
     ) -> StorageResult<assistant_runtime::StoredRunSettlementResult> {
@@ -434,18 +601,11 @@ impl StorageEngine {
         };
         if let Some(report) = proxy_report {
             let input = self
-                .load_inputs()?
-                .into_iter()
-                .find(|input| input.input_id == report.input_id)
+                .load_input_for_id(&report.session_id, &report.input_id)?
                 .ok_or_else(|| super::invalid_data("proxy report input is missing"))?;
-            let run = self
-                .load_runs()?
-                .into_iter()
-                .find(|run| run.run_id == report.run_id)
-                .ok_or_else(|| super::invalid_data("proxy report Run is missing"))?;
-            result.accepted_proxy_report = Some(assistant_runtime::AcceptedInput {
-                input,
-                run,
+            result.accepted_proxy_report = Some(assistant_runtime::AcceptedInput::Control {
+                input: Box::new(input),
+                run: None,
                 is_duplicate: false,
             });
         }

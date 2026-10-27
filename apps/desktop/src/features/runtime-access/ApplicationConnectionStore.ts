@@ -1,3 +1,4 @@
+import { startupMessage } from "../../runtime-client/startupStatus";
 import { isTauri } from "@tauri-apps/api/core";
 import { action, computed, makeObservable, observable, observableRef, reaction, runInAction, type IReactionDisposer } from "mobx";
 import type { HostLoginResult, HostMode } from "@ez-assistant/protocol";
@@ -533,6 +534,8 @@ export class ApplicationConnectionStore {
       const binding = await beginRuntimeConnection();
       if (selection !== this.#update_selection) return;
       if (origin === null) await this.startLocal().catch(() => undefined);
+      // DMG 已替换随包来源时，先由用户确认接续本机 Host；不能用仍在运行的旧协议遮住该入口。
+      if (origin === null && this.local_state === "upgrade_required") return;
       // await 期间连接可以进入工作区；解除前一次判断留下的静态收窄，仍按最新状态检查。
       if (selection !== this.#update_selection || (this.phase as ApplicationConnectionStore["phase"]) === "workspace") return;
       if (origin === null || origin.trim()) await prepareDesktopUpdate(binding, origin);
@@ -595,8 +598,9 @@ export class ApplicationConnectionStore {
     // 不能让这些恢复请求继续占用账号操作锁，也不能在它们迟到完成时重设页面。
     let connected!: () => void;
     const ready = new Promise<void>((resolve) => { connected = resolve; });
-    this.#auth_reaction = reaction(() => [store.local_connection.state, store.local_connection.last_error_code] as const, ([state, code]) => {
+    this.#auth_reaction = reaction(() => [store.local_connection.state, store.local_connection.last_error_code, store.local_connection.startup] as const, ([state, code, health]) => {
       if (generation !== this.#generation || (this.logout_confirmation && this.pending)) return;
+      if (health && health.status !== "ready") runInAction(() => { this.progress = startupMessage(health); });
       if (code === "center_protocol_incompatible") { this.#connectionError({ code }); }
       else if (code === "login_context_changed") { this.#clear(); runInAction(() => { this.phase = "loading"; }); void this.recheckSession(); }
       else if (code === "authentication_required") this.#authenticationRequired();

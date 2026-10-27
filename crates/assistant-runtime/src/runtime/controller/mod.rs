@@ -26,7 +26,7 @@ use crate::{
         InternalBoundaryCoordinator, InternalBoundaryRequest, InternalBoundarySource,
     },
     observation::ObservationCoordinator,
-    run::{allocate_run_id, create_user_message},
+    run::{allocate_input_id, create_user_message, ensure_message_id_available},
     session::SessionController,
 };
 
@@ -62,7 +62,7 @@ pub(super) struct ManagedSession {
 pub(super) struct DeliveryReceipt {
     pub target_session_id: String,
     pub input_id: String,
-    pub run_id: String,
+    pub run_id: Option<String>,
     pub status: &'static str,
 }
 
@@ -231,7 +231,7 @@ impl ControllerToolCoordinator {
     /// 执行主控 `send_session_message` 工具的权威投递用例。
     ///
     /// 本函数只获取目标 Session mutation gate：先校验当前主控、代理关系和空 Queue，再由 Store
-    /// 原子接受 `ControllerDelivery` Input 与首次 Run；`start_goal` 为真时，同一事务还创建 Goal
+    /// 原子接受 `ControllerDelivery` Input；`start_goal` 为真时，同一事务还创建 Goal
     /// 并冻结其回复路径。Store 成功后复用统一 Input/Goal 投影并唤醒目标；同一主控 ToolCall 的
     /// 重放返回首次 receipt，不重新入队或重复创建 Goal。
     pub(super) async fn deliver(
@@ -261,7 +261,8 @@ impl ControllerToolCoordinator {
             controller_run_id,
             controller_tool_call_id,
         )?;
-        let (variant, approval_mode, input_id, run_id, model_selection) = {
+        let history = crate::runtime::load_identity_history(self.store.as_ref(), &target).await?;
+        let (variant, input_id, model_selection) = {
             let state = target.lock_state()?;
             if let Some(existing) = state
                 .inputs
@@ -271,7 +272,10 @@ impl ControllerToolCoordinator {
                 return Ok(DeliveryReceipt {
                     target_session_id: target_session_id.as_str().to_owned(),
                     input_id: existing.stored.input_id.as_str().to_owned(),
-                    run_id: existing.first_run_id.as_str().to_owned(),
+                    run_id: existing
+                        .first_run_id
+                        .as_ref()
+                        .map(|id| id.as_str().to_owned()),
                     status: "already_accepted",
                 });
             }
@@ -296,9 +300,7 @@ impl ControllerToolCoordinator {
             }
             (
                 state.current_variant,
-                state.approval_mode,
-                allocate_input_id(&state)?,
-                allocate_run_id(&state)?,
+                allocate_input_id(&state, &history)?,
                 state.model_selection.clone(),
             )
         };
@@ -315,6 +317,10 @@ impl ControllerToolCoordinator {
             .reply_route(controller_session_id, controller_run_id)
             .await?;
         let mut message = create_user_message(message_text, Vec::new(), variant)?;
+        {
+            let state = target.lock_state()?;
+            ensure_message_id_available(&mut message.id, &state, &history)?;
+        }
         message.origin = UserMessageOrigin::Runtime;
         InternalBoundaryCoordinator::append(
             &mut message,
@@ -353,7 +359,7 @@ impl ControllerToolCoordinator {
                 feedback_answer: None,
                 agent_shell_target: None,
                 input_id,
-                run_id,
+
                 session_id: target_session_id.clone(),
                 idempotency_key: Some(idempotency_key),
                 agent_variant: variant,
@@ -363,7 +369,7 @@ impl ControllerToolCoordinator {
                 channel_source: None,
                 skill_activation: None,
                 mcp_selection: None,
-                approval_mode,
+
                 message,
                 new_goal,
                 resumed_goal: None,
@@ -374,21 +380,21 @@ impl ControllerToolCoordinator {
             .map_err(|source| RuntimeError::from_store("deliver controller message", source))?;
         let receipt = DeliveryReceipt {
             target_session_id: target_session_id.as_str().to_owned(),
-            input_id: accepted.input.input_id.as_str().to_owned(),
-            run_id: accepted.run.run_id.as_str().to_owned(),
-            status: if accepted.is_duplicate {
+            input_id: accepted.input_id().as_str().to_owned(),
+            run_id: accepted.run_id().map(|id| id.as_str().to_owned()),
+            status: if accepted.is_duplicate() {
                 "already_accepted"
             } else {
                 "accepted"
             },
         };
-        if !accepted.is_duplicate {
+        if !accepted.is_duplicate() {
             let projection = {
                 let mut state = target.lock_state()?;
                 if let Some(goal) = prepared_goal {
                     state.goal = Some(goal.control);
                 }
-                project_accepted_input(&mut state, accepted, None)
+                project_accepted_input(&mut state, accepted, None)?
             };
             self.publish_and_wake_projected_input(&target, projection, goal_snapshot)?;
         }
@@ -398,7 +404,7 @@ impl ControllerToolCoordinator {
     /// 在源 Run 结算事务开始前构造代理报告 Input，但不持久化或修改主控 Session。
     ///
     /// 调用方仍持有源 Session mutation gate，因此这里只短暂读取主控 Session 当前变体和审批模式，
-    /// 并分配报告 Input/Run ID。返回值随后作为源 Run settlement 的可选 effect 原子提交。
+    /// 并分配报告 Input ID。返回值随后作为源 Run settlement 的可选 effect 原子提交。
     pub(crate) async fn prepare_proxy_report(
         &self,
         draft: ProxyReportDraft,
@@ -406,24 +412,25 @@ impl ControllerToolCoordinator {
         let target = self.session(&draft.controller_session_id).await?;
         target.ensure_healthy()?;
         target.ensure_active()?;
-        let (variant, approval_mode, input_id, run_id) = {
+        let history = crate::runtime::load_identity_history(self.store.as_ref(), &target).await?;
+        let (variant, input_id) = {
             let state = target.lock_state()?;
             if state.role != SessionRole::Controller {
                 return Err(RuntimeError::ControllerUnavailable);
             }
-            (
-                state.current_variant,
-                state.approval_mode,
-                allocate_input_id(&state)?,
-                allocate_run_id(&state)?,
-            )
+            (state.current_variant, allocate_input_id(&state, &history)?)
         };
-        build_proxy_report_input(draft, variant, approval_mode, input_id, run_id)
+        let mut input = build_proxy_report_input(draft, variant, input_id)?;
+        {
+            let state = target.lock_state()?;
+            ensure_message_id_available(&mut input.message.id, &state, &history)?;
+        }
+        Ok(input)
     }
 
     /// 将已经随源 Run settlement 落库的代理报告投影到主控 Session，并启动其执行。
     ///
-    /// `accepted` 不是待提交命令，而是 Store 已可靠接受的 `ProxyReport` Input 与首次 Run；本函数
+    /// `accepted` 不是待提交命令，而是 Store 已可靠接受的 `ProxyReport` Input；本函数
     /// 不再写 Store。调用方必须先完成源 Session 的内存结算并释放源 mutation gate，本函数随后只取
     /// 主控 Session gate，避免同时持有两个 Session gate。若崩溃恢复或安全重试发现同一 Input 已在
     /// 内存中，则直接返回；否则完成统一 Session lane 投影，再发布可丢失的观察事件并唤醒 Queue。
@@ -431,14 +438,14 @@ impl ControllerToolCoordinator {
         &self,
         accepted: crate::AcceptedInput,
     ) -> RuntimeResult<()> {
-        let target = self.session(&accepted.input.session_id).await?;
+        let target = self.session(accepted.session_id()).await?;
         let _mutation = target.mutation().await;
         let projection = {
             let mut state = target.lock_state()?;
-            if state.inputs.contains_key(&accepted.input.input_id) {
+            if accepted.is_duplicate() || state.inputs.contains_key(accepted.input_id()) {
                 return Ok(());
             }
-            project_accepted_input(&mut state, accepted, None)
+            project_accepted_input(&mut state, accepted, None)?
         };
         // 观察事件和 Queue 唤醒不属于内存投影临界区；先释放主控 gate，也让后续 driver 能取得它。
         drop(_mutation);
@@ -452,11 +459,6 @@ impl ControllerToolCoordinator {
         projection: AcceptedInputProjection,
         goal: Option<assistant_protocol::GoalSnapshot>,
     ) -> RuntimeResult<()> {
-        let _ = self.events.send(RuntimeEvent::RunAccepted {
-            created_at_ms: projection.run.created_at_ms,
-            session_id: target.id().clone(),
-            run_id: projection.run.run_id,
-        });
         if let Some(goal) = goal {
             let _ = self.events.send(RuntimeEvent::GoalChanged {
                 session_id: target.id().clone(),
@@ -505,9 +507,7 @@ impl ControllerToolCoordinator {
 pub(crate) fn build_proxy_report_input(
     draft: ProxyReportDraft,
     variant: assistant_protocol::AgentVariant,
-    approval_mode: assistant_protocol::ApprovalMode,
     input_id: InputId,
-    run_id: RunId,
 ) -> RuntimeResult<NewStoredInput> {
     let text = proxy_report_text(&draft);
     let mut message = create_user_message(text, Vec::new(), variant)?;
@@ -530,7 +530,7 @@ pub(crate) fn build_proxy_report_input(
         feedback_answer: None,
         agent_shell_target: None,
         input_id,
-        run_id,
+
         session_id: draft.controller_session_id,
         idempotency_key: Some(idempotency_key),
         agent_variant: variant,
@@ -548,7 +548,7 @@ pub(crate) fn build_proxy_report_input(
         channel_source: None,
         skill_activation: None,
         mcp_selection: None,
-        approval_mode,
+
         message,
         new_goal: None,
         resumed_goal: None,
@@ -587,24 +587,6 @@ impl ControllerToolCoordinator {
             _ => ReplyRoute::SessionDefault,
         })
     }
-}
-
-fn allocate_input_id(state: &crate::session::SessionState) -> RuntimeResult<InputId> {
-    for _ in 0..8 {
-        let value =
-            crate::id::generate("input").map_err(|_| RuntimeError::InternalStateUnavailable {
-                component: "input id random source",
-            })?;
-        let id = InputId::new(value).map_err(|_| RuntimeError::InternalStateUnavailable {
-            component: "input id generator",
-        })?;
-        if !state.inputs.contains_key(&id) {
-            return Ok(id);
-        }
-    }
-    Err(RuntimeError::InternalStateUnavailable {
-        component: "input id collision",
-    })
 }
 
 fn delivery_idempotency_key(

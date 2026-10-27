@@ -8,6 +8,12 @@ startup_gate = os.environ.get("MCP_FIXTURE_START_GATE")
 while startup_gate and not os.path.exists(startup_gate):
     time.sleep(0.02)
 
+if len(sys.argv) > 1 and sys.argv[1] == "missing-config":
+    sys.stderr.write("private-token-do-not-show\n")
+    sys.stderr.write("deepseek-search-mcp: 请在通用辅助的原生配置文件中上传 deepseek-search.json 并填写 api_key，随后刷新 MCP。\n")
+    sys.stderr.flush()
+    sys.exit(2)
+
 legacy = len(sys.argv) > 1 and sys.argv[1] == "legacy"
 if len(sys.argv) > 1 and sys.argv[1] in ("reject-once", "disconnect"):
     os.environ["MCP_FIXTURE_CALL_MODE"] = sys.argv[1]

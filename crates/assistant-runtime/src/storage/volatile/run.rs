@@ -125,15 +125,16 @@ impl VolatileRuntimeStore {
                 run.message_steps
                     .insert(message_id(message).clone(), completed.step);
             }
-            for activation in completed.skill_activations {
-                state
-                    .skill_activations
-                    .insert(activation.activation_id.clone(), activation);
-            }
             state
                 .pending_tool_exchanges
                 .remove(completed.receipt.as_str());
             record_session_usage(&mut state, &completed.session_id, &messages);
+            state.record_run_history(&completed.run_id)?;
+            let history = state.histories.entry(completed.session_id).or_default();
+            history
+                .skill_activations
+                .extend(completed.skill_activations);
+            history.normalize();
             Ok(())
         })
     }
@@ -156,6 +157,13 @@ impl VolatileRuntimeStore {
                 .any(|pending| pending.run_id == settlement.run_id)
             {
                 return Err(conflict("run has a pending tool exchange"));
+            }
+            if state.child_tasks.values().any(|child| {
+                child.session_id == settlement.session_id
+                    && child.parent_run_id == settlement.run_id
+                    && !child.status.is_terminal()
+            }) {
+                return Err(conflict("run still owns an unfinished child"));
             }
             validate_volatile_goal_effect(&state, &settlement)?;
             validate_volatile_proxy_report(&state, &settlement)?;
@@ -224,15 +232,21 @@ impl VolatileRuntimeStore {
             run.cancel_requested = settlement.cancel_requested;
             run.error = settlement.error;
             run.finished_at_ms = Some(settlement.finished_at_ms);
-            for request in state.feedback.values_mut().filter(|r| {
-                r.run_id == settlement.run_id
-                    && r.status == assistant_protocol::FeedbackStatus::Pending
-            }) {
-                if request.mode == assistant_protocol::FeedbackMode::Wait
-                    || settlement.status != RunStatus::Completed
-                {
-                    request.status = assistant_protocol::FeedbackStatus::Invalidated;
-                }
+            let invalidated = state
+                .feedback
+                .values()
+                .filter(|r| {
+                    r.session_id == settlement.session_id
+                        && r.run_id == settlement.run_id
+                        && r.status == assistant_protocol::FeedbackStatus::Pending
+                        && (r.mode == assistant_protocol::FeedbackMode::Wait
+                            || settlement.status != RunStatus::Completed)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            for mut request in invalidated {
+                request.status = assistant_protocol::FeedbackStatus::Invalidated;
+                state.record_feedback_request(request);
             }
             let session = state
                 .sessions
@@ -245,6 +259,9 @@ impl VolatileRuntimeStore {
                 result.accepted_proxy_report =
                     Some(insert_volatile_proxy_report(&mut state, *report)?);
             }
+            state.record_run_history(&settlement.run_id)?;
+            state.release_input_control(&input_id, &settlement.run_id)?;
+            state.runs.remove(&settlement.run_id);
             Ok(result)
         })
     }
@@ -308,6 +325,9 @@ impl VolatileRuntimeStore {
                 .expect("terminal run existence checked before append")
                 .message_ids
                 .push(message_id(&message).clone());
+            state.record_run_history(&reconciliation.run_id)?;
+            state.release_input_control(&reconciliation.input_id, &reconciliation.run_id)?;
+            state.runs.remove(&reconciliation.run_id);
             Ok(())
         })
     }
@@ -370,6 +390,7 @@ impl VolatileRuntimeStore {
                 .updated_at_ms = continuation.committed_at_ms;
             record_session_usage(&mut state, &continuation.session_id, &continuation.messages);
             let result = apply_volatile_goal_effect(&mut state, continuation.goal_effect)?;
+            state.record_run_history(&continuation.run_id)?;
             Ok(StoredRunContinuationResult {
                 goal: result.goal,
                 resume_required: result.resume_required,

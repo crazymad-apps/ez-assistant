@@ -75,15 +75,12 @@ fn formal_host_projects_main_and_child_tool_images_across_restart_and_failures()
     );
     let main_resource_id = image_resource_id(&main_detail);
 
-    let child_parent = first.runtime(
-        "submit_input",
-        json!({
-            "session_id":session_id,
-            "message":format!("DELEGATE_IMAGE_CASE {}", image_path.display()),
-            "variant":"build",
-            "idempotency_key":"child-image",
-        }),
-    );
+    let child_parent = first.submit_started_input(json!({
+        "session_id":session_id,
+        "message":format!("DELEGATE_IMAGE_CASE {}", image_path.display()),
+        "variant":"build",
+        "idempotency_key":"child-image",
+    }));
     let child_parent_run_id = text(&child_parent["run"]["run_id"]);
     let child_deadline = Instant::now() + Duration::from_secs(20);
     let child = loop {
@@ -244,15 +241,12 @@ fn submit_and_wait(
     message: &str,
     idempotency_key: &str,
 ) -> Value {
-    let submitted = client.runtime(
-        "submit_input",
-        json!({
-            "session_id":session_id,
-            "message":message,
-            "variant":"build",
-            "idempotency_key":idempotency_key,
-        }),
-    );
+    let submitted = client.submit_started_input(json!({
+        "session_id":session_id,
+        "message":message,
+        "variant":"build",
+        "idempotency_key":idempotency_key,
+    }));
     let run_id = text(&submitted["run"]["run_id"]);
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {

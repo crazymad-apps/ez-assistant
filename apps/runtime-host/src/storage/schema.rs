@@ -38,16 +38,24 @@ pub(super) fn initialize_recall_fts(connection: &mut Connection) -> bool {
         .ok()
         .flatten()
         .is_some();
+    let triggers_complete = connection.query_row(
+        "SELECT COUNT(*)=3 FROM sqlite_schema WHERE type='trigger' AND name IN (
+            'conversation_recall_documents_ai','conversation_recall_documents_ad','conversation_recall_documents_au')",
+        [], |row| row.get::<_, bool>(0),
+    ).unwrap_or(false);
     let Ok(transaction) = connection.transaction_with_behavior(TransactionBehavior::Immediate)
     else {
         return false;
     };
-    if !existed
+    // F02 的版本事务只替换普通派生表并移除触发器，不在受限迁移回调中启动 FTS。
+    // 触发器缺失也意味着旧虚拟索引不再匹配正文表；在此事务一起重建，失败只关闭 Recall。
+    if (!existed || !triggers_complete)
         && transaction
             .execute_batch(
                 "DROP TRIGGER IF EXISTS conversation_recall_documents_ai;
                  DROP TRIGGER IF EXISTS conversation_recall_documents_ad;
                  DROP TRIGGER IF EXISTS conversation_recall_documents_au;
+                 DROP TABLE IF EXISTS conversation_recall_fts;
                  DELETE FROM conversation_recall_documents;
                  UPDATE conversation_recall_heads
                  SET indexed_message_count = 0, state = 'dirty';",

@@ -309,6 +309,9 @@ pub enum OutputPreferenceSnapshot {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct UserMessageSnapshot {
+    /// 继承消息保留原 Input 身份用于阅读，不能据此恢复或重新输入原执行。
+    #[serde(default)]
+    pub inherited: bool,
     pub message_id: MessageId,
     /// 历史记录无法恢复归属时保持为空。
     pub input_id: Option<InputId>,
@@ -374,10 +377,20 @@ pub enum MessageFeedback {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct AssistantMessageSnapshot {
+    /// 继承的 Run／Step 身份仅供阅读，不属于本会话可控制的执行。
+    #[serde(default)]
+    pub inherited: bool,
+    /// 仅保留截至分支点的内容，不展示来源后续终态或完整耗时。
+    #[serde(default)]
+    pub partial: bool,
     /// 关联 Run 被接受的可靠时间；不是这条消息的创建时间，无归属时保持未知。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub run_created_at_ms: Option<i64>,
+    /// 所属 attempt 可靠领取后的开始时间，不包含排队等待。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub run_started_at_ms: Option<i64>,
     pub message_id: MessageId,
     pub run_id: Option<RunId>,
     pub attempt: Option<u32>,
@@ -849,7 +862,16 @@ pub struct SessionViewSnapshot {
 /// 出现可路由却没有业务实现的命令。
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
-pub struct GetApplicationSnapshotRequest {}
+pub struct GetApplicationSnapshotRequest {
+    /// 从列表起点一次读取的活动会话数量；缺省 100，刷新时传入已加载数量。
+    #[serde(default)]
+    #[ts(optional)]
+    pub active_sessions_limit: Option<u32>,
+    /// 从列表起点一次读取的归档会话数量；缺省 100。
+    #[serde(default)]
+    #[ts(optional)]
+    pub archived_sessions_limit: Option<u32>,
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
@@ -1153,7 +1175,10 @@ mod tests {
     #[test]
     fn conversation_item_preserves_segment_order_on_the_wire() {
         let message = AssistantMessageSnapshot {
+            inherited: false,
+            partial: false,
             run_created_at_ms: None,
+            run_started_at_ms: None,
             message_id: MessageId::new("message-1").expect("message id"),
             run_id: None,
             attempt: None,

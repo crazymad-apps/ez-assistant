@@ -14,6 +14,21 @@ use crate::mcp::{
 use agent_tools::{Dispatcher, ResolvedBatchItemRef, ToolContext, ToolRegistry};
 use agent_types::{ToolCall, ToolCallId, ToolName, ToolResultStatus};
 
+fn test_registry(factory: Arc<dyn McpConnectionFactory>) -> McpRegistry {
+    McpRegistry::new(factory, crate::observation::ObservationCoordinator::new(32))
+}
+
+#[test]
+fn connection_diagnostic_preserves_owned_source_and_reason() {
+    let message =
+        "来源：插件 · general-assistant；缺少插件原生配置文件 deepseek-search.json，请填写 api_key";
+    let error =
+        McpConnectionError::new(McpConnectionFailureKind::InvalidConfig, message.to_owned());
+    let diagnostic = connection_diagnostic(McpServerKey::new("deepseek-search").unwrap(), &error);
+    assert_eq!(diagnostic.message, message);
+    assert_eq!(diagnostic.code, McpDiagnosticCode::InvalidConfig);
+}
+
 struct FixtureConnection {
     pages: StdMutex<VecDeque<Vec<McpToolDefinition>>>,
     calls: StdMutex<VecDeque<Result<McpRawCallResult, McpConnectionError>>>,
@@ -157,6 +172,7 @@ fn tool(schema: Value) -> McpToolDefinition {
 
 fn server(fingerprint: u8) -> McpServerConfig {
     McpServerConfig {
+        source: assistant_protocol::McpServerSource::User,
         plugin_name: None,
         plugin_sha256: None,
         server_key: McpServerKey::new("github").expect("key"),
@@ -172,6 +188,7 @@ fn server(fingerprint: u8) -> McpServerConfig {
         startup_timeout: None,
         tool_timeout: None,
         fingerprint: [fingerprint; 32],
+        removed_environment: BTreeSet::new(),
     }
 }
 
@@ -185,6 +202,48 @@ fn candidate(server: McpServerConfig) -> McpRegistryCandidate {
         servers: BTreeMap::from([(key, server)]),
         diagnostics: Vec::new(),
     }
+}
+
+#[tokio::test]
+async fn changed_source_after_connect_closes_candidate_without_replacing_old_connection() {
+    let old = FixtureConnection::new(vec![tool(json!({"type":"object"}))]);
+    let next = FixtureConnection::new(vec![tool(json!({"type":"object"}))]);
+    let registry = test_registry(FixtureFactory::new(vec![old.clone(), next.clone()]));
+    registry
+        .refresh(
+            candidate(server(1)),
+            None,
+            McpRuntimeConfig::test_default(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .finish()
+        .await;
+    let before = registry.projections().unwrap();
+    let result = registry
+        .refresh_checked(
+            candidate(server(2)),
+            None,
+            McpRuntimeConfig::test_default(),
+            CancellationToken::new(),
+            || async { Err::<(), _>(RuntimeError::McpConfigConflict) },
+        )
+        .await;
+    assert!(matches!(result, Err(RuntimeError::McpConfigConflict)));
+    assert_eq!(old.closed.load(Ordering::SeqCst), 0);
+    assert_eq!(next.closed.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        registry
+            .projections()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()
+            .fingerprint,
+        before.values().next().unwrap().fingerprint
+    );
+    registry.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -203,7 +262,7 @@ async fn single_request_failures_keep_connection_for_next_explicit_call() {
             structured_content: Some(json!({"id": 1})),
             is_error: false,
         });
-        let registry = McpRegistry::new(FixtureFactory::new(vec![connection.clone()]));
+        let registry = test_registry(FixtureFactory::new(vec![connection.clone()]));
         registry
             .refresh(
                 candidate(server(1)),
@@ -220,6 +279,8 @@ async fn single_request_failures_keep_connection_for_next_explicit_call() {
             .resolve(&key, "create_issue", json!({}))
             .await
             .expect("resolve");
+        let history = registry.events.read_history();
+        let mut changes = registry.events.subscribe();
         let failure = registry
             .execute(
                 &invocation,
@@ -231,6 +292,8 @@ async fn single_request_failures_keep_connection_for_next_explicit_call() {
             .expect_err("first request must fail");
         assert!(failure.remote_may_have_executed);
         assert!(!invocation.is_retired());
+        assert!(history.capture(|| Ok(())).unwrap().is_some());
+        assert!(changes.try_recv().is_err());
         assert_eq!(connection.closed.load(Ordering::SeqCst), 0);
         assert_eq!(
             connection.calls.lock().expect("calls").len(),
@@ -265,7 +328,7 @@ async fn broken_connections_are_retired_without_replaying_request() {
     ] {
         let connection = FixtureConnection::new(vec![tool(json!({"type":"object"}))]);
         connection.with_failure(kind);
-        let registry = McpRegistry::new(FixtureFactory::new(vec![connection.clone()]));
+        let registry = test_registry(FixtureFactory::new(vec![connection.clone()]));
         registry
             .refresh(
                 candidate(server(1)),
@@ -282,6 +345,8 @@ async fn broken_connections_are_retired_without_replaying_request() {
             .resolve(&key, "create_issue", json!({}))
             .await
             .expect("resolve");
+        let history = registry.events.read_history();
+        let mut changes = registry.events.subscribe();
         let failure = registry
             .execute(
                 &invocation,
@@ -294,6 +359,11 @@ async fn broken_connections_are_retired_without_replaying_request() {
         assert_eq!(failure.kind, McpCallFailureKind::RequestFailed);
         assert!(failure.remote_may_have_executed);
         assert!(invocation.is_retired());
+        assert!(history.capture(|| Ok(())).unwrap().is_none());
+        assert!(matches!(
+            changes.try_recv().unwrap().event,
+            assistant_protocol::RuntimeEvent::McpRegistryChanged
+        ));
         assert_eq!(connection.closed.load(Ordering::SeqCst), 1);
         assert_eq!(registry.diagnostics().expect("diagnostics").len(), 1);
         assert_eq!(
@@ -311,7 +381,7 @@ async fn broken_connections_are_retired_without_replaying_request() {
 #[tokio::test]
 async fn conflicting_sources_retire_existing_connection_and_publish_diagnostic() {
     let old = FixtureConnection::new(vec![tool(json!({"type":"object"}))]);
-    let registry = McpRegistry::new(FixtureFactory::new(vec![old.clone()]));
+    let registry = test_registry(FixtureFactory::new(vec![old.clone()]));
     let key = McpServerKey::new("github").expect("key");
     registry
         .refresh(
@@ -358,7 +428,7 @@ async fn conflicting_sources_retire_existing_connection_and_publish_diagnostic()
 #[tokio::test]
 async fn independent_server_remains_available_when_plugin_name_conflicts() {
     let independent = FixtureConnection::new(vec![tool(json!({"type":"object"}))]);
-    let registry = McpRegistry::new(FixtureFactory::new(vec![independent.clone()]));
+    let registry = test_registry(FixtureFactory::new(vec![independent.clone()]));
     let mut configured = candidate(server(1));
     let key = McpServerKey::new("github").expect("key");
     configured
@@ -398,7 +468,7 @@ async fn independent_server_remains_available_when_plugin_name_conflicts() {
 #[tokio::test]
 async fn retiring_plugin_package_closes_idle_connection_before_file_change() {
     let old = FixtureConnection::new(vec![tool(json!({"type":"object"}))]);
-    let registry = McpRegistry::new(FixtureFactory::new(vec![old.clone()]));
+    let registry = test_registry(FixtureFactory::new(vec![old.clone()]));
     let mut configured = server(1);
     configured.plugin_name = Some("example-tools".into());
     configured.plugin_sha256 = Some("a".repeat(64));
@@ -443,7 +513,7 @@ async fn server_tool_timeout_overrides_default_in_both_directions() {
         Some(Duration::from_secs(1800)),
     ] {
         let connection = FixtureConnection::new(vec![tool(json!({"type":"object"}))]);
-        let registry = McpRegistry::new(FixtureFactory::new(vec![connection]));
+        let registry = test_registry(FixtureFactory::new(vec![connection]));
         let runtime = McpRuntimeConfig::test_default();
         let mut configured = server(1);
         let key = configured.server_key.clone();
@@ -476,7 +546,7 @@ async fn server_tool_timeout_overrides_default_in_both_directions() {
 async fn replacement_rejects_old_approval_identity_before_old_calls_finish() {
     let old = FixtureConnection::new(vec![tool(json!({"type":"object"}))]);
     let next = FixtureConnection::new(vec![tool(json!({"type":"object"}))]);
-    let registry = McpRegistry::new(FixtureFactory::new(vec![old.clone(), next]));
+    let registry = test_registry(FixtureFactory::new(vec![old.clone(), next]));
     registry
         .refresh(
             candidate(server(1)),
@@ -499,6 +569,8 @@ async fn replacement_rejects_old_approval_identity_before_old_calls_finish() {
         .acquire_lease()
         .expect("in-flight call");
     // 相同配置与 Schema 也必须识别为新连接；提交不得等待旧调用，审批失效可先发生。
+    let history = registry.events.read_history();
+    let mut changes = registry.events.subscribe();
     let committed = tokio::time::timeout(
         Duration::from_secs(1),
         registry.refresh(
@@ -512,6 +584,12 @@ async fn replacement_rejects_old_approval_identity_before_old_calls_finish() {
     .expect("commit must not wait for lease")
     .expect("refresh");
     assert_eq!(old.closed.load(Ordering::SeqCst), 0);
+    // 旧连接仍有租约时，新目录已经发布；快照不能等 finish 的网络清理才失效。
+    assert!(history.capture(|| Ok(())).unwrap().is_none());
+    assert!(matches!(
+        changes.try_recv().unwrap().event,
+        assistant_protocol::RuntimeEvent::McpRegistryChanged
+    ));
     assert_eq!(
         registry
             .validate_invocation(&invocation)
@@ -544,7 +622,7 @@ async fn refresh_and_shutdown_report_connection_cleanup_failures() {
     let next = FixtureConnection::new(vec![tool(json!({"type":"object"}))]);
     old.close_failed.store(true, Ordering::SeqCst);
     next.close_failed.store(true, Ordering::SeqCst);
-    let registry = McpRegistry::new(FixtureFactory::new(vec![old, next]));
+    let registry = test_registry(FixtureFactory::new(vec![old, next]));
     registry
         .refresh(
             candidate(server(1)),
@@ -592,7 +670,7 @@ async fn long_description_warnings_do_not_block_loading_or_calls_and_clear_on_re
         is_error: false,
     });
     let short = FixtureConnection::new(vec![tool(json!({"type":"object"}))]);
-    let registry = McpRegistry::new(FixtureFactory::new(vec![connection.clone(), short]));
+    let registry = test_registry(FixtureFactory::new(vec![connection.clone(), short]));
     let key = McpServerKey::new("github").expect("key");
     let refreshed = registry
         .refresh(
@@ -687,7 +765,7 @@ async fn refresh_compiles_schema_and_call_projects_ordered_content() {
         structured_content: Some(json!({"id": 1})),
         is_error: false,
     });
-    let registry = McpRegistry::new(FixtureFactory::new(vec![connection.clone()]));
+    let registry = test_registry(FixtureFactory::new(vec![connection.clone()]));
     let refresh = registry
         .refresh(
             candidate(server(1)),
@@ -766,7 +844,7 @@ async fn fixed_gateway_freezes_real_identity_and_preserves_remote_error_content(
         structured_content: None,
         is_error: true,
     });
-    let registry = Arc::new(McpRegistry::new(FixtureFactory::new(vec![connection])));
+    let registry = Arc::new(test_registry(FixtureFactory::new(vec![connection])));
     registry
         .refresh(
             candidate(server(1)),
@@ -832,7 +910,7 @@ async fn failed_candidate_keeps_old_state_and_closes_only_failed_connection() {
         "type": "object",
         "properties": {"x": {"$ref": "https://example.com/schema"}}
     }))]);
-    let registry = McpRegistry::new(FixtureFactory::new(vec![old.clone(), failed.clone()]));
+    let registry = test_registry(FixtureFactory::new(vec![old.clone(), failed.clone()]));
     registry
         .refresh(
             candidate(server(1)),
@@ -879,9 +957,7 @@ async fn failed_candidate_keeps_old_state_and_closes_only_failed_connection() {
 #[tokio::test]
 async fn retired_connection_waits_for_existing_lease_before_close() {
     let connection = FixtureConnection::new(vec![tool(json!({"type": "object"}))]);
-    let registry = Arc::new(McpRegistry::new(FixtureFactory::new(vec![
-        connection.clone(),
-    ])));
+    let registry = Arc::new(test_registry(FixtureFactory::new(vec![connection.clone()])));
     registry
         .refresh(
             candidate(server(1)),
@@ -922,7 +998,7 @@ async fn unsupported_content_reports_that_remote_may_have_executed() {
         structured_content: None,
         is_error: false,
     });
-    let registry = McpRegistry::new(FixtureFactory::new(vec![connection]));
+    let registry = test_registry(FixtureFactory::new(vec![connection]));
     registry
         .refresh(
             candidate(server(1)),
@@ -959,9 +1035,7 @@ async fn unsupported_content_reports_that_remote_may_have_executed() {
 async fn plugin_retirement_cancellation_interrupts_call_without_cancelling_run() {
     let connection = FixtureConnection::new(vec![tool(json!({"type":"object"}))]);
     connection.block_call.store(true, Ordering::SeqCst);
-    let registry = Arc::new(McpRegistry::new(FixtureFactory::new(vec![
-        connection.clone(),
-    ])));
+    let registry = Arc::new(test_registry(FixtureFactory::new(vec![connection.clone()])));
     registry
         .refresh(
             candidate(server(1)),
@@ -1011,7 +1085,7 @@ async fn plugin_retirement_cancellation_interrupts_call_without_cancelling_run()
 async fn plugin_retirement_reports_close_failure() {
     let connection = FixtureConnection::new(vec![tool(json!({"type":"object"}))]);
     connection.close_failed.store(true, Ordering::SeqCst);
-    let registry = McpRegistry::new(FixtureFactory::new(vec![connection.clone()]));
+    let registry = test_registry(FixtureFactory::new(vec![connection.clone()]));
     let mut configured = server(1);
     configured.plugin_name = Some("example-tools".into());
     configured.plugin_sha256 = Some("a".repeat(64));

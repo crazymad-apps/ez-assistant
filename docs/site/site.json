@@ -144,6 +144,10 @@
         {
           "id": "login-options",
           "file": "manual/login-options.md"
+        },
+        {
+          "id": "runtime-environment",
+          "file": "manual/runtime-environment.md"
         }
       ]
     },
@@ -166,6 +170,14 @@
         {
           "id": "plugins",
           "file": "manual/plugins.md"
+        },
+        {
+          "id": "mcp-configuration",
+          "file": "manual/mcp-configuration.md"
+        },
+        {
+          "id": "plugin-development",
+          "file": "manual/plugin-development.md"
         },
         {
           "id": "warehouse-cad",

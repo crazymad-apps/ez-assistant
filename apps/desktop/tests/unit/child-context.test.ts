@@ -3,7 +3,7 @@ import type { ChildTaskTreeItemSnapshot } from "@ez-assistant/protocol";
 import { mergeChildTaskItems } from "../../src/features/conversation/childTaskPresentation";
 
 function child(id: string, used: number, window: number): ChildTaskTreeItemSnapshot {
-  return { task: { child_task_id: id, session_id: "s", parent_run_id: "r", parent_tool_call_id: id,
+  return { task: { inherited: false, body_unavailable: false, child_task_id: id, session_id: "s", parent_run_id: "r", parent_tool_call_id: id,
     title: id, status: "running", variant: "build", cancel_requested: false, final_text: "", error: null,
     created_at_ms: 0, started_at_ms: 0, finished_at_ms: null }, can_cancel: true, pending_approval_count: 0,
     usage: { accumulated: null, context: { accuracy: "estimated", mode: "local_summary", used_tokens: used, window_tokens: window, usage_basis_points: 1000 } } };

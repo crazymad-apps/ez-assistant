@@ -5,6 +5,7 @@ export const siteNodeKinds = ['text', 'paragraph', 'heading', 'strong', 'em', 's
 export class SiteNode {
   @ApiProperty({ enum: siteNodeKinds }) kind!: typeof siteNodeKinds[number];
   @ApiPropertyOptional({ type: String }) text?: string;
+  @ApiPropertyOptional({ type: String, maxLength: 64 }) language?: string;
   @ApiPropertyOptional({ type: String }) href?: string;
   @ApiPropertyOptional({ type: String }) id?: string;
   @ApiPropertyOptional({ type: Number }) level?: number;

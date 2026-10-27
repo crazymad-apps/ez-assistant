@@ -3,8 +3,11 @@
 use std::{collections::BTreeMap, fs, path::Path};
 
 use assistant_protocol::{McpDiagnosticCode, McpDiagnosticSnapshot, McpServerKey};
-use assistant_runtime::{McpServerConfig, PluginMcpDiscovery, StoredPlugin};
+use assistant_runtime::{
+    ManagedMcpServerDefinition, McpServerConfig, PluginMcpDiscovery, StoredPlugin,
+};
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 
 use super::PluginManifest;
 
@@ -104,6 +107,24 @@ fn discover_one(user_root: &Path, plugin: &StoredPlugin, result: &mut PluginMcpD
                 .push(diagnostic(None, "plugin MCP server name is invalid"));
             continue;
         };
+        result.definitions.push(ManagedMcpServerDefinition {
+            source: assistant_protocol::McpServerSource::Plugin(plugin.name.clone()),
+            server_key: key.clone(),
+            definition_digest: sha.to_owned(),
+            source_enabled: plugin.enabled,
+            source_available: false,
+            ready: false,
+            raw: Map::new(),
+            parameter_bindings: BTreeMap::new(),
+            parameters: Vec::new(),
+            plugin_settings_revision: None,
+            plugin_sha256: Some(sha.to_owned()),
+            configuration: None,
+        });
+        let definition = result
+            .definitions
+            .last_mut()
+            .expect("definition just inserted");
         let scoped = package
             .join("mcp")
             .join(name)
@@ -136,25 +157,69 @@ fn discover_one(user_root: &Path, plugin: &StoredPlugin, result: &mut PluginMcpD
                 .push(diagnostic(Some(key), "plugin MCP descriptor is invalid"));
             continue;
         };
+        definition.definition_digest = format!(
+            "sha256:{:x}",
+            Sha256::digest([sha.as_bytes(), &bytes].concat())
+        );
+        definition.source_available = true;
+        for field in ["env", "headers"] {
+            if let Some(values) = raw.get(field).and_then(Value::as_object) {
+                for (key, value) in values {
+                    let bindings = value.as_str().map(parameter_references).unwrap_or_default();
+                    if !bindings.is_empty() {
+                        definition.parameter_bindings.insert(key.clone(), bindings);
+                    }
+                }
+            }
+        }
+        let original = raw.clone();
         if !expand_server(&mut raw, &package, &parameters, &software) {
+            let mut missing = parameters.clone();
+            for field in &manifest.configuration {
+                missing.entry(field.name.clone()).or_default();
+            }
+            let mut empty_software = software.clone();
+            for field in &manifest.external_software {
+                empty_software.entry(field.name.clone()).or_default();
+            }
+            let mut partial = original;
+            // 仅供脱敏管理投影，ready=false 时绝不将占位展开用于执行。
+            let _ = expand_server(&mut partial, &package, &missing, &empty_software);
+            definition.raw = partial;
             result.diagnostics.push(diagnostic(
                 Some(key),
                 "plugin MCP configuration is incomplete or conflicts with reserved environment",
             ));
             continue;
         }
+        definition.raw = raw.clone();
         match McpServerConfig::from_plugin_descriptor(
             plugin.name.clone(),
             sha.to_owned(),
             key.clone(),
             raw,
         ) {
-            Ok(server) => result.servers.push(server),
+            Ok(_) => {
+                definition.ready = true;
+            }
             Err(_) => result
                 .diagnostics
                 .push(diagnostic(Some(key), "plugin MCP configuration is invalid")),
         }
     }
+}
+
+fn parameter_references(value: &str) -> Vec<String> {
+    let mut remaining = value;
+    let mut names = std::collections::BTreeSet::new();
+    while let Some((_, after)) = remaining.split_once("${config.") {
+        let Some((name, rest)) = after.split_once('}') else {
+            break;
+        };
+        names.insert(name.to_owned());
+        remaining = rest;
+    }
+    names.into_iter().collect()
 }
 
 fn parse_values(source: &str) -> Option<BTreeMap<String, String>> {
@@ -308,6 +373,24 @@ mod tests {
     use super::*;
     use assistant_runtime::{McpConnectionFactory, McpConnectionOptions, PluginSource};
 
+    fn ready_server(discovery: &PluginMcpDiscovery) -> McpServerConfig {
+        let definition = discovery
+            .definitions
+            .iter()
+            .find(|definition| definition.ready)
+            .expect("ready definition");
+        let assistant_protocol::McpServerSource::Plugin(name) = &definition.source else {
+            panic!("plugin fixture")
+        };
+        McpServerConfig::from_plugin_descriptor(
+            name.clone(),
+            definition.plugin_sha256.clone().unwrap(),
+            definition.server_key.clone(),
+            definition.raw.clone(),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn bundled_mcp_paths_resolve_under_canonical_plugin_root() {
         let home = tempfile::tempdir().unwrap();
@@ -452,14 +535,14 @@ mod tests {
             created_at_ms: 1,
             updated_at_ms: 1,
         };
-        let mut discovery = discover_mcp(home.path(), vec![plugin]);
+        let discovery = discover_mcp(home.path(), vec![plugin]);
         assert!(discovery.diagnostics.is_empty());
         let factory = crate::mcp::HostMcpConnectionFactory::new(home.path().join("runtime"));
         let token = CancellationToken::new();
         let connection = tokio::time::timeout(
             Duration::from_secs(10),
             factory.connect(
-                discovery.servers.remove(0),
+                ready_server(&discovery),
                 McpConnectionOptions {
                     max_concurrent_requests: 1,
                     control_timeout: Duration::from_secs(5),
@@ -535,12 +618,13 @@ mod tests {
             updated_at_ms: 1,
         };
         let ready = discover_mcp(home.path(), vec![plugin.clone()]);
-        assert_eq!(ready.servers.len(), 1);
+        assert_eq!(ready.definitions.len(), 1);
         assert!(ready.diagnostics.is_empty());
-        assert_eq!(ready.servers[0].plugin_name(), Some("example-tools"));
+        assert_eq!(ready_server(&ready).plugin_name(), Some("example-tools"));
         plugin.parameters_json = "{}".into();
         let missing = discover_mcp(home.path(), vec![plugin]);
-        assert!(missing.servers.is_empty());
+        assert_eq!(missing.definitions.len(), 1);
+        assert!(!missing.definitions[0].ready);
         assert_eq!(missing.diagnostics.len(), 1);
         assert!(!missing.diagnostics[0].message.contains("secret-value"));
     }
@@ -611,13 +695,13 @@ mod tests {
             created_at_ms: 1,
             updated_at_ms: 1,
         };
-        let mut discovery = discover_mcp(home.path(), vec![plugin]);
+        let discovery = discover_mcp(home.path(), vec![plugin]);
         assert!(
             discovery.diagnostics.is_empty(),
             "{:?}",
             discovery.diagnostics
         );
-        let server = discovery.servers.remove(0);
+        let server = ready_server(&discovery);
         let factory = crate::mcp::HostMcpConnectionFactory::new(home.path().join("runtime"));
         let token = CancellationToken::new();
         let connection = tokio::time::timeout(

@@ -130,7 +130,11 @@ Docker 部署将 `site:publish` 输出目录只读挂载到入口的 `/srv/site-
 
 ## 插件使用文档的维护
 
-手册“专业插件”分组包含安装总览与五个独立使用章节；`plugins.md` 的原有段落锚点继续保留。
+手册“专业插件”分组包含安装总览、[插件开发规则](manual/plugin-development.md)与五个独立使用章节；
+`plugins.md` 的原有段落锚点继续保留。开发规则核对 Host 与中心实际准入校验，以及独立插件仓库的
+`docs/development.md`、`docs/plugin-contract.md`，区分源码目录、归档结构和安装后的可写目录。
+该页也作为规划中的内置操作手册 Skill 的插件开发内容来源；Skill 的资源装配与生效方式由对应
+Feature 实现，不因官网正文存在就视为内置能力已可用。
 插件能力、版本和运行前提以独立 `ez-assistant-plugins` 仓库对应目录的 `plugin.json`、
 `README.md` 和 Skill 使用规则为依据，转写成用户操作说明后在此维护，不自动将源码说明全部公开。
 

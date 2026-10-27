@@ -29,7 +29,7 @@ pub struct SkillDefinition {
     pub plugin_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_sha256: Option<String>,
-    /// 共享 Root 中的源目录；只供 Runtime/工具按需读取，不进入模型目录或 revision。
+    /// 文件来源为共享目录；Builtin 使用 builtin:<name> 标签，不是可读取的磁盘路径。
     pub source_path: String,
     pub definition_digest: String,
     /// 本次扫描读取的正文；接纳输入或执行边界内使用，只有激活正文进入历史消息。
@@ -197,6 +197,8 @@ impl SkillCatalog {
             || self.definitions.iter().any(|definition| {
                 definition.description.trim().is_empty()
                     || definition.source_path.is_empty()
+                    || (definition.source == SkillSource::Builtin
+                        && definition.source_path != format!("builtin:{}", definition.name))
                     || !is_sha256_v1(&definition.definition_digest)
                     || (definition.source == SkillSource::Plugin)
                         != definition.plugin_name.is_some()

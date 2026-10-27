@@ -87,9 +87,6 @@ pub enum CompactionError {
         /// 不包含响应正文的脱敏诊断。
         message: String,
     },
-    /// 正常请求带工具，但当前模型不能显式禁用工具调用。
-    #[error("compaction cannot suppress tools because the model does not support tool_choice none")]
-    UnsupportedToolSuppression,
     /// replacement 的紧凑 JSON 并未小于权威源快照。
     #[error(
         "context compaction was ineffective: replacement is {replacement_bytes} bytes, source is {source_bytes} bytes"

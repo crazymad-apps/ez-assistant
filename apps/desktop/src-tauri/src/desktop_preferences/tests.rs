@@ -51,6 +51,43 @@ fn host_namespaces_preserve_local_preferences_and_do_not_accept_credential_urls(
 }
 
 #[test]
+fn account_close_preference_is_used_by_native_window_close_without_replacing_local_layout() {
+    let directory = tempdir().expect("isolated desktop preferences");
+    let mut local = DesktopPreferences {
+        left_sidebar_width: 312,
+        close_behavior: DesktopCloseBehavior::HideToTray,
+        ..Default::default()
+    };
+    save_to_directory(directory.path(), local.clone()).unwrap();
+    save_theme_to_directory(directory.path(), DEFAULT_THEME_ID).unwrap();
+    let other_namespace = "http://remote.test:7240";
+    save_namespace(directory.path(), local.clone(), Some(other_namespace)).unwrap();
+    let account_namespace = "http://host.test:7240/users/11111111-1111-4111-8111-111111111111/7";
+
+    for behavior in [
+        DesktopCloseBehavior::QuitDesktop,
+        DesktopCloseBehavior::HideToTray,
+    ] {
+        let account = DesktopPreferences {
+            left_sidebar_width: 400,
+            close_behavior: behavior,
+            ..Default::default()
+        };
+        save_namespace(directory.path(), account.clone(), Some(account_namespace)).unwrap();
+        // 原生关闭不带登录身份，必须从同一设备偏好读到当前界面已保存的选择。
+        local.close_behavior = behavior;
+        assert_eq!(load_from_directory(directory.path()).unwrap(), local);
+        let document = load_document(directory.path()).unwrap();
+        assert_eq!(document.hosts[account_namespace], account);
+        assert_eq!(
+            document.hosts[other_namespace].close_behavior,
+            DesktopCloseBehavior::HideToTray
+        );
+        assert_eq!(document.theme_id, Some(serde_json::json!(DEFAULT_THEME_ID)));
+    }
+}
+
+#[test]
 fn preferences_round_trip_without_runtime_state() {
     let directory = tempdir().expect("tempdir");
     let preferences = DesktopPreferences {
@@ -204,4 +241,50 @@ fn network_preferences_backup_original_once_and_preserve_other_namespaces_and_th
     assert_eq!(document.local, DesktopPreferences::default());
     assert_eq!(document.theme_id, Some(serde_json::json!("default_light")));
     assert_eq!(fs::read(&backup).unwrap(), original);
+}
+
+#[test]
+fn new_and_missing_close_preferences_default_to_quit_but_existing_values_survive() {
+    let directory = tempdir().expect("new isolated preferences");
+    assert_eq!(
+        load_from_directory(directory.path())
+            .unwrap()
+            .close_behavior,
+        DesktopCloseBehavior::QuitDesktop
+    );
+    let path = directory.path().join(PREFERENCES_FILE);
+    fs::write(
+        &path,
+        r#"{"left_sidebar_open":true,"right_sidebar_open":true}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        load_from_directory(directory.path())
+            .unwrap()
+            .close_behavior,
+        DesktopCloseBehavior::QuitDesktop
+    );
+    for behavior in [
+        DesktopCloseBehavior::HideToTray,
+        DesktopCloseBehavior::QuitDesktop,
+    ] {
+        let preferences = DesktopPreferences {
+            close_behavior: behavior,
+            ..Default::default()
+        };
+        save_to_directory(directory.path(), preferences.clone()).unwrap();
+        save_namespace(
+            directory.path(),
+            preferences,
+            Some("http://remote.test:7240"),
+        )
+        .unwrap();
+        save_theme_to_directory(directory.path(), DEFAULT_THEME_ID).unwrap();
+        let document = load_document(directory.path()).unwrap();
+        assert_eq!(document.local.close_behavior, behavior);
+        assert_eq!(
+            document.hosts["http://remote.test:7240"].close_behavior,
+            behavior
+        );
+    }
 }

@@ -368,6 +368,12 @@ pub struct ChildTaskSnapshot {
     pub created_at_ms: i64,
     pub started_at_ms: Option<i64>,
     pub finished_at_ms: Option<i64>,
+    /// 继承的阅读记录不接受原执行控制。
+    #[serde(default)]
+    pub inherited: bool,
+    /// 可靠描述仍在，正文不可读取；客户端不得展示空正文或链接回来源会话。
+    #[serde(default)]
+    pub body_unavailable: bool,
 }
 
 /// 工具调用在 Run 观察投影中的状态。
@@ -662,6 +668,10 @@ pub struct RunSnapshot {
     /// Run 可靠终结的时间；活动 Run 或旧记录无法恢复时为空。
     #[serde(default)]
     pub finished_at_ms: Option<i64>,
+    /// 本 attempt 可靠领取后的实际开始时间；未开始或旧记录未知时为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub started_at_ms: Option<i64>,
     /// 当前活动态或终态。
     pub status: RunStatus,
     /// 本次 Run 继承的 Input Agent 变体。
@@ -807,6 +817,7 @@ mod tests {
             input_id: InputId::new("input-1").expect("input id"),
             attempt: 1,
             created_at_ms: Some(1),
+            started_at_ms: Some(1),
             finished_at_ms: Some(2),
             status: RunStatus::Failed,
             variant: AgentVariant::Plan,
@@ -846,6 +857,10 @@ mod tests {
         let json = serde_json::to_string(&snapshot).expect("serialize snapshot");
         let decoded: RunSnapshot = serde_json::from_str(&json).expect("deserialize snapshot");
         assert_eq!(decoded, snapshot);
+        let mut legacy = serde_json::to_value(&snapshot).unwrap();
+        legacy.as_object_mut().unwrap().remove("started_at_ms");
+        let legacy: RunSnapshot = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.started_at_ms, None);
     }
 
     #[test]

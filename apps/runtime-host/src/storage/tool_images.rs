@@ -1,6 +1,10 @@
 //! Session `tool-images/` 的启动恢复扫描与当前 generation 引用收集。
 
-use std::{collections::BTreeSet, fs, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::Path,
+};
 
 use agent_types::{ConversationMessage, ConversationSnapshot, ToolImageReference, ToolResultPart};
 use assistant_protocol::{ChildTaskId, SessionId};
@@ -45,7 +49,7 @@ impl StorageEngine {
     }
 
     pub(super) fn recover_session_tool_images(
-        &self,
+        &mut self,
         session_id: &SessionId,
         generation: u64,
     ) -> StorageResult<bool> {
@@ -55,28 +59,71 @@ impl StorageEngine {
         let mut all_conversations_readable =
             !self.unavailable_sessions.contains(session_id.as_str());
         let mut diagnostic = false;
+        let mut historical_children = Vec::new();
 
         if all_conversations_readable {
-            match conversation::read(&body_path(&session_directory, generation)) {
-                Ok(conversation) => collect_tool_images(&conversation, &mut references),
-                Err(_) => {
+            let path = body_path(&session_directory, generation);
+            let owner = assistant_protocol::ConversationOwner::MainSession {
+                session_id: session_id.clone(),
+            };
+            // 恢复本来就需要检查所有正文的图片引用；顺便建立位置索引，避免随后
+            // Session 装配为了读取历史事实再次扫描整个文件。不缓存正文或图片内容。
+            let document = if self.allow_legacy_history {
+                conversation::read_document(&path, &owner, generation)
+            } else {
+                self.conversation_indexes
+                    .read_owned(&path, &owner, generation)
+                    .and_then(|conversation| {
+                        self.conversation_indexes
+                            .read_history(&path, &owner, generation)
+                            .map(|history| conversation::ConversationDocument {
+                                conversation,
+                                history: Some(history.facts),
+                            })
+                    })
+            };
+            match document {
+                Ok(conversation::ConversationDocument {
+                    conversation,
+                    history: Some(history),
+                }) => {
+                    collect_tool_images(&conversation, &mut references);
+                    historical_children = history.child_tasks;
+                }
+                Ok(_) | Err(_) => {
                     all_conversations_readable = false;
                     diagnostic = true;
                 }
             }
         }
 
-        let children = self.session_child_generations(session_id)?;
+        if !self.allow_legacy_history {
+            match self.pending_child_catalog(session_id) {
+                Ok(children) => historical_children.extend(children),
+                Err(_) => {
+                    all_conversations_readable = false;
+                    diagnostic = true;
+                }
+            }
+        }
+        let children = self.session_child_generations(session_id, historical_children)?;
         for (child_task_id, generation) in children {
-            if self
-                .unavailable_child_tasks
-                .contains(child_task_id.as_str())
-            {
+            if self.unavailable_child_tasks.contains(&(
+                session_id.as_str().to_owned(),
+                child_task_id.as_str().to_owned(),
+            )) {
                 all_conversations_readable = false;
                 continue;
             }
             let directory = child_task_directory(&session_directory, &child_task_id);
-            match conversation::read(&child_body_path(&directory, generation)) {
+            match conversation::read_owned(
+                &child_body_path(&directory, generation),
+                &assistant_protocol::ConversationOwner::ChildTask {
+                    session_id: session_id.clone(),
+                    child_task_id: child_task_id.clone(),
+                },
+                generation,
+            ) {
                 Ok(conversation) => collect_tool_images(&conversation, &mut references),
                 Err(_) => {
                     all_conversations_readable = false;
@@ -138,25 +185,35 @@ impl StorageEngine {
         Ok(diagnostic)
     }
 
+    /// 主文件中的目录保存已结束 child 的阅读位置；尚未闭合父交换的真实控制补充在途位置。
+    /// 此处只收集资源引用，不装配任务。主文件或任一 child 不可读时，调用方停止完整图片清理。
     fn session_child_generations(
         &self,
         session_id: &SessionId,
-    ) -> StorageResult<Vec<(ChildTaskId, u64)>> {
+        historical_children: Vec<assistant_runtime::StoredChildTaskHistory>,
+    ) -> StorageResult<BTreeMap<ChildTaskId, u64>> {
+        let mut generations: BTreeMap<_, _> = historical_children
+            .into_iter()
+            .map(|task| (task.child_task_id, task.body_generation))
+            .collect();
         let mut statement = self
             .connection
             .prepare(
                 "SELECT child_task_id, body_generation
-                 FROM child_tasks WHERE session_id = ?1 ORDER BY child_task_id",
+                 FROM child_tasks WHERE session_id = ?1
+                 AND (?2 OR status IN ('accepted','running')) ORDER BY child_task_id",
             )
             .map_err(|source| {
                 internal_error("tool image child tasks could not be queried", source)
             })?;
         let rows = statement
-            .query_map(params![session_id.as_str()], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-            })
+            .query_map(
+                params![session_id.as_str(), self.allow_legacy_history],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
             .map_err(|source| internal_error("tool image child tasks could not be read", source))?;
-        rows.collect::<Result<Vec<_>, _>>()
+        let controls = rows
+            .collect::<Result<Vec<_>, _>>()
             .map_err(|source| internal_error("tool image child row could not be read", source))?
             .into_iter()
             .map(|(child_task_id, generation)| {
@@ -166,11 +223,14 @@ impl StorageEngine {
                     positive_u64(generation, "stored child body generation is invalid")?,
                 ))
             })
-            .collect()
+            .collect::<StorageResult<Vec<_>>>()?;
+        // 父工具交换尚未提交时，控制指针可能比父文件快照更新；不使用旧 generation 覆盖它。
+        generations.extend(controls);
+        Ok(generations)
     }
 }
 
-fn collect_tool_images(
+pub(super) fn collect_tool_images(
     conversation: &ConversationSnapshot,
     output: &mut BTreeSet<ToolImageReference>,
 ) {

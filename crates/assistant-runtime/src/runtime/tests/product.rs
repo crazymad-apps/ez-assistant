@@ -17,6 +17,268 @@ use crate::{
 
 struct MissingMcpTestSource;
 
+#[tokio::test]
+async fn application_snapshot_refreshes_requested_prefixes_beyond_old_page_limit() {
+    let runtime = runtime(empty_model());
+    for index in 0..506 {
+        let session = runtime
+            .create_session(CreateSessionRequest::default())
+            .await
+            .unwrap()
+            .session;
+        if index < 5 {
+            runtime
+                .archive_session(assistant_protocol::ArchiveSessionRequest {
+                    session_id: session.session_id,
+                })
+                .await
+                .unwrap();
+        }
+    }
+    let defaults = runtime
+        .get_application_snapshot(GetApplicationSnapshotRequest::default())
+        .await
+        .unwrap()
+        .snapshot
+        .value;
+    assert_eq!(defaults.active_sessions.len(), 100);
+    assert_eq!(defaults.active_sessions_next_offset, Some(100));
+    assert_eq!(defaults.archived_sessions.len(), 5);
+    assert_eq!(defaults.archived_sessions_next_offset, None);
+
+    let snapshot = runtime
+        .get_application_snapshot(GetApplicationSnapshotRequest {
+            active_sessions_limit: Some(500),
+            archived_sessions_limit: Some(3),
+        })
+        .await
+        .unwrap()
+        .snapshot;
+    let page = runtime
+        .list_sessions(assistant_protocol::ListSessionsRequest {
+            limit: Some(500),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.sessions.len(), 500);
+    assert!(page.has_more);
+    assert_eq!(snapshot.value.active_sessions, page.sessions);
+    assert_eq!(snapshot.value.active_sessions_next_offset, Some(500));
+    assert_eq!(snapshot.value.archived_sessions.len(), 3);
+    assert_eq!(snapshot.value.archived_sessions_next_offset, Some(3));
+    assert_eq!(snapshot.observed_sequence, runtime.event_sender.sequence());
+
+    // 数值边界不溢出；不足请求数量时终止分页，而不是编造下一页。
+    let all = runtime
+        .get_application_snapshot(GetApplicationSnapshotRequest {
+            active_sessions_limit: Some(u32::MAX),
+            archived_sessions_limit: Some(0),
+        })
+        .await
+        .unwrap()
+        .snapshot
+        .value;
+    assert_eq!(all.active_sessions.len(), 501);
+    assert_eq!(all.active_sessions_next_offset, None);
+    assert_eq!(all.archived_sessions.len(), 1);
+    assert_eq!(all.archived_sessions_next_offset, Some(1));
+}
+
+#[tokio::test]
+async fn application_snapshot_ignores_stream_output_but_rejects_summary_changes() {
+    let store = Arc::new(super::store::FaultInjectingStore::healthy());
+    let runtime = runtime_with_store(
+        empty_model(),
+        store.clone(),
+        RuntimeConfig::new(NonZeroUsize::new(256).unwrap()),
+    )
+    .await;
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    let events = runtime.event_sender.clone();
+    let noise_owner = session_id.clone();
+    *store.summary_read_hook.lock().unwrap() = Some(Box::new(move || {
+        let _ = events.send(RuntimeEvent::ToolOutput {
+            session_id: noise_owner.clone(),
+            run_id: RunId::new("noise").unwrap(),
+            step: 1,
+            call_id: assistant_protocol::ToolCallId::new("call").unwrap(),
+            channel: assistant_protocol::ToolOutputChannel::Stdout,
+            chunk: "output".into(),
+        });
+    }));
+    let snapshot = runtime
+        .get_application_snapshot(GetApplicationSnapshotRequest::default())
+        .await
+        .unwrap()
+        .snapshot;
+    assert!(
+        snapshot
+            .value
+            .active_sessions
+            .iter()
+            .any(|session| session.session_id == session_id)
+    );
+    assert_eq!(snapshot.observed_sequence, runtime.event_sender.sequence());
+    let events = runtime.event_sender.clone();
+    *store.summary_read_hook.lock().unwrap() = Some(Box::new(move || {
+        let _ = events.send(RuntimeEvent::SessionChanged {
+            session_id: session_id.clone(),
+        });
+    }));
+    assert!(matches!(
+        runtime
+            .get_application_snapshot(GetApplicationSnapshotRequest::default())
+            .await,
+        Err(RuntimeError::SnapshotBusy)
+    ));
+}
+
+#[tokio::test]
+async fn session_snapshot_isolated_from_other_session_output() {
+    let store = Arc::new(super::store::FaultInjectingStore::healthy());
+    let runtime = runtime_with_store(
+        empty_model(),
+        store.clone(),
+        RuntimeConfig::new(NonZeroUsize::new(256).unwrap()),
+    )
+    .await;
+    let first = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    let second = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    runtime.prepared_session(&second).await.unwrap();
+    let events = runtime.event_sender.clone();
+    *store.window_read_hook.lock().unwrap() = Some(Box::new(move || {
+        let _ = events.send(RuntimeEvent::TextDelta {
+            session_id: first.clone(),
+            run_id: RunId::new("other-run").unwrap(),
+            step: 1,
+            part_id: assistant_protocol::PartId::new("p").unwrap(),
+            delta: "other session output".into(),
+        });
+    }));
+    let view = runtime
+        .get_session_view(GetSessionViewRequest {
+            session_id: second.clone(),
+        })
+        .await
+        .expect("unrelated output cannot starve a session snapshot");
+    assert_eq!(view.snapshot.value.session.session_id, second);
+    assert_eq!(
+        view.snapshot.observed_sequence,
+        runtime.event_sender.sequence()
+    );
+    let events = runtime.event_sender.clone();
+    *store.window_read_hook.lock().unwrap() = Some(Box::new(move || {
+        let _ = events.send(RuntimeEvent::TextDelta {
+            session_id: second.clone(),
+            run_id: RunId::new("same-run").unwrap(),
+            step: 1,
+            part_id: assistant_protocol::PartId::new("p").unwrap(),
+            delta: "related output".into(),
+        });
+    }));
+    let streamed = runtime
+        .get_session_view(GetSessionViewRequest {
+            session_id: view.snapshot.value.session.session_id,
+        })
+        .await
+        .expect(
+            "streamed text is captured at the final watermark without restarting history reads",
+        );
+    assert_eq!(
+        streamed.snapshot.observed_sequence,
+        runtime.event_sender.sequence()
+    );
+}
+
+#[tokio::test]
+async fn session_snapshot_holds_its_existing_mutation_gate_without_reentering_it() {
+    let store = Arc::new(super::store::FaultInjectingStore::healthy());
+    let runtime = runtime_with_store(
+        empty_model(),
+        store.clone(),
+        RuntimeConfig::new(NonZeroUsize::new(256).unwrap()),
+    )
+    .await;
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    let session = runtime.prepared_session(&session_id).await.unwrap();
+    session
+        .ensure_conversation_loaded(runtime.store.as_ref())
+        .await
+        .unwrap();
+    let observed_session = session.clone();
+    *store.window_read_hook.lock().unwrap() = Some(Box::new(move || {
+        assert!(
+            futures_util::FutureExt::now_or_never(observed_session.mutation()).is_none(),
+            "owner gate must remain held through the window read"
+        );
+    }));
+    let mutation = session.mutation().await;
+    let full_reads_before = store.conversation_load_count();
+    let mut reading = Box::pin(runtime.get_session_view(GetSessionViewRequest { session_id }));
+    assert!(
+        futures_util::poll!(reading.as_mut()).is_pending(),
+        "snapshot must wait behind a reliable commit"
+    );
+    drop(mutation);
+    tokio::time::timeout(Duration::from_secs(1), reading)
+        .await
+        .expect("snapshot must not reenter the gate")
+        .unwrap();
+    assert_eq!(
+        store.conversation_load_count(),
+        full_reads_before,
+        "warm views must reuse the execution window instead of reloading the body"
+    );
+}
+
+#[tokio::test]
+async fn cold_session_view_hydrates_from_its_single_product_body_read() {
+    let store = Arc::new(super::store::FaultInjectingStore::healthy());
+    let runtime = runtime_with_store(
+        empty_model(),
+        store.clone(),
+        RuntimeConfig::new(NonZeroUsize::new(256).unwrap()),
+    )
+    .await;
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    let session = runtime.prepared_session(&session_id).await.unwrap();
+    // 新会话创建路径可预装空 Journal；模拟重开后的按需正文装配状态。
+    session.lock_state().unwrap().journal = None;
+    let before = store.conversation_load_count();
+    runtime
+        .get_session_view(GetSessionViewRequest { session_id })
+        .await
+        .unwrap();
+    assert_eq!(store.conversation_load_count(), before + 1);
+    assert!(session.lock_state().unwrap().journal.is_some());
+}
+
 impl McpConfigSource for MissingMcpTestSource {
     fn load(&self) -> ConfigSourceFuture<'_> {
         Box::pin(std::future::ready(ConfigSourceLoad::Missing))
@@ -234,7 +496,7 @@ async fn markdown_export_contains_product_content_without_runtime_metadata() {
         .await
         .expect("session");
     let submitted = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session.session.session_id.clone(),
             message: "exported question".to_owned(),
@@ -331,7 +593,7 @@ async fn completed_assistant_turn_exposes_the_reliable_run_finish_time() {
         .session
         .session_id;
     let run = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "finish time".to_owned(),
@@ -412,7 +674,7 @@ async fn session_usage_projects_latest_and_token_weighted_cache_hit_rates() {
         .session_id;
     for message in ["first request", "second request"] {
         let run = runtime
-            .submit_input(SubmitInputRequest {
+            .submit_started_input(SubmitInputRequest {
                 mode: assistant_protocol::SubmitInputMode::Normal,
                 session_id: session_id.clone(),
                 message: message.to_owned(),
@@ -457,7 +719,7 @@ async fn assistant_feedback_is_persisted_in_the_conversation_projection_and_can_
         .session
         .session_id;
     let run = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "question".to_owned(),
@@ -679,7 +941,7 @@ async fn mcp_discovery_is_hierarchical_filtered_and_persisted() {
         .await
         .expect("persist deny");
     let submitted = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "find the right GitHub tool".to_owned(),
@@ -757,7 +1019,14 @@ async fn selected_mcp_freezes_queue_conversation_fork_and_full_run_disclosure() 
     let connection = Arc::new(WorkingMcpTestConnection {
         calls: AtomicUsize::new(0),
     });
-    let runtime = runtime(model.clone()).with_mcp_services(
+    let store = Arc::new(crate::storage::VolatileRuntimeStore::default());
+    let runtime = runtime_with_store(
+        model.clone(),
+        store.clone(),
+        RuntimeConfig::new(NonZeroUsize::new(32).unwrap()),
+    )
+    .await
+    .with_mcp_services(
         Arc::new(StaticMcpTestSource),
         Arc::new(WorkingMcpTestFactory { connection }),
         Arc::new(crate::mcp::UnavailableMcpImageMaterializer),
@@ -782,7 +1051,7 @@ async fn selected_mcp_freezes_queue_conversation_fork_and_full_run_disclosure() 
     assert_eq!(options.servers[0].server_key.as_str(), "github");
     assert_eq!(options.servers[0].visible_tool_count, 2);
     let controller = runtime.session_for_test(&session_id).await;
-    controller.lock_state().expect("state").queue_paused_by_user = true;
+    controller.lock_state().expect("state").resume_required = true;
     let submitted = runtime
         .submit_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
@@ -799,6 +1068,7 @@ async fn selected_mcp_freezes_queue_conversation_fork_and_full_run_disclosure() 
         .expect("submit selected MCP input");
     let queue = crate::runtime::product::queue_snapshot(&controller, &Default::default())
         .expect("queue snapshot");
+    assert_eq!(store.selection_control_counts(&session_id).unwrap(), (0, 1));
     assert_eq!(
         queue.items[0]
             .as_message()
@@ -817,13 +1087,22 @@ async fn selected_mcp_freezes_queue_conversation_fork_and_full_run_disclosure() 
         .await
         .expect("resume selected input");
     assert_eq!(
-        wait_for_terminal(&runtime, &session_id, &submitted.run.run_id)
-            .await
-            .status,
+        wait_for_terminal(
+            &runtime,
+            &session_id,
+            &runtime
+                .wait_for_input_claim(&session_id, &submitted.input_id)
+                .await
+                .unwrap()
+                .run_id
+        )
+        .await
+        .status,
         assistant_protocol::RunStatus::Completed
     );
     let requests = model.take_requests();
     assert_eq!(requests.len(), 1);
+    assert_eq!(store.selection_control_counts(&session_id).unwrap(), (0, 0));
     let request_json = serde_json::to_string(&requests[0].conversation).expect("request JSON");
     assert!(request_json.contains("MCP_SERVER_SELECTION_V1"));
     assert!(request_json.contains("disclosure"));
@@ -846,7 +1125,7 @@ async fn selected_mcp_freezes_queue_conversation_fork_and_full_run_disclosure() 
     ));
     let forked = runtime
         .fork_session(assistant_protocol::ForkSessionRequest {
-            session_id,
+            session_id: session_id.clone(),
             fork_point: assistant_protocol::MessageId::new("selected-mcp-answer")
                 .expect("message id"),
             expected_generation: view.conversation.generation,
@@ -855,7 +1134,7 @@ async fn selected_mcp_freezes_queue_conversation_fork_and_full_run_disclosure() 
         .expect("fork selected MCP prefix");
     let fork_view = runtime
         .get_session_view(assistant_protocol::GetSessionViewRequest {
-            session_id: forked.session.session_id,
+            session_id: forked.session.session_id.clone(),
         })
         .await
         .expect("fork view")
@@ -866,6 +1145,35 @@ async fn selected_mcp_freezes_queue_conversation_fork_and_full_run_disclosure() 
         assistant_protocol::ConversationItem::User(user)
             if user.mcp_selection.as_ref().is_some_and(|tag| tag.server_key.as_str() == "github")
     ));
+    assert_eq!(
+        store
+            .selection_control_counts(&forked.session.session_id)
+            .unwrap(),
+        (0, 0)
+    );
+    drop(runtime);
+    let restarted = runtime_with_store(
+        model.clone(),
+        store.clone(),
+        RuntimeConfig::new(NonZeroUsize::new(32).unwrap()),
+    )
+    .await;
+    for id in [session_id, forked.session.session_id] {
+        let view = restarted
+            .get_session_view(assistant_protocol::GetSessionViewRequest {
+                session_id: id.clone(),
+            })
+            .await
+            .unwrap()
+            .snapshot
+            .value;
+        assert!(
+            matches!(&view.conversation.items[0], assistant_protocol::ConversationItem::User(user)
+            if user.mcp_selection.as_ref().is_some_and(|tag| tag.server_key.as_str() == "github"))
+        );
+        assert_eq!(store.selection_control_counts(&id).unwrap(), (0, 0));
+    }
+    assert!(model.take_requests().is_empty());
 }
 
 #[tokio::test]
@@ -921,7 +1229,7 @@ async fn selected_mcp_is_inherited_by_goal_runs_but_not_the_next_ordinary_input(
         .session
         .session_id;
     let goal = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::StartGoal,
             session_id: session_id.clone(),
             message: "finish with GitHub".to_owned(),
@@ -961,7 +1269,7 @@ async fn selected_mcp_is_inherited_by_goal_runs_but_not_the_next_ordinary_input(
     .await
     .expect("Goal continuation completes");
     let ordinary = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "ordinary next turn".to_owned(),
@@ -1056,7 +1364,7 @@ async fn selected_mcp_disclosure_and_fixed_gateways_are_inherited_by_child_agent
         .session_id;
     set_auto_approval(&runtime, &session_id).await;
     let submitted = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "delegate with selected GitHub".to_owned(),
@@ -1140,7 +1448,7 @@ async fn mcp_gateway_uses_real_identity_approval_schema_two_and_history_projecti
         .session
         .session_id;
     let first = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "create the first issue".to_owned(),
@@ -1232,7 +1540,7 @@ async fn mcp_gateway_uses_real_identity_approval_schema_two_and_history_projecti
         .await
         .expect("set Auto");
     let second = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "create the second issue".to_owned(),
@@ -1331,7 +1639,7 @@ async fn invalid_mcp_arguments_and_explicit_deny_never_reach_the_remote_server()
         .session
         .session_id;
     let invalid = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "invalid arguments".to_owned(),
@@ -1401,7 +1709,7 @@ async fn invalid_mcp_arguments_and_explicit_deny_never_reach_the_remote_server()
         .await
         .expect("set Auto");
     let denied = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "denied call".to_owned(),
@@ -1456,7 +1764,7 @@ async fn refreshing_a_server_cancels_its_pending_approval_without_calling_remote
         .session
         .session_id;
     let run = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "call before refresh".to_owned(),
@@ -1517,7 +1825,7 @@ async fn mcp_candidate_test_times_out_without_persisting_or_enabling_tools() {
     let result = runtime
         .test_mcp_server(assistant_protocol::TestMcpServerRequest {
             test_id: assistant_protocol::IdempotencyKey::new("timeout-test").expect("test id"),
-            server: assistant_protocol::McpServerDraft {
+            server: Some(assistant_protocol::McpServerDraft {
                 server_key: assistant_protocol::McpServerKey::new("timeout").expect("server key"),
                 display_name: "Timeout".to_owned(),
                 description: "timeout fixture".to_owned(),
@@ -1530,7 +1838,8 @@ async fn mcp_candidate_test_times_out_without_persisting_or_enabling_tools() {
                 },
                 startup_timeout_ms: None,
                 tool_timeout_ms: None,
-            },
+            }),
+            managed: None,
         })
         .await
         .expect("bounded candidate test result");
@@ -1571,7 +1880,7 @@ async fn conversation_pages_are_latest_first_queries_with_generation_bound_curso
         .expect("session");
     for message in ["one", "two"] {
         let submitted = runtime
-            .submit_input(SubmitInputRequest {
+            .submit_started_input(SubmitInputRequest {
                 mode: assistant_protocol::SubmitInputMode::Normal,
                 session_id: session.session.session_id.clone(),
                 message: message.to_owned(),
@@ -1659,6 +1968,55 @@ async fn conversation_pages_are_latest_first_queries_with_generation_bound_curso
         matches!(item, ConversationItem::Assistant(message) if message.message_id == around.anchor_message_id)
     }));
 
+    let around_message_request = assistant_protocol::GetConversationPageAroundMessageRequest {
+        owner: ConversationOwner::MainSession {
+            session_id: view.value.session.session_id.clone(),
+        },
+        message_id: around.anchor_message_id.clone(),
+        limit: 2,
+    };
+    runtime
+        .get_conversation_page_around_message(around_message_request.clone())
+        .await
+        .expect("unrelated configuration events do not invalidate message location");
+    runtime
+        .get_conversation_recall_window(assistant_protocol::GetConversationRecallWindowRequest {
+            session_id: view.value.session.session_id.clone(),
+            owner: around_message_request.owner.clone(),
+            message_id: around.anchor_message_id.clone(),
+            before: 1,
+            after: 1,
+        })
+        .await
+        .expect("recall window uses the target owner barrier without reentry");
+
+    let parent = runtime
+        .session(&view.value.session.session_id)
+        .await
+        .unwrap();
+    let events = runtime.event_sender.clone();
+    *store.window_read_hook.lock().unwrap() = Some(Box::new(move || {
+        assert!(futures_util::FutureExt::now_or_never(parent.mutation()).is_none());
+        let _ = events.send(RuntimeEvent::McpRegistryChanged);
+    }));
+    assert!(matches!(
+        runtime
+            .get_conversation_page_around_run(GetConversationPageAroundRunRequest {
+                session_id: view.value.session.session_id.clone(),
+                run_id: view.value.runs[1].run_id.clone(),
+                limit: 2,
+            })
+            .await,
+        Err(RuntimeError::SnapshotBusy)
+    ));
+    assert!(matches!(
+        runtime
+            .get_conversation_page_around_message(around_message_request)
+            .await,
+        Err(RuntimeError::SnapshotBusy)
+    ));
+    *store.window_read_hook.lock().unwrap() = None;
+
     let ConversationItem::User(first_user) = &older.items[0] else {
         panic!("older page starts with user")
     };
@@ -1723,7 +2081,7 @@ async fn queue_priority_and_interrupt_pause_resume_on_new_user_intent() {
         .session
         .session_id;
     let active = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "active".to_owned(),
@@ -1898,7 +2256,7 @@ async fn tool_detail_is_loaded_by_stable_owner_message_and_call_ids() {
         .session_id;
     set_auto_approval(&runtime, &session_id).await;
     let run = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "save a report".to_owned(),
@@ -2150,7 +2508,7 @@ async fn reasoning_sources_and_run_times_recover_from_reliable_conversation() {
         .session_id;
     let mut events = first.subscribe_events();
     let accepted = first
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "sources".into(),

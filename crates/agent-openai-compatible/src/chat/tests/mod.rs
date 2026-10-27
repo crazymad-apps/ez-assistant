@@ -43,7 +43,7 @@ fn tool_name(value: &str) -> ToolName {
     ToolName::new(value).expect("valid tool name")
 }
 
-/// 基础方言：不支持 reasoning。
+/// 基础方言：未声明请求端思考能力。
 fn base_adapter() -> ChatProtocolAdapter {
     ChatProtocolAdapter::openai_compatible(provider_id("openai"))
 }

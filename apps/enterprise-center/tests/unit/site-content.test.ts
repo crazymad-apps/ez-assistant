@@ -5,7 +5,7 @@ import Fastify from 'fastify';
 import { compile } from '../../dist/site-content/compile.js';
 import { publishDirectory } from '../../dist/site-content/directory.js';
 import { registerSiteContent } from '../../dist/site-content/static.js';
-import { releaseNotes } from '../../dist/site-content/markdown.js';
+import { markdown, releaseNotes } from '../../dist/site-content/markdown.js';
 import { siteFixture } from '../support/site-content.js';
 
 it('受限编译保留正文和稳定链接，拒绝脚本、HTML、外链图片、悬空引用及异常元信息', () => {
@@ -89,4 +89,12 @@ it('内容校验仅定位相对源文件与固定原因，不输出原正文', (
   try { compile(files); } catch (error) { expect(String(error)).not.toContain('private-fixture-value'); }
   files.set('home/hero.md', Buffer.from('[missing](../manual/absent.md)'));
   expect(() => compile(files)).toThrow('home/hero.md：链接、段落或图片引用无效');
+});
+
+it('代码块保留语言和原文，未知 info 安全降级，不把代码当作节点执行', () => {
+  const code = '{"name":"sample","html":"<script>text only</script>"}\n';
+  expect(markdown('```json title="sample"\n' + code + '```')[0]).toEqual({ kind: 'code', language: 'json', text: code });
+  expect(markdown('```text\n目录/\n  └── 文件\n```')[0]).toEqual({ kind: 'code', language: 'text', text: '目录/\n  └── 文件\n' });
+  expect(markdown('```\n' + code + '```')[0]).toEqual({ kind: 'code', text: code });
+  expect(markdown('```<script>\n' + code + '```')[0]).toEqual({ kind: 'code', text: code });
 });

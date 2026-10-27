@@ -19,7 +19,7 @@ export type DesktopPreferences = {
 
 export type DesktopCloseBehavior = "hide_to_tray" | "quit_desktop";
 
-const defaults: DesktopPreferences = { left_sidebar_open: true, right_sidebar_open: true, left_sidebar_width: 286, right_sidebar_width: 380, expanded_workspace_ids: null, close_behavior: "hide_to_tray", default_approval_mode: "auto", last_model_selection: null };
+const defaults: DesktopPreferences = { left_sidebar_open: true, right_sidebar_open: true, left_sidebar_width: 286, right_sidebar_width: 380, expanded_workspace_ids: null, close_behavior: "quit_desktop", default_approval_mode: "auto", last_model_selection: null };
 const WEB_KEY = "ez-assistant:view";
 const WEB_THEME_KEY = "ez-assistant:theme";
 
@@ -70,6 +70,7 @@ export async function loadDesktopPreferences(namespace?: string): Promise<Deskto
     right_sidebar_open: typeof data.right_sidebar_open === "boolean" ? data.right_sidebar_open : true,
     left_sidebar_width: typeof data.left_sidebar_width === "number" && Number.isFinite(data.left_sidebar_width) ? Math.min(420, Math.max(220, data.left_sidebar_width)) : 286,
     right_sidebar_width: typeof data.right_sidebar_width === "number" && Number.isFinite(data.right_sidebar_width) ? Math.max(1, data.right_sidebar_width) : 380,
+    close_behavior: data.close_behavior === "hide_to_tray" || data.close_behavior === "quit_desktop" ? data.close_behavior : defaults.close_behavior,
     expanded_workspace_ids: null,
     resource_workspace: null,
   };

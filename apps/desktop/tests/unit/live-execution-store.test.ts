@@ -1,3 +1,4 @@
+import { emptyRun } from "../../src/stores/liveExecutionProjection";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   ChildTaskViewSnapshot,
@@ -9,6 +10,82 @@ import { executionElapsedMs, hostClockAnchor, restartStep } from "../../src/stor
 import { LiveExecutionStore } from "../../src/stores/LiveExecutionStore";
 
 describe("LiveExecutionStore", () => {
+  it("rebases child metadata without repeating a displayed delta or reverting a later failure", () => {
+    vi.stubGlobal("requestAnimationFrame", () => 1);
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    const live = new LiveExecutionStore();
+    const view: ChildTaskViewSnapshot = {
+      task: { task: { session_id: "session-1", child_task_id: "child", parent_run_id: "run-1", parent_tool_call_id: "call",
+        title: "child", status: "running", variant: "build", cancel_requested: false, final_text: "", error: null,
+        created_at_ms: 1, started_at_ms: 2, finished_at_ms: null, inherited: false, body_unavailable: false },
+      usage: { accumulated: null }, pending_approval_count: 0, can_cancel: true },
+      approval_ids: [], conversation: { owner: { type: "child_task", session_id: "session-1", child_task_id: "child" },
+        generation: 1, items: [], previous_cursor: null, has_more: false },
+    };
+    const text = envelope(1, { type: "child_task_event", session_id: "session-1", parent_run_id: "run-1", child_task_id: "child",
+      event: { type: "text_delta", step: 1, part_id: "p", delta: "tail" } });
+    const failed = envelope(2, { type: "child_task_event", session_id: "session-1", parent_run_id: "run-1", child_task_id: "child",
+      event: { type: "finished", status: "failed", error: { code: "model_execution_failed", message: "later" }, finished_at_ms: 3 } });
+    live.buffer(text); live.buffer(failed);
+    live.rebaseChildTask(view, 2, [text, failed]);
+    const run = live.runForChildTask("session-1", "child");
+    expect(run?.status).toBe("failed");
+    expect(run?.steps[0]?.segments).toMatchObject([{ type: "text", text: "tail" }]);
+    expect(live.childTasksForSession("session-1")[0]?.status).toBe("failed");
+  });
+
+  it("preserves a later child across a parent baseline while keeping inherited descriptors authoritative", () => {
+    vi.stubGlobal("requestAnimationFrame", () => 1);
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    const live = new LiveExecutionStore();
+    const task: ChildTaskViewSnapshot["task"]["task"] = {
+      session_id: "session-1", child_task_id: "child", parent_run_id: "run-1", parent_tool_call_id: "call", title: "child",
+      status: "running", variant: "build", cancel_requested: false, final_text: "", error: null,
+      created_at_ms: 1, started_at_ms: 2, finished_at_ms: null, inherited: false, body_unavailable: false,
+    };
+    const created = envelope(2, { type: "child_task_event", session_id: "session-1", parent_run_id: "run-1", child_task_id: "child", event: { type: "created", task } });
+    const text = envelope(3, { type: "child_task_event", session_id: "session-1", parent_run_id: "run-1", child_task_id: "child", event: { type: "text_delta", step: 1, part_id: "p", delta: "tail" } });
+    live.buffer(created); live.buffer(text);
+    const view = activeSessionView(1);
+    view.child_tasks = [];
+    live.rebaseSession(view, 1, 1, [created, text]);
+    expect(live.childTasksForSession("session-1")).toHaveLength(1);
+    expect(live.runForChildTask("session-1", "child")?.steps[0]?.segments).toMatchObject([{ text: "tail" }]);
+    view.child_tasks = [{ task: { ...task, inherited: true, status: "completed" }, usage: { accumulated: null }, pending_approval_count: 0, can_cancel: false }];
+    live.rebaseSession(view, 1, 1, [created, text]);
+    expect(live.childTasksForSession("session-1")[0]?.inherited).toBe(true);
+    expect(live.runForChildTask("session-1", "child")).toBeNull();
+  });
+
+  it("keeps source live output separate from an inherited child with the same ID", () => {
+    vi.stubGlobal("requestAnimationFrame", () => 1);
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    const live = new LiveExecutionStore();
+    const view: ChildTaskViewSnapshot = {
+      task: { task: {
+        session_id: "branch", child_task_id: "shared", parent_run_id: "parent", parent_tool_call_id: "call",
+        title: "inherited", status: "completed", variant: "build", cancel_requested: false,
+        final_text: "frozen", error: null, created_at_ms: 1, started_at_ms: 2, finished_at_ms: 3,
+        inherited: true, body_unavailable: false,
+      }, usage: { accumulated: null }, pending_approval_count: 0, can_cancel: false },
+      approval_ids: [],
+      conversation: { owner: { type: "child_task", session_id: "branch", child_task_id: "shared" },
+        generation: 1, items: [], previous_cursor: null, has_more: false },
+    };
+    live.buffer(envelope(1, { type: "child_task_event", session_id: "source", parent_run_id: "parent",
+      child_task_id: "shared", event: { type: "text_delta", step: 1, part_id: "text", delta: "source" } }));
+    live.reconcileChildTask(view);
+    live.buffer(envelope(2, { type: "child_task_event", session_id: "branch", parent_run_id: "parent",
+      child_task_id: "shared", event: { type: "text_delta", step: 1, part_id: "text", delta: "must not run" } }));
+    live.buffer(envelope(3, { type: "step_committed", owner: view.conversation.owner, generation: 1, step: 1 }));
+    live.flush();
+    expect(live.runForChildTask("source", "shared")?.steps[0]?.segments[0]).toMatchObject({ text: "source" });
+    expect(live.runForChildTask("branch", "shared")).toBeNull();
+    live.reconcileChildTask({ ...view, conversation: { ...view.conversation, generation: 2 } });
+    expect(live.runForChildTask("source", "shared")?.steps).toHaveLength(1);
+    live.dispose();
+  });
+
   afterEach(() => vi.unstubAllGlobals());
 
   it("batches deltas until the next animation frame", () => {
@@ -61,6 +138,8 @@ describe("LiveExecutionStore", () => {
       event: {
         type: "created",
         task: {
+          inherited: false,
+          body_unavailable: false,
           child_task_id: "child-live",
           session_id: "session-1",
           parent_run_id: "run-parent",
@@ -99,6 +178,8 @@ describe("LiveExecutionStore", () => {
       event: {
         type: "created",
         task: {
+          inherited: false,
+          body_unavailable: false,
           child_task_id: "child-stale",
           session_id: "session-1",
           parent_run_id: "run-parent",
@@ -117,7 +198,7 @@ describe("LiveExecutionStore", () => {
     }));
 
     expect(store.childTasksForSession("session-1")).toHaveLength(1);
-    expect(store.runForChildTask("child-stale")).not.toBeNull();
+    expect(store.runForChildTask("session-1", "child-stale")).not.toBeNull();
 
     store.reconcileSession({
       session: { session_id: "session-1" },
@@ -127,7 +208,7 @@ describe("LiveExecutionStore", () => {
     } as unknown as SessionViewSnapshot);
 
     expect(store.childTasksForSession("session-1")).toHaveLength(0);
-    expect(store.runForChildTask("child-stale")).toBeNull();
+    expect(store.runForChildTask("session-1", "child-stale")).toBeNull();
   });
 
   it("preserves reasoning, text and tool groups in event order", () => {
@@ -746,6 +827,8 @@ describe("LiveExecutionStore", () => {
     const store = new LiveExecutionStore();
     store.reconcileChildTask({
       task: { task: {
+        inherited: false,
+        body_unavailable: false,
         child_task_id: "child-1", session_id: "session-1", parent_run_id: "run-1",
         parent_tool_call_id: "delegate-1", title: "child", status: "running", variant: "build",
         cancel_requested: false, final_text: "", error: null, created_at_ms: 1,
@@ -774,7 +857,7 @@ describe("LiveExecutionStore", () => {
     const callback = frame as FrameRequestCallback | null;
     callback?.(0);
 
-    expect(store.runForChildTask("child-1")?.steps).toEqual([]);
+    expect(store.runForChildTask("session-1", "child-1")?.steps).toEqual([]);
   });
 
   it("drops pending and live tails synchronously when a stream gap is observed", () => {
@@ -928,7 +1011,10 @@ describe("reasoning source and reliable execution time", () => {
     now.mockReturnValue(500);
     live.flush();
     expect(live.clock_anchor).toEqual({ host_at_ms: 1000, received_at_ms: 50 });
-    expect(executionElapsedMs(live.runForSession("s")!, live.clock_anchor, 500)).toBe(1350);
+    expect(executionElapsedMs(live.runForSession("s")!, live.clock_anchor, 500)).toBeNull();
+    live.buffer({ ...envelope(2, { type: "run_started", session_id: "s", run_id: "r", started_at_ms: 100 }), emitted_at_ms: 1000 });
+    live.flush();
+    expect(executionElapsedMs(live.runForSession("s")!, live.clock_anchor, 500)).toBe(900);
     live.clear();
     expect(live.clock_anchor).toBeNull();
     now.mockRestore();
@@ -941,6 +1027,7 @@ describe("reasoning source and reliable execution time", () => {
     expect(live.runForSession("session-1")?.created_at_ms).toBeNull();
     const view = activeSessionView(1);
     view.active_run!.created_at_ms = 100;
+    view.active_run!.started_at_ms = 100;
     view.active_run!.finished_at_ms = null;
     live.reconcileSession(view, 1000);
     live.buffer(envelope(2000, { type: "run_finished", session_id: "session-1", run_id: "run-1", status: "failed", error: null, finished_at_ms: 1500 }));
@@ -955,27 +1042,58 @@ describe("reasoning source and reliable execution time", () => {
     const live = store();
     live.buffer(envelope(99, { type: "child_task_event", session_id: "session-1", parent_run_id: "parent", child_task_id: "child", event: { type: "reasoning_delta", step: 1, part_id: "p", source: "summary", delta: "child summary" } }));
     live.flush();
-    expect(live.runForChildTask("child")?.created_at_ms).toBeNull();
-    expect(live.runForChildTask("child")?.steps[0]?.segments[0]).toMatchObject({ source: "summary" });
+    expect(live.runForChildTask("session-1", "child")?.created_at_ms).toBeNull();
+    expect(live.runForChildTask("session-1", "child")?.steps[0]?.segments[0]).toMatchObject({ source: "summary" });
     live.buffer(envelope(101, { type: "child_task_event", session_id: "session-1", parent_run_id: "parent", child_task_id: "child", event: { type: "finished", status: "cancelled", error: null, finished_at_ms: 100 } }));
     live.flush();
-    expect(live.runForChildTask("child")?.finished_at_ms).toBe(100);
+    expect(live.runForChildTask("session-1", "child")?.finished_at_ms).toBe(100);
     expect(live.runForSession("session-1")).toBeNull();
   });
 
   it("uses monotonic time against a Host anchor for active waits and freezes all terminal outcomes", () => {
-    const run = { created_at_ms: 1000, finished_at_ms: null, status: "running" as const };
+    const run = { started_at_ms: 1000, finished_at_ms: null, status: "running" as const };
     const anchor = hostClockAnchor(6000, 30)!;
     expect(executionElapsedMs(run, anchor, 530)).toBe(5500);
     for (const status of ["completed", "failed", "cancelled", "interrupted", "compaction_required"] as const) {
       expect(executionElapsedMs({ ...run, status, finished_at_ms: 8000 }, anchor, 999999)).toBe(7000);
       expect(executionElapsedMs({ ...run, status }, anchor, 999999)).toBeNull();
     }
-    for (const created_at_ms of [null, NaN, Infinity, -1, Number.MAX_SAFE_INTEGER + 1]) {
-      expect(executionElapsedMs({ ...run, created_at_ms }, anchor, 530)).toBeNull();
+    for (const started_at_ms of [null, NaN, Infinity, -1, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(executionElapsedMs({ ...run, started_at_ms }, anchor, 530)).toBeNull();
     }
     expect(executionElapsedMs({ ...run, status: "completed", finished_at_ms: 999 }, anchor, 530)).toBeNull();
     expect(executionElapsedMs(run, null, 530)).toBeNull();
+  });
+
+  it("excludes a long queue wait and gives a retry its own reliable start", () => {
+    const live = store();
+    vi.spyOn(performance, "now").mockReturnValue(50);
+    live.buffer({ ...envelope(1, { type: "run_accepted", session_id: "s", run_id: "first", created_at_ms: 100 }), emitted_at_ms: 1_000_000 });
+    live.flush();
+    expect(executionElapsedMs(live.runForSession("s")!, live.clock_anchor, 50)).toBeNull();
+    live.buffer({ ...envelope(2, { type: "run_started", session_id: "s", run_id: "first", started_at_ms: 1_100_000 }), emitted_at_ms: 1_100_050 });
+    live.buffer({ ...envelope(3, { type: "model_attempt_started", session_id: "s", run_id: "first", attempt: 2 }), emitted_at_ms: 1_100_050 });
+    live.flush();
+    expect(executionElapsedMs(live.runForSession("s")!, live.clock_anchor, 50)).toBe(50);
+    live.buffer(envelope(4, { type: "run_finished", session_id: "s", run_id: "first", status: "failed", error: null, finished_at_ms: 1_100_300 }));
+    live.buffer(envelope(5, { type: "run_accepted", session_id: "s", run_id: "retry", created_at_ms: 1_200_000 }));
+    live.flush();
+    expect(live.runForSession("s")?.started_at_ms).toBeNull();
+    live.buffer({ ...envelope(6, { type: "run_started", session_id: "s", run_id: "retry", started_at_ms: 1_300_000 }), emitted_at_ms: 1_300_000 });
+    live.flush();
+    expect(executionElapsedMs(live.runForSession("s")!, live.clock_anchor, 50)).toBe(0);
+  });
+
+  it("uses a child's reliable start independently of its parent and accepts old events without inventing one", () => {
+    const live = store();
+    live.buffer(envelope(1, { type: "run_started", session_id: "s", run_id: "parent", started_at_ms: 100 }));
+    live.buffer(envelope(2, { type: "child_task_event", session_id: "s", parent_run_id: "parent", child_task_id: "old", event: { type: "started" } }));
+    live.buffer(envelope(3, { type: "child_task_event", session_id: "s", parent_run_id: "parent", child_task_id: "child", event: { type: "started", started_at_ms: 10_000 } }));
+    live.buffer(envelope(4, { type: "child_task_event", session_id: "s", parent_run_id: "parent", child_task_id: "child", event: { type: "finished", status: "completed", error: null, finished_at_ms: 10_400 } }));
+    live.flush();
+    expect(live.runForChildTask("s", "old")?.started_at_ms).toBeNull();
+    expect(executionElapsedMs(live.runForChildTask("s", "child")!, null, 0)).toBe(400);
+    expect(executionElapsedMs({ started_at_ms: null, finished_at_ms: 50_000, status: "cancelled" }, null, 0)).toBeNull();
   });
 });
 
@@ -988,4 +1106,16 @@ it("discards interrupted text and reasoning while retaining settled tools", () =
     tool,
   ] }], 2);
   expect(steps).toEqual([{ step: 2, segments: [tool] }]);
+});
+
+// 队列接纳不能替代当前轮次，也不能单独生成正文占位。
+describe("queued input visibility", () => {
+  it("keeps running output selected when another input is accepted", () => {
+    const store = new LiveExecutionStore();
+    store.runs.set("s:running", { ...emptyRun("s", "running", 1), status: "running", started_at_ms: 2 });
+    store.runs.set("s:queued", emptyRun("s", "queued", 3));
+    expect(store.runForSession("s")?.run_id).toBe("running");
+    store.runs.delete("s:running");
+    expect(store.runForSession("s")?.status).toBe("accepted");
+  });
 });

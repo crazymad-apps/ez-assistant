@@ -198,11 +198,16 @@ export function formatDateTime(timestamp: number | null): string {
 
 /** 将实时尾部并入同一行，首次提交时保持 React 身份；child 只接自己的最后一个消息段。 */
 export function attachLiveTurn(rows: ConversationRow[], live: LiveRunProjection | null, child_id: string | null): ConversationRow[] {
+  // 继承身份不是 live Run 的目标；旧事件或同名 ID 不能恢复为可执行尾部。
+  const readonly_target = [...rows].reverse().find((row) => row.type === "assistant_turn"
+    && (child_id ? row.run_id === null : row.run_id === live?.run_id));
+  if (readonly_target?.type === "assistant_turn"
+    && readonly_target.messages.some((message) => message.inherited || message.partial)) return rows;
   const target = [...rows].reverse().find((row) => row.type === "assistant_turn" && (child_id ? row.run_id === null : row.run_id === live?.run_id));
   if (target?.type === "assistant_turn") {
     target.live_run = live;
     if (child_id) target.key = `assistant:child:${child_id}`;
-  } else if (live) {
+  } else if (live && (child_id !== null || live.status !== "accepted")) {
     rows.push({ type: "assistant_turn", key: child_id ? `assistant:child:${child_id}` : `assistant:${live.run_id}`, run_id: live.run_id, messages: [], live_run: live });
   }
   return rows;

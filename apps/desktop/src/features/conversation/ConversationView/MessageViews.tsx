@@ -129,6 +129,7 @@ export function UserMessage(props: Readonly<{
           {props.message.mcp_selection && <span title={props.message.mcp_selection.server_key}>MCP · {props.message.mcp_selection.display_name}</span>}
         </div>
       )}
+      {props.message.inherited && <span className={styles.user_skill}>继承</span>}
       <time>{formatTime(props.message.created_at_ms)}</time>
       <PresenceBoundary present={source.type === "device" && device_source_open}>
       {source.type === "device" && device_source_open ? (

@@ -138,3 +138,9 @@ JSON 代码预览使用 `jsonc-parser@3.3.1`（MIT）格式化和扫描，以 Re
 ## v0.32.0 F05 M0 OpenCode 配置边界
 
 OpenCode 在既有服务商编辑器提供明确 Chat／Responses、普通按量／Go 地址预设及最终 URL，预设只在点击时覆盖地址字段。保存、凭据保持、目录刷新和固定参数沿现有真实 API；模型参数页以客户端验证说明替代后台推理测试按钮，后端同样拒绝该调用。目录成功不能展示为推理成功。
+
+## v0.32.1 官网手册 Markdown 一致性
+
+- 用户追加要求手册排版和代码高亮复用 Agent。SiteDocument 继续消费受限 SiteNode，链接、图片与章节身份沿原白名单；不导入 Desktop 的 Native Bridge、文件处理或业务状态。
+- 正文样式与 Agent MarkdownContent 共用 packages/markdown/styles/content；官网只映射自身主题变量和标题尺度。代码块使用与 Agent 相同版本的 Streamdown／Shiki 组件，按需加载，保留完整文本、缩进和独立横向滚动，失败显示普通代码。
+- SiteNode 的可选 language 从现有 Markdown fence 提取首个受限语言标记，旧内容缺少该字段时按普通代码展示；OpenAPI 和生成 SDK 同步，无数据库迁移。原始 HTML、文件链接和外部图片边界保持。

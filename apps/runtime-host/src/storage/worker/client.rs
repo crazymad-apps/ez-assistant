@@ -154,7 +154,15 @@ impl LocalRuntimeStore {
         build: impl FnOnce(oneshot::Sender<Result<T, StoreError>>) -> Command,
     ) -> Result<T, StoreError> {
         let (reply, result) = oneshot::channel();
-        self.enqueue(build(reply)).await?;
+        {
+            let _phase = assistant_runtime::request_diagnostics::request_phase(
+                assistant_runtime::request_diagnostics::RequestPhase::StoreQueue,
+            );
+            self.enqueue(build(reply)).await?;
+        }
+        let _phase = assistant_runtime::request_diagnostics::request_phase(
+            assistant_runtime::request_diagnostics::RequestPhase::StoreReply,
+        );
         result.await.map_err(|_| worker_unavailable())?
     }
 
@@ -196,6 +204,15 @@ impl LocalRuntimeStore {
 }
 
 impl RuntimeStore for LocalRuntimeStore {
+    fn load_conversation_history(
+        &self,
+        owner: assistant_protocol::ConversationOwner,
+    ) -> StoreFuture<'_, assistant_runtime::StoredConversationHistory> {
+        Box::pin(async move {
+            self.request(|reply| Command::LoadConversationHistory { owner, reply })
+                .await
+        })
+    }
     fn load_feedback(
         &self,
         session_id: &SessionId,
@@ -422,7 +439,7 @@ impl RuntimeStore for LocalRuntimeStore {
     fn search_conversation_titles(
         &self,
         request: ConversationSearchRequest,
-    ) -> StoreFuture<'_, Vec<assistant_protocol::ConversationHistoryHit>> {
+    ) -> StoreFuture<'_, ConversationSearchPage<assistant_protocol::ConversationHistoryHit>> {
         Box::pin(async move {
             self.request(|reply| Command::SearchConversationTitles { request, reply })
                 .await
@@ -811,6 +828,13 @@ impl RuntimeStore for LocalRuntimeStore {
         })
     }
 
+    fn claim_input(&self, run: StoredRun) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            self.request(|reply| Command::ClaimInput { run, reply })
+                .await
+        })
+    }
+
     fn accept_input(&self, input: NewStoredInput) -> StoreFuture<'_, AcceptedInput> {
         Box::pin(async move {
             self.request(|reply| Command::AcceptInput {
@@ -969,6 +993,17 @@ impl RuntimeStore for LocalRuntimeStore {
         })
     }
 
+    fn load_execution_window(
+        &self,
+        session_id: &SessionId,
+    ) -> StoreFuture<'_, assistant_runtime::ExecutionWindow> {
+        let session_id = session_id.clone();
+        Box::pin(async move {
+            self.request(|reply| Command::LoadExecutionWindow { session_id, reply })
+                .await
+        })
+    }
+
     fn load_conversation(
         &self,
         session_id: &SessionId,
@@ -976,6 +1011,16 @@ impl RuntimeStore for LocalRuntimeStore {
         let session_id = session_id.clone();
         Box::pin(async move {
             self.request(|reply| Command::LoadConversation { session_id, reply })
+                .await
+        })
+    }
+
+    fn get_conversation_usage(
+        &self,
+        owner: assistant_protocol::ConversationOwner,
+    ) -> StoreFuture<'_, assistant_runtime::StoredConversationUsage> {
+        Box::pin(async move {
+            self.request(|reply| Command::GetConversationUsage { owner, reply })
                 .await
         })
     }

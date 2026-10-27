@@ -111,6 +111,8 @@ pub enum SkillSource {
     UserAgents,
     /// 已生效的受管插件包内 Skill。
     Plugin,
+    /// 随 Host 交付的只读正文，优先级低于所有自定义来源。
+    Builtin,
 }
 
 /// 从通用 frontmatter 保留的兼容元数据；不参与权限决策。

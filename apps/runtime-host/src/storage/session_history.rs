@@ -13,9 +13,8 @@ use assistant_runtime::{
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
 use super::{
-    StorageEngine, StorageResult, body_path, conflict, create_new_private_file,
-    database_write_error, internal_error, invalid_data, non_negative_u64, positive_u64,
-    sync_directory, to_i64,
+    StorageEngine, StorageResult, body_path, conflict, database_write_error, internal_error,
+    invalid_data, non_negative_u64, positive_u64, sync_directory, to_i64,
 };
 use crate::config_source::prepare_private_directory;
 
@@ -167,8 +166,14 @@ impl StorageEngine {
 
         let session_directory = self.session_directory(&clear.session_id)?;
         let result_body = body_path(&session_directory, result_generation);
-        if let Err(error) =
-            create_new_private_file(&result_body).and_then(|_| sync_directory(&session_directory))
+        if let Err(error) = super::conversation::create_empty(
+            &result_body,
+            &assistant_protocol::ConversationOwner::MainSession {
+                session_id: clear.session_id.clone(),
+            },
+            result_generation,
+        )
+        .and_then(|_| sync_directory(&session_directory))
         {
             let _ = self.mark_clear_interrupted(clear.operation_id.as_str(), clear.changed_at_ms);
             return Err(error);
@@ -226,8 +231,19 @@ impl StorageEngine {
                 .map_err(|source| {
                     database_write_error("clear session could not be switched", source)
                 })?;
+            // 正常评价已经随 generation 换代丢弃；旧源恢复才存在 SQL 评价表。
+            if self.allow_legacy_history {
+                transaction
+                    .execute(
+                        "DELETE FROM message_feedback WHERE session_id = ?1",
+                        [clear.session_id.as_str()],
+                    )
+                    .map_err(|source| {
+                        database_write_error("legacy message feedback could not be cleared", source)
+                    })?;
+            }
+            super::usage::snapshot::clear(&transaction, &clear.session_id)?;
             for statement in [
-                "DELETE FROM message_feedback WHERE session_id = ?1",
                 "DELETE FROM session_work_plans WHERE session_id = ?1",
                 "DELETE FROM work_plan_completion_receipts WHERE session_id = ?1",
                 "DELETE FROM session_goals WHERE session_id = ?1",

@@ -28,7 +28,7 @@ export const ProviderConnectionForm = observer(function ProviderConnectionForm(p
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const busy = settings.pending_action !== null;
   const opencode = connection.provider_type === "opencode";
-  const responses = ["opencode", "openai", "deepseek", "dashscope_api", "dashscope_plan", "moonshot"].includes(connection.provider_type);
+  const responses = ["opencode", "openai", "sub2api", "deepseek", "dashscope_api", "dashscope_plan", "moonshot"].includes(connection.provider_type);
   const history_support = serverHistorySupport(connection);
   let history_reason = "当前接口不支持服务端历史续接。";
   if (history_support === "unknown") history_reason = "尚未确认当前接口支持续接，可在接口选项中声明能力。";
@@ -64,6 +64,7 @@ export const ProviderConnectionForm = observer(function ProviderConnectionForm(p
         </span></div>
       </div>
       {opencode && <OpenCodeConnectionFields connection={connection} onChange={change} />}
+      {connection.provider_type === "sub2api" && <p>自动获取增强模型目录，不支持时读取普通列表；无需填写查询参数，缺失能力保持未知。</p>}
       {props.provider?.has_api_key && <div className={styles.runtime_actions}>
         <Button type="button" onClick={() => { setClearSecret(!clear_secret); setSecret(""); setShowSecret(false); setDirty(true); }}>{clear_secret ? "取消清除密钥" : "清除密钥"}</Button>
         {clear_secret && <span>保存后清除密钥</span>}

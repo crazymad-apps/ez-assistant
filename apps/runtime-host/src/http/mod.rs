@@ -8,6 +8,7 @@ mod auth;
 mod commands;
 mod compatibility;
 mod desktop;
+mod diagnostics;
 mod error;
 mod events;
 mod login;
@@ -92,6 +93,9 @@ impl HttpState {
         &self,
         permit: &crate::access::AccessPermit,
     ) -> Result<Arc<ReadyServices>, error::HttpError> {
+        let _phase = assistant_runtime::request_diagnostics::request_phase(
+            assistant_runtime::request_diagnostics::RequestPhase::UserDomain,
+        );
         if let Some(domains) = &self.domains {
             return domains
                 .ensure(permit)
@@ -149,8 +153,15 @@ async fn ensure_ready(
 
 async fn health(
     axum::extract::State(state): axum::extract::State<HttpState>,
-) -> Json<RuntimeHostHealth> {
-    Json(state.startup.health())
+    axum::Extension(permit): axum::Extension<crate::access::AccessPermit>,
+) -> Result<Json<RuntimeHostHealth>, error::HttpError> {
+    let health = match &state.domains {
+        Some(domains) => domains
+            .health(&permit)
+            .map_err(|_| error::HttpError::unauthorized())?,
+        None => None,
+    };
+    Ok(Json(health.unwrap_or_else(|| state.startup.health())))
 }
 
 async fn capabilities(

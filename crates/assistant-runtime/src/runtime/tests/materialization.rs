@@ -193,7 +193,9 @@ async fn center_agent_catalog_refreshes_and_resolves_missing_plugin_requirements
     blocked.mode = assistant_protocol::SubmitInputMode::Normal;
     blocked.custom_agent = Some(selection.clone());
     assert!(matches!(
-        runtime.materialize_session(blocked, Vec::new()).await,
+        runtime
+            .materialize_started_session(blocked, Vec::new())
+            .await,
         Err(RuntimeError::ConfigurationUnavailable)
     ));
     *state.lock().unwrap() = Some(vec![CustomAgentConfig {
@@ -263,10 +265,15 @@ async fn center_agent_missing_capability_can_send_and_retry_with_frozen_snapshot
         assistant_protocol::AgentDependencyStatus::CapabilityMissing
     );
     let first = runtime
-        .materialize_session(request.clone(), Vec::new())
+        .materialize_started_session(request.clone(), Vec::new())
         .await
         .unwrap();
-    wait_for_terminal(&runtime, &first.session.session_id, &first.run.run_id).await;
+    wait_for_terminal(
+        &runtime,
+        &first.session.session_id,
+        &first.run.as_ref().unwrap().run_id,
+    )
+    .await;
     let session = runtime.session(&first.session.session_id).await.unwrap();
     assert!(
         session
@@ -279,7 +286,7 @@ async fn center_agent_missing_capability_can_send_and_retry_with_frozen_snapshot
     );
     *state.lock().unwrap() = None;
     let retry = runtime
-        .materialize_session(request.clone(), Vec::new())
+        .materialize_started_session(request.clone(), Vec::new())
         .await
         .unwrap();
     assert_eq!(retry.session.session_id, first.session.session_id);
@@ -287,7 +294,7 @@ async fn center_agent_missing_capability_can_send_and_retry_with_frozen_snapshot
     different_selection.custom_agent = None;
     assert!(
         runtime
-            .materialize_session(different_selection, Vec::new())
+            .materialize_started_session(different_selection, Vec::new())
             .await
             .is_err()
     );
@@ -344,11 +351,16 @@ async fn personal_agent_first_send_freezes_prompt_across_edit_retry_clear_and_fo
         source: CustomAgentSource::Personal,
     });
     let first = runtime
-        .materialize_session(request.clone(), Vec::new())
+        .materialize_started_session(request.clone(), Vec::new())
         .await
         .expect("first send");
     assert_eq!(first.session.custom_agent, request.custom_agent);
-    wait_for_terminal(&runtime, &first.session.session_id, &first.run.run_id).await;
+    wait_for_terminal(
+        &runtime,
+        &first.session.session_id,
+        &first.run.as_ref().unwrap().run_id,
+    )
+    .await;
     let session = runtime.session(&first.session.session_id).await.unwrap();
     assert!(
         session
@@ -371,7 +383,7 @@ async fn personal_agent_first_send_freezes_prompt_across_edit_retry_clear_and_fo
         .await
         .expect("edit agent");
     let retry = runtime
-        .materialize_session(request, Vec::new())
+        .materialize_started_session(request, Vec::new())
         .await
         .expect("same key retry");
     assert_eq!(retry.session.session_id, first.session.session_id);
@@ -456,7 +468,7 @@ async fn text_only_materialization_creates_no_provisional_attachment_or_session(
     let runtime = runtime_with_tools(model, ToolSetSnapshot::default());
     assert!(
         runtime
-            .materialize_session(manifest("invalid file batch"), Vec::new())
+            .materialize_started_session(manifest("invalid file batch"), Vec::new())
             .await
             .is_err()
     );
@@ -477,15 +489,19 @@ async fn text_only_materialization_creates_no_provisional_attachment_or_session(
     request.skill_name = None;
 
     let result = runtime
-        .materialize_session(request, Vec::new())
+        .materialize_started_session(request, Vec::new())
         .await
         .expect("materialize text-only session");
     assert!(result.attachments.is_empty());
     assert_eq!(result.session.title, "text only");
     assert_eq!(
-        wait_for_terminal(&runtime, &result.session.session_id, &result.run.run_id)
-            .await
-            .status,
+        wait_for_terminal(
+            &runtime,
+            &result.session.session_id,
+            &result.run.as_ref().unwrap().run_id
+        )
+        .await
+        .status,
         assistant_protocol::RunStatus::Completed
     );
     assert_eq!(
@@ -500,17 +516,148 @@ async fn text_only_materialization_creates_no_provisional_attachment_or_session(
 }
 
 #[tokio::test]
+async fn cleared_materialization_key_never_returns_or_replays_a_later_input() {
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(false),
+        8_192,
+        [
+            ModelScript::Events(message_events(&assistant_text(
+                "original-key-final",
+                "first",
+            ))),
+            ModelScript::Events(message_events(&assistant_text("later-key-final", "later"))),
+        ],
+    ));
+    let runtime = runtime_with_tools(model, ToolSetSnapshot::default());
+    let mut request = manifest("original key input");
+    request.mode = assistant_protocol::SubmitInputMode::Normal;
+    request.attachments.clear();
+    request.quotes.clear();
+    request.skill_name = None;
+    let original = runtime
+        .materialize_started_session(request.clone(), Vec::new())
+        .await
+        .unwrap();
+    wait_for_terminal(
+        &runtime,
+        &original.session.session_id,
+        &original.run.as_ref().unwrap().run_id,
+    )
+    .await;
+    let generation = runtime
+        .session(&original.session.session_id)
+        .await
+        .unwrap()
+        .lock_state()
+        .unwrap()
+        .body_generation;
+    runtime
+        .clear_session(assistant_protocol::ClearSessionRequest {
+            session_id: original.session.session_id.clone(),
+            expected_generation: generation,
+            operation_id: assistant_protocol::IdempotencyKey::new("clear-original-key").unwrap(),
+        })
+        .await
+        .unwrap();
+    let reuse = runtime
+        .store
+        .accept_input(crate::NewStoredInput {
+            feedback_answer: None,
+            agent_shell_target: None,
+            input_id: original.run.as_ref().unwrap().input_id.clone(),
+
+            session_id: original.session.session_id.clone(),
+            idempotency_key: None,
+            agent_variant: assistant_protocol::AgentVariant::Build,
+            origin: crate::InputOrigin::User,
+            goal_binding: None,
+            cross_session: None,
+            channel_source: Some(crate::InputChannelSource::desktop_text()),
+            skill_activation: None,
+            mcp_selection: None,
+
+            message: agent_types::UserMessage {
+                id: MessageId::new("replacement-reserved-user").unwrap(),
+                origin: agent_types::UserMessageOrigin::User,
+                transcript_visibility: agent_types::TranscriptVisibility::Visible,
+                parts: vec![UserPart::Text(TextPart {
+                    id: PartId::new("replacement-reserved-text").unwrap(),
+                    text: "must not replace the original identity".into(),
+                })],
+            },
+            new_goal: None,
+            resumed_goal: None,
+            generated_title: None,
+            accepted_at_ms: super::super::now_ms().unwrap(),
+        })
+        .await;
+    assert_eq!(reuse.unwrap_err().kind(), crate::StoreErrorKind::Conflict);
+    let later = runtime
+        .submit_started_input(assistant_protocol::SubmitInputRequest {
+            session_id: original.session.session_id.clone(),
+            message: "later input".into(),
+            variant: assistant_protocol::AgentVariant::Build,
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+        })
+        .await
+        .unwrap();
+    wait_for_terminal(&runtime, &original.session.session_id, &later.run.run_id).await;
+    let lookup = runtime
+        .get_session_materialization(assistant_protocol::GetSessionMaterializationRequest {
+            idempotency_key: request.idempotency_key.clone(),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(lookup, RuntimeError::SnapshotStale));
+    assert!(matches!(
+        runtime
+            .materialize_started_session(request, Vec::new())
+            .await
+            .unwrap_err(),
+        RuntimeError::SnapshotStale
+    ));
+    let runs = runtime
+        .list_runs(assistant_protocol::ListRunsRequest {
+            session_id: original.session.session_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(runs.runs.len(), 1);
+    assert_eq!(runs.runs[0].run_id, later.run.run_id);
+    assert_eq!(
+        runtime
+            .list_sessions(assistant_protocol::ListSessionsRequest::default())
+            .await
+            .unwrap()
+            .sessions
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn first_send_materializes_goal_skill_quotes_and_files_once() {
     let entered = Arc::new(Notify::new());
     let model = Arc::new(CancellationAwareModel {
         capabilities: model_capabilities(true),
         entered: entered.clone(),
     });
-    let mut runtime = runtime_with_tools(model, ToolSetSnapshot::default());
+    let store = Arc::new(crate::storage::VolatileRuntimeStore::default());
+    let mut runtime = runtime_with_store(
+        model,
+        store.clone(),
+        RuntimeConfig::new(NonZeroUsize::new(32).unwrap()),
+    )
+    .await;
     runtime.skill_package_source = Arc::new(super::sessions::StaticSkillPackageSource);
 
     let first = runtime
-        .materialize_session(manifest("ship this change"), staged())
+        .materialize_started_session(manifest("ship this change"), staged())
         .await
         .expect("materialize first send");
     assert_eq!(first.session.title, "ship this change");
@@ -528,6 +675,27 @@ async fn first_send_materializes_goal_skill_quotes_and_files_once() {
     tokio::time::timeout(Duration::from_secs(1), entered.notified())
         .await
         .expect("materialized run starts");
+    assert_eq!(
+        store
+            .selection_control_counts(&first.session.session_id)
+            .unwrap(),
+        (0, 0)
+    );
+    assert!(
+        store.contains_input_control(&first.input_id).unwrap(),
+        "active Input still has execution dependencies"
+    );
+    assert!(
+        store
+            .load_session_state(&first.session.session_id)
+            .await
+            .unwrap()
+            .state
+            .inputs[0]
+            .skill_activation
+            .is_some(),
+        "consumed selection is projected from reliable history while its Run is active"
+    );
     let conversation = runtime
         .conversation_snapshot(&first.session.session_id)
         .await
@@ -570,12 +738,15 @@ async fn first_send_materializes_goal_skill_quotes_and_files_once() {
     }));
 
     let retry = runtime
-        .materialize_session(manifest("ship this change"), staged())
+        .materialize_started_session(manifest("ship this change"), staged())
         .await
         .expect("response-loss retry");
     assert_eq!(retry.session.session_id, first.session.session_id);
     assert_eq!(retry.input_id, first.input_id);
-    assert_eq!(retry.run.run_id, first.run.run_id);
+    assert_eq!(
+        retry.run.as_ref().unwrap().run_id,
+        first.run.as_ref().unwrap().run_id
+    );
     assert_eq!(
         runtime
             .list_sessions(assistant_protocol::ListSessionsRequest::default())
@@ -587,7 +758,7 @@ async fn first_send_materializes_goal_skill_quotes_and_files_once() {
     );
 
     let conflict = runtime
-        .materialize_session(manifest("different content"), staged())
+        .materialize_started_session(manifest("different content"), staged())
         .await
         .expect_err("same key with different manifest must conflict");
     assert_eq!(

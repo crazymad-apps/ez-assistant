@@ -30,7 +30,7 @@ pub struct SkillCandidate {
     pub plugin_sha256: Option<String>,
     /// Workspace 候选所属根目录顺序；用户级候选为 `None`。
     pub workspace_root_order: Option<usize>,
-    /// 供本机诊断和激活后按需访问共享资源使用的候选目录。
+    /// 文件来源为共享目录；Builtin 为 builtin:<name> 标签，不是可访问的磁盘路径。
     pub source_path: String,
     /// 原始 `SKILL.md` 字节生成的定义身份。
     pub definition_digest: String,
@@ -173,10 +173,27 @@ pub struct PluginSkillPackage {
 pub type SkillScanFuture<'a> =
     Pin<Box<dyn Future<Output = Result<SkillScanResult, SkillPackageSourceError>> + Send + 'a>>;
 
+/// 当前执行 Winner 的精确身份和只读参考页键；不允许指定物理目录或其他用户域。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SkillReferenceRequest {
+    pub name: SkillName,
+    pub definition_digest: String,
+    pub reference: String,
+}
+
+/// 来源返回完整 UTF-8 正文；不存在或未提供该能力时返回 None，不回退文件或网络。
+pub type SkillReferenceFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Option<String>, SkillPackageSourceError>> + Send + 'a>>;
+
 /// Runtime 使用的 Skill 包发现端口；实现不得在扫描时执行包内脚本。
 pub trait SkillPackageSource: Send + Sync {
     /// 扫描请求指定的固定 Root 并返回文件事实；单个坏包应成为诊断而非端口错误。
     fn scan(&self, request: SkillScanRequest) -> SkillScanFuture<'_>;
+
+    /// 按冻结身份读取来源自带的有界参考页；不能执行脚本或按任意路径访问文件。
+    fn read_reference(&self, _request: SkillReferenceRequest) -> SkillReferenceFuture<'_> {
+        Box::pin(async { Ok(None) })
+    }
 }
 
 /// 无 Host 嵌入式 Runtime 的稳定空实现。
@@ -460,6 +477,7 @@ fn candidate_order(left: &SkillCandidate, right: &SkillCandidate) -> std::cmp::O
 fn candidate_priority(candidate: &SkillCandidate) -> (u8, usize, SkillSource) {
     match candidate.source {
         SkillSource::Plugin => (0, 0, candidate.source),
+        SkillSource::Builtin => (3, 0, candidate.source),
         SkillSource::WorkspaceEzAssistant | SkillSource::WorkspaceAgents => (
             1,
             candidate.workspace_root_order.unwrap_or(usize::MAX),

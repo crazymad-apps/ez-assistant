@@ -63,15 +63,20 @@ impl AssistantRuntime {
             .register_scope(PermissionFileScope::Workspace(stored.workspace_id.clone()))
             .await?;
         let projection = summary(&stored);
-        self.workspaces
-            .write()
-            .map_err(|_| RuntimeError::InternalStateUnavailable {
-                component: "workspace registry",
-            })?
-            .insert(stored.workspace_id.clone(), stored);
-        self.publish(assistant_protocol::RuntimeEvent::WorkspaceChanged {
-            workspace_id: projection.workspace_id.clone(),
-        });
+        self.event_sender.publish_transition(|| {
+            self.workspaces
+                .write()
+                .map_err(|_| RuntimeError::InternalStateUnavailable {
+                    component: "workspace registry",
+                })?
+                .insert(stored.workspace_id.clone(), stored);
+            Ok((
+                (),
+                Some(assistant_protocol::RuntimeEvent::WorkspaceChanged {
+                    workspace_id: projection.workspace_id.clone(),
+                }),
+            ))
+        })?;
         Ok(RegisterWorkspaceResult {
             workspace: projection,
             restored,
@@ -117,15 +122,20 @@ impl AssistantRuntime {
                 }
             })?;
         let projection = summary(&stored);
-        self.workspaces
-            .write()
-            .map_err(|_| RuntimeError::InternalStateUnavailable {
-                component: "workspace registry",
-            })?
-            .insert(stored.workspace_id.clone(), stored);
-        self.publish(assistant_protocol::RuntimeEvent::WorkspaceChanged {
-            workspace_id: projection.workspace_id.clone(),
-        });
+        self.event_sender.publish_transition(|| {
+            self.workspaces
+                .write()
+                .map_err(|_| RuntimeError::InternalStateUnavailable {
+                    component: "workspace registry",
+                })?
+                .insert(stored.workspace_id.clone(), stored);
+            Ok((
+                (),
+                Some(assistant_protocol::RuntimeEvent::WorkspaceChanged {
+                    workspace_id: projection.workspace_id.clone(),
+                }),
+            ))
+        })?;
         Ok(UpdateWorkspaceResult {
             workspace: projection,
         })
@@ -185,15 +195,20 @@ impl AssistantRuntime {
             .await
             .map_err(|source| RuntimeError::from_store("remove workspace", source))?;
         let projection = summary(&stored);
-        self.workspaces
-            .write()
-            .map_err(|_| RuntimeError::InternalStateUnavailable {
-                component: "workspace registry",
-            })?
-            .insert(stored.workspace_id.clone(), stored);
-        self.publish(assistant_protocol::RuntimeEvent::WorkspaceChanged {
-            workspace_id: projection.workspace_id.clone(),
-        });
+        self.event_sender.publish_transition(|| {
+            self.workspaces
+                .write()
+                .map_err(|_| RuntimeError::InternalStateUnavailable {
+                    component: "workspace registry",
+                })?
+                .insert(stored.workspace_id.clone(), stored);
+            Ok((
+                (),
+                Some(assistant_protocol::RuntimeEvent::WorkspaceChanged {
+                    workspace_id: projection.workspace_id.clone(),
+                }),
+            ))
+        })?;
         Ok(RemoveWorkspaceResult {
             workspace: projection,
         })
@@ -229,15 +244,20 @@ impl AssistantRuntime {
             .register_scope(PermissionFileScope::Workspace(stored.workspace_id.clone()))
             .await?;
         let projection = summary(&stored);
-        self.workspaces
-            .write()
-            .map_err(|_| RuntimeError::InternalStateUnavailable {
-                component: "workspace registry",
-            })?
-            .insert(stored.workspace_id.clone(), stored);
-        self.publish(assistant_protocol::RuntimeEvent::WorkspaceChanged {
-            workspace_id: projection.workspace_id.clone(),
-        });
+        self.event_sender.publish_transition(|| {
+            self.workspaces
+                .write()
+                .map_err(|_| RuntimeError::InternalStateUnavailable {
+                    component: "workspace registry",
+                })?
+                .insert(stored.workspace_id.clone(), stored);
+            Ok((
+                (),
+                Some(assistant_protocol::RuntimeEvent::WorkspaceChanged {
+                    workspace_id: projection.workspace_id.clone(),
+                }),
+            ))
+        })?;
         Ok(RestoreWorkspaceResult {
             workspace: projection,
         })

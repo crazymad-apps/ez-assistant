@@ -127,7 +127,7 @@ it('默认自动升级空库并初始化超级管理员，之后才开放 HTTP',
   const service = await startService(loadConfig({ ...env, CENTER_DATABASE_AUTO_UPGRADE: undefined }));
   try {
     const centerId = (await f.pool.query('SELECT center_id FROM public.center_identity WHERE singleton = true')).rows[0].center_id;
-    expect(await (await fetch(`${service.address}/api/info`)).json()).toMatchObject({ center_id: centerId, software_version: '0.1.0', protocol_version: 3, min_protocol_version: 3 });
+    expect(await (await fetch(`${service.address}/api/info`)).json()).toMatchObject({ center_id: centerId, software_version: '0.1.0', protocol_version: 4, min_protocol_version: 4 });
     expect(await exactCounts(f.pool)).toEqual(baselineCounts);
     const user = (await f.pool.query('SELECT username,role,is_super_admin,enabled,password_hash FROM public.users')).rows[0];
     expect(user).toMatchObject({ username: 'admin', role: 'admin', is_super_admin: true, enabled: true });

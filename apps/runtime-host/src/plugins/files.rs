@@ -30,6 +30,7 @@ use super::{
 #[derive(Clone)]
 pub(crate) struct HostPluginFiles {
     user_root: PathBuf,
+    mcp_write_gate: Arc<tokio::sync::Mutex<()>>,
     center: Option<(
         Arc<crate::access::Credentials>,
         crate::access::enterprise::UserKey,
@@ -40,6 +41,7 @@ impl HostPluginFiles {
     pub(crate) fn new(user_root: PathBuf) -> Self {
         Self {
             user_root,
+            mcp_write_gate: Arc::new(tokio::sync::Mutex::new(())),
             center: None,
         }
     }
@@ -383,9 +385,36 @@ impl PluginFilePort for HostPluginFiles {
         plugins: Vec<StoredPlugin>,
     ) -> BoxFuture<'_, Result<PluginMcpDiscovery, PluginFileError>> {
         let user_root = self.user_root.clone();
+        let write_gate = self.mcp_write_gate.clone();
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
-                super::capabilities::discover_mcp(&user_root, plugins)
+                let names = plugins
+                    .iter()
+                    .map(|plugin| plugin.name.clone())
+                    .collect::<Vec<_>>();
+                let mut discovery = super::capabilities::discover_mcp(&user_root, plugins);
+                for name in names {
+                    if let Ok(root) = super::config_files::config_root(&user_root, &name) {
+                        let source: Arc<dyn assistant_runtime::McpConfigSource> =
+                            Arc::new(crate::mcp::LocalMcpConfigSource::plugin(
+                                root.join(super::config_files::MCP_OVERRIDES_FILE),
+                                write_gate.clone(),
+                            ));
+                        discovery
+                            .configuration_sources
+                            .push((assistant_protocol::McpServerSource::Plugin(name), source));
+                    }
+                }
+                for definition in &mut discovery.definitions {
+                    if let Some((_, source)) = discovery
+                        .configuration_sources
+                        .iter()
+                        .find(|(source, _)| source == &definition.source)
+                    {
+                        definition.configuration = Some(source.clone());
+                    }
+                }
+                discovery
             })
             .await
             .map_err(|_| PluginFileError::Unavailable)

@@ -1,5 +1,15 @@
 use super::*;
 
+impl State {
+    fn materialized_input(&self, session_id: &SessionId) -> Result<StoredInput, StoreError> {
+        let id = self
+            .materialization_inputs
+            .get(session_id)
+            .ok_or_else(|| conflict("original materialization Input identity is unavailable"))?;
+        self.input_projection(session_id, id)
+    }
+}
+
 impl VolatileRuntimeStore {
     pub(super) fn create_session(
         &self,
@@ -70,18 +80,8 @@ impl VolatileRuntimeStore {
                 .find(|session| session.materialization_key.as_ref() == Some(key))
                 .cloned()
             {
-                let input = state
-                    .inputs
-                    .values()
-                    .find(|input| input.session_id == existing.session_id)
-                    .cloned()
-                    .ok_or_else(|| conflict("materialized input is missing"))?;
-                let run = state
-                    .runs
-                    .values()
-                    .find(|run| run.input_id == input.input_id && run.attempt == 1)
-                    .cloned()
-                    .ok_or_else(|| conflict("materialized run is missing"))?;
+                let input = state.materialized_input(&existing.session_id)?;
+                let accepted = state.existing_input_acceptance(input.clone())?;
                 let attachments = state
                     .attachments
                     .values()
@@ -106,9 +106,9 @@ impl VolatileRuntimeStore {
                                 })
                         })
                 });
-                let existing_selection = state
-                    .mcp_input_selections
-                    .values()
+                let selections = state.mcp_selection_projections(Some(&existing.session_id));
+                let existing_selection = selections
+                    .iter()
                     .find(|selection| selection.input_id.as_ref() == Some(&input.input_id));
                 let selection_matches = existing_selection
                     .map(|selection| (&selection.server_key, selection.display_name.as_str()))
@@ -134,22 +134,23 @@ impl VolatileRuntimeStore {
                     goal: state.goals.get(&existing.session_id).cloned(),
                     session: existing,
                     attachments,
-                    accepted: AcceptedInput {
-                        input,
-                        run,
-                        is_duplicate: true,
-                    },
+                    accepted,
                 });
             }
             if state
                 .sessions
                 .contains_key(&materialization.session.session_id)
                 || state.inputs.contains_key(&materialization.input.input_id)
-                || state.runs.contains_key(&materialization.input.run_id)
                 || materialization.input.session_id != materialization.session.session_id
             {
                 return Err(conflict("materialization identities conflict"));
             }
+            state.ensure_new_input_identity(
+                &materialization.input.session_id,
+                &materialization.input.input_id,
+                None,
+                &materialization.input.message.id,
+            )?;
             validate_input_message_with_channel_source(
                 materialization.input.origin,
                 materialization.input.goal_binding.as_ref(),
@@ -161,6 +162,10 @@ impl VolatileRuntimeStore {
             validate_volatile_input_activation(&state, &materialization.input)?;
             if let Some(selection) = materialization.input.mcp_selection.as_ref()
                 && (materialization.input.origin != InputOrigin::User
+                    || state.contains_mcp_selection(
+                        &materialization.input.session_id,
+                        &selection.selection_id,
+                    )
                     || selection.session_id != materialization.input.session_id
                     || selection.input_id.as_ref() != Some(&materialization.input.input_id)
                     || selection.message_id != materialization.input.message.id)
@@ -240,24 +245,7 @@ impl VolatileRuntimeStore {
                 queued_message: Some(input.message),
                 accepted_at_ms: input.accepted_at_ms,
             };
-            let run = StoredRun {
-                shell: None,
-                run_id: input.run_id,
-                session_id: input.session_id,
-                input_id: input.input_id,
-                attempt: 1,
-                status: RunStatus::Accepted,
-                agent_variant: input.agent_variant,
-                approval_mode: input.approval_mode,
-                reasoning_effort: None,
-                cancel_requested: false,
-                error: None,
-                message_ids: Vec::new(),
-                message_steps: std::collections::HashMap::new(),
-                created_at_ms: input.accepted_at_ms,
-                started_at_ms: None,
-                finished_at_ms: None,
-            };
+
             if let Some(goal) = input.new_goal {
                 state.goals.insert(goal.session_id.clone(), goal);
             }
@@ -277,6 +265,9 @@ impl VolatileRuntimeStore {
             state
                 .sessions
                 .insert(session.session_id.clone(), session.clone());
+            state
+                .materialization_inputs
+                .insert(session.session_id.clone(), stored_input.input_id.clone());
             for attachment in &attachments {
                 state
                     .attachments
@@ -285,19 +276,22 @@ impl VolatileRuntimeStore {
             state
                 .inputs
                 .insert(stored_input.input_id.clone(), stored_input.clone());
+            state.input_identities.insert(
+                stored_input.input_id.clone(),
+                InputIdentity::from_input(&stored_input),
+            );
             if let Some(selection) = mcp_selection {
                 state
                     .mcp_input_selections
                     .insert(selection.selection_id.clone(), selection);
             }
-            state.runs.insert(run.run_id.clone(), run.clone());
             Ok(StoredSessionMaterialization {
                 goal: state.goals.get(&stored_input.session_id).cloned(),
                 session,
                 attachments,
-                accepted: AcceptedInput {
-                    input: stored_input,
-                    run,
+                accepted: AcceptedInput::Control {
+                    input: Box::new(stored_input),
+                    run: None,
                     is_duplicate: false,
                 },
             })
@@ -319,19 +313,8 @@ impl VolatileRuntimeStore {
             else {
                 return Ok(None);
             };
-            let input = state
-                .inputs
-                .values()
-                .filter(|input| input.session_id == session.session_id)
-                .min_by_key(|input| (input.accepted_at_ms, input.queue_order))
-                .cloned()
-                .ok_or_else(|| conflict("materialized input is missing"))?;
-            let run = state
-                .runs
-                .values()
-                .find(|run| run.input_id == input.input_id && run.attempt == 1)
-                .cloned()
-                .ok_or_else(|| conflict("materialized run is missing"))?;
+            let input = state.materialized_input(&session.session_id)?;
+            let accepted = state.existing_input_acceptance(input.clone())?;
             let mut available = state
                 .attachments
                 .values()
@@ -379,11 +362,7 @@ impl VolatileRuntimeStore {
                 goal: state.goals.get(&session.session_id).cloned(),
                 session,
                 attachments,
-                accepted: AcceptedInput {
-                    input,
-                    run,
-                    is_duplicate: true,
-                },
+                accepted,
             }))
         })
     }
@@ -453,9 +432,11 @@ impl VolatileRuntimeStore {
             let mut activation_ids = BTreeSet::new();
             for activation in &fork.skill_activations {
                 if !activation_ids.insert(activation.activation_id.clone())
-                    || state
-                        .skill_activations
-                        .contains_key(&activation.activation_id)
+                    || state.contains_skill_activation(
+                        &fork.session.session_id,
+                        &activation.owner,
+                        &activation.activation_id,
+                    )
                     || activation.session_id != fork.session.session_id
                     || !matches!(
                         &activation.owner,
@@ -472,14 +453,19 @@ impl VolatileRuntimeStore {
             }
             let mut selection_ids = BTreeSet::new();
             for selection in &fork.mcp_selections {
-                let source_selection = state.mcp_input_selections.values().find(|candidate| {
-                    candidate.session_id == fork.source_session_id
-                        && candidate.message_id == selection.message_id
-                });
+                let source_selection =
+                    state
+                        .histories
+                        .get(&fork.source_session_id)
+                        .and_then(|history| {
+                            history
+                                .mcp_selections
+                                .iter()
+                                .find(|candidate| candidate.message_id == selection.message_id)
+                        });
                 if !selection_ids.insert(selection.selection_id.clone())
                     || state
-                        .mcp_input_selections
-                        .contains_key(&selection.selection_id)
+                        .contains_mcp_selection(&fork.session.session_id, &selection.selection_id)
                     || selection.session_id != fork.session.session_id
                     || selection.input_id.is_some()
                     || !message_ids.contains(selection.message_id.as_str())
@@ -496,10 +482,20 @@ impl VolatileRuntimeStore {
             let mut command_message_ids = BTreeSet::new();
             for copied in &fork.session_commands {
                 let command = &copied.command;
-                let source = state.session_commands.get(&copied.source_input_id);
+                let source = state
+                    .histories
+                    .get(&fork.source_session_id)
+                    .and_then(|history| {
+                        history
+                            .commands
+                            .iter()
+                            .find(|command| command.input_id == copied.source_input_id)
+                    });
                 if !command_ids.insert(command.input_id.clone())
                     || !command_message_ids.insert(command.user_message_id.clone())
                     || state.inputs.contains_key(&command.input_id)
+                    || state.input_identities.contains_key(&command.input_id)
+                    || state.command_identities.contains_key(&command.input_id)
                     || state.session_commands.contains_key(&command.input_id)
                     || command.session_id != fork.session.session_id
                     || command.idempotency_key.is_some()
@@ -520,6 +516,17 @@ impl VolatileRuntimeStore {
             }
 
             let mut path_rewrites = BTreeMap::new();
+            // 同一独占提交中从源事实裁切，不从已释放的 Run 控制重建继承历史。
+            let mut inherited = state
+                .histories
+                .get(&fork.source_session_id)
+                .cloned()
+                .unwrap_or_default()
+                .fork_lineage(
+                    &fork.session.session_id,
+                    &fork.conversation,
+                    &fork.session_commands,
+                )?;
             let mut attachments = Vec::with_capacity(fork.attachments.len());
             for reference in &fork.attachments {
                 let source = state
@@ -546,6 +553,50 @@ impl VolatileRuntimeStore {
             }
             let mut conversation = fork.conversation;
             rewrite_file_reference_paths(&mut conversation, &path_rewrites)?;
+            // 所有 child 准备成功后才安装目标；正文缺失只保留明确不可用的目录，
+            // 不把来源 owner 的单键正文借给目标，也不创建 child 执行控制。
+            let mut children = Vec::new();
+            for child in &mut inherited.child_tasks {
+                if child.body_unavailable {
+                    continue;
+                }
+                let source_key = (fork.source_session_id.clone(), child.child_task_id.clone());
+                let (Some(body), Some(source_facts)) = (
+                    state.child_conversations.get(&source_key),
+                    state.child_histories.get(&source_key),
+                ) else {
+                    child.body_unavailable = true;
+                    continue;
+                };
+                let source_binding = state
+                    .child_history(&fork.source_session_id, &child.child_task_id)
+                    .ok_or_else(|| conflict("fork child source description is missing"))?;
+                if source_binding.parent_run_id != child.parent_run_id
+                    || source_binding.parent_tool_call_id != child.parent_tool_call_id
+                    || source_binding.status != child.status
+                {
+                    return Err(conflict("fork child source binding changed"));
+                }
+                let mut body = body.clone();
+                let mut facts = source_facts.fork_lineage(&fork.session.session_id, &body, &[])?;
+                if rewrite_file_reference_paths(&mut body, &path_rewrites).is_err() {
+                    child.body_unavailable = true;
+                    continue;
+                }
+                facts.child_tasks = vec![child.clone()];
+                facts.skill_activations = source_facts
+                    .skill_activations
+                    .iter()
+                    .cloned()
+                    .map(|mut activation| {
+                        activation.session_id = fork.session.session_id.clone();
+                        activation.run_id = None;
+                        activation.input_id = None;
+                        activation
+                    })
+                    .collect();
+                children.push((child.child_task_id.clone(), body, facts));
+            }
             let message_count = u64::try_from(conversation.messages.len())
                 .map_err(|_| conflict("fork conversation is too large"))?;
             let stored = StoredSession {
@@ -609,26 +660,34 @@ impl VolatileRuntimeStore {
             if let Some(goal) = &goal {
                 state.goals.insert(stored.session_id.clone(), goal.clone());
             }
-            for activation in &fork.skill_activations {
-                state
-                    .skill_activations
-                    .insert(activation.activation_id.clone(), activation.clone());
+            state.histories.insert(stored.session_id.clone(), inherited);
+            for (id, body, facts) in children {
+                let key = (stored.session_id.clone(), id);
+                state.child_conversations.insert(key.clone(), body);
+                state.child_histories.insert(key, facts);
             }
-            for selection in &fork.mcp_selections {
-                state
-                    .mcp_input_selections
-                    .insert(selection.selection_id.clone(), selection.clone());
-            }
+            // Fork 只继承可靠选择；目标不产生可消费的选择控制或输入身份。
+            let history = state
+                .histories
+                .entry(stored.session_id.clone())
+                .or_default();
+            history
+                .skill_activations
+                .extend(fork.skill_activations.iter().cloned());
+            history
+                .mcp_selections
+                .extend(fork.mcp_selections.iter().cloned());
             let session_commands = fork
                 .session_commands
                 .into_iter()
                 .map(|copied| copied.command)
                 .collect::<Vec<_>>();
-            for command in &session_commands {
-                state
-                    .session_commands
-                    .insert(command.input_id.clone(), command.clone());
-            }
+            state
+                .histories
+                .entry(stored.session_id.clone())
+                .or_default()
+                .commands
+                .extend(session_commands.iter().cloned());
             Ok(StoredSessionFork {
                 session: stored,
                 conversation,
@@ -655,20 +714,8 @@ impl VolatileRuntimeStore {
                 .ok_or_else(|| conflict("delete session does not exist"))?;
             Ok(assistant_protocol::DeleteSessionImpact {
                 message_count: session.message_count,
-                run_count: count_u64(
-                    state
-                        .runs
-                        .values()
-                        .filter(|run| run.session_id == session_id)
-                        .count(),
-                )?,
-                child_task_count: count_u64(
-                    state
-                        .child_tasks
-                        .values()
-                        .filter(|task| task.session_id == session_id)
-                        .count(),
-                )?,
+                run_count: count_u64(state.session_run_ids(&session_id).len())?,
+                child_task_count: count_u64(state.session_child_ids(&session_id).len())?,
                 attachment_count: count_u64(
                     state
                         .attachments
@@ -692,20 +739,8 @@ impl VolatileRuntimeStore {
             }
             let current = assistant_protocol::DeleteSessionImpact {
                 message_count: session.message_count,
-                run_count: count_u64(
-                    state
-                        .runs
-                        .values()
-                        .filter(|run| run.session_id == deletion.session_id)
-                        .count(),
-                )?,
-                child_task_count: count_u64(
-                    state
-                        .child_tasks
-                        .values()
-                        .filter(|task| task.session_id == deletion.session_id)
-                        .count(),
-                )?,
+                run_count: count_u64(state.session_run_ids(&deletion.session_id).len())?,
+                child_task_count: count_u64(state.session_child_ids(&deletion.session_id).len())?,
                 attachment_count: count_u64(
                     state
                         .attachments
@@ -729,17 +764,19 @@ impl VolatileRuntimeStore {
                 .filter(|input| input.session_id == deletion.session_id)
                 .map(|input| input.input_id.clone())
                 .collect::<BTreeSet<_>>();
-            let child_ids = state
-                .child_tasks
-                .values()
-                .filter(|task| task.session_id == deletion.session_id)
-                .map(|task| task.child_task_id.clone())
-                .collect::<BTreeSet<_>>();
             state
                 .feedback
                 .retain(|_, request| request.session_id != deletion.session_id);
             state.sessions.remove(&deletion.session_id);
+            state.materialization_inputs.remove(&deletion.session_id);
             state.conversations.remove(&deletion.session_id);
+            state.histories.remove(&deletion.session_id);
+            state
+                .input_identities
+                .retain(|_, identity| identity.session_id != deletion.session_id);
+            state
+                .child_histories
+                .retain(|(owner, _), _| owner != &deletion.session_id);
             state.session_usage.remove(&deletion.session_id);
             state.work_plans.remove(&deletion.session_id);
             state.goals.remove(&deletion.session_id);
@@ -750,17 +787,19 @@ impl VolatileRuntimeStore {
             state
                 .session_commands
                 .retain(|_, command| command.session_id != deletion.session_id);
+            state
+                .command_identities
+                .retain(|_, identity| identity.session_id != deletion.session_id);
             state.runs.retain(|id, _| !run_ids.contains(id));
-            state.child_tasks.retain(|id, _| !child_ids.contains(id));
+            state
+                .child_tasks
+                .retain(|_, task| task.session_id != deletion.session_id);
             state
                 .child_conversations
-                .retain(|id, _| !child_ids.contains(id));
+                .retain(|(owner, _), _| owner != &deletion.session_id);
             state
                 .attachments
                 .retain(|_, attachment| attachment.session_id != deletion.session_id);
-            state
-                .message_feedback
-                .retain(|(session_id, _), _| session_id != &deletion.session_id);
             state
                 .skill_activations
                 .retain(|_, activation| activation.session_id != deletion.session_id);

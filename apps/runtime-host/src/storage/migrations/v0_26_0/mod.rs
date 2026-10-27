@@ -6,6 +6,7 @@ use super::{Migration, MigrationError, Result, v0_25_3};
 
 pub(super) fn entry() -> Migration {
     Migration {
+        key: "release",
         version: "0.26.0",
         min_compatible_host_version: Some("0.25.3"),
         rebuilds_referenced_tables: false,
@@ -31,6 +32,10 @@ fn apply(connection: &Connection) -> Result<()> {
 
 pub(super) fn validate(connection: &Connection) -> Result<()> {
     v0_25_3::validate(connection)?;
+    validate_additions(connection)
+}
+
+pub(super) fn validate_additions(connection: &Connection) -> Result<()> {
     connection.prepare(
         "SELECT model_catalog_json, model_catalog_refreshed_at_ms, model_catalog_connection_changed FROM providers LIMIT 0",
     )?;

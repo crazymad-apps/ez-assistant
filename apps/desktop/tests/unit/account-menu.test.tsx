@@ -57,12 +57,13 @@ describe("AccountMenu", () => {
     connection.dispose();
   });
 
-  it("renders on the entry page without a RootStoreProvider", () => {
+  it("renders workspace connection status without a RootStoreProvider", () => {
     const root = new RootStore();
     const connection = new ApplicationConnectionStore(root);
     runInAction(() => {
       root.connection.state = "connected";
       connection.current = root;
+      connection.phase = "workspace";
       connection.session = {
         token: null,
         expires_at_ms: 0,
@@ -76,9 +77,9 @@ describe("AccountMenu", () => {
 
     const view = render(<AccountMenu connection={connection} />);
     expect(screen.getByRole("button", { name: "账号与 Runtime" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "账号与 Runtime" }).querySelector('[data-icon="settings"]')).toBeNull();
+    expect(screen.getByRole("button", { name: "账号与 Runtime" }).querySelector('[data-icon="settings"]')).not.toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "账号与 Runtime" }));
-    expect(screen.queryByRole("menuitem", { name: "设置" })).not.toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "设置" })).toBeEnabled();
     expect(screen.getByText("Runtime 已连接")).toBeVisible();
     expect(screen.queryByText("运行时已连接")).not.toBeInTheDocument();
     view.unmount();

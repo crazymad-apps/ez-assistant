@@ -61,13 +61,33 @@ pub(crate) fn derive_pinned_memory_context(
         .map_err(|_| PinnedMemoryContextError::InvalidConversation)?;
     validate_latest_programmatic_context(history)?;
 
-    let mut pending = BTreeMap::<ToolCallId, MemoryMutationKind>::new();
-    let mut upserts = BTreeMap::<PinnedMemoryId, PinnedMemoryDeltaEntryV1>::new();
-    let mut deleted_ids = BTreeSet::<PinnedMemoryId>::new();
-
+    let mut state = PinnedMemoryContext::default();
     for message in &history.messages {
+        state.push(message)?;
+    }
+    state.render()
+}
+
+/// 随执行窗口增量维护的净记忆变化；不保留旧工具正文，也不回写历史。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct PinnedMemoryContext {
+    latest_programmatic_context: Option<String>,
+    pending: BTreeMap<ToolCallId, MemoryMutationKind>,
+    upserts: BTreeMap<PinnedMemoryId, PinnedMemoryDeltaEntryV1>,
+    deleted_ids: BTreeSet<PinnedMemoryId>,
+}
+
+impl PinnedMemoryContext {
+    pub(crate) fn push(
+        &mut self,
+        message: &ConversationMessage,
+    ) -> Result<(), PinnedMemoryContextError> {
         match message {
-            ConversationMessage::ContextSummary(_) => pending.clear(),
+            ConversationMessage::ContextSummary(summary) => {
+                self.pending.clear();
+                self.latest_programmatic_context
+                    .clone_from(&summary.programmatic_context);
+            }
             ConversationMessage::Assistant(assistant) => {
                 for part in &assistant.parts {
                     let AssistantPart::ToolCall(call) = part else {
@@ -80,16 +100,16 @@ pub(crate) fn derive_pinned_memory_context(
                         _ => None,
                     };
                     if let Some(kind) = kind {
-                        pending.insert(call.id.clone(), kind);
+                        self.pending.insert(call.id.clone(), kind);
                     }
                 }
             }
             ConversationMessage::Tool(tool) => {
-                let Some(kind) = pending.remove(&tool.result.call_id) else {
-                    continue;
+                let Some(kind) = self.pending.remove(&tool.result.call_id) else {
+                    return Ok(());
                 };
                 if tool.result.status == ToolResultStatus::Error {
-                    continue;
+                    return Ok(());
                 }
                 let value = tool
                     .result
@@ -98,26 +118,36 @@ pub(crate) fn derive_pinned_memory_context(
                     .ok_or(PinnedMemoryContextError::MalformedSuccessfulResult)?;
                 let result: PinnedMemoryToolResultV1 = serde_json::from_value(value.clone())
                     .map_err(|_| PinnedMemoryContextError::MalformedSuccessfulResult)?;
-                apply_mutation(kind, result, &mut upserts, &mut deleted_ids)?;
+                apply_mutation(kind, result, &mut self.upserts, &mut self.deleted_ids)?;
             }
             ConversationMessage::System(_) | ConversationMessage::User(_) => {}
         }
+        Ok(())
     }
+    pub(crate) fn render(&self) -> Result<Option<String>, PinnedMemoryContextError> {
+        if let Some(context) = &self.latest_programmatic_context {
+            let delta: PinnedMemoryDeltaV1 = serde_json::from_str(context)
+                .map_err(|_| PinnedMemoryContextError::InvalidExistingContext)?;
+            validate_delta(&delta).map_err(|_| PinnedMemoryContextError::InvalidExistingContext)?;
+            validate_encoded_size(context)
+                .map_err(|_| PinnedMemoryContextError::InvalidExistingContext)?;
+        }
 
-    if upserts.is_empty() && deleted_ids.is_empty() {
-        return Ok(None);
+        if self.upserts.is_empty() && self.deleted_ids.is_empty() {
+            return Ok(None);
+        }
+        let delta = PinnedMemoryDeltaV1 {
+            kind: DELTA_KIND.to_owned(),
+            version: DELTA_VERSION,
+            upserts: self.upserts.values().cloned().collect(),
+            deleted_ids: self.deleted_ids.iter().cloned().collect(),
+        };
+        validate_delta(&delta)?;
+        let encoded =
+            serde_json::to_string(&delta).map_err(|_| PinnedMemoryContextError::Serialization)?;
+        validate_encoded_size(&encoded)?;
+        Ok(Some(encoded))
     }
-    let delta = PinnedMemoryDeltaV1 {
-        kind: DELTA_KIND.to_owned(),
-        version: DELTA_VERSION,
-        upserts: upserts.into_values().collect(),
-        deleted_ids: deleted_ids.into_iter().collect(),
-    };
-    validate_delta(&delta)?;
-    let encoded =
-        serde_json::to_string(&delta).map_err(|_| PinnedMemoryContextError::Serialization)?;
-    validate_encoded_size(&encoded)?;
-    Ok(Some(encoded))
 }
 
 fn validate_latest_programmatic_context(

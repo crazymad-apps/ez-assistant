@@ -1,5 +1,251 @@
 use super::*;
 
+#[tokio::test]
+async fn session_view_does_not_reread_main_history_for_each_child() {
+    let model = Arc::new(DelegationScenarioModel::delayed(
+        &["first", "second", "third"],
+        Duration::ZERO,
+    ));
+    let store = Arc::new(super::store::FaultInjectingStore::healthy());
+    let runtime = runtime_with_store(model, store.clone(), delegation_runtime_config()).await;
+    runtime
+        .config_registry
+        .replace_document_for_test(&config_with_delegation(3, 3, 1000));
+    let id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    set_auto_approval(&runtime, &id).await;
+    submit_completed_turn(&runtime, &id, "delegate").await;
+    store.main_history_loads.store(0, Ordering::SeqCst);
+    store.child_history_loads.store(0, Ordering::SeqCst);
+    let view = runtime
+        .get_session_view(GetSessionViewRequest { session_id: id })
+        .await
+        .unwrap()
+        .snapshot
+        .value;
+    assert_eq!(view.child_tasks.len(), 3);
+    assert!(
+        view.child_tasks
+            .iter()
+            .all(|child| child.task.status.is_terminal() && child.task.final_text.is_empty())
+    );
+    assert!(
+        store.main_history_loads.load(Ordering::SeqCst) <= 2,
+        "one main Run read and one child directory read must suffice for the whole tree"
+    );
+    assert_eq!(
+        store.child_history_loads.load(Ordering::SeqCst),
+        0,
+        "terminal child summaries must use the parent directory and usage snapshots"
+    );
+    let detail = runtime
+        .get_child_task(assistant_protocol::GetChildTaskRequest {
+            session_id: view.session.session_id.clone(),
+            child_task_id: view.child_tasks[0].task.child_task_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        !detail.task.final_text.is_empty(),
+        "opening the child must still load its final response"
+    );
+    // child 正文提交同样属于父 Session 的观察范围，不能返回混合快照。
+    let events = runtime.event_sender.clone();
+    let owner = assistant_protocol::ConversationOwner::ChildTask {
+        session_id: view.session.session_id.clone(),
+        child_task_id: view.child_tasks[0].task.child_task_id.clone(),
+    };
+    *store.window_read_hook.lock().unwrap() = Some(Box::new(move || {
+        let _ = events.send(RuntimeEvent::ConversationCommitted {
+            owner: owner.clone(),
+            generation: 1,
+        });
+    }));
+    assert!(matches!(
+        runtime
+            .get_session_view(GetSessionViewRequest {
+                session_id: view.session.session_id.clone(),
+            })
+            .await,
+        Err(RuntimeError::SnapshotBusy)
+    ));
+    *store.window_read_hook.lock().unwrap() = None;
+    runtime.shutdown(Default::default()).await.unwrap();
+}
+
+#[tokio::test]
+async fn fork_child_history_is_owner_scoped_readonly_and_survives_source_deletion() {
+    let model = Arc::new(DelegationScenarioModel::delayed(
+        &["fork child"],
+        Duration::ZERO,
+    ));
+    let store = Arc::new(crate::storage::VolatileRuntimeStore::default());
+    let runtime =
+        runtime_with_store(model.clone(), store.clone(), delegation_runtime_config()).await;
+    runtime
+        .config_registry
+        .replace_document_for_test(&config_with_delegation(1, 1, 1000));
+    let source = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    set_auto_approval(&runtime, &source).await;
+    let submitted = runtime
+        .submit_started_input(SubmitInputRequest {
+            session_id: source.clone(),
+            message: "delegate once".to_owned(),
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            variant: assistant_protocol::AgentVariant::Build,
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_for_terminal(&runtime, &source, &submitted.run.run_id)
+            .await
+            .status,
+        assistant_protocol::RunStatus::Completed
+    );
+    let child = store
+        .load_conversation_history(assistant_protocol::ConversationOwner::MainSession {
+            session_id: source.clone(),
+        })
+        .await
+        .unwrap()
+        .facts
+        .child_tasks
+        .remove(0);
+    let body = store
+        .load_child_conversation(&source, &child.child_task_id)
+        .await
+        .unwrap();
+    let mut previous = source.clone();
+    let mut targets = Vec::new();
+    for _ in 0..2 {
+        let fork = runtime
+            .fork_session(assistant_protocol::ForkSessionRequest {
+                session_id: previous,
+                fork_point: assistant_protocol::MessageId::new("parent-delegate-batch").unwrap(),
+                expected_generation: 1,
+            })
+            .await
+            .unwrap()
+            .session
+            .session_id;
+        let view = runtime
+            .get_session_view(GetSessionViewRequest {
+                session_id: fork.clone(),
+            })
+            .await
+            .unwrap()
+            .snapshot
+            .value;
+        assert_eq!(view.child_tasks.len(), 1);
+        assert!(view.child_tasks[0].task.inherited);
+        assert!(!view.child_tasks[0].task.body_unavailable);
+        assert!(!view.child_tasks[0].can_cancel);
+        let listed = runtime
+            .list_child_tasks(assistant_protocol::ListChildTasksRequest {
+                session_id: fork.clone(),
+                parent_run_id: submitted.run.run_id.clone(),
+            })
+            .await
+            .unwrap()
+            .tasks;
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].inherited);
+        let child_view = runtime
+            .get_child_task_view(assistant_protocol::GetChildTaskViewRequest {
+                session_id: fork.clone(),
+                child_task_id: child.child_task_id.clone(),
+            })
+            .await
+            .unwrap()
+            .snapshot
+            .value;
+        assert_eq!(child_view.task.task.final_text, "result for fork child");
+        assert_eq!(child_view.task.task.session_id, fork);
+        assert_eq!(
+            store
+                .load_child_conversation(&fork, &child.child_task_id)
+                .await
+                .unwrap(),
+            body
+        );
+        assert!(
+            runtime
+                .cancel_child_task(assistant_protocol::CancelChildTaskRequest {
+                    session_id: fork.clone(),
+                    child_task_id: child.child_task_id.clone(),
+                })
+                .await
+                .is_err()
+        );
+        assert!(!store.contains_child_control(&child.child_task_id).unwrap());
+        previous = fork.clone();
+        targets.push(fork);
+    }
+    assert_eq!(
+        model.parent_requests(),
+        2,
+        "Fork/read never invokes the model"
+    );
+    for deleted in [&source, &targets[0]] {
+        let confirmation = runtime
+            .prepare_delete_session(assistant_protocol::PrepareDeleteSessionRequest {
+                session_id: deleted.clone(),
+            })
+            .await
+            .unwrap();
+        runtime
+            .delete_session(assistant_protocol::DeleteSessionRequest {
+                session_id: deleted.clone(),
+                confirmation_token: confirmation.confirmation_token,
+            })
+            .await
+            .unwrap();
+    }
+    drop(runtime);
+    let runtime =
+        runtime_with_store(model.clone(), store.clone(), delegation_runtime_config()).await;
+    let remaining = &targets[1];
+    let view = runtime
+        .get_child_task_view(assistant_protocol::GetChildTaskViewRequest {
+            session_id: remaining.clone(),
+            child_task_id: child.child_task_id.clone(),
+        })
+        .await
+        .unwrap()
+        .snapshot
+        .value;
+    assert_eq!(view.task.task.session_id, *remaining);
+    assert_eq!(view.task.task.final_text, "result for fork child");
+    assert_eq!(
+        store
+            .load_child_conversation(remaining, &child.child_task_id)
+            .await
+            .unwrap(),
+        body
+    );
+    assert!(
+        store
+            .load_child_conversation(&source, &child.child_task_id)
+            .await
+            .is_err()
+    );
+    assert_eq!(model.parent_requests(), 2);
+}
+
 struct DelegationScenarioModel {
     capabilities: ModelCapabilities,
     tasks: Vec<String>,
@@ -218,14 +464,17 @@ fn delegation_runtime_config() -> RuntimeConfig {
 async fn wait_for_child_count(
     store: &dyn RuntimeStore,
     count: usize,
-) -> Vec<crate::StoredChildTask> {
+) -> Vec<crate::StoredChildTaskHistory> {
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             let tasks = store
                 .load_runtime()
                 .await
                 .expect("child projection")
-                .child_tasks;
+                .child_history
+                .into_iter()
+                .map(|(_, task)| task)
+                .collect::<Vec<_>>();
             if tasks.len() >= count {
                 return tasks;
             }
@@ -244,6 +493,22 @@ async fn one_delegate_task_runs_an_isolated_child_and_returns_only_its_final_res
 #[tokio::test]
 async fn child_stream_retry_preserves_isolation_and_returns_only_its_final_result() {
     isolated_child_result(true).await;
+}
+
+fn watch_child_commit_barrier(
+    store: &super::store::FaultInjectingStore,
+    session: Arc<crate::session::SessionController>,
+) -> Arc<Mutex<Vec<&'static str>>> {
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let stages = observed.clone();
+    *store.child_write_hook.lock().unwrap() = Some(Box::new(move |stage| {
+        assert!(
+            futures_util::FutureExt::now_or_never(session.mutation()).is_none(),
+            "child {stage} must hold the parent snapshot barrier"
+        );
+        stages.lock().unwrap().push(stage);
+    }));
+    observed
 }
 
 async fn isolated_child_result(interrupt_child: bool) {
@@ -297,7 +562,7 @@ async fn isolated_child_result(interrupt_child: bool) {
         8_192,
         script,
     ));
-    let store = Arc::new(crate::storage::VolatileRuntimeStore::default());
+    let store = Arc::new(super::store::FaultInjectingStore::healthy());
     let workspaces = Arc::new(TestChildWorkspaceFactory::default());
     let runtime =
         runtime_with_store_and_child_workspaces(model.clone(), store.clone(), workspaces.clone())
@@ -312,9 +577,13 @@ async fn isolated_child_result(interrupt_child: bool) {
         .await
         .expect("session");
     set_auto_approval(&runtime, &session.session.session_id).await;
+    let stages = watch_child_commit_barrier(
+        &store,
+        runtime.session(&session.session.session_id).await.unwrap(),
+    );
     let mut events = runtime.subscribe_events();
     let started = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -329,6 +598,14 @@ async fn isolated_child_result(interrupt_child: bool) {
         .expect("run accepted");
     let terminal =
         wait_for_terminal(&runtime, &session.session.session_id, &started.run.run_id).await;
+    let committed_stages = stages.lock().unwrap().clone();
+    for stage in ["create", "start", "settle"] {
+        assert!(
+            committed_stages.contains(&stage),
+            "missing child {stage} commit"
+        );
+    }
+    *store.child_write_hook.lock().unwrap() = None;
     assert_eq!(terminal.status, assistant_protocol::RunStatus::Completed);
     assert_eq!(terminal.text, "parent received delegated answer");
 
@@ -402,11 +679,47 @@ async fn isolated_child_result(interrupt_child: bool) {
     assert_eq!(requests[1].generation.max_output_tokens, Some(1_024));
 
     let recovered = store.load_runtime().await.expect("child projection");
-    assert_eq!(recovered.child_tasks.len(), 1);
-    let child = &recovered.child_tasks[0];
+    assert_eq!(recovered.child_history.len(), 1);
+    let child = &recovered.child_history[0].1;
+    assert!(
+        !store.contains_child_control(&child.child_task_id).unwrap(),
+        "terminal child control is released after reliable history"
+    );
+    assert!(recovered.child_tasks.is_empty());
+    let window = store
+        .load_conversation_window(crate::ConversationWindowRequest {
+            owner: assistant_protocol::ConversationOwner::ChildTask {
+                session_id: session.session.session_id.clone(),
+                child_task_id: child.child_task_id.clone(),
+            },
+            generation: child.body_generation,
+            end: None,
+            limit: 30,
+        })
+        .await
+        .unwrap();
+    let facts = window.history.unwrap();
+    assert_eq!(facts.child_tasks, vec![child.clone()]);
+    assert_eq!(facts.message_origins.len(), 2);
+    assert!(
+        facts
+            .message_origins
+            .iter()
+            .all(|origin| origin.run_id.is_none()
+                && origin.input_id.is_none()
+                && origin.attempt.is_none())
+    );
+    let impact = store
+        .inspect_session_deletion(&session.session.session_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        impact.child_task_count, 1,
+        "released child remains in deletion impact"
+    );
     assert_eq!(
         child.status,
-        assistant_protocol::ChildTaskStatus::Completed,
+        Some(assistant_protocol::ChildTaskStatus::Completed),
         "child error: {:?}",
         child.error
     );
@@ -472,9 +785,9 @@ async fn isolated_child_result(interrupt_child: bool) {
     assert!(observed.iter().any(|event| matches!(
         event,
         assistant_protocol::RuntimeEvent::ChildTaskEvent {
-            event: assistant_protocol::ChildTaskEvent::Started,
+            event: assistant_protocol::ChildTaskEvent::Started { started_at_ms },
             ..
-        }
+        } if started_at_ms.is_some() && *started_at_ms == child.started_at_ms
     )));
     assert!(observed.iter().any(|event| matches!(
         event,
@@ -511,6 +824,45 @@ async fn isolated_child_result(interrupt_child: bool) {
         .await
         .expect("get child task");
     assert_eq!(queried.task, listed.tasks[0]);
+    let mut stale = runtime
+        .child_tasks
+        .get(&session.session.session_id, &child.child_task_id)
+        .unwrap()
+        .unwrap();
+    stale.status = assistant_protocol::ChildTaskStatus::Failed;
+    stale.title = "stale execution observation".into();
+    stale.finished_at_ms = Some(1);
+    stale.error = Some(assistant_protocol::RuntimeErrorInfo {
+        code: assistant_protocol::RuntimeErrorCode::InvalidRequest,
+        message: "stale observation".into(),
+    });
+    runtime
+        .child_tasks
+        .remove_session(&session.session.session_id)
+        .unwrap();
+    runtime.child_tasks.upsert(stale).unwrap();
+    assert_eq!(
+        runtime
+            .get_child_task(assistant_protocol::GetChildTaskRequest {
+                session_id: session.session.session_id.clone(),
+                child_task_id: child.child_task_id.clone(),
+            })
+            .await
+            .unwrap()
+            .task,
+        queried.task
+    );
+    assert_eq!(
+        runtime
+            .cancel_child_task(assistant_protocol::CancelChildTaskRequest {
+                session_id: session.session.session_id.clone(),
+                child_task_id: child.child_task_id.clone(),
+            })
+            .await
+            .unwrap()
+            .task,
+        queried.task
+    );
     let other = runtime
         .create_session(CreateSessionRequest::default())
         .await
@@ -543,10 +895,102 @@ async fn isolated_child_result(interrupt_child: bool) {
             .tasks,
         listed.tasks
     );
+    runtime
+        .shutdown(ShutdownRuntimeRequest::default())
+        .await
+        .unwrap();
+    let restarted = runtime_with_store(
+        model.clone(),
+        store.clone(),
+        RuntimeConfig::new(NonZeroUsize::new(256).unwrap()),
+    )
+    .await;
+    let restored = restarted
+        .get_child_task(assistant_protocol::GetChildTaskRequest {
+            session_id: session.session.session_id.clone(),
+            child_task_id: child.child_task_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(restored.task, queried.task);
+    let cancelled = restarted
+        .cancel_child_task(assistant_protocol::CancelChildTaskRequest {
+            session_id: session.session.session_id.clone(),
+            child_task_id: child.child_task_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(cancelled.task, restored.task);
+    assert!(
+        !store
+            .load_runtime()
+            .await
+            .unwrap()
+            .child_tasks
+            .iter()
+            .any(|control| control.child_task_id == child.child_task_id)
+    );
+    assert!(
+        model.take_requests().is_empty(),
+        "history queries never resume the child"
+    );
+    if interrupt_child {
+        store
+            .delete_session(crate::SessionDeletion {
+                session_id: session.session.session_id.clone(),
+                operation_id: "delete-child-history".into(),
+                expected_impact: impact,
+            })
+            .await
+            .unwrap();
+    } else {
+        restarted
+            .restore_session(assistant_protocol::RestoreSessionRequest {
+                session_id: session.session.session_id.clone(),
+            })
+            .await
+            .unwrap();
+        let view = restarted
+            .get_session_view(GetSessionViewRequest {
+                session_id: session.session.session_id.clone(),
+            })
+            .await
+            .unwrap();
+        restarted
+            .clear_session(assistant_protocol::ClearSessionRequest {
+                session_id: session.session.session_id.clone(),
+                operation_id: assistant_protocol::IdempotencyKey::new("clear-child-history")
+                    .unwrap(),
+                expected_generation: view.snapshot.value.conversation_generation,
+            })
+            .await
+            .unwrap();
+    }
+    assert!(
+        store
+            .load_child_conversation(&session.session.session_id, &child.child_task_id)
+            .await
+            .is_err()
+    );
+    assert!(store.load_runtime().await.unwrap().child_history.is_empty());
 }
 
 #[tokio::test]
 async fn child_compaction_preserves_dynamic_load_skill_request_and_continues() {
+    child_compaction_projection_case("success").await;
+}
+
+#[tokio::test]
+async fn child_compaction_registry_failure_does_not_write_stale_child_or_parent_terminal() {
+    child_compaction_projection_case("registry").await;
+}
+
+#[tokio::test]
+async fn child_compaction_provider_failure_retains_http_status_in_child_history() {
+    child_compaction_projection_case("provider400").await;
+}
+
+async fn child_compaction_projection_case(case: &str) {
     let child_task = "Continue after a provider overflow with all prior details. ".repeat(80);
     let delegate_call = AssistantMessage {
         purpose: agent_types::AssistantMessagePurpose::ModelResponse,
@@ -593,12 +1037,19 @@ async fn child_compaction_preserves_dynamic_load_skill_request_and_continues() {
             ModelScript::FailEstablishment(ModelError::ContextOverflow {
                 message: "fixture overflow".to_owned(),
             }),
-            ModelScript::Events(message_events(&child_summary)),
+            if case == "provider400" {
+                ModelScript::FailEstablishment(ModelError::Provider {
+                    message: "private-child-provider-marker".into(),
+                    status: Some(400),
+                })
+            } else {
+                ModelScript::Events(message_events(&child_summary))
+            },
             ModelScript::Events(message_events(&child_final)),
             ModelScript::Events(message_events(&parent_final)),
         ],
     ));
-    let store = Arc::new(crate::storage::VolatileRuntimeStore::default());
+    let store = Arc::new(super::store::FaultInjectingStore::healthy());
     let mut runtime = runtime_with_store_and_child_workspaces(
         model.clone(),
         store.clone(),
@@ -615,8 +1066,22 @@ async fn child_compaction_preserves_dynamic_load_skill_request_and_continues() {
         .await
         .expect("session");
     set_auto_approval(&runtime, &session.session.session_id).await;
+    let stages = watch_child_commit_barrier(
+        &store,
+        runtime.session(&session.session.session_id).await.unwrap(),
+    );
+    if case == "registry" {
+        let registry = runtime.child_tasks.clone();
+        *store.context_write_hook.lock().unwrap() = Some(Box::new(move |target, committed| {
+            if committed.is_some()
+                && matches!(target, crate::ContextReplacementTarget::ChildTask { .. })
+            {
+                registry.poison_projection_for_test();
+            }
+        }));
+    }
     let started = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -629,8 +1094,70 @@ async fn child_compaction_preserves_dynamic_load_skill_request_and_continues() {
         })
         .await
         .expect("run accepted");
+    if case == "registry" {
+        let owner = runtime.session(&session.session.session_id).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if owner.lock_state().unwrap().is_faulted {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        // 等待原执行完全退出，避免仅检查故障标记而遗漏较晚的陈旧终态写入。
+        runtime.tasks.close();
+        assert!(runtime.tasks.wait_or_abort(Duration::from_secs(2)).await);
+        let recovered = store
+            .load_session_state(&session.session.session_id)
+            .await
+            .unwrap()
+            .state;
+        assert_eq!(
+            recovered.runs[0].status,
+            assistant_protocol::RunStatus::Running
+        );
+        assert_eq!(
+            recovered.child_tasks[0].status,
+            assistant_protocol::ChildTaskStatus::Running
+        );
+        assert_eq!(recovered.child_tasks[0].body_generation, 2);
+        let history = store
+            .load_child_conversation(
+                &session.session.session_id,
+                &recovered.child_tasks[0].child_task_id,
+            )
+            .await
+            .unwrap();
+        assert!(
+            history
+                .messages
+                .iter()
+                .any(|m| matches!(m, ConversationMessage::ContextSummary(_)))
+        );
+        assert_eq!(
+            model.take_requests().len(),
+            4,
+            "no child or parent continuation after projection failure"
+        );
+        return;
+    }
     let terminal =
         wait_for_terminal(&runtime, &session.session.session_id, &started.run.run_id).await;
+    let committed_stages = stages.lock().unwrap().clone();
+    let expected_stages: &[&str] = if case == "provider400" {
+        &["create", "start", "settle"]
+    } else {
+        &["create", "start", "settle", "replace"]
+    };
+    for stage in expected_stages {
+        assert!(
+            committed_stages.contains(stage),
+            "missing child {stage} commit"
+        );
+    }
+    *store.child_write_hook.lock().unwrap() = None;
     assert_eq!(
         terminal.status,
         assistant_protocol::RunStatus::Completed,
@@ -639,10 +1166,39 @@ async fn child_compaction_preserves_dynamic_load_skill_request_and_continues() {
     );
 
     let recovered = store.load_runtime().await.expect("child projection");
-    let child = recovered.child_tasks.first().expect("one child task");
+    assert_eq!(
+        store
+            .selection_control_counts(&session.session.session_id)
+            .unwrap(),
+        (0, 0)
+    );
+    assert_eq!(recovered.skill_activations.len(), 1);
+    let child = &recovered.child_history.first().expect("one child task").1;
+    if case == "provider400" {
+        assert_eq!(
+            child.status,
+            Some(assistant_protocol::ChildTaskStatus::Failed)
+        );
+        let error = child.error.as_ref().unwrap();
+        assert_eq!(
+            error.code,
+            assistant_protocol::RuntimeErrorCode::ContextCompactionFailed
+        );
+        assert!(error.message.contains("status=400"));
+        assert!(!error.message.contains("private-child-provider-marker"));
+        assert_eq!(child.body_generation, 1);
+        let requests = model.take_requests();
+        assert_eq!(
+            requests.len(),
+            5,
+            "400 is not retried and child does not continue"
+        );
+        assert!(requests[3].tools.is_empty());
+        return;
+    }
     assert_eq!(
         child.status,
-        assistant_protocol::ChildTaskStatus::Completed,
+        Some(assistant_protocol::ChildTaskStatus::Completed),
         "child error: {:?}",
         child.error
     );
@@ -670,7 +1226,8 @@ async fn child_compaction_preserves_dynamic_load_skill_request_and_continues() {
             .any(|definition| definition.name.as_str() == "load_skill")
     );
     assert_eq!(summary_request.system, overflow_request.system);
-    assert_eq!(summary_request.tools, overflow_request.tools);
+    assert!(summary_request.tools.is_empty());
+    assert_eq!(requests[4].tools, overflow_request.tools);
     assert_eq!(summary_request.reasoning, overflow_request.reasoning);
     assert_eq!(
         summary_request.provider_options,
@@ -728,7 +1285,7 @@ async fn child_model_failure_is_persisted_before_the_parent_receives_an_error_re
         .expect("session");
     set_auto_approval(&runtime, &session.session.session_id).await;
     let started = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -746,8 +1303,11 @@ async fn child_model_failure_is_persisted_before_the_parent_receives_an_error_re
     assert_eq!(terminal.status, assistant_protocol::RunStatus::Completed);
 
     let recovered = store.load_runtime().await.expect("child projection");
-    let child = recovered.child_tasks.first().expect("one child task");
-    assert_eq!(child.status, assistant_protocol::ChildTaskStatus::Failed);
+    let child = &recovered.child_history.first().expect("one child task").1;
+    assert_eq!(
+        child.status,
+        Some(assistant_protocol::ChildTaskStatus::Failed)
+    );
     assert_eq!(
         child.error.as_ref().map(|error| error.code),
         Some(assistant_protocol::RuntimeErrorCode::ModelExecutionFailed)
@@ -805,7 +1365,7 @@ async fn plan_and_build_parent_agents_expose_the_same_delegate_definition() {
         ),
     ] {
         let started = runtime
-            .submit_input(SubmitInputRequest {
+            .submit_started_input(SubmitInputRequest {
                 mode: assistant_protocol::SubmitInputMode::Normal,
                 variant,
                 session_id: session_id.clone(),
@@ -868,7 +1428,7 @@ async fn sibling_delegations_overlap_but_respect_the_frozen_concurrency_limit() 
         .expect("session");
     set_auto_approval(&runtime, &session.session.session_id).await;
     let started = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -886,12 +1446,19 @@ async fn sibling_delegations_overlap_but_respect_the_frozen_concurrency_limit() 
         wait_for_terminal(&runtime, &session.session.session_id, &started.run.run_id).await;
     assert_eq!(terminal.status, assistant_protocol::RunStatus::Completed);
     assert_eq!(model.peak_children(), 2);
-    let children = store.load_runtime().await.expect("children").child_tasks;
+    let children = store
+        .load_runtime()
+        .await
+        .expect("children")
+        .child_history
+        .into_iter()
+        .map(|(_, task)| task)
+        .collect::<Vec<_>>();
     assert_eq!(children.len(), 3);
     assert!(
         children
             .iter()
-            .all(|task| task.status == assistant_protocol::ChildTaskStatus::Completed)
+            .all(|task| task.status == Some(assistant_protocol::ChildTaskStatus::Completed))
     );
 }
 
@@ -912,7 +1479,7 @@ async fn task_limit_rejects_excess_calls_without_creating_extra_child_records() 
         .expect("session");
     set_auto_approval(&runtime, &session.session.session_id).await;
     let started = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -929,7 +1496,14 @@ async fn task_limit_rejects_excess_calls_without_creating_extra_child_records() 
     let terminal =
         wait_for_terminal(&runtime, &session.session.session_id, &started.run.run_id).await;
     assert_eq!(terminal.status, assistant_protocol::RunStatus::Completed);
-    let children = store.load_runtime().await.expect("children").child_tasks;
+    let children = store
+        .load_runtime()
+        .await
+        .expect("children")
+        .child_history
+        .into_iter()
+        .map(|(_, task)| task)
+        .collect::<Vec<_>>();
     assert_eq!(children.len(), 2);
     let conversation = runtime
         .conversation_snapshot(&session.session.session_id)
@@ -967,7 +1541,7 @@ async fn child_timeout_is_failed_and_parent_can_still_summarize() {
         .expect("session");
     set_auto_approval(&runtime, &session.session.session_id).await;
     let started = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -984,11 +1558,18 @@ async fn child_timeout_is_failed_and_parent_can_still_summarize() {
     let terminal =
         wait_for_terminal(&runtime, &session.session.session_id, &started.run.run_id).await;
     assert_eq!(terminal.status, assistant_protocol::RunStatus::Completed);
-    let children = store.load_runtime().await.expect("children").child_tasks;
+    let children = store
+        .load_runtime()
+        .await
+        .expect("children")
+        .child_history
+        .into_iter()
+        .map(|(_, task)| task)
+        .collect::<Vec<_>>();
     assert_eq!(children.len(), 1);
     assert_eq!(
         children[0].status,
-        assistant_protocol::ChildTaskStatus::Failed
+        Some(assistant_protocol::ChildTaskStatus::Failed)
     );
     assert_eq!(
         children[0].error.as_ref().map(|error| error.code),
@@ -1013,7 +1594,7 @@ async fn child_timeout_disabled_allows_task_to_finish() {
         .expect("session");
     set_auto_approval(&runtime, &session.session.session_id).await;
     let started = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -1030,11 +1611,18 @@ async fn child_timeout_disabled_allows_task_to_finish() {
     let terminal =
         wait_for_terminal(&runtime, &session.session.session_id, &started.run.run_id).await;
     assert_eq!(terminal.status, assistant_protocol::RunStatus::Completed);
-    let children = store.load_runtime().await.expect("children").child_tasks;
+    let children = store
+        .load_runtime()
+        .await
+        .expect("children")
+        .child_history
+        .into_iter()
+        .map(|(_, task)| task)
+        .collect::<Vec<_>>();
     assert_eq!(children.len(), 1);
     assert_eq!(
         children[0].status,
-        assistant_protocol::ChildTaskStatus::Completed
+        Some(assistant_protocol::ChildTaskStatus::Completed)
     );
     assert_eq!(children[0].error.as_ref().map(|error| error.code), None);
 }
@@ -1053,7 +1641,7 @@ async fn cancelling_one_child_does_not_cancel_its_sibling_or_parent() {
         .expect("session");
     set_auto_approval(&runtime, &session.session.session_id).await;
     let started = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -1083,19 +1671,26 @@ async fn cancelling_one_child_does_not_cancel_its_sibling_or_parent() {
     let terminal =
         wait_for_terminal(&runtime, &session.session.session_id, &started.run.run_id).await;
     assert_eq!(terminal.status, assistant_protocol::RunStatus::Completed);
-    let children = store.load_runtime().await.expect("children").child_tasks;
+    let children = store
+        .load_runtime()
+        .await
+        .expect("children")
+        .child_history
+        .into_iter()
+        .map(|(_, task)| task)
+        .collect::<Vec<_>>();
     assert_eq!(
         children
             .iter()
             .find(|task| task.title == "slow-task")
-            .map(|task| task.status),
+            .and_then(|task| task.status),
         Some(assistant_protocol::ChildTaskStatus::Cancelled)
     );
     assert_eq!(
         children
             .iter()
             .find(|task| task.title == "fast-task")
-            .map(|task| task.status),
+            .and_then(|task| task.status),
         Some(assistant_protocol::ChildTaskStatus::Completed)
     );
     let conversation = runtime
@@ -1135,7 +1730,7 @@ async fn cancelling_parent_cascades_to_children_and_skips_parent_summary() {
         .expect("session");
     set_auto_approval(&runtime, &session.session.session_id).await;
     let started = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -1160,11 +1755,18 @@ async fn cancelling_parent_cascades_to_children_and_skips_parent_summary() {
     let terminal =
         wait_for_terminal(&runtime, &session.session.session_id, &started.run.run_id).await;
     assert_eq!(terminal.status, assistant_protocol::RunStatus::Cancelled);
-    let children = store.load_runtime().await.expect("children").child_tasks;
+    let children = store
+        .load_runtime()
+        .await
+        .expect("children")
+        .child_history
+        .into_iter()
+        .map(|(_, task)| task)
+        .collect::<Vec<_>>();
     assert!(
         children
             .iter()
-            .all(|task| task.status == assistant_protocol::ChildTaskStatus::Cancelled)
+            .all(|task| task.status == Some(assistant_protocol::ChildTaskStatus::Cancelled))
     );
     assert_eq!(model.parent_requests(), 1);
 }
@@ -1212,7 +1814,7 @@ async fn child_tool_approval_carries_child_identity_and_resolves_independently()
         .await
         .expect("session");
     let started = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -1276,7 +1878,10 @@ async fn child_tool_approval_carries_child_identity_and_resolves_independently()
         .load_runtime()
         .await
         .expect("children")
-        .child_tasks;
+        .child_history
+        .into_iter()
+        .map(|(_, task)| task)
+        .collect::<Vec<_>>();
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].child_task_id, child_task_id);
 }
@@ -1326,7 +1931,7 @@ async fn child_tool_reads_the_parent_sessions_new_approval_mode() {
         .session
         .session_id;
     let run = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session_id.clone(),
@@ -1389,7 +1994,7 @@ async fn denying_delegate_approval_does_not_create_a_child_task() {
         .await
         .expect("session");
     let started = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -1426,7 +2031,7 @@ async fn denying_delegate_approval_does_not_create_a_child_task() {
             .load_runtime()
             .await
             .expect("runtime projection")
-            .child_tasks
+            .child_history
             .is_empty()
     );
 }
@@ -1462,7 +2067,7 @@ async fn child_waiting_for_approval_does_not_block_its_sibling() {
         .await
         .expect("session");
     let started = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -1532,10 +2137,17 @@ async fn child_waiting_for_approval_does_not_block_its_sibling() {
 
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            let children = store.load_runtime().await.expect("children").child_tasks;
+            let children = store
+                .load_runtime()
+                .await
+                .expect("children")
+                .child_history
+                .into_iter()
+                .map(|(_, task)| task)
+                .collect::<Vec<_>>();
             if children.iter().any(|task| {
                 task.title == "fast-task"
-                    && task.status == assistant_protocol::ChildTaskStatus::Completed
+                    && task.status == Some(assistant_protocol::ChildTaskStatus::Completed)
             }) {
                 return;
             }
@@ -1626,7 +2238,7 @@ async fn cancelling_child_removes_its_pending_approval_without_running_the_tool(
         .await
         .expect("session");
     let started = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -1679,10 +2291,17 @@ async fn cancelling_child_removes_its_pending_approval_without_running_the_tool(
             .is_empty()
     );
     assert!(probe.executed_inputs().is_empty());
-    let children = store.load_runtime().await.expect("children").child_tasks;
+    let children = store
+        .load_runtime()
+        .await
+        .expect("children")
+        .child_history
+        .into_iter()
+        .map(|(_, task)| task)
+        .collect::<Vec<_>>();
     assert_eq!(
         children[0].status,
-        assistant_protocol::ChildTaskStatus::Cancelled
+        Some(assistant_protocol::ChildTaskStatus::Cancelled)
     );
     let mut cancellation_has_child_identity = false;
     while let Ok(event) = events.try_recv() {
@@ -1721,7 +2340,15 @@ async fn sibling_model_routing_is_distinct_from_parent_and_each_other() {
         .session_id;
     set_auto_approval(&runtime, &session).await;
     submit_completed_turn(&runtime, &session, "two independent tasks").await;
-    let children = runtime.store.load_runtime().await.unwrap().child_tasks;
+    let children = runtime
+        .store
+        .load_runtime()
+        .await
+        .unwrap()
+        .child_history
+        .into_iter()
+        .map(|(_, task)| task)
+        .collect::<Vec<_>>();
     assert_eq!(children.len(), 2);
     let calls = factory.calls.lock().unwrap();
     let parent = super::super::model::conversation_routing_id(
@@ -1746,5 +2373,55 @@ async fn sibling_model_routing_is_distinct_from_parent_and_each_other() {
     for route in child_routes {
         assert_ne!(route, parent);
         assert!(calls.iter().any(|call| call.0 == route));
+    }
+}
+
+#[tokio::test]
+async fn mcp_management_tools_are_parent_only_and_not_inherited_by_child() {
+    let mut call = assistant_tool_call("delegate-management", "delegate_task");
+    let AssistantPart::ToolCall(part) = &mut call.parts[0] else {
+        unreachable!()
+    };
+    part.arguments = json!({"title":"child test", "task":"return text"});
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(true),
+        8192,
+        [
+            ModelScript::Events(message_events(&call)),
+            ModelScript::Events(message_events(&assistant_text("child-done", "done"))),
+            ModelScript::Events(message_events(&assistant_text("parent-done", "done"))),
+        ],
+    ));
+    let runtime = runtime(model.clone()).with_mcp_services(
+        Arc::new(crate::mcp::MissingMcpConfigSource),
+        Arc::new(crate::mcp::UnavailableMcpConnectionFactory),
+        Arc::new(crate::mcp::UnavailableMcpImageMaterializer),
+    );
+    runtime
+        .config_registry
+        .replace_document_for_test(&config_with_delegation(1, 1, 1000));
+    let session = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    set_auto_approval(&runtime, &session).await;
+    submit_completed_turn(&runtime, &session, "delegate once").await;
+    let requests = model.take_requests();
+    assert_eq!(requests.len(), 3);
+    for name in ["get_mcp_configuration", "configure_mcp", "refresh_mcp"] {
+        assert!(
+            requests[0]
+                .tools
+                .iter()
+                .any(|tool| tool.name.as_str() == name)
+        );
+        assert!(
+            !requests[1]
+                .tools
+                .iter()
+                .any(|tool| tool.name.as_str() == name)
+        );
     }
 }

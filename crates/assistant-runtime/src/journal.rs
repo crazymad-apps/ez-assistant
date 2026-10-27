@@ -8,6 +8,7 @@ use agent_types::{
 use assistant_protocol::RunId;
 use thiserror::Error;
 
+#[derive(Clone)]
 struct PendingExchange {
     run_id: RunId,
     receipt: ExchangeReceipt,
@@ -17,6 +18,11 @@ struct PendingExchange {
 /// 内存 Journal 的结构不变量错误。
 #[derive(Debug, Error)]
 pub(crate) enum JournalError {
+    #[error("execution context is invalid")]
+    Context {
+        #[source]
+        source: crate::StoreError,
+    },
     /// 上一个工具交换尚未完成。
     #[error("journal already has a pending tool exchange")]
     PendingExchangeExists,
@@ -49,8 +55,9 @@ pub(crate) enum JournalError {
 }
 
 /// 不持久化的单 Session Conversation Journal。
+#[derive(Clone)]
 pub(crate) struct InMemoryJournal {
-    completed: Vec<ConversationMessage>,
+    window: crate::ExecutionWindow,
     pending: Option<PendingExchange>,
     #[cfg(test)]
     next_exchange: u64,
@@ -59,7 +66,7 @@ pub(crate) struct InMemoryJournal {
 impl InMemoryJournal {
     pub(crate) fn new() -> Self {
         Self {
-            completed: Vec::new(),
+            window: crate::ExecutionWindow::default(),
             pending: None,
             #[cfg(test)]
             next_exchange: 1,
@@ -69,19 +76,45 @@ impl InMemoryJournal {
     pub(crate) fn from_snapshot(snapshot: ConversationSnapshot) -> Result<Self, JournalError> {
         validate(&snapshot.messages)?;
         Ok(Self {
-            completed: snapshot.messages,
+            window: crate::ExecutionWindow::from_snapshot(snapshot)
+                .map_err(|source| JournalError::Context { source })?,
             pending: None,
             #[cfg(test)]
             next_exchange: 1,
         })
     }
 
+    pub(crate) fn from_window(window: crate::ExecutionWindow) -> Self {
+        Self {
+            window,
+            pending: None,
+            #[cfg(test)]
+            next_exchange: 1,
+        }
+    }
+
+    pub(crate) fn instructions(&self) -> Result<Vec<String>, crate::StoreError> {
+        self.window.instructions()
+    }
+
+    pub(crate) fn display_metadata(
+        &self,
+    ) -> (
+        Vec<assistant_protocol::ConversationFileReference>,
+        Vec<assistant_protocol::SessionArtifact>,
+    ) {
+        (
+            self.window.file_references.clone(),
+            self.window.artifacts.snapshot(),
+        )
+    }
+
     pub(crate) fn message_count(&self) -> usize {
-        self.completed.len()
+        self.window.conversation.messages.len()
     }
 
     pub(crate) fn snapshot(&self) -> ConversationSnapshot {
-        ConversationSnapshot::new(self.completed.clone())
+        ConversationSnapshot::new(self.window.conversation.messages.clone())
     }
 
     pub(crate) fn replace_completed(
@@ -92,7 +125,28 @@ impl InMemoryJournal {
             return Err(JournalError::PendingExchangeExists);
         }
         validate(&snapshot.messages)?;
-        self.completed = snapshot.messages;
+        let mut candidate = self.window.clone();
+        // 结算只追加尚未提交的尾部；压缩替换则保留已经归并的净记忆与能力状态。
+        if snapshot
+            .messages
+            .starts_with(&candidate.conversation.messages)
+        {
+            for message in snapshot
+                .messages
+                .iter()
+                .skip(candidate.conversation.messages.len())
+            {
+                candidate
+                    .append_uncommitted(message.clone())
+                    .map_err(|source| JournalError::Context { source })?;
+            }
+        } else {
+            candidate.conversation = snapshot;
+        }
+        candidate
+            .finish()
+            .map_err(|source| JournalError::Context { source })?;
+        self.window = candidate;
         Ok(())
     }
 
@@ -107,10 +161,17 @@ impl InMemoryJournal {
         if self.pending.is_some() {
             return Err(JournalError::PendingExchangeExists);
         }
-        let mut candidate = self.completed.clone();
+        let mut candidate = self.window.conversation.messages.clone();
         candidate.push(message);
         validate(&candidate)?;
-        self.completed = candidate;
+        let message = candidate
+            .pop()
+            .expect("candidate contains appended message");
+        let mut window = self.window.clone();
+        window
+            .append_uncommitted(message)
+            .map_err(|source| JournalError::Context { source })?;
+        self.window = window;
         Ok(())
     }
 
@@ -177,7 +238,7 @@ impl InMemoryJournal {
         let mut batch = vec![ConversationMessage::Assistant(pending.assistant.clone())];
         batch.extend(results.iter().cloned().map(ConversationMessage::Tool));
         batch.extend(trailing.iter().cloned());
-        let mut candidate = self.completed.clone();
+        let mut candidate = self.window.conversation.messages.clone();
         candidate.extend(batch.iter().cloned());
         validate(&candidate)?;
         Ok(batch)
@@ -202,7 +263,16 @@ impl InMemoryJournal {
         trailing: Vec<ConversationMessage>,
     ) -> Result<(), JournalError> {
         let batch = self.tool_exchange_batch_with_trailing(run_id, receipt, &results, &trailing)?;
-        self.completed.extend(batch);
+        let mut window = self.window.clone();
+        for message in batch {
+            window
+                .append_uncommitted(message)
+                .map_err(|source| JournalError::Context { source })?;
+        }
+        window
+            .finish()
+            .map_err(|source| JournalError::Context { source })?;
+        self.window = window;
         self.pending = None;
         Ok(())
     }

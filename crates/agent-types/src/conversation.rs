@@ -1,3 +1,7 @@
+mod validation;
+
+pub use validation::ToolExchangeValidator;
+
 use std::{borrow::Cow, collections::HashSet};
 
 use serde::{Deserialize, Deserializer, Serialize, de};
@@ -120,101 +124,11 @@ impl ConversationSnapshot {
     /// 每个 ToolCallId 在同一压缩边界内必须唯一；含 Tool Call 的 AssistantMessage 后必须立即按
     /// 声明顺序出现恰好一个对应 ToolMessage，才能开始下一条非 Tool 消息。
     pub fn validate_tool_exchange_pairs(&self) -> Result<(), ConversationValidationError> {
-        let mut seen_calls = HashSet::new();
-        let mut completed_calls = HashSet::new();
-        let mut pending_calls = Vec::new();
-        let mut next_result = 0;
-
+        let mut validation = ToolExchangeValidator::default();
         for message in &self.messages {
-            match message {
-                ConversationMessage::Tool(message) => {
-                    let actual = &message.result.call_id;
-                    if pending_calls.is_empty() {
-                        return if completed_calls.contains(actual) {
-                            Err(ConversationValidationError::DuplicateToolResult {
-                                call_id: actual.clone(),
-                            })
-                        } else {
-                            Err(ConversationValidationError::ToolResultWithoutCall {
-                                call_id: actual.clone(),
-                            })
-                        };
-                    }
-
-                    let expected = &pending_calls[next_result];
-                    if actual != expected {
-                        return if completed_calls.contains(actual) {
-                            Err(ConversationValidationError::DuplicateToolResult {
-                                call_id: actual.clone(),
-                            })
-                        } else if pending_calls[next_result + 1..].contains(actual) {
-                            Err(ConversationValidationError::ToolResultOutOfOrder {
-                                expected: expected.clone(),
-                                actual: actual.clone(),
-                            })
-                        } else {
-                            Err(ConversationValidationError::ToolResultWithoutCall {
-                                call_id: actual.clone(),
-                            })
-                        };
-                    }
-
-                    completed_calls.insert(actual.clone());
-                    next_result += 1;
-                    if next_result == pending_calls.len() {
-                        pending_calls.clear();
-                        next_result = 0;
-                    }
-                }
-                non_tool => {
-                    if let Some(missing) = pending_calls.get(next_result) {
-                        return Err(ConversationValidationError::MissingToolResult {
-                            call_id: missing.clone(),
-                        });
-                    }
-
-                    // 摘要之前的消息不再进入后续模型请求，不能占用新上下文的调用 ID。
-                    // 必须先确认上一批结果完整，不能用摘要掩盖未配对的调用。
-                    if matches!(message, ConversationMessage::ContextSummary(_)) {
-                        seen_calls.clear();
-                        completed_calls.clear();
-                    }
-
-                    if let ConversationMessage::Assistant(message) = non_tool {
-                        for part in &message.parts {
-                            if let AssistantPart::ProviderState(state) = part
-                                && state.context_effect()
-                                    == Some(ProviderContextEffect::ReplacePriorContext)
-                            {
-                                // 原生边界只能重置完整交换；不能抹掉同一响应前面的待执行调用。
-                                if !pending_calls.is_empty() {
-                                    return Err(
-                                        ConversationValidationError::InvalidProviderContextBoundary,
-                                    );
-                                }
-                                seen_calls.clear();
-                                completed_calls.clear();
-                            }
-                            if let AssistantPart::ToolCall(call) = part {
-                                if !seen_calls.insert(call.id.clone()) {
-                                    return Err(ConversationValidationError::DuplicateToolCallId {
-                                        call_id: call.id.clone(),
-                                    });
-                                }
-                                pending_calls.push(call.id.clone());
-                            }
-                        }
-                    }
-                }
-            }
+            validation.push(message)?;
         }
-
-        if let Some(missing) = pending_calls.get(next_result) {
-            return Err(ConversationValidationError::MissingToolResult {
-                call_id: missing.clone(),
-            });
-        }
-        Ok(())
+        validation.finish()
     }
 
     /// 在接纳响应和执行工具前，核对本次请求快照与响应中的调用 ID。
@@ -1363,6 +1277,45 @@ mod tests {
             orphan.validate_tool_exchange_pairs(),
             Err(ConversationValidationError::ToolResultWithoutCall {
                 call_id: id("call_1"),
+            })
+        );
+    }
+
+    #[test]
+    fn incremental_tool_validation_keeps_pending_order_and_scope_between_batches() {
+        let mut validation = ToolExchangeValidator::default();
+        validation
+            .push(&tool_call_message(
+                "assistant-stream",
+                &["call_1", "call_2"],
+            ))
+            .unwrap();
+        assert!(!validation.is_complete());
+        assert_eq!(
+            validation.finish(),
+            Err(ConversationValidationError::MissingToolResult {
+                call_id: id("call_1")
+            })
+        );
+        validation
+            .push(&tool_result_message("first-result", "call_1"))
+            .unwrap();
+        assert!(!validation.is_complete());
+        assert_eq!(
+            validation.finish(),
+            Err(ConversationValidationError::MissingToolResult {
+                call_id: id("call_2")
+            })
+        );
+        validation
+            .push(&tool_result_message("second-result", "call_2"))
+            .unwrap();
+        assert!(validation.is_complete());
+        assert_eq!(validation.finish(), Ok(()));
+        assert_eq!(
+            validation.push(&tool_call_message("later-batch", &["call_1"])),
+            Err(ConversationValidationError::DuplicateToolCallId {
+                call_id: id("call_1")
             })
         );
     }

@@ -126,7 +126,21 @@ impl AssistantRuntime {
         crate::normalize_context_usage_adjustments(&mut conversation);
         // Fork 不复制 Run；把切换结果保存为不可变展示上下文，仍由独立 Session 绑定控制执行。
         let projection = self.projection_context(&source, &[]).await?;
-        let results = super::product::project_conversation(&conversation, &projection)?;
+        let history = self
+            .store
+            .load_conversation_history(assistant_protocol::ConversationOwner::MainSession {
+                session_id: request.session_id.clone(),
+            })
+            .await
+            .map_err(|source| RuntimeError::from_store("load fork history", source))?;
+        if history.generation != source_generation {
+            return Err(RuntimeError::SnapshotStale);
+        }
+        let results = super::product::project_conversation_with_history(
+            &conversation,
+            Some(&history.facts),
+            &projection,
+        )?;
         for item in results {
             if let assistant_protocol::ConversationItem::ShellSwitchResult {
                 message_id,
@@ -214,6 +228,35 @@ impl AssistantRuntime {
             }
         }
         let mut attachments = Vec::with_capacity(used_attachment_ids.len());
+        // child 正文只为确定受管附件的新身份读取；Store 仍在原 Fork 提交内
+        // 独立核对正文和资源。缺失正文不阻断可靠父前缀，其不可用状态由 Store 冻结。
+        for child in history.facts.fork_child_tasks(&conversation) {
+            if child.body_unavailable {
+                continue;
+            }
+            let Ok(body) = self
+                .store
+                .load_child_conversation(&request.session_id, &child.child_task_id)
+                .await
+            else {
+                continue;
+            };
+            for message in &body.messages {
+                let ConversationMessage::User(user) = message else {
+                    continue;
+                };
+                for part in &user.parts {
+                    let UserPart::FileReferences(references) = part else {
+                        continue;
+                    };
+                    for file in &references.files {
+                        if let Some(id) = attachments_by_path.get(&file.readable_path) {
+                            used_attachment_ids.insert(id.clone());
+                        }
+                    }
+                }
+            }
+        }
         let mut allocated_attachment_ids = BTreeSet::new();
         for source_attachment_id in used_attachment_ids {
             let attachment_id = self.allocate_attachment_id()?;
@@ -290,11 +333,19 @@ impl AssistantRuntime {
             })
             .collect::<RuntimeResult<Vec<_>>>()?;
         let mut session_commands = Vec::new();
+        let mut command_message_ids = BTreeSet::new();
+        let mut command_input_ids = BTreeSet::new();
         for source_command in source_commands.into_iter().filter(|command| {
             command.state == crate::StoredSessionCommandState::Committed
                 && fork_message_ids.contains(command.user_message_id.as_str())
         }) {
-            let message_id = crate::run::allocate_message_id()?;
+            let message_id = agent_types::MessageId::new(crate::id::generate_unique("m", |id| {
+                fork_message_ids.contains(id) || command_message_ids.contains(id)
+            })?)
+            .map_err(|_| RuntimeError::InternalStateUnavailable {
+                component: "fork command message id",
+            })?;
+            command_message_ids.insert(message_id.as_str().to_owned());
             for message in &mut conversation.messages {
                 if let ConversationMessage::User(user) = message
                     && user.id == source_command.user_message_id
@@ -303,14 +354,23 @@ impl AssistantRuntime {
                 }
             }
             let input_id =
-                assistant_protocol::InputId::new(crate::id::generate("i").map_err(|_| {
-                    RuntimeError::InternalStateUnavailable {
-                        component: "fork session command id random source",
-                    }
+                assistant_protocol::InputId::new(crate::id::generate_unique("i", |id| {
+                    command_input_ids.contains(id)
+                        || history
+                            .facts
+                            .inputs
+                            .iter()
+                            .any(|input| input.input_id.as_str() == id)
+                        || history
+                            .facts
+                            .commands
+                            .iter()
+                            .any(|command| command.input_id.as_str() == id)
                 })?)
                 .map_err(|_| RuntimeError::InternalStateUnavailable {
                     component: "fork session command id",
                 })?;
+            command_input_ids.insert(input_id.as_str().to_owned());
             session_commands.push(crate::ForkedSessionCommand {
                 source_input_id: source_command.input_id.clone(),
                 command: crate::StoredSessionCommand {
@@ -389,6 +449,7 @@ impl AssistantRuntime {
             })?;
         let controller = std::sync::Arc::new(crate::session::SessionController::recovered(
             stored.session,
+            Vec::new(),
             Vec::new(),
             Vec::new(),
             stored.session_commands,
@@ -716,7 +777,7 @@ impl AssistantRuntime {
             .ensure_conversation_loaded(self.store.as_ref())
             .await?;
         Ok(ListRunsResult {
-            runs: session.run_snapshots()?,
+            runs: self.product_run_snapshots(&session).await?,
         })
     }
 
@@ -1187,9 +1248,14 @@ impl AssistantRuntime {
         session.ensure_active()?;
         session.ensure_healthy()?;
         if let Some(key) = request.idempotency_key.as_ref()
-            && let Some((input_id, run)) = session.find_idempotent(key)?
+            && let Some((input_id, run)) = self.find_idempotent_run(&session, key).await?
         {
-            return Ok(ReenterFromUserMessageResult { input_id, run });
+            return Ok(ReenterFromUserMessageResult {
+                input_id,
+                run: run.ok_or(RuntimeError::InvalidRequest {
+                    reason: "idempotency key belongs to unclaimed input",
+                })?,
+            });
         }
         session.ensure_idle()?;
         let current = self
@@ -1214,6 +1280,28 @@ impl AssistantRuntime {
             .ok_or(RuntimeError::InvalidRequest {
                 reason: "target message is not a user message in this session",
             })?;
+        // 继承前缀只承诺阅读；不能用同名 User 恢复来源 Input 或裁写其执行。
+        // 仍在本 Session mutation 内读取同代文件，未知旧归属保持既有后续校验。
+        let history = self
+            .store
+            .load_conversation_history(assistant_protocol::ConversationOwner::MainSession {
+                session_id: request.session_id.clone(),
+            })
+            .await
+            .map_err(|source| RuntimeError::from_store("load re-entry history", source))?;
+        if history.generation != session.lock_state()?.body_generation {
+            return Err(RuntimeError::SnapshotStale);
+        }
+        if history
+            .facts
+            .message_origins
+            .iter()
+            .any(|origin| origin.message_id == target_message_id && origin.inherited)
+        {
+            return Err(RuntimeError::InvalidRequest {
+                reason: "inherited messages cannot resume or rewrite the original execution",
+            });
+        }
         let current_goal = session.lock_state()?.goal.clone();
         if let Some(goal) = current_goal.as_ref() {
             let objective_index = current.messages.iter().position(|message| {
@@ -1227,7 +1315,11 @@ impl AssistantRuntime {
             }
         }
         let files = self.resolve_file_references(&request.session_id, &request.attachment_ids)?;
-        let new_message = create_user_message(request.message, files, request.variant)?;
+        let mut new_message = create_user_message(request.message, files, request.variant)?;
+        {
+            let state = session.lock_state()?;
+            crate::run::ensure_message_id_available(&mut new_message.id, &state, &history.facts)?;
+        }
         let mut messages = current.messages[..target_index].to_vec();
         messages.push(ConversationMessage::User(new_message.clone()));
         let mut replacement = ConversationSnapshot::new(messages);
@@ -1273,8 +1365,8 @@ impl AssistantRuntime {
         let (input_id, run_id, approval_mode) = {
             let state = session.lock_state()?;
             (
-                self.allocate_input_id(&state)?,
-                allocate_run_id(&state)?,
+                crate::run::allocate_input_id(&state, &history.facts)?,
+                allocate_run_id(&state, &history.facts)?,
                 state.approval_mode,
             )
         };
@@ -1288,6 +1380,7 @@ impl AssistantRuntime {
                 attachments: self.attachments.clone(),
                 shell: None,
                 skill_catalog: self.current_skill_catalog(&session).await?,
+                skill_package_source: self.skill_package_source.clone(),
                 model_factory: self.model_factory.clone(),
                 context_window: self.context_window.clone(),
                 run_tool_factory: self.run_tool_factory.as_ref(),
@@ -1298,9 +1391,11 @@ impl AssistantRuntime {
                 controller_tools: self.controller_tool_coordinator(),
                 output_dispatcher: self.output_dispatcher.clone(),
                 mcp_registry: self.mcp_service.registry.clone(),
+                mcp_management: self.mcp_management(),
                 mcp_image_materializer: self.mcp_service.image_materializer.clone(),
             },
             RunAuthorizationInput {
+                input_id: input_id.clone(),
                 permission_coordinator: self.permission_coordinator.clone(),
                 approval_registry: self.approval_registry.clone(),
                 variant: request.variant,
@@ -1337,6 +1432,8 @@ impl AssistantRuntime {
         let rewritten = self
             .store
             .rewrite_from_user(ConversationRewrite {
+                run_id: run_id.clone(),
+                approval_mode,
                 session_id: request.session_id.clone(),
                 target_user_message_id: target_message_id,
                 conversation: replacement.clone(),
@@ -1344,7 +1441,7 @@ impl AssistantRuntime {
                     feedback_answer: None,
                     agent_shell_target: None,
                     input_id: input_id.clone(),
-                    run_id: run_id.clone(),
+
                     session_id: request.session_id,
                     idempotency_key: request.idempotency_key,
                     agent_variant: request.variant,
@@ -1354,7 +1451,7 @@ impl AssistantRuntime {
                     channel_source: Some(crate::InputChannelSource::desktop_text()),
                     skill_activation: None,
                     mcp_selection: None,
-                    approval_mode,
+
                     message: new_message.clone(),
                     new_goal: None,
                     resumed_goal: None,
@@ -1413,8 +1510,8 @@ impl AssistantRuntime {
                 rewritten.input.input_id.clone(),
                 InputRecord {
                     stored: rewritten.input.clone(),
-                    first_run_id: rewritten.run.run_id.clone(),
-                    latest_run_id: rewritten.run.run_id,
+                    first_run_id: Some(rewritten.run.run_id.clone()),
+                    latest_run_id: Some(rewritten.run.run_id),
                 },
             );
             debug_assert_eq!(

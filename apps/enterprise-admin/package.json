@@ -28,6 +28,7 @@
   },
   "dependencies": {
     "@ant-design/icons": "6.3.4",
+    "@streamdown/code": "1.1.1",
     "antd": "6.6.4",
     "axios": "1.20.0",
     "dayjs": "1.11.23",
@@ -38,6 +39,7 @@
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "react-router": "8.4.0",
+    "streamdown": "2.5.0",
     "three": "0.134.0",
     "vanta": "0.5.24"
   },

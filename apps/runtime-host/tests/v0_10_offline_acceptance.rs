@@ -53,14 +53,9 @@ fn two_real_host_processes_recover_and_complete_the_v0_10_session_lifecycle() {
     );
     let blocked_run = string(&blocked["run"]["run_id"]);
     first_client.wait_for_status("restart blocker", &session_id, &blocked_run, &["running"]);
-    let queued = submit(
-        &mut first_client,
-        &session_id,
-        "QUEUED_AFTER_RESTART",
-        "queued-submit",
-    );
-    let queued_run = string(&queued["run"]["run_id"]);
-    assert_eq!(queued["run"]["status"], "accepted");
+    let queued=first_client.runtime("submit_input",json!({"session_id":session_id,"message":"QUEUED_AFTER_RESTART","variant":"build","idempotency_key":"queued-submit"}));
+    assert!(queued["run"].is_null());
+    let queued_input = string(&queued["input_id"]);
 
     // 断开并重连客户端不会取消 Runtime-owned Run；查询只依赖权威快照。
     drop(first_client);
@@ -98,13 +93,20 @@ fn two_real_host_processes_recover_and_complete_the_v0_10_session_lifecycle() {
     let runs = client.runtime("list_runs", json!({ "session_id": session_id }));
     assert_run_status(&runs, &first_run, "completed");
     assert_run_status(&runs, &blocked_run, "interrupted");
-    assert_run_status(&runs, &queued_run, "accepted");
+    assert!(
+        !runs["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|run| run["input_id"] == queued_input)
+    );
     let recovered_conversation = client.conversation(&session_id);
     assert!(serialized(&recovered_conversation).contains("FIRST_CASE"));
     assert!(serialized(&recovered_conversation).contains("BLOCK_FOR_RESTART"));
     assert!(!serialized(&recovered_conversation).contains("QUEUED_AFTER_RESTART"));
 
     client.runtime("resume_session", json!({ "session_id": session_id }));
+    let queued_run = string(&client.wait_for_input_run(&session_id, &queued_input)["run_id"]);
     assert_eq!(
         client.wait_for_status("resumed queue", &session_id, &queued_run, &["completed"])["status"],
         "completed"
@@ -271,15 +273,12 @@ fn two_real_host_processes_recover_and_complete_the_v0_10_session_lifecycle() {
 }
 
 fn submit(client: &mut Client, session_id: &str, message: &str, key: &str) -> Value {
-    client.runtime(
-        "submit_input",
-        json!({
-            "session_id": session_id,
-            "message": message,
-            "variant": "build",
-            "idempotency_key": key
-        }),
-    )
+    client.submit_started_input(json!({
+        "session_id": session_id,
+        "message": message,
+        "variant": "build",
+        "idempotency_key": key
+    }))
 }
 
 fn wait_for_pending_approval(client: &mut Client, session_id: &str) -> Value {
@@ -337,7 +336,7 @@ fn verify_physical_state(runtime_home: &Path, session_id: &str) {
     assert_eq!(model_id, "offline-alternate");
     assert!(generation > 1);
     assert_eq!(message_count, 2);
-    for (table, expected) in [("inputs", 1_i64), ("runs", 1), ("run_message_refs", 2)] {
+    for (table, expected) in [("inputs", 1_i64), ("runs", 0)] {
         let count: i64 = connection
             .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
                 row.get(0)
@@ -345,6 +344,16 @@ fn verify_physical_state(runtime_home: &Path, session_id: &str) {
             .expect("table count");
         assert_eq!(count, expected, "unexpected {table} count");
     }
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE name='run_message_refs'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
     for table in ["pending_tool_exchanges", "body_appends"] {
         let count: i64 = connection
             .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
@@ -358,7 +367,28 @@ fn verify_physical_state(runtime_home: &Path, session_id: &str) {
         "users/_personal/data/sessions/{session_id}/conversation.{generation}.jsonl"
     ));
     let content = fs::read_to_string(body).expect("read authoritative conversation JSONL");
-    assert_eq!(content.lines().count(), 2);
+    assert!(content.ends_with('\n'));
+    let records: Vec<Value> = content
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records[0]["type"], "header");
+    assert_eq!(records[0]["format"], "ez_assistant_history");
+    assert_eq!(records[0]["version"], 1);
+    assert_eq!(
+        records[0]["owner"],
+        json!({"type":"main_session","session_id":session_id})
+    );
+    assert_eq!(records[0]["generation"], generation);
+    let mut stored_messages = 0;
+    for frame in &records[1..] {
+        assert_eq!(frame["type"], "commit");
+        stored_messages += frame["messages"]
+            .as_array()
+            .expect("history commit messages")
+            .len();
+    }
+    assert_eq!(stored_messages, 2);
     assert!(content.contains("REPLACEMENT_CASE"));
     assert!(content.contains("replacement answer"));
     assert!(!content.contains("FIRST_CASE"));

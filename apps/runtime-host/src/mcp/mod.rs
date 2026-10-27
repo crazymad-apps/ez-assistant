@@ -7,5 +7,5 @@ mod http_client;
 mod image;
 
 pub(crate) use config_source::LocalMcpConfigSource;
-pub(crate) use connection::HostMcpConnectionFactory;
+pub(crate) use connection::{BoundedLineReader, HostMcpConnectionFactory, MAX_MESSAGE_BYTES};
 pub(crate) use image::HostMcpImageMaterializer;

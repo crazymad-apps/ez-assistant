@@ -12,6 +12,17 @@ use reqwest::blocking::{
 use serde_json::{Value, json};
 use support::{FakeProvider, HostProcess, write_config};
 
+fn assert_stale_materialization(client: &HttpClient, host: &HostProcess, key: &str) {
+    let response = client.post(format!("{}/commands",host.base_url())).bearer_auth(host.access_token())
+        .json(&json!({"request_id":"stale-materialization-query","command":{"scope":"runtime","payload":{"type":"get_session_materialization","payload":{"idempotency_key":key}}}}))
+        .send().unwrap();
+    assert!(!response.status().is_success());
+    assert_eq!(
+        response.json::<Value>().unwrap()["error"]["code"],
+        "snapshot_stale"
+    );
+}
+
 #[test]
 fn materialization_key_reads_committed_result_without_replaying_input_or_upload() {
     let runtime_test_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.runtime-test");
@@ -76,7 +87,9 @@ fn materialization_key_reads_committed_result_without_replaying_input_or_upload(
     let session_id = result["session"]["session_id"]
         .as_str()
         .expect("session id");
-    let run_id = result["run"]["run_id"].as_str().expect("run id");
+    assert!(result["run"].is_null());
+    let claimed = runtime.wait_for_input_run(session_id, result["input_id"].as_str().unwrap());
+    let run_id = claimed["run_id"].as_str().unwrap();
     runtime.wait_for_status(
         "initial materialization",
         session_id,
@@ -165,7 +178,48 @@ fn materialization_key_reads_committed_result_without_replaying_input_or_upload(
             .len(),
         1
     );
+    let conversation = runtime.conversation(session_id);
+    runtime.runtime("clear_session", json!({"session_id":session_id,"operation_id":"materialization-clear","expected_generation":conversation["generation"]}));
+    let later = runtime.submit_started_input(json!({"session_id":session_id,"message":"FIRST_CASE later input","mode":"normal","variant":"build","attachment_ids":[],"quotes":[]}));
+    let later_run = later["run"]["run_id"].as_str().unwrap();
+    runtime.wait_for_status(
+        "later input after clear",
+        session_id,
+        later_run,
+        &["completed"],
+    );
+    assert_stale_materialization(&client, &second_host, key);
+    let stale_retry = client
+        .post(format!(
+            "{}/session-materializations",
+            second_host.base_url()
+        ))
+        .bearer_auth(second_host.access_token())
+        .multipart(Form::new().text("manifest", manifest.to_string()).part(
+            "fixture-file",
+            Part::bytes(b"content".to_vec()).file_name("fixture.txt"),
+        ))
+        .send()
+        .unwrap();
+    assert!(!stale_retry.status().is_success());
+    assert_eq!(
+        stale_retry.json::<Value>().unwrap()["error"]["code"],
+        "snapshot_stale"
+    );
+    let runs = runtime.runtime("list_runs", json!({"session_id":session_id}));
+    assert_eq!(runs["runs"].as_array().unwrap().len(), 1);
+    assert_eq!(runs["runs"][0]["run_id"], later_run);
     runtime.runtime("shutdown_runtime", json!({}));
     drop(runtime);
     assert!(second_host.wait().status.success());
+    let third_host = HostProcess::start(home.path());
+    let mut runtime = third_host.connect();
+    assert_stale_materialization(&client, &third_host, key);
+    assert_eq!(
+        runtime.runtime("list_runs", json!({"session_id":session_id})),
+        runs
+    );
+    runtime.runtime("shutdown_runtime", json!({}));
+    drop(runtime);
+    assert!(third_host.wait().status.success());
 }

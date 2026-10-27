@@ -10,8 +10,8 @@ import { SettingsMessages } from "../SettingsMessages";
 import styles from "./index.module.scss";
 
 const close_behavior_options: readonly SelectionOption<DesktopCloseBehavior>[] = [
-  { value: "hide_to_tray", label: "隐藏到托盘", description: "关闭主窗口后保留桌面客户端" },
-  { value: "quit_desktop", label: "退出客户端", description: "关闭主窗口时进入退出确认" },
+  { value: "quit_desktop", label: "退出客户端", description: "关闭时询问，默认同时停止本机 Runtime" },
+  { value: "hide_to_tray", label: "隐藏窗口", description: "保留客户端和 Runtime，可从托盘或系统入口重新打开" },
 ];
 
 export const LocalRuntimeSettingsPage = observer(function LocalRuntimeSettingsPage(props: Readonly<{ on_back: () => void }>) {

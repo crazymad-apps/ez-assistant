@@ -85,6 +85,7 @@ pub(super) async fn handle_command(
             ),
         );
     }
+    assistant_runtime::request_diagnostics::correlate_request_id(&request.request_id);
 
     if let Err(error) = permit.check() {
         return command_error(Some(request.request_id), error.protocol_info());
@@ -156,6 +157,9 @@ pub(super) async fn handle_command(
         return command_error(Some(request.request_id), error.protocol_info());
     }
     let dispatched = dispatch(&state, &services, request.command, permit).await;
+    let _response = assistant_runtime::request_diagnostics::request_phase(
+        assistant_runtime::request_diagnostics::RequestPhase::Response,
+    );
     match dispatched {
         Ok((result, shutdown_requested)) => {
             let response = (
@@ -637,8 +641,12 @@ async fn dispatch_runtime(
             ),
             false,
         ),
+        RuntimeCommand::RefreshMcpServer(request) => (
+            RuntimeCommandResult::RefreshMcpServer(runtime.refresh_mcp_server(request).await?),
+            false,
+        ),
         RuntimeCommand::TestMcpServer(request) => (
-            RuntimeCommandResult::TestMcpServer(runtime.test_mcp_server(request).await?),
+            RuntimeCommandResult::TestMcpServer(runtime.test_mcp_server(*request).await?),
             false,
         ),
         RuntimeCommand::CancelMcpServerTest(request) => (

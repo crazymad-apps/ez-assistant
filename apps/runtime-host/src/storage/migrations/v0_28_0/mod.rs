@@ -9,6 +9,7 @@ mod tests;
 
 pub(super) fn entry() -> Migration {
     Migration {
+        key: "release",
         version: "0.28.0",
         min_compatible_host_version: Some("0.28.0"),
         rebuilds_referenced_tables: true,
@@ -127,6 +128,10 @@ fn apply(connection: &Connection) -> Result<()> {
 
 pub(super) fn validate(connection: &Connection) -> Result<()> {
     v0_27_0::validate(connection)?;
+    validate_additions(connection)
+}
+
+pub(super) fn validate_additions(connection: &Connection) -> Result<()> {
     let columns: Vec<(String, i64)> = connection
         .prepare("SELECT name, \"notnull\" FROM pragma_table_info('workspaces') ORDER BY cid")?
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?

@@ -48,9 +48,7 @@ fn configured_model_auto_continues_a_goal_across_agent_executions() {
         json!({ "session_id": session_id, "approval_mode": "auto" }),
     );
 
-    let submitted = client.runtime(
-        "submit_input",
-        json!({
+    let submitted = client.submit_started_input(json!({
             "session_id": session_id,
             "message": "Run a deterministic Goal lifecycle smoke test. During the first AgentExecution, call update_plan exactly once with objective 'Validate real Goal continuation' and one in_progress item named 'Complete the next AgentExecution'. After the tool result, finish with a short ordinary answer and do not call update_goal. When the Runtime automatically continues the same Run with the next AgentExecution, call update_goal as the only tool call with status complete and a short summary. Do not call any other tool.",
             "variant": "build",

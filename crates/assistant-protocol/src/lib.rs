@@ -120,7 +120,7 @@ pub use event::{
 };
 pub use host::{
     RuntimeHostCapabilities, RuntimeHostFeature, RuntimeHostHealth, RuntimeHostHealthStatus,
-    RuntimeHostStartupError, RuntimeHostStartupStage,
+    RuntimeHostStartupError, RuntimeHostStartupProgress, RuntimeHostStartupStage,
 };
 pub use id::{
     ApprovalId, AttachmentId, ChildTaskId, DeleteConfirmationToken, DeviceId, GoalId,
@@ -135,14 +135,15 @@ pub use mcp::{
     GetMcpConfigurationRequest, GetMcpConfigurationResult, ListMcpServerOptionsRequest,
     ListMcpServerOptionsResult, McpConfigurationMutation, McpConfigurationSnapshot,
     McpConnectionTestOutcome, McpConnectionTestStage, McpDiagnosticCode, McpDiagnosticSnapshot,
-    McpFieldChange, McpImportPreviewEntry, McpRefreshControlResultSnapshot, McpRefreshOutcome,
-    McpSecretChange, McpSelectionTagSnapshot, McpServerDraft, McpServerOptionSnapshot,
-    McpServerOptionsContext, McpServerRefreshOutcome, McpServerRefreshResultSnapshot,
-    McpServerRuntimeState, McpServerSnapshot, McpServerTransportDraft, McpToolIdentity,
+    McpFieldChange, McpImportPreviewEntry, McpManagedConfigurationSnapshot,
+    McpManagedServerTestDraft, McpRefreshControlResultSnapshot, McpRefreshOutcome, McpSecretChange,
+    McpSelectionTagSnapshot, McpServerDraft, McpServerOptionSnapshot, McpServerOptionsContext,
+    McpServerRefreshOutcome, McpServerRefreshResultSnapshot, McpServerRuntimeState,
+    McpServerSnapshot, McpServerSource, McpServerTarget, McpServerTransportDraft, McpToolIdentity,
     McpTransportKind, MutateMcpConfigurationRequest, MutateMcpConfigurationResult,
     PermissionMcpMatcher, PermissionMcpServerMatch, PermissionMcpToolMatch,
     PreviewMcpImportRequest, PreviewMcpImportResult, QueuedSessionCommandSnapshot,
-    QueuedSessionItemSnapshot, SessionCommand, SessionCommandQueueState,
+    QueuedSessionItemSnapshot, RefreshMcpServerRequest, SessionCommand, SessionCommandQueueState,
     SubmitSessionCommandRequest, SubmitSessionCommandResult, TestMcpServerRequest,
     TestMcpServerResult,
 };

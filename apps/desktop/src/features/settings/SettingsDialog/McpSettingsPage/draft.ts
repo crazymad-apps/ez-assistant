@@ -41,3 +41,18 @@ export function validateMcpDraft(draft: McpServerDraft): string | null {
   }
   return null;
 }
+
+export function sourceLabel(server: Pick<McpServerSnapshot, "source">): string {
+  if (server.source.type === "plugin") return `插件 · ${server.source.name}`;
+  if (server.source.type === "builtin") return "内置";
+  return "用户添加";
+}
+
+export function serverIdentity(server: McpServerSnapshot): string {
+  return JSON.stringify([server.source, server.server_key]);
+}
+
+/** 使用 Runtime 返回的选用来源，不在前端重复实现加载优先级。 */
+export function priorityLabel(server: McpServerSnapshot): string | null {
+  return server.shadowed_by ? `同名服务优先使用：${sourceLabel({ source: server.shadowed_by })}` : null;
+}

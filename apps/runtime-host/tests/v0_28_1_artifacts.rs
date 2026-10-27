@@ -60,7 +60,7 @@ fn view(client: &mut Client, session: &str) -> Value {
     client.runtime("get_session_view", json!({"session_id":session}))["snapshot"]["value"].clone()
 }
 fn submit(client: &mut Client, session: &str, input: Value) {
-    let run = client.runtime("submit_input", json!({"session_id":session,"message":format!("ARTIFACT {input}"),"variant":"build","mode":"normal","attachment_ids":[],"quotes":[]}))["run"].clone();
+    let run = client.submit_started_input(json!({"session_id":session,"message":format!("ARTIFACT {input}"),"variant":"build","mode":"normal","attachment_ids":[],"quotes":[]}))["run"].clone();
     client.wait_for_status(
         "artifact declaration",
         session,

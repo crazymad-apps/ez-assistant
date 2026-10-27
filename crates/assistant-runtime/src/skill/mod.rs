@@ -3,6 +3,7 @@
 mod activation;
 mod catalog;
 mod discovery;
+mod reference;
 mod types;
 
 pub(crate) use activation::{
@@ -22,6 +23,11 @@ pub use discovery::{
     SkillScanRequest, SkillScanResult, compile_skill_discovery, explicit_skill_states,
     sort_diagnostics,
 };
+pub use discovery::{SkillReferenceFuture, SkillReferenceRequest};
+pub use reference::{
+    BUILTIN_GUIDE_REFERENCES, BUILTIN_GUIDE_SKILL_NAME, MAX_SKILL_REFERENCE_BYTES,
+};
+pub(crate) use reference::{ReadSkillReferenceAuthorizationFacts, ReadSkillReferenceTool};
 pub use types::{SkillMetadata, SkillName, SkillNameError, SkillSource};
 
 #[cfg(test)]

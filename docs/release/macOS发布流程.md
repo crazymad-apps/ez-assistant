@@ -22,9 +22,13 @@
 总控脚本只支持 Apple Silicon Mac 上的 arm64 Developer ID 发布。Mac App Store、Universal
 Binary、CI/CD 和其他平台不在当前流程内。v0.29.0 起同时生成 F01 在线更新制品及签名清单。
 
+v0.32.1 在途 M4 将 DMG 的内容改为系统 PKG 安装器，安装目标为 `/Applications`；
+原 `.app.tar.gz` 应用内更新包继续保留。以下 PKG 要求适用于该新入口，不能据此宣称 M4 或正式发布已经验收。
+
 ## 2. 首次准备
 
-1. 在登录 Keychain 安装带私钥的 `Developer ID Application` 证书。
+1. 在登录 Keychain 安装带私钥的 `Developer ID Application` 和 `Developer ID Installer` 证书。
+   后者用于 PKG，不能用 Application 证书替代；二者必须属于同一 Team。
 2. 创建 App Store Connect Team API Key，不使用 Individual API Key。
 3. 把 `AuthKey_<KEY_ID>.p8` 保存到仓库外的用户私有目录。
 4. 限制目录和私钥权限：
@@ -63,6 +67,7 @@ xcrun notarytool store-credentials "ez-assistant-notary" \
 cd /absolute/path/to/ez-assistant/apps/desktop
 
 export APPLE_SIGNING_IDENTITY='Developer ID Application: <NAME> (<TEAM_ID>)'
+export APPLE_INSTALLER_SIGNING_IDENTITY='Developer ID Installer: <NAME> (<TEAM_ID>)'
 export APPLE_TEAM_ID='<TEAM_ID>'
 export APPLE_API_ISSUER='<ISSUER_ID>'
 export APPLE_API_KEY='<KEY_ID>'
@@ -78,11 +83,11 @@ npm run release:macos
 1. 检查 macOS/arm64、Developer ID identity、Team ID、API Key 文件名和 `0600` 权限。
 2. 构建 release Runtime sidecar 与 Desktop 前端。
 3. 由 Tauri 签名嵌套 Runtime 和 App，提交 App 公证并 staple App ticket。
-4. 生成并签名 DMG。
+4. 将维护程序副本单独以 Application 证书签名并校验，再将 App 与同步安装交接脚本封装成 Developer ID Installer 签名的 PKG，再生成并签名 DMG。
 5. 将最终 DMG 单独提交 Apple 公证，等待 `Accepted`，读取公证日志并 staple
    DMG ticket。
 6. 运行独立验证，检查 App、所有 Mach-O、DMG、arm64 架构、Developer ID、Team ID、
-   Hardened Runtime、entitlements、Gatekeeper、ticket、DMG 完整性和只读挂载内容。
+   Hardened Runtime、entitlements、Gatekeeper、ticket、DMG 完整性、PKG 签名和展开后的 App 内容。
 7. 从最终 App 生成不携带 AppleDouble/xattrs 的更新压缩包，读取实际随包 Host 构建信息，
    生成并签名 `release.json` 与在线制品；摘要和签名对应最终公证、装订后的文件。
 8. 输出 App/DMG 绝对路径、DMG 大小、最终 SHA-256 和 DMG submission ID。
@@ -102,6 +107,10 @@ target/aarch64-apple-darwin/release/bundle/desktop-release/
 
 只分发当次脚本最后输出路径与 SHA-256 对应的 stapled DMG。不使用旧 `target`
 目录中的同名或历史产物作为本次发布证据。
+
+本地测试可在已签名 App 上使用 `npm run package:macos -- --app <App.app> --output <新路径.dmg>
+--unsigned-pkg --signing-identity <Application身份>`；这只构建外层签名、内部 PKG 未签名的测试候选，
+不执行公证或发布。正式入口不接受缺少 Installer 身份的降级。
 
 ## 5. 单独复验
 

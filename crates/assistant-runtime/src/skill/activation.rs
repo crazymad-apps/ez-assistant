@@ -68,11 +68,11 @@ pub(crate) fn render_user_activation(
     definition: &SkillDefinition,
 ) -> String {
     format!(
-        "SKILL_ACTIVATION_V1\ntrigger: user\nname: {}\ncatalog_revision: {}\ndefinition_digest: {}\nshared_skill_root: {}\n<skill-instructions>\n{}\n</skill-instructions>",
+        "SKILL_ACTIVATION_V1\ntrigger: user\nname: {}\ncatalog_revision: {}\ndefinition_digest: {}\n{}\n<skill-instructions>\n{}\n</skill-instructions>",
         definition.name.as_str(),
         catalog_revision,
         definition.definition_digest,
-        definition.source_path,
+        activation_source(definition),
         definition.body,
     )
 }
@@ -83,13 +83,25 @@ pub(crate) fn render_model_activation(
     definition: &SkillDefinition,
 ) -> String {
     format!(
-        "SKILL_ACTIVATION_V1\ntrigger: model\nname: {}\ncatalog_revision: {}\ndefinition_digest: {}\nshared_skill_root: {}\n<skill-instructions>\n{}\n</skill-instructions>",
+        "SKILL_ACTIVATION_V1\ntrigger: model\nname: {}\ncatalog_revision: {}\ndefinition_digest: {}\n{}\n<skill-instructions>\n{}\n</skill-instructions>",
         definition.name.as_str(),
         catalog_revision,
         definition.definition_digest,
-        definition.source_path,
+        activation_source(definition),
         definition.body,
     )
+}
+
+/// 内置正文没有资源目录，避免模型把来源标签当作文件路径。
+fn activation_source(definition: &SkillDefinition) -> String {
+    if definition.source == super::SkillSource::Builtin {
+        format!(
+            "builtin_skill: {}\nThe embedded instructions are included below; there is no filesystem resource directory.",
+            definition.name
+        )
+    } else {
+        format!("shared_skill_root: {}", definition.source_path)
+    }
 }
 
 /// 一次工具激活暂存的精确定义身份；提交后正文与身份分别进入消息和账本。

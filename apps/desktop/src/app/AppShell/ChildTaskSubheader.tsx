@@ -1,3 +1,4 @@
+import { childKey } from "../../stores/liveExecutionProjection";
 import { observer } from "mobx-react-lite";
 import { ContextRing } from "../../features/context-panel/ContextPanel/ContextSection";
 import { Icon } from "../../components/Icon";
@@ -18,7 +19,7 @@ export const ChildTaskSubheader = observer(function ChildTaskSubheader() {
   }
 
   const session_view = store.projection.session_views.get(session_id);
-  const child_view = store.projection.child_task_views.get(child_task_id);
+  const child_view = store.projection.child_task_views.get(childKey(session_id, child_task_id));
   const reliable_items = child_view
     ? [...(session_view?.child_tasks ?? []), child_view.task]
     : session_view?.child_tasks ?? [];
@@ -49,6 +50,7 @@ export const ChildTaskSubheader = observer(function ChildTaskSubheader() {
         <span className={styles.child_status} data-status={item.task.status}>
           <i aria-hidden="true" />
           {childTaskStatusLabel(item.task.status)}
+          {item.task.inherited && " · 继承"}
         </span>
       </div>
       <div className={styles.child_usages}>

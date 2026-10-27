@@ -57,6 +57,7 @@ impl StartupStateHandle {
         self.0.send_if_modified(|state| {
             if let StartupState::Starting(current) = state {
                 current.stage = Some(stage);
+                current.progress = None;
                 true
             } else {
                 false
@@ -68,6 +69,7 @@ impl StartupStateHandle {
         self.0.send_if_modified(|state| {
             if let StartupState::Starting(current) = state {
                 current.stage = Some(progress.stage);
+                current.progress = progress.progress;
                 current.database_version = progress.database_version.clone();
                 current.min_compatible_host_version = progress.min_compatible_host_version.clone();
                 true
@@ -103,6 +105,7 @@ impl StartupStateHandle {
                 let mut ready = current.clone();
                 ready.status = RuntimeHostHealthStatus::Ready;
                 ready.stage = None;
+                ready.progress = None;
                 ready.error = None;
                 *state = StartupState::Ready(
                     Arc::new(ReadyServices {
@@ -145,6 +148,7 @@ fn health(
     error: Option<RuntimeHostStartupError>,
 ) -> RuntimeHostHealth {
     RuntimeHostHealth {
+        progress: None,
         status,
         stage,
         error,
@@ -160,9 +164,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stage_progress_is_ephemeral_and_cleared_at_the_next_stage() {
+        let startup = StartupStateHandle::new();
+        startup.database_progress(crate::storage::DatabaseStartupProgress {
+            stage: RuntimeHostStartupStage::HistoryBackup,
+            progress: Some(assistant_protocol::RuntimeHostStartupProgress {
+                completed: 3,
+                total: 7,
+            }),
+            database_version: Some("0.32.1".into()),
+            min_compatible_host_version: Some("0.32.1".into()),
+        });
+        assert_eq!(startup.health().progress.unwrap().completed, 3);
+        startup.stage(RuntimeHostStartupStage::Recovery);
+        assert!(startup.health().progress.is_none());
+        assert_eq!(
+            startup.health().stage,
+            Some(RuntimeHostStartupStage::Recovery)
+        );
+    }
+
+    #[test]
     fn configuration_failure_retains_the_committed_database_version() {
         let startup = StartupStateHandle::new();
         startup.database_progress(crate::storage::DatabaseStartupProgress {
+            progress: None,
             stage: RuntimeHostStartupStage::Recovery,
             database_version: Some("0.25.1".into()),
             min_compatible_host_version: None,

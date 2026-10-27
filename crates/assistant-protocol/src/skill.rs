@@ -19,6 +19,7 @@ pub enum SkillSourceSnapshot {
     HostSupplement,
     UserAgents,
     Plugin,
+    Builtin,
 }
 
 /// 当前管理投影中一个名称的可用状态。

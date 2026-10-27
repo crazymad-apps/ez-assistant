@@ -43,7 +43,7 @@ async fn reload_and_start_race_keeps_database_credentials_independent() {
         .expect("new session");
 
     let old_run = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: before_reload.session.session_id.clone(),
@@ -79,7 +79,7 @@ async fn reload_and_start_race_keeps_database_credentials_independent() {
     let start_session_id = after_reload.session.session_id.clone();
     let new_run = tokio::spawn(async move {
         start_runtime
-            .submit_input(SubmitInputRequest {
+            .submit_started_input(SubmitInputRequest {
                 mode: assistant_protocol::SubmitInputMode::Normal,
                 variant: assistant_protocol::AgentVariant::Build,
                 session_id: start_session_id,
@@ -178,7 +178,7 @@ async fn provider_changes_affect_future_runs_and_invalid_global_config_does_not_
     set_auto_approval(&runtime, &second.session.session_id).await;
 
     let first_run = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: first.session.session_id.clone(),
@@ -215,7 +215,7 @@ async fn provider_changes_affect_future_runs_and_invalid_global_config_does_not_
         assistant_protocol::ConfigurationState::Ready
     );
     let second_run = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: second.session.session_id.clone(),
@@ -248,7 +248,7 @@ async fn provider_changes_affect_future_runs_and_invalid_global_config_does_not_
         assistant_protocol::ConfigurationState::Invalid
     );
     let rejected_run = runtime
-        .submit_input(test_input(
+        .submit_started_input(test_input(
             &second.session.session_id,
             "must not use stale key",
         ))
@@ -341,8 +341,12 @@ async fn model_currentness_conflict_atomically_commits_the_failed_input() {
         .await
         .expect("change provider while preparation is suspended");
     store.release_model_config_load();
+    let accepted_run = runtime
+        .wait_for_input_claim(&session.session_id, &accepted.input_id)
+        .await
+        .unwrap();
     assert_eq!(
-        wait_for_terminal(&runtime, &session.session_id, &accepted.run.run_id)
+        wait_for_terminal(&runtime, &session.session_id, &accepted_run.run_id)
             .await
             .status,
         assistant_protocol::RunStatus::Failed
@@ -491,7 +495,7 @@ async fn deleting_an_idle_session_provider_preserves_history_and_requires_resele
     );
     assert!(view.composer_capabilities.model_error.is_some());
     let failed = runtime
-        .submit_input(test_input(&session.session_id, "cannot execute"))
+        .submit_started_input(test_input(&session.session_id, "cannot execute"))
         .await
         .unwrap()
         .run;
@@ -575,7 +579,7 @@ async fn deleting_a_provider_does_not_interrupt_an_already_started_run() {
         .unwrap()
         .session;
     let run = runtime
-        .submit_input(test_input(&session.session_id, "running"))
+        .submit_started_input(test_input(&session.session_id, "running"))
         .await
         .unwrap()
         .run;

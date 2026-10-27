@@ -266,6 +266,9 @@ pub(super) fn run_worker(
             Command::ReplaceContext { replacement, reply } => {
                 let _ = reply.send(engine.replace_context(replacement));
             }
+            Command::ClaimInput { run, reply } => {
+                let _ = reply.send(engine.claim_input(run));
+            }
             Command::AcceptInput { input, reply } => {
                 let _ = reply.send(engine.accept_input(*input));
             }
@@ -324,8 +327,17 @@ pub(super) fn run_worker(
             Command::ResumeGoalWithHeldInput { resume, reply } => {
                 let _ = reply.send(engine.resume_goal_with_held_input(resume));
             }
+            Command::LoadExecutionWindow { session_id, reply } => {
+                let _ = reply.send(engine.load_execution_window(&session_id));
+            }
             Command::LoadConversation { session_id, reply } => {
                 let _ = reply.send(engine.load_conversation(&session_id));
+            }
+            Command::LoadConversationHistory { owner, reply } => {
+                let _ = reply.send(engine.load_conversation_history(owner));
+            }
+            Command::GetConversationUsage { owner, reply } => {
+                let _ = reply.send(engine.get_conversation_usage(&owner));
             }
             Command::GetSessionUsage { session_id, reply } => {
                 let _ = reply.send(engine.get_session_usage(&session_id));

@@ -359,7 +359,7 @@ async fn managed_proxy_temporary_503_retries_through_real_host_transport() {
 }
 
 async fn submit_recovery_test(runtime: &AssistantRuntime, session_id: &SessionId) -> RunId {
-    runtime
+    let submitted = runtime
         .submit_session_input(assistant_runtime::SubmitSessionInputRequest {
             source: assistant_runtime::InputChannelSource::desktop_text(),
             input: SubmitInputRequest {
@@ -375,9 +375,26 @@ async fn submit_recovery_test(runtime: &AssistantRuntime, session_id: &SessionId
             },
         })
         .await
-        .unwrap()
-        .run
-        .run_id
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if let Some(run) = runtime
+                .list_runs(assistant_protocol::ListRunsRequest {
+                    session_id: session_id.clone(),
+                })
+                .await
+                .unwrap()
+                .runs
+                .into_iter()
+                .find(|run| run.input_id == submitted.input_id)
+            {
+                break run.run_id;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap()
 }
 
 async fn recovery_terminal(
@@ -543,4 +560,42 @@ async fn managed_proxy_invalid_or_oversized_requests_do_not_retry() {
         assert_eq!(f.mock.proxy_requests.lock().unwrap().len(), 1);
         f.stop().await;
     }
+}
+
+#[tokio::test]
+async fn sub2api_default_capabilities_execute_through_enterprise_factory() {
+    let mut f = Fixture::with_domains(true, None).await;
+    set_configuration(&f, "gemini-4-argon-high", true, 272000);
+    {
+        let mut configuration = f.mock.model_configuration.lock().unwrap();
+        configuration["provider_type"] = json!("sub2api");
+        configuration["parameters"]["max_output_tokens"] = json!({"state":"unknown"});
+        configuration["parameters"]["streaming"] = json!("unknown");
+        configuration["parameters"]["image_input"] = json!("unsupported");
+        configuration["parameters"]["reasoning_efforts"] = json!({});
+    }
+    let alice = f.login("alice").await;
+    let settings = refresh(&f, &alice).await;
+    assert!(settings.default_model.is_some());
+    let runtime = f.services(&alice).await.runtime.clone();
+    let session = runtime
+        .create_session(assistant_protocol::CreateSessionRequest::default())
+        .await
+        .unwrap();
+    let run = submit_recovery_test(&runtime, &session.session.session_id).await;
+    let status = recovery_terminal(&runtime, &session.session.session_id, &run).await;
+    assert_eq!(
+        status.status,
+        assistant_protocol::RunStatus::Completed,
+        "{:?}",
+        status.error
+    );
+    {
+        let requests = f.mock.proxy_requests.lock().unwrap();
+        assert!(!requests.is_empty());
+        assert!(requests[0].1.get("max_output_tokens").is_none());
+        assert_eq!(requests[0].1["stream"], json!(true));
+        assert!(!requests[0].1["tools"].as_array().unwrap().is_empty());
+    }
+    f.stop().await;
 }

@@ -37,7 +37,7 @@ async fn info(listener: &TcpListener) {
             .to_ascii_lowercase()
             .contains("authorization:")
     );
-    let body = r#"{"center_id":"11111111-1111-4111-8111-111111111111","protocol_version":3,"min_protocol_version":3}"#;
+    let body = r#"{"center_id":"11111111-1111-4111-8111-111111111111","protocol_version":4,"min_protocol_version":4}"#;
     socket
         .write_all(
             format!(

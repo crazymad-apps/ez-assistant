@@ -75,7 +75,7 @@ async fn parent_update_plan_is_automatic_durable_and_injected_at_next_claim() {
         .session_id;
 
     let first = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "make a plan".to_owned(),
@@ -110,7 +110,7 @@ async fn parent_update_plan_is_automatic_durable_and_injected_at_next_claim() {
     assert_eq!(plan.items.len(), 1);
 
     let second = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "continue from the plan".to_owned(),
@@ -322,7 +322,7 @@ async fn completing_every_todo_clears_the_current_work_plan_automatically() {
         .session_id;
     let mut events = runtime.subscribe_events();
     let submitted = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "finish everything".to_owned(),
@@ -473,7 +473,7 @@ async fn recovered_work_plan_is_available_to_the_first_claim_after_restart() {
     )
     .await;
     let run = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "continue".to_owned(),

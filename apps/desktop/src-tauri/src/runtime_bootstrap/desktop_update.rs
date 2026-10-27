@@ -4,7 +4,7 @@ use super::*;
 pub(crate) struct DesktopHandoff {
     _guard: tokio::sync::OwnedMutexGuard<()>,
     coordinator: RuntimeBootstrapCoordinator,
-    previous: Option<(RuntimeBootstrap, RuntimeDiscovery)>,
+    previous: Option<RuntimeDiscovery>,
 }
 
 impl RuntimeBootstrapCoordinator {
@@ -23,14 +23,16 @@ impl RuntimeBootstrapCoordinator {
     ) -> Result<DesktopHandoff, RuntimeBootstrapError> {
         let guard = self.lifecycle_gate.clone().lock_owned().await;
         let previous = if let Some(expected) = expected {
-            let (actual, discovery) = self.inspect_target(false).await?;
-            if actual.instance_id != expected.instance_id
-                || actual.base_url != expected.base_url
-                || actual.access_token != expected.access_token
+            // 来源已在登录前冻结；安装前只复核同一安全发现记录，不再依赖旧 HTTP。
+            let discovery = read_discovery(&self.runtime_home)?;
+            validate_discovery(&discovery)?;
+            if discovery.instance_id != expected.instance_id
+                || discovery.address != expected.base_url
+                || discovery.access_token != expected.access_token
             {
                 return Err(instance_changed());
             }
-            Some((actual, discovery))
+            Some(discovery)
         } else {
             None
         };
@@ -55,9 +57,22 @@ impl RuntimeBootstrapCoordinator {
             .runtime_executable
             .canonicalize()
             .map_err(|_| source_unavailable())?;
+        let candidate = executable.clone();
+        let digest = tokio::task::spawn_blocking(move || crate::runtime_source::digest(&candidate))
+            .await
+            .map_err(|_| source_unavailable())?
+            .map_err(|_| source_unavailable())?;
+        crate::runtime_source::verify(
+            &executable,
+            &digest,
+            &assistant_protocol::ClientCompatibility::current(),
+        )
+        .await
+        .map_err(|_| source_unavailable())?;
         match coordinator.inspect_target(false).await {
             Ok((bootstrap, discovery)) => {
                 if discovery.executable_path.as_ref() != Some(&executable)
+                    || discovery.executable_sha256.as_ref() != Some(&digest)
                     || bootstrap.capabilities.runtime_version
                         != assistant_protocol::SOFTWARE_VERSION
                 {
@@ -73,6 +88,7 @@ impl RuntimeBootstrapCoordinator {
                 let bootstrap = coordinator.wait_for_start().await?;
                 let discovery = read_discovery(&coordinator.runtime_home)?;
                 if discovery.executable_path.as_ref() != Some(&executable)
+                    || discovery.executable_sha256.as_ref() != Some(&digest)
                     || bootstrap.capabilities.runtime_version
                         != assistant_protocol::SOFTWARE_VERSION
                 {
@@ -91,19 +107,104 @@ impl DesktopHandoff {
             .map(|_| self.coordinator.runtime_home.clone())
     }
 
-    pub(crate) async fn stop(&self) -> Result<(), RuntimeBootstrapError> {
-        let Some((previous, original)) = &self.previous else {
-            return Ok(());
+    /// 已完成下载与验签后消费交接对象；原生任务持有 gate，取消等待也不会提前放行。
+    /// 成功时归还同一对象供安装阶段继续持锁，失败则释放，不启动或修补业务状态。
+    pub(crate) async fn stop(self) -> Result<Self, RuntimeBootstrapError> {
+        if self.previous.is_none() {
+            return Ok(self);
         };
-        let current = read_discovery(&self.coordinator.runtime_home)?;
-        if current.instance_id != original.instance_id
-            || current.pid != original.pid
-            || current.access_token != original.access_token
-            || current.address != original.address
-        {
-            return Err(instance_changed());
+        let (guard, _) = self
+            .coordinator
+            .stop_native(self._guard, self.previous.clone())
+            .await?;
+        Ok(Self {
+            _guard: guard,
+            coordinator: self.coordinator,
+            previous: self.previous,
+        })
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    /// 来源绑定后暂停真实 Host；安装停止必须仅依赖原生锁归属，不再请求已失去响应的 HTTP。
+    #[tokio::test]
+    #[ignore = "需要显式 EZ_ASSISTANT_TEST_HOST_BINARY；只新建项目隔离 Home"]
+    async fn isolated_update_handoff_stops_unresponsive_host_and_rejects_changed_instance() {
+        let binary = PathBuf::from(std::env::var_os("EZ_ASSISTANT_TEST_HOST_BINARY").unwrap())
+            .canonicalize()
+            .unwrap();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../.runtime-test")
+            .canonicalize()
+            .unwrap();
+        let home = tempfile::Builder::new()
+            .prefix("f01-update-handoff-")
+            .tempdir_in(root)
+            .unwrap();
+        fs::set_permissions(home.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+        fs::write(home.path().join("host.toml"), format!("version = \"0.27.0\"\nmode = \"enterprise\"\n[enterprise]\ncenter_url = \"http://127.0.0.1:9\"\n[host_access]\nremote_enabled = false\nport = {port}\n")).unwrap();
+        fs::set_permissions(
+            home.path().join("host.toml"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let mut child = tokio::process::Command::new(&binary)
+            .args(["serve", "--runtime-home"])
+            .arg(home.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let coordinator = RuntimeBootstrapCoordinator::new(home.path().to_owned(), binary).unwrap();
+        let worker = coordinator.clone();
+        let result = tokio::spawn(async move {
+            let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
+            let mut expected = loop {
+                if let Ok(value) = worker.desktop_update_target().await {
+                    break value;
+                }
+                assert!(tokio::time::Instant::now() < deadline);
+                tokio::time::sleep(POLL_INTERVAL).await;
+            };
+            let original = read_discovery(&worker.runtime_home).unwrap();
+            expected.instance_id = "changed-instance".into();
+            assert!(worker.desktop_handoff(Some(&expected)).await.is_err());
+            expected.instance_id = original.instance_id;
+            nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(original.pid as i32),
+                nix::sys::signal::Signal::SIGSTOP,
+            )
+            .unwrap();
+            let handoff = tokio::time::timeout(
+                Duration::from_secs(1),
+                worker.desktop_handoff(Some(&expected)),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let handoff = handoff.stop().await.unwrap();
+            assert!(instance_lock_released(&worker.runtime_home).unwrap());
+            assert!(
+                worker.lifecycle_gate.try_lock().is_err(),
+                "installation retains the same gate"
+            );
+            drop(handoff);
+            assert!(worker.lifecycle_gate.try_lock().is_ok());
+        })
+        .await;
+        if child.try_wait().unwrap().is_none() {
+            child.kill().await.unwrap();
         }
-        self.coordinator.stop_for_upgrade(previous).await?;
-        self.coordinator.wait_for_instance_to_stop(original).await
+        child.wait().await.unwrap();
+        result.unwrap();
     }
 }

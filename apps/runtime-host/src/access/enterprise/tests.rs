@@ -219,7 +219,7 @@ impl Fixture {
         let center_router = Router::new()
             .route(
                 "/api/info",
-                get(|| async { Json(json!({"protocol_version":3,"min_protocol_version":3,"capabilities":["managed_models","llm_proxy"]})) }),
+                get(|| async { Json(json!({"protocol_version":4,"min_protocol_version":4,"capabilities":["managed_models","llm_proxy"]})) }),
             )
             .route("/api/runtime/model-configuration", get(runtime::models::configuration))
             .route("/api/llm/providers/{provider}/v1/chat/completions", post(runtime::models::proxy))
@@ -457,7 +457,7 @@ async fn bootstrap_cannot_impersonate_user_and_cookie_exchange_keeps_identity() 
     assert_eq!(update.status(), StatusCode::OK);
     let update = update.json::<Value>().await.unwrap();
     assert_eq!(update.as_object().unwrap().len(), 2);
-    assert_eq!(update["enterprise_protocols"], json!([3]));
+    assert_eq!(update["enterprise_protocols"], json!(SUPPORTED_PROTOCOLS));
     let config = std::fs::read_to_string(f.home.path().join("host.toml")).unwrap();
     assert!(config.contains(update["center_url"].as_str().unwrap()));
     assert!(!f.home.path().join("users").exists());

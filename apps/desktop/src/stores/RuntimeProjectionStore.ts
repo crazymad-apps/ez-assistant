@@ -1,3 +1,4 @@
+import { childKey } from "./liveExecutionProjection";
 import { action, makeObservable, observable, observableRef } from "mobx";
 import type {
   ApplicationSnapshot,
@@ -25,7 +26,14 @@ export type ConversationHistoryProjection = Readonly<{
   load_error: string | null;
 }>;
 
+export type ConversationLoadState = Readonly<{
+  status: "idle" | "loading" | "error";
+  error: string | null;
+}>;
+const IDLE_LOAD: ConversationLoadState = { status: "idle", error: null };
+
 export class RuntimeProjectionStore {
+  readonly conversation_loads = observable.map<string, ConversationLoadState>(undefined, { deep: false });
   application: ApplicationSnapshot | null = null;
   readonly session_views = observable.map<SessionId, SessionViewSnapshot>(undefined, {
     deep: false,
@@ -34,17 +42,17 @@ export class RuntimeProjectionStore {
     undefined,
     { deep: false },
   );
-  readonly child_task_views = observable.map<ChildTaskId, ChildTaskViewSnapshot>(undefined, {
+  readonly child_task_views = observable.map<string, ChildTaskViewSnapshot>(undefined, {
     deep: false,
   });
-  readonly child_conversation_histories = observable.map<ChildTaskId, ConversationHistoryProjection>(
+  readonly child_conversation_histories = observable.map<string, ConversationHistoryProjection>(
     undefined,
     { deep: false },
   );
   #application_snapshot_sequence = 0;
   // 复用 Runtime 已有事件水位，只隔离同一 owner 的并发读取返回顺序，不建立新的协议 revision。
   #session_snapshot_sequences = new Map<SessionId, number>();
-  #child_snapshot_sequences = new Map<ChildTaskId, number>();
+  #child_snapshot_sequences = new Map<string, number>();
   observed_sequence = 0;
   is_stale = true;
 
@@ -67,7 +75,26 @@ export class RuntimeProjectionStore {
       acceptEvent: action,
       markStale: action,
       resetForInstance: action,
+      setConversationLoadState: action,
     });
+  }
+
+  conversationLoadState(session_id: SessionId, child_task_id: ChildTaskId | null = null): ConversationLoadState {
+    return this.conversation_loads.get(JSON.stringify([session_id, child_task_id])) ?? IDLE_LOAD;
+  }
+
+  sessionSnapshotSequence(session_id: SessionId): number {
+    return this.#session_snapshot_sequences.get(session_id) ?? 0;
+  }
+
+  childSnapshotSequence(session_id: SessionId, child_task_id: ChildTaskId): number {
+    return this.#child_snapshot_sequences.get(childKey(session_id, child_task_id)) ?? 0;
+  }
+
+  setConversationLoadState(session_id: SessionId, child_task_id: ChildTaskId | null, state: ConversationLoadState): void {
+    const key = JSON.stringify([session_id, child_task_id]);
+    if (state.status === "idle") this.conversation_loads.delete(key);
+    else this.conversation_loads.set(key, state);
   }
 
   applyApplicationSnapshot(snapshot: ObservedSnapshot<ApplicationSnapshot>): void {
@@ -117,13 +144,13 @@ export class RuntimeProjectionStore {
     if (!isChildOwner(snapshot.value.conversation.owner, session_id, child_task_id)) {
       return false;
     }
-    const previous_sequence = this.#child_snapshot_sequences.get(child_task_id);
+    const previous_sequence = this.#child_snapshot_sequences.get(childKey(session_id, child_task_id));
     if (previous_sequence !== undefined && snapshot.observed_sequence < previous_sequence) {
       return false;
     }
-    this.#child_snapshot_sequences.set(child_task_id, snapshot.observed_sequence);
-    this.child_task_views.set(child_task_id, snapshot.value);
-    this.#applyLatestChildConversationPage(child_task_id, snapshot.value.conversation);
+    this.#child_snapshot_sequences.set(childKey(session_id, child_task_id), snapshot.observed_sequence);
+    this.child_task_views.set(childKey(session_id, child_task_id), snapshot.value);
+    this.#applyLatestChildConversationPage(session_id, child_task_id, snapshot.value.conversation);
     return true;
   }
 
@@ -141,12 +168,12 @@ export class RuntimeProjectionStore {
     return true;
   }
 
-  beginLoadingPreviousChild(child_task_id: ChildTaskId): boolean {
-    const history = this.child_conversation_histories.get(child_task_id);
+  beginLoadingPreviousChild(session_id: SessionId, child_task_id: ChildTaskId): boolean {
+    const history = this.child_conversation_histories.get(childKey(session_id, child_task_id));
     if (!history || history.is_loading_previous || !history.has_more || !history.previous_cursor) {
       return false;
     }
-    this.child_conversation_histories.set(child_task_id, {
+    this.child_conversation_histories.set(childKey(session_id, child_task_id), {
       ...history,
       is_loading_previous: true,
       previous_request: { cursor: history.previous_cursor, first_id: history.items[0]?.message_id ?? null },
@@ -177,21 +204,23 @@ export class RuntimeProjectionStore {
   }
 
   applyPreviousChildConversationPage(
+    session_id: SessionId,
     child_task_id: ChildTaskId,
     snapshot: ObservedSnapshot<ConversationPage>,
   ): boolean {
-    const current = this.child_conversation_histories.get(child_task_id);
+    const current = this.child_conversation_histories.get(childKey(session_id, child_task_id));
     const page = snapshot.value;
     if (
       !current
       || current.generation !== page.generation
       || page.owner.type !== "child_task"
       || page.owner.child_task_id !== child_task_id
+      || page.owner.session_id !== session_id
       || page.owner.session_id !== current.owner.session_id
     ) {
       return false;
     }
-    this.child_conversation_histories.set(child_task_id, {
+    this.child_conversation_histories.set(childKey(session_id, child_task_id), {
       owner: page.owner,
       generation: page.generation,
       items: mergeConversationItems(page.items, current.items),
@@ -216,12 +245,12 @@ export class RuntimeProjectionStore {
     });
   }
 
-  failLoadingPreviousChild(child_task_id: ChildTaskId, message: string): void {
-    const current = this.child_conversation_histories.get(child_task_id);
+  failLoadingPreviousChild(session_id: SessionId, child_task_id: ChildTaskId, message: string): void {
+    const current = this.child_conversation_histories.get(childKey(session_id, child_task_id));
     if (!current) {
       return;
     }
-    this.child_conversation_histories.set(child_task_id, {
+    this.child_conversation_histories.set(childKey(session_id, child_task_id), {
       ...current,
       previous_request: undefined,
       is_loading_previous: false,
@@ -246,6 +275,7 @@ export class RuntimeProjectionStore {
   }
 
   resetForInstance(): void {
+    this.conversation_loads.clear();
     this.application = null;
     this.#application_snapshot_sequence = 0;
     this.#session_snapshot_sequences.clear();
@@ -287,14 +317,14 @@ export class RuntimeProjectionStore {
     });
   }
 
-  #applyLatestChildConversationPage(child_task_id: ChildTaskId, page: ConversationPage): void {
-    const current = this.child_conversation_histories.get(child_task_id);
+  #applyLatestChildConversationPage(session_id: SessionId, child_task_id: ChildTaskId, page: ConversationPage): void {
+    const current = this.child_conversation_histories.get(childKey(session_id, child_task_id));
     if (!current
       || current.generation !== page.generation
       || current.owner.type !== "child_task"
       || current.owner.session_id !== page.owner.session_id
       || current.owner.child_task_id !== child_task_id) {
-      this.child_conversation_histories.set(child_task_id, historyFromPage(page));
+      this.child_conversation_histories.set(childKey(session_id, child_task_id), historyFromPage(page));
       return;
     }
     const first_latest_id = page.items[0] ? conversationItemId(page.items[0]) : null;
@@ -302,10 +332,10 @@ export class RuntimeProjectionStore {
       ? current.items.some((item) => conversationItemId(item) === first_latest_id)
       : current.items.length === 0;
     if (!retained_previous) {
-      this.child_conversation_histories.set(child_task_id, historyFromPage(page));
+      this.child_conversation_histories.set(childKey(session_id, child_task_id), historyFromPage(page));
       return;
     }
-    this.child_conversation_histories.set(child_task_id, {
+    this.child_conversation_histories.set(childKey(session_id, child_task_id), {
       owner: page.owner,
       generation: page.generation,
       items: mergeConversationItems(current.items, page.items),

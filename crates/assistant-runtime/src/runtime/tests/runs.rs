@@ -1,6 +1,156 @@
 use super::*;
 
 #[tokio::test]
+async fn terminal_queries_and_duplicate_cancel_read_reliable_history_after_restart() {
+    let model = Arc::new(ScriptedModelService::completing(
+        model_capabilities(false),
+        8_192,
+        assistant_text("reliable-final", "reliable answer"),
+    ));
+    let store = Arc::new(crate::storage::VolatileRuntimeStore::default());
+    let config = RuntimeConfig::new(NonZeroUsize::new(256).unwrap());
+    let runtime = runtime_with_store(model.clone(), store.clone(), config).await;
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    let request = SubmitInputRequest {
+        mode: assistant_protocol::SubmitInputMode::Normal,
+        variant: assistant_protocol::AgentVariant::Build,
+        session_id: session_id.clone(),
+        message: "history".into(),
+        attachment_ids: vec![],
+        quotes: vec![],
+        skill_name: None,
+        mcp_server_key: None,
+        idempotency_key: Some(assistant_protocol::IdempotencyKey::new("history-key").unwrap()),
+    };
+    let accepted = runtime.submit_started_input(request.clone()).await.unwrap();
+    let expected = wait_for_terminal(&runtime, &session_id, &accepted.run.run_id).await;
+    assert!(expected.started_at_ms.is_some());
+    assert!(
+        !store.contains_input_control(&accepted.input_id).unwrap(),
+        "completed Input retains only its original identity"
+    );
+    assert!(
+        !store.contains_run_control(&expected.run_id).unwrap(),
+        "reliable terminal history does not retain a Run control"
+    );
+    let session = runtime.session(&session_id).await.unwrap();
+    {
+        let _mutation = session.mutation().await;
+        let mut state = session.lock_state().unwrap();
+        let cached = state.runs.get_mut(&expected.run_id).unwrap();
+        cached.append_text(99, "stale observation");
+        cached.fail_before_start(
+            assistant_protocol::RuntimeErrorInfo {
+                code: assistant_protocol::RuntimeErrorCode::InvalidRequest,
+                message: "stale observation".into(),
+            },
+            1,
+        );
+    }
+    assert_eq!(
+        runtime
+            .get_run(GetRunRequest {
+                session_id: session_id.clone(),
+                run_id: expected.run_id.clone(),
+            })
+            .await
+            .unwrap()
+            .run,
+        expected,
+    );
+    assert_eq!(
+        runtime
+            .list_runs(assistant_protocol::ListRunsRequest {
+                session_id: session_id.clone()
+            })
+            .await
+            .unwrap()
+            .runs,
+        vec![expected.clone()],
+    );
+    let view = runtime
+        .get_session_view(GetSessionViewRequest {
+            session_id: session_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        view.snapshot
+            .value
+            .conversation
+            .items
+            .iter()
+            .any(|item| matches!(
+                item,
+                assistant_protocol::ConversationItem::Assistant(message)
+                    if message.status == Some(expected.status)
+                        && message.finished_at_ms == expected.finished_at_ms
+                        && message.run_started_at_ms == expected.started_at_ms
+            ))
+    );
+    assert_eq!(
+        runtime
+            .submit_started_input(request.clone())
+            .await
+            .unwrap()
+            .run,
+        expected
+    );
+    let cancel = CancelRunRequest {
+        session_id: session_id.clone(),
+        run_id: expected.run_id.clone(),
+    };
+    assert_eq!(
+        runtime.cancel_run(cancel.clone()).await.unwrap().run,
+        expected
+    );
+    runtime
+        .shutdown(ShutdownRuntimeRequest::default())
+        .await
+        .unwrap();
+    let restarted = runtime_with_store(model.clone(), store, config).await;
+    assert!(
+        restarted
+            .session(&session_id)
+            .await
+            .unwrap()
+            .lock_state()
+            .unwrap()
+            .runs
+            .is_empty()
+    );
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), restarted.cancel_run(cancel))
+            .await
+            .expect("cancel does not reenter the mutation gate")
+            .unwrap()
+            .run,
+        expected,
+    );
+    assert_eq!(
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            restarted.submit_started_input(request)
+        )
+        .await
+        .expect("idempotent read does not reenter the mutation gate")
+        .unwrap()
+        .run,
+        expected,
+    );
+    assert_eq!(
+        model.take_requests().len(),
+        1,
+        "history reads never execute again"
+    );
+}
+
+#[tokio::test]
 async fn non_running_lifecycle_rejects_new_sessions_but_queries_remain_available() {
     let runtime = runtime(empty_model());
     let session = runtime
@@ -15,7 +165,7 @@ async fn non_running_lifecycle_rejects_new_sessions_but_queries_remain_available
         ));
         assert_eq!(runtime.lifecycle().expect("lifecycle"), lifecycle);
         assert!(matches!(
-            runtime.submit_input(SubmitInputRequest {
+            runtime.submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
                 variant: assistant_protocol::AgentVariant::Build,
                 session_id: session.session.session_id.clone(),
@@ -61,7 +211,7 @@ async fn completed_run_commits_user_before_model_and_final_assistant_once() {
         .await
         .expect("session");
     let started = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -74,7 +224,6 @@ async fn completed_run_commits_user_before_model_and_final_assistant_once() {
         })
         .await
         .expect("run accepted");
-    assert_eq!(started.run.status, assistant_protocol::RunStatus::Accepted);
     assert!(started.run.run_id.as_str().starts_with("r_"));
 
     let terminal =
@@ -138,7 +287,7 @@ async fn completed_model_usage_is_projected_as_a_runtime_event_and_persisted_in_
         .await
         .expect("session");
     let started = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -212,7 +361,7 @@ async fn slow_or_dropped_event_subscribers_never_block_run_completion() {
         .await
         .expect("session");
     let started = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -270,7 +419,7 @@ async fn successful_tool_exchange_is_committed_before_the_next_model_step() {
         .expect("session");
     set_auto_approval(&runtime, &session.session.session_id).await;
     let started = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -327,7 +476,9 @@ async fn successful_tool_exchange_is_committed_before_the_next_model_step() {
     )));
     assert!(observed.iter().any(|event| matches!(
         event,
-        RuntimeEvent::RunStarted { run_id, .. } if run_id == &started.run.run_id
+        RuntimeEvent::RunStarted { run_id, started_at_ms, .. }
+            if run_id == &started.run.run_id
+                && started_at_ms.is_some() && *started_at_ms == terminal.started_at_ms
     )));
     assert_eq!(
         observed
@@ -385,6 +536,35 @@ async fn successful_tool_exchange_is_committed_before_the_next_model_step() {
         terminal.tools[0].status,
         assistant_protocol::ToolActivityStatus::Completed
     );
+    runtime
+        .shutdown(ShutdownRuntimeRequest::default())
+        .await
+        .unwrap();
+    let restarted = runtime_with_store(
+        model.clone(),
+        runtime.store.clone(),
+        RuntimeConfig::new(NonZeroUsize::new(256).unwrap()),
+    )
+    .await;
+    let restored = restarted
+        .get_run(GetRunRequest {
+            session_id: session.session.session_id,
+            run_id: terminal.run_id.clone(),
+        })
+        .await
+        .unwrap()
+        .run;
+    assert_eq!(restored.text, terminal.text);
+    let mut reliable_tools = terminal.tools;
+    for tool in &mut reliable_tools {
+        tool.stdout.clear();
+        tool.stderr.clear();
+    }
+    assert_eq!(restored.tools, reliable_tools);
+    assert!(
+        model.take_requests().is_empty(),
+        "tool history is never replayed"
+    );
 }
 
 #[tokio::test]
@@ -411,7 +591,7 @@ async fn pending_tool_exchange_is_hidden_and_a_second_input_remains_queued() {
         .expect("session");
     set_auto_approval(&runtime, &session.session.session_id).await;
     let started = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),

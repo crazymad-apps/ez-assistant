@@ -138,6 +138,42 @@ describe("SessionManagementController session archiving", () => {
   });
 });
 
+describe("SessionManagementController compaction results", () => {
+  it.each([
+    [{ type: "compacted", source_generation: 1, result_generation: 2, compacted_message_count: 4, retained_message_count: 2 }, "上下文压缩完成。", "success"],
+    [{ type: "no_op" }, "当前没有需要压缩的较早内容。", "neutral"],
+    [{ type: "cancelled" }, "已取消压缩。", "neutral"],
+  ])("shows the authoritative %j result without submitting an input", async (outcome, message, tone) => {
+    const fixture = controllerFixture(false);
+    fixture.command.mockReset().mockResolvedValue({ payload: { outcome } });
+
+    expect(await fixture.controller.compactSession("session-current", 1)).toEqual(outcome);
+
+    expect(fixture.command).toHaveBeenCalledOnce();
+    expect(fixture.command).toHaveBeenCalledWith({
+      type: "compact_session",
+      payload: { session_id: "session-current", expected_generation: 1, operation_id: expect.any(String) },
+    });
+    expect(fixture.state.session_notice).toEqual({ session_id: "session-current", message, tone });
+    expect(fixture.state.pending_compaction_session_id).toBeNull();
+    expect(fixture.load_session).toHaveBeenCalledWith("session-current");
+    expect(fixture.load_application).toHaveBeenCalledOnce();
+  });
+
+  it("shows the safe upstream status and clears pending state after failure", async () => {
+    const fixture = controllerFixture(false);
+    const message = "Context compaction failed: provider (HTTP 400).";
+    fixture.command.mockReset().mockRejectedValue(new Error(message));
+
+    expect(await fixture.controller.compactSession("session-current", 1)).toBeNull();
+
+    expect(fixture.state.interaction_error).toBe(message);
+    expect(fixture.state.session_notice).toBeNull();
+    expect(fixture.state.pending_compaction_session_id).toBeNull();
+    expect(fixture.load_session).toHaveBeenCalledWith("session-current");
+  });
+});
+
 function controllerFixture(restored: boolean) {
   const workspace: WorkspaceSummary = {
     workspace_id: "workspace-1",

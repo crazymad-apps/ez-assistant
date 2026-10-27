@@ -4,6 +4,7 @@ use rusqlite::Connection;
 
 pub(super) fn entry() -> Migration {
     Migration {
+        key: "release",
         version: "0.28.1",
         min_compatible_host_version: Some("0.28.1"),
         rebuilds_referenced_tables: false,
@@ -26,6 +27,10 @@ fn apply(connection: &Connection) -> Result<()> {
 }
 pub(super) fn validate(connection: &Connection) -> Result<()> {
     v0_28_0::validate(connection)?;
+    validate_additions(connection)
+}
+
+pub(super) fn validate_additions(connection: &Connection) -> Result<()> {
     connection.prepare(
         "SELECT request_id, session_id, run_id, snapshot_json FROM session_feedback LIMIT 0",
     )?;

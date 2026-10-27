@@ -90,6 +90,9 @@ impl SessionLoader {
     }
 
     pub async fn prepare(&self, id: &SessionId) -> RuntimeResult<Arc<SessionController>> {
+        let _phase = crate::request_diagnostics::request_phase(
+            crate::request_diagnostics::RequestPhase::SessionPreparation,
+        );
         let gate = self.loading_gate(id)?;
         let _gate = gate.lock().await;
         let cached = self.cached(id)?;
@@ -107,9 +110,10 @@ impl SessionLoader {
             .prepare_session_execution(id)
             .await
             .map_err(|e| RuntimeError::from_store("prepare session execution", e))?;
-        for recovery in
-            super::recovery::prepare_interrupted_run_settlements(&loaded.state, super::now_ms()?)?
-        {
+        let recoveries =
+            super::recovery::prepare_interrupted_run_settlements(&loaded.state, super::now_ms()?)?;
+        let changed = !recoveries.is_empty();
+        for recovery in recoveries {
             match recovery {
                 super::recovery::PreparedRunRecovery::Settlement(settlement) => {
                     self.store.settle_run(*settlement).await.map_err(|e| {
@@ -124,11 +128,21 @@ impl SessionLoader {
                 }
             }
         }
-        loaded = self
-            .store
-            .load_session_state(id)
-            .await
-            .map_err(|e| RuntimeError::from_store("reload prepared session", e))?;
+        if changed {
+            loaded = self
+                .store
+                .load_session_state(id)
+                .await
+                .map_err(|e| RuntimeError::from_store("reload prepared session", e))?;
+            loaded.execution_window = Some(
+                self.store
+                    .load_execution_window(id)
+                    .await
+                    .map_err(|e| RuntimeError::from_store("reload execution window", e))?,
+            );
+        }
+        let execution_window = loaded.execution_window.take();
+        let completed_runs = completed_history_runs(&loaded.state);
         let mut recovered = super::recovery::recover_session_registries(loaded)?;
         let prepared =
             recovered
@@ -145,6 +159,9 @@ impl SessionLoader {
             prepared.lock_state()?.execution_prepared = true;
             prepared
         };
+        if let Some(window) = execution_window {
+            session.install_execution_window(window)?;
+        }
         let requests = self
             .store
             .load_feedback(id)
@@ -157,7 +174,8 @@ impl SessionLoader {
                         .lock_state()?
                         .runs
                         .get(&request.run_id)
-                        .is_none_or(|run| run.status() != assistant_protocol::RunStatus::Completed))
+                        .is_none_or(|run| run.status() != assistant_protocol::RunStatus::Completed)
+                        && !completed_runs.contains(&request.run_id))
             {
                 request.status = assistant_protocol::FeedbackStatus::Invalidated;
                 self.store
@@ -176,6 +194,9 @@ impl SessionLoader {
         self.permissions
             .register_scope(PermissionFileScope::Session(id.clone()))
             .await?;
+        // 尚未执行的缓存只包含上次进程的诊断控制；准备已完成恢复，不能保留旧中断投影
+        // 覆盖文件中的可靠终态。本入口在 execution_prepared 后提前返回，不触及活动 child。
+        self.children.remove_session(id)?;
         for child in recovered.child_tasks.into_values() {
             self.children.upsert(child)?;
         }
@@ -196,6 +217,9 @@ impl SessionLoader {
     }
 
     pub async fn load(&self, id: &SessionId) -> RuntimeResult<Arc<SessionController>> {
+        let _phase = crate::request_diagnostics::request_phase(
+            crate::request_diagnostics::RequestPhase::SessionLoad,
+        );
         if let Some(session) = self.cached(id)? {
             return Ok(session);
         }
@@ -214,6 +238,7 @@ impl SessionLoader {
                 session_id: id.clone(),
             });
         }
+        let completed_runs = completed_history_runs(&loaded.state);
         let mut recovered = super::recovery::recover_session_registries(loaded)?;
         let session = recovered.sessions.remove(id).ok_or_else(unavailable)?;
         let requests = self
@@ -228,7 +253,8 @@ impl SessionLoader {
                         .lock_state()?
                         .runs
                         .get(&request.run_id)
-                        .is_none_or(|run| run.status() != assistant_protocol::RunStatus::Completed))
+                        .is_none_or(|run| run.status() != assistant_protocol::RunStatus::Completed)
+                        && !completed_runs.contains(&request.run_id))
             {
                 request.status = assistant_protocol::FeedbackStatus::Invalidated;
             }
@@ -260,4 +286,19 @@ fn unavailable() -> RuntimeError {
     RuntimeError::InternalStateUnavailable {
         component: "session registry",
     }
+}
+
+fn completed_history_runs(
+    state: &crate::RecoveredRuntime,
+) -> std::collections::BTreeSet<assistant_protocol::RunId> {
+    state
+        .run_history
+        .iter()
+        .filter(|(_, run)| {
+            !run.inherited
+                && !run.partial
+                && run.status == Some(assistant_protocol::RunStatus::Completed)
+        })
+        .map(|(_, run)| run.run_id.clone())
+        .collect()
 }

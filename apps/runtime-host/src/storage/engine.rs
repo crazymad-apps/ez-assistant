@@ -19,8 +19,8 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use super::{
     BLOBS_DIRECTORY, BUSY_TIMEOUT, DATA_DIRECTORY, DATABASE_FILE, DELETION_STAGING_DIRECTORY,
     SESSIONS_DIRECTORY, STAGING_DIRECTORY, StorageResult, WORKSPACES_DIRECTORY, body_path,
-    conflict, conversation, create_new_private_file, database_write_error, internal_error,
-    invalid_data, invalid_data_with_source,
+    conflict, conversation, database_write_error, internal_error, invalid_data,
+    invalid_data_with_source,
     mode::{
         agent_variant_value, approval_mode_value, parse_agent_variant, parse_approval_mode,
         parse_reasoning_effort, reasoning_effort_value,
@@ -41,12 +41,120 @@ pub(super) struct StorageEngine {
     pub(super) deletion_staging_directory: PathBuf,
     pub(super) connection: Connection,
     pub(super) unavailable_sessions: HashSet<String>,
-    pub(super) unavailable_child_tasks: HashSet<String>,
+    pub(super) unavailable_child_tasks: HashSet<(String, String)>,
     pub(super) conversation_indexes: conversation::ConversationIndexCache,
     pub(super) recall_index_available: bool,
+    // 仅由完成独立备份后的迁移控制器启用，不作为产品配置或持久化兼容开关。
+    pub(super) allow_legacy_history: bool,
 }
 
 impl StorageEngine {
+    pub(super) fn read_owner_document(
+        &self,
+        path: &Path,
+        owner: &ConversationOwner,
+        generation: u64,
+    ) -> StorageResult<conversation::ConversationDocument> {
+        let document = conversation::read_document(path, owner, generation)?;
+        if document.history.is_none() && !self.allow_legacy_history {
+            return Err(invalid_data("conversation history header is missing"));
+        }
+        Ok(document)
+    }
+    /// 写入失败后文件尾部可能已有待提交帧；只读入口不能把它提前发布为可靠历史。
+    /// 回执恢复通过专用底层原语执行，不经过产品读取入口。
+    pub(super) fn ensure_no_pending_history(&self, owner: &ConversationOwner) -> StorageResult<()> {
+        let pending: bool = match owner {
+            ConversationOwner::MainSession { session_id } => self.connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM body_appends WHERE session_id=?1)",
+                [session_id.as_str()], |row| row.get(0),
+            ),
+            ConversationOwner::ChildTask { session_id, child_task_id } => self.connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM child_body_appends WHERE session_id=?1 AND child_task_id=?2)",
+                params![session_id.as_str(), child_task_id.as_str()], |row| row.get(0),
+            ),
+        }.map_err(|source| internal_error("conversation commit state could not be checked", source))?;
+        if pending {
+            return Err(invalid_data(
+                "conversation has an unfinished history append",
+            ));
+        }
+        Ok(())
+    }
+    pub(super) fn load_conversation_history(
+        &mut self,
+        owner: ConversationOwner,
+    ) -> StorageResult<assistant_runtime::StoredConversationHistory> {
+        self.ensure_no_pending_history(&owner)?;
+        let (generation, path) = match &owner {
+            ConversationOwner::MainSession { session_id } => {
+                super::filesystem::validate_session_component(session_id)?;
+                if self.unavailable_sessions.contains(session_id.as_str()) {
+                    return Err(invalid_data("session conversation is unavailable"));
+                }
+                let generation = self.session_generation(session_id)?;
+                (
+                    generation,
+                    body_path(&self.session_directory(session_id)?, generation),
+                )
+            }
+            ConversationOwner::ChildTask {
+                session_id,
+                child_task_id,
+            } => {
+                super::filesystem::validate_session_component(session_id)?;
+                super::filesystem::validate_child_task_component(child_task_id)?;
+                if self.unavailable_child_tasks.contains(&(
+                    session_id.as_str().to_owned(),
+                    child_task_id.as_str().to_owned(),
+                )) {
+                    return Err(invalid_data("child conversation is unavailable"));
+                }
+                let generation = self.child_history_generation(session_id, child_task_id)?;
+                (
+                    generation,
+                    self.child_body(session_id, child_task_id, generation)?,
+                )
+            }
+        };
+        self.conversation_indexes
+            .read_history(&path, &owner, generation)
+    }
+    /// 迁移控制器已完成只读准入及独立备份，临时交出唯一 Connection 以闭合旧恢复事实。
+    /// 不运行 Runtime、不开放业务队列；调用者最终取回同一 Connection 继续切换事务。
+    pub(super) fn for_history_upgrade(
+        runtime_home: &Path,
+        connection: Connection,
+    ) -> StorageResult<Self> {
+        let data = runtime_home.join(DATA_DIRECTORY);
+        let directories = [
+            data.join(SESSIONS_DIRECTORY),
+            data.join(WORKSPACES_DIRECTORY),
+            data.join(BLOBS_DIRECTORY),
+            data.join(STAGING_DIRECTORY),
+            data.join(DELETION_STAGING_DIRECTORY),
+        ];
+        for directory in &directories {
+            prepare_private_directory(directory).map_err(|source| {
+                internal_error("history upgrade directory could not be prepared", source)
+            })?;
+        }
+        Ok(Self {
+            runtime_home: runtime_home.to_path_buf(),
+            sessions_directory: directories[0].clone(),
+            workspaces_directory: directories[1].clone(),
+            blobs_directory: directories[2].clone(),
+            upload_staging_directory: directories[3].clone(),
+            deletion_staging_directory: directories[4].clone(),
+            connection,
+            unavailable_sessions: HashSet::new(),
+            unavailable_child_tasks: HashSet::new(),
+            conversation_indexes: conversation::ConversationIndexCache::default(),
+            recall_index_available: false,
+            allow_legacy_history: true,
+        })
+    }
+
     #[cfg(test)]
     pub(super) fn open(runtime_home: &Path) -> StorageResult<Self> {
         Self::open_with_progress(runtime_home, None)
@@ -58,6 +166,7 @@ impl StorageEngine {
     ) -> StorageResult<Self> {
         if let Some(progress) = progress {
             progress.send_replace(super::DatabaseStartupProgress {
+                progress: None,
                 stage: assistant_protocol::RuntimeHostStartupStage::DatabaseCheck,
                 database_version: None,
                 min_compatible_host_version: None,
@@ -154,6 +263,7 @@ impl StorageEngine {
             unavailable_child_tasks: HashSet::new(),
             conversation_indexes: conversation::ConversationIndexCache::default(),
             recall_index_available,
+            allow_legacy_history: false,
         };
         if let Some(progress) = progress {
             progress.send_modify(|current| {
@@ -183,7 +293,7 @@ impl StorageEngine {
         self.unavailable_sessions.extend(tool_image_diagnostics);
         self.pause_running_goals_for_recovery()?;
         self.backfill_session_usage()?;
-        Ok(RecoveredRuntime {
+        let mut state = RecoveredRuntime {
             devices: self.load_devices()?,
             workspaces: self.load_all_workspaces()?,
             attachments: self.load_attachments()?,
@@ -191,12 +301,24 @@ impl StorageEngine {
             inputs: self.load_inputs()?,
             session_commands: self.load_session_commands()?,
             mcp_input_selections: self.load_mcp_input_selections()?,
-            runs: self.load_runs()?,
-            child_tasks: self.load_child_tasks()?,
+            runs: self.load_unfinished_runs_scoped(None)?,
+            run_history: Vec::new(),
+            child_tasks: self.load_unfinished_child_tasks_scoped(None)?,
+            child_history: Vec::new(),
             work_plans: self.load_all_work_plans()?,
             goals: self.load_all_goals()?,
             skill_activations: self.load_skill_activations()?,
-        })
+        };
+        let available: Vec<_> = state
+            .sessions
+            .iter()
+            .filter(|session| session.conversation_state == StoredConversationState::Available)
+            .map(|session| session.session_id.clone())
+            .collect();
+        for session_id in available {
+            self.load_session_history_state(&session_id, &mut state)?;
+        }
+        Ok(state)
     }
 
     pub(super) fn create_session(
@@ -209,7 +331,13 @@ impl StorageEngine {
         let skill_catalog_json = "{}";
         let paths = self.prepare_new_session_directories(&session)?;
         let body_path = body_path(&paths.session_directory, 1);
-        create_new_private_file(&body_path)?;
+        conversation::create_empty(
+            &body_path,
+            &ConversationOwner::MainSession {
+                session_id: session.session_id.clone(),
+            },
+            1,
+        )?;
         if let Err(error) = sync_directory(&paths.session_directory) {
             remove_created_session_directories(&paths);
             return Err(error);
@@ -316,22 +444,62 @@ super::agent_shell::encode_environment(session.agent_shell_environment.as_ref())
         })
     }
 
-    pub(super) fn load_conversation(
-        &self,
+    pub(super) fn load_execution_window(
+        &mut self,
         session_id: &SessionId,
-    ) -> StorageResult<agent_types::ConversationSnapshot> {
+    ) -> StorageResult<assistant_runtime::ExecutionWindow> {
+        let owner = ConversationOwner::MainSession {
+            session_id: session_id.clone(),
+        };
+        self.ensure_no_pending_history(&owner)?;
         super::filesystem::validate_session_component(session_id)?;
         if self.unavailable_sessions.contains(session_id.as_str()) {
             return Err(invalid_data("session conversation is unavailable"));
         }
         let generation = self.session_generation(session_id)?;
-        conversation::read(&body_path(&self.session_directory(session_id)?, generation))
+        self.conversation_indexes.read_execution_window(
+            &body_path(&self.session_directory(session_id)?, generation),
+            &owner,
+            generation,
+        )
+    }
+
+    pub(super) fn load_conversation(
+        &mut self,
+        session_id: &SessionId,
+    ) -> StorageResult<agent_types::ConversationSnapshot> {
+        self.ensure_no_pending_history(&ConversationOwner::MainSession {
+            session_id: session_id.clone(),
+        })?;
+        super::filesystem::validate_session_component(session_id)?;
+        if self.unavailable_sessions.contains(session_id.as_str()) {
+            return Err(invalid_data("session conversation is unavailable"));
+        }
+        let generation = self.session_generation(session_id)?;
+        if !self.allow_legacy_history {
+            return self.conversation_indexes.read_owned(
+                &body_path(&self.session_directory(session_id)?, generation),
+                &ConversationOwner::MainSession {
+                    session_id: session_id.clone(),
+                },
+                generation,
+            );
+        }
+        self.read_owner_document(
+            &body_path(&self.session_directory(session_id)?, generation),
+            &ConversationOwner::MainSession {
+                session_id: session_id.clone(),
+            },
+            generation,
+        )
+        .map(|document| document.conversation)
     }
 
     pub(super) fn load_conversation_window(
         &mut self,
         request: ConversationWindowRequest,
     ) -> StorageResult<StoredConversationWindow> {
+        self.ensure_no_pending_history(&request.owner)?;
         let path = match &request.owner {
             ConversationOwner::MainSession { session_id } => {
                 super::filesystem::validate_session_component(session_id)?;
@@ -349,18 +517,20 @@ super::agent_shell::encode_environment(session.agent_shell_environment.as_ref())
             } => {
                 super::filesystem::validate_session_component(session_id)?;
                 super::filesystem::validate_child_task_component(child_task_id)?;
-                if self
-                    .unavailable_child_tasks
-                    .contains(child_task_id.as_str())
-                {
+                if self.unavailable_child_tasks.contains(&(
+                    session_id.as_str().to_owned(),
+                    child_task_id.as_str().to_owned(),
+                )) {
                     return Err(invalid_data("child conversation is unavailable"));
                 }
-                if self.child_generation(session_id, child_task_id)? != request.generation {
+                if self.child_history_generation(session_id, child_task_id)? != request.generation {
                     return Err(conflict("conversation generation changed"));
                 }
                 self.child_body(session_id, child_task_id, request.generation)?
             }
         };
+        self.conversation_indexes
+            .validate_owner(&path, &request.owner, request.generation)?;
         self.conversation_indexes
             .read_window(&path, request.generation, request.end, request.limit)
     }
@@ -369,6 +539,7 @@ super::agent_shell::encode_environment(session.agent_shell_environment.as_ref())
         &mut self,
         request: ConversationRawWindowRequest,
     ) -> StorageResult<StoredConversationRawWindow> {
+        self.ensure_no_pending_history(&request.owner)?;
         let path = match &request.owner {
             ConversationOwner::MainSession { session_id } => {
                 super::filesystem::validate_session_component(session_id)?;
@@ -386,28 +557,34 @@ super::agent_shell::encode_environment(session.agent_shell_environment.as_ref())
             } => {
                 super::filesystem::validate_session_component(session_id)?;
                 super::filesystem::validate_child_task_component(child_task_id)?;
-                if self
-                    .unavailable_child_tasks
-                    .contains(child_task_id.as_str())
-                {
+                if self.unavailable_child_tasks.contains(&(
+                    session_id.as_str().to_owned(),
+                    child_task_id.as_str().to_owned(),
+                )) {
                     return Err(invalid_data("child conversation is unavailable"));
                 }
-                if self.child_generation(session_id, child_task_id)? != request.generation {
+                if self.child_history_generation(session_id, child_task_id)? != request.generation {
                     return Err(conflict("conversation generation changed"));
                 }
                 self.child_body(session_id, child_task_id, request.generation)?
             }
         };
+        self.conversation_indexes
+            .validate_owner(&path, &request.owner, request.generation)?;
         let (conversation, end, total) =
             self.conversation_indexes
                 .read_raw_window(&path, request.start, request.limit)?;
         let start = request.start.min(total);
+        let history = self
+            .conversation_indexes
+            .read_history_window(&path, &conversation)?;
         Ok(StoredConversationRawWindow {
             generation: request.generation,
             start,
             end,
             total,
             conversation,
+            history,
         })
     }
 
@@ -415,6 +592,7 @@ super::agent_shell::encode_environment(session.agent_shell_environment.as_ref())
         &mut self,
         request: ConversationMessageLocationRequest,
     ) -> StorageResult<Option<StoredConversationMessageLocation>> {
+        self.ensure_no_pending_history(&request.owner)?;
         let (generation, path) = match &request.owner {
             ConversationOwner::MainSession { session_id } => {
                 super::filesystem::validate_session_component(session_id)?;
@@ -433,19 +611,21 @@ super::agent_shell::encode_environment(session.agent_shell_environment.as_ref())
             } => {
                 super::filesystem::validate_session_component(session_id)?;
                 super::filesystem::validate_child_task_component(child_task_id)?;
-                if self
-                    .unavailable_child_tasks
-                    .contains(child_task_id.as_str())
-                {
+                if self.unavailable_child_tasks.contains(&(
+                    session_id.as_str().to_owned(),
+                    child_task_id.as_str().to_owned(),
+                )) {
                     return Err(invalid_data("child conversation is unavailable"));
                 }
-                let generation = self.child_generation(session_id, child_task_id)?;
+                let generation = self.child_history_generation(session_id, child_task_id)?;
                 (
                     generation,
                     self.child_body(session_id, child_task_id, generation)?,
                 )
             }
         };
+        self.conversation_indexes
+            .validate_owner(&path, &request.owner, generation)?;
         self.conversation_indexes
             .locate_message(&path, &request.message_id)?
             .map(|(ordinal, display_ordinal)| {
@@ -485,8 +665,7 @@ super::agent_shell::encode_environment(session.agent_shell_environment.as_ref())
             .prepare(&format!("SELECT session_id, title, json_array(sessions.model_provider_instance_id, sessions.model_id), reasoning_effort, system_prompt_json, '{{}}', current_variant,
                         approval_mode, role, proxy_controller_session_id, proxy_changed_at_ms,
                         sessions.lifecycle, body_generation, message_count, created_at_ms,
-                        COALESCE((SELECT MAX(runs.finished_at_ms) FROM runs
-                                  WHERE runs.session_id = sessions.session_id), created_at_ms),
+                        sessions.updated_at_ms,
                         archived_at_ms, is_pinned, title_origin,
                         sessions.pc_output_device_id, devices.display_name,
                         sessions.materialization_key, sessions.automatic_title_pending, sessions.agent_shell_kind, sessions.agent_shell_environment_json, sessions.custom_agent_json, sessions.server_history_key, sessions.context_management_mode

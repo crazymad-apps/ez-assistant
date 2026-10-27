@@ -14,7 +14,7 @@ export const DesktopPins = observer(function DesktopPins() {
       const device = pin.device ? store.network.devices.find((item) => item.id === pin.device) : null;
       const name = device?.name ?? pin.device_name;
       const hint = pin.device && !device?.online ? " · 离线或暂不可访问" : "";
-      return <div className={styles.session_row} data-has-actions="true" data-selected={store.navigation.target_device === pin.device && store.navigation.selected_session_id === pin.session_id} key={JSON.stringify([pin.device, pin.session_id])}>
+      return <div className={styles.session_row} data-variant="pinned" data-has-actions="true" data-selected={store.navigation.target_device === pin.device && store.navigation.selected_session_id === pin.session_id} key={JSON.stringify([pin.device, pin.session_id])}>
         <button className={styles.session_open} data-navigation-action type="button" title={`${title} · ${name}${hint}`} onClick={() => void store.selectSession(pin.session_id, pin.device)}>
           {pin.device && <Icon name="desktop" size={14} />}
           <span className={styles.session_title}>{title}</span>

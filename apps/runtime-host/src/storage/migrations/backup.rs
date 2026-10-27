@@ -1,4 +1,7 @@
-//! 独立 SQLite 快照及可重新读取的核验清单；不复制附件/Conversation 文件，不执行恢复。
+//! 独立 SQLite、会话历史与配置的配套备份；不扫描项目目录，核验完成后才发布清单。
+
+#[cfg(test)]
+mod managed_tests;
 
 use std::{
     collections::BTreeMap,
@@ -16,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{MigrationError, Result};
+use crate::host_layout::files::{self, Entry};
 
 #[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(super) struct TableEvidence {
@@ -32,12 +36,18 @@ pub(super) struct DatabaseEvidence {
 
 /// 调用者持有源库读快照和进程独占锁。返回目录前重新只读连接备份并精确核验所有普通表。
 /// 出错保留独立目录供诊断，不自动覆盖/删除旧备份；清单最后写入，存在半成品不代表验证成功。
-pub(super) fn create(
+pub(super) fn create_with_progress(
     source: &Connection,
     home: &Path,
     source_path: &Path,
     target: &str,
+    mut progress: impl FnMut(
+        assistant_protocol::RuntimeHostStartupStage,
+        Option<assistant_protocol::RuntimeHostStartupProgress>,
+    ),
 ) -> Result<PathBuf> {
+    use assistant_protocol::{RuntimeHostStartupProgress, RuntimeHostStartupStage::*};
+    progress(DatabaseBackup, None);
     let expected = evidence(source)?;
     let root = home.join("backups/database");
     crate::config_source::prepare_private_directory(&root)?;
@@ -52,7 +62,17 @@ pub(super) fn create(
     {
         let backup = Backup::new(source, &mut destination)?;
         loop {
-            match backup.step(256)? {
+            let step = backup.step(256)?;
+            let pages = backup.progress();
+            progress(
+                DatabaseBackup,
+                Some(RuntimeHostStartupProgress {
+                    completed: u64::try_from(pages.pagecount - pages.remaining)
+                        .map_err(|_| MigrationError::Integrity)?,
+                    total: u64::try_from(pages.pagecount).map_err(|_| MigrationError::Integrity)?,
+                }),
+            );
+            match step {
                 StepResult::Done => break,
                 StepResult::More => {}
                 // 启动没有业务 writer；不在异常锁竞争时无限重试或写入源库补救。
@@ -64,6 +84,62 @@ pub(super) fn create(
     // Windows 的 FlushFileBuffers 需要写权限句柄，只读打开后 sync 会拒绝访问。
     crate::platform::sync_file_at(&database)?;
     verify(&database, &expected)?;
+
+    // 白名单只枚举受管主会话／child 历史，不进入 private、附件、依赖或外部工作区。
+    progress(HistoryBackup, None);
+    let managed_files = managed_inventory(home)?;
+    let total = managed_files
+        .values()
+        .filter(|entry| !matches!(entry, Entry::Directory))
+        .count() as u64;
+    let mut completed = 0;
+    progress(
+        HistoryBackup,
+        Some(RuntimeHostStartupProgress { completed, total }),
+    );
+    for (relative, entry) in &managed_files {
+        files::copy_entry(&home.join(relative), &directory.join(relative), entry)
+            .map_err(managed_files_error)?;
+        if !matches!(entry, Entry::Directory) {
+            completed += 1;
+            progress(
+                HistoryBackup,
+                Some(RuntimeHostStartupProgress { completed, total }),
+            );
+        }
+    }
+    progress(
+        BackupVerification,
+        Some(RuntimeHostStartupProgress {
+            completed: 0,
+            total: 2,
+        }),
+    );
+    if managed_inventory(home)? != managed_files {
+        return Err(MigrationError::BackupMismatch);
+    }
+    progress(
+        BackupVerification,
+        Some(RuntimeHostStartupProgress {
+            completed: 1,
+            total: 2,
+        }),
+    );
+    if managed_inventory(&directory)? != managed_files {
+        return Err(MigrationError::BackupMismatch);
+    }
+    progress(
+        BackupVerification,
+        Some(RuntimeHostStartupProgress {
+            completed: 2,
+            total: 2,
+        }),
+    );
+    for (relative, entry) in managed_files.iter().rev() {
+        if matches!(entry, Entry::Directory) {
+            super::super::sync_directory(&directory.join(relative))?;
+        }
+    }
 
     let config_path = home.join("config.toml");
     let config_hash = match fs::symlink_metadata(&config_path) {
@@ -88,7 +164,9 @@ pub(super) fn create(
         "target_version": target,
         "database": expected,
         "config_sha256": config_hash,
-        "external_files_included": false,
+        "external_files_included": true,
+        "file_scope": "session_history_only",
+        "managed_files": managed_files,
     });
     let contents = serde_json::to_vec_pretty(&manifest)?;
     let output = directory.join("manifest.json");
@@ -101,6 +179,131 @@ pub(super) fn create(
     super::super::sync_directory(&directory)?;
     super::super::sync_directory(&root)?;
     Ok(directory)
+}
+
+/// 只释放调用方本轮创建的备份目录，不枚举或清理其他备份；不能跟随顶层链接。
+pub(super) fn remove_after_upgrade(home: &Path, directory: &Path) -> Result<()> {
+    let root = home.join("backups/database");
+    if directory.parent() != Some(root.as_path()) {
+        return Err(MigrationError::InvalidPath);
+    }
+    let metadata = fs::symlink_metadata(directory)?;
+    if !metadata.is_dir() || crate::platform::is_reparse_or_link(&metadata) {
+        return Err(MigrationError::InvalidPath);
+    }
+    fs::remove_dir_all(directory)?;
+    super::super::sync_directory(&root)?;
+    Ok(())
+}
+
+#[cfg(test)]
+pub(super) fn create(
+    source: &Connection,
+    home: &Path,
+    source_path: &Path,
+    target: &str,
+) -> Result<PathBuf> {
+    create_with_progress(source, home, source_path, target, |_, _| {})
+}
+
+/// 仅备份受管历史路径的所有代次；不递归扫描会话目录，项目里的同名文件也不纳入。
+/// SQLite 及日志由 Backup API 负责，附件／工具图片等未被迁移改写的资源仍留在原位置。
+fn managed_inventory(home: &Path) -> Result<BTreeMap<PathBuf, Entry>> {
+    let mut entries = BTreeMap::new();
+    let data = Path::new(super::super::DATA_DIRECTORY);
+    if !inventory_directory(home, data, &mut entries)? {
+        return Ok(entries);
+    }
+    let staging = data.join("staging");
+    let has_staging = inventory_directory(home, &staging, &mut entries)?;
+    let roots = [
+        data.join(super::super::SESSIONS_DIRECTORY),
+        staging.join("deletions"),
+    ];
+    // 尚未提交的删除会先把整个 Session 移到 staging/deletions；升级恢复会改动其中历史。
+    // 只保全相同层级的历史文件，仍不进入该 Session 的 private／资源目录。
+    for (index, sessions) in roots.iter().enumerate() {
+        if index == 1 && !has_staging {
+            continue;
+        }
+        if !inventory_directory(home, sessions, &mut entries)? {
+            continue;
+        }
+        for session in fs::read_dir(home.join(sessions))? {
+            let session = session?;
+            if !session.file_type()?.is_dir() {
+                continue;
+            }
+            let relative = sessions.join(session.file_name());
+            inventory_directory(home, &relative, &mut entries)?;
+            inventory_history_files(home, &relative, "conversation.", &mut entries)?;
+            let children = relative.join("child-tasks");
+            if !inventory_directory(home, &children, &mut entries)? {
+                continue;
+            }
+            for child in fs::read_dir(home.join(&children))? {
+                let child = child?;
+                if !child.file_type()?.is_dir() {
+                    continue;
+                }
+                let relative = children.join(child.file_name());
+                inventory_directory(home, &relative, &mut entries)?;
+                inventory_history_files(home, &relative, "body-", &mut entries)?;
+            }
+        }
+    }
+    Ok(entries)
+}
+
+fn inventory_directory(
+    home: &Path,
+    relative: &Path,
+    entries: &mut BTreeMap<PathBuf, Entry>,
+) -> Result<bool> {
+    if !files::exists(&home.join(relative)).map_err(managed_files_error)? {
+        return Ok(false);
+    }
+    if files::inspect(&home.join(relative)).map_err(managed_files_error)? != Entry::Directory {
+        return Err(MigrationError::InvalidPath);
+    }
+    entries.insert(relative.to_owned(), Entry::Directory);
+    Ok(true)
+}
+
+fn inventory_history_files(
+    home: &Path,
+    relative: &Path,
+    prefix: &str,
+    entries: &mut BTreeMap<PathBuf, Entry>,
+) -> Result<()> {
+    for file in fs::read_dir(home.join(relative))? {
+        let file = file?;
+        let name = file.file_name();
+        let Some(generation) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(prefix))
+            .and_then(|name| name.strip_suffix(".jsonl"))
+        else {
+            continue;
+        };
+        if !generation.parse::<u64>().is_ok_and(|value| value > 0) {
+            continue;
+        }
+        let path = relative.join(name);
+        let entry = files::inspect(&home.join(&path)).map_err(managed_files_error)?;
+        if matches!(entry, Entry::Directory) {
+            return Err(MigrationError::InvalidPath);
+        }
+        entries.insert(path, entry);
+    }
+    Ok(())
+}
+
+fn managed_files_error(source: crate::host_layout::Error) -> MigrationError {
+    MigrationError::Store(super::super::internal_error(
+        "managed data backup could not be verified",
+        source,
+    ))
 }
 
 fn verify(path: &Path, expected: &DatabaseEvidence) -> Result<()> {

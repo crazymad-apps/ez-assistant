@@ -3,6 +3,7 @@
 //! `authorize` 只处理网络来源、凭据解析和 CORS。其余中间件分别约束登录、
 //! 用户身份、就绪服务和传输生命周期；页面来源与本机证明都不能替代用户身份。
 
+use assistant_runtime::request_diagnostics::{RequestPhase, request_phase};
 use axum::{
     Extension,
     body::Body,
@@ -68,6 +69,7 @@ pub(super) async fn authorize(
     mut request: Request,
     next: Next,
 ) -> Response {
+    let authentication = request_phase(RequestPhase::Authentication);
     if let Err(error) = normalize_authority(&mut request) {
         return error.into_response();
     }
@@ -91,6 +93,7 @@ pub(super) async fn authorize(
     if let Some(permit) = permit {
         request.extensions_mut().insert(permit);
     }
+    drop(authentication);
     with_cors(next.run(request).await, origin.as_deref())
 }
 
@@ -174,6 +177,7 @@ pub(super) async fn verify_enterprise(
     mut request: Request,
     next: Next,
 ) -> Response {
+    let verification = request_phase(RequestPhase::EnterpriseVerification);
     if state.access.center().is_some()
         && !permit.native
         && let Err(error) = state
@@ -186,6 +190,7 @@ pub(super) async fn verify_enterprise(
     }
     request.extensions_mut().insert(Some(permit.clone()));
     request.extensions_mut().insert(permit);
+    drop(verification);
     next.run(request).await
 }
 

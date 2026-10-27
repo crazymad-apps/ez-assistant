@@ -37,15 +37,15 @@ const MAX_SECRET_BYTES: usize = 32 * 1024;
 const MAX_STARTUP_TIMEOUT_MS: u64 = 60_000;
 
 pub(crate) struct McpConfigStore {
-    source: Arc<dyn McpConfigSource>,
-    gate: Mutex<()>,
+    pub(super) source: Arc<dyn McpConfigSource>,
+    pub(crate) gate: Arc<Mutex<()>>,
 }
 
 impl McpConfigStore {
     pub(crate) fn new(source: Arc<dyn McpConfigSource>) -> Self {
         Self {
             source,
-            gate: Mutex::new(()),
+            gate: Arc::new(Mutex::new(())),
         }
     }
 
@@ -54,6 +54,7 @@ impl McpConfigStore {
         self.snapshot_with_runtime(&BTreeMap::new()).await
     }
 
+    #[cfg(test)]
     pub(crate) async fn snapshot_with_runtime(
         &self,
         runtime: &BTreeMap<McpServerKey, McpRegistryServerProjection>,
@@ -61,27 +62,6 @@ impl McpConfigStore {
         let _gate = self.gate.lock().await;
         let loaded = self.load().await?;
         Ok(loaded.project(runtime))
-    }
-
-    pub(crate) async fn registry_candidate(&self) -> RuntimeResult<McpRegistryCandidate> {
-        let _gate = self.gate.lock().await;
-        let loaded = self.load().await?;
-        Ok(McpRegistryCandidate {
-            document_valid: loaded.mutable,
-            blocked_keys: BTreeSet::new(),
-            supplemental_diagnostics: Vec::new(),
-            configured_keys: loaded
-                .raw_servers
-                .keys()
-                .filter_map(|key| McpServerKey::new(key.clone()).ok())
-                .collect(),
-            servers: loaded
-                .servers
-                .into_iter()
-                .map(|server| (server.server_key.clone(), server))
-                .collect(),
-            diagnostics: loaded.diagnostics,
-        })
     }
 
     pub(crate) async fn preview_import(
@@ -147,6 +127,10 @@ impl McpConfigStore {
         let mut root = current.root;
         let mut servers = current.raw_servers;
         match mutation {
+            McpConfigurationMutation::PatchManaged { .. }
+            | McpConfigurationMutation::ResetManaged { .. } => {
+                return Err(RuntimeError::McpConfigInvalid);
+            }
             McpConfigurationMutation::Upsert { server } => {
                 let existing = servers
                     .get(server.server_key.as_str())
@@ -241,7 +225,7 @@ impl McpConfigStore {
             .config)
     }
 
-    async fn load(&self) -> RuntimeResult<ParsedDocument> {
+    pub(super) async fn load(&self) -> RuntimeResult<ParsedDocument> {
         match self.source.load().await {
             ConfigSourceLoad::Missing => Ok(ParsedDocument::empty()),
             ConfigSourceLoad::Document(document) => Ok(parse_document(
@@ -255,7 +239,7 @@ impl McpConfigStore {
 
 pub(crate) struct McpRegistryCandidate {
     pub(crate) document_valid: bool,
-    /// 多个插件声明同名服务时，冲突候选都不得继续运行。
+    /// 已选中的最高优先级来源配置不可用，不允许连接其他同名来源。
     pub(crate) blocked_keys: BTreeSet<McpServerKey>,
     /// 候选虽可运行，但另一管理来源存在独立故障。
     pub(crate) supplemental_diagnostics: Vec<McpDiagnosticSnapshot>,
@@ -264,16 +248,35 @@ pub(crate) struct McpRegistryCandidate {
     pub(crate) diagnostics: Vec<McpDiagnosticSnapshot>,
 }
 
-struct ParsedDocument {
-    revision: Option<String>,
-    root: Map<String, Value>,
+pub(super) struct ParsedDocument {
+    pub(super) revision: Option<String>,
+    pub(super) root: Map<String, Value>,
     raw_servers: BTreeMap<String, Value>,
     servers: Vec<McpServerConfig>,
     diagnostics: Vec<McpDiagnosticSnapshot>,
-    mutable: bool,
+    pub(super) mutable: bool,
 }
 
 impl ParsedDocument {
+    pub(super) fn candidate(&self) -> McpRegistryCandidate {
+        McpRegistryCandidate {
+            document_valid: self.mutable,
+            blocked_keys: BTreeSet::new(),
+            supplemental_diagnostics: Vec::new(),
+            configured_keys: self
+                .raw_servers
+                .keys()
+                .filter_map(|key| McpServerKey::new(key.clone()).ok())
+                .collect(),
+            servers: self
+                .servers
+                .iter()
+                .cloned()
+                .map(|server| (server.server_key.clone(), server))
+                .collect(),
+            diagnostics: self.diagnostics.clone(),
+        }
+    }
     fn empty() -> Self {
         let mut root = Map::new();
         root.insert("mcpServers".to_owned(), Value::Object(Map::new()));
@@ -287,11 +290,11 @@ impl ParsedDocument {
         }
     }
 
-    fn public_revision(&self) -> &str {
+    pub(super) fn public_revision(&self) -> &str {
         self.revision.as_deref().unwrap_or(ABSENT_REVISION)
     }
 
-    fn project(
+    pub(super) fn project(
         self,
         runtime: &BTreeMap<McpServerKey, McpRegistryServerProjection>,
     ) -> McpConfigurationSnapshot {
@@ -319,13 +322,13 @@ struct ImportedDocument {
     top_level: Map<String, Value>,
 }
 
-struct NormalizedServer {
+pub(super) struct NormalizedServer {
     raw: Map<String, Value>,
-    config: McpServerConfig,
+    pub(super) config: McpServerConfig,
     warnings: Vec<String>,
 }
 
-fn parse_document(contents: &str, revision: Option<String>) -> ParsedDocument {
+pub(super) fn parse_document(contents: &str, revision: Option<String>) -> ParsedDocument {
     let value = match serde_json::from_str::<Value>(contents) {
         Ok(value) => value,
         Err(_) => {
@@ -368,7 +371,7 @@ fn parse_document(contents: &str, revision: Option<String>) -> ParsedDocument {
     let mut servers = Vec::new();
     let mut diagnostics = root
         .keys()
-        .filter(|name| name.as_str() != "mcpServers")
+        .filter(|name| !matches!(name.as_str(), "mcpServers" | "managedServers"))
         .map(|name| unknown_field_diagnostic(None, name))
         .collect::<Vec<_>>();
     for (raw_key, value) in &server_values {
@@ -442,7 +445,8 @@ fn parse_import(contents: &str) -> ImportedDocument {
             servers.clone(),
             value
                 .into_iter()
-                .filter(|(key, _)| key != "mcpServers")
+                // 独立服务导入不能借保留未知字段的路径覆盖受管凭据。
+                .filter(|(key, _)| !matches!(key.as_str(), "mcpServers" | "managedServers"))
                 .collect(),
         ),
         Some(_) => {
@@ -506,7 +510,7 @@ fn parse_import(contents: &str) -> ImportedDocument {
     }
 }
 
-fn normalize_server(
+pub(super) fn normalize_server(
     key: &McpServerKey,
     raw: Map<String, Value>,
 ) -> Result<NormalizedServer, McpDiagnosticSnapshot> {
@@ -620,6 +624,7 @@ fn normalize_server(
     Ok(NormalizedServer {
         raw,
         config: McpServerConfig {
+            source: assistant_protocol::McpServerSource::User,
             server_key: key.clone(),
             plugin_name: None,
             plugin_sha256: None,
@@ -630,6 +635,7 @@ fn normalize_server(
             startup_timeout,
             tool_timeout,
             fingerprint,
+            removed_environment: BTreeSet::new(),
         },
         warnings,
     })
@@ -642,6 +648,7 @@ pub(super) fn plugin_server(
     raw: Map<String, Value>,
 ) -> Result<McpServerConfig, McpDiagnosticSnapshot> {
     let mut config = normalize_server(&key, raw)?.config;
+    config.source = assistant_protocol::McpServerSource::Plugin(plugin_name.clone());
     config.plugin_name = Some(plugin_name);
     config.plugin_sha256 = Some(plugin_sha256);
     Ok(config)
@@ -763,12 +770,14 @@ fn validate_all_servers(servers: &BTreeMap<String, Value>) -> RuntimeResult<()> 
     Ok(())
 }
 
-fn project_server(
+pub(super) fn project_server(
     server: McpServerConfig,
     runtime: &BTreeMap<McpServerKey, McpRegistryServerProjection>,
 ) -> McpServerSnapshot {
     let transport_kind = server.transport_kind();
-    let applied = runtime.get(&server.server_key);
+    let applied = runtime
+        .get(&server.server_key)
+        .filter(|state| state.source == server.source);
     let (target_summary, environment_keys, header_keys) = match &server.transport {
         McpServerTransportConfig::Stdio {
             command,
@@ -786,16 +795,23 @@ fn project_server(
         ),
     };
     McpServerSnapshot {
+        source: server.source,
+        managed: None,
+        shadowed_by: None,
         server_key: server.server_key,
         display_name: server.display_name,
         description: server.description,
         transport: transport_kind,
         enabled: server.enabled,
-        runtime_state: if !server.enabled {
-            McpServerRuntimeState::Disabled
-        } else {
-            applied.map_or(McpServerRuntimeState::Unavailable, |state| state.state)
-        },
+        // enabled 是保存意图；刷新前旧连接仍可能存在，不能伪报已经停止。
+        runtime_state: applied.map_or(
+            if server.enabled {
+                McpServerRuntimeState::Unavailable
+            } else {
+                McpServerRuntimeState::Disabled
+            },
+            |state| state.state,
+        ),
         tool_count: applied.map_or(0, |state| state.tool_count),
         needs_refresh: if !server.enabled {
             applied.is_some()
@@ -908,7 +924,7 @@ fn string_array(
     }
 }
 
-fn secret_map(
+pub(super) fn secret_map(
     raw: &Map<String, Value>,
     name: &'static str,
     environment: bool,

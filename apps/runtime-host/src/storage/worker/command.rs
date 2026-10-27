@@ -35,6 +35,10 @@ use tokio::sync::oneshot;
 /// 每个变体只携带业务参数和一次性回复通道；命令按 mpsc 接收顺序在同一线程执行，
 /// 因此不得在调用方假设并行数据库事务或另存一份存储状态。
 pub(super) enum Command {
+    LoadConversationHistory {
+        owner: assistant_protocol::ConversationOwner,
+        reply: oneshot::Sender<Result<assistant_runtime::StoredConversationHistory, StoreError>>,
+    },
     LoadFeedback {
         session_id: SessionId,
         reply:
@@ -134,7 +138,9 @@ pub(super) enum Command {
     },
     SearchConversationTitles {
         request: ConversationSearchRequest,
-        reply: oneshot::Sender<Result<Vec<assistant_protocol::ConversationHistoryHit>, StoreError>>,
+        reply: oneshot::Sender<
+            Result<ConversationSearchPage<assistant_protocol::ConversationHistoryHit>, StoreError>,
+        >,
     },
     LoadRuntimeGlobals {
         reply: oneshot::Sender<Result<RecoveredRuntime, StoreError>>,
@@ -304,6 +310,10 @@ pub(super) enum Command {
         replacement: ContextReplacement,
         reply: oneshot::Sender<Result<ContextReplacementResult, StoreError>>,
     },
+    ClaimInput {
+        run: StoredRun,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
     AcceptInput {
         input: Box<NewStoredInput>,
         reply: oneshot::Sender<Result<AcceptedInput, StoreError>>,
@@ -369,9 +379,17 @@ pub(super) enum Command {
         resume: GoalHeldInputResume,
         reply: oneshot::Sender<Result<GoalHeldInputResumeResult, StoreError>>,
     },
+    LoadExecutionWindow {
+        session_id: SessionId,
+        reply: oneshot::Sender<Result<assistant_runtime::ExecutionWindow, StoreError>>,
+    },
     LoadConversation {
         session_id: SessionId,
         reply: oneshot::Sender<Result<agent_types::ConversationSnapshot, StoreError>>,
+    },
+    GetConversationUsage {
+        owner: assistant_protocol::ConversationOwner,
+        reply: oneshot::Sender<Result<assistant_runtime::StoredConversationUsage, StoreError>>,
     },
     GetSessionUsage {
         session_id: SessionId,

@@ -37,6 +37,21 @@
         <Property Id="AUTOLAUNCHAPP" Secure="yes" />
         <!-- Property to forward cli args to the launched app to not lose those of the pre-update instance -->
         <Property Id="LAUNCHAPPARGS" Secure="yes" />
+        <!-- 不让文件延迟替换触发重启；提交前的本安装占用/延迟重命名检查必须通过。 -->
+        <Property Id="REBOOT" Value="ReallySuppress" />
+
+        <!-- 新包临时 EXE 无界面执行；不要求旧版已实现安装准备参数。 -->
+        <Binary Id="InstallationCoordinator" SourceFile="{{main_binary_path}}"/>
+        <Property Id="EZ_PREVIOUS_INSTALLDIR" Secure="yes">
+            <RegistrySearch Id="PreviousInstallationForHandoff" Root="HKCU"
+                            Key="Software\\{{manufacturer}}\\{{product_name}}" Name="InstallDir" Type="raw" />
+        </Property>
+        <CustomAction Id="PrepareInstallation" BinaryKey="InstallationCoordinator"
+                      ExeCommand='--prepare-installation &quot;[INSTALLDIR].&quot;'
+                      Execute="immediate" Impersonate="yes" Return="check" />
+        <CustomAction Id="VerifyInstallationOccupancy" BinaryKey="InstallationCoordinator"
+                      ExeCommand='--verify-installation &quot;[INSTALLDIR].&quot; &quot;[EZ_PREVIOUS_INSTALLDIR].&quot;'
+                      Execute="deferred" Impersonate="yes" Return="check" />
 
         {{#if allow_downgrades}}
             <MajorUpgrade Schedule="afterInstallInitialize" AllowDowngrades="yes" />
@@ -45,6 +60,10 @@
         {{/if}}
 
         <InstallExecuteSequence>
+            <!-- 仅执行安装时停止；打开 UI、旧包升级卸载及普通卸载均不重复交接。 -->
+            <Custom Action="PrepareInstallation" Before="InstallValidate">NOT REMOVE AND NOT UPGRADINGPRODUCTCODE</Custom>
+            <!-- 文件脚本执行后、提交前只检查，不再结束用户随后启动的进程；占用则回滚。 -->
+            <Custom Action="VerifyInstallationOccupancy" Before="InstallFinalize">NOT REMOVE AND NOT UPGRADINGPRODUCTCODE</Custom>
             <RemoveShortcuts>Installed AND NOT UPGRADINGPRODUCTCODE</RemoveShortcuts>
         </InstallExecuteSequence>
 
@@ -176,7 +195,32 @@
                 <File Id="UpdateTaskUninstaller" Source="uninstall-task.ps1" KeyPath="yes" Checksum="yes"/>
             </Component>
             {{/if}}
-            {{resources}}
+            <!-- Tauri 通用 resources 使用文件 KeyPath，不适用于本项目的 perUser 安装。
+                 当前随包资源为 runtime-tools；显式维护 HKCU KeyPath 和卸载目录，保留 ICE 校验。
+                 新增 bundle.resources 时须在此同步其组件，不能静默依赖通用资源片段。
+                 Candle 的 SourceDir 是主 EXE 的完整路径；Windows 规范化 \.. 后定位同目录工具。 -->
+            <Directory Id="RuntimeToolsDirectory" Name="runtime-tools">
+                <Directory Id="RuntimeToolsBin" Name="bin">
+                    <Component Id="RuntimeToolsExecutable" Guid="__RUNTIME_TOOLS_EXECUTABLE_GUID__" Win64="$(var.Win64)">
+                        <File Id="RuntimeToolsRipgrep" Source="$(var.SourceDir)\..\runtime-tools\bin\rg.exe"/>
+                        <RegistryValue Root="HKCU" Key="Software\{{manufacturer}}\{{product_name}}\Components" Name="RuntimeToolsExecutable" Type="integer" Value="1" KeyPath="yes"/>
+                        <RemoveFolder Id="RemoveRuntimeToolsBin" Directory="RuntimeToolsBin" On="uninstall"/>
+                        <RemoveFolder Id="RemoveRuntimeToolsDirectory" Directory="RuntimeToolsDirectory" On="uninstall"/>
+                    </Component>
+                </Directory>
+                <Directory Id="RuntimeToolsLicenses" Name="licenses">
+                    <Directory Id="RuntimeToolsRipgrepLicenses" Name="ripgrep">
+                        <Component Id="RuntimeToolsLicenseFiles" Guid="__RUNTIME_TOOLS_LICENSES_GUID__" Win64="$(var.Win64)">
+                            <File Id="RuntimeToolsLicenseMit" Source="$(var.SourceDir)\..\runtime-tools\licenses\ripgrep\LICENSE-MIT"/>
+                            <File Id="RuntimeToolsUnlicense" Source="$(var.SourceDir)\..\runtime-tools\licenses\ripgrep\UNLICENSE"/>
+                            <File Id="RuntimeToolsCopying" Source="$(var.SourceDir)\..\runtime-tools\licenses\ripgrep\COPYING"/>
+                            <RegistryValue Root="HKCU" Key="Software\{{manufacturer}}\{{product_name}}\Components" Name="RuntimeToolsLicenseFiles" Type="integer" Value="1" KeyPath="yes"/>
+                            <RemoveFolder Id="RemoveRuntimeToolsRipgrepLicenses" Directory="RuntimeToolsRipgrepLicenses" On="uninstall"/>
+                            <RemoveFolder Id="RemoveRuntimeToolsLicenses" Directory="RuntimeToolsLicenses" On="uninstall"/>
+                        </Component>
+                    </Directory>
+                </Directory>
+            </Directory>
             <Component Id="CMP_UninstallShortcut" Guid="*">
 
                 <Shortcut Id="UninstallShortcut"
@@ -234,9 +278,8 @@
 
             <ComponentRef Id="RegistryEntries"/>
 
-            {{#each resource_file_ids as |resource_file_id| ~}}
-                <ComponentRef Id="{{ resource_file_id }}"/>
-            {{/each~}}
+            <ComponentRef Id="RuntimeToolsExecutable"/>
+            <ComponentRef Id="RuntimeToolsLicenseFiles"/>
 
             {{#if enable_elevated_update_task}}
                 <ComponentRef Id="UpdateTask" />

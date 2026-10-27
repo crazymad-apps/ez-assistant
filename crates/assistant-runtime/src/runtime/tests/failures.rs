@@ -49,7 +49,7 @@ async fn failed_run_history_is_compacted_before_overflow_failure_settles() {
             }),
             ModelScript::FailEstablishment(ModelError::Provider {
                 message: "fixture compaction failure".to_owned(),
-                status: Some(500),
+                status: Some(400),
             }),
         ],
     ));
@@ -60,7 +60,7 @@ async fn failed_run_history_is_compacted_before_overflow_failure_settles() {
         .expect("session");
 
     let failed = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -78,7 +78,7 @@ async fn failed_run_history_is_compacted_before_overflow_failure_settles() {
     assert!(failed.error.is_some());
 
     let compact = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -102,7 +102,7 @@ async fn failed_run_history_is_compacted_before_overflow_failure_settles() {
         compact
             .error
             .as_ref()
-            .is_some_and(|error| error.message.contains("provider_overflow"))
+            .is_some_and(|error| error.message.contains("status=400"))
     );
     assert_eq!(model.take_requests().len(), 3);
     assert_eq!(
@@ -144,7 +144,7 @@ async fn threshold_compaction_replaces_history_and_continues_the_same_run() {
         .expect("session");
 
     let first_run = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -166,7 +166,7 @@ async fn threshold_compaction_replaces_history_and_continues_the_same_run() {
 
     let mut events = runtime.subscribe_events();
     let continued = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -296,7 +296,7 @@ async fn one_user_long_run_can_compact_three_times_without_replaying_tools_or_re
         .session_id;
     set_auto_approval(&runtime, &session_id).await;
     let accepted = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session_id.clone(),
@@ -450,7 +450,8 @@ async fn fault_isomorphic_usage_is_subtracted_before_the_next_model_request() {
     let normal_tool_request = &requests[1];
     let summary_request = &requests[2];
     assert_eq!(summary_request.system, normal_tool_request.system);
-    assert_eq!(summary_request.tools, normal_tool_request.tools);
+    assert!(summary_request.tools.is_empty());
+    assert_eq!(requests[3].tools, normal_tool_request.tools);
     assert_eq!(summary_request.reasoning, normal_tool_request.reasoning);
     assert_eq!(
         summary_request.provider_options,
@@ -566,7 +567,7 @@ async fn oversized_protected_tool_tail_stops_without_summarizing_the_same_input_
     let mut events = runtime.subscribe_events();
 
     let accepted = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session_id.clone(),
@@ -669,7 +670,7 @@ async fn provider_overflow_continuation_advances_the_same_run_step() {
         .expect("session");
 
     let first_run = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -691,7 +692,7 @@ async fn provider_overflow_continuation_advances_the_same_run_step() {
 
     let mut events = runtime.subscribe_events();
     let continued = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -768,7 +769,7 @@ async fn retry_exhaustion_persists_safe_attempt_diagnostics() {
         .await
         .expect("session");
     let started = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -878,7 +879,7 @@ async fn in_stream_failure_reports_establishment_and_partial_output_without_retr
         .await
         .expect("session");
     let started = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -918,7 +919,7 @@ async fn core_engine_panic_becomes_internal_failure_and_session_is_not_left_busy
         .await
         .expect("session");
     let started = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -973,7 +974,7 @@ async fn prestart_settlement_failure_faults_the_session_without_partial_commit()
         .config_registry
         .replace_document_for_test("invalid runtime configuration");
     let accepted = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             session_id: session.session_id.clone(),
             message: "must remain recoverable".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -1051,7 +1052,7 @@ async fn runtime_task_panic_settles_current_run_and_faults_session_without_wakin
         .await
         .expect("session");
     let first = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -1098,7 +1099,7 @@ async fn runtime_task_panic_settles_current_run_and_faults_session_without_wakin
     assert_eq!(model.calls.load(Ordering::Relaxed), 1);
     assert!(matches!(
         runtime
-            .submit_input(SubmitInputRequest {
+            .submit_started_input(SubmitInputRequest {
                 mode: assistant_protocol::SubmitInputMode::Normal,
                 variant: assistant_protocol::AgentVariant::Build,
                 session_id: session.session.session_id,
@@ -1123,7 +1124,7 @@ async fn blank_message_and_unknown_run_do_not_mutate_conversation() {
         .expect("session");
     assert!(matches!(
         runtime
-            .submit_input(SubmitInputRequest {
+            .submit_started_input(SubmitInputRequest {
                 mode: assistant_protocol::SubmitInputMode::Normal,
                 variant: assistant_protocol::AgentVariant::Build,
                 session_id: session.session.session_id.clone(),
@@ -1179,7 +1180,7 @@ async fn duplicate_provider_message_id_settles_as_failure_without_replaying_tool
         .session_id;
     set_auto_approval(&runtime, &session_id).await;
     let accepted = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session_id.clone(),
@@ -1235,7 +1236,7 @@ async fn uncommitted_continuation_candidate_is_absent_after_recorder_failure_and
         .session
         .session_id;
     let submitted = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session_id.clone(),
@@ -1271,4 +1272,91 @@ async fn uncommitted_continuation_candidate_is_absent_after_recorder_failure_and
     .await;
     let restored = restarted.conversation_snapshot(&session_id).await.unwrap();
     assert_eq!(restored, saved);
+}
+
+#[tokio::test]
+async fn parent_compaction_projection_failure_keeps_committed_history_without_terminal_append() {
+    let mut first = assistant_text("m1-parent-first", "old answer");
+    first.usage = Some(agent_types::TokenUsage {
+        input_tokens: 7_000,
+        output_tokens: 500,
+        total_tokens: 7_500,
+        cached_input_tokens: None,
+        reasoning_tokens: None,
+    });
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(false),
+        8_192,
+        [
+            ModelScript::Events(message_events(&first)),
+            ModelScript::Events(message_events(&assistant_text(
+                "m1-parent-summary",
+                "short summary",
+            ))),
+        ],
+    ));
+    let store = Arc::new(super::store::FaultInjectingStore::healthy());
+    let runtime = runtime_with_store(
+        model.clone(),
+        store.clone(),
+        RuntimeConfig::new(NonZeroUsize::new(128).unwrap()),
+    )
+    .await;
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    submit_completed_turn(&runtime, &session_id, "old turn").await;
+    let owner = runtime.session(&session_id).await.unwrap();
+    let damaged = owner.clone();
+    *store.context_write_hook.lock().unwrap() = Some(Box::new(move |_, committed| {
+        if committed.is_some() {
+            damaged.lock_state().unwrap().journal = None;
+        }
+    }));
+    let started = runtime
+        .submit_started_input(SubmitInputRequest {
+            session_id: session_id.clone(),
+            message: "continue".into(),
+            variant: assistant_protocol::AgentVariant::Build,
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            attachment_ids: vec![],
+            quotes: vec![],
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+        })
+        .await;
+    assert!(started.is_ok() || matches!(started, Err(RuntimeError::SnapshotStale)));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if owner.lock_state().unwrap().is_faulted {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    runtime.tasks.close();
+    assert!(runtime.tasks.wait_or_abort(Duration::from_secs(2)).await);
+    let state = store.load_session_state(&session_id).await.unwrap().state;
+    assert!(
+        state
+            .runs
+            .iter()
+            .any(|r| r.status == assistant_protocol::RunStatus::Running)
+    );
+    assert!(
+        store
+            .load_conversation(&session_id)
+            .await
+            .unwrap()
+            .messages
+            .iter()
+            .any(|m| matches!(m, ConversationMessage::ContextSummary(_)))
+    );
+    assert_eq!(model.take_requests().len(), 2);
 }

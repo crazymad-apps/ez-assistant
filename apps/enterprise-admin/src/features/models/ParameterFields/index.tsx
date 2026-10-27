@@ -142,7 +142,13 @@ export function ParameterFields(props: Props) {
                 aria-label={name}
                 disabled={props.disabled}
                 value={props.value[field]}
-                options={supports}
+                options={
+                  field === 'streaming' || field === 'tool_calls'
+                    ? supports.map((option) =>
+                        option.value === 'unknown' ? { ...option, label: '缺省（支持）' } : option,
+                      )
+                    : supports
+                }
                 onChange={(value) => set(field, value)}
               />
             </Form.Item>
@@ -171,7 +177,13 @@ export function ParameterFields(props: Props) {
                 aria-label={`工具选择 ${key}`}
                 disabled={props.disabled}
                 value={props.value.tool_choice[key]}
-                options={supports}
+                options={
+                  key === 'auto'
+                    ? supports.map((option) =>
+                        option.value === 'unknown' ? { ...option, label: '缺省（支持）' } : option,
+                      )
+                    : supports
+                }
                 onChange={(value) => set('tool_choice', { ...props.value.tool_choice, [key]: value })}
               />
             </Form.Item>

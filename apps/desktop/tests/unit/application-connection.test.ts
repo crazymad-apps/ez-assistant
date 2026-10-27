@@ -44,6 +44,17 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllGlobals(); });
 
 describe("Desktop connection entry and switching", () => {
+  it("keeps manual bundle handoff available before checking the old Host enterprise protocol", async () => {
+    native.local.mockRejectedValueOnce({ code: "runtime_upgrade_required", message: "更新将中断正在运行的会话。" });
+    const entry = new ApplicationConnectionStore(new RootStore());
+    await entry.initialize();
+    await vi.waitFor(() => expect(entry.local_state).toBe("upgrade_required"));
+    expect(native.prepare).not.toHaveBeenCalled();
+    expect(entry.update_required).toBe(false);
+    expect(native.upgrade).not.toHaveBeenCalled();
+    entry.dispose();
+  });
+
   it("releases the login lock before resource restoration and ignores its completion after logout", async () => {
     const restore = deferred<undefined>();
     resources.restore.mockReturnValueOnce(restore.promise);

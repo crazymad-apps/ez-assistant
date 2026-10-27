@@ -43,7 +43,7 @@ async fn automatic_and_manual_title_triggers_share_the_same_side_path() {
         .expect("session state")
         .automatic_title_pending = true;
     let submitted = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             session_id: session.session_id.clone(),
             message: "请实现标题旁路".to_owned(),
             variant: AgentVariant::Build,
@@ -141,7 +141,7 @@ async fn manual_title_failure_publishes_a_safe_model_diagnostic() {
         .session
         .session_id;
     let submitted = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             session_id: session_id.clone(),
             message: "需要一个可重命名的会话".to_owned(),
             variant: AgentVariant::Build,
@@ -222,7 +222,7 @@ async fn plain_text_title_continuation_never_overwrites_the_fallback_title() {
         .expect("session state")
         .automatic_title_pending = true;
     let submitted = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             session_id: session.session_id.clone(),
             message: "分析 computer use 实现".to_owned(),
             variant: AgentVariant::Build,
@@ -270,9 +270,21 @@ async fn fork_creates_an_independent_session_at_a_reliable_assistant_message() {
     let model = Arc::new(ScriptedModelService::new(
         model_capabilities(false),
         8_192,
-        [ModelScript::Events(message_events(&assistant))],
+        [
+            ModelScript::Events(message_events(&assistant)),
+            ModelScript::Events(message_events(&assistant_text(
+                "assistant-fork-continued",
+                "independent continuation",
+            ))),
+        ],
     ));
-    let runtime = runtime(model);
+    let store = Arc::new(crate::storage::VolatileRuntimeStore::default());
+    let runtime = runtime_with_store(
+        model.clone(),
+        store.clone(),
+        RuntimeConfig::new(NonZeroUsize::new(32).unwrap()),
+    )
+    .await;
     let source = runtime
         .create_session(CreateSessionRequest {
             title: Some("Source".to_owned()),
@@ -283,7 +295,7 @@ async fn fork_creates_an_independent_session_at_a_reliable_assistant_message() {
         .expect("source session")
         .session;
     let submitted = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: source.session_id.clone(),
             message: "first turn".to_owned(),
@@ -325,6 +337,61 @@ async fn fork_creates_an_independent_session_at_a_reliable_assistant_message() {
     assert_eq!(forked.title, "Source（分支）");
     assert_eq!(forked.model_selection, source.model_selection);
     assert_eq!(forked.message_count, 2);
+    let history = store
+        .load_conversation_history(assistant_protocol::ConversationOwner::MainSession {
+            session_id: forked.session_id.clone(),
+        })
+        .await
+        .unwrap()
+        .facts;
+    assert_eq!(
+        history.runs.len(),
+        1,
+        "Fork must retain reliable Run history"
+    );
+    assert_eq!(history.inputs.len(), 1);
+    assert_eq!(history.message_origins.len(), 2);
+    assert!(history.runs[0].inherited && !history.runs[0].partial);
+    assert_eq!(history.runs[0].run_id, submitted.run.run_id);
+    assert!(
+        history
+            .message_origins
+            .iter()
+            .all(|origin| origin.inherited)
+    );
+    let view = runtime
+        .get_session_view(GetSessionViewRequest {
+            session_id: forked.session_id.clone(),
+        })
+        .await
+        .unwrap()
+        .snapshot
+        .value;
+    assert!(view.active_run.is_none() && view.runs.is_empty());
+    let assistant_protocol::ConversationItem::Assistant(projected) = &view.conversation.items[1]
+    else {
+        panic!("inherited complete Assistant");
+    };
+    assert!(projected.inherited && !projected.partial);
+    assert_eq!(projected.run_id.as_ref(), Some(&submitted.run.run_id));
+    assert_eq!(
+        projected.status,
+        Some(assistant_protocol::RunStatus::Completed)
+    );
+    // 源消息 ID 确实位于可靠继承历史；分配只修改尚未提交的新身份，不写历史或恢复控制。
+    let mut collided = history.inputs[0].user_message_id.clone();
+    {
+        let target = runtime.session(&forked.session_id).await.unwrap();
+        let state = target.lock_state().unwrap();
+        crate::run::ensure_message_id_available(&mut collided, &state, &history).unwrap();
+    }
+    assert_ne!(collided, history.inputs[0].user_message_id);
+    assert!(
+        !history
+            .message_origins
+            .iter()
+            .any(|origin| origin.message_id == collided)
+    );
     let forked_conversation = runtime
         .conversation_snapshot(&forked.session_id)
         .await
@@ -339,6 +406,122 @@ async fn fork_creates_an_independent_session_at_a_reliable_assistant_message() {
             .len(),
         2
     );
+
+    let repeated = runtime
+        .fork_session(ForkSessionRequest {
+            session_id: forked.session_id.clone(),
+            fork_point: assistant_protocol::MessageId::new("assistant-fork-point").unwrap(),
+            expected_generation: 1,
+        })
+        .await
+        .expect("repeat fork of inherited history")
+        .session;
+    for target in [&forked.session_id, &repeated.session_id] {
+        assert!(matches!(
+            runtime
+                .retry_run(assistant_protocol::RetryRunRequest {
+                    session_id: target.clone(),
+                    run_id: submitted.run.run_id.clone(),
+                })
+                .await,
+            Err(RuntimeError::RunNotRetryable { .. })
+        ));
+        assert!(
+            runtime
+                .cancel_run(CancelRunRequest {
+                    session_id: target.clone(),
+                    run_id: submitted.run.run_id.clone(),
+                })
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            runtime
+                .reenter_from_user_message(ReenterFromUserMessageRequest {
+                    session_id: target.clone(),
+                    message_id: assistant_protocol::MessageId::new(
+                        history.inputs[0].user_message_id.as_str(),
+                    )
+                    .unwrap(),
+                    message: "cannot rewrite inherited execution".to_owned(),
+                    attachment_ids: Vec::new(),
+                    idempotency_key: None,
+                    variant: AgentVariant::Build,
+                })
+                .await,
+            Err(RuntimeError::InvalidRequest { .. })
+        ));
+    }
+    assert_eq!(model.take_requests().len(), 1, "Fork never runs a model");
+    let confirmation = runtime
+        .prepare_delete_session(PrepareDeleteSessionRequest {
+            session_id: source.session_id.clone(),
+        })
+        .await
+        .unwrap();
+    runtime
+        .delete_session(DeleteSessionRequest {
+            session_id: source.session_id,
+            confirmation_token: confirmation.confirmation_token,
+        })
+        .await
+        .unwrap();
+    drop(runtime);
+    let runtime = runtime_with_store(
+        model.clone(),
+        store.clone(),
+        RuntimeConfig::new(NonZeroUsize::new(32).unwrap()),
+    )
+    .await;
+    for target in [&forked.session_id, &repeated.session_id] {
+        assert_eq!(
+            store
+                .load_conversation_history(assistant_protocol::ConversationOwner::MainSession {
+                    session_id: target.clone(),
+                })
+                .await
+                .unwrap()
+                .facts,
+            history,
+            "source deletion and restart preserve each owner's facts"
+        );
+    }
+    let continuation = runtime
+        .submit_started_input(SubmitInputRequest {
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            session_id: forked.session_id.clone(),
+            message: "continue independently".to_owned(),
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+            variant: AgentVariant::Build,
+        })
+        .await
+        .unwrap();
+    assert_ne!(continuation.run.run_id, submitted.run.run_id);
+    assert_eq!(
+        wait_for_terminal(&runtime, &forked.session_id, &continuation.run.run_id)
+            .await
+            .status,
+        assistant_protocol::RunStatus::Completed
+    );
+    let continued = store
+        .load_conversation_history(assistant_protocol::ConversationOwner::MainSession {
+            session_id: forked.session_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(continued.facts.runs.len(), 2);
+    assert!(
+        continued
+            .facts
+            .runs
+            .iter()
+            .any(|run| { run.run_id == continuation.run.run_id && !run.inherited && !run.partial })
+    );
+    assert_eq!(model.take_requests().len(), 1);
 }
 
 #[tokio::test]
@@ -427,7 +610,7 @@ async fn faulted_idle_session_can_fork_reliable_history_and_be_deleted() {
         .expect("source session")
         .session;
     let submitted = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: source.session_id.clone(),
             message: "persist a reliable turn".to_owned(),
@@ -504,7 +687,7 @@ async fn first_input_generates_a_bounded_title_without_overwriting_a_user_title(
         .expect("generated session")
         .session;
     runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: generated.session_id.clone(),
             message: "\n  首行作为会话标题  \n后续正文".to_owned(),
@@ -543,7 +726,7 @@ async fn first_input_generates_a_bounded_title_without_overwriting_a_user_title(
         .await
         .expect("rename");
     runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: renamed.session_id.clone(),
             message: "不应覆盖标题".to_owned(),
@@ -712,7 +895,7 @@ async fn archived_session_is_filtered_read_only_and_can_be_restored() {
     );
     assert!(matches!(
         runtime
-            .submit_input(SubmitInputRequest {
+            .submit_started_input(SubmitInputRequest {
                 mode: assistant_protocol::SubmitInputMode::Normal,
                 variant: assistant_protocol::AgentVariant::Build,
                 session_id: session_id.clone(),
@@ -809,7 +992,7 @@ async fn active_run_blocks_archive_model_switch_and_history_reentry() {
         .expect("session");
     let session_id = created.session.session_id;
     let active = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session_id.clone(),
@@ -952,7 +1135,7 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
         .expect("replacement attachment")
         .attachment;
     let first = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session_id.clone(),
@@ -967,7 +1150,7 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
         .expect("first input");
     wait_for_terminal(&runtime, &session_id, &first.run.run_id).await;
     let second = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session_id.clone(),

@@ -84,7 +84,8 @@ fn formal_host_projects_and_controls_goal_and_work_plan_across_restart() {
             "expected_generation":blocked_view["goal"]["generation"]
         }),
     );
-    let resumed_run = string(&resumed["run"]["run_id"]);
+    assert!(resumed["run"].is_null());
+    let resumed_run = wait_for_new_run(&mut client, &blocked_session, &blocked_run);
     assert_eq!(
         client.wait_for_status(
             "resumed blocked Goal",
@@ -160,7 +161,8 @@ fn formal_host_projects_and_controls_goal_and_work_plan_across_restart() {
             "expected_generation":recovery_view["goal"]["generation"]
         }),
     );
-    let resumed_run = string(&resumed["run"]["run_id"]);
+    assert!(resumed["run"].is_null());
+    let resumed_run = wait_for_new_run(&mut client, &recovery_session, &recovery_run);
     assert_eq!(
         client.wait_for_status(
             "recovered Goal",
@@ -242,7 +244,12 @@ fn verify_long_goal_physical_state(runtime_home: &std::path::Path, session_id: &
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .expect("Goal Input counts");
-    assert_eq!(input_counts, (1, 1, 0));
+    assert_eq!(
+        input_counts,
+        (1, 0, 0),
+        "completed Input keeps only its identity"
+    );
+    assert_eq!(connection.query_row("SELECT COUNT(*) FROM inputs WHERE session_id=?1 AND (user_message_id IS NOT NULL OR accepted_at_ms IS NOT NULL OR agent_variant IS NOT NULL OR origin IS NOT NULL OR goal_id IS NOT NULL OR channel_source_json IS NOT NULL OR queued_message_json IS NOT NULL)",[session_id],|row|row.get::<_,i64>(0)).unwrap(),0);
     let completed_runs: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM runs WHERE session_id = ?1 AND status = 'completed'",
@@ -250,21 +257,42 @@ fn verify_long_goal_physical_state(runtime_home: &std::path::Path, session_id: &
             |row| row.get(0),
         )
         .expect("completed Goal Run count");
-    assert_eq!(completed_runs, 1);
+    assert_eq!(completed_runs, 0);
     drop(connection);
 
     let body = runtime_home.join(format!(
         "users/_personal/data/sessions/{session_id}/conversation.{generation}.jsonl"
     ));
     let content = fs::read_to_string(body).expect("read authoritative Goal Conversation JSONL");
-    assert_eq!(
-        i64::try_from(content.lines().count()).expect("JSONL line count fits i64"),
-        message_count
-    );
-    let messages = content
+    let records = content
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).expect("valid Goal JSONL record"))
         .collect::<Vec<_>>();
+    assert_eq!(records[0]["type"], "header");
+    assert_eq!(
+        records[0]["owner"],
+        json!({"type":"main_session","session_id":session_id})
+    );
+    assert_eq!(records[0]["format"], "ez_assistant_history");
+    assert_eq!(records[0]["generation"], generation);
+    assert!(
+        records
+            .iter()
+            .filter_map(|record| record.get("history"))
+            .filter_map(|history| history["inputs"].as_array())
+            .flatten()
+            .any(|input| input["origin"] == "user" && input["goal_binding"].is_object()),
+        "original Input origin and Goal binding must remain in file history"
+    );
+    let messages: Vec<_> = records
+        .iter()
+        .skip(1)
+        .flat_map(|record| {
+            assert_eq!(record["type"], "commit");
+            record["messages"].as_array().unwrap()
+        })
+        .collect();
+    assert_eq!(i64::try_from(messages.len()).unwrap(), message_count);
     let visible_users = messages
         .iter()
         .filter(|message| {
@@ -295,16 +323,13 @@ fn create_session(client: &mut Client, title: &str) -> String {
 }
 
 fn submit_goal(client: &mut Client, session_id: &str, message: &str, key: &str) -> Value {
-    client.runtime(
-        "submit_input",
-        json!({
-            "session_id":session_id,
-            "message":message,
-            "variant":"build",
-            "mode":"start_goal",
-            "idempotency_key":key
-        }),
-    )
+    client.submit_started_input(json!({
+        "session_id":session_id,
+        "message":message,
+        "variant":"build",
+        "mode":"start_goal",
+        "idempotency_key":key
+    }))
 }
 
 fn session_view(client: &mut Client, session_id: &str) -> Value {
@@ -344,4 +369,21 @@ fn wait_for_goal_clear(client: &mut Client, session_id: &str) -> Value {
 
 fn string(value: &Value) -> String {
     value.as_str().expect("string value").to_owned()
+}
+
+fn wait_for_new_run(client: &mut Client, session_id: &str, previous: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(12);
+    loop {
+        let list = client.runtime("list_runs", json!({"session_id":session_id}));
+        if let Some(run) = list["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|run| run["run_id"] != previous)
+        {
+            return string(&run["run_id"]);
+        }
+        assert!(Instant::now() < deadline, "resumed Goal was not claimed");
+        thread::sleep(Duration::from_millis(20));
+    }
 }

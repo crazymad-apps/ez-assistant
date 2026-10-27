@@ -55,7 +55,7 @@ async fn end_turn_blocks_preexisting_queue_and_reply_precedes_it() {
         .session
         .session_id;
     let first = runtime
-        .submit_input(input(&session, "initial"))
+        .submit_started_input(input(&session, "initial"))
         .await
         .unwrap();
     model.entered.notified().await;
@@ -66,21 +66,19 @@ async fn end_turn_blocks_preexisting_queue_and_reply_precedes_it() {
     model.released.notify_one();
     let request = pending(&runtime, &session).await;
     wait_for_terminal(&runtime, &session, &first.run.run_id).await;
-    assert_eq!(
-        runtime
-            .get_run(assistant_protocol::GetRunRequest {
-                session_id: session.clone(),
-                run_id: queued.run.run_id.clone()
-            })
-            .await
-            .unwrap()
-            .run
-            .status,
-        assistant_protocol::RunStatus::Accepted
-    );
+    assert!(queued.run.is_none());
     assert_eq!(inner.take_requests().len(), 1);
     runtime.answer_feedback(reply(&request)).await.unwrap();
-    wait_for_terminal(&runtime, &session, &queued.run.run_id).await;
+    wait_for_terminal(
+        &runtime,
+        &session,
+        &runtime
+            .wait_for_input_claim(&session, &queued.input_id)
+            .await
+            .unwrap()
+            .run_id,
+    )
+    .await;
     let requests = inner.take_requests();
     assert_eq!(requests.len(), 2);
     let user_text = |request: &ModelRequest| {
@@ -127,7 +125,7 @@ async fn concurrent_answer_and_cancel_choose_one_terminal_fact() {
         .session
         .session_id;
     let run = runtime
-        .submit_input(input(&session, "race"))
+        .submit_started_input(input(&session, "race"))
         .await
         .unwrap()
         .run;
@@ -193,7 +191,7 @@ async fn failed_publication_and_duplicate_feedback_calls_do_not_open_waits() {
             .session
             .session_id;
         let run = runtime
-            .submit_input(input(&session, "publish failure"))
+            .submit_started_input(input(&session, "publish failure"))
             .await
             .unwrap()
             .run;

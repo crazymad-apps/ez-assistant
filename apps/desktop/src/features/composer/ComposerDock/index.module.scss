@@ -226,10 +226,12 @@
   height: var(--ez-control-height);
   min-height: var(--ez-control-height);
   place-items: center;
+  padding: 0;
+  border-radius: 50%;
   color: var(--ez-on-primary);
   background: var(--ez-primary);
 
-  &[data-action="send"] svg { transform: rotate(-135deg); }
+  &[data-action="send"] svg { transform: rotate(180deg); }
   &:hover:not(:disabled) { color: var(--ez-on-primary); background: var(--ez-primary-hover); }
 }
 

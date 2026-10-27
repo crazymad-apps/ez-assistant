@@ -447,6 +447,65 @@ describe('SettingsDialog model management', () => {
     expect(screen.queryByRole('button', { name: '添加服务' })).not.toBeInTheDocument();
   });
 
+  it('keeps a shadowed plugin MCP editable and displays the authoritative source', async () => {
+    const store = mcpSettingsStore();
+    const server = managedServer(store);
+    store.settings.mcp.configuration = { ...store.settings.mcp.configuration!, servers: [{ ...server, enabled: true, shadowed_by: { type: 'user' }, managed: { ...server.managed!, configured_enabled: true } }] };
+    renderDialog(store);
+    expect(screen.getByText(/同名服务优先使用：用户添加/)).toBeVisible();
+    expect(screen.getByRole('checkbox', { name: '启用 受管服务' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: /受管服务 github/ }));
+    expect(screen.getByText(/当前配置保留，可继续编辑/)).toBeVisible();
+    expect(screen.getByRole('checkbox', { name: '启用此服务' })).toBeEnabled();
+    expect(screen.getAllByRole('button', { name: '保存' }).at(-1)).toBeEnabled();
+  });
+
+  it('uses managed identity and file revision while keeping startup fields readonly', async () => {
+    const store = mcpSettingsStore();
+    const server = managedServer(store);
+    const mutate = vi.spyOn(store.settings.mcp, 'mutate').mockResolvedValue(false);
+    const test = vi.spyOn(store.settings.mcp, 'test').mockResolvedValue();
+    renderDialog(store);
+    fireEvent.click(screen.getByRole('button', { name: /受管服务 github/ }));
+    expect(screen.queryByRole('button', { name: '删除服务…' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('启动命令')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('启用此服务')).not.toBeChecked();
+    expect(screen.getByLabelText('Access key')).toHaveValue('');
+    fireEvent.change(screen.getByLabelText('环境变量值 1'), { target: { value: 'new-value' } });
+    expect(screen.getByRole('button', { name: '刷新此服务' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: '测试连接' }));
+    expect(test).toHaveBeenCalledWith(expect.objectContaining({ target: { source: server.source, server_key: 'github' }, expected_revision: 'plugin-file-r1', environment: { CUSTOM: { mode: 'replace', value: 'new-value' } } }));
+    runInAction(() => { store.settings.mcp.configuration = { ...store.settings.mcp.configuration!, revision: 'background-root-r2', servers: [{ ...server, managed: { ...server.managed!, revision: 'background-file-r2' } }] }; });
+    fireEvent.click(screen.getAllByRole('button', { name: /^保存$/ }).at(-1)!);
+    await waitFor(() => expect(mutate).toHaveBeenCalledWith('plugin-file-r1', { type: 'patch_managed', payload: expect.objectContaining({ enabled: false, expected_definition_digest: 'definition-1', target: { source: server.source, server_key: 'github' } }) }));
+  });
+
+  it('restores managed defaults separately from removing a value', async () => {
+    const store = mcpSettingsStore();
+    managedServer(store);
+    const mutate = vi.spyOn(store.settings.mcp, 'mutate').mockResolvedValue(true);
+    renderDialog(store);
+    fireEvent.click(screen.getByRole('button', { name: /受管服务 github/ }));
+    fireEvent.click(screen.getByRole('button', { name: '恢复默认 CUSTOM' }));
+    await waitFor(() => expect(mutate).toHaveBeenCalledWith('plugin-file-r1', { type: 'reset_managed', payload: expect.objectContaining({ enabled: false, environment: ['CUSTOM'], headers: [] }) }));
+  });
+
+  it('saves bound parameters through the original plugin entry and protects drafts', async () => {
+    const store = mcpSettingsStore();
+    const server = managedServer(store);
+    const save = vi.spyOn(store.settings.mcp, 'saveParameter').mockResolvedValue(server);
+    renderDialog(store);
+    fireEvent.click(screen.getByRole('button', { name: /受管服务 github/ }));
+    fireEvent.change(screen.getByLabelText('Access key'), { target: { value: 'parameter-secret' } });
+    expect(screen.getAllByRole('button', { name: /^保存$/ }).at(-1)).toBeDisabled();
+    fireEvent.click(screen.getAllByRole('button', { name: /^保存$/ })[0]!);
+    await waitFor(() => expect(save).toHaveBeenCalledWith(server, 'key', 'parameter-secret'));
+    expect(screen.getByLabelText('Access key')).toHaveValue('');
+    fireEvent.change(screen.getByLabelText('环境变量值 1'), { target: { value: 'unsaved' } });
+    fireEvent.click(screen.getByRole('button', { name: '返回 MCP 列表' }));
+    expect(screen.getByRole('dialog', { name: '放弃未保存的修改？' })).toBeVisible();
+  });
+
   it('asks before abandoning MCP changes and cancels connection tests on leave', async () => {
     const store = mcpSettingsStore();
     const cancel = vi.spyOn(store.settings.mcp, 'cancelTest');
@@ -669,7 +728,6 @@ describe('SettingsDialog model management', () => {
 
   it('manages Gateway access and confirms a visible device candidate without CLI state', async () => {
     const store = settingsStore();
-    store.settings.page = 'devices';
     store.device_gateway.stale = false;
     store.device_gateway.snapshot = {
       enabled: true,
@@ -701,6 +759,7 @@ describe('SettingsDialog model management', () => {
     const access = vi.spyOn(store.device_gateway, 'setAccessEnabled').mockResolvedValue(true);
     const confirm = vi.spyOn(store.device_gateway, 'confirmPairing').mockResolvedValue(true);
     renderDialog(store);
+    fireEvent.click(within(screen.getByRole('navigation', { name: '设置页面' })).getByRole('button', { name: '智能终端' }));
 
     expect(screen.getByRole('heading', { name: '智能终端' })).toBeVisible();
     expect(screen.queryByText('管理局域网智能终端接入、配对和设备身份')).not.toBeInTheDocument();
@@ -1036,6 +1095,7 @@ function mcpSettingsStore(): RootStore {
     servers: [
       {
         server_key: 'github',
+        source: { type: 'user' },
         display_name: 'GitHub',
         description: '管理 Issue',
         transport: 'stdio',
@@ -1200,4 +1260,10 @@ function onlineModel(): import('@ez-assistant/protocol').DiscoveredModel {
       default_reasoning_effort: null,
     },
   };
+}
+
+function managedServer(store: RootStore) {
+  const server = { ...store.settings.mcp.configuration!.servers[0]!, source: { type: 'plugin' as const, name: 'fixture-plugin' }, display_name: '受管服务', enabled: false, environment_keys: ['TOKEN', 'CUSTOM'], managed: { revision: 'plugin-file-r1', definition_digest: 'definition-1', configured_enabled: false, source_enabled: true, source_available: true, configuration_ready: true, environment: { TOKEN: true, CUSTOM: false }, headers: {}, parameter_bindings: { TOKEN: ['key'] }, parameters: [{ name: 'key', label: 'Access key', required: true, secret: true, is_set: true }], plugin_settings_revision: 'settings-r1', plugin_sha256: 'fixture-sha' } };
+  store.settings.mcp.configuration = { ...store.settings.mcp.configuration!, servers: [server] };
+  return server;
 }

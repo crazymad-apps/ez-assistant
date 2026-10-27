@@ -684,7 +684,7 @@ async fn submitting_input_uses_the_local_catalog_without_discovery() {
     let (runtime, factory, _, session_id) = online_execution_fixture().await;
     let before = factory.fetches.load(Ordering::SeqCst);
     let submitted = runtime
-        .submit_input(input_request(&session_id, "local catalog execution"))
+        .submit_started_input(input_request(&session_id, "local catalog execution"))
         .await
         .unwrap();
     wait_for_terminal(&runtime, &session_id, &submitted.run.run_id).await;
@@ -714,7 +714,7 @@ async fn runtime_shutdown_after_local_preparation_does_not_discover() {
     let (runtime, factory, _, session_id) = online_execution_fixture().await;
     let before = factory.fetches.load(Ordering::SeqCst);
     let submitted = runtime
-        .submit_input(input_request(&session_id, "pending"))
+        .submit_started_input(input_request(&session_id, "pending"))
         .await
         .unwrap();
     wait_for_terminal(&runtime, &session_id, &submitted.run.run_id).await;
@@ -763,7 +763,7 @@ async fn fixed_execution_does_not_fetch_an_offline_catalog() {
     factory.offline.store(true, Ordering::SeqCst);
     let before = factory.fetches.load(Ordering::SeqCst);
     let submitted = runtime
-        .submit_input(input_request(&session_id, "fixed offline execution"))
+        .submit_started_input(input_request(&session_id, "fixed offline execution"))
         .await
         .unwrap();
     wait_for_terminal(&runtime, &session_id, &submitted.run.run_id).await;
@@ -818,7 +818,7 @@ async fn title_compaction_and_goal_reuse_session_parameters_without_discovery() 
         .session
         .session_id;
     let input = runtime
-        .submit_input(input_request(&session_id, "question"))
+        .submit_started_input(input_request(&session_id, "question"))
         .await
         .unwrap();
     wait_for_terminal(&runtime, &session_id, &input.run.run_id).await;
@@ -1037,7 +1037,7 @@ async fn personal_history_policy_is_validated_and_binding_survives_only_unchange
         .unwrap()
         .session;
     let input = runtime
-        .submit_input(input_request(&session.session_id, "history scope"))
+        .submit_started_input(input_request(&session.session_id, "history scope"))
         .await
         .unwrap();
     wait_for_terminal(&runtime, &session.session_id, &input.run.run_id).await;
@@ -1263,7 +1263,7 @@ async fn history_model_switch_epochs_survive_aba_and_default_switches_only_affec
 async fn first_run_records_mode_and_recovery_reads_current_parameters() {
     let (runtime, _, _, session_id) = online_execution_fixture().await;
     let submitted = runtime
-        .submit_input(input_request(&session_id, "freeze context mechanism"))
+        .submit_started_input(input_request(&session_id, "freeze context mechanism"))
         .await
         .unwrap();
     wait_for_terminal(&runtime, &session_id, &submitted.run.run_id).await;
@@ -1398,4 +1398,60 @@ async fn same_model_reapplication_changes_frozen_mode_and_invalidates_history() 
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn optional_output_limit_and_default_streaming_reach_the_real_run_request() {
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(true),
+        8192,
+        [ModelScript::Events(message_events(&assistant_text(
+            "answer",
+            "upstream default output",
+        )))],
+    ));
+    let factory = Arc::new(DiscoveryFactory {
+        model: Some(model.clone()),
+        ..Default::default()
+    });
+    let runtime = fixture(factory);
+    let selection = create(&runtime).await;
+    runtime
+        .refresh_provider_models(selection.provider_instance_id.clone())
+        .await
+        .unwrap();
+    let mut fixed = model_fixture::parameters();
+    fixed.max_output_tokens = ModelTokenLimit::Unknown;
+    fixed.streaming = ModelFeatureSupport::Unknown;
+    runtime
+        .save_model_fixed_config(SaveModelFixedConfigRequest {
+            origin: assistant_protocol::ModelConfigOrigin::Online,
+            selection: selection.clone(),
+            parameters: fixed,
+        })
+        .await
+        .unwrap();
+    runtime
+        .set_default_model(assistant_protocol::SetDefaultModelRequest {
+            selection: Some(selection),
+        })
+        .await
+        .unwrap();
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    let input = runtime
+        .submit_started_input(input_request(&session_id, "question"))
+        .await
+        .unwrap();
+    wait_for_terminal(&runtime, &session_id, &input.run.run_id).await;
+    let requests = model.take_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].generation.max_output_tokens, None);
+    let transcript =
+        serde_json::to_string(&runtime.conversation_snapshot(&session_id).await.unwrap()).unwrap();
+    assert!(transcript.contains("upstream default output"));
 }

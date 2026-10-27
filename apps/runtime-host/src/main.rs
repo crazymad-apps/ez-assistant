@@ -3,6 +3,7 @@
 mod access;
 mod attachment_hash;
 mod build_info;
+mod builtin;
 mod config;
 mod config_source;
 mod desktop_media;
@@ -19,6 +20,7 @@ mod platform;
 mod plugins;
 mod recall_reference_key;
 mod resources;
+mod runtime_tools;
 mod server;
 mod speech;
 mod storage;
@@ -76,6 +78,11 @@ async fn run(action: CliAction) -> Result<(), Box<dyn Error>> {
             );
             Ok(())
         }
+        CliAction::Mcp(arguments) => match arguments.command {
+            config::BuiltinMcpCommand::DeepseekSearch { stdio: _ } => {
+                builtin::deepseek_search::run_stdio().await
+            }
+        },
         CliAction::Access(arguments) => access::offline::run(arguments).await,
         CliAction::Launch(arguments) => {
             let config = LaunchConfig::resolve(arguments)?;

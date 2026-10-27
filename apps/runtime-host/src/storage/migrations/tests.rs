@@ -7,7 +7,7 @@ use super::*;
 
 #[test]
 fn compiled_release_has_complete_migration_manifest() {
-    validate_manifest(env!("CARGO_PKG_VERSION"), &manifest()).unwrap();
+    validate_manifest(env!("CARGO_PKG_VERSION"), &product_manifest()).unwrap();
 }
 
 fn db(home: &Path) -> Connection {
@@ -52,6 +52,7 @@ fn validate_baseline(connection: &Connection) -> Result<()> {
 }
 fn first() -> Migration {
     Migration {
+        key: "release",
         version: BASELINE,
         min_compatible_host_version: None,
         rebuilds_referenced_tables: false,
@@ -119,6 +120,7 @@ fn rebuild_manifest(
     [
         first(),
         Migration {
+            key: "release",
             version: "0.25.2",
             min_compatible_host_version: Some("0.25.2"),
             rebuilds_referenced_tables: false,
@@ -127,6 +129,7 @@ fn rebuild_manifest(
             validate: empty,
         },
         Migration {
+            key: "release",
             version: "0.25.3",
             min_compatible_host_version: Some("0.25.2"),
             rebuilds_referenced_tables: true,
@@ -347,7 +350,7 @@ fn unversioned_and_empty_ledger_preserve_history_and_verify_independent_backup()
         let manifest: serde_json::Value =
             serde_json::from_slice(&fs::read(backup_path.join("manifest.json")).unwrap()).unwrap();
         assert_eq!(manifest["database"]["tables"]["sessions"]["rows"], 1);
-        assert_eq!(manifest["external_files_included"], false);
+        assert_eq!(manifest["external_files_included"], true);
         assert!(
             connection
                 .execute("UPDATE sessions SET model_id='orphan'", [])
@@ -403,6 +406,7 @@ fn skips_committed_prefix_and_records_explicit_empty_versions_in_semver_order() 
     let manifest = [
         first(),
         Migration {
+            key: "release",
             version: "0.25.2",
             min_compatible_host_version: Some("0.25.2"),
             rebuilds_referenced_tables: false,
@@ -411,6 +415,7 @@ fn skips_committed_prefix_and_records_explicit_empty_versions_in_semver_order() 
             validate: empty,
         },
         Migration {
+            key: "release",
             version: "0.25.10",
             min_compatible_host_version: Some("0.25.2"),
             rebuilds_referenced_tables: false,
@@ -434,6 +439,7 @@ fn failure_rolls_back_current_sql_and_ledger_then_stops_successors() {
     let manifest = [
         first(),
         Migration {
+            key: "release",
             version: "0.25.2",
             min_compatible_host_version: Some("0.25.2"),
             rebuilds_referenced_tables: false,
@@ -442,6 +448,7 @@ fn failure_rolls_back_current_sql_and_ledger_then_stops_successors() {
             validate: empty,
         },
         Migration {
+            key: "release",
             version: "0.25.3",
             min_compatible_host_version: Some("0.25.2"),
             rebuilds_referenced_tables: false,
@@ -480,6 +487,7 @@ fn failure_rolls_back_current_sql_and_ledger_then_stops_successors() {
         &[
             first(),
             Migration {
+                key: "release",
                 version: "0.25.2",
                 min_compatible_host_version: Some("0.25.2"),
                 rebuilds_referenced_tables: false,
@@ -610,6 +618,7 @@ fn validation_failure_and_illegal_transaction_controls_roll_back_initial_ledger(
                 home.path(),
                 BASELINE,
                 &[Migration {
+                    key: "release",
                     version: BASELINE,
                     min_compatible_host_version: None,
                     rebuilds_referenced_tables: false,
@@ -655,6 +664,7 @@ fn rejects_ledger_gaps_unknown_versions_invalid_values_and_newer_database_before
             &[
                 first(),
                 Migration {
+                    key: "release",
                     version: "0.25.2",
                     min_compatible_host_version: Some("0.25.2"),
                     rebuilds_referenced_tables: false,
@@ -678,6 +688,7 @@ fn invalid_manifest_is_rejected_without_creating_database() {
         vec![],
         vec![first(), first()],
         vec![Migration {
+            key: "release",
             version: "0.25.2",
             min_compatible_host_version: Some("0.25.2"),
             rebuilds_referenced_tables: false,
@@ -815,6 +826,7 @@ fn validation_cannot_mutate_business_rows_or_ledger() {
                 home.path(),
                 BASELINE,
                 &[Migration {
+                    key: "release",
                     version: BASELINE,
                     min_compatible_host_version: None,
                     rebuilds_referenced_tables: false,
@@ -846,6 +858,7 @@ fn ledger_with_missing_middle_release_or_wrong_shape_is_rejected() {
     let manifest = [
         first(),
         Migration {
+            key: "release",
             version: "0.25.2",
             min_compatible_host_version: Some("0.25.2"),
             rebuilds_referenced_tables: false,
@@ -854,6 +867,7 @@ fn ledger_with_missing_middle_release_or_wrong_shape_is_rejected() {
             validate: empty,
         },
         Migration {
+            key: "release",
             version: "0.25.3",
             min_compatible_host_version: Some("0.25.2"),
             rebuilds_referenced_tables: false,
@@ -884,6 +898,7 @@ fn controlled_upgrade_reports_backup_and_failed_sql_without_enabling_runtime() {
     let startup = crate::http::StartupStateHandle::new();
     let mut stages = Vec::new();
     let failing = Migration {
+        key: "release",
         version: BASELINE,
         min_compatible_host_version: None,
         rebuilds_referenced_tables: false,
@@ -912,6 +927,8 @@ fn controlled_upgrade_reports_backup_and_failed_sql_without_enabling_runtime() {
         vec![
             RuntimeHostStartupStage::DatabaseCheck,
             RuntimeHostStartupStage::DatabaseBackup,
+            RuntimeHostStartupStage::HistoryBackup,
+            RuntimeHostStartupStage::BackupVerification,
             RuntimeHostStartupStage::DatabaseMigration
         ]
     );
@@ -1126,5 +1143,179 @@ fn f04_upgrade_preserves_source_and_has_verified_independent_backup() {
             .join(DATABASE_FILE)
             .display(),
         backup.display()
+    );
+}
+
+/// 正式启动入口的生命周期回归；仅新建无用户数据的隔离 Home。
+fn cleanup_home() -> tempfile::TempDir {
+    let base = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../.runtime-test/f02-backup-cleanup-20261022");
+    fs::create_dir_all(&base).unwrap();
+    tempfile::Builder::new()
+        .prefix("upgrade-")
+        .tempdir_in(base)
+        .unwrap()
+}
+
+#[test]
+fn product_upgrade_removes_only_its_backup_after_verified_success() {
+    use assistant_protocol::RuntimeHostStartupStage;
+    let home = cleanup_home();
+    align(home.path(), |_| {}).unwrap();
+    let source = db(home.path());
+    source
+        .execute_batch("DROP TABLE conversation_usage_snapshots")
+        .unwrap();
+    assert_eq!(
+        source
+            .execute(
+                "DELETE FROM schema_migrations WHERE migration_key='conversation_usage_snapshots_v1'",
+                []
+            )
+            .unwrap(),
+        1
+    );
+    let expected = backup::evidence(&source).unwrap();
+    let ledger_rows: i64 = source
+        .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    drop(source);
+    let history = home
+        .path()
+        .join("data/sessions/fixture/conversation.1.jsonl");
+    fs::create_dir_all(history.parent().unwrap()).unwrap();
+    fs::write(&history, b"unmodified fixture history\n").unwrap();
+    let prior = home.path().join("backups/database/upgrade-prior");
+    fs::create_dir_all(&prior).unwrap();
+    fs::write(prior.join("preserve"), b"earlier backup").unwrap();
+    let mut verified = None;
+    align(home.path(), |stage| {
+        if stage.stage == RuntimeHostStartupStage::DatabaseMigration && verified.is_none() {
+            let current = fs::read_dir(home.path().join("backups/database"))
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| path != &prior)
+                .unwrap();
+            let saved = Connection::open_with_flags(
+                current.join("runtime.sqlite3"),
+                OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .unwrap();
+            backup::check_integrity(&saved).unwrap();
+            assert_eq!(backup::evidence(&saved).unwrap(), expected);
+            assert_eq!(
+                saved
+                    .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                ledger_rows
+            );
+            assert!(current.join("manifest.json").is_file());
+            assert_eq!(
+                fs::read(current.join("data/sessions/fixture/conversation.1.jsonl")).unwrap(),
+                fs::read(&history).unwrap()
+            );
+            verified = Some(current);
+        }
+    })
+    .unwrap();
+    assert!(
+        !verified
+            .expect("verified backup existed before migration")
+            .exists()
+    );
+    assert_eq!(
+        fs::read_dir(home.path().join("backups/database"))
+            .unwrap()
+            .count(),
+        1
+    );
+    assert_eq!(fs::read(prior.join("preserve")).unwrap(), b"earlier backup");
+    let source = db(home.path());
+    backup::check_integrity(&source).unwrap();
+    assert_eq!(
+        source
+            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        ledger_rows + 1
+    );
+    assert_eq!(
+        source
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE migration_key='conversation_usage_snapshots_v1'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+    let mut actual = backup::evidence(&source).unwrap();
+    let mut original = expected;
+    actual.tables.remove("schema_migrations");
+    actual.tables.remove("conversation_usage_snapshots");
+    original.tables.remove("schema_migrations");
+    assert_eq!(
+        actual.tables, original.tables,
+        "existing table rows and fields remain unchanged"
+    );
+    drop(source);
+    align(home.path(), |stage| {
+        assert_ne!(stage.stage, RuntimeHostStartupStage::DatabaseBackup)
+    })
+    .unwrap();
+    assert_eq!(fs::read(&history).unwrap(), b"unmodified fixture history\n");
+    assert_eq!(fs::read(prior.join("preserve")).unwrap(), b"earlier backup");
+}
+
+#[test]
+fn product_upgrade_failure_preserves_verified_backup_and_source() {
+    let home = cleanup_home();
+    align(home.path(), |_| {}).unwrap();
+    let source = db(home.path());
+    source
+        .execute_batch("DROP TABLE conversation_usage_snapshots")
+        .unwrap();
+    assert_eq!(
+        source
+            .execute(
+                "DELETE FROM schema_migrations WHERE migration_key='conversation_usage_snapshots_v1'",
+                []
+            )
+            .unwrap(),
+        1
+    );
+    source.execute_batch("CREATE TRIGGER fail_upgrade_fixture BEFORE INSERT ON schema_migrations WHEN NEW.migration_key='conversation_usage_snapshots_v1' BEGIN SELECT RAISE(ABORT,'isolated migration fixture'); END;").unwrap();
+    let expected = backup::evidence(&source).unwrap();
+    drop(source);
+    let error = align(home.path(), |_| {}).unwrap_err();
+    let MigrationError::VersionFailed {
+        backup: Some(saved),
+        ..
+    } = error
+    else {
+        panic!("expected migration failure with backup");
+    };
+    let backup = Connection::open_with_flags(
+        saved.join("runtime.sqlite3"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    backup::check_integrity(&backup).unwrap();
+    assert_eq!(backup::evidence(&backup).unwrap(), expected);
+    assert!(saved.join("manifest.json").is_file());
+    let source = db(home.path());
+    assert_eq!(backup::evidence(&source).unwrap(), expected);
+    assert_eq!(
+        source
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE migration_key='conversation_usage_snapshots_v1'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
     );
 }

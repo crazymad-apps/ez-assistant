@@ -407,6 +407,7 @@ test("loads real workspaces and sessions from the temporary Runtime Host", async
   const forked_title = `${renamed_title}（分支）`;
   await expect(session_header.getByRole("button", { name: forked_title })).toBeVisible();
   await expect(page.getByText("离线回复：FIRST_CASE", { exact: true })).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: "继承 · 已完成" }).first()).toBeVisible();
 
   await session_header.getByRole("button", { name: "更多会话操作" }).click();
   await page.getByRole("menuitem", { name: "永久删除" }).click();

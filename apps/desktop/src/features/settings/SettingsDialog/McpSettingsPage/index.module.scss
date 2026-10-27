@@ -43,7 +43,7 @@
 .connection_field input { height: var(--ez-control-height); }
 .inline_row { flex-wrap: wrap; }
 .inline_row input { flex: 1; }
-.secret_row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr) auto; gap: 8px; }
+.secret_row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr) auto auto; gap: 8px; }
 .timeout_fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 12px 0; }
 .actions { margin: 18px 0; flex-wrap: wrap; }
 .actions span { flex: 1; }

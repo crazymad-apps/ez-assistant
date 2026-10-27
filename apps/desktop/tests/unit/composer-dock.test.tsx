@@ -1542,11 +1542,16 @@ describe("ComposerDock", () => {
     expect(desktop.querySelector("svg")).toHaveAttribute("data-icon", "desktop");
     expect(device.querySelector("svg")).toHaveAttribute("data-icon", "device");
     expect(within(menu).queryByRole("menuitem", { name: "离线终端" })).not.toBeInTheDocument();
-    expect(within(menu).queryByRole("menuitem", { name: "管理智能终端" })).not.toBeInTheDocument();
+    expect(within(menu).getByRole("menuitem", { name: "管理智能终端" })).toBeVisible();
     expect(menu.querySelector("small")).not.toBeInTheDocument();
 
     await user.click(device);
     expect(set_hosting).toHaveBeenCalledWith("device-1");
+
+    await user.click(trigger);
+    await user.click(screen.getByRole("menuitem", { name: "管理智能终端" }));
+    expect(store.settings.is_open).toBe(true);
+    expect(store.settings.page).toBe("devices");
   });
 });
 
@@ -1677,6 +1682,8 @@ function sessionView(overrides: Readonly<{
 function childTaskItem(): ChildTaskTreeItemSnapshot {
   return {
     task: {
+      inherited: false,
+      body_unavailable: false,
       child_task_id: "child-1",
       session_id: "session-1",
       parent_run_id: "run-1",

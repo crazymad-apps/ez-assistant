@@ -109,7 +109,7 @@ impl VolatileRuntimeStore {
                     }
                     let product_history = state
                         .child_conversations
-                        .get(&child_task_id)
+                        .get(&(session_id.clone(), child_task_id.clone()))
                         .ok_or_else(|| conflict("child conversation does not exist"))?;
                     let merged = super::super::merge_context_replacement_with_product_history(
                         product_history,
@@ -123,7 +123,7 @@ impl VolatileRuntimeStore {
                     })?;
                     state
                         .child_conversations
-                        .insert(child_task_id.clone(), merged);
+                        .insert((session_id.clone(), child_task_id.clone()), merged);
                     let task = state
                         .child_tasks
                         .get_mut(&child_task_id)
@@ -134,11 +134,13 @@ impl VolatileRuntimeStore {
                         .checked_add(u64::from(!native))
                         .ok_or_else(|| conflict("child conversation generation is exhausted"))?;
                     task.message_count = message_count;
-                    ContextReplacementResult {
+                    let result = ContextReplacementResult {
                         source_generation,
                         result_generation: task.body_generation,
                         product_message_count: message_count,
-                    }
+                    };
+                    state.record_child_history(&child_task_id, &[], None)?;
+                    result
                 }
                 ContextReplacementTarget::IdleSession {
                     session_id,
@@ -236,11 +238,15 @@ impl VolatileRuntimeStore {
                     return Err(conflict("shell switch session does not exist"));
                 }
             }
-            if state.runs.contains_key(&commit.run_id) {
-                let run = state.runs.get(&commit.run_id).expect("checked run");
-                if run.input_id != commit.input_id || run.status != RunStatus::Accepted {
-                    return Err(conflict("run cannot start"));
-                }
+            let run = state
+                .runs
+                .get(&commit.run_id)
+                .ok_or_else(|| conflict("Input has not been claimed"))?;
+            if run.session_id != commit.session_id
+                || run.input_id != commit.input_id
+                || run.status != RunStatus::Accepted
+            {
+                return Err(conflict("run cannot start"));
             }
             let message = commit.message.map(ConversationMessage::User);
             if let Some(message) = message.as_ref() {
@@ -287,6 +293,7 @@ impl VolatileRuntimeStore {
                     .expect("checked session")
                     .agent_shell_kind = Some(target);
             }
+            state.record_run_history(&commit.run_id)?;
             Ok(())
         })
     }
@@ -304,11 +311,7 @@ impl VolatileRuntimeStore {
                 return Err(conflict("session command result message is invalid"));
             }
             let mut state = self.lock()?;
-            let existing = state
-                .session_commands
-                .get(&commit.input_id)
-                .cloned()
-                .ok_or_else(|| conflict("session command does not exist"))?;
+            let existing = state.command_projection(&commit.session_id, &commit.input_id)?;
             if !commit.result.matches_command(&existing.command)
                 || existing.session_id != commit.session_id
                 || existing.user_message_id != commit.message.id
@@ -389,7 +392,13 @@ impl VolatileRuntimeStore {
                 .expect("checked command");
             stored.state = StoredSessionCommandState::Committed;
             stored.result = Some(commit.result);
-            Ok(stored.clone())
+            let stored = stored.clone();
+            let history = state.histories.entry(commit.session_id).or_default();
+            history.commands.push(stored.clone());
+            history.normalize();
+            // 正文与结果已经在同一独占提交内冻结；只保留最小接纳身份供幂等读取。
+            state.session_commands.remove(&commit.input_id);
+            Ok(stored)
         })
     }
 }

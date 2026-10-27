@@ -1,4 +1,5 @@
-import { copyFile, mkdir, open } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { copyFile, cp, mkdir, open, rm } from "node:fs/promises";
 import { arch, platform } from "node:process";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
@@ -57,4 +58,15 @@ function resolveTargetTriple(currentPlatform, currentArch) {
     return "x86_64-unknown-linux-gnu";
   }
   throw new Error(`Sidecar packaging is not configured for ${currentPlatform}/${currentArch}`);
+}
+
+// 随包工具是资源目录，避免 Linux 安装时占用系统 /usr/bin/rg。
+const tools = resolve(outputDirectory, "runtime-tools");
+await rm(tools, { recursive: true, force: true });
+await cp(resolve(dirname(source), "runtime-tools"), tools, { recursive: true });
+if (targetTriple.endsWith("apple-darwin")) {
+  const identity = process.env.APPLE_SIGNING_IDENTITY ?? "-";
+  execFileSync("codesign", ["--force", "--sign", identity,
+    ...(identity === "-" ? [] : ["--options", "runtime", "--timestamp"]),
+    resolve(tools, "bin/rg")], { stdio: "inherit" });
 }

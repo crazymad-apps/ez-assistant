@@ -175,11 +175,12 @@ impl AssistantRuntime {
     fn publish_provider_configuration(&self, provider: Arc<StoredProvider>) -> RuntimeResult<()> {
         // Arc 身份也代表该实例的固定设置接纳点。无目录／固定记录缓存，无额外 revision 字段；
         // 任一固定记录变更都会使该实例正在准备的请求重试，覆盖“原先无记录期间新增”。
-        self.managed_models_mut()?.providers.insert(
-            provider.provider_instance_id.clone(),
-            Arc::new(provider.as_ref().clone()),
-        );
-        self.publish(RuntimeEvent::ConfigChanged);
-        Ok(())
+        self.event_sender.publish_transition(|| {
+            self.managed_models_mut()?.providers.insert(
+                provider.provider_instance_id.clone(),
+                Arc::new(provider.as_ref().clone()),
+            );
+            Ok(((), Some(RuntimeEvent::ConfigChanged)))
+        })
     }
 }

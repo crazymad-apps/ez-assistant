@@ -6,6 +6,37 @@ use std::{
 };
 
 #[test]
+#[allow(unsafe_code)]
+fn native_metadata_queries_use_the_owned_process_handle() {
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    };
+    // SAFETY: 借用当前 PID 打开新的查询句柄，成功后只由 OwnedHandle 关闭；测试不终止进程。
+    let raw = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            0,
+            std::process::id(),
+        )
+    };
+    assert!(!raw.is_null());
+    let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+    assert!(process_owned_by_current_user(&handle).unwrap());
+    assert!(process_start(&handle).unwrap() > 0);
+    assert_eq!(
+        crate::runtime_source::canonical_home(&process_image(&handle).unwrap()),
+        crate::runtime_source::canonical_home(&std::env::current_exe().unwrap())
+    );
+    let process = LockProcess {
+        pid: std::process::id(),
+        start: process_start(&handle).unwrap(),
+        image: process_image(&handle).unwrap(),
+        handle,
+    };
+    assert!(!process.exited().unwrap());
+}
+
+#[test]
 fn private_discovery_is_read_without_modification_and_lock_contention_is_observed() {
     let root = tempfile::tempdir().unwrap();
     let run = root.path().join("run");

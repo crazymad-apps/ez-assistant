@@ -423,3 +423,11 @@ describe('fixed parameter draft validation', () => {
     expect(sameParameters(left, modelParameters())).toBe(true);
   });
 });
+
+it('keeps an empty optional output limit instead of inventing a number', () => {
+  const parameters = modelParameters();
+  const draft = tokenDraft(parameters);
+  const saved = compileTokenDraft(parameters, { ...draft, max_output_tokens: '' });
+  expect(saved.max_output_tokens).toEqual({ state: 'unknown' });
+  expect(saved.context_window_tokens).toEqual(parameters.context_window_tokens);
+});

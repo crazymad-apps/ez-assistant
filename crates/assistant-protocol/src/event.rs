@@ -46,7 +46,12 @@ pub enum ChildTaskEvent {
     Created {
         task: Box<ChildTaskSnapshot>,
     },
-    Started,
+    Started {
+        /// child 取得执行许可后已可靠保存的开始时间。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        started_at_ms: Option<i64>,
+    },
     StepStarted {
         step: u32,
     },
@@ -253,6 +258,10 @@ pub enum RuntimeEvent {
     },
     /// 一个 Run 的 AgentExecution 已开始。
     RunStarted {
+        /// 当前 attempt 已可靠保存的领取时间，不是事件发送时间。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        started_at_ms: Option<i64>,
         /// Run 所属 Session。
         session_id: SessionId,
         /// 已开始的 Run。
@@ -442,6 +451,43 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn legacy_started_event_readers_accept_optional_reliable_times() {
+        #[derive(Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum LegacyChildEvent {
+            Started,
+        }
+        #[derive(Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum LegacyRunEvent {
+            RunStarted {
+                session_id: SessionId,
+                run_id: RunId,
+            },
+        }
+        let child = serde_json::to_value(ChildTaskEvent::Started {
+            started_at_ms: Some(123),
+        })
+        .unwrap();
+        assert!(matches!(
+            serde_json::from_value::<LegacyChildEvent>(child).unwrap(),
+            LegacyChildEvent::Started
+        ));
+        let run = serde_json::to_value(RuntimeEvent::RunStarted {
+            session_id: session_id(),
+            run_id: run_id(),
+            started_at_ms: Some(456),
+        })
+        .unwrap();
+        let LegacyRunEvent::RunStarted {
+            session_id: owner,
+            run_id: id,
+        } = serde_json::from_value::<LegacyRunEvent>(run).unwrap();
+        assert_eq!(owner, session_id());
+        assert_eq!(id, run_id());
+    }
 
     #[test]
     fn event_envelope_has_a_stable_watermark_shape() {
@@ -709,7 +755,9 @@ mod tests {
                     session_id: session_id(),
                     parent_run_id: run_id(),
                     child_task_id: ChildTaskId::new("child-1").expect("child id"),
-                    event: ChildTaskEvent::Started,
+                    event: ChildTaskEvent::Started {
+                        started_at_ms: None,
+                    },
                 },
                 "child_task_event",
             ),
@@ -723,6 +771,7 @@ mod tests {
             ),
             (
                 RuntimeEvent::RunStarted {
+                    started_at_ms: None,
                     session_id: session_id(),
                     run_id: run_id(),
                 },

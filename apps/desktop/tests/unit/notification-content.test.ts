@@ -16,7 +16,7 @@ afterEach(() => {
 });
 
 function assistant(overrides: Partial<Extract<ConversationItem, { type: 'assistant' }>> = {}): ConversationItem {
-  return { type: 'assistant', message_id: 'answer', run_id: 'old-run', attempt: 1, step: 2,
+  return { type: 'assistant', inherited: false, partial: false, message_id: 'answer', run_id: 'old-run', attempt: 1, step: 2,
     created_at_ms: null, finished_at_ms: 100, status: 'completed', segments: [
       { type: 'reasoning', part_id: 'reasoning', text: '不应出现在通知中的推理' },
       { type: 'text', part_id: 'body', text: '**旧轮回复**：已完成 [检查](https://example.test/private)' },

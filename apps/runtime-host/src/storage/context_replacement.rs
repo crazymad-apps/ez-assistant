@@ -172,8 +172,11 @@ impl StorageEngine {
                 product_message_count: merged.messages.len() as u64,
             });
         }
-        let payload = conversation::encode_messages(&merged.messages)?;
-        conversation::decode(std::io::BufReader::new(payload.as_slice()))?;
+        let owner = ConversationOwner::ChildTask {
+            session_id: session_id.clone(),
+            child_task_id: child_task_id.clone(),
+        };
+        let mut history = self.history_for_replacement(&owner, &merged)?;
         let previous_generation = self.child_generation(&session_id, &child_task_id)?;
         let task_directory =
             child_task_directory(&self.session_directory(&session_id)?, &child_task_id);
@@ -186,7 +189,11 @@ impl StorageEngine {
                 .ok_or_else(|| conflict("child conversation generation is exhausted"))?;
         }
         let new_path = child_body_path(&task_directory, new_generation);
-        conversation::write_replacement(&new_path, &payload)?;
+        for child in &mut history.child_tasks {
+            child.body_generation = new_generation;
+            child.message_count = merged.messages.len() as u64;
+        }
+        conversation::write_generation(&new_path, &owner, new_generation, &merged, &history)?;
         sync_directory(&task_directory)?;
 
         let message_count = u64::try_from(merged.messages.len()).map_err(|source| {
@@ -196,6 +203,8 @@ impl StorageEngine {
                 source,
             )
         })?;
+        let new_usage =
+            self.new_replacement_usage_messages(&owner, previous_generation, &snapshot)?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -236,10 +245,10 @@ impl StorageEngine {
                 session_id: session_id.clone(),
                 child_task_id: child_task_id.clone(),
             },
-            None,
-            &snapshot.messages,
+            new_usage,
             changed_at_ms,
         )?;
+        super::usage::snapshot::replace_context(&transaction, &owner, &snapshot)?;
         transaction.commit().map_err(|source| {
             database_write_error("child context replacement could not be committed", source)
         })?;
@@ -314,7 +323,20 @@ impl StorageEngine {
     ) -> StorageResult<()> {
         let session_directory = self.session_directory(&plan.session_id)?;
         let new_path = body_path(&session_directory, plan.new_generation);
-        let replacement = conversation::read(&new_path)?;
+        let replacement = self
+            .read_owner_document(
+                &new_path,
+                &assistant_protocol::ConversationOwner::MainSession {
+                    session_id: plan.session_id.clone(),
+                },
+                plan.new_generation,
+            )?
+            .conversation;
+        let owner = ConversationOwner::MainSession {
+            session_id: plan.session_id.clone(),
+        };
+        let new_usage =
+            self.new_replacement_usage_messages(&owner, plan.previous_generation, &replacement)?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -378,10 +400,10 @@ impl StorageEngine {
             &ConversationOwner::MainSession {
                 session_id: plan.session_id.clone(),
             },
-            None,
-            &replacement.messages,
+            new_usage,
             plan.changed_at_ms,
         )?;
+        super::usage::snapshot::replace_context(&transaction, &owner, &replacement)?;
         transaction.commit().map_err(|source| {
             database_write_error("idle context replacement could not commit", source)
         })?;

@@ -91,7 +91,12 @@ pub trait PluginFilePort: Send + Sync {
 
 #[derive(Default)]
 pub struct PluginMcpDiscovery {
-    pub servers: Vec<crate::McpServerConfig>,
+    pub definitions: Vec<crate::ManagedMcpServerDefinition>,
+    /// 本次扫描的文件来源句柄，含已移除全部 MCP 声明的插件；不缓存配置值。
+    pub configuration_sources: Vec<(
+        assistant_protocol::McpServerSource,
+        Arc<dyn crate::McpConfigSource>,
+    )>,
     pub diagnostics: Vec<McpDiagnosticSnapshot>,
 }
 
@@ -145,6 +150,8 @@ pub(crate) struct PluginManager {
 }
 
 impl PluginManager {
+    /// 从 Store 读取本用户当前包及参数，再由 Host 交回声明和安全文件来源。
+    /// 管理查询保留禁用／损坏定义；此处不持长期包租约，修改和候选安装须重新核对来源。
     pub(crate) async fn mcp_candidates(&self) -> RuntimeResult<PluginMcpDiscovery> {
         let corrupt = self
             .audit_state
@@ -158,46 +165,66 @@ impl PluginManager {
             .await
             .map_err(storage)?
             .into_iter()
-            .filter(|plugin| {
-                plugin.enabled && plugin.active_sha256.is_some() && !corrupt.contains(&plugin.name)
-            })
+            .filter(|plugin| plugin.active_sha256.is_some())
             .collect::<Vec<_>>();
         if plugins.is_empty() {
             return Ok(PluginMcpDiscovery::default());
         }
-        self.files()?
-            .mcp_candidates(plugins)
+        let mut discovery = self
+            .files()?
+            .mcp_candidates(
+                plugins
+                    .iter()
+                    .filter(|plugin| !corrupt.contains(&plugin.name))
+                    .cloned()
+                    .collect(),
+            )
             .await
-            .map_err(|_| RuntimeError::PluginPackageUnavailable)
-    }
-
-    pub(crate) async fn declared_mcp_keys(
-        &self,
-    ) -> RuntimeResult<BTreeSet<assistant_protocol::McpServerKey>> {
-        let mut keys = BTreeSet::new();
-        for plugin in self.store.list_plugins().await.map_err(storage)? {
-            if !plugin.enabled || plugin.active_sha256.is_none() {
-                continue;
-            }
-            let Some(manifest) = plugin
-                .active_manifest_json
-                .as_deref()
-                .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
-            else {
-                continue;
-            };
-            if let Some(names) = manifest.get("mcp").and_then(serde_json::Value::as_array) {
-                for name in names {
-                    if let Some(name) = name.as_str()
-                        && let Ok(key) = assistant_protocol::McpServerKey::new(name.to_owned())
-                    {
-                        keys.insert(key);
-                    }
+            .unwrap_or_default();
+        // 损坏／缺失包仍保留声明身份供管理展示；绝不构造可执行占位候选。
+        for plugin in &plugins {
+            let projected = project_plugin(plugin.clone(), PluginPackageState::Available);
+            for name in projected.mcp {
+                let Ok(key) = assistant_protocol::McpServerKey::new(name) else {
+                    continue;
+                };
+                if discovery.definitions.iter().any(|definition| {
+                    definition.source
+                        == assistant_protocol::McpServerSource::Plugin(plugin.name.clone())
+                        && definition.server_key == key
+                }) {
+                    continue;
                 }
+                discovery
+                    .definitions
+                    .push(crate::ManagedMcpServerDefinition {
+                        source: assistant_protocol::McpServerSource::Plugin(plugin.name.clone()),
+                        server_key: key,
+                        definition_digest: plugin.active_sha256.clone().unwrap_or_default(),
+                        source_enabled: plugin.enabled,
+                        source_available: false,
+                        ready: false,
+                        raw: serde_json::Map::new(),
+                        parameter_bindings: BTreeMap::new(),
+                        parameters: Vec::new(),
+                        plugin_settings_revision: None,
+                        plugin_sha256: plugin.active_sha256.clone(),
+                        configuration: None,
+                    });
             }
         }
-        Ok(keys)
+        for definition in &mut discovery.definitions {
+            if let assistant_protocol::McpServerSource::Plugin(name) = &definition.source
+                && let Some(plugin) = plugins.iter().find(|plugin| &plugin.name == name)
+            {
+                let projected = project_plugin(plugin.clone(), PluginPackageState::Available);
+                definition.plugin_settings_revision = Some(projected.settings_revision);
+                definition.parameters = projected.configuration;
+            }
+        }
+        Ok(discovery)
     }
+
     pub(crate) async fn active_skill_packages(
         &self,
     ) -> RuntimeResult<Vec<crate::PluginSkillPackage>> {
@@ -278,14 +305,18 @@ impl PluginManager {
         };
         let (keys, close_failed) = registry.retire_plugin_package(name, sha256).await?;
         for key in keys {
-            for approval in approvals.invalidate_pending_mcp_server(&key)? {
-                let _ = self.events.send(RuntimeEvent::ApprovalCancelled {
-                    session_id: approval.session_id,
-                    run_id: approval.run_id,
-                    child_task_id: approval.child_task_id,
-                    approval_id: approval.approval_id,
-                });
-            }
+            self.events.publish_batch_transition(|| {
+                let mut events = Vec::new();
+                for approval in approvals.invalidate_pending_mcp_server(&key)? {
+                    events.push(RuntimeEvent::ApprovalCancelled {
+                        session_id: approval.session_id,
+                        run_id: approval.run_id,
+                        child_task_id: approval.child_task_id,
+                        approval_id: approval.approval_id,
+                    });
+                }
+                Ok(((), events))
+            })?;
         }
         if close_failed {
             Err(RuntimeError::PluginBusy)
@@ -354,6 +385,12 @@ impl PluginManager {
         if self.active.lock().await.is_some() {
             return Err(RuntimeError::PluginBusy);
         }
+        // 参数与直接 MCP 文件写入共用包使用门；不在持有该门时递归调用设置入口。
+        let _configuration = self
+            .use_gate(&request.name)
+            .await
+            .try_write_owned()
+            .map_err(|_| RuntimeError::PluginBusy)?;
         let current = self
             .store
             .list_plugins()

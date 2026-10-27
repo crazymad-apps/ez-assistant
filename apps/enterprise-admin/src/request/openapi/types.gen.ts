@@ -205,11 +205,11 @@ export type AuditPage = {
 
 export type ProviderConnection = {
     display_name: string;
-    provider_type: 'openai' | 'opencode' | 'deepseek' | 'dashscope_api' | 'dashscope_plan' | 'moonshot' | 'zhipu' | 'vllm' | 'local';
+    provider_type: 'openai' | 'sub2api' | 'opencode' | 'deepseek' | 'dashscope_api' | 'dashscope_plan' | 'moonshot' | 'zhipu' | 'vllm' | 'local';
     endpoint: string;
     protocol_preference: 'auto' | 'responses' | 'chat_completions';
     models_path: string;
-    discovery_format: 'openai' | 'vllm' | 'moonshot' | 'dashscope_native';
+    discovery_format: 'openai' | 'sub2api' | 'vllm' | 'moonshot' | 'dashscope_native';
     responses_transport?: 'http' | 'websocket';
     server_history_enabled: boolean;
     server_history_support_override: 'supported' | 'unsupported' | null;
@@ -355,7 +355,7 @@ export type RuntimeModelConfiguration = {
     center_id: string;
     reason?: string;
     endpoint?: string;
-    provider_type?: 'openai' | 'opencode' | 'deepseek' | 'dashscope_api' | 'dashscope_plan' | 'moonshot' | 'zhipu' | 'vllm' | 'local';
+    provider_type?: 'openai' | 'sub2api' | 'opencode' | 'deepseek' | 'dashscope_api' | 'dashscope_plan' | 'moonshot' | 'zhipu' | 'vllm' | 'local';
     provider_display_name?: string;
     protocol?: 'open_ai_responses' | 'open_ai_chat_completions';
     model_id?: string;
@@ -875,6 +875,7 @@ export type SiteScenario = {
 export type SiteNode = {
     kind: 'text' | 'paragraph' | 'heading' | 'strong' | 'em' | 's' | 'blockquote' | 'bullet_list' | 'ordered_list' | 'list_item' | 'code' | 'code_inline' | 'link' | 'image' | 'break' | 'hr' | 'table' | 'thead' | 'tbody' | 'tr' | 'th' | 'td';
     text?: string;
+    language?: string;
     href?: string;
     id?: string;
     level?: number;

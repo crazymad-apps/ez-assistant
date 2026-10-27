@@ -55,18 +55,15 @@ fn auxiliary_inspector_reads_relative_and_absolute_local_images_without_artifact
             }),
         )["session"]["session_id"],
     );
-    let submitted = client.runtime(
-        "submit_input",
-        json!({
-            "session_id":session_id,
-            "message":format!(
-                "INSPECT_LOCAL_CASE relative.png|{}",
-                absolute_image.display()
-            ),
-            "variant":"build",
-            "idempotency_key":"inspect-local-images",
-        }),
-    );
+    let submitted = client.submit_started_input(json!({
+        "session_id":session_id,
+        "message":format!(
+            "INSPECT_LOCAL_CASE relative.png|{}",
+            absolute_image.display()
+        ),
+        "variant":"build",
+        "idempotency_key":"inspect-local-images",
+    }));
     let run_id = text(&submitted["run"]["run_id"]);
     let approval = wait_for_approval(&mut client, &session_id);
     let resolved_relative_image =

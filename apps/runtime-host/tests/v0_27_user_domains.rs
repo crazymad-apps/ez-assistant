@@ -75,7 +75,7 @@ async fn real_process_has_no_personal_fallback_and_routes_events_to_its_user() {
     let center_router = Router::new()
         .route(
             "/api/info",
-            get(|| async { Json(json!({"protocol_version":3,"min_protocol_version":3})) }),
+            get(|| async { Json(json!({"protocol_version":4,"min_protocol_version":4})) }),
         )
         .route(
             "/api/auth/login",
@@ -105,7 +105,12 @@ async fn real_process_has_no_personal_fallback_and_routes_events_to_its_user() {
     let center_task = tokio::spawn(async move {
         axum::serve(center, center_router).await.unwrap();
     });
-    let home = tempfile::tempdir().unwrap();
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.runtime-test");
+    std::fs::create_dir_all(&base).unwrap();
+    let home = tempfile::Builder::new()
+        .prefix("f06-enterprise-domains-")
+        .tempdir_in(std::fs::canonicalize(base).unwrap())
+        .unwrap();
     let port = std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
@@ -245,6 +250,23 @@ async fn real_process_has_no_personal_fallback_and_routes_events_to_its_user() {
             .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 2); // 既有默认主控 Session + 本测试创建的普通 Session。
+        let snapshots = connection
+            .prepare("SELECT system_prompt_json FROM sessions")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        for snapshot in snapshots {
+            let prompt: agent_model::SystemPromptSnapshot =
+                serde_json::from_str(&snapshot).unwrap();
+            let directories = prompt.parts().last().unwrap();
+            assert!(directories.starts_with("<runtime_directories>"));
+            assert!(directories.contains("<runtime_mode>enterprise</runtime_mode>"));
+            assert!(directories.contains(&format!("{CENTER}_{id}")));
+            assert!(!directories.contains(&format!("{CENTER}_{}", if id == 1 { 2 } else { 1 })));
+            assert!(!directories.contains("users/_personal"));
+        }
         let own: String = connection
             .query_row(
                 "SELECT title FROM sessions WHERE role='standard'",

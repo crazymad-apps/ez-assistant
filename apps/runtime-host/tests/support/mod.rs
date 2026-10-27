@@ -1216,18 +1216,33 @@ fn reserve_fixture_port() -> TcpListener {
 
 impl HostProcess {
     pub fn start(runtime_home: &Path) -> Self {
-        Self::start_inner(runtime_home, None, None)
+        Self::start_inner(runtime_home, None, None, false, None)
     }
 
     pub fn start_with_password(runtime_home: &Path, password: &str) -> Self {
-        Self::start_inner(runtime_home, Some(password), None)
+        Self::start_inner(runtime_home, Some(password), None, false, None)
     }
 
     pub fn start_with_client(runtime_home: &Path, client: &HttpClient) -> Self {
-        Self::start_inner(runtime_home, None, Some(client))
+        Self::start_inner(runtime_home, None, Some(client), false, None)
     }
 
-    fn start_inner(runtime_home: &Path, password: Option<&str>, http: Option<&HttpClient>) -> Self {
+    pub fn start_with_request_diagnostics(runtime_home: &Path) -> Self {
+        Self::start_inner(runtime_home, None, None, true, None)
+    }
+
+    /// 用复制后的正式二进制验证资源可移植性，不再从源码工作目录启动。
+    pub fn start_with_executable(runtime_home: &Path, executable: &Path) -> Self {
+        Self::start_inner(runtime_home, None, None, false, Some(executable))
+    }
+
+    fn start_inner(
+        runtime_home: &Path,
+        password: Option<&str>,
+        http: Option<&HttpClient>,
+        diagnostics: bool,
+        executable: Option<&Path>,
+    ) -> Self {
         // 产品默认固定 7240；每个隔离夹具显式配置自己的空闲端口，避免并行用例争用。
         let path = runtime_home.join(if runtime_home.join("host.toml").exists() {
             "host.toml"
@@ -1257,7 +1272,16 @@ impl HostProcess {
         // 仅为测试子进程指定私有 Home，不改当前进程环境或真实用户目录，重启沿用同一路径。
         let user_directory = runtime_home.join("fixture-user-home");
         fs::create_dir_all(&user_directory).expect("create isolated test user directory");
-        let mut command = Command::new(env!("CARGO_BIN_EXE_ez-assistant-runtime"));
+        let mut command = Command::new(
+            executable.unwrap_or_else(|| Path::new(env!("CARGO_BIN_EXE_ez-assistant-runtime"))),
+        );
+        if executable.is_some() {
+            command.current_dir(runtime_home);
+        }
+        command.env(
+            "EZ_ASSISTANT_REQUEST_DIAGNOSTICS",
+            if diagnostics { "1" } else { "0" },
+        );
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt as _;
@@ -1375,7 +1399,9 @@ pub struct Client {
 impl Client {
     fn connect(base_url: String, access_token: String) -> Self {
         Self {
+            // 夹具只访问 loopback，不能受本机系统代理影响。
             http: HttpClient::builder()
+                .no_proxy()
                 .default_headers(compatibility_headers())
                 .connect_timeout(Duration::from_secs(3))
                 .timeout(Duration::from_secs(12))
@@ -1384,6 +1410,37 @@ impl Client {
             base_url,
             access_token,
             next_request: 1,
+        }
+    }
+
+    /// 执行用例显式等待实际领取；队列协议用例必须直接使用 runtime("submit_input", …)。
+    pub fn submit_started_input(&mut self, payload: Value) -> Value {
+        let session_id = payload["session_id"].as_str().unwrap().to_owned();
+        let mut accepted = self.runtime("submit_input", payload);
+        if accepted["run"].is_null() {
+            accepted["run"] =
+                self.wait_for_input_run(&session_id, accepted["input_id"].as_str().unwrap());
+        }
+        accepted
+    }
+
+    pub fn wait_for_input_run(&mut self, session_id: &str, input_id: &str) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(12);
+        loop {
+            let list = self.runtime("list_runs", json!({"session_id":session_id}));
+            if let Some(run) = list["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|run| run["input_id"] == input_id)
+            {
+                return run.clone();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Input {input_id} was not claimed"
+            );
+            thread::sleep(Duration::from_millis(20));
         }
     }
 
@@ -1532,14 +1589,18 @@ fn wait_until_ready_with_client(
     child: &mut Child,
     client: Option<&HttpClient>,
 ) -> (String, String) {
-    let deadline = Instant::now() + Duration::from_secs(8);
+    // 对齐产品普通冷启动预算；合跑时大体积 debug 映像的身份摘要也在发布 discovery 前完成。
+    let deadline = Instant::now() + Duration::from_secs(60);
     let discovery_path = runtime_home.join("run/runtime.json");
+    // 与产品本机客户端一致，隔离就绪探测不经过用户的系统代理。
     let default_http = HttpClient::builder()
+        .no_proxy()
         .connect_timeout(Duration::from_millis(200))
         .timeout(Duration::from_millis(500))
         .build()
         .expect("readiness client");
     let http = client.unwrap_or(&default_http);
+    let mut last_probe = "discovery not yet published".to_owned();
     loop {
         if let Ok(bytes) = fs::read(&discovery_path)
             && let Ok(discovery) = serde_json::from_slice::<Value>(&bytes)
@@ -1547,36 +1608,46 @@ fn wait_until_ready_with_client(
                 discovery["address"].as_str(),
                 discovery["access_token"].as_str(),
             )
-            && http
+        {
+            match http
                 .get(format!("{base_url}/health"))
                 .bearer_auth(access_token)
                 .send()
-                .is_ok_and(|response| {
-                    response.status().is_success()
-                        && response
-                            .json::<serde_json::Value>()
-                            .is_ok_and(|health| health["status"] == "ready")
-                })
-        {
-            return (base_url.to_owned(), access_token.to_owned());
+            {
+                Ok(response) => {
+                    let status = response.status();
+                    match response.json::<Value>() {
+                        Ok(health) => {
+                            if status.is_success() && health["status"] == "ready" {
+                                return (base_url.to_owned(), access_token.to_owned());
+                            }
+                            last_probe = format!("HTTP {status}: {health}");
+                        }
+                        Err(error) => last_probe = format!("HTTP {status}: {error}"),
+                    }
+                }
+                Err(error) => last_probe = error.to_string(),
+            }
         }
-        if let Some(status) = child.try_wait().expect("poll Runtime Host") {
+        let exited = child.try_wait().expect("poll Runtime Host");
+        if exited.is_some() || Instant::now() >= deadline {
+            // 夹具在构造 HostProcess 前也必须由 owner 回收，不能因断言留下后台 Host。
+            let status = exited.unwrap_or_else(|| {
+                let _ = child.kill();
+                child.wait().expect("reap startup fixture")
+            });
             let mut stdout = String::new();
             let mut stderr = String::new();
-            if let Some(mut pipe) = child.stdout.take() {
-                let _ = pipe.read_to_string(&mut stdout);
+            if let Some(pipe) = child.stdout.take() {
+                let _ = pipe.take(65536).read_to_string(&mut stdout);
             }
-            if let Some(mut pipe) = child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr);
+            if let Some(pipe) = child.stderr.take() {
+                let _ = pipe.take(65536).read_to_string(&mut stderr);
             }
             panic!(
-                "Runtime Host exited before ready: {status}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+                "Runtime Host did not become ready ({status}); last probe: {last_probe}\nstdout:\n{stdout}\nstderr:\n{stderr}"
             );
         }
-        assert!(
-            Instant::now() < deadline,
-            "Runtime Host did not become ready"
-        );
         thread::sleep(Duration::from_millis(10));
     }
 }

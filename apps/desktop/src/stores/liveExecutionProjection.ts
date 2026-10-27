@@ -1,4 +1,5 @@
 import type {
+  ChildTaskId,
   ReasoningSource,
   ModelFailureKind,
   ModelRequestStatus,
@@ -54,6 +55,7 @@ export type LiveRunProjection = Readonly<{
   session_id: SessionId;
   run_id: string;
   created_at_ms: number | null;
+  started_at_ms: number | null;
   finished_at_ms: number | null;
   status: RunStatus;
   active_step: number;
@@ -74,6 +76,7 @@ export function emptyRun(
     session_id,
     run_id,
     created_at_ms,
+    started_at_ms: null,
     finished_at_ms: null,
     status: "accepted",
     active_step: 0,
@@ -88,6 +91,11 @@ export function emptyRun(
 
 export function runKey(session_id: SessionId, run_id: string): string {
   return `${session_id}:${run_id}`;
+}
+
+/** 分支可保留同名 child；用完整 owner 编码，不能让分隔符参与身份解释。 */
+export function childKey(session_id: SessionId, child_task_id: ChildTaskId): string {
+  return JSON.stringify([session_id, child_task_id]);
 }
 
 export function ensureStep(
@@ -272,19 +280,19 @@ export function hostClockAnchor(host_at_ms: number | null | undefined, received_
 
 /** 终态只读可靠起止；活动值基于 Host 锚点估计，绝不相减两台机器的墙钟。 */
 export function executionElapsedMs(
-  run: Pick<LiveRunProjection, "created_at_ms" | "finished_at_ms" | "status">,
+  run: Pick<LiveRunProjection, "started_at_ms" | "finished_at_ms" | "status">,
   anchor: HostClockAnchor | null,
   monotonic_now_ms: number,
 ): number | null {
-  if (!validHostTime(run.created_at_ms)) return null;
-  if (run.status !== "accepted" && run.status !== "running" && run.status !== "cancelling") {
-    return validHostTime(run.finished_at_ms) && run.finished_at_ms >= run.created_at_ms
-      ? run.finished_at_ms - run.created_at_ms
+  if (run.status === "accepted" || !validHostTime(run.started_at_ms)) return null;
+  if (run.status !== "running" && run.status !== "cancelling") {
+    return validHostTime(run.finished_at_ms) && run.finished_at_ms >= run.started_at_ms
+      ? run.finished_at_ms - run.started_at_ms
       : null;
   }
   if (!anchor || !Number.isFinite(monotonic_now_ms) || monotonic_now_ms < anchor.received_at_ms
-    || anchor.host_at_ms < run.created_at_ms) return null;
-  const elapsed = anchor.host_at_ms - run.created_at_ms + monotonic_now_ms - anchor.received_at_ms;
+    || anchor.host_at_ms < run.started_at_ms) return null;
+  const elapsed = anchor.host_at_ms - run.started_at_ms + monotonic_now_ms - anchor.received_at_ms;
   return Number.isSafeInteger(Math.floor(elapsed)) ? elapsed : null;
 }
 

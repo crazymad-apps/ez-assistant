@@ -15,7 +15,7 @@ use crate::{
         GoalControl, GoalState, allocate_goal_id, create_continuation_message,
         inject_resume_context, inject_start_context,
     },
-    run::{RunRecord, allocate_run_id},
+    run::RunRecord,
     session::SessionController,
 };
 
@@ -278,8 +278,9 @@ impl AssistantRuntime {
         session.ensure_active()?;
         session.ensure_healthy()?;
 
+        let history = crate::runtime::load_identity_history(self.store.as_ref(), &session).await?;
         // 一次锁内冻结恢复所依赖的全部事实并分配 ID；后续 Store I/O 期间不持有 Session 锁。
-        let (goal, model_selection, input_id, run_id, variant, approval_mode) = {
+        let (goal, model_selection, input_id, variant) = {
             let state = session.lock_state()?;
             let goal = state
                 .goal
@@ -302,10 +303,8 @@ impl AssistantRuntime {
             (
                 goal.clone(),
                 state.model_selection.clone(),
-                self.allocate_input_id(&state)?,
-                allocate_run_id(&state)?,
+                crate::run::allocate_input_id(&state, &history)?,
                 state.current_variant,
-                state.approval_mode,
             )
         };
         ensure_goal_model_supported(
@@ -323,7 +322,11 @@ impl AssistantRuntime {
                 .map_err(|_| RuntimeError::InternalStateUnavailable {
                     component: "Goal resume transition",
                 })?;
-        let message = create_continuation_message(&resumed, "explicit_resume")?;
+        let mut message = create_continuation_message(&resumed, "explicit_resume")?;
+        {
+            let state = session.lock_state()?;
+            crate::run::ensure_message_id_available(&mut message.id, &state, &history)?;
+        }
 
         // accept_input 在 Store 中原子恢复 Goal，并创建绑定新世代的 Input/Run；失败不会留下半恢复状态。
         let accepted = self
@@ -332,7 +335,7 @@ impl AssistantRuntime {
                 feedback_answer: None,
                 agent_shell_target: None,
                 input_id,
-                run_id,
+
                 session_id: request.session_id.clone(),
                 idempotency_key: None,
                 agent_variant: variant,
@@ -347,7 +350,7 @@ impl AssistantRuntime {
                 channel_source: None,
                 skill_activation: None,
                 mcp_selection: None,
-                approval_mode,
+
                 message,
                 new_goal: None,
                 resumed_goal: Some(resumed.to_stored(request.session_id.clone())),
@@ -359,28 +362,20 @@ impl AssistantRuntime {
 
         // 只有持久化成功后才一次性投影 Goal、队列、Input 和 Run，Store 结果保持为权威事实。
         let goal = super::super::product::project_goal(&resumed)?;
-        let projection = {
+        {
             let mut state = session.lock_state()?;
             state.goal = Some(resumed);
-            project_accepted_input(&mut state, accepted, None)
-        };
+            project_accepted_input(&mut state, accepted, None)?;
+        }
 
-        // 事件发布和队列唤醒必须晚于内存投影，使观察者看到 RunAccepted 时已能读取完整状态。
-        self.publish(assistant_protocol::RuntimeEvent::RunAccepted {
-            created_at_ms: projection.run.created_at_ms,
-            session_id: request.session_id.clone(),
-            run_id: projection.run.run_id.clone(),
-        });
+        // 事件发布和队列唤醒必须晚于内存投影，使观察者读取到完整的 Goal 与暂存队列状态。
         self.publish(assistant_protocol::RuntimeEvent::GoalChanged {
             session_id: request.session_id,
             goal_id: goal.goal_id.clone(),
             generation: goal.generation,
         });
         self.wake_queue(session.clone())?;
-        Ok(ResumeGoalResult {
-            goal,
-            run: projection.run,
-        })
+        Ok(ResumeGoalResult { goal, run: None })
     }
 
     /// 选择一条 held 用户指导作为恢复输入；不复制正文，也不创建新的 Input/Run。
@@ -493,13 +488,11 @@ impl AssistantRuntime {
                     component: "held input projection",
                 })?
                 .stored = result.input;
-            let snapshot = state
-                .runs
-                .get(&result.run.run_id)
-                .map(RunRecord::snapshot)
-                .ok_or(RuntimeError::InternalStateUnavailable {
-                    component: "held input Run projection",
-                })?;
+            let snapshot = result
+                .run
+                .as_ref()
+                .and_then(|run| state.runs.get(&run.run_id))
+                .map(RunRecord::snapshot);
             (snapshot, state.queue_revision)
         };
         self.publish(assistant_protocol::RuntimeEvent::QueueChanged {

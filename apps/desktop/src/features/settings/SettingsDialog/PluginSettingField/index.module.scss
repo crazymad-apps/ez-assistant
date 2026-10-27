@@ -1,0 +1,32 @@
+@use '../../../../styles/fields';
+
+.setting_field {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+}
+.setting_field label {
+  display: grid;
+  gap: 5px;
+  flex: 1;
+  min-width: 0;
+}
+.setting_field small {
+  color: var(--ez-text-secondary);
+  font-weight: 400;
+}
+.setting_field input {
+  box-sizing: border-box;
+  min-width: 0;
+  height: var(--ez-control-height);
+  padding: 0 10px;
+  border: 1px solid var(--ez-border-strong);
+  border-radius: var(--ez-radius-small);
+  color: var(--ez-text);
+  background: var(--ez-surface);
+  font: inherit;
+}
+
+.setting_field input:focus {
+  @include fields.focus-border;
+}

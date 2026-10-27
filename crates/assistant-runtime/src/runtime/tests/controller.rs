@@ -121,7 +121,7 @@ async fn controller_user_run_gets_controller_tools_but_standard_run_does_not() {
         .expect("standard");
 
     let controller_run = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             session_id: controller.session.session_id.clone(),
             message: "inspect sessions".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -145,7 +145,7 @@ async fn controller_user_run_gets_controller_tools_but_standard_run_does_not() {
         assistant_protocol::RunStatus::Completed
     );
     let standard_run = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             session_id: standard.session.session_id.clone(),
             message: "ordinary work".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -208,7 +208,7 @@ async fn queued_delivery_is_silently_removed_when_user_takes_over() {
         .await
         .expect("target");
     let controller_input = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             session_id: controller.session.session_id.clone(),
             message: "hold controller run".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -299,7 +299,7 @@ async fn queued_delivery_is_silently_removed_when_user_takes_over() {
         .expect("queue does not block disabling proxy again");
 
     let user = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             session_id: target.session.session_id.clone(),
             message: "user takes over".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -329,7 +329,7 @@ async fn queued_delivery_is_silently_removed_when_user_takes_over() {
             !state
                 .runs
                 .values()
-                .any(|run| { run.snapshot().run_id.as_str() == receipt.run_id })
+                .any(|run| { Some(run.snapshot().run_id.as_str()) == receipt.run_id.as_deref() })
         );
         assert!(state.inputs.contains_key(&user.input_id));
     }
@@ -363,7 +363,7 @@ async fn controller_delivery_goal_keeps_reply_route_through_continuation_and_rep
         .await
         .expect("target");
     let source = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             session_id: controller.session.session_id.clone(),
             message: "delegate a long task".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -403,7 +403,8 @@ async fn controller_delivery_goal_keeps_reply_route_through_continuation_and_rep
         )
         .await
         .expect("start delegated Goal");
-    let target_input_id = assistant_protocol::InputId::new(receipt.input_id).expect("input id");
+    let target_input_id =
+        assistant_protocol::InputId::new(receipt.input_id.clone()).expect("input id");
     {
         let state = target_controller.lock_state().expect("target state");
         assert!(state.goal.is_some());
@@ -442,7 +443,14 @@ async fn controller_delivery_goal_keeps_reply_route_through_continuation_and_rep
     runtime
         .wake_queue(target_controller.clone())
         .expect("wake delegated Goal");
-    let target_run_id = assistant_protocol::RunId::new(receipt.run_id).expect("run id");
+    let target_run_id = runtime
+        .wait_for_input_claim(
+            &target.session.session_id,
+            &assistant_protocol::InputId::new(receipt.input_id).unwrap(),
+        )
+        .await
+        .unwrap()
+        .run_id;
     assert_eq!(
         wait_for_terminal(&runtime, &target.session.session_id, &target_run_id)
             .await
@@ -548,7 +556,7 @@ async fn proxy_reports_only_the_run_that_drains_the_queue_and_gets_no_controller
     target_controller
         .lock_state()
         .expect("target state")
-        .queue_paused_by_user = true;
+        .resume_required = true;
     let first = runtime
         .submit_input(SubmitInputRequest {
             session_id: target.session.session_id.clone(),
@@ -587,23 +595,43 @@ async fn proxy_reports_only_the_run_that_drains_the_queue_and_gets_no_controller
     target_controller
         .lock_state()
         .expect("target state")
-        .queue_paused_by_user = false;
+        .resume_required = false;
     runtime
         .wake_queue(target_controller.clone())
         .expect("wake target queue");
 
     assert_eq!(
-        wait_for_terminal(&runtime, &target.session.session_id, &first.run.run_id)
-            .await
-            .status,
+        wait_for_terminal(
+            &runtime,
+            &target.session.session_id,
+            &runtime
+                .wait_for_input_claim(&target.session.session_id, &first.input_id)
+                .await
+                .unwrap()
+                .run_id
+        )
+        .await
+        .status,
         assistant_protocol::RunStatus::Completed
     );
     assert_eq!(
-        wait_for_terminal(&runtime, &target.session.session_id, &last.run.run_id)
-            .await
-            .status,
+        wait_for_terminal(
+            &runtime,
+            &target.session.session_id,
+            &runtime
+                .wait_for_input_claim(&target.session.session_id, &last.input_id)
+                .await
+                .unwrap()
+                .run_id
+        )
+        .await
+        .status,
         assistant_protocol::RunStatus::Completed
     );
+    let last_run = runtime
+        .wait_for_input_claim(&target.session.session_id, &last.input_id)
+        .await
+        .unwrap();
     let controller_session = runtime
         .session_for_test(&controller.session.session_id)
         .await;
@@ -625,8 +653,8 @@ async fn proxy_reports_only_the_run_that_drains_the_queue_and_gets_no_controller
                             source_run_id,
                             ..
                         }) => {
-                            assert_eq!(source_run_id, &last.run.run_id);
-                            Some(input.latest_run_id.clone())
+                            assert_eq!(source_run_id, &last_run.run_id);
+                            input.latest_run_id.clone()
                         }
                         _ => None,
                     }
@@ -702,7 +730,7 @@ async fn recovery_interrupts_source_without_creating_proxy_report() {
         .expect("target state")
         .queue_paused_by_user = true;
     let accepted = first_runtime
-        .submit_input(SubmitInputRequest {
+        .submit_claimed_input(SubmitInputRequest {
             session_id: target.session.session_id.clone(),
             message: "work interrupted by crash".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -799,7 +827,7 @@ async fn enabling_proxy_during_an_active_run_reports_that_run_at_settlement() {
         .await
         .expect("target");
     let source = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             session_id: target.session.session_id.clone(),
             message: "start before proxy".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -885,7 +913,7 @@ async fn failed_prestart_run_reports_a_stable_failure_when_it_drains_the_queue()
     target_controller
         .lock_state()
         .expect("target state")
-        .queue_paused_by_user = true;
+        .resume_required = true;
     let source = runtime
         .submit_input(SubmitInputRequest {
             session_id: target.session.session_id.clone(),
@@ -910,10 +938,14 @@ async fn failed_prestart_run_reports_a_stable_failure_when_it_drains_the_queue()
     target_controller
         .lock_state()
         .expect("target state")
-        .queue_paused_by_user = false;
+        .resume_required = false;
     runtime.wake_queue(target_controller).expect("wake queue");
+    let source_run = runtime
+        .wait_for_input_claim(&target.session.session_id, &source.input_id)
+        .await
+        .unwrap();
     assert_eq!(
-        wait_for_terminal(&runtime, &target.session.session_id, &source.run.run_id)
+        wait_for_terminal(&runtime, &target.session.session_id, &source_run.run_id)
             .await
             .status,
         assistant_protocol::RunStatus::Failed
@@ -922,7 +954,7 @@ async fn failed_prestart_run_reports_a_stable_failure_when_it_drains_the_queue()
         .session_for_test(&controller.session.session_id)
         .await;
     let (status, report_run_id) =
-        wait_for_proxy_report_status(&controller_session, &source.run.run_id).await;
+        wait_for_proxy_report_status(&controller_session, &source_run.run_id).await;
     assert_eq!(status, assistant_protocol::RunStatus::Failed);
     wait_for_terminal(&runtime, &controller.session.session_id, &report_run_id).await;
     let report_text = controller_session
@@ -966,7 +998,7 @@ async fn disabling_proxy_during_an_active_run_suppresses_its_report() {
         .await
         .expect("target");
     let source = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             session_id: target.session.session_id.clone(),
             message: "toggle proxy during work".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -1045,7 +1077,7 @@ async fn cancelled_run_reports_cancelled_after_proxy_is_enabled_mid_run() {
         .await
         .expect("target");
     let source = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             session_id: target.session.session_id.clone(),
             message: "cancel managed work".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -1114,9 +1146,10 @@ async fn wait_for_proxy_report_status(
                             source_run_id: candidate,
                             source_run_status,
                             ..
-                        }) if candidate == source_run_id => {
-                            Some((*source_run_status, input.latest_run_id.clone()))
-                        }
+                        }) if candidate == source_run_id => input
+                            .latest_run_id
+                            .clone()
+                            .map(|id| (*source_run_status, id)),
                         _ => None,
                     }
                 })

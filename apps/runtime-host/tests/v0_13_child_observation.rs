@@ -30,15 +30,12 @@ fn parallel_children_survive_archive_restore_and_formal_host_restart() {
         "set_session_approval_mode",
         json!({ "session_id": session_id, "approval_mode": "auto" }),
     );
-    let submitted = first.runtime(
-        "submit_input",
-        json!({
-            "session_id": session_id,
-            "message": "DELEGATE_PARALLEL_CASE",
-            "variant": "build",
-            "idempotency_key": "parallel-child-restart"
-        }),
-    );
+    let submitted = first.submit_started_input(json!({
+        "session_id": session_id,
+        "message": "DELEGATE_PARALLEL_CASE",
+        "variant": "build",
+        "idempotency_key": "parallel-child-restart"
+    }));
     let parent_run_id = submitted["run"]["run_id"]
         .as_str()
         .expect("parent run id")
@@ -147,15 +144,12 @@ fn killed_host_interrupts_child_and_repairs_the_parent_delegate_result_without_r
         "set_session_approval_mode",
         json!({ "session_id": session_id, "approval_mode": "auto" }),
     );
-    let submitted = first.runtime(
-        "submit_input",
-        json!({
-            "session_id": session_id,
-            "message": "DELEGATE_BLOCK_CASE",
-            "variant": "build",
-            "idempotency_key": "interrupted-child-restart"
-        }),
-    );
+    let submitted = first.submit_started_input(json!({
+        "session_id": session_id,
+        "message": "DELEGATE_BLOCK_CASE",
+        "variant": "build",
+        "idempotency_key": "interrupted-child-restart"
+    }));
     let parent_run_id = submitted["run"]["run_id"]
         .as_str()
         .expect("parent run id")
@@ -256,15 +250,12 @@ fn child_query_cancel_and_product_view_use_the_formal_host_contract() {
         "set_session_approval_mode",
         json!({ "session_id": session_id, "approval_mode": "auto" }),
     );
-    let submitted = client.runtime(
-        "submit_input",
-        json!({
-            "session_id": session_id,
-            "message": "DELEGATE_CASE",
-            "variant": "build",
-            "idempotency_key": "formal-child-observation"
-        }),
-    );
+    let submitted = client.submit_started_input(json!({
+        "session_id": session_id,
+        "message": "DELEGATE_CASE",
+        "variant": "build",
+        "idempotency_key": "formal-child-observation"
+    }));
     let parent_run_id = submitted["run"]["run_id"]
         .as_str()
         .expect("parent run id")

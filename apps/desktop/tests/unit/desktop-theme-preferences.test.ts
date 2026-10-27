@@ -18,6 +18,19 @@ beforeEach(() => {
   localStorage.clear();
 });
 
+it('defaults missing close behavior to quit while preserving either stored choice', async () => {
+  expect((await loadDesktopPreferences()).close_behavior).toBe('quit_desktop');
+  localStorage.setItem('ez-assistant:view', '{}');
+  expect((await loadDesktopPreferences()).close_behavior).toBe('quit_desktop');
+  for (const close_behavior of ['hide_to_tray', 'quit_desktop'] as const) {
+    localStorage.setItem('ez-assistant:view', JSON.stringify({ close_behavior }));
+    const preferences = await loadDesktopPreferences();
+    expect(preferences.close_behavior).toBe(close_behavior);
+    await saveDesktopPreferences({ ...preferences, left_sidebar_width: 310 });
+    expect((await loadDesktopPreferences()).close_behavior).toBe(close_behavior);
+  }
+});
+
 describe('theme storage through existing desktop preferences bridge', () => {
   it('keeps theme independent from old layout snapshots and never copies user information', async () => {
     const old_layout = await loadDesktopPreferences();

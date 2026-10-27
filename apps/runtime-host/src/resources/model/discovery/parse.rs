@@ -1,5 +1,7 @@
 //! 只映射已经核对的接口字段；未知能力和非法限制必须保持可观察，不用静态目录补齐。
 
+mod sub2api;
+
 use std::num::NonZeroU64;
 
 use assistant_runtime::{
@@ -24,6 +26,8 @@ pub(super) fn page(
     let document: Value = serde_json::from_slice(bytes)
         .map_err(|source| ModelDiscoveryError::with_source(ErrorKind::InvalidResponse, source))?;
     match format {
+        DiscoveryFormat::Sub2api if document.get("models").is_some() => sub2api::page(&document),
+        DiscoveryFormat::Sub2api => openai_page(&document, DiscoveryFormat::OpenAi),
         DiscoveryFormat::DashScope => dashscope_page(&document, expected_page),
         DiscoveryFormat::OpenAi | DiscoveryFormat::Vllm | DiscoveryFormat::Moonshot => {
             openai_page(&document, format)
@@ -49,7 +53,11 @@ fn openai_page(
         .iter()
         .map(|entry| {
             let mut model = identity(entry, "id")?;
-            if entry.get("object").and_then(Value::as_str) != Some("model") {
+            // 兼容服务可能省略条目类型；显式声明时仍须为 model，模型身份继续严格校验。
+            if entry
+                .get("object")
+                .is_some_and(|value| value.as_str() != Some("model"))
+            {
                 return Err(invalid());
             }
             // max_model_len 是 vLLM 的显式扩展；普通兼容服务不能仅凭同名字段被猜成 vLLM。

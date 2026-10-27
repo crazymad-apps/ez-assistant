@@ -7,7 +7,7 @@ import type { RuntimeBootstrap } from "../../src/native-bridge/runtimeBootstrap"
 
 const page = (ids: string[], generation = 1): ConversationPage => ({
   owner: { type: "main_session", session_id: "s" }, generation,
-  items: ids.map(message_id => ({ type: "user", message_id, input_id: null, text: message_id,
+  items: ids.map(message_id => ({ type: "user", inherited: false, message_id, input_id: null, text: message_id,
     created_at_ms: 0, attachment_ids: [], quotes: [], source: { type: "user" } })),
   previous_cursor: ids[0] === "m1" ? null : "cursor", has_more: ids[0] !== "m1",
 });

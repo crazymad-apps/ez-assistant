@@ -20,6 +20,7 @@ const MAX_SYSTEM_CONTEXT_BYTES: usize = 256 * 1024;
 
 pub(super) struct HostSessionEnvironmentFactory {
     sessions_directory: PathBuf,
+    personal: bool,
     paths: std::sync::Arc<crate::user_paths::UserPaths>,
 }
 
@@ -28,15 +29,18 @@ impl HostSessionEnvironmentFactory {
     pub(super) fn new(runtime_home: &Path) -> Self {
         Self::with_paths(
             runtime_home,
+            true,
             std::sync::Arc::new(crate::user_paths::UserPaths::new(runtime_home, Vec::new())),
         )
     }
     pub(super) fn with_paths(
         runtime_home: &Path,
+        personal: bool,
         paths: std::sync::Arc<crate::user_paths::UserPaths>,
     ) -> Self {
         Self {
             paths,
+            personal,
             // 与 Store 使用同样的原生路径组件，避免 Windows Fork 校验中的分隔符差异。
             sessions_directory: runtime_home.join("data").join("sessions"),
         }
@@ -132,6 +136,7 @@ impl SessionEnvironmentFactory for HostSessionEnvironmentFactory {
         parts.push(render_directory_prompt(
             &environment,
             &self.paths.user_root,
+            self.personal,
         )?);
         ensure_context_limit(&parts)?;
         Ok(PreparedSessionEnvironment {
@@ -167,13 +172,19 @@ impl SessionEnvironmentFactory for HostSessionEnvironmentFactory {
             session_private_directory: private_directory,
         };
         let mut parts = request.source_system_prompt.parts().to_vec();
-        if parts.pop().is_none() {
+        // Catalog 和自定义 Agent 指令插在目录部分之前；只替换完整的 Host 最后部分，
+        // 不扫描用户正文，也不以删除未知指令的方式修复不符合约定的快照。
+        let last = parts
+            .last_mut()
+            .ok_or_else(SessionEnvironmentFactoryError::new)?;
+        let body = last
+            .strip_prefix("<runtime_directories>")
+            .and_then(|body| body.strip_suffix("</runtime_directories>"))
+            .ok_or_else(SessionEnvironmentFactoryError::new)?;
+        if body.contains("<runtime_directories") || body.contains("</runtime_directories") {
             return Err(SessionEnvironmentFactoryError::new());
         }
-        parts.push(render_directory_prompt(
-            &environment,
-            &self.paths.user_root,
-        )?);
+        *last = render_directory_prompt(&environment, &self.paths.user_root, self.personal)?;
         ensure_context_limit(&parts)?;
         Ok(PreparedSessionEnvironment {
             system_prompt: SystemPromptSnapshot::new(parts),
@@ -266,10 +277,16 @@ fn path_text(path: &Path) -> Result<String, SessionEnvironmentFactoryError> {
 fn render_directory_prompt(
     environment: &SessionExecutionEnvironment,
     user_root: &Path,
+    personal: bool,
 ) -> Result<String, SessionEnvironmentFactoryError> {
     // 直接使用本用户服务装配时固定的根目录；不从工作区、OS Home 或源会话提示词猜测。
     let mut lines = vec![
         "<runtime_directories>".to_owned(),
+        format!(
+            "  <runtime_mode>{}</runtime_mode>",
+            if personal { "personal" } else { "enterprise" }
+        ),
+        "  <runtime_execution_semantics>This session's directories and tool execution belong to the connected EZ Assistant Runtime Host and current user domain. The client may run on another device; its local paths are not Host paths. runtime_mode describes configuration ownership, not tool permission. Enterprise users may also manage personal settings; check each resource's source and the available tools.</runtime_execution_semantics>".to_owned(),
         format!(
             "  <user_data_directory>{}</user_data_directory>",
             escape_xml(&path_text(user_root)?)
@@ -333,23 +350,43 @@ mod tests {
     use assistant_protocol::{SessionId, WorkspaceId};
     use tempfile::TempDir;
 
+    use crate::resources::{HostResources, model::HostModelServiceFactory};
+
     use super::*;
     use assistant_runtime::{
         MemoryContextSnapshot, PersonaSnapshot, PinnedMemoryCreatedBy, StoredPinnedMemory,
         WorkspaceEnvironmentSource,
     };
 
-    #[test]
-    fn personal_and_enterprise_prompts_use_the_current_user_root() {
+    fn runtime_home() -> TempDir {
         let test_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.runtime-test");
         fs::create_dir_all(&test_root).expect("test directory");
-        let root = tempfile::Builder::new()
-            .prefix("user-directory-prompt-")
-            .tempdir_in(test_root)
-            .expect("isolated runtime home");
-        for user in ["_personal", "f27d8da0-4c20-43f8-9177-176e9eb870a0_1"] {
+        tempfile::Builder::new()
+            .prefix("session-environment-")
+            .tempdir_in(fs::canonicalize(test_root).expect("test root"))
+            .expect("isolated runtime home")
+    }
+
+    #[test]
+    fn personal_and_enterprise_prompts_use_the_actual_domain_not_its_path() {
+        let root = runtime_home();
+        // 刻意反转目录名称，证明模式由正式用户资源装配传递，而非按路径推导。
+        for (personal, user, mode) in [
+            (true, "_personal", "personal"),
+            (false, "center-user_1", "enterprise"),
+            (false, "_personal", "enterprise"),
+            (true, "center-user_1", "personal"),
+        ] {
             let user_root = root.path().join("host&data/users").join(user);
-            let factory = HostSessionEnvironmentFactory::new(&user_root);
+            let resources = HostResources::for_user(
+                &user_root,
+                personal,
+                std::sync::Arc::new(HostModelServiceFactory::new(&user_root)),
+                std::sync::Arc::new(crate::user_paths::UserPaths::new(&user_root, Vec::new())),
+                None,
+            )
+            .expect("actual user resources");
+            let factory = resources.session_environment_factory;
             let source = factory
                 .create_environment(SessionEnvironmentFactoryRequest {
                     session_id: &SessionId::new("source").expect("session id"),
@@ -368,6 +405,10 @@ mod tests {
             );
             assert!(prompt.contains(&user_tag));
             assert!(prompt.contains(&skills_tag));
+            assert!(prompt.contains(&format!("<runtime_mode>{mode}</runtime_mode>")));
+            assert_eq!(prompt.matches("<runtime_mode>").count(), 1);
+            assert!(prompt.contains("connected EZ Assistant Runtime Host"));
+            assert!(prompt.contains("not tool permission"));
             assert!(prompt.contains("host&amp;data"));
             assert_ne!(
                 source.environment.working_directory,
@@ -388,6 +429,7 @@ mod tests {
             let prompt = fork.system_prompt.parts().last().expect("fork directories");
             assert_eq!(prompt.matches(&user_tag).count(), 1);
             assert_eq!(prompt.matches(&skills_tag).count(), 1);
+            assert!(prompt.contains(&format!("<runtime_mode>{mode}</runtime_mode>")));
             assert!(prompt.contains("fork"));
             assert!(!prompt.contains("legacy session directories"));
         }
@@ -424,7 +466,7 @@ mod tests {
 
     #[test]
     fn bound_and_unbound_environments_have_stable_distinct_directory_prompts() {
-        let root = TempDir::new().expect("runtime home");
+        let root = runtime_home();
         let workspace = root.path().join("project&");
         let agent_directory = root.path().join("agent");
         fs::create_dir_all(&workspace).expect("workspace");
@@ -471,7 +513,7 @@ mod tests {
 
     #[test]
     fn private_workspace_uses_its_agent_directory_for_cwd_and_agents_instructions() {
-        let root = TempDir::new().expect("runtime home");
+        let root = runtime_home();
         let agent_directory = root.path().join("data/workspaces/w-private/agent");
         fs::create_dir_all(&agent_directory).expect("private workspace directory");
         fs::write(
@@ -513,7 +555,7 @@ mod tests {
 
     #[test]
     fn context_parts_follow_the_frozen_product_order_and_escape_user_text() {
-        let root = TempDir::new().expect("runtime home");
+        let root = runtime_home();
         let workspace = root.path().join("workspace");
         let agent_directory = root.path().join("agent");
         fs::create_dir_all(&workspace).expect("workspace");
@@ -568,7 +610,7 @@ mod tests {
 
     #[test]
     fn independent_session_does_not_probe_or_include_workspace_instructions() {
-        let root = TempDir::new().expect("runtime home");
+        let root = runtime_home();
         fs::write(root.path().join(AGENTS_FILE), "must not be loaded")
             .expect("unrelated instructions");
         let factory = HostSessionEnvironmentFactory::new(root.path());
@@ -594,7 +636,7 @@ mod tests {
 
     #[test]
     fn workspace_roots_and_agents_instructions_preserve_primary_then_additional_order() {
-        let root = TempDir::new().expect("runtime home");
+        let root = runtime_home();
         let primary = root.path().join("primary");
         let docs = root.path().join("docs");
         let agent_directory = root.path().join("agent");
@@ -650,7 +692,7 @@ mod tests {
 
     #[test]
     fn workspace_instructions_enforce_size_utf8_file_and_containment_rules() {
-        let root = TempDir::new().expect("runtime home");
+        let root = runtime_home();
         let workspace = root.path().join("workspace");
         fs::create_dir_all(&workspace).expect("workspace");
         let instructions = workspace.join(AGENTS_FILE);
@@ -684,7 +726,7 @@ mod tests {
 
     #[test]
     fn fork_preserves_frozen_context_and_only_rebuilds_session_directories() {
-        let root = TempDir::new().expect("runtime home");
+        let root = runtime_home();
         let workspace = root.path().join("workspace");
         let agent_directory = root.path().join("agent");
         fs::create_dir_all(&workspace).expect("workspace");
@@ -765,6 +807,148 @@ mod tests {
             fork.environment
                 .session_attachment_directory
                 .contains("s-fork")
+        );
+    }
+
+    #[test]
+    fn fork_rebuilds_target_identity_and_preserves_literal_user_tags() {
+        let root = runtime_home();
+        let source = HostSessionEnvironmentFactory::new(root.path())
+            .create_environment(SessionEnvironmentFactoryRequest {
+                session_id: &SessionId::new("source").expect("source id"),
+                workspace: None,
+                memory_context: &MemoryContextSnapshot::default(),
+            })
+            .expect("source environment");
+        let mut parts = source.system_prompt.into_parts();
+        // 自定义 Agent 正文可以含同名标签；只拥有最后的完整环境部分。
+        let literal =
+            "<runtime_directories><runtime_mode>user example</runtime_mode></runtime_directories>";
+        parts.insert(1, literal.to_owned());
+        let frozen = SystemPromptSnapshot::new(parts);
+        let original = frozen.clone();
+        let target_home = root.path().join("other-domain");
+        let target = HostSessionEnvironmentFactory::with_paths(
+            &target_home,
+            false,
+            std::sync::Arc::new(crate::user_paths::UserPaths::new(&target_home, Vec::new())),
+        );
+        let fork = target
+            .create_fork_environment(ForkSessionEnvironmentFactoryRequest {
+                session_id: &SessionId::new("fork").expect("fork id"),
+                source_system_prompt: &frozen,
+                source_environment: &source.environment,
+            })
+            .expect("fork environment");
+        assert_eq!(frozen, original, "source is never rewritten");
+        assert_eq!(fork.system_prompt.parts()[1], literal);
+        assert_eq!(&fork.system_prompt.parts()[..2], &frozen.parts()[..2]);
+        let directories = fork.system_prompt.parts().last().expect("directories");
+        assert!(directories.contains("<runtime_mode>enterprise</runtime_mode>"));
+        assert!(directories.contains(target_home.to_str().expect("target path")));
+        assert!(!directories.contains(&source.environment.session_private_directory));
+        assert_eq!(fork.environment.workspace_id, None);
+        assert_eq!(
+            fork.environment.working_directory,
+            fork.environment.session_private_directory
+        );
+        assert_ne!(
+            fork.environment.session_private_directory,
+            source.environment.session_private_directory
+        );
+        assert_ne!(
+            fork.environment.session_tool_image_directory,
+            source.environment.session_tool_image_directory
+        );
+    }
+
+    #[test]
+    fn fork_rejects_missing_malformed_or_nonfinal_directory_parts() {
+        let root = runtime_home();
+        let factory = HostSessionEnvironmentFactory::new(root.path());
+        let source = factory
+            .create_environment(SessionEnvironmentFactoryRequest {
+                session_id: &SessionId::new("source").expect("source id"),
+                workspace: None,
+                memory_context: &MemoryContextSnapshot::default(),
+            })
+            .expect("source environment");
+        let directory = source.system_prompt.parts().last().expect("directories");
+        let snapshots = [
+            Vec::new(),
+            vec![BASE_SYSTEM_PROMPT.to_owned()],
+            vec![directory.clone(), "must not be discarded".to_owned()],
+            vec![format!("prefix{directory}")],
+            vec![format!("{directory}suffix")],
+            vec!["<runtime_directories>missing closing tag".to_owned()],
+            vec![format!("{directory}{directory}")],
+            vec![format!(
+                "<runtime_directories>{directory}</runtime_directories>"
+            )],
+        ];
+        for parts in snapshots {
+            let frozen = SystemPromptSnapshot::new(parts);
+            let original = frozen.clone();
+            assert!(
+                factory
+                    .create_fork_environment(ForkSessionEnvironmentFactoryRequest {
+                        session_id: &SessionId::new("fork").expect("fork id"),
+                        source_system_prompt: &frozen,
+                        source_environment: &source.environment,
+                    })
+                    .is_err()
+            );
+            assert_eq!(frozen, original);
+        }
+    }
+
+    #[test]
+    fn create_and_fork_enforce_the_complete_prompt_size_limit() {
+        let root = runtime_home();
+        let factory = HostSessionEnvironmentFactory::new(root.path());
+        let id = SessionId::new("source").expect("source id");
+        let oversized = MemoryContextSnapshot {
+            persona: PersonaSnapshot {
+                enabled: true,
+                content: "x".repeat(MAX_SYSTEM_CONTEXT_BYTES),
+                revision: 1,
+                updated_at_ms: 1,
+            },
+            ..MemoryContextSnapshot::default()
+        };
+        assert!(
+            factory
+                .create_environment(SessionEnvironmentFactoryRequest {
+                    session_id: &id,
+                    workspace: None,
+                    memory_context: &oversized,
+                })
+                .is_err()
+        );
+        let source = factory
+            .create_environment(SessionEnvironmentFactoryRequest {
+                session_id: &id,
+                workspace: None,
+                memory_context: &MemoryContextSnapshot::default(),
+            })
+            .expect("source environment");
+        let frozen = SystemPromptSnapshot::new(vec![
+            "x".repeat(MAX_SYSTEM_CONTEXT_BYTES),
+            source
+                .system_prompt
+                .parts()
+                .last()
+                .expect("directories")
+                .clone(),
+        ]);
+        assert!(
+            factory
+                .create_fork_environment(ForkSessionEnvironmentFactoryRequest {
+                    session_id: &SessionId::new("fork").expect("fork id"),
+                    source_system_prompt: &frozen,
+                    source_environment: &source.environment,
+                })
+                .is_err()
         );
     }
 }

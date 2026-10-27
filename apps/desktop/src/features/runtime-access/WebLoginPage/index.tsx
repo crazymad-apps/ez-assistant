@@ -1,6 +1,5 @@
 import { observer } from "mobx-react-lite";
 import { useState, type FormEvent } from "react";
-import { AccountMenu } from "../AccountMenu";
 import { Button } from "../../../components/Button";
 import type { ApplicationConnectionStore } from "../ApplicationConnectionStore";
 import { RuntimeEntryLayout } from "../RuntimeEntryLayout";
@@ -32,7 +31,6 @@ export const WebLoginPage = observer(function WebLoginPage({
           <div className={styles.form}>
             <p className={styles.loading} role="status">{connection.error ?? connection.progress ?? "正在连接 Runtime…"}</p>
             {connection.can_retry && connection.error && <Button disabled={connection.pending} onClick={() => void connection.retryInitialization()}>重试初始化</Button>}
-            {connection.session && <AccountMenu connection={connection} />}
           </div>
         ) : (
           <form

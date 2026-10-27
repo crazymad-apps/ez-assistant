@@ -4,7 +4,7 @@ import { SettingsStore } from "../../src/stores/SettingsStore";
 import { McpSettingsStore } from "../../src/features/settings/SettingsDialog/McpSettingsPage/store";
 import { serverDraft, validateMcpDraft } from "../../src/features/settings/SettingsDialog/McpSettingsPage/draft";
 import type { RuntimeClient } from "../../src/runtime-client/RuntimeClient";
-import type { McpServerDraft, RuntimeCommand } from "@ez-assistant/protocol";
+import type { McpServerDraft, McpServerSnapshot, RuntimeCommand } from "@ez-assistant/protocol";
 
 function deferred() {
   let resolve!: (value: unknown) => void;
@@ -86,6 +86,34 @@ describe("MCP settings request ownership", () => {
     expect(new_commands).toEqual([]);
     expect(store.test_result).toBeNull();
   });
+  it("uses the managed file revision and original plugin parameter authority", async () => {
+    const requests: RuntimeCommand[] = [];
+    const server: McpServerSnapshot = { source: { type: "plugin", name: "fixture" }, server_key: "remote", display_name: "Remote", description: "", transport: "streamable_http", enabled: false, runtime_state: "unavailable", tool_count: 0, needs_refresh: false, target_summary: "Managed HTTP", startup_timeout_ms: null, tool_timeout_ms: null, environment_keys: [], header_keys: [], managed: { revision: "file-r1", definition_digest: "digest", configured_enabled: false, source_enabled: true, source_available: true, configuration_ready: true, environment: {}, headers: {}, parameters: [], parameter_bindings: {}, plugin_settings_revision: "param-r1", plugin_sha256: "sha" } };
+    const runtime = client(async request => {
+      requests.push(request);
+      if (request.type === "refresh_mcp_server") return { payload: { servers: [{ server_key: "remote", outcome: "disabled", tool_count: 0 }], diagnostics: [] } };
+      return { payload: { snapshot: { ...snapshot, servers: [server] } } };
+    });
+    const store = new McpSettingsStore(() => runtime);
+    await store.saveParameter(server, "key", "new-value");
+    expect(requests[0]).toEqual({ type: "mutate_plugin_settings", payload: { name: "fixture", expected_active_sha256: "sha", expected_revision: "param-r1", mutation: { type: "set_parameter", name: "key", value: "new-value" } } });
+    expect(requests.some(request => request.type === "mutate_mcp_configuration")).toBe(false);
+    await store.refresh(server, "root-r1");
+    expect(requests).toContainEqual({ type: "refresh_mcp_server", payload: { target: { source: server.source, server_key: "remote" }, expected_revision: "file-r1", expected_definition_digest: "digest" } });
+    expect(store.notice_message).toContain("已关闭连接");
+  });
+
+  it.each([true, false])("reports the chosen source only after a successful refresh (%s)", async success => {
+    const server: McpServerSnapshot = { source: { type: "plugin", name: "fixture" }, server_key: "remote", display_name: "Remote", description: "", transport: "stdio", enabled: true, shadowed_by: { type: "user" }, runtime_state: "unavailable", tool_count: 0, needs_refresh: false, target_summary: "Managed stdio", startup_timeout_ms: null, tool_timeout_ms: null, environment_keys: [], header_keys: [] };
+    const runtime = client(async request => request.type === "refresh_mcp_server"
+      ? { payload: { outcome: success ? "success" : "failure", servers: [{ server_key: "remote", outcome: success ? "refreshed" : "retained_after_failure", tool_count: 0 }] } }
+      : { payload: { snapshot: { ...snapshot, servers: [server] } } });
+    const store = new McpSettingsStore(() => runtime);
+    await store.refresh(server, "r1");
+    expect(store.notice_message).toContain(success ? "同名服务优先使用：用户添加" : "刷新失败");
+    expect(store.error_message).toBeNull();
+  });
+
 });
 
 function timeoutDraft(timeout: number | undefined): McpServerDraft {

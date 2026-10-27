@@ -1,3 +1,4 @@
+import { priorityLabel, serverIdentity, sourceLabel } from "./draft";
 import { observer } from "mobx-react-lite";
 import { useEffect, useRef, useState } from "react";
 import { Icon } from "../../../../components/Icon";
@@ -22,7 +23,7 @@ export const McpSettingsPage = observer(function McpSettingsPage(props: Readonly
   const [deleting, setDeleting] = useState<{ server: McpServerSnapshot; revision: string } | null>(null);
   const trigger = useRef<HTMLElement | null>(null);
   const snapshot = settings.configuration;
-  const busy = settings.pending_action === "save";
+  const busy = settings.pending_action !== null;
   const readonly = settings.stale || !snapshot || busy;
   // 复用现有 Application 失效刷新：配置保存、Command 结算及 SSE gap 后都会重新读取。
   useEffect(() => { if (available) void settings.load(); }, [available, application, settings]);
@@ -47,7 +48,7 @@ export const McpSettingsPage = observer(function McpSettingsPage(props: Readonly
   if (!available) {
     content = <SettingsPageContainer title="MCP"><p className={styles.error}>当前运行时不支持 MCP 管理，请重启升级运行时。</p></SettingsPageContainer>;
   } else if (editing) {
-    content = <ServerEditor {...editing} onDelete={beginDelete} onDirtyChange={props.onDirtyChange} onDone={done} />;
+    content = <ServerEditor key={editing.server ? serverIdentity(editing.server) : "new"} {...editing} onDelete={beginDelete} onDirtyChange={props.onDirtyChange} onDone={done} />;
   } else {
     content = <SettingsPageContainer title="MCP" actions={<><button disabled={readonly} onClick={() => { settings.clearMessages(); setImportRevision(snapshot!.revision); }} type="button">导入配置</button><button className={shared.primary_button} disabled={readonly} onClick={() => beginEdit(null)} type="button"><Icon name="plus" size={14} />添加服务</button></>}>
       <div className={styles.page}>
@@ -57,12 +58,12 @@ export const McpSettingsPage = observer(function McpSettingsPage(props: Readonly
         {snapshot?.diagnostics.map((diagnostic, index) => <p className={diagnostic.code === "tool_description_long" ? styles.warning : styles.error} key={index} role={diagnostic.code === "tool_description_long" ? "status" : "alert"}>{diagnostic.code === "tool_description_long" && "警告："}{diagnostic.server_key && `${diagnostic.server_key}：`}{diagnostic.message}</p>)}
         {settings.loading && !snapshot && <p role="status">正在读取 MCP 配置…</p>}
         {snapshot && servers.length === 0 && <p className={styles.empty}>{normalized ? "没有匹配的服务" : "还没有 MCP 服务"}</p>}
-        <div className={styles.server_list}>{servers.map((server) => <article key={server.server_key}>
+        <div className={styles.server_list}>{servers.map((server) => <article key={serverIdentity(server)}>
           <button className={styles.server_body} disabled={readonly} onClick={() => beginEdit(server)} type="button">
             <i data-state={server.needs_refresh ? "pending" : server.runtime_state} />
-            <span><strong>{server.display_name} <code>{server.server_key}</code></strong><em>{server.description || "未配置业务范围"}</em><small>{server.transport === "stdio" ? "本地 stdio" : "Streamable HTTP"} · {stateLabel(server)}</small></span><Icon name="chevron-right" size={15} />
+            <span><strong>{server.display_name} <code>{server.server_key}</code></strong><em>{server.description || "未配置业务范围"}</em><small>{sourceLabel(server)} · {server.transport === "stdio" ? "本地 stdio" : "Streamable HTTP"} · {stateLabel(server)}</small></span><Icon name="chevron-right" size={15} />
           </button>
-          <label className={shared.switch}><input aria-label={`启用 ${server.display_name}`} checked={server.enabled} disabled={readonly} onChange={(event) => { void settings.mutate(snapshot!.revision, { type: "set_enabled", payload: { server_key: server.server_key, enabled: event.target.checked } }); }} type="checkbox" /><span /><b>{server.enabled ? "已启用" : "已禁用"}</b></label>
+          <label className={shared.switch}><input aria-label={`启用 ${server.display_name}`} checked={server.managed?.configured_enabled ?? server.enabled} disabled={readonly || server.managed?.source_available === false} onChange={(event) => { void settings.mutate(server.managed?.revision ?? snapshot!.revision, server.managed ? { type: "patch_managed", payload: { target: { source: server.source, server_key: server.server_key }, expected_definition_digest: server.managed.definition_digest, enabled: event.target.checked, environment: {}, headers: {} } } : { type: "set_enabled", payload: { server_key: server.server_key, enabled: event.target.checked } }); }} type="checkbox" /><span /><b>{(server.managed?.configured_enabled ?? server.enabled) ? "已启用" : "已禁用"}</b></label>
         </article>)}</div>
       </div>
     </SettingsPageContainer>;
@@ -74,6 +75,9 @@ export const McpSettingsPage = observer(function McpSettingsPage(props: Readonly
 });
 
 function stateLabel(server: McpServerSnapshot): string {
+  const priority = priorityLabel(server);
+  if (priority) return `${priority}${server.needs_refresh ? " · 待刷新" : ""}`;
+  if (server.managed && !server.managed.source_enabled) return "插件已停用";
   if (server.needs_refresh) return `配置待刷新 · ${server.tool_count} 个工具`;
   if (server.runtime_state === "connected") return `已连接 · ${server.tool_count} 个工具`;
   if (server.runtime_state === "connected_without_tools") return "已连接 · 无工具";

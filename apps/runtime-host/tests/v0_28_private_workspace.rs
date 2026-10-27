@@ -276,9 +276,7 @@ fn session_workspace(client: &mut Client, session_id: &str) -> Value {
 }
 
 fn submit(client: &mut Client, session_id: &str, message: &str, key: &str) {
-    let submitted = client.runtime(
-        "submit_input",
-        json!({"session_id":session_id,"message":message,"variant":"build","approval_mode":"auto","idempotency_key":key}),
+    let submitted = client.submit_started_input(json!({"session_id":session_id,"message":message,"variant":"build","approval_mode":"auto","idempotency_key":key}),
     );
     let run_id = text(&submitted["run"]["run_id"]);
     assert_eq!(

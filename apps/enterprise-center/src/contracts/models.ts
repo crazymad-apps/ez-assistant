@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export const providerTypes = [
   'openai',
+  'sub2api',
   'opencode',
   'deepseek',
   'dashscope_api',
@@ -59,8 +60,8 @@ export class ProviderConnection {
   @ApiProperty() endpoint!: string;
   @ApiProperty({ enum: preferences }) protocol_preference!: (typeof preferences)[number];
   @ApiProperty() models_path!: string;
-  @ApiProperty({ enum: ['openai', 'vllm', 'moonshot', 'dashscope_native'] }) discovery_format!:
-    'openai' | 'vllm' | 'moonshot' | 'dashscope_native';
+  @ApiProperty({ enum: ['openai', 'sub2api', 'vllm', 'moonshot', 'dashscope_native'] }) discovery_format!:
+    'openai' | 'sub2api' | 'vllm' | 'moonshot' | 'dashscope_native';
   @ApiPropertyOptional({ enum: ['http', 'websocket'], default: 'http' })
   responses_transport?: 'http' | 'websocket';
   @ApiProperty({ default: false }) server_history_enabled!: boolean;

@@ -78,86 +78,85 @@ impl RunModelDiagnostics {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
-
-    fn publish(&self, event: RuntimeEvent) {
-        let _ = self.events.send(event);
-    }
 }
 
 impl ModelAttemptObserver for RunModelDiagnostics {
     fn observe(&self, event: ModelAttemptEvent) {
-        match event {
-            ModelAttemptEvent::Started { attempt, .. } => {
-                {
-                    let mut state = self.lock_state();
-                    if attempt == 1 {
-                        *state = ModelAttemptState::default();
+        let _ = self.events.publish_transition(|| {
+            let event = match event {
+                ModelAttemptEvent::Started { attempt, .. } => {
+                    {
+                        let mut state = self.lock_state();
+                        if attempt == 1 {
+                            *state = ModelAttemptState::default();
+                        }
+                        state.attempt = attempt;
+                        state.retries = attempt.saturating_sub(1);
+                        state.request = Some(ModelRequestStatus::Requesting { attempt });
                     }
-                    state.attempt = attempt;
-                    state.retries = attempt.saturating_sub(1);
-                    state.request = Some(ModelRequestStatus::Requesting { attempt });
+                    RuntimeEvent::ModelAttemptStarted {
+                        session_id: self.session_id.clone(),
+                        run_id: self.run_id.clone(),
+                        attempt,
+                    }
                 }
-                self.publish(RuntimeEvent::ModelAttemptStarted {
-                    session_id: self.session_id.clone(),
-                    run_id: self.run_id.clone(),
+                ModelAttemptEvent::StreamFailed {
                     attempt,
-                });
-            }
-            ModelAttemptEvent::StreamFailed {
-                attempt,
-                error,
-                will_retry,
-                ..
-            }
-            | ModelAttemptEvent::EstablishmentFailed {
-                attempt,
-                error,
-                will_retry,
-                ..
-            } => {
-                {
-                    let mut state = self.lock_state();
-                    state.attempt = attempt;
-                    state.request = None;
-                }
-                self.publish(RuntimeEvent::ModelAttemptFailed {
-                    session_id: self.session_id.clone(),
-                    run_id: self.run_id.clone(),
-                    attempt,
-                    kind: model_failure_kind(&error),
+                    error,
                     will_retry,
-                });
-            }
-            ModelAttemptEvent::RetryScheduled {
-                next_attempt,
-                delay_ms,
-                ..
-            } => {
-                self.lock_state().request = Some(ModelRequestStatus::RetryWaiting {
-                    next_attempt,
-                    delay_ms,
-                });
-                self.publish(RuntimeEvent::ModelRetryScheduled {
-                    session_id: self.session_id.clone(),
-                    run_id: self.run_id.clone(),
-                    next_attempt,
-                    delay_ms,
-                });
-            }
-            ModelAttemptEvent::StreamEstablished { attempt, .. } => {
-                {
-                    let mut state = self.lock_state();
-                    state.attempt = attempt;
-                    state.stream_established = true;
-                    state.request = None;
+                    ..
                 }
-                self.publish(RuntimeEvent::ModelStreamEstablished {
-                    session_id: self.session_id.clone(),
-                    run_id: self.run_id.clone(),
+                | ModelAttemptEvent::EstablishmentFailed {
                     attempt,
-                });
-            }
-        }
+                    error,
+                    will_retry,
+                    ..
+                } => {
+                    {
+                        let mut state = self.lock_state();
+                        state.attempt = attempt;
+                        state.request = None;
+                    }
+                    RuntimeEvent::ModelAttemptFailed {
+                        session_id: self.session_id.clone(),
+                        run_id: self.run_id.clone(),
+                        attempt,
+                        kind: model_failure_kind(&error),
+                        will_retry,
+                    }
+                }
+                ModelAttemptEvent::RetryScheduled {
+                    next_attempt,
+                    delay_ms,
+                    ..
+                } => {
+                    self.lock_state().request = Some(ModelRequestStatus::RetryWaiting {
+                        next_attempt,
+                        delay_ms,
+                    });
+                    RuntimeEvent::ModelRetryScheduled {
+                        session_id: self.session_id.clone(),
+                        run_id: self.run_id.clone(),
+                        next_attempt,
+                        delay_ms,
+                    }
+                }
+                ModelAttemptEvent::StreamEstablished { attempt, .. } => {
+                    {
+                        let mut state = self.lock_state();
+                        state.attempt = attempt;
+                        state.stream_established = true;
+                        state.request = None;
+                    }
+                    RuntimeEvent::ModelStreamEstablished {
+                        session_id: self.session_id.clone(),
+                        run_id: self.run_id.clone(),
+                        attempt,
+                    }
+                }
+            };
+            Ok(((), Some(event)))
+        });
     }
 }
 

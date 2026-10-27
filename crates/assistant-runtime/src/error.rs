@@ -181,10 +181,10 @@ pub enum RuntimeError {
         #[source]
         source: ModelError,
     },
-    /// 独立手动上下文压缩未能生成或提交受控结果。
+    /// 手动、父 Run 或 child 上下文压缩未能生成、提交或安装受控结果。
     #[error("session context compaction failed")]
     ContextCompactionFailed {
-        /// 保留压缩布局、响应或替换校验的完整内部错误链。
+        /// 保留模型、存储来源与提交阶段的完整内部错误链。
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
@@ -461,10 +461,17 @@ impl RuntimeError {
                     crate::run::model_failure_kind_value(crate::run::model_failure_kind(source))
                 ),
             ),
-            Self::ContextCompactionFailed { .. } => RuntimeErrorInfo::new(
-                RuntimeErrorCode::ContextCompactionFailed,
-                "session context compaction failed",
-            ),
+            Self::ContextCompactionFailed { source } => source
+                .downcast_ref::<crate::context_compaction::RuntimeCompactionError>()
+                .map_or_else(
+                    || {
+                        RuntimeErrorInfo::new(
+                            RuntimeErrorCode::ContextCompactionFailed,
+                            "session context compaction failed",
+                        )
+                    },
+                    crate::context_compaction::RuntimeCompactionError::to_protocol_info,
+                ),
             Self::ModelBuildFailed { .. } | Self::AgentBuildFailed { .. } => RuntimeErrorInfo::new(
                 RuntimeErrorCode::ModelBuildFailed,
                 "model could not be prepared for this run",

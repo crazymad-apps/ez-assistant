@@ -9,19 +9,17 @@ export const DesktopLifecycleDialog = observer(function DesktopLifecycleDialog()
 
   const stops_runtime = intent !== "quit_desktop" || lifecycle.stop_runtime_on_quit;
   const title = intent === "restart_runtime"
-    ? "重启本机 Runtime？"
+    ? "重启后台服务？"
     : intent === "stop_runtime"
-      ? "停止本机 Runtime？"
-      : lifecycle.stop_runtime_on_quit
-        ? "退出并停止本机 Runtime？"
-        : "退出桌面客户端？";
+      ? "停止后台服务？"
+      : "退出应用？";
   const confirm_label = intent === "restart_runtime"
-    ? "重启本机 Runtime"
+    ? "重启"
     : intent === "stop_runtime"
-      ? "停止本机 Runtime"
+      ? "停止"
       : lifecycle.stop_runtime_on_quit
-        ? "退出并停止本机 Runtime"
-        : "退出客户端";
+        ? "退出并停止"
+        : "保留后台并退出";
 
   return (
     <Dialog
@@ -38,7 +36,7 @@ export const DesktopLifecycleDialog = observer(function DesktopLifecycleDialog()
         <div className={styles.body}>
           {intent === "quit_desktop" ? (
             <>
-              <p>退出桌面客户端后，Runtime 默认继续运行。</p>
+              <p>停止后台服务会中断本机所有运行中的会话。取消勾选可让会话继续运行。</p>
               {lifecycle.terminal_count > 0 && <p>将关闭 {lifecycle.terminal_count} 个终端，终端内运行的进程将结束。</p>}
               <label className={styles.checkbox}>
                 <input
@@ -47,27 +45,13 @@ export const DesktopLifecycleDialog = observer(function DesktopLifecycleDialog()
                   onChange={(event) => lifecycle.setStopRuntimeOnQuit(event.currentTarget.checked)}
                   type="checkbox"
                 />
-                同时停止本机 Runtime
+                同时停止后台服务
               </label>
             </>
           ) : (
-            <p>{intent === "restart_runtime" ? "本机 Runtime 将受控停止并启动新实例。" : "桌面客户端会保留，你可以稍后重新启动 Runtime。"}</p>
+            <p>{intent === "restart_runtime" ? "重启本机后台服务会中断所有运行中的会话。" : "停止本机后台服务后，所有运行中的会话都会中断。"}</p>
           )}
-          {stops_runtime && <p>将中断本机 Host 所有用户的任务，并使所有客户端断开。下方如有数量，仅代表当前用户。</p>}
-          {stops_runtime && !lifecycle.local_impact_known && <p>当前连接为其他 Runtime；本机任务数量未载入。本次操作只影响本机 Runtime。</p>}
-          {stops_runtime && lifecycle.local_impact_known && (
-            <div className={styles.impact}>
-              <strong>本次操作影响</strong>
-              <dl>
-                <div><dt>活动 Run</dt><dd>{lifecycle.impact.active_runs}</dd></div>
-                <div><dt>排队输入</dt><dd>{lifecycle.impact.queued_inputs}</dd></div>
-                <div><dt>待审批</dt><dd>{lifecycle.impact.pending_approvals}</dd></div>
-              </dl>
-              {(lifecycle.impact.active_runs + lifecycle.impact.queued_inputs + lifecycle.impact.pending_approvals) > 0 && (
-                <p>未完成的工作会被中断，请确认后继续。</p>
-              )}
-            </div>
-          )}
+          {!lifecycle.local_impact_known && <p>此操作只影响本机，远程设备会继续运行。</p>}
           {lifecycle.error_message && <p className={styles.error} role="alert">{lifecycle.error_message}</p>}
         </div>
         <footer>

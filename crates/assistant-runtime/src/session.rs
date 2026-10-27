@@ -115,7 +115,7 @@ pub(crate) fn context_history_hash(
     history: &agent_types::ConversationSnapshot,
 ) -> Option<[u8; 32]> {
     use sha2::{Digest, Sha256};
-    serde_json::to_vec(history)
+    serde_json::to_vec(&history.project_provider_context().ok()?)
         .ok()
         .map(|bytes| Sha256::digest(bytes).into())
 }
@@ -143,8 +143,8 @@ pub(crate) struct ActiveSessionTitleGeneration {
 #[derive(Clone)]
 pub(crate) struct InputRecord {
     pub(crate) stored: StoredInput,
-    pub(crate) first_run_id: RunId,
-    pub(crate) latest_run_id: RunId,
+    pub(crate) first_run_id: Option<RunId>,
+    pub(crate) latest_run_id: Option<RunId>,
 }
 
 impl SessionState {
@@ -284,6 +284,7 @@ impl SessionController {
     pub(crate) fn recovered(
         stored: StoredSession,
         runs: Vec<StoredRun>,
+        history: Vec<crate::StoredRunHistory>,
         inputs: Vec<StoredInput>,
         commands: Vec<StoredSessionCommand>,
         mcp_selections: Vec<crate::StoredMcpSelection>,
@@ -293,13 +294,27 @@ impl SessionController {
     ) -> Self {
         let is_conversation_available =
             stored.conversation_state == StoredConversationState::Available;
-        let committed_inputs = inputs
-            .iter()
-            .filter(|input| input.state == StoredInputState::Committed)
-            .map(|input| &input.input_id)
-            .collect::<std::collections::BTreeSet<_>>();
+        let mut input_attempts = BTreeMap::<InputId, BTreeMap<u32, RunId>>::new();
+        for run in history
+            .into_iter()
+            .filter(|run| !run.inherited && !run.partial)
+        {
+            if let Some(input_id) = run.input_id {
+                input_attempts
+                    .entry(input_id)
+                    .or_default()
+                    .insert(run.attempt, run.run_id);
+            }
+        }
+        for run in &runs {
+            input_attempts
+                .entry(run.input_id.clone())
+                .or_default()
+                .insert(run.attempt, run.run_id.clone());
+        }
         let run_records = runs
             .into_iter()
+            .filter(|run| !run.status.is_terminal())
             .map(|mut run| {
                 // 原始持久记录保持不动；旧进程的 Run 只展示为中断。
                 // 显式操作前再按会话完成结算，不恢复旧执行句柄。
@@ -308,7 +323,6 @@ impl SessionController {
                     assistant_protocol::RunStatus::Running
                         | assistant_protocol::RunStatus::Cancelling
                 ) || run.status == assistant_protocol::RunStatus::Accepted
-                    && committed_inputs.contains(&run.input_id)
                 {
                     run.status = assistant_protocol::RunStatus::Interrupted;
                 }
@@ -319,14 +333,15 @@ impl SessionController {
         let mut queue_item_ids = Vec::new();
         let mut goal_inputs = Vec::new();
         for input in inputs {
-            let mut owned_runs = run_records
-                .values()
-                .filter(|run| run.input_id() == &input.input_id)
-                .collect::<Vec<_>>();
-            owned_runs.sort_by_key(|run| run.attempt());
-            if let (Some(first), Some(latest)) = (owned_runs.first(), owned_runs.last()) {
+            let owned_runs = input_attempts.get(&input.input_id);
+            if let Some(owned_runs) = owned_runs
+                && let (Some((_, first)), Some((_, latest))) =
+                    (owned_runs.first_key_value(), owned_runs.last_key_value())
+            {
                 if input.state == StoredInputState::Queued
-                    && latest.status() == assistant_protocol::RunStatus::Accepted
+                    && run_records
+                        .get(latest)
+                        .is_some_and(|run| run.status() == assistant_protocol::RunStatus::Accepted)
                 {
                     if input.goal_binding.is_some() {
                         goal_inputs.push((input.queue_order, input.input_id.clone()));
@@ -338,8 +353,23 @@ impl SessionController {
                     input.input_id.clone(),
                     InputRecord {
                         stored: input,
-                        first_run_id: first.snapshot().run_id,
-                        latest_run_id: latest.snapshot().run_id,
+                        first_run_id: Some(first.clone()),
+                        latest_run_id: Some(latest.clone()),
+                    },
+                );
+            } else if input.state == StoredInputState::Queued {
+                // 未领取的输入没有 Run；恢复只重建可撤销队列，仍需显式恢复执行。
+                if input.goal_binding.is_some() {
+                    goal_inputs.push((input.queue_order, input.input_id.clone()));
+                } else {
+                    queue_item_ids.push((input.queue_order, input.input_id.clone()));
+                }
+                input_records.insert(
+                    input.input_id.clone(),
+                    InputRecord {
+                        stored: input,
+                        first_run_id: None,
+                        latest_run_id: None,
                     },
                 );
             }
@@ -542,18 +572,13 @@ impl SessionController {
     pub(crate) fn find_idempotent(
         &self,
         key: &IdempotencyKey,
-    ) -> RuntimeResult<Option<(InputId, RunSnapshot)>> {
+    ) -> RuntimeResult<Option<(InputId, Option<RunId>)>> {
         let state = self.lock_state()?;
         Ok(state
             .inputs
             .values()
             .find(|input| input.stored.idempotency_key.as_ref() == Some(key))
-            .and_then(|input| {
-                state
-                    .runs
-                    .get(&input.first_run_id)
-                    .map(|run| (input.stored.input_id.clone(), run.snapshot()))
-            }))
+            .map(|input| (input.stored.input_id.clone(), input.first_run_id.clone())))
     }
 
     /// 内部状态故障后只允许查询和进程级恢复，不再接受新的 Session 变更。
@@ -639,17 +664,6 @@ impl SessionController {
             })
     }
 
-    pub(crate) fn run_snapshot(&self, run_id: &RunId) -> RuntimeResult<RunSnapshot> {
-        self.lock_state()?
-            .runs
-            .get(run_id)
-            .map(RunRecord::snapshot)
-            .ok_or_else(|| RuntimeError::RunNotFound {
-                session_id: self.id.clone(),
-                run_id: run_id.clone(),
-            })
-    }
-
     pub(crate) fn id(&self) -> &SessionId {
         &self.id
     }
@@ -704,6 +718,9 @@ impl SessionController {
     }
 
     pub(crate) async fn mutation(&self) -> AsyncMutexGuard<'_, ()> {
+        let _waiting = crate::request_diagnostics::request_phase(
+            crate::request_diagnostics::RequestPhase::SessionGate,
+        );
         self.mutation_gate.lock().await
     }
 
@@ -728,29 +745,25 @@ impl SessionController {
             }
         }
 
-        let product_history = match store.load_conversation(&self.id).await {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                if error.kind() == crate::StoreErrorKind::InvalidData {
-                    self.lock_state()?.is_conversation_available = false;
-                }
-                return Err(RuntimeError::from_store("load session conversation", error));
-            }
-        };
-        let snapshot =
-            context_for_mode(&product_history, self.lock_state()?.context_management_mode);
-        let persisted_message_count = snapshot.messages.len();
-        let journal = InMemoryJournal::from_snapshot(snapshot).map_err(|_| {
-            RuntimeError::StorageUnavailable {
-                operation: "load session conversation",
-                source: None,
-            }
-        })?;
+        let window = store
+            .load_execution_window(&self.id)
+            .await
+            .map_err(|error| RuntimeError::from_store("load execution window", error))?;
+        self.install_execution_window(window)
+    }
+
+    /// 调用方持有装载／mutation gate；扫描完成后一次安装有效窗口，已有 Journal 不被阅读覆盖。
+    pub(crate) fn install_execution_window(
+        &self,
+        mut window: crate::ExecutionWindow,
+    ) -> RuntimeResult<()> {
         let mut state = self.lock_state()?;
-        for run in state.runs.values_mut() {
-            run.hydrate(&product_history);
+        if state.journal.is_some() {
+            return Ok(());
         }
-        state.persisted_message_count = persisted_message_count;
+        window.conversation = context_for_mode(&window.conversation, state.context_management_mode);
+        let journal = InMemoryJournal::from_window(window);
+        state.persisted_message_count = journal.message_count();
         state.journal = Some(journal);
         Ok(())
     }
@@ -762,20 +775,29 @@ impl SessionController {
         store: &dyn RuntimeStore,
         mode: agent_model::ContextManagementMode,
     ) -> RuntimeResult<Option<InMemoryJournal>> {
-        if self.lock_state()?.context_management_mode == Some(mode) {
-            return Ok(None);
+        {
+            let state = self.lock_state()?;
+            if state.context_management_mode == Some(mode) {
+                return Ok(None);
+            }
+            if state.context_management_mode.is_none()
+                && let Some(journal) = &state.journal
+            {
+                let mut journal = journal.clone();
+                journal
+                    .replace_completed(context_for_mode(&journal.snapshot(), Some(mode)))
+                    .map_err(|_| RuntimeError::InternalStateUnavailable {
+                        component: "initial execution mode",
+                    })?;
+                return Ok(Some(journal));
+            }
         }
-        let history = store
-            .load_conversation(&self.id)
+        let mut window = store
+            .load_execution_window(&self.id)
             .await
             .map_err(|source| RuntimeError::from_store("prepare context mode", source))?;
-        let snapshot = context_for_mode(&history, Some(mode));
-        InMemoryJournal::from_snapshot(snapshot)
-            .map(Some)
-            .map_err(|_| RuntimeError::StorageUnavailable {
-                operation: "prepare context mode",
-                source: None,
-            })
+        window.conversation = context_for_mode(&window.conversation, Some(mode));
+        Ok(Some(InMemoryJournal::from_window(window)))
     }
 
     pub(crate) fn lock_state(&self) -> RuntimeResult<MutexGuard<'_, SessionState>> {
@@ -791,7 +813,7 @@ fn context_for_mode(
     history: &ConversationSnapshot,
     mode: Option<agent_model::ContextManagementMode>,
 ) -> ConversationSnapshot {
-    if mode == Some(agent_model::ContextManagementMode::ServerCompaction) {
+    if mode.is_none() || mode == Some(agent_model::ContextManagementMode::ServerCompaction) {
         // 精确路由稍后由共享原生投影选择；文本摘要同样是合法压缩点。
         history.clone()
     } else {

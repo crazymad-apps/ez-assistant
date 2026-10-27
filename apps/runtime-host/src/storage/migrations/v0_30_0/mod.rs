@@ -4,6 +4,7 @@ use rusqlite::Connection;
 
 pub(super) fn entry() -> Migration {
     Migration {
+        key: "release",
         version: "0.30.0",
         min_compatible_host_version: Some("0.30.0"),
         rebuilds_referenced_tables: true,
@@ -84,6 +85,10 @@ fn apply(connection: &Connection) -> Result<()> {
 
 pub(super) fn validate(connection: &Connection) -> Result<()> {
     v0_29_0::validate_layout(connection)?;
+    validate_additions(connection)
+}
+
+pub(super) fn validate_additions(connection: &Connection) -> Result<()> {
     connection.prepare("SELECT context_management_mode FROM sessions LIMIT 0")?;
     connection.prepare("SELECT context_management_mode FROM child_tasks LIMIT 0")?;
     let invalid: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE context_management_mode IS NOT NULL AND context_management_mode NOT IN ('local_summary','server_compaction')) OR EXISTS(SELECT 1 FROM child_tasks WHERE context_management_mode NOT IN ('local_summary','server_compaction')) OR EXISTS(SELECT 1 FROM model_request_records WHERE request_kind NOT IN ('agent_turn','context_summary','context_compaction','legacy_compacted'))", [], |row| row.get(0))?;

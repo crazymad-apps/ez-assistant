@@ -5,6 +5,7 @@ mod feedback;
 pub(crate) mod model;
 pub(crate) mod shell;
 mod skills;
+pub(crate) use skills::embedded_skill;
 mod task_workspace;
 mod tools;
 
@@ -55,6 +56,7 @@ impl HostResources {
             model_factory,
             session_environment_factory: Arc::new(HostSessionEnvironmentFactory::with_paths(
                 runtime_home,
+                personal,
                 paths.clone(),
             )),
             run_tool_factory: Arc::new(

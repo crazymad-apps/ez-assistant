@@ -330,9 +330,10 @@ it.skipIf(!process.env.CENTER_WS_LIFECYCLE_SCENARIO)(
       const run = async (message: string) => {
         const result = await command('submit_input', { session_id, message, variant: 'build' });
         await expect
-          .poll(async () => (await command('get_run', { session_id, run_id: result.run.run_id })).run.status, {
-            timeout: 15000,
-          })
+          .poll(async () => {
+            const { runs } = await command('list_runs', { session_id });
+            return runs.find((candidate: { input_id: string; status: string }) => candidate.input_id === result.input_id)?.status;
+          }, { timeout: 15000 })
           .toBe('completed');
       };
       await run('HOST_FIRST ' + 'history '.repeat(1000));

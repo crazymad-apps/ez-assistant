@@ -6,7 +6,6 @@
 //! `assistant-runtime` 的 Authorizer 决策。
 
 use std::{
-    ffi::OsString,
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     path::Path,
     sync::Arc,
@@ -46,6 +45,7 @@ struct LocalToolResources {
     filesystem: Arc<LocalFileSystem>,
     paths: Arc<crate::user_paths::UserPaths>,
     shell: Arc<LocalShell>,
+    shell_environment: EnvironmentPolicy,
     read_config: ReadFileToolConfig,
     search_config: SearchFilesToolConfig,
     shell_config: ShellExecToolConfig,
@@ -131,18 +131,29 @@ impl LocalToolResources {
             nonzero64(MAX_SHELL_OUTPUT_BYTES),
         )
         .map_err(ToolResourceError::configuration)?;
+        let mut shell_environment = EnvironmentPolicy::default();
+        if let Some(path) = crate::runtime_tools::prepend_path(std::env::var_os("PATH").as_deref())
+            .map_err(|error| ToolResourceError {
+                message: error.to_string(),
+            })?
+        {
+            shell_environment
+                .overrides
+                .insert("PATH".into(), Some(path));
+        }
         Ok(Self {
             // Agent 文件能力由 Runtime 按用户优先的分层规则授权；不得在 I/O 层
             // 再用内置默认规则覆盖结果。HTTP 资源入口仍单独执行用户域检查。
             filesystem: Arc::new(LocalFileSystem::new(LocalFileSystemConfig {
                 max_text_file_bytes: nonzero64(MAX_TEXT_FILE_BYTES),
-                ripgrep_program: OsString::from("rg"),
+                ripgrep_program: crate::runtime_tools::ripgrep(),
                 max_search_stderr_bytes: nonzero64(MAX_SEARCH_STDERR_BYTES),
             })),
             paths,
             shell: Arc::new(LocalShell::new(LocalShellConfig::new(
-                EnvironmentPolicy::default(),
+                shell_environment.clone(),
             ))),
+            shell_environment,
             read_config,
             search_config,
             shell_config,
@@ -219,7 +230,7 @@ impl LocalToolResources {
                     |snapshot| {
                         Arc::new(LocalShell::new(LocalShellConfig {
                             launcher: super::shell::launcher(snapshot),
-                            environment: EnvironmentPolicy::default(),
+                            environment: self.shell_environment.clone(),
                         }))
                     },
                 ),

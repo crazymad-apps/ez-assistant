@@ -47,7 +47,15 @@ const ProviderEditorForm = observer(function ProviderEditorForm() {
   const type = Form.useWatch(['connection', 'provider_type'], form) ?? 'openai';
   const credentialMode = Form.useWatch(['credential', 'mode'], form);
   const opencode = type === 'opencode';
-  const responses = ['opencode', 'openai', 'deepseek', 'dashscope_api', 'dashscope_plan', 'moonshot'].includes(type);
+  const responses = [
+    'opencode',
+    'openai',
+    'sub2api',
+    'deepseek',
+    'dashscope_api',
+    'dashscope_plan',
+    'moonshot',
+  ].includes(type);
   const watchedConnection = Form.useWatch('connection', form);
   const urls = opencode && watchedConnection ? opencodeUrls({ ...defaultConnection, ...watchedConnection }) : null;
   const historySupport = serverHistorySupport({ ...defaultConnection, ...watchedConnection });
@@ -72,7 +80,11 @@ const ProviderEditorForm = observer(function ProviderEditorForm() {
     }
     let discovery_format: ProviderConnection['discovery_format'] = 'openai';
     if (input.connection.provider_type === 'dashscope_api') discovery_format = 'dashscope_native';
-    else if (input.connection.provider_type === 'moonshot' || input.connection.provider_type === 'vllm')
+    else if (
+      input.connection.provider_type === 'moonshot' ||
+      input.connection.provider_type === 'vllm' ||
+      input.connection.provider_type === 'sub2api'
+    )
       discovery_format = input.connection.provider_type;
     let savedId = id;
     const credential = input.credential.mode === 'replace' ? input.credential : { mode: input.credential.mode };
@@ -232,7 +244,11 @@ const ProviderEditorForm = observer(function ProviderEditorForm() {
           <Form.Item
             name={['connection', 'models_path']}
             label="模型发现路径"
-            extra="留空使用默认路径；同源绝对路径将替换服务地址的整个路径，不能填写完整 URL。"
+            extra={
+              type === 'sub2api'
+                ? '留空使用默认路径；自动获取增强目录，不支持时读取普通列表，无需填写查询参数。'
+                : '留空使用默认路径；同源绝对路径将替换服务地址的整个路径，不能填写完整 URL。'
+            }
           >
             <Input placeholder="例如 /v1/models" />
           </Form.Item>

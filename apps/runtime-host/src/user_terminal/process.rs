@@ -64,6 +64,16 @@ impl TerminalProcess {
         send: impl Fn(TerminalEvent) -> Result<(), TerminalError> + Send + Sync + 'static,
     ) -> Result<Arc<Self>, TerminalError> {
         filter_environment(&mut command);
+        let inherited_path = std::env::var_os("PATH");
+        let original_path = command.get_env("PATH").or(inherited_path.as_deref());
+        if let Some(path) = crate::runtime_tools::prepend_path(original_path)
+            .map_err(|_| failure("随包工具 PATH 无效。"))?
+        {
+            command.env("PATH", path);
+            if let Some(directory) = crate::runtime_tools::directory() {
+                command.env("EZ_ASSISTANT_TOOL_BIN", directory);
+            }
+        }
         // CMD 把 canonicalize 返回的本机 verbatim 路径误认成 UNC 并回退 Windows 目录。
         // 这里只把已授权本机盘符路径转换为等价普通形式，不重新解析目录或放宽访问边界。
         #[cfg(windows)]

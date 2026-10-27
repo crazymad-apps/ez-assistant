@@ -718,6 +718,39 @@ async fn disconnected_initialization_waiter_does_not_own_the_initialization_task
     let first = tokio::spawn(async move { domains.ensure(&permit).await });
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(!first.is_finished());
+    // 本人健康查询不等待初始化锁；另一用户完成初始化也不能覆盖本人的 Starting。
+    let health = tokio::time::timeout(
+        Duration::from_secs(1),
+        f.request(reqwest::Method::GET, "/health", Some(&alice))
+            .send(),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .json::<RuntimeHostHealth>()
+    .await
+    .unwrap();
+    assert_eq!(health.status, RuntimeHostHealthStatus::Starting);
+    let bob = f.login("bob").await;
+    assert_eq!(f.ready(&bob).await.status(), StatusCode::NO_CONTENT);
+    let bob_health = f
+        .request(reqwest::Method::GET, "/health", Some(&bob))
+        .send()
+        .await
+        .unwrap()
+        .json::<RuntimeHostHealth>()
+        .await
+        .unwrap();
+    assert_eq!(bob_health.status, RuntimeHostHealthStatus::Ready);
+    let alice_health = f
+        .request(reqwest::Method::GET, "/health", Some(&alice))
+        .send()
+        .await
+        .unwrap()
+        .json::<RuntimeHostHealth>()
+        .await
+        .unwrap();
+    assert_eq!(alice_health.status, RuntimeHostHealthStatus::Starting);
     first.abort();
     let _ = first.await;
     connection.execute_batch("ROLLBACK").unwrap();

@@ -6,6 +6,7 @@ mod shell_choices;
 
 pub(super) fn entry() -> Migration {
     Migration {
+        key: "release",
         version: "0.29.0",
         min_compatible_host_version: Some("0.29.0"),
         rebuilds_referenced_tables: false,
@@ -30,6 +31,10 @@ pub(super) fn validate(connection: &Connection) -> Result<()> {
 // 后继版本复用既有布局核验，但由各自版本校验演进后的配置周期约束。
 pub(super) fn validate_layout(connection: &Connection) -> Result<()> {
     v0_28_1::validate(connection)?;
+    validate_layout_additions(connection)
+}
+
+pub(super) fn validate_layout_additions(connection: &Connection) -> Result<()> {
     shell_choices::validate(connection)?;
     connection.prepare("SELECT server_history_key FROM sessions LIMIT 0")?;
     connection.prepare("SELECT server_history_enabled, server_history_support_override, server_history_key FROM providers LIMIT 0")?;

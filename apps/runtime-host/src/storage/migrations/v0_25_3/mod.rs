@@ -6,6 +6,7 @@ use super::{Migration, MigrationError, Result, v0_25_1};
 
 pub(super) fn entry() -> Migration {
     Migration {
+        key: "release",
         version: "0.25.3",
         // 老 Host 不认识绑定，会用不同解释器执行命令，不能继续写入此库。
         min_compatible_host_version: Some("0.25.3"),
@@ -38,6 +39,10 @@ fn apply(connection: &Connection) -> Result<()> {
 
 pub(super) fn validate(connection: &Connection) -> Result<()> {
     v0_25_1::validate(connection)?;
+    validate_additions(connection)
+}
+
+pub(super) fn validate_additions(connection: &Connection) -> Result<()> {
     connection.prepare("SELECT agent_shell_kind FROM sessions LIMIT 0")?;
     connection.prepare("SELECT agent_shell_environment_json FROM sessions LIMIT 0")?;
     connection.prepare("SELECT agent_shell_target FROM inputs LIMIT 0")?;

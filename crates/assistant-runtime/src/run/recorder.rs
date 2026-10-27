@@ -87,8 +87,7 @@ impl ExecutionRecorder for RuntimeRecorder {
         assistant: AssistantMessage,
     ) -> RecordFuture<'a, ExchangeReceipt> {
         Box::pin(async move {
-            // 各目标独占自己的 mutation gate；Store await 不能被同一目标的终态结算越过，
-            // sibling child 之间则不互相阻塞。
+            // 可靠提交统一按 parent → child → Store；Provider、工具和审批等待不持该 gate。
             let _mutation = self.target.mutation().await;
             self.target
                 .validate_begin(&assistant)
@@ -370,7 +369,7 @@ mod tests {
                 feedback_answer: None,
                 agent_shell_target: None,
                 input_id: InputId::new("input-recorder-child").expect("input id"),
-                run_id: run_id.clone(),
+
                 session_id: session_id.clone(),
                 idempotency_key: None,
                 agent_variant: AgentVariant::Build,
@@ -380,7 +379,7 @@ mod tests {
                 channel_source: Some(crate::InputChannelSource::desktop_text()),
                 skill_activation: None,
                 mcp_selection: None,
-                approval_mode: ApprovalMode::Ask,
+
                 message: user_message("parent-user"),
                 new_goal: None,
                 resumed_goal: None,
@@ -390,6 +389,27 @@ mod tests {
             .await
             .expect("create parent run");
         let child_task_id = ChildTaskId::new("ct-recorder-child").expect("child id");
+        store
+            .claim_input(crate::StoredRun {
+                shell: None,
+                run_id: run_id.clone(),
+                session_id: session_id.clone(),
+                input_id: InputId::new("input-recorder-child").unwrap(),
+                attempt: 1,
+                status: assistant_protocol::RunStatus::Accepted,
+                agent_variant: AgentVariant::Build,
+                approval_mode: ApprovalMode::Ask,
+                reasoning_effort: None,
+                cancel_requested: false,
+                error: None,
+                message_ids: Vec::new(),
+                message_steps: Default::default(),
+                created_at_ms: 2,
+                started_at_ms: None,
+                finished_at_ms: None,
+            })
+            .await
+            .unwrap();
         store
             .create_child_task(NewStoredChildTask {
                 context_management_mode: agent_model::ContextManagementMode::LocalSummary,
@@ -437,33 +457,44 @@ mod tests {
             ChildTaskRecord::recovered(&stored, Some(conversation)).expect("recover child record"),
         );
         let recorder = RuntimeRecorder::for_child(
-            task,
-            session,
+            task.clone(),
+            session.clone(),
             store.clone(),
             crate::observation::ObservationCoordinator::new(16),
             Arc::new(crate::skill::SkillActivationLatch::new(Vec::new())),
         );
         let call_id = ToolCallId::new("child-call").expect("call id");
-        let receipt = recorder
-            .begin_tool_exchange(
-                1,
-                AssistantMessage {
-                    purpose: agent_types::AssistantMessagePurpose::ModelResponse,
-                    id: MessageId::new("child-assistant-tool").expect("message id"),
-                    model: ModelIdentity::new(
-                        ProviderId::new("fixture").expect("provider id"),
-                        "fixture",
-                    ),
-                    parts: vec![AssistantPart::ToolCall(ToolCall {
-                        id: call_id.clone(),
-                        name: ToolName::new("fixture").expect("tool name"),
-                        arguments: json!({}),
-                    })],
-                    finish_reason: FinishReason::ToolCalls,
-                    usage: None,
-                },
-            )
+        let parent = session.mutation().await;
+        let mut begin = recorder.begin_tool_exchange(
+            1,
+            AssistantMessage {
+                purpose: agent_types::AssistantMessagePurpose::ModelResponse,
+                id: MessageId::new("child-assistant-tool").expect("message id"),
+                model: ModelIdentity::new(
+                    ProviderId::new("fixture").expect("provider id"),
+                    "fixture",
+                ),
+                parts: vec![AssistantPart::ToolCall(ToolCall {
+                    id: call_id.clone(),
+                    name: ToolName::new("fixture").expect("tool name"),
+                    arguments: json!({}),
+                })],
+                finish_reason: FinishReason::ToolCalls,
+                usage: None,
+            },
+        );
+        assert!(
+            futures_util::poll!(begin.as_mut()).is_pending(),
+            "child commit must wait for the parent view barrier"
+        );
+        assert!(
+            futures_util::FutureExt::now_or_never(task.mutation()).is_some(),
+            "waiting for parent must not hold child gate"
+        );
+        drop(parent);
+        let receipt = tokio::time::timeout(std::time::Duration::from_secs(1), begin)
             .await
+            .expect("child commit resumes after parent barrier")
             .expect("begin child exchange");
         recorder
             .mark_tool_execution_started(&receipt, &call_id)

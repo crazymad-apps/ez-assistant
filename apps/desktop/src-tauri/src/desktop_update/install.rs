@@ -137,7 +137,7 @@ pub(super) async fn run(
             remote_origin: source.remote_origin.clone(),
         },
     )?;
-    handoff.stop().await.map_err(|error| {
+    let handoff = handoff.stop().await.map_err(|error| {
         eprintln!("desktop update: Host handoff failed: {error}");
         UpdateError::Install
     })?;

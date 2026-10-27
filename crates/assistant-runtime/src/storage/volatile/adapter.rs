@@ -1,6 +1,12 @@
 use super::*;
 
 impl RuntimeStore for VolatileRuntimeStore {
+    fn load_conversation_history(
+        &self,
+        owner: ConversationOwner,
+    ) -> StoreFuture<'_, super::super::StoredConversationHistory> {
+        VolatileRuntimeStore::load_conversation_history(self, owner)
+    }
     fn load_feedback(
         &self,
         session_id: &SessionId,
@@ -99,7 +105,7 @@ impl RuntimeStore for VolatileRuntimeStore {
     fn search_conversation_titles(
         &self,
         request: ConversationSearchRequest,
-    ) -> StoreFuture<'_, Vec<assistant_protocol::ConversationHistoryHit>> {
+    ) -> StoreFuture<'_, ConversationSearchPage<assistant_protocol::ConversationHistoryHit>> {
         VolatileRuntimeStore::search_conversation_titles(self, request)
     }
 
@@ -261,6 +267,10 @@ impl RuntimeStore for VolatileRuntimeStore {
 
     fn upload_attachment(&self, upload: NewAttachmentUpload) -> StoreFuture<'_, StoredAttachment> {
         VolatileRuntimeStore::upload_attachment(self, upload)
+    }
+
+    fn claim_input(&self, run: StoredRun) -> StoreFuture<'_, ()> {
+        VolatileRuntimeStore::claim_input(self, run)
     }
 
     fn accept_input(&self, input: NewStoredInput) -> StoreFuture<'_, AcceptedInput> {

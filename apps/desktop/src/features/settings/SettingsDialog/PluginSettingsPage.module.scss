@@ -47,11 +47,8 @@
 .meta span { padding: 4px 8px; border-radius: 6px; background: var(--ez-surface-muted); }
 .toggle, .danger label { display: flex; align-items: center; gap: 8px; }
 .toggle { font-weight: 600; }
-.setting_field { display: flex; align-items: end; gap: 8px; }
-.setting_field label { display: grid; gap: 5px; flex: 1; min-width: 0; }
-.setting_field small { color: var(--ez-text-secondary); font-weight: 400; }
-.setting_field input, .file_form input { box-sizing: border-box; min-width: 0; padding: 0 10px; border: 1px solid var(--ez-border-strong); border-radius: var(--ez-radius-small); color: var(--ez-text); background: var(--ez-surface); font: inherit; }
-.setting_field input:focus, .file_form input:focus { @include fields.focus-border; }
+.file_form input { box-sizing: border-box; min-width: 0; padding: 0 10px; border: 1px solid var(--ez-border-strong); border-radius: var(--ez-radius-small); color: var(--ez-text); background: var(--ez-surface); font: inherit; }
+.file_form input:focus { @include fields.focus-border; }
 .file_form { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(120px, 1fr) auto; align-items: end; gap: 8px; }
 .file_picker { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .file_picker span { overflow: hidden; color: var(--ez-text-secondary); font-size: var(--ez-font-small); text-overflow: ellipsis; white-space: nowrap; }

@@ -3,15 +3,18 @@ import type {
   ChildTaskStatus,
   ChildTaskTreeItemSnapshot,
 } from "@ez-assistant/protocol";
+import { childKey } from "../../stores/liveExecutionProjection";
 
 export function mergeChildTaskItems(
   reliable_items: readonly ChildTaskTreeItemSnapshot[],
   live_tasks: readonly ChildTaskSnapshot[],
 ): ChildTaskTreeItemSnapshot[] {
-  const merged = new Map(reliable_items.map((item) => [item.task.child_task_id, item]));
+  const merged = new Map(reliable_items.map((item) => [childKey(item.task.session_id, item.task.child_task_id), item]));
   for (const live_task of live_tasks) {
-    const reliable = merged.get(live_task.child_task_id);
-    merged.set(live_task.child_task_id, {
+    const key = childKey(live_task.session_id, live_task.child_task_id);
+    const reliable = merged.get(key);
+    if (reliable?.task.inherited) continue;
+    merged.set(key, {
       task: reliable
         ? {
             ...reliable.task,
@@ -23,7 +26,7 @@ export function mergeChildTaskItems(
       // 实时 usage 只属于单个 Step；窗口与累计均沿用 Runtime 刷新后的可靠投影。
       usage: reliable?.usage ?? { accumulated: null },
       pending_approval_count: reliable?.pending_approval_count ?? 0,
-      can_cancel: !isTerminalChildTask(live_task.status),
+      can_cancel: !live_task.inherited && !live_task.body_unavailable && !isTerminalChildTask(live_task.status),
     });
   }
   return [...merged.values()].sort((left, right) => (

@@ -20,7 +20,7 @@ pub(crate) fn admit(path: &Path) -> Result<Option<Connection>> {
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
     let target = parse_version(env!("CARGO_PKG_VERSION"))?;
-    let entries = manifest();
+    let entries = product_manifest();
     let versions = validate_manifest(env!("CARGO_PKG_VERSION"), &entries)?;
     let minimum = compatibility::read(&connection)?;
     compatibility::admit(minimum.as_ref(), &target)?;
@@ -66,9 +66,9 @@ pub(crate) fn projected_evidence(source: &Path, paths: &Relocation) -> Result<se
     let mut expected = Connection::open_in_memory()?;
     copy_connection(&source, &mut expected)?;
     expected.pragma_update(None, "foreign_keys", true)?;
-    let entries = manifest();
+    let entries = layout_manifest(&expected)?;
     let versions = validate_manifest(env!("CARGO_PKG_VERSION"), &entries)?;
-    let completed = completed_prefix(&expected, &versions)?;
+    let completed = completed_prefix(&expected, &versions, &entries)?;
     for (index, migration) in entries.iter().enumerate().skip(completed) {
         apply_version(
             &mut expected,
@@ -77,6 +77,7 @@ pub(crate) fn projected_evidence(source: &Path, paths: &Relocation) -> Result<se
             &entries,
             index,
             Some(paths),
+            None,
         )?;
     }
     evidence(&expected)
@@ -101,14 +102,28 @@ pub(crate) fn verify(path: &Path, expected: &serde_json::Value) -> Result<()> {
 
 /// 原文件已原子迁到用户域、整套备份已验证，之后才允许这条具体版本链修改目标库。
 pub(crate) fn upgrade(home: &Path, paths: &Relocation) -> Result<()> {
+    let connection = admit(&home.join(DATA_DIRECTORY).join(DATABASE_FILE))?
+        .ok_or(MigrationError::InvalidPath)?;
+    let entries = layout_manifest(&connection)?;
+    connection.close().map_err(|(_, error)| error)?;
     migrate_layout_with_progress(
         home,
         env!("CARGO_PKG_VERSION"),
-        &manifest(),
+        &entries,
         |_| {},
         Some(paths),
     )
     .map(|_| ())
+}
+
+// 布局投影只计算确定性的 SQL 迁移；F02 文件准备在布局正式发布后的常规启动执行。
+// 已经完成 F02 的库仍须用完整身份链准入，不能退回旧账本解释。
+fn layout_manifest(connection: &Connection) -> Result<Vec<Migration>> {
+    Ok(if f02_history::committed(connection)? {
+        product_manifest()
+    } else {
+        manifest().to_vec()
+    })
 }
 
 #[cfg(test)]

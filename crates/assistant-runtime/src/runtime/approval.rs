@@ -23,6 +23,7 @@ use crate::{
 /// disarm；权限文件无效、CAS 失败和请求 Future 被丢弃都应允许客户端用同一审批重试。
 struct ResolutionGuard<'a> {
     runtime: &'a AssistantRuntime,
+    session_id: assistant_protocol::SessionId,
     approval_id: ApprovalId,
     armed: bool,
 }
@@ -36,10 +37,17 @@ impl ResolutionGuard<'_> {
 impl Drop for ResolutionGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
-            let _ = self
-                .runtime
-                .approval_registry
-                .restore_pending(&self.approval_id);
+            let _ = self.runtime.event_sender.publish_transition(|| {
+                self.runtime
+                    .approval_registry
+                    .restore_pending(&self.approval_id)?;
+                Ok((
+                    (),
+                    Some(RuntimeEvent::SessionChanged {
+                        session_id: self.session_id.clone(),
+                    }),
+                ))
+            });
         }
     }
 }
@@ -98,28 +106,31 @@ impl AssistantRuntime {
         session_id: &assistant_protocol::SessionId,
         run_id: &assistant_protocol::RunId,
     ) -> RuntimeResult<()> {
-        let approvals = self
-            .approval_registry
-            .begin_run_cancellation(session_id, run_id)?;
-        if approvals.is_empty() {
-            return Ok(());
-        }
-        let removed = match self.approval_registry.finish_run_cancellation(&approvals) {
-            Ok(removed) => removed,
-            Err(error) => {
-                self.approval_registry.abort_run_cancellation(&approvals)?;
-                return Err(error);
+        self.event_sender.publish_batch_transition(|| {
+            let approvals = self
+                .approval_registry
+                .begin_run_cancellation(session_id, run_id)?;
+            if approvals.is_empty() {
+                return Ok(((), Vec::new()));
             }
-        };
-        for approval in removed {
-            let _ = self.event_sender.send(RuntimeEvent::ApprovalCancelled {
-                session_id: approval.session_id,
-                run_id: approval.run_id,
-                child_task_id: approval.child_task_id,
-                approval_id: approval.approval_id,
-            });
-        }
-        Ok(())
+            let removed = match self.approval_registry.finish_run_cancellation(&approvals) {
+                Ok(removed) => removed,
+                Err(error) => {
+                    self.approval_registry.abort_run_cancellation(&approvals)?;
+                    return Err(error);
+                }
+            };
+            let events = removed
+                .into_iter()
+                .map(|approval| RuntimeEvent::ApprovalCancelled {
+                    session_id: approval.session_id,
+                    run_id: approval.run_id,
+                    child_task_id: approval.child_task_id,
+                    approval_id: approval.approval_id,
+                })
+                .collect();
+            Ok(((), events))
+        })
     }
 
     pub async fn list_pending_approvals(
@@ -139,11 +150,20 @@ impl AssistantRuntime {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
         let session = self.session(&request.session_id).await?;
-        let snapshot = self
-            .approval_registry
-            .begin_resolution(&request.session_id, &request.approval_id)?;
+        let snapshot = self.event_sender.publish_transition(|| {
+            let snapshot = self
+                .approval_registry
+                .begin_resolution(&request.session_id, &request.approval_id)?;
+            Ok((
+                snapshot,
+                Some(RuntimeEvent::SessionChanged {
+                    session_id: request.session_id.clone(),
+                }),
+            ))
+        })?;
         let mut resolution = ResolutionGuard {
             runtime: self,
+            session_id: request.session_id.clone(),
             approval_id: request.approval_id.clone(),
             armed: true,
         };
@@ -182,17 +202,26 @@ impl AssistantRuntime {
 
         // AllowOnce/Deny 无持久化步骤；持久 Allow 则只会在上面的写入成功后到达这里。
         // resolve 是唯一向等待中的 Core 发送最终 decision 的位置。
-        let resolved = self
-            .approval_registry
-            .resolve(&request.approval_id, request.decision)?;
+        self.event_sender.publish_transition(|| {
+            let result = self
+                .approval_registry
+                .resolve(&request.approval_id, request.decision);
+            // receiver 已关闭时 resolve 仍移除了条目，必须发布新的队列基线。
+            let event = match &result {
+                Ok(resolved) => RuntimeEvent::ApprovalResolved {
+                    session_id: resolved.session_id.clone(),
+                    run_id: resolved.run_id.clone(),
+                    child_task_id: resolved.child_task_id.clone(),
+                    approval_id: request.approval_id.clone(),
+                    decision: request.decision,
+                },
+                Err(_) => RuntimeEvent::SessionChanged {
+                    session_id: request.session_id.clone(),
+                },
+            };
+            Ok((result, Some(event)))
+        })??;
         resolution.disarm();
-        let _ = self.event_sender.send(RuntimeEvent::ApprovalResolved {
-            session_id: resolved.session_id,
-            run_id: resolved.run_id,
-            child_task_id: resolved.child_task_id,
-            approval_id: request.approval_id.clone(),
-            decision: request.decision,
-        });
         if let Some(scope) = persistent_scope {
             self.drain_exact_rule_approvals(&scope, &persisted_rules);
         }
@@ -236,39 +265,61 @@ impl AssistantRuntime {
                     break;
                 }
                 if self
-                    .approval_registry
-                    .begin_resolution(&session_id, &approval.approval_id)
+                    .event_sender
+                    .publish_transition(|| {
+                        let snapshot = self
+                            .approval_registry
+                            .begin_resolution(&session_id, &approval.approval_id)?;
+                        Ok((
+                            snapshot,
+                            Some(RuntimeEvent::SessionChanged {
+                                session_id: session_id.clone(),
+                            }),
+                        ))
+                    })
                     .is_err()
                 {
                     break;
                 }
+                let mut resolution = ResolutionGuard {
+                    runtime: self,
+                    session_id: session_id.clone(),
+                    approval_id: approval.approval_id.clone(),
+                    armed: true,
+                };
                 // 规则可能在取得 resolving lease 前再次变化；最后一次复核失败时恢复队首，
                 // 不能越过它继续处理后面的审批。
                 if !self.current_rules_allow_without_ask(&session_id, approval.variant, &invocation)
                 {
-                    let _ = self
-                        .approval_registry
-                        .restore_pending(&approval.approval_id);
                     break;
                 }
-                let Ok(resolved) = self
-                    .approval_registry
-                    .resolve_by_rule(&approval.approval_id)
-                else {
-                    break;
-                };
                 let decision = match scope {
                     PermissionFileScope::Session(_) => ApprovalDecision::AllowSession,
                     PermissionFileScope::Workspace(_) => ApprovalDecision::AllowWorkspace,
                     PermissionFileScope::Global => break,
                 };
-                let _ = self.event_sender.send(RuntimeEvent::ApprovalResolved {
-                    session_id: resolved.session_id,
-                    run_id: resolved.run_id,
-                    child_task_id: resolved.child_task_id,
-                    approval_id: resolved.approval_id,
-                    decision,
+                let resolved = self.event_sender.publish_transition(|| {
+                    let result = self
+                        .approval_registry
+                        .resolve_by_rule(&approval.approval_id);
+                    let event = match &result {
+                        Ok(resolved) => RuntimeEvent::ApprovalResolved {
+                            session_id: resolved.session_id.clone(),
+                            run_id: resolved.run_id.clone(),
+                            child_task_id: resolved.child_task_id.clone(),
+                            approval_id: resolved.approval_id.clone(),
+                            decision,
+                        },
+                        Err(_) => RuntimeEvent::SessionChanged {
+                            session_id: session_id.clone(),
+                        },
+                    };
+                    Ok((result, Some(event)))
                 });
+                if !matches!(resolved, Ok(Ok(_))) {
+                    break;
+                }
+                resolution.disarm();
             }
         }
     }

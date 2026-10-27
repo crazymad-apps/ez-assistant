@@ -76,7 +76,6 @@ async fn explicitly_configured_live_connections_supply_required_model_limits() {
                     discovered.iter().any(|model| {
                         &model.model_id == id
                             && matches!(model.metadata.context_window_tokens, Limit::Known(_))
-                            && matches!(model.metadata.max_output_tokens, Limit::Known(_))
                     })
                 });
                 println!(
@@ -241,7 +240,7 @@ async fn live_fixed_parameters_complete_one_text_turn() {
         tools: vec![],
         tool_choice: ToolChoice::None,
         generation: GenerationConfig {
-            max_output_tokens: Some(frozen.max_output_tokens().min(32)),
+            max_output_tokens: Some(frozen.max_output_tokens().map_or(32, |limit| limit.min(32))),
             ..GenerationConfig::default()
         },
         reasoning: None,

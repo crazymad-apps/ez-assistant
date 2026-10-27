@@ -17,8 +17,7 @@ use std::{
 use support::{Client, FakeProvider, HostProcess, test_directory, write_config};
 
 fn submit(client: &mut Client, session: &str, key: &str) -> String {
-    client.runtime(
-        "submit_input",
+    client.submit_started_input(
         json!({"session_id":session,"message":key,"variant":"build","idempotency_key":key}),
     )["run"]["run_id"]
         .as_str()
@@ -187,7 +186,7 @@ fn formal_host_batch_edits_preserve_permissions_cancellation_and_complete_histor
         &mut client,
         json!({"schema_version":1,"rules":[{"id":"plan-allow","effect":"allow","variants":["plan"],"matcher":{"type":"file","operation":"edit","path":work.path(),"path_match":"recursive"}}]}),
     );
-    let plan_run = client.runtime("submit_input",json!({"session_id":session,"message":"plan-denied","variant":"plan","idempotency_key":"plan-denied"}))["run"]["run_id"].as_str().unwrap().to_owned();
+    let plan_run = client.submit_started_input(json!({"session_id":session,"message":"plan-denied","variant":"plan","idempotency_key":"plan-denied"}))["run"]["run_id"].as_str().unwrap().to_owned();
     client.wait_for_status("plan boundary", &session, &plan_run, &["completed"]);
     assert_eq!(last_detail(&mut client, &session)["status"], "failed");
     assert_eq!(fs::read_to_string(&paths[0]).unwrap(), "approved");
@@ -280,7 +279,7 @@ fn formal_host_batch_edits_preserve_permissions_cancellation_and_complete_histor
             |row| row.get::<_, i64>(0)
         )
         .unwrap(),
-        8
+        0
     );
     assert_eq!(
         db.query_row("SELECT COUNT(*) FROM pending_tool_exchanges", [], |row| row
@@ -289,11 +288,11 @@ fn formal_host_batch_edits_preserve_permissions_cancellation_and_complete_histor
         0
     );
     assert_eq!(
-        db.query_row("SELECT status FROM runs WHERE run_id=?1", [run], |row| {
-            row.get::<_, String>(0)
+        db.query_row("SELECT COUNT(*) FROM runs WHERE run_id=?1", [run], |row| {
+            row.get::<_, i64>(0)
         })
         .unwrap(),
-        "cancelled"
+        0
     );
 }
 

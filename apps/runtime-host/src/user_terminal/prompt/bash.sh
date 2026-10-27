@@ -1,5 +1,11 @@
 # 保留进入提示符时的状态；PWD 的文本只能经变量展开进入 PS1，不能拼成可执行源码。
 __ez_terminal_status=$?
+    if [ -n "${EZ_ASSISTANT_TOOL_BIN-}" ]; then
+        case ":$PATH:" in
+            *":$EZ_ASSISTANT_TOOL_BIN:"*) ;;
+            *) export PATH="$EZ_ASSISTANT_TOOL_BIN${PATH:+:$PATH}" ;;
+        esac
+    fi
 __ez_terminal_prompt() {
     local previous=$1 text=$PS1 output= char next index=0 replacement='\W'
     case "$PWD" in

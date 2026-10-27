@@ -342,7 +342,9 @@ describe("AppShell session header", () => {
 
   it("docks the selected child task directly below the main session header", () => {
     const store = storeWithSessions();
-    store.live_execution.child_tasks.set("child-1", {
+    store.live_execution.child_tasks.set(JSON.stringify(["session-1", "child-1"]), {
+      inherited: false,
+      body_unavailable: false,
       child_task_id: "child-1",
       session_id: "session-1",
       parent_run_id: "run-1",

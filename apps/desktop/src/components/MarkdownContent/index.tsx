@@ -1,4 +1,5 @@
 import type { ThemePreset } from "../../styles/themePresets";
+import { isTauri } from "@tauri-apps/api/core";
 import { useMarkdownPlugins } from "./codeTheme";
 import { MarkdownCode, MarkdownThemeContext } from "./MarkdownCode";
 import {
@@ -136,10 +137,12 @@ function SafeLink({ href, children, ...props }: ComponentProps<"a">) {
       {...props}
       href={safe_href}
       onClick={(event) => {
+        if (!isTauri()) return;
         event.preventDefault();
         void openExternalHttpUrl(safe_href);
       }}
-      rel="noreferrer"
+      target="_blank"
+      rel="noopener noreferrer"
     >
       {children}
     </a>

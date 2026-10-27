@@ -8,6 +8,362 @@ use assistant_protocol::{
 };
 
 #[tokio::test]
+async fn consumed_input_keeps_identity_and_retry_uses_history_without_losing_queue_priority() {
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(false),
+        8192,
+        [],
+    ));
+    let store = Arc::new(crate::storage::VolatileRuntimeStore::default());
+    let config = RuntimeConfig::new(NonZeroUsize::new(256).unwrap());
+    let first = runtime_with_store(model.clone(), store.clone(), config).await;
+    let owner = first
+        .create_session(CreateSessionRequest {
+            title: Some("Input control boundary".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    let at_ms = super::super::now_ms().unwrap();
+    let input = |label: &str, key: Option<IdempotencyKey>| crate::NewStoredInput {
+        feedback_answer: None,
+        agent_shell_target: None,
+        input_id: assistant_protocol::InputId::new(format!("input-{label}")).unwrap(),
+
+        session_id: owner.clone(),
+        idempotency_key: key,
+        agent_variant: AgentVariant::Build,
+        origin: crate::InputOrigin::User,
+        goal_binding: None,
+        cross_session: None,
+        channel_source: Some(crate::InputChannelSource::desktop_text()),
+        skill_activation: None,
+        mcp_selection: None,
+
+        message: agent_types::UserMessage {
+            id: MessageId::new(format!("user-{label}")).unwrap(),
+            origin: agent_types::UserMessageOrigin::User,
+            transcript_visibility: agent_types::TranscriptVisibility::Visible,
+            parts: vec![UserPart::Text(TextPart {
+                id: agent_types::PartId::new(format!("text-{label}")).unwrap(),
+                text: label.into(),
+            })],
+        },
+        new_goal: None,
+        resumed_goal: None,
+        generated_title: None,
+        accepted_at_ms: at_ms,
+    };
+    // 通过 Store 端口构造确定性持久现场，尚未把它交给任何运行中的执行器。
+    let queued = input("queued", None);
+    let original = input(
+        "history",
+        Some(IdempotencyKey::new("original-key").unwrap()),
+    );
+    store.accept_input(queued.clone()).await.unwrap();
+    store.accept_input(original.clone()).await.unwrap();
+    let original_order = store
+        .load_runtime()
+        .await
+        .unwrap()
+        .inputs
+        .into_iter()
+        .find(|input| input.input_id == original.input_id)
+        .unwrap()
+        .queue_order;
+    store
+        .prioritize_queued_input(crate::QueuePriorityChange {
+            session_id: owner.clone(),
+            input_id: original.input_id.clone(),
+        })
+        .await
+        .unwrap();
+    let before = store.load_runtime().await.unwrap();
+    let queued_before = before
+        .inputs
+        .iter()
+        .find(|input| input.input_id == queued.input_id)
+        .unwrap()
+        .clone();
+    assert_ne!(
+        before
+            .inputs
+            .iter()
+            .find(|input| input.input_id == original.input_id)
+            .unwrap()
+            .queue_order,
+        original_order
+    );
+    store
+        .claim_input(crate::StoredRun {
+            shell: None,
+            run_id: RunId::new("run-history").unwrap(),
+            session_id: owner.clone(),
+            input_id: original.input_id.clone(),
+            attempt: 1,
+            status: assistant_protocol::RunStatus::Accepted,
+            agent_variant: original.agent_variant,
+            approval_mode: assistant_protocol::ApprovalMode::Ask,
+            reasoning_effort: None,
+            cancel_requested: false,
+            error: None,
+            message_ids: Vec::new(),
+            message_steps: Default::default(),
+            created_at_ms: at_ms,
+            started_at_ms: None,
+            finished_at_ms: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        store
+            .cancel_queued_input(&owner, &original.input_id)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .prioritize_queued_input(crate::QueuePriorityChange {
+                session_id: owner.clone(),
+                input_id: original.input_id.clone()
+            })
+            .await
+            .is_err()
+    );
+    store
+        .commit_user_message(crate::UserMessageCommit {
+            context_management_mode: agent_model::ContextManagementMode::LocalSummary,
+            shell: None,
+            operation_id: "consume-prioritized".into(),
+            session_id: owner.clone(),
+            input_id: original.input_id.clone(),
+            run_id: RunId::new("run-history").unwrap().clone(),
+            message: Some(original.message.clone()),
+            reasoning_effort: None,
+            created_at_ms: at_ms,
+        })
+        .await
+        .unwrap();
+    store
+        .settle_run(crate::StoredRunSettlement {
+            operation_id: "first-failure".into(),
+            run_id: RunId::new("run-history").unwrap().clone(),
+            session_id: owner.clone(),
+            status: assistant_protocol::RunStatus::Failed,
+            cancel_requested: false,
+            error: Some(assistant_protocol::RuntimeErrorInfo {
+                code: assistant_protocol::RuntimeErrorCode::InvalidRequest,
+                message: "fixture failure".into(),
+            }),
+            queued_user_message: None,
+            messages: vec![ConversationMessage::Assistant(assistant_text(
+                "failed-answer",
+                "saved partial answer",
+            ))],
+            message_step: Some(1),
+            goal_effect: None,
+            proxy_report: None,
+            finished_at_ms: at_ms,
+        })
+        .await
+        .unwrap();
+    assert!(!store.contains_input_control(&original.input_id).unwrap());
+    let loaded = store.load_runtime().await.unwrap();
+    let read_only = loaded
+        .inputs
+        .iter()
+        .find(|input| input.input_id == original.input_id)
+        .unwrap();
+    assert_eq!(
+        read_only.queue_order, original_order,
+        "temporary priority is not the original acceptance order"
+    );
+    assert_eq!(
+        loaded
+            .inputs
+            .iter()
+            .find(|input| input.input_id == queued.input_id),
+        Some(&queued_before)
+    );
+    assert!(matches!(
+        store.accept_input(original.clone()).await.unwrap(),
+        crate::AcceptedInput::Historical { .. }
+    ));
+    assert!(!store.contains_input_control(&original.input_id).unwrap());
+    let saved_body = store.load_conversation(&owner).await.unwrap();
+    for field in ["input", "message"] {
+        let mut collision = input("collision", None);
+        match field {
+            "input" => collision.input_id = original.input_id.clone(),
+            _ => collision.message.id = original.message.id.clone(),
+        }
+        assert!(
+            store.accept_input(collision).await.is_err(),
+            "released {field} identity must not be reused"
+        );
+        assert_eq!(store.load_conversation(&owner).await.unwrap(), saved_body);
+    }
+    let retry = store
+        .create_run_attempt(crate::NewStoredRunAttempt {
+            run_id: RunId::new("actual-retry").unwrap(),
+            source_run_id: RunId::new("run-history").unwrap().clone(),
+            session_id: owner.clone(),
+            approval_mode: ApprovalMode::Auto,
+            created_at_ms: at_ms,
+        })
+        .await
+        .unwrap();
+    assert!(store.contains_input_control(&original.input_id).unwrap());
+    assert_eq!(retry.attempt, 2);
+    store
+        .commit_user_message(crate::UserMessageCommit {
+            context_management_mode: agent_model::ContextManagementMode::LocalSummary,
+            shell: None,
+            operation_id: "begin-actual-retry".into(),
+            session_id: owner.clone(),
+            input_id: original.input_id.clone(),
+            run_id: retry.run_id.clone(),
+            message: None,
+            reasoning_effort: None,
+            created_at_ms: at_ms,
+        })
+        .await
+        .unwrap();
+    store
+        .settle_run(crate::StoredRunSettlement {
+            operation_id: "finish-actual-retry".into(),
+            run_id: retry.run_id.clone(),
+            session_id: owner.clone(),
+            status: assistant_protocol::RunStatus::Completed,
+            cancel_requested: false,
+            error: None,
+            queued_user_message: None,
+            messages: vec![ConversationMessage::Assistant(assistant_text(
+                "retry-answer",
+                "retry completed",
+            ))],
+            message_step: Some(1),
+            goal_effect: None,
+            proxy_report: None,
+            finished_at_ms: at_ms,
+        })
+        .await
+        .unwrap();
+    assert!(!store.contains_input_control(&original.input_id).unwrap());
+    let duplicate = store.accept_input(original.clone()).await.unwrap();
+    assert_eq!(
+        duplicate.run_id(),
+        Some(&RunId::new("run-history").unwrap()),
+        "idempotency retains the original first attempt"
+    );
+    let body = store.load_conversation(&owner).await.unwrap();
+    assert_eq!(
+        body.messages
+            .iter()
+            .filter(|message| matches!(message, ConversationMessage::User(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        store
+            .load_runtime()
+            .await
+            .unwrap()
+            .inputs
+            .iter()
+            .find(|input| input.input_id == queued.input_id),
+        Some(&queued_before)
+    );
+    drop(first);
+    let restarted = runtime_with_store(model.clone(), store.clone(), config).await;
+    let restored = restarted
+        .get_run(GetRunRequest {
+            session_id: owner.clone(),
+            run_id: retry.run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        restored.run.status,
+        assistant_protocol::RunStatus::Completed
+    );
+    assert_eq!(restored.run.text, "retry completed");
+    assert!(!store.contains_input_control(&original.input_id).unwrap());
+    assert!(store.contains_input_control(&queued.input_id).unwrap());
+    assert!(
+        model.take_requests().is_empty(),
+        "history and preparation never start queued work"
+    );
+}
+
+#[tokio::test]
+async fn recovered_history_selection_ids_are_scoped_to_their_session_and_owner() {
+    let runtime = runtime(Arc::new(ScriptedModelService::new(
+        model_capabilities(false),
+        8192,
+        [],
+    )));
+    let first = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    let second = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    let mut stored = runtime.store.load_runtime().await.unwrap();
+    for id in [&first, &second] {
+        stored.mcp_input_selections.push(crate::StoredMcpSelection {
+            selection_id: "same-selection".into(),
+            session_id: id.clone(),
+            input_id: None,
+            message_id: MessageId::new("same-message").unwrap(),
+            server_key: assistant_protocol::McpServerKey::new("fixture").unwrap(),
+            display_name: id.as_str().into(),
+            created_at_ms: 1,
+        });
+        stored.skill_activations.push(crate::StoredSkillActivation {
+            activation_id: "same-activation".into(),
+            session_id: id.clone(),
+            owner: crate::SkillActivationOwner::Session(id.clone()),
+            run_id: None,
+            input_id: None,
+            message_id: MessageId::new("same-message").unwrap(),
+            name: crate::SkillName::parse("review").unwrap(),
+            catalog_revision: format!("sha256-v1:{}", "a".repeat(64)),
+            definition_digest: format!("sha256-v1:{}", "b".repeat(64)),
+            trigger: crate::SkillActivationTrigger::User,
+            created_at_ms: 1,
+        });
+    }
+    let registries = super::super::recovery::recover_registries(stored.clone()).unwrap();
+    for id in [&first, &second] {
+        let state = registries.sessions.get(id).unwrap().lock_state().unwrap();
+        assert_eq!(state.mcp_selections.len(), 1);
+        assert_eq!(&state.mcp_selections[0].session_id, id);
+        assert_eq!(state.skill_activations.len(), 1);
+        assert_eq!(&state.skill_activations[0].session_id, id);
+        assert!(state.inputs.is_empty());
+        assert!(state.runs.is_empty());
+    }
+    let mut duplicate_mcp = stored.clone();
+    duplicate_mcp
+        .mcp_input_selections
+        .push(stored.mcp_input_selections[0].clone());
+    assert!(super::super::recovery::recover_registries(duplicate_mcp).is_err());
+    stored
+        .skill_activations
+        .push(stored.skill_activations[0].clone());
+    assert!(super::super::recovery::recover_registries(stored).is_err());
+}
+
+#[tokio::test]
 async fn quoted_text_direct_locator_is_normalized_and_submitted_as_a_structured_user_part() {
     let runtime = runtime(Arc::new(ScriptedModelService::new(
         model_capabilities(false),
@@ -24,7 +380,7 @@ async fn quoted_text_direct_locator_is_normalized_and_submitted_as_a_structured_
         .session
         .session_id;
     let first = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             session_id: session_id.clone(),
             message: "prefix selected suffix".to_owned(),
             variant: AgentVariant::Build,
@@ -86,7 +442,7 @@ async fn quoted_text_direct_locator_is_normalized_and_submitted_as_a_structured_
     assert!(!normalized[0].source_available);
 
     let second = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             session_id: session_id.clone(),
             message: String::new(),
             variant: AgentVariant::Build,
@@ -139,7 +495,7 @@ async fn repeated_idempotency_key_returns_the_first_input_and_run() {
         .expect("session");
     let key = IdempotencyKey::new("submit-1").expect("key");
     let first = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: AgentVariant::Plan,
             session_id: session.session.session_id.clone(),
@@ -153,7 +509,7 @@ async fn repeated_idempotency_key_returns_the_first_input_and_run() {
         .await
         .expect("first submit");
     let repeated = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -207,6 +563,35 @@ async fn repeated_idempotency_key_returns_the_first_input_and_run() {
         )),
         "Desktop input must not receive channel metadata injection"
     );
+    let mut stored = runtime.store.load_runtime().await.unwrap();
+    assert!(
+        stored.runs.is_empty(),
+        "completed Runs are file history, not recovery controls"
+    );
+    assert_eq!(stored.run_history.len(), 1);
+    // 即使没有任何旧执行行，首次身份及幂等返回也必须成立。
+    stored.runs.clear();
+    let mut recovered = super::super::recovery::recover_registries(stored).unwrap();
+    let recovered_session = recovered
+        .sessions
+        .remove(&session.session.session_id)
+        .unwrap();
+    assert!(recovered_session.lock_state().unwrap().runs.is_empty());
+    let (input_id, run) = runtime
+        .find_idempotent_run(
+            &recovered_session,
+            &IdempotencyKey::new("submit-1").unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(input_id, first.input_id);
+    assert_eq!(run.as_ref().unwrap().run_id, first.run.run_id);
+    assert_eq!(
+        run.as_ref().unwrap().status,
+        assistant_protocol::RunStatus::Completed
+    );
+    assert!(recovered_session.lock_state().unwrap().runs.is_empty());
 }
 
 #[tokio::test]
@@ -220,7 +605,7 @@ async fn queued_input_can_be_cancelled_without_entering_the_conversation() {
         .expect("session");
     set_auto_approval(&runtime, &session.session.session_id).await;
     let active = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -261,6 +646,20 @@ async fn queued_input_can_be_cancelled_without_entering_the_conversation() {
             .queued_input_count,
         1
     );
+    assert!(queued.run.is_none(), "暂存输入没有 Run");
+    let snapshot = runtime
+        .store
+        .load_session_state(&session.session.session_id)
+        .await
+        .unwrap();
+    assert!(
+        !snapshot
+            .state
+            .runs
+            .iter()
+            .any(|run| run.input_id == queued.input_id)
+    );
+    let queued_id = queued.input_id.clone();
     runtime
         .cancel_queued_input(CancelQueuedInputRequest {
             session_id: session.session.session_id.clone(),
@@ -296,13 +695,12 @@ async fn queued_input_can_be_cancelled_without_entering_the_conversation() {
         0
     );
     assert!(
-        runtime
-            .get_run(GetRunRequest {
-                session_id: session.session.session_id,
-                run_id: queued.run.run_id
-            })
+        !runtime
+            .product_run_snapshots(&runtime.session(&session.session.session_id).await.unwrap())
             .await
-            .is_err()
+            .unwrap()
+            .iter()
+            .any(|run| run.input_id == queued_id)
     );
 }
 
@@ -322,7 +720,7 @@ async fn same_queue_item_ids_execute_in_acceptance_order() {
         .expect("session");
     set_auto_approval(&runtime, &session.session.session_id).await;
     let first = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -352,6 +750,7 @@ async fn same_queue_item_ids_execute_in_acceptance_order() {
         })
         .await
         .expect("second queued");
+    assert!(second.run.is_none());
     assert_eq!(
         runtime
             .get_session(GetSessionRequest {
@@ -379,8 +778,12 @@ async fn same_queue_item_ids_execute_in_acceptance_order() {
             .status,
         assistant_protocol::RunStatus::Cancelled
     );
+    let second_run = runtime
+        .wait_for_input_claim(&session.session.session_id, &second.input_id)
+        .await
+        .unwrap();
     assert_eq!(
-        wait_for_terminal(&runtime, &session.session.session_id, &second.run.run_id)
+        wait_for_terminal(&runtime, &session.session.session_id, &second_run.run_id)
             .await
             .status,
         assistant_protocol::RunStatus::Completed
@@ -437,7 +840,7 @@ async fn retrying_a_prestart_failure_reuses_the_user_message_and_creates_a_new_a
         .await
         .expect("session");
     let first = runtime
-        .submit_input(SubmitInputRequest {
+        .submit_started_input(SubmitInputRequest {
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -478,7 +881,7 @@ async fn retrying_a_prestart_failure_reuses_the_user_message_and_creates_a_new_a
     let retry = runtime
         .retry_run(RetryRunRequest {
             session_id: session.session.session_id.clone(),
-            run_id: first.run.run_id,
+            run_id: first.run.run_id.clone(),
         })
         .await
         .expect("retry");
@@ -486,6 +889,10 @@ async fn retrying_a_prestart_failure_reuses_the_user_message_and_creates_a_new_a
     assert_eq!(retry.run.attempt, 2);
     assert_eq!(retry.run.variant, AgentVariant::Build);
     assert_eq!(retry.run.approval_mode, ApprovalMode::Auto);
+    assert!(retry.run.started_at_ms.is_none());
+    let completed_retry =
+        wait_for_terminal(&runtime, &session.session.session_id, &retry.run.run_id).await;
+    assert!(completed_retry.started_at_ms.is_some());
     assert_eq!(
         wait_for_terminal(&runtime, &session.session.session_id, &retry.run.run_id)
             .await
@@ -501,4 +908,161 @@ async fn retrying_a_prestart_failure_reuses_the_user_message_and_creates_a_new_a
             .len(),
         2
     );
+    let loaded = runtime
+        .store
+        .load_session_state(&session.session.session_id)
+        .await
+        .unwrap();
+    assert!(loaded.state.runs.is_empty());
+    assert_eq!(loaded.state.run_history.len(), 2);
+    let mut recovered = super::super::recovery::recover_session_registries(loaded).unwrap();
+    let recovered_session = recovered
+        .sessions
+        .remove(&session.session.session_id)
+        .unwrap();
+    let state = recovered_session.lock_state().unwrap();
+    assert!(state.runs.is_empty());
+    let input = state.inputs.get(&first.input_id).unwrap();
+    assert_eq!(input.first_run_id, Some(first.run.run_id));
+    assert_eq!(input.latest_run_id, Some(retry.run.run_id));
+}
+
+#[tokio::test]
+async fn queued_input_recovers_without_run_and_idempotent_resubmit_does_not_claim_it() {
+    let store = Arc::new(crate::storage::VolatileRuntimeStore::default());
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(false),
+        8192,
+        [ModelScript::Events(message_events(&assistant_text(
+            "queue-answer",
+            "done",
+        )))],
+    ));
+    let first = runtime_with_store(
+        model.clone(),
+        store.clone(),
+        RuntimeConfig::new(NonZeroUsize::new(256).unwrap()),
+    )
+    .await;
+    let session_id = first
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    let input_id = assistant_protocol::InputId::new("queued-without-run").unwrap();
+    let key = IdempotencyKey::new("queued-key").unwrap();
+    let input = crate::NewStoredInput {
+        feedback_answer: None,
+        agent_shell_target: None,
+        input_id: input_id.clone(),
+        session_id: session_id.clone(),
+        idempotency_key: Some(key.clone()),
+        agent_variant: AgentVariant::Build,
+        origin: crate::InputOrigin::User,
+        goal_binding: None,
+        cross_session: None,
+        channel_source: Some(crate::InputChannelSource::desktop_text()),
+        skill_activation: None,
+        mcp_selection: None,
+        message: crate::run::create_user_message(
+            "queued body".into(),
+            Vec::new(),
+            AgentVariant::Build,
+        )
+        .unwrap(),
+        new_goal: None,
+        resumed_goal: None,
+        generated_title: None,
+        accepted_at_ms: super::super::now_ms().unwrap(),
+    };
+    assert!(matches!(
+        store.accept_input(input).await.unwrap(),
+        crate::AcceptedInput::Control { run: None, .. }
+    ));
+    let before = store.load_runtime().await.unwrap();
+    assert!(before.runs.is_empty());
+    assert!(before.run_history.is_empty());
+    assert!(
+        store
+            .load_conversation(&session_id)
+            .await
+            .unwrap()
+            .messages
+            .is_empty()
+    );
+    first
+        .shutdown(ShutdownRuntimeRequest::default())
+        .await
+        .unwrap();
+    let runtime = runtime_with_store(
+        model.clone(),
+        store.clone(),
+        RuntimeConfig::new(NonZeroUsize::new(256).unwrap()),
+    )
+    .await;
+    let summary = runtime
+        .get_session(GetSessionRequest {
+            session_id: session_id.clone(),
+        })
+        .await
+        .unwrap()
+        .session;
+    assert_eq!(summary.queued_input_count, 1);
+    assert!(summary.resume_required);
+    assert!(
+        runtime
+            .list_runs(assistant_protocol::ListRunsRequest {
+                session_id: session_id.clone()
+            })
+            .await
+            .unwrap()
+            .runs
+            .is_empty()
+    );
+    let duplicate = runtime
+        .submit_input(SubmitInputRequest {
+            session_id: session_id.clone(),
+            message: "ignored retry body".into(),
+            variant: AgentVariant::Build,
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: Some(key),
+        })
+        .await
+        .unwrap();
+    assert_eq!(duplicate.input_id, input_id);
+    assert!(duplicate.run.is_none());
+    assert!(model.take_requests().is_empty());
+    runtime
+        .resume_session(assistant_protocol::ResumeSessionRequest {
+            session_id: session_id.clone(),
+        })
+        .await
+        .unwrap();
+    let claimed = runtime
+        .wait_for_input_claim(&session_id, &input_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_for_terminal(&runtime, &session_id, &claimed.run_id)
+            .await
+            .status,
+        assistant_protocol::RunStatus::Completed
+    );
+    let body = store.load_conversation(&session_id).await.unwrap();
+    assert_eq!(
+        body.messages
+            .iter()
+            .filter(|message| matches!(message, ConversationMessage::User(_)))
+            .count(),
+        1
+    );
+    runtime
+        .shutdown(ShutdownRuntimeRequest::default())
+        .await
+        .unwrap();
 }

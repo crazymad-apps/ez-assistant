@@ -12,7 +12,7 @@ use std::{
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub(super) enum Entry {
+pub(crate) enum Entry {
     Directory,
     File { size: u64, sha256: String },
     Link { target: PathBuf },
@@ -25,7 +25,7 @@ pub(super) fn bytes_entry(bytes: &[u8]) -> Entry {
     }
 }
 
-pub(super) fn inspect(path: &Path) -> Result<Entry> {
+pub(crate) fn inspect(path: &Path) -> Result<Entry> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() {
         return Ok(Entry::Link {
@@ -68,7 +68,7 @@ pub(super) fn inspect(path: &Path) -> Result<Entry> {
     })
 }
 
-pub(super) fn inventory(
+pub(crate) fn inventory(
     root: &Path,
     relative: &Path,
     output: &mut BTreeMap<PathBuf, Entry>,
@@ -85,7 +85,7 @@ pub(super) fn inventory(
 }
 
 /// 目标必须不存在；源与复制件逐项回读，文件的独立 inode 不依赖原布局生命周期。
-pub(super) fn copy_entry(source: &Path, target: &Path, entry: &Entry) -> Result<()> {
+pub(crate) fn copy_entry(source: &Path, target: &Path, entry: &Entry) -> Result<()> {
     if exists(target)? {
         return Err(Error::Conflict);
     }
@@ -113,7 +113,7 @@ pub(super) fn copy_entry(source: &Path, target: &Path, entry: &Entry) -> Result<
     Ok(())
 }
 
-pub(super) fn exists(path: &Path) -> Result<bool> {
+pub(crate) fn exists(path: &Path) -> Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),

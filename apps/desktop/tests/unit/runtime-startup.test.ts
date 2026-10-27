@@ -10,6 +10,25 @@ const bootstrap: RuntimeBootstrap = {
 const health = (status: string, error: string | null = null) => new Response(JSON.stringify({ status, stage: "database_migration", error, database_version: null, target_version: "0.25.1" }));
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 describe("authenticated startup observation", () => {
+  it("keeps command cancellation attached after headers while the response body is pending", async () => {
+    const fetcher = vi.fn((_url, init) => Promise.resolve(new Response(new ReadableStream({
+      start(controller) {
+        init.signal.addEventListener("abort", () => controller.error(init.signal.reason), { once: true });
+      },
+    }))));
+    vi.stubGlobal("fetch", fetcher);
+    const client = new RuntimeClient(bootstrap);
+    const abort = new AbortController();
+    const waiting = client.command({ type: "get_session_view", payload: { session_id: "fixture" } }, { signal: abort.signal });
+    const rejected = expect(waiting).rejects.toMatchObject({ name: "AbortError" });
+    await Promise.resolve();
+    await Promise.resolve();
+    abort.abort(new DOMException("selection changed", "AbortError"));
+    await rejected;
+    expect(fetcher.mock.calls[0]![1].signal.aborted).toBe(true);
+    client.dispose();
+  });
+
   it("uses explicit Bearer without ambient cookies and same-origin cookies otherwise", async () => {
     const fetcher = vi.fn().mockImplementation(() => Promise.resolve(health("ready")));
     vi.stubGlobal("fetch", fetcher);
@@ -28,7 +47,7 @@ describe("authenticated startup observation", () => {
       database_version: null, target_version: "0.25.2", min_compatible_host_version: "0.25.3",
     })).toBe("数据库要求 Host 至少为 0.25.3，当前为 0.25.2。未继续初始化，请使用兼容版本。");
   });
-  it("waits for one blocking readiness request without polling", async () => {
+  it("finishes a fast readiness request without starting progress polling", async () => {
     let finish!: (response: Response) => void;
     const fetcher = vi.fn(() => new Promise<Response>((resolve) => { finish = resolve; }));
     vi.stubGlobal("fetch", fetcher);
@@ -42,6 +61,29 @@ describe("authenticated startup observation", () => {
     expect(fetcher).toHaveBeenCalledWith(expect.stringContaining("/runtime/ensure-ready"), expect.objectContaining({ method: "POST" }));
     client.dispose();
   });
+  it("observes phase and work counts while keeping exactly one readiness request", async () => {
+    vi.useFakeTimers();
+    let finish!: (response: Response) => void;
+    const fetcher = vi.fn((url: string) => url.endsWith("/runtime/ensure-ready")
+      ? new Promise<Response>((resolve) => { finish = resolve; })
+      : Promise.resolve(Response.json({ status: "starting", stage: "history_backup", progress: { completed: 2, total: 3 }, database_version: "0.32.1", target_version: "0.32.1", error: null })));
+    vi.stubGlobal("fetch", fetcher);
+    const client = new RuntimeClient(bootstrap), receive = vi.fn();
+    const waiting = client.waitUntilReady(receive);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(receive).toHaveBeenCalledWith(expect.objectContaining({ stage: "history_backup", progress: { completed: 2, total: 3 } }));
+    expect(startupMessage(receive.mock.calls[0]![0])).toBe("正在备份会话历史（2 / 3 个文件）…");
+    await vi.advanceTimersByTimeAsync(500);
+    expect(fetcher.mock.calls.filter(([url]) => url.endsWith("/runtime/ensure-ready"))).toHaveLength(1);
+    expect(fetcher.mock.calls.filter(([url]) => url.endsWith("/health"))).toHaveLength(2);
+    finish(new Response(null, { status: 204 }));
+    await waiting;
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(receive.mock.calls.at(-1)![0].status).toBe("ready");
+    client.dispose();
+  });
+
   it("does not retry failed initialization", async () => {
     const fetcher = vi.fn().mockResolvedValue(Response.json({ error: { code: "storage_unavailable", message: "初始化失败" } }, { status: 503 }));
     vi.stubGlobal("fetch", fetcher);

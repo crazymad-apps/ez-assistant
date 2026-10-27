@@ -34,10 +34,10 @@ const TRAY_RUNTIME_STATUS: &str = "desktop.tray.runtime-status";
 const TRAY_RESTART_RUNTIME: &str = "desktop.tray.restart-runtime";
 const TRAY_STOP_RUNTIME: &str = "desktop.tray.stop-runtime";
 const TRAY_QUIT_DESKTOP: &str = "desktop.tray.quit";
-const STOP_RUNTIME_BUTTON: &str = "停止 Runtime";
-const RESTART_RUNTIME_BUTTON: &str = "重启 Runtime";
-const QUIT_DESKTOP_BUTTON: &str = "退出桌面客户端";
-const QUIT_AND_STOP_BUTTON: &str = "退出并停止 Runtime";
+const STOP_RUNTIME_BUTTON: &str = "停止";
+const RESTART_RUNTIME_BUTTON: &str = "重启";
+const QUIT_DESKTOP_BUTTON: &str = "保留后台并退出";
+const QUIT_AND_STOP_BUTTON: &str = "退出并停止";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -65,7 +65,7 @@ impl NativeRuntimeState {
     }
 
     fn can_stop(self) -> bool {
-        matches!(self, Self::Connected | Self::Reconnecting)
+        !matches!(self, Self::Stopping | Self::Restarting | Self::Stopped)
     }
 
     fn can_restart(self) -> bool {
@@ -83,13 +83,6 @@ pub(crate) enum DesktopLifecycleIntent {
     QuitDesktop,
     StopRuntime,
     RestartRuntime,
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
-pub(crate) struct NativeRuntimeImpact {
-    active_runs: usize,
-    queued_inputs: usize,
-    pending_approvals: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -138,7 +131,6 @@ pub(crate) struct DesktopLifecycleCoordinator {
     allow_exit: AtomicBool,
     native_action_pending: AtomicBool,
     pending_intent: Mutex<Option<DesktopLifecycleIntent>>,
-    native_runtime_impact: Mutex<NativeRuntimeImpact>,
     native_runtime_state: Mutex<NativeRuntimeState>,
     native_runtime_items: Mutex<Option<NativeRuntimeItems>>,
 }
@@ -149,7 +141,6 @@ impl DesktopLifecycleCoordinator {
             allow_exit: AtomicBool::new(false),
             native_action_pending: AtomicBool::new(false),
             pending_intent: Mutex::new(None),
-            native_runtime_impact: Mutex::new(NativeRuntimeImpact::default()),
             native_runtime_state: Mutex::new(NativeRuntimeState::Connecting),
             native_runtime_items: Mutex::new(None),
         }
@@ -174,7 +165,7 @@ impl DesktopLifecycleCoordinator {
             app_handle,
             APP_STOP_RUNTIME,
             "停止 Runtime…",
-            false,
+            true,
             None::<&str>,
         )?;
         let application_show = MenuItem::with_id(
@@ -236,7 +227,7 @@ impl DesktopLifecycleCoordinator {
             app_handle,
             TRAY_STOP_RUNTIME,
             "停止 Runtime…",
-            false,
+            true,
             None::<&str>,
         )?;
         let tray_quit = MenuItem::with_id(
@@ -332,19 +323,6 @@ impl DesktopLifecycleCoordinator {
         self.allow_exit.store(true, Ordering::SeqCst);
     }
 
-    fn runtime_impact(&self) -> NativeRuntimeImpact {
-        self.native_runtime_impact
-            .lock()
-            .map(|impact| *impact)
-            .unwrap_or_default()
-    }
-
-    fn update_runtime_impact(&self, impact: NativeRuntimeImpact) {
-        if let Ok(mut current_impact) = self.native_runtime_impact.lock() {
-            *current_impact = impact;
-        }
-    }
-
     pub(crate) fn update_runtime_state(&self, state: NativeRuntimeState) {
         let Ok(mut current_state) = self.native_runtime_state.lock() else {
             return;
@@ -421,16 +399,12 @@ fn request_native_intent<R: Runtime>(app: &AppHandle<R>, intent: DesktopLifecycl
     if !coordinator.begin_native_action() {
         return;
     }
-    let impact = coordinator.runtime_impact();
     match intent {
         DesktopLifecycleIntent::StopRuntime => {
             let app = app.clone();
             app.dialog()
-                .message(runtime_impact_message(
-                    impact,
-                    "停止后，未完成的工作会被中断。",
-                ))
-                .title("停止 Runtime？")
+                .message("停止本机后台服务后，所有运行中的会话都会中断。")
+                .title("停止后台服务？")
                 .kind(MessageDialogKind::Warning)
                 .buttons(MessageDialogButtons::OkCancelCustom(
                     STOP_RUNTIME_BUTTON.to_owned(),
@@ -448,11 +422,8 @@ fn request_native_intent<R: Runtime>(app: &AppHandle<R>, intent: DesktopLifecycl
         DesktopLifecycleIntent::RestartRuntime => {
             let app = app.clone();
             app.dialog()
-                .message(runtime_impact_message(
-                    impact,
-                    "重启期间，未完成的工作会被中断。",
-                ))
-                .title("重启 Runtime？")
+                .message("重启本机后台服务会中断所有运行中的会话。")
+                .title("重启后台服务？")
                 .kind(MessageDialogKind::Warning)
                 .buttons(MessageDialogButtons::OkCancelCustom(
                     RESTART_RUNTIME_BUTTON.to_owned(),
@@ -471,21 +442,21 @@ fn request_native_intent<R: Runtime>(app: &AppHandle<R>, intent: DesktopLifecycl
             let app = app.clone();
             app.dialog()
                 .message(
-                    "退出将关闭全部终端及其中运行的进程；Runtime 默认继续运行。\n\n如需同时停止 Runtime，请选择“退出并停止 Runtime”。",
+                    "退出将停止本机后台服务，并中断所有运行中的会话。\n如需继续任务，请选择“保留后台并退出”。",
                 )
-                .title("退出桌面客户端？")
+                .title("退出应用？")
                 .kind(MessageDialogKind::Warning)
                 .buttons(MessageDialogButtons::YesNoCancelCustom(
-                    QUIT_DESKTOP_BUTTON.to_owned(),
                     QUIT_AND_STOP_BUTTON.to_owned(),
+                    QUIT_DESKTOP_BUTTON.to_owned(),
                     "取消".to_owned(),
                 ))
                 .show_with_result(move |result| match result {
                     MessageDialogResult::Yes => {
-                        spawn_quit(app);
+                        spawn_runtime_action(app, DesktopLifecycleIntent::StopRuntime, true);
                     }
                     MessageDialogResult::No => {
-                        spawn_runtime_action(app, DesktopLifecycleIntent::StopRuntime, true);
+                        spawn_quit(app);
                     }
                     MessageDialogResult::Custom(value) if value == QUIT_DESKTOP_BUTTON => {
                         spawn_quit(app);
@@ -515,13 +486,6 @@ fn spawn_quit<R: Runtime>(app: AppHandle<R>) {
             app.exit(0);
         }
     });
-}
-
-fn runtime_impact_message(impact: NativeRuntimeImpact, consequence: &str) -> String {
-    format!(
-        "活动 Run：{}\n排队输入：{}\n待审批：{}\n\n{consequence}",
-        impact.active_runs, impact.queued_inputs, impact.pending_approvals
-    )
 }
 
 fn spawn_runtime_action<R: Runtime>(
@@ -611,8 +575,14 @@ pub(crate) fn request_intent<R: Runtime>(app: &AppHandle<R>, intent: DesktopLife
 // 加入浏览器 child WebView 后窗口不再是单 WebviewWindow；窗口操作必须按 Window 身份查找。
 fn show_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), DesktopLifecycleError> {
     #[cfg(target_os = "macos")]
-    app.set_dock_visibility(true)
-        .map_err(|_| DesktopLifecycleError::WindowActionFailed)?;
+    {
+        app.set_dock_visibility(true)
+            .map_err(|_| DesktopLifecycleError::WindowActionFailed)?;
+        // 托盘操作不会像 Dock/Finder 一样解除系统的应用隐藏状态；仅显示 NSWindow
+        // 不能覆盖 Cmd+H 等应用级隐藏，因此先恢复应用，再恢复同一个主窗口。
+        app.show()
+            .map_err(|_| DesktopLifecycleError::WindowActionFailed)?;
+    }
     let window = app
         .get_window("main")
         .ok_or(DesktopLifecycleError::MainWindowUnavailable)?;
@@ -630,9 +600,7 @@ fn hide_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), DesktopLifecyc
     window
         .hide()
         .map_err(|_| DesktopLifecycleError::WindowActionFailed)?;
-    #[cfg(target_os = "macos")]
-    app.set_dock_visibility(false)
-        .map_err(|_| DesktopLifecycleError::WindowActionFailed)?;
+    // 隐藏窗口后保留 Dock，系统 Reopen 仍可唤回同一窗口。
     Ok(())
 }
 
@@ -728,19 +696,15 @@ pub(crate) fn take_pending_desktop_lifecycle_intent(
 pub(crate) fn update_native_runtime_state(
     coordinator: State<'_, DesktopLifecycleCoordinator>,
     state: NativeRuntimeState,
-    impact: Option<NativeRuntimeImpact>,
 ) {
-    if let Some(impact) = impact {
-        coordinator.update_runtime_impact(impact);
-    }
     coordinator.update_runtime_state(state);
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        DesktopLifecycleCoordinator, DesktopLifecycleIntent, NativeMenuAction, NativeRuntimeImpact,
-        NativeRuntimeState, native_menu_action, runtime_impact_message,
+        DesktopLifecycleCoordinator, DesktopLifecycleIntent, NativeMenuAction, NativeRuntimeState,
+        native_menu_action,
     };
 
     #[test]
@@ -789,18 +753,26 @@ mod tests {
     }
 
     #[test]
-    fn native_runtime_confirmation_lists_the_cached_impact() {
-        let message = runtime_impact_message(
-            NativeRuntimeImpact {
-                active_runs: 2,
-                queued_inputs: 3,
-                pending_approvals: 4,
-            },
-            "操作会中断未完成工作。",
-        );
-
-        assert!(message.contains("活动 Run：2"));
-        assert!(message.contains("排队输入：3"));
-        assert!(message.contains("待审批：4"));
+    fn native_management_remains_available_before_or_without_business_connection() {
+        for state in [
+            NativeRuntimeState::Connecting,
+            NativeRuntimeState::Disconnected,
+            NativeRuntimeState::Reconnecting,
+            NativeRuntimeState::Connected,
+        ] {
+            assert!(state.can_stop());
+            assert!(state.can_restart());
+        }
+        for state in [NativeRuntimeState::Stopping, NativeRuntimeState::Restarting] {
+            assert!(!state.can_stop());
+            assert!(!state.can_restart());
+        }
+        assert!(!NativeRuntimeState::Stopped.can_stop());
+        assert!(NativeRuntimeState::Stopped.can_restart());
+        let coordinator = DesktopLifecycleCoordinator::new();
+        assert!(coordinator.begin_native_action());
+        assert!(!coordinator.begin_native_action());
+        coordinator.finish_native_action();
+        assert!(coordinator.begin_native_action());
     }
 }

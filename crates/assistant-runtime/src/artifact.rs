@@ -3,9 +3,9 @@
 use std::{collections::HashMap, sync::Arc};
 
 use agent_tools::{Tool, ToolContext, ToolError, ToolExecuteFuture, ToolResolution};
-use agent_types::{
-    AssistantPart, ConversationMessage, ConversationSnapshot, ToolName, ToolResultStatus,
-};
+#[cfg(test)]
+use agent_types::ConversationSnapshot;
+use agent_types::{AssistantPart, ConversationMessage, ToolName, ToolResultStatus};
 use assistant_protocol::{RunId, SessionArtifact, SessionResourceLocator};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -121,68 +121,79 @@ impl Tool for DeclareArtifactTool {
     }
 }
 
-pub(crate) fn project_artifacts(history: &ConversationSnapshot) -> Vec<SessionArtifact> {
-    let calls = history
-        .messages
-        .iter()
-        .filter_map(|message| {
-            if let ConversationMessage::Assistant(message) = message {
-                Some(message.parts.iter())
-            } else {
-                None
+/// 可靠声明的当前净状态；只保留标题与文件定位，不保留工具正文。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ArtifactProjection {
+    calls: std::collections::HashSet<agent_types::ToolCallId>,
+    indexes: HashMap<String, usize>,
+    artifacts: Vec<Option<SessionArtifact>>,
+}
+
+impl ArtifactProjection {
+    pub(crate) fn push(&mut self, message: &ConversationMessage) {
+        match message {
+            ConversationMessage::Assistant(assistant) => {
+                self.calls.clear();
+                self.calls
+                    .extend(assistant.parts.iter().filter_map(|part| match part {
+                        AssistantPart::ToolCall(call) if call.name.as_str() == TOOL_NAME => {
+                            Some(call.id.clone())
+                        }
+                        _ => None,
+                    }));
             }
-        })
-        .flatten()
-        .filter_map(|part| match part {
-            AssistantPart::ToolCall(call) if call.name.as_str() == TOOL_NAME => {
-                Some(call.id.as_str())
-            }
-            _ => None,
-        })
-        .collect::<std::collections::HashSet<_>>();
-    let mut indexes = HashMap::new();
-    let mut artifacts: Vec<Option<SessionArtifact>> = Vec::new();
-    for message in &history.messages {
-        let ConversationMessage::Tool(message) = message else {
-            continue;
-        };
-        if message.result.status != ToolResultStatus::Success
-            || !calls.contains(message.result.call_id.as_str())
-        {
-            continue;
-        }
-        let Some(value) = message.result.content.as_single_json() else {
-            continue;
-        };
-        let Ok(declaration) = serde_json::from_value::<ArtifactDeclaration>(value.clone()) else {
-            continue;
-        };
-        // locator 的协议编码固定；避免用分隔符拼接产生身份碰撞。
-        let Ok(key) = serde_json::to_string(&declaration.locator) else {
-            continue;
-        };
-        match declaration.action {
-            ArtifactAction::Declare => {
-                let artifact = SessionArtifact {
-                    title: declaration.title,
-                    locator: declaration.locator,
-                    source_run_id: declaration.source_run_id,
+            ConversationMessage::Tool(message) => {
+                if !self.calls.remove(&message.result.call_id)
+                    || message.result.status != ToolResultStatus::Success
+                {
+                    return;
+                }
+                let Some(value) = message.result.content.as_single_json() else {
+                    return;
                 };
-                if let Some(&index) = indexes.get(&key) {
-                    artifacts[index] = Some(artifact);
-                } else {
-                    indexes.insert(key, artifacts.len());
-                    artifacts.push(Some(artifact));
+                let Ok(declaration) = serde_json::from_value::<ArtifactDeclaration>(value.clone())
+                else {
+                    return;
+                };
+                let Ok(key) = serde_json::to_string(&declaration.locator) else {
+                    return;
+                };
+                match declaration.action {
+                    ArtifactAction::Declare => {
+                        let artifact = SessionArtifact {
+                            title: declaration.title,
+                            locator: declaration.locator,
+                            source_run_id: declaration.source_run_id,
+                        };
+                        if let Some(&index) = self.indexes.get(&key) {
+                            self.artifacts[index] = Some(artifact);
+                        } else {
+                            self.indexes.insert(key, self.artifacts.len());
+                            self.artifacts.push(Some(artifact));
+                        }
+                    }
+                    ArtifactAction::Withdraw => {
+                        if let Some(index) = self.indexes.remove(&key) {
+                            self.artifacts[index] = None;
+                        }
+                    }
                 }
             }
-            ArtifactAction::Withdraw => {
-                if let Some(index) = indexes.remove(&key) {
-                    artifacts[index] = None;
-                }
-            }
+            _ => self.calls.clear(),
         }
     }
-    artifacts.into_iter().flatten().collect()
+    pub(crate) fn snapshot(&self) -> Vec<SessionArtifact> {
+        self.artifacts.iter().flatten().cloned().collect()
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn project_artifacts(history: &ConversationSnapshot) -> Vec<SessionArtifact> {
+    let mut projection = ArtifactProjection::default();
+    for message in &history.messages {
+        projection.push(message);
+    }
+    projection.snapshot()
 }
 
 #[cfg(test)]

@@ -12,7 +12,7 @@ export function ModelCompactionFields(props: Readonly<{
   const { parameters, connection, on_change } = props;
   const opencode = connection.provider_type === "opencode";
   const responses = connection.protocol_preference !== 'chat_completions' &&
-    ['opencode', 'openai', 'deepseek', 'dashscope_api', 'dashscope_plan', 'moonshot'].includes(connection.provider_type);
+    ['opencode', 'openai', 'sub2api', 'deepseek', 'dashscope_api', 'dashscope_plan', 'moonshot'].includes(connection.provider_type);
   return <CollapsibleSection title="上下文压缩" defaultOpen>
     <div className={styles.model_form}>
       <ModelFieldSelector label="服务端压缩能力" value={parameters.server_compaction_support} options={support_options}

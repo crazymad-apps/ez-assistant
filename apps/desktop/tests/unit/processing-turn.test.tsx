@@ -25,6 +25,8 @@ function message(
   status: AssistantMessageSnapshot['status'] = 'running',
 ): AssistantMessageSnapshot {
   return {
+    inherited: false,
+    partial: false,
     message_id: id,
     run_id: 'r',
     step,
@@ -33,6 +35,7 @@ function message(
     status,
     created_at_ms: null,
     run_created_at_ms: 1000,
+    run_started_at_ms: 1000,
     finished_at_ms: status === 'completed' ? 9000 : null,
     usage: null,
     can_fork: true,
@@ -43,6 +46,7 @@ function message(
 function live(): LiveRunProjection {
   return {
     ...emptyRun('s', 'r', 1000),
+    started_at_ms: 1000,
     status: 'running',
     active_step: 1,
     steps: [{ step: 1, segments: [{ type: 'reasoning', source: 'raw', part_id: 'thought', text: '检查资料' }] }],
@@ -55,6 +59,31 @@ afterEach(() => {
 });
 
 describe('processing turn', () => {
+  it('renders inherited partial history without future status, full duration or a live tail', () => {
+    const store = new RootStore();
+    const inherited = {
+      ...message('retained', 1, [{ type: 'text', part_id: 'prefix', text: '可靠前缀' }], 'completed'),
+      inherited: true,
+      partial: true,
+    };
+    const rows = attachLiveTurn(groupConversationTurns([{ type: 'assistant', ...inherited }]), live(), null);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.type === 'assistant_turn' && rows[0].live_run).toBeUndefined();
+    const mounted = render(<RootStoreProvider store={store}>
+      <ProcessingTurn {...options} messages={[inherited]} live_run={live()} awaiting_approval />
+    </RootStoreProvider>);
+    expect(screen.getByRole('status')).toHaveTextContent('继承 · 截至分支点');
+    expect(screen.queryByLabelText('处理耗时')).not.toBeInTheDocument();
+    expect(screen.getByText('可靠前缀')).toBeVisible();
+    expect(screen.queryByText('检查资料')).not.toBeInTheDocument();
+    expect(screen.queryByText('等待审批')).not.toBeInTheDocument();
+    mounted.rerender(<RootStoreProvider store={store}>
+      <ProcessingTurn {...options} messages={[{ ...inherited, partial: false }]} live_run={null} />
+    </RootStoreProvider>);
+    expect(screen.getByRole('status')).toHaveTextContent('继承 · 已完成');
+    store.dispose();
+  });
+
   it.each(['same-message', 'later-tool-message'] as const)(
     'keeps the last body visible after tool-ended completion and history reload: %s', async (placement) => {
       const store = new RootStore();
@@ -216,6 +245,7 @@ describe('processing turn', () => {
         { type: 'assistant', ...committed },
         {
           type: 'user',
+          inherited: false,
           message_id: 'u',
           input_id: null,
           text: '中断边界',
@@ -234,6 +264,22 @@ describe('processing turn', () => {
     expect(rows[0]?.type === 'assistant_turn' && rows[0].key).not.toBe(
       rows[2]?.type === 'assistant_turn' && rows[2].key,
     );
+  });
+
+  it('does not mount an execution timer before starting or for a cancelled queued input', () => {
+    const store = new RootStore();
+    const interval = vi.spyOn(window, 'setInterval');
+    const view = (run: LiveRunProjection) => <RootStoreProvider store={store}>
+      <ProcessingTurn {...options} messages={[]} live_run={run} />
+    </RootStoreProvider>;
+    const accepted = emptyRun('s', 'r', 1);
+    const { rerender } = render(view(accepted));
+    expect(screen.getByRole('status')).toHaveTextContent('等待执行');
+    expect(screen.queryByLabelText('处理耗时')).not.toBeInTheDocument();
+    expect(interval).not.toHaveBeenCalled();
+    rerender(view({ ...accepted, status: 'cancelled', finished_at_ms: 1_000_000 }));
+    expect(screen.queryByLabelText('处理耗时')).not.toBeInTheDocument();
+    expect(interval).not.toHaveBeenCalled();
   });
 
   it('advances while waiting, stops on terminal feedback, and keeps unknown time unavailable', () => {
@@ -260,8 +306,8 @@ describe('processing turn', () => {
       vi.advanceTimersByTime(90000);
     });
     expect(screen.getByLabelText('处理耗时')).toHaveTextContent('6秒');
-    rerender(view({ ...live(), created_at_ms: null }));
-    expect(screen.getByLabelText('处理耗时')).toHaveTextContent('耗时不可用');
+    rerender(view({ ...live(), started_at_ms: null }));
+    expect(screen.queryByLabelText('处理耗时')).not.toBeInTheDocument();
   });
 
   it('reveals a historical intermediate message before positioning its quote and keeps errors outside collapse', () => {
@@ -283,4 +329,8 @@ describe('processing turn', () => {
     rerender(view());
     expect(screen.getByRole('button', { name: '处理过程' })).toHaveAttribute('aria-expanded', 'true');
   });
+});
+
+it('does not append an empty main turn for an unstarted Run', () => {
+  expect(attachLiveTurn([], emptyRun('s', 'queued', 1), null)).toEqual([]);
 });

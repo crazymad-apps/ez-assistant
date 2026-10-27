@@ -67,6 +67,7 @@ impl VolatileRuntimeStore {
             }
             for input_id in &removed_input_ids {
                 state.inputs.remove(input_id);
+                state.input_identities.remove(input_id);
                 state.runs.retain(|_, run| &run.input_id != input_id);
             }
             let cancelling_run_id = active_run_ids.into_iter().next();
@@ -178,12 +179,14 @@ impl VolatileRuntimeStore {
             };
             validate_input_message(InputOrigin::User, Some(&binding), None, &resume.message)
                 .map_err(|_| conflict("held Goal resume message is invalid"))?;
-            let run = state
+            if state
                 .runs
                 .values()
-                .find(|run| run.input_id == resume.input_id && run.status == RunStatus::Accepted)
-                .cloned()
-                .ok_or_else(|| conflict("held Input has no accepted Run"))?;
+                .any(|run| run.input_id == resume.input_id)
+            {
+                return Err(conflict("held Input was already claimed"));
+            }
+            let run = None;
             let input = state
                 .inputs
                 .get_mut(&resume.input_id)

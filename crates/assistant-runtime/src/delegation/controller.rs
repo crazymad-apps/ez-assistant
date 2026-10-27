@@ -38,7 +38,7 @@ use crate::{
     },
     run::RuntimeRecorder,
     session::SessionController,
-    skill::{LoadSkillTool, SkillActivationLatch, SkillCatalog},
+    skill::{LoadSkillTool, ReadSkillReferenceTool, SkillActivationLatch, SkillCatalog},
 };
 
 /// 父 Run 冻结的一组子执行资源与委派配额。
@@ -63,6 +63,7 @@ pub(crate) struct ParentDelegationController {
     execution_permits: Arc<Semaphore>,
     created_tasks: Mutex<u32>,
     skill_catalog: SkillCatalog,
+    skill_package_source: Arc<dyn crate::SkillPackageSource>,
     mcp_registry: Arc<McpRegistry>,
     disclosure_context: Option<agent_types::UserMessage>,
     resource_projection: crate::runtime::resource_reference::ResourceReferenceProjection,
@@ -88,6 +89,7 @@ pub(crate) struct ParentDelegationResources {
     pub(crate) events: ObservationCoordinator,
     pub(crate) limits: crate::DelegationConfig,
     pub(crate) skill_catalog: SkillCatalog,
+    pub(crate) skill_package_source: Arc<dyn crate::SkillPackageSource>,
     pub(crate) mcp_registry: Arc<McpRegistry>,
     pub(crate) disclosure_context: Option<agent_types::UserMessage>,
     pub(crate) resource_projection: crate::runtime::resource_reference::ResourceReferenceProjection,
@@ -121,6 +123,7 @@ impl ParentDelegationController {
             execution_permits,
             created_tasks: Mutex::new(0),
             skill_catalog: resources.skill_catalog,
+            skill_package_source: resources.skill_package_source,
             mcp_registry: resources.mcp_registry,
             disclosure_context: resources.disclosure_context,
             resource_projection: resources.resource_projection,
@@ -137,41 +140,52 @@ impl ParentDelegationController {
         // 配额统计“父模型发起的委派尝试”而非只统计成功创建的 child。创建失败也不返还，
         // 避免异常存储/工作区状态驱动同一 Run 无界重试并制造更多部分资源。
         self.reserve_child_task_slot()?;
-        let child_task_id = self.allocate_child_task_id().map_err(internal_tool_error)?;
+        let child_task_id = self
+            .allocate_child_task_id()
+            .await
+            .map_err(internal_tool_error)?;
         let parent_tool_call_id = assistant_protocol::ToolCallId::new(parent_call_id.as_str())
             .map_err(|_| ToolError::execution("delegate_task call identity is invalid"))?;
-        let mut stored = self
-            .store
-            .create_child_task(NewStoredChildTask {
-                context_management_mode: self.context_management_mode,
-                context_window_tokens: self.context_window_tokens,
-                child_task_id: child_task_id.clone(),
-                session_id: self.session.id().clone(),
-                parent_run_id: self.parent_run_id.clone(),
-                parent_tool_call_id,
-                title: input.title().to_owned(),
-                system_prompt: self.child_agent.system_prompt().clone(),
-                agent_variant: self.variant,
-                created_at_ms: crate::runtime::now_ms().map_err(internal_tool_error)?,
-            })
-            .await
-            .map_err(|_| ToolError::execution("child task could not be created"))?;
-        self.registry
-            .upsert(stored.clone())
-            .map_err(internal_tool_error)?;
-        let _ = self.events.send(RuntimeEvent::ChildTaskEvent {
-            session_id: stored.session_id.clone(),
-            parent_run_id: stored.parent_run_id.clone(),
-            child_task_id: stored.child_task_id.clone(),
-            event: ChildTaskEvent::Created {
-                task: Box::new(child_snapshot(&stored, String::new())),
-            },
-        });
-
         let child_cancellation = Arc::new(ChildTaskCancellation::child_of(&cancellation));
-        self.registry
-            .activate(&stored, child_cancellation.clone())
-            .map_err(internal_tool_error)?;
+        let mut stored = {
+            let _parent = self.session.mutation().await;
+            self.session.ensure_healthy().map_err(internal_tool_error)?;
+            let stored = self
+                .store
+                .create_child_task(NewStoredChildTask {
+                    context_management_mode: self.context_management_mode,
+                    context_window_tokens: self.context_window_tokens,
+                    child_task_id: child_task_id.clone(),
+                    session_id: self.session.id().clone(),
+                    parent_run_id: self.parent_run_id.clone(),
+                    parent_tool_call_id,
+                    title: input.title().to_owned(),
+                    system_prompt: self.child_agent.system_prompt().clone(),
+                    agent_variant: self.variant,
+                    created_at_ms: crate::runtime::now_ms().map_err(internal_tool_error)?,
+                })
+                .await
+                .map_err(|_| ToolError::execution("child task could not be created"))?;
+            self.events
+                .publish_transition(|| {
+                    self.registry.upsert(stored.clone())?;
+                    self.registry
+                        .activate(&stored, child_cancellation.clone())?;
+                    Ok((
+                        (),
+                        Some(RuntimeEvent::ChildTaskEvent {
+                            session_id: stored.session_id.clone(),
+                            parent_run_id: stored.parent_run_id.clone(),
+                            child_task_id: stored.child_task_id.clone(),
+                            event: ChildTaskEvent::Created {
+                                task: Box::new(child_snapshot(&stored, String::new())),
+                            },
+                        }),
+                    ))
+                })
+                .map_err(internal_tool_error)?;
+            stored
+        };
         let _active = ActiveChildGuard::new(self.registry.clone(), child_task_id.clone());
         // accepted 任务可以等待 permit，但不会提前创建临时目录。父级或单独取消在排队期
         // 立即唤醒；Semaphore permit 只覆盖实际工作阶段并由 RAII 释放。
@@ -296,22 +310,6 @@ impl ParentDelegationController {
             } else {
                 self.child_agent.clone()
             };
-        let started_at_ms = match crate::runtime::now_ms() {
-            Ok(value) => value,
-            Err(_) => {
-                let error = RuntimeErrorInfo::new(
-                    RuntimeErrorCode::Internal,
-                    "child task start time is unavailable",
-                );
-                self.settle_accepted_and_publish(
-                    &mut stored,
-                    ChildTaskStatus::Failed,
-                    Some(error.clone()),
-                )
-                .await?;
-                return Err(child_error(&stored, error));
-            }
-        };
         let start_operation_id = match id::generate("append") {
             Ok(value) => value,
             Err(_) => {
@@ -328,18 +326,51 @@ impl ParentDelegationController {
                 return Err(child_error(&stored, error));
             }
         };
-        if self
-            .store
-            .start_child_task(ChildTaskStart {
-                operation_id: start_operation_id,
-                child_task_id: child_task_id.clone(),
-                session_id: self.session.id().clone(),
-                message: message.clone(),
-                started_at_ms,
-            })
-            .await
-            .is_err()
-        {
+        let started = {
+            let _parent = self.session.mutation().await;
+            self.session.ensure_healthy().map_err(internal_tool_error)?;
+            let result: crate::RuntimeResult<i64> = async {
+                // 不把等待 parent 读取屏障的时间计入 child 实际执行耗时。
+                let started_at_ms = crate::runtime::now_ms()?;
+                self.store
+                    .start_child_task(ChildTaskStart {
+                        operation_id: start_operation_id,
+                        child_task_id: child_task_id.clone(),
+                        session_id: self.session.id().clone(),
+                        message: message.clone(),
+                        started_at_ms,
+                    })
+                    .await
+                    .map_err(|source| {
+                        crate::RuntimeError::from_store("start child task", source)
+                    })?;
+                Ok(started_at_ms)
+            }
+            .await;
+            if let Ok(started_at_ms) = result {
+                stored.status = ChildTaskStatus::Running;
+                stored.started_at_ms = Some(started_at_ms);
+                stored.message_count = 1;
+                self.events
+                    .publish_transition(|| {
+                        self.registry.upsert(stored.clone())?;
+                        Ok((
+                            (),
+                            Some(RuntimeEvent::ChildTaskEvent {
+                                session_id: stored.session_id.clone(),
+                                parent_run_id: stored.parent_run_id.clone(),
+                                child_task_id: stored.child_task_id.clone(),
+                                event: ChildTaskEvent::Started {
+                                    started_at_ms: Some(started_at_ms),
+                                },
+                            }),
+                        ))
+                    })
+                    .map_err(internal_tool_error)?;
+            }
+            result.is_ok()
+        };
+        if !started {
             let error = RuntimeErrorInfo::new(
                 RuntimeErrorCode::Internal,
                 "child task input could not be persisted",
@@ -352,18 +383,6 @@ impl ParentDelegationController {
             .await?;
             return Err(child_error(&stored, error));
         }
-        stored.status = ChildTaskStatus::Running;
-        stored.started_at_ms = Some(started_at_ms);
-        stored.message_count = 1;
-        self.registry
-            .upsert(stored.clone())
-            .map_err(internal_tool_error)?;
-        let _ = self.events.send(RuntimeEvent::ChildTaskEvent {
-            session_id: stored.session_id.clone(),
-            parent_run_id: stored.parent_run_id.clone(),
-            child_task_id: stored.child_task_id.clone(),
-            event: ChildTaskEvent::Started,
-        });
 
         let task = Arc::new(
             ChildTaskRecord::recovered(
@@ -428,6 +447,14 @@ impl ParentDelegationController {
                 skill_activation_latch,
             ))
             .map_err(|_| ToolError::execution("child load_skill tool could not be created"))?;
+        if let Some(tool) = ReadSkillReferenceTool::for_catalog(
+            &self.skill_catalog,
+            self.skill_package_source.clone(),
+        ) {
+            child_agent = child_agent.try_with_tool(tool).map_err(|_| {
+                ToolError::execution("child skill reference tool could not be created")
+            })?;
+        }
         let mut remaining_budget = child_agent.execution_budget().clone();
         let mut next_step = std::num::NonZeroU32::MIN;
         let (outcome, forced_error) = loop {
@@ -556,27 +583,34 @@ impl ParentDelegationController {
                     .as_ref()
                     .unwrap_or(self.child_compactor.as_ref()),
                 task.as_ref(),
+                self.session.as_ref(),
                 self.store.as_ref(),
                 normal_request,
                 child_token.clone(),
+                |replacement, committed| {
+                    stored.body_generation = committed.result_generation;
+                    stored.message_count = committed.product_message_count;
+                    self.events.publish_transition(|| {
+                        task.replace_conversation(replacement.clone(), committed.result_generation)
+                            .map_err(crate::context_compaction::RuntimeCompactionError::into_runtime_error)?;
+                        self.registry.upsert(stored.clone())?;
+                        Ok((
+                            (),
+                            Some(RuntimeEvent::ConversationCommitted {
+                                owner: assistant_protocol::ConversationOwner::ChildTask {
+                                    session_id: stored.session_id.clone(),
+                                    child_task_id: stored.child_task_id.clone(),
+                                },
+                                generation: stored.body_generation,
+                            }),
+                        ))
+                    })
+                },
             )
             .await
             {
-                Ok((replacement, committed)) => {
+                Ok((replacement, _committed)) => {
                     after_compaction = true;
-                    stored.body_generation = committed.result_generation;
-                    stored.message_count = committed.product_message_count;
-                    self.registry
-                        .upsert(stored.clone())
-                        .map_err(internal_tool_error)?;
-                    // 正文和 registry 换代完成后才通知观察者，刷新子任务窗口及历史。
-                    let _ = self.events.send(RuntimeEvent::ConversationCommitted {
-                        owner: assistant_protocol::ConversationOwner::ChildTask {
-                            session_id: stored.session_id.clone(),
-                            child_task_id: stored.child_task_id.clone(),
-                        },
-                        generation: stored.body_generation,
-                    });
                     if let Some(binding) = &self.child_model_binding {
                         let rebound = binding
                             .compile_child(&stored.child_task_id, stored.body_generation)
@@ -604,7 +638,7 @@ impl ParentDelegationController {
                         conversation: self.resource_projection.apply(replacement),
                     };
                 }
-                Err(error) if error.is_cancelled() || child_token.is_cancelled() => {
+                Err(error) if !error.is_committed() && (error.is_cancelled() || child_token.is_cancelled()) => {
                     break (
                         Some(agent_core::ExecutionOutcome::Cancelled {
                             consumption: agent_core::ExecutionConsumption::default(),
@@ -612,18 +646,11 @@ impl ParentDelegationController {
                         None,
                     );
                 }
-                Err(_) => {
-                    break (
-                        None,
-                        Some(RuntimeErrorInfo::new(
-                            RuntimeErrorCode::ContextCompactionFailed,
-                            format!(
-                                "child context compaction failed (reason={})",
-                                compaction_reason_label(reason)
-                            ),
-                        )),
-                    );
+                Err(error) if error.is_committed() => {
+                    // 不追加旧 child 终态；所属 Session 已隔离，父 Recorder／结算也拒绝写入。
+                    return Err(ToolError::execution(error.to_protocol_info().message));
                 }
+                Err(error) => break (None, Some(error.to_protocol_info())),
             }
         };
 
@@ -647,48 +674,56 @@ impl ParentDelegationController {
             final_message_id: terminal.final_message_id.clone(),
             finished_at_ms: crate::runtime::now_ms().map_err(internal_tool_error)?,
         };
-        self.store
-            .settle_child_task(settlement.clone())
-            .await
-            .map_err(|_| {
-                ToolError::execution("child task terminal state could not be persisted")
-            })?;
-        task.commit_terminal(&settlement.messages)
-            .map_err(internal_tool_error)?;
-        stored.status = settlement.status;
-        stored.cancel_requested |= settlement.cancel_requested;
-        stored.error = settlement.error.clone();
-        stored.final_message_id = settlement.final_message_id;
-        stored.finished_at_ms = Some(settlement.finished_at_ms);
-        stored.message_count += u64::try_from(settlement.messages.len()).unwrap_or(u64::MAX);
-        self.registry
-            .upsert(stored.clone())
-            .map_err(internal_tool_error)?;
-        let owner = assistant_protocol::ConversationOwner::ChildTask {
-            session_id: stored.session_id.clone(),
-            child_task_id: stored.child_task_id.clone(),
-        };
-        let _ = self.events.send(RuntimeEvent::ConversationCommitted {
-            owner: owner.clone(),
-            generation: stored.body_generation,
-        });
-        if let Some(step) = terminal.final_step {
-            let _ = self.events.send(RuntimeEvent::StepCommitted {
-                owner,
-                step,
-                generation: stored.body_generation,
-            });
+        {
+            let _parent = self.session.mutation().await;
+            let _child = task.mutation().await;
+            self.session.ensure_healthy().map_err(internal_tool_error)?;
+            self.store
+                .settle_child_task(settlement.clone())
+                .await
+                .map_err(|_| {
+                    ToolError::execution("child task terminal state could not be persisted")
+                })?;
+            task.commit_terminal(&settlement.messages)
+                .map_err(internal_tool_error)?;
+            stored.status = settlement.status;
+            stored.cancel_requested |= settlement.cancel_requested;
+            stored.error = settlement.error.clone();
+            stored.final_message_id = settlement.final_message_id;
+            stored.finished_at_ms = Some(settlement.finished_at_ms);
+            stored.message_count += u64::try_from(settlement.messages.len()).unwrap_or(u64::MAX);
+            self.events
+                .publish_batch_transition(|| {
+                    self.registry.upsert(stored.clone())?;
+                    let owner = assistant_protocol::ConversationOwner::ChildTask {
+                        session_id: stored.session_id.clone(),
+                        child_task_id: stored.child_task_id.clone(),
+                    };
+                    let mut events = vec![RuntimeEvent::ConversationCommitted {
+                        owner: owner.clone(),
+                        generation: stored.body_generation,
+                    }];
+                    if let Some(step) = terminal.final_step {
+                        events.push(RuntimeEvent::StepCommitted {
+                            owner,
+                            step,
+                            generation: stored.body_generation,
+                        });
+                    }
+                    events.push(RuntimeEvent::ChildTaskEvent {
+                        session_id: stored.session_id.clone(),
+                        parent_run_id: stored.parent_run_id.clone(),
+                        child_task_id: stored.child_task_id.clone(),
+                        event: ChildTaskEvent::Finished {
+                            finished_at_ms: stored.finished_at_ms,
+                            status: stored.status,
+                            error: stored.error.clone(),
+                        },
+                    });
+                    Ok(((), events))
+                })
+                .map_err(internal_tool_error)?;
         }
-        let _ = self.events.send(RuntimeEvent::ChildTaskEvent {
-            session_id: stored.session_id.clone(),
-            parent_run_id: stored.parent_run_id.clone(),
-            child_task_id: stored.child_task_id.clone(),
-            event: ChildTaskEvent::Finished {
-                finished_at_ms: stored.finished_at_ms,
-                status: stored.status,
-                error: stored.error.clone(),
-            },
-        });
 
         // workspace lease 到这里仍存活；只有终态已可靠提交后才允许 Drop 清理。
         drop(workspace);
@@ -710,7 +745,11 @@ impl ParentDelegationController {
         }
     }
 
-    fn allocate_child_task_id(&self) -> Result<ChildTaskId, crate::RuntimeError> {
+    async fn allocate_child_task_id(&self) -> Result<ChildTaskId, crate::RuntimeError> {
+        // 工具执行期间不持父 mutation 等待 I/O；这里只读同代目录，create 的
+        // Store 操作还须再核对当前目录和真实控制，防止把继承 child 恢复为执行。
+        let history =
+            crate::runtime::load_identity_history(self.store.as_ref(), &self.session).await?;
         for _ in 0..id::GENERATION_ATTEMPTS {
             let value =
                 id::generate("ct").map_err(|_| crate::RuntimeError::InternalStateUnavailable {
@@ -721,7 +760,12 @@ impl ParentDelegationController {
                     component: "child task id generator",
                 }
             })?;
-            if !self.registry.contains(&task_id)? {
+            if !self.registry.contains(&task_id)?
+                && !history
+                    .child_tasks
+                    .iter()
+                    .any(|child| child.child_task_id == task_id)
+            {
                 return Ok(task_id);
             }
         }
@@ -737,24 +781,15 @@ impl ParentDelegationController {
         error: Option<RuntimeErrorInfo>,
     ) -> Result<(), ToolError> {
         settle_accepted(
+            self.session.as_ref(),
             self.store.as_ref(),
             self.registry.as_ref(),
+            &self.events,
             stored,
             status,
             error,
         )
-        .await?;
-        let _ = self.events.send(RuntimeEvent::ChildTaskEvent {
-            session_id: stored.session_id.clone(),
-            parent_run_id: stored.parent_run_id.clone(),
-            child_task_id: stored.child_task_id.clone(),
-            event: ChildTaskEvent::Finished {
-                finished_at_ms: stored.finished_at_ms,
-                status: stored.status,
-                error: stored.error.clone(),
-            },
-        });
-        Ok(())
+        .await
     }
 
     fn reserve_child_task_slot(&self) -> Result<(), ToolError> {
@@ -779,6 +814,8 @@ fn internal_tool_error(_error: crate::RuntimeError) -> ToolError {
 
 fn child_snapshot(stored: &StoredChildTask, final_text: String) -> ChildTaskSnapshot {
     ChildTaskSnapshot {
+        inherited: false,
+        body_unavailable: stored.conversation_state == crate::StoredConversationState::Unavailable,
         child_task_id: stored.child_task_id.clone(),
         session_id: stored.session_id.clone(),
         parent_run_id: stored.parent_run_id.clone(),

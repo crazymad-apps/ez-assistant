@@ -1,4 +1,5 @@
 import type { ChildTaskTreeItemSnapshot } from "@ez-assistant/protocol";
+import { childKey } from "../../../stores/liveExecutionProjection";
 import { Icon } from "../../../components/Icon";
 import { childTaskStatusLabel, formatCompactTokens } from "../childTaskPresentation";
 import styles from "./index.module.scss";
@@ -28,13 +29,13 @@ export function ChildTaskTree({ embedded = false, items, on_open }: Readonly<{
           context_label = `${prefix}${(context.usage_basis_points / 100).toFixed(1)}%`;
         }
         return (
-        <div className={styles.child_task} data-embedded={embedded} key={item.task.child_task_id}>
+        <div className={styles.child_task} data-embedded={embedded} key={childKey(item.task.session_id, item.task.child_task_id)}>
           {!embedded && <span className={styles.task_branch} aria-hidden="true" />}
-          <button aria-label={`查看子任务：${item.task.title}`} onClick={() => on_open(item)} type="button">
+          <button aria-label={`查看子任务：${item.task.title}`} disabled={item.task.body_unavailable} onClick={() => on_open(item)} type="button">
             <i data-status={item.task.status} />
             <span className={styles.task_text}>
               <strong>{item.task.title}</strong>
-              <small>{childTaskStatusLabel(item.task.status)}{item.pending_approval_count > 0 ? ` · ${item.pending_approval_count} 项待审批` : ""}</small>
+              <small>{childTaskStatusLabel(item.task.status)}{item.task.inherited && " · 继承"}{item.task.body_unavailable && " · 正文不可用"}{item.pending_approval_count > 0 ? ` · ${item.pending_approval_count} 项待审批` : ""}</small>
             </span>
             <span className={styles.task_usages}>
               <span className={styles.task_usage} title="当前上下文窗口占用">上下文 {context_label}{context?.calibration_pending && " · 待校准"}</span>
@@ -42,7 +43,7 @@ export function ChildTaskTree({ embedded = false, items, on_open }: Readonly<{
                 <span className={styles.task_usage}>累计 {formatCompactTokens(item.usage.accumulated.total_tokens)}</span>
               )}
             </span>
-            <Icon name="chevron-right" size={14} />
+            {!item.task.body_unavailable && <Icon name="chevron-right" size={14} />}
           </button>
         </div>
       );

@@ -22,7 +22,7 @@
 ## 职责
 
 - 实现真实文本文件 read/list/find/search/write/edit/delete。
-- 使用系统 `rg` 作为名称和内容搜索后端，不自行维护递归搜索引擎。
+- 使用宿主指定的 `rg` 作为名称和内容搜索后端，不自行维护递归搜索引擎；正式 Host 优先注入随包程序绝对路径。
 - 实现平台 Shell launcher、敏感环境过滤、stdout/stderr 流、输出上限、timeout、
   cancellation 和进程树清理。
 - 提供基于已解析 `AbsolutePath` 的可取消、有上限普通二进制文件读取机制；它从打开后的

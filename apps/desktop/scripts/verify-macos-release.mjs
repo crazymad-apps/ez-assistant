@@ -1,4 +1,4 @@
-import { lstat, mkdir, mkdtemp, readdir, realpath, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, realpath, rm, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { platform, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -99,16 +99,20 @@ async function verifyMountedDmg(targetPath, expectedTeamId) {
     ]);
     attached = true;
     const entries = await readdir(mountPoint);
-    const applications = entries.filter((entry) => entry.endsWith(".app"));
-    if (applications.length !== 1) {
-      throw new Error(`DMG must contain exactly one top-level app; found ${applications.length}`);
+    const packages = entries.filter((entry) => entry.endsWith(".pkg"));
+    if (packages.length !== 1 || entries.some((entry) => entry.endsWith(".app") || entry === "Applications")) {
+      throw new Error("DMG must contain one PKG installer without a competing drag-and-drop entry");
     }
-    const applicationsLink = join(mountPoint, "Applications");
-    const applicationsMetadata = await lstat(applicationsLink).catch(() => undefined);
-    if (!applicationsMetadata?.isSymbolicLink()) {
-      throw new Error("DMG must contain a top-level Applications symlink");
-    }
-    await verifyApp(join(mountPoint, applications[0]), expectedTeamId);
+    const pkg = join(mountPoint, packages[0]);
+    const signature = run("pkgutil", ["--check-signature", pkg], false).stdout;
+    if (!signature.includes("Developer ID Installer:") || !signature.includes(`(${expectedTeamId})`)) throw new Error("PKG signing team does not match release");
+    run("spctl", ["--assess", "--type", "install", "--verbose=4", pkg]);
+    const expanded = join(temporaryRoot, "expanded");
+    run("pkgutil", ["--expand-full", pkg, expanded]);
+    const payload = join(expanded, "component.pkg", "Payload");
+    const applications = (await readdir(payload)).filter((entry) => entry.endsWith(".app"));
+    if (applications.length !== 1) throw new Error("PKG must contain exactly one application");
+    await verifyApp(join(payload, applications[0]), expectedTeamId);
   } catch (error) {
     verificationError = error;
   }
