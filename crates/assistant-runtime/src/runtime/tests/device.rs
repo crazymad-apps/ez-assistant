@@ -12,6 +12,7 @@ struct CapturingDispatcher {
     outputs: Mutex<Vec<ChannelOutput>>,
     speeches: Mutex<Vec<ChannelSpeechSegment>>,
     failure: Option<ChannelOutputDispatchError>,
+    fail_after: Option<usize>,
 }
 
 struct DeviceSourceGatedModel {
@@ -59,6 +60,7 @@ impl CapturingDispatcher {
             outputs: Mutex::new(Vec::new()),
             speeches: Mutex::new(Vec::new()),
             failure: Some(ChannelOutputDispatchError::Unavailable),
+            fail_after: None,
         }
     }
 
@@ -67,6 +69,7 @@ impl CapturingDispatcher {
             outputs: Mutex::new(Vec::new()),
             speeches: Mutex::new(Vec::new()),
             failure: Some(ChannelOutputDispatchError::Cancelled),
+            fail_after: None,
         }
     }
 
@@ -92,8 +95,13 @@ impl ChannelOutputDispatcher for CapturingDispatcher {
     }
 
     fn dispatch_speech(&self, segment: ChannelSpeechSegment) -> ChannelOutputFuture {
-        self.speeches.lock().expect("speech log").push(segment);
-        let result = self.failure.map_or(Ok(()), Err);
+        let mut speeches = self.speeches.lock().expect("speech log");
+        speeches.push(segment);
+        let result = if self.fail_after.is_none_or(|n| speeches.len() >= n) {
+            self.failure.map_or(Ok(()), Err)
+        } else {
+            Ok(())
+        };
         Box::pin(std::future::ready(result))
     }
 
@@ -237,6 +245,97 @@ async fn controller_speak_dispatches_every_segment_in_tool_call_order() {
 }
 
 #[tokio::test]
+async fn controller_speak_automatically_splits_long_text_without_repeating_it() {
+    let dispatcher = Arc::new(CapturingDispatcher::default());
+    let runtime = runtime(Arc::new(ScriptedModelService::new(
+        model_capabilities(true),
+        8_192,
+        [
+            ModelScript::Events(message_events(&speak_call(
+                "speak-first-message",
+                "speak-first-call",
+                &"甲".repeat(129),
+            ))),
+            ModelScript::Events(message_events(&speak_call(
+                "speak-last-message",
+                "speak-last-call",
+                "第二版播报",
+            ))),
+            ModelScript::Events(message_events(&speak_call(
+                "speak-third-message",
+                "speak-third-call",
+                "最终简短播报。",
+            ))),
+            ModelScript::Events(message_events(&assistant_text(
+                "speak-final-answer",
+                "这是保留在 Desktop Conversation 中的完整回答。",
+            ))),
+        ],
+    )))
+    .with_channel_output_dispatcher(dispatcher.clone());
+    let controller = runtime
+        .create_session_inner(
+            assistant_protocol::CreateSessionRequest::default(),
+            crate::SessionRole::Controller,
+            "主控会话",
+        )
+        .await
+        .expect("controller");
+    let device = runtime
+        .register_paired_device(paired_device("device-speak", "播报终端"))
+        .await
+        .expect("paired device");
+    let accepted = runtime
+        .submit_session_input(device_session_input(
+            controller.session.session_id.clone(),
+            DeviceInputSource {
+                device_id: device.device_id.clone(),
+                client_input_id: "client-speak".to_owned(),
+                modality: InputModality::Text,
+                requested_output: OutputPreference::Audio,
+            },
+            "请给我完整说明，并准备一段播报",
+        ))
+        .await
+        .expect("device input");
+    let terminal = wait_for_terminal(
+        &runtime,
+        &controller.session.session_id,
+        &accepted.run.run_id,
+    )
+    .await;
+    assert_eq!(
+        terminal.status,
+        assistant_protocol::RunStatus::Completed,
+        "unexpected terminal error: {:?}",
+        terminal.error
+    );
+    let output = dispatcher.wait_for_output().await;
+    assert_eq!(
+        output.assistant_text.as_deref(),
+        Some("这是保留在 Desktop Conversation 中的完整回答。")
+    );
+    assert!(output.speech_completed);
+    let speeches = dispatcher.speeches.lock().expect("speech log");
+    assert_eq!(speeches.len(), 5);
+    assert_eq!(
+        speeches[..3]
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<String>(),
+        "甲".repeat(129)
+    );
+    assert!(speeches.iter().all(|p| p.text.chars().count() <= 60));
+    let ids = speeches
+        .iter()
+        .map(|p| p.segment_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(ids.len(), speeches.len());
+    assert_eq!(speeches[3].text, "第二版播报");
+    assert_eq!(speeches[4].text, "最终简短播报。");
+}
+
+#[tokio::test]
 async fn interrupted_speak_is_a_successful_takeover_instead_of_a_tool_failure() {
     let dispatcher = Arc::new(CapturingDispatcher::cancelling());
     let runtime = runtime(Arc::new(ScriptedModelService::new(
@@ -294,6 +393,69 @@ async fn interrupted_speak_is_a_successful_takeover_instead_of_a_tool_failure() 
         terminal.error
     );
     assert_eq!(dispatcher.speeches.lock().expect("speech log").len(), 1);
+}
+
+#[tokio::test]
+async fn automatic_speak_stops_remaining_segments_when_user_takes_over() {
+    let dispatcher = Arc::new(CapturingDispatcher {
+        fail_after: Some(2),
+        ..CapturingDispatcher::cancelling()
+    });
+    let runtime = runtime(Arc::new(ScriptedModelService::new(
+        model_capabilities(true),
+        8_192,
+        [
+            ModelScript::Events(message_events(&speak_call(
+                "interrupted-speak-message",
+                "interrupted-speak-call",
+                &"甲".repeat(129),
+            ))),
+            ModelScript::Events(message_events(&assistant_text(
+                "interrupted-speak-final",
+                "用户接管后的正常结束。",
+            ))),
+        ],
+    )))
+    .with_channel_output_dispatcher(dispatcher.clone());
+    let controller = runtime
+        .create_session_inner(
+            assistant_protocol::CreateSessionRequest::default(),
+            crate::SessionRole::Controller,
+            "主控会话",
+        )
+        .await
+        .expect("controller");
+    let device = runtime
+        .register_paired_device(paired_device("device-takeover", "接管测试终端"))
+        .await
+        .expect("paired device");
+    let accepted = runtime
+        .submit_session_input(device_session_input(
+            controller.session.session_id.clone(),
+            DeviceInputSource {
+                device_id: device.device_id,
+                client_input_id: "client-takeover".to_owned(),
+                modality: InputModality::Text,
+                requested_output: OutputPreference::Audio,
+            },
+            "测试用户接管",
+        ))
+        .await
+        .expect("device input");
+
+    let terminal = wait_for_terminal(
+        &runtime,
+        &controller.session.session_id,
+        &accepted.run.run_id,
+    )
+    .await;
+    assert_eq!(
+        terminal.status,
+        assistant_protocol::RunStatus::Completed,
+        "unexpected terminal error: {:?}",
+        terminal.error
+    );
+    assert_eq!(dispatcher.speeches.lock().expect("speech log").len(), 2);
 }
 
 #[tokio::test]
