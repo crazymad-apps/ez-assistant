@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use agent_tools::{Tool, ToolContext, ToolError, ToolExecuteFuture, ToolResolution};
-use agent_types::ToolName;
+use agent_types::{ToolCallId, ToolName};
 use assistant_protocol::RunId;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -14,18 +14,19 @@ use crate::{
     RuntimeResult, session::SessionController,
 };
 
-/// 单次调用的字符限制用于把自然断句交给模型，同时控制单次 TTS 请求的失败面。
-pub(crate) const MAX_SPEAK_TEXT_CHARS: usize = 120;
+/// 单次正文有界；Runtime 在投递前按标点组织为最多 60 字符的独立 TTS 片段。
+pub(crate) const MAX_SPEAK_TEXT_CHARS: usize = 1200;
+const MAX_SPEAK_SEGMENT_CHARS: usize = 60;
 /// 配额跨同一 Run 输出周期内的所有 AgentExecution 累计。
 pub(crate) const MAX_SPEAK_SEGMENTS_PER_OUTPUT_CYCLE: usize = 20;
 const SPEAK_TOOL_NAME: &str = "speak";
-const SPEAK_TOOL_DESCRIPTION: &str = "Queue one natural spoken segment for the current output cycle. Each call must contain at most 120 Unicode characters of plain text without Markdown and should end at a natural semantic or sentence boundary. Call this tool no more than 20 times in one output cycle. For a longer spoken reply, call this tool multiple times sequentially in the exact playback order; if 20 segments are not enough, compress and prioritize the content. Do not label the segments or split a sentence mechanically. Each accepted call is synthesized and queued immediately, so never repeat content already submitted.";
+const SPEAK_TOOL_DESCRIPTION: &str = "Queue plain spoken text for the current output cycle, at most 1200 Unicode characters per call, without Markdown. Runtime automatically splits it at punctuation into ordered TTS segments of at most 60 Unicode characters. The output cycle may queue at most 20 TTS segments across all calls; compress and prioritize if needed. Calls execute sequentially. Never repeat text already accepted, including an accepted prefix reported by a failed call.";
 
 /// `speak` 私有工具的严格输入；正文不会自动从 Assistant Message 截断生成。
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(in crate::runtime) struct SpeakInput {
-    /// 不超过 120 个字符的自然完整播报片段；每个输出周期最多调用 20 次。
+    /// 不超过 1200 字符的播报正文；Runtime 自动切段，每个输出周期最多 20 段。
     text: String,
 }
 
@@ -95,51 +96,62 @@ impl Tool for SpeakTool {
         context: ToolContext,
     ) -> ToolExecuteFuture<'a, Self::Output> {
         Box::pin(async move {
-            // ToolCallId 同时作为 Host 队列中的片段身份，避免再引入一套只为播报服务的序号。
-            let segment_id = context.call_id().cloned().ok_or_else(|| {
+            let call_id = context.call_id().cloned().ok_or_else(|| {
                 ToolError::execution("the speak tool call identity is unavailable")
             })?;
-            let deliveries = prepare_speech_segment(&self.session, &self.run_id).map_err(|error| {
-                match error {
-                    RuntimeError::InvalidRequest {
-                        reason: "speak segment limit reached",
-                    } => {
-                        ToolError::execution(
-                            "the output cycle already queued 20 spoken segments; finish without calling speak again",
-                        )
-                    }
-                    _ => ToolError::execution("the active output cycle is unavailable"),
-                }
-            })?;
-            let dispatch = self
-                .dispatcher
-                .dispatch_speech(ChannelSpeechSegment {
-                    session_id: self.session.id().clone(),
-                    run_id: self.run_id.clone(),
-                    segment_id,
-                    text,
-                    deliveries,
-                    cancellation: context.cancellation,
-                })
-                .await;
-            match dispatch {
-                Ok(()) => {}
-                Err(ChannelOutputDispatchError::Cancelled) => {
-                    // 用户接管或输出周期取消属于正常控制流，不诱导模型把它解释成需要道歉的故障。
+            let segments = split_speak_text(&text);
+            // 整次调用先核对剩余配额，避免只排入一部分后才发现超过上限。
+            prepare_speech_segment(&self.session, &self.run_id, segments.len())
+                .map_err(|_| ToolError::execution("the active output cycle has insufficient speech capacity; shorten this unqueued text"))?;
+            let multiple = segments.len() > 1;
+            let mut queued_chars = 0;
+            for (index, text) in segments.into_iter().enumerate() {
+                if context.cancellation.is_cancelled() {
                     mark_speech_cancelled(&self.session, &self.run_id).map_err(|_| {
                         ToolError::execution("the active output cycle is unavailable")
                     })?;
                     return Ok(SpeakOutput { accepted: false });
                 }
-                Err(ChannelOutputDispatchError::Unavailable) => {
-                    return Err(ToolError::execution(
-                        "the spoken segment could not be queued",
-                    ));
+                // 子段只派生 Host 投递身份；规范 Tool Call/Result 仍是一对。
+                let segment_id = if multiple {
+                    ToolCallId::new(format!("{}-s{}", call_id.as_str(), index + 1))
+                        .map_err(|_| ToolError::execution("invalid speech segment identity"))?
+                } else {
+                    call_id.clone()
+                };
+                let deliveries = prepare_speech_segment(&self.session, &self.run_id, 1)
+                    .map_err(|_| ToolError::execution(format!("speech stopped after {queued_chars} Unicode characters were queued; do not repeat that prefix")))?;
+                let count = text.chars().count();
+                let dispatch = self
+                    .dispatcher
+                    .dispatch_speech(ChannelSpeechSegment {
+                        session_id: self.session.id().clone(),
+                        run_id: self.run_id.clone(),
+                        segment_id,
+                        text,
+                        deliveries,
+                        cancellation: context.cancellation.clone(),
+                    })
+                    .await;
+                match dispatch {
+                    Ok(()) => {}
+                    Err(ChannelOutputDispatchError::Cancelled) => {
+                        mark_speech_cancelled(&self.session, &self.run_id).map_err(|_| {
+                            ToolError::execution("the active output cycle is unavailable")
+                        })?;
+                        return Ok(SpeakOutput { accepted: false });
+                    }
+                    Err(ChannelOutputDispatchError::Unavailable) => {
+                        return Err(ToolError::execution(format!(
+                            "speech stopped after {queued_chars} Unicode characters were queued; do not repeat that prefix; the remaining spoken text could not be queued"
+                        )));
+                    }
                 }
+                // 每次 await 后重新核对 Run，旧投递不得改写后继输出周期。
+                mark_speech_accepted(&self.session, &self.run_id)
+                    .map_err(|_| ToolError::execution("the active output cycle is unavailable"))?;
+                queued_chars += count;
             }
-            // dispatch 跨越 await；再次核对活动 Run，避免迟到的 Host 结果改写后继输出周期。
-            mark_speech_accepted(&self.session, &self.run_id)
-                .map_err(|_| ToolError::execution("the active output cycle is unavailable"))?;
             Ok(SpeakOutput { accepted: true })
         })
     }
@@ -153,6 +165,7 @@ impl Tool for SpeakTool {
 fn prepare_speech_segment(
     session: &SessionController,
     run_id: &RunId,
+    segment_count: usize,
 ) -> RuntimeResult<Vec<crate::ResolvedChannelDelivery>> {
     let state = session.lock_state()?;
     if state
@@ -170,7 +183,7 @@ fn prepare_speech_segment(
         .ok_or(RuntimeError::InvalidRequest {
             reason: "session has no active output cycle",
         })?;
-    if cycle.speech_segment_count >= MAX_SPEAK_SEGMENTS_PER_OUTPUT_CYCLE {
+    if cycle.speech_segment_count + segment_count > MAX_SPEAK_SEGMENTS_PER_OUTPUT_CYCLE {
         return Err(RuntimeError::InvalidRequest {
             reason: "speak segment limit reached",
         });
@@ -233,19 +246,43 @@ fn mark_speech_cancelled(session: &SessionController, run_id: &RunId) -> Runtime
 
 /// 校验模型提供的单段朗读正文。
 ///
-/// 限制按 Unicode 标量值计数而不是 UTF-8 字节数；这里仅建立可执行的硬边界，自然断句、纯文本
-/// 表达和多段顺序仍由工具描述约束模型。
+/// 限制按 Unicode 标量值计数；按标点切段由 Runtime 执行，不依赖模型遵守长度提示。
 fn validate_speak_text(text: String) -> Result<String, &'static str> {
     let text = text.trim().to_owned();
     if text.is_empty() || text.chars().count() > MAX_SPEAK_TEXT_CHARS {
-        return Err(
-            "speak text must contain at most 120 Unicode characters; split longer speech into sequential calls at natural sentence boundaries",
-        );
+        return Err("speak text must contain at most 1200 Unicode characters");
     }
     if text.chars().any(char::is_control) {
         return Err("speak text must not contain control characters");
     }
     Ok(text)
+}
+
+/// 按标点组织短句；超长句按 Unicode 字符切分，保持正文内容和顺序。
+fn split_speak_text(text: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut count = 0;
+    for token in text.split_inclusive(['。', '！', '？', '.', '!', '?', '；', ';', '，', ','])
+    {
+        let token_len = token.chars().count();
+        if count > 0 && count + token_len > MAX_SPEAK_SEGMENT_CHARS {
+            segments.push(std::mem::take(&mut current));
+            count = 0;
+        }
+        for ch in token.chars() {
+            current.push(ch);
+            count += 1;
+            if count == MAX_SPEAK_SEGMENT_CHARS {
+                segments.push(std::mem::take(&mut current));
+                count = 0;
+            }
+        }
+    }
+    if !current.is_empty() {
+        segments.push(current);
+    }
+    segments
 }
 
 #[cfg(test)]
@@ -265,8 +302,41 @@ mod tests {
     }
 
     #[test]
+    fn automatic_segments_preserve_unicode_and_punctuation() {
+        for text in [
+            "你".repeat(129),
+            "你好，世界。Hello!".repeat(20),
+            "🙂".repeat(121),
+        ] {
+            let parts = split_speak_text(&text);
+            assert_eq!(parts.concat(), text);
+            assert!(
+                parts
+                    .iter()
+                    .all(|p| !p.is_empty() && p.chars().count() <= 60)
+            );
+        }
+        let english = format!("{}.{}.", "a".repeat(39), "b".repeat(39));
+        assert_eq!(
+            split_speak_text(&english)
+                .iter()
+                .map(|p| p.chars().count())
+                .collect::<Vec<_>>(),
+            vec![40, 40]
+        );
+        let text = format!("{}，{}。", "甲".repeat(39), "乙".repeat(39));
+        assert_eq!(
+            split_speak_text(&text),
+            vec![
+                format!("{}，", "甲".repeat(39)),
+                format!("{}。", "乙".repeat(39))
+            ]
+        );
+    }
+
+    #[test]
     fn speak_description_exposes_per_cycle_segment_limit() {
-        assert!(SPEAK_TOOL_DESCRIPTION.contains("no more than 20 times"));
-        assert!(SPEAK_TOOL_DESCRIPTION.contains("at most 120 Unicode characters"));
+        assert!(SPEAK_TOOL_DESCRIPTION.contains("at most 20 TTS segments"));
+        assert!(SPEAK_TOOL_DESCRIPTION.contains("at most 60 Unicode characters"));
     }
 }

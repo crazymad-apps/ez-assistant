@@ -712,7 +712,7 @@ fn take_channel_output(
 /// 构造轮内隐藏补播提醒，明确它不是新的用户交互，并把工具硬上限同步给模型。
 fn speech_delivery_reminder_text() -> String {
     format!(
-        "This is an internal speech-delivery reminder, not a new user interaction. The user-visible answer for this output cycle is already complete. Do not apologize, acknowledge this reminder, greet the user, mention a missing tool call, or restate the answer as normal assistant prose. Call the speak tool now with a concise natural spoken version of the answer. If more than {} Unicode characters are needed, call speak multiple times sequentially in playback order, splitting only at natural semantic or sentence boundaries. Use at most {} speak calls in this output cycle; compress and prioritize the content if that is not enough. Do not number or label the segments. After the final speak call, finish without additional user-facing prose.",
+        "This is an internal speech-delivery reminder, not a new user interaction. The user-visible answer for this output cycle is already complete. Do not apologize, acknowledge this reminder, greet the user, mention a missing tool call, or restate the answer as normal assistant prose. Call the speak tool now with a concise natural spoken version of the answer. Each call accepts at most {} Unicode characters and Runtime automatically splits it at punctuation into ordered segments of at most 60 Unicode characters. Use at most {} TTS segments in this output cycle; compress and prioritize the content if that is not enough. Do not number or label the segments. After the final speak call, finish without additional user-facing prose.",
         MAX_SPEAK_TEXT_CHARS, MAX_SPEAK_SEGMENTS_PER_OUTPUT_CYCLE
     )
 }
