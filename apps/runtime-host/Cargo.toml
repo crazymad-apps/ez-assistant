@@ -38,7 +38,7 @@ getrandom.workspace = true
 hmac.workspace = true
 image.workspace = true
 infer.workspace = true
-mdns-sd = { version = "0.21.0", default-features = false, features = ["async"] }
+mdns-sd = { version = "0.21.7", default-features = false, features = ["async"] }
 pakery-core = "0.2.1"
 pakery-crypto = { version = "0.2.1", default-features = false, features = ["std", "p256", "spake2"] }
 pakery-spake2 = { version = "0.2.1", features = ["os_rng"] }
