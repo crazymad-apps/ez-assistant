@@ -43,9 +43,14 @@ export const ProviderRoute = observer(function ProviderRoute() {
 
   function remove() {
     if (!usage.value || usage.loading || usage.error) return;
+    const { allowed_model_ids: allowed, default_model: isDefault, fixed_config_count: fixed } = usage.value;
+    const listed = allowed.slice(0, 8).join('、');
+    const impact = allowed.length
+      ? `组织可用模型中的 ${allowed.length} 项将失效（${listed}${allowed.length > 8 ? '等' : ''}）。`
+      : '';
     modal.confirm({
       title: '删除服务商？',
-      content: `将删除 ${usage.value.fixed_config_count} 条固定配置。${usage.value.default_model ? '企业默认引用将失效，需要重新选择。' : ''}历史与默认引用保留。`,
+      content: `将删除 ${fixed} 条固定配置。${impact}${isDefault ? '其中包含组织默认模型，需要重新配置。' : ''}策略引用及调用历史保留。`,
       okButtonProps: { danger: true },
 
       onOk: async () => {
@@ -132,17 +137,15 @@ export const ProviderRoute = observer(function ProviderRoute() {
             </Typography.Text>
           )}
           pagination={false}
-          scroll={{ x: 750 }}
+          scroll={{ x: 950 }}
           columns={[
             {
-              title: '模型名称 / ID',
-
-              render: (_, row) => (
-                <Space orientation="vertical" size={0}>
-                  {row.name && <span>{row.name}</span>}
-                  <span>{row.id}</span>
-                </Space>
-              ),
+              title: '模型名称',
+              render: (_, row) => row.name || '—',
+            },
+            {
+              title: '模型 ID',
+              dataIndex: 'id',
             },
             {
               title: '来源',
@@ -162,8 +165,8 @@ export const ProviderRoute = observer(function ProviderRoute() {
                   {row.fixed && <Tag>已固定</Tag>}
                   {row.template && <Tag>使用模板</Tag>}
                   {row.requires && <Tag color="warning">待配置</Tag>}
-                  {data?.settings.default_model?.provider_instance_id === id &&
-                    data.settings.default_model.model_id === row.id && <Tag color="blue">默认</Tag>}
+                  {data?.settings.policy?.default_model?.provider_instance_id === id &&
+                    data.settings.policy.default_model.model_id === row.id && <Tag color="blue">默认</Tag>}
                 </Space>
               ),
             },

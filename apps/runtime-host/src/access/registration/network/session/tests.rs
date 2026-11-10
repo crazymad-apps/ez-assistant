@@ -2,7 +2,7 @@ use super::*;
 #[tokio::test(start_paused = true)]
 async fn source_renewal_timeout_closes_only_its_scope() {
     let (send, mut outgoing) = mpsc::channel(16);
-    let (session, _receive) = Session::new(send, Arc::new(Credentials::new()), None);
+    let (session, _receive) = Session::new(send, Arc::new(Credentials::new()), None, None);
     let permit = AccessPermit::new(false, None, CancellationToken::new());
     let source = Source {
         view_id: None,
@@ -51,7 +51,7 @@ async fn source_renewal_timeout_closes_only_its_scope() {
 #[tokio::test]
 async fn dropped_connection_cancels_pending_request_and_access() {
     let (send, mut outgoing) = mpsc::channel(16);
-    let (session, _receive) = Session::new(send, Arc::new(Credentials::new()), None);
+    let (session, _receive) = Session::new(send, Arc::new(Credentials::new()), None, None);
     let request = {
         let session = session.clone();
         tokio::spawn(async move { session.request("directory", json!({})).await })
@@ -76,7 +76,7 @@ async fn dropped_connection_cancels_pending_request_and_access() {
 #[tokio::test]
 async fn concurrent_open_waiters_share_access_and_cancel_independently() {
     let (send, _outgoing) = mpsc::channel(16);
-    let (session, mut jobs) = Session::new(send, Arc::new(Credentials::new()), None);
+    let (session, mut jobs) = Session::new(send, Arc::new(Credentials::new()), None, None);
     let permit = AccessPermit::new(false, None, CancellationToken::new());
     let open = |session: Arc<Session>, permit: AccessPermit| {
         tokio::spawn(async move {
@@ -112,7 +112,7 @@ async fn concurrent_open_waiters_share_access_and_cancel_independently() {
 #[tokio::test]
 async fn late_open_after_access_ended_does_not_close_device_connection() {
     let (send, mut outgoing) = mpsc::channel(16);
-    let (session, mut jobs) = Session::new(send, Arc::new(Credentials::new()), None);
+    let (session, mut jobs) = Session::new(send, Arc::new(Credentials::new()), None, None);
     session.receive(json!({"type":"stream_open","access_id":"00112233-4455-4677-8899-aabbccddeeff","stream_id":"1","kind":"http"}), true).unwrap();
     let Message::Text(reply) = outgoing.recv().await.unwrap() else {
         panic!("expected reset")

@@ -10,7 +10,7 @@ import type { AuthenticatedRequest } from '../security.js';
 import { AgentsService } from './service.js';
 
 @Controller('api')
-@Access('admin')
+@Access('organization')
 @ApiTags('agents')
 @ApiDefaultResponse({ type: CenterErrorResponse, description: '输入、身份、条件写或依赖失败' })
 export class AgentsController {
@@ -77,7 +77,7 @@ export class AgentsController {
   }
 
   @Get('runtime/agents')
-  @Access('authenticated')
+  @Access('member')
   @ApiOperation({ operationId: 'listRuntimeAgents', summary: '登录用户读取完整企业 Agent 配置目录' })
   @ApiOkResponse({ type: [AgentConfig] })
   runtimeList(@Req() request: AuthenticatedRequest) { return this.agents.runtimeList(request.token); }

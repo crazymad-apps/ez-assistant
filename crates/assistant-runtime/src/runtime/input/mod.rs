@@ -216,6 +216,9 @@ fn wake_queue_with(
     tasks: Arc<super::tasks::RuntimeTasks>,
     session: Arc<SessionController>,
 ) -> RuntimeResult<()> {
+    if context.root_cancellation.is_cancelled() {
+        return Ok(());
+    }
     let should_spawn = {
         let mut state = session.lock_state()?;
         if state.is_faulted
@@ -305,6 +308,10 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
             return;
         }
         let mutation = session.mutation().await;
+        if context.root_cancellation.is_cancelled() {
+            finish_driver(&session);
+            return;
+        }
         let (input_id, command, queue_revision) = {
             let mut state = match session.lock_state() {
                 Ok(state) => state,
@@ -431,6 +438,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                 &config,
                 &context.config_registry,
                 RunCompilationResources {
+                    plugin: context.plugin.clone(),
                     attachments: context.attachments.clone(),
                     shell,
                     skill_catalog,
@@ -620,7 +628,12 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                 } = compiled.into_parts();
                 let context_management_mode = model_binding.model.context_management_mode();
                 let replacement_journal = match session
-                    .prepare_journal_for_mode(context.store.as_ref(), context_management_mode)
+                    .prepare_journal_for_mode(
+                        context.store.as_ref(),
+                        context_management_mode,
+                        context.model_factory.configuration_source()
+                            == crate::ModelSource::External,
+                    )
                     .await
                 {
                     Ok(journal) => journal,

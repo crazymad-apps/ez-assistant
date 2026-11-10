@@ -18,10 +18,10 @@ export function detail(row: FeedbackEntity): FeedbackDetail {
 }
 
 /** 列表与总数使用同一语句快照；不返回正文、环境和完整目标引用。 */
-export async function listFeedback(manager: EntityManager, input: ReturnType<typeof feedbackQuery>, owner: number | null): Promise<FeedbackPage> {
+export async function listFeedback(manager: EntityManager, organizationId: string, input: ReturnType<typeof feedbackQuery>, owner: number | null): Promise<FeedbackPage> {
   const rows: { items: FeedbackSummary[]; total: number }[] = await manager.query(`WITH filtered AS (
     SELECT id,title,target_kind,target_name,status,source,owner_user_id,owner_username,owner_display_name,created_at,updated_at
-    FROM public.feedback WHERE ($1::integer IS NULL OR owner_user_id=$1)
+    FROM public.feedback WHERE organization_id=$11 AND ($1::integer IS NULL OR owner_user_id=$1)
       AND ($2::text IS NULL OR status=$2) AND ($3::text IS NULL OR source=$3)
       AND ($4::text IS NULL OR target_kind=$4) AND ($5::text IS NULL OR target_reference=$5)
       AND ($6::boolean IS NULL OR (target_reference IS NULL)=$6)
@@ -30,6 +30,6 @@ export async function listFeedback(manager: EntityManager, input: ReturnType<typ
   ), page AS (SELECT * FROM filtered ORDER BY created_at DESC,id DESC LIMIT $9 OFFSET $10)
   SELECT (SELECT count(*)::integer FROM filtered) AS total,
     COALESCE((SELECT json_agg(page ORDER BY created_at DESC,id DESC) FROM page),'[]'::json) AS items`,
-  [owner, input.status, input.source, input.kind, input.reference, input.unresolved, input.title, input.submission, input.limit, input.offset]);
+  [owner, input.status, input.source, input.kind, input.reference, input.unresolved, input.title, input.submission, input.limit, input.offset, organizationId]);
   return { ...rows[0]!, limit: input.limit, offset: input.offset };
 }

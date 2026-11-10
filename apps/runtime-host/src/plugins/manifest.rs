@@ -1,4 +1,4 @@
-//! 与 C01 format_version=1 对齐的清单及入口静态准入；此阶段不启动包内程序。
+//! 插件 v1／v2 清单及入口静态准入；此阶段不启动包内程序。
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -60,6 +60,7 @@ pub(crate) struct PluginManifest {
     pub(crate) mcp: Vec<String>,
     pub(crate) configuration: Vec<Configuration>,
     pub(crate) external_software: Vec<ExternalSoftware>,
+    pub(crate) ui: Option<assistant_protocol::PluginUi>,
 }
 
 fn valid_text(value: &str, max: usize, allow_empty: bool, multiline: bool) -> bool {
@@ -115,8 +116,15 @@ impl PluginManifest {
         if bytes.len() > 1024 * 1024 {
             return Err(PackageError::TooLarge);
         }
-        let manifest: Self = serde_json::from_slice(bytes).map_err(|_| PackageError::Invalid)?;
-        if manifest.format_version != 1
+        let raw: Value = serde_json::from_slice(bytes).map_err(|_| PackageError::Invalid)?;
+        let has_ui = raw.get("ui").is_some();
+        let manifest: Self = serde_json::from_value(raw).map_err(|_| PackageError::Invalid)?;
+        if !matches!(manifest.format_version, 1 | 2)
+            || (manifest.format_version == 1 && has_ui)
+            || (manifest.format_version == 2
+                && (manifest.ui.is_none()
+                    || Version::parse(&manifest.min_host_version)
+                        .is_ok_and(|v| v < Version::new(0, 33, 0))))
             || !valid_text(&manifest.name, 64, false, false)
             || !plugin_name(&manifest.name)
             || !valid_text(&manifest.display_name, 128, false, false)
@@ -139,7 +147,7 @@ impl PluginManifest {
             )
             || manifest.skills.len() > 256
             || manifest.mcp.len() > 256
-            || manifest.skills.is_empty() && manifest.mcp.is_empty()
+            || manifest.skills.is_empty() && manifest.mcp.is_empty() && manifest.ui.is_none()
             || !unique(&manifest.skills)
             || !unique(&manifest.mcp)
             || !manifest
@@ -153,6 +161,10 @@ impl PluginManifest {
             || !unique(manifest.external_software.iter().map(|s| &s.name))
         {
             return Err(PackageError::Invalid);
+        }
+        if let Some(ui) = &manifest.ui {
+            assistant_runtime::validate_plugin_ui(ui, &manifest.mcp)
+                .map_err(|_| PackageError::Invalid)?;
         }
         for field in &manifest.configuration {
             if !server_name(&field.name) || !valid_text(&field.label, 128, false, false) {
@@ -256,6 +268,17 @@ impl PluginManifest {
             let path = format!("skills/{name}/SKILL.md");
             let bytes = read_descriptor(root, index, &path, 256 * 1024)?;
             validate_skill(&bytes, name)?;
+        }
+        if let Some(ui) = &self.ui {
+            for entry in &ui.entries {
+                if let assistant_protocol::PluginUiResource::Package { path } = &entry.resource {
+                    let bytes = read_descriptor(root, index, path, 2 * 1024 * 1024)?;
+                    std::str::from_utf8(&bytes).map_err(|_| PackageError::Invalid)?;
+                }
+                if let Some(icon) = &entry.icon {
+                    read_descriptor(root, index, icon, 256 * 1024)?;
+                }
+            }
         }
         for name in &self.mcp {
             let common = format!("mcp/{name}/server.json");

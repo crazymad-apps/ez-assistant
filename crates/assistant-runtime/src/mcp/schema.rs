@@ -102,6 +102,28 @@ impl McpSchemaEngine {
         &self,
         definition: McpToolDefinition,
     ) -> Result<CompiledMcpTool, McpSchemaFailure> {
+        if definition.meta.as_ref().is_some_and(|meta| {
+            serde_json::to_vec(meta).map_or(true, |bytes| bytes.len() > 64 * 1024)
+                || !meta.is_object()
+                || meta.get("ui").is_some_and(|ui| {
+                    !ui.is_object()
+                        || ui.get("resourceUri").is_some_and(|uri| {
+                            uri.as_str()
+                                .is_none_or(|uri| !uri.starts_with("ui://") || uri.len() > 1024)
+                        })
+                        || ui.get("visibility").is_some_and(|visibility| {
+                            visibility.as_array().is_none_or(|items| {
+                                items.iter().any(|item| item != "model" && item != "app")
+                            })
+                        })
+                })
+        }) {
+            return Err(schema_failure(
+                McpSchemaFailureKind::Invalid,
+                "MCP UI metadata is invalid or exceeds the limit",
+            ));
+        }
+
         let permit = self.permits.clone().acquire_owned().await.map_err(|_| {
             schema_failure(
                 McpSchemaFailureKind::Unavailable,
@@ -200,7 +222,7 @@ fn compile_tool_blocking(
     })
 }
 
-fn compile_schema(schema: &Value) -> Result<Validator, McpSchemaFailure> {
+pub(crate) fn compile_schema(schema: &Value) -> Result<Validator, McpSchemaFailure> {
     let encoded = encoded_len(schema);
     if encoded > MAX_SCHEMA_BYTES {
         return Err(schema_failure(
@@ -339,6 +361,7 @@ mod tests {
             input_schema: schema,
             output_schema: None,
             annotations: None,
+            meta: None,
         }
     }
 

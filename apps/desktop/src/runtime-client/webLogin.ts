@@ -7,11 +7,11 @@ export class WebLoginError extends Error {
   constructor(message: string, readonly code = "authentication_required") { super(message); }
 }
 
-export async function loginWeb(request: HostLoginRequest): Promise<void> {
-  await readResponse(await fetch("/auth/login", {
+export async function loginWeb(request: HostLoginRequest): Promise<HostLoginResult> {
+  return readResponse(await fetch("/auth/login", {
     method: "POST", credentials: "same-origin", redirect: "error",
     headers: { ...compatibilityHeaders(), "Content-Type": "application/json" }, body: JSON.stringify(request),
-  }));
+  })) as Promise<HostLoginResult>;
 }
 
 export async function discoverWebHost(): Promise<RuntimeHostCapabilities> {

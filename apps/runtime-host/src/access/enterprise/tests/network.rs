@@ -3,12 +3,13 @@ use super::*;
 fn key() -> UserKey {
     UserKey {
         center_id: CENTER_ID.into(),
+        organization_id: ORGANIZATION_ID.into(),
         user_id: 1,
     }
 }
 fn candidate(mock: &Mock) -> Value {
     let serial = mock.serial.fetch_add(1, Ordering::SeqCst) + 1;
-    let token = format!("ct_{serial:064x}");
+    let token = format!("test.{serial:064x}.fixture");
     mock.tokens.lock().unwrap().insert(token.clone(), 1);
     let mut value = identity(1, false);
     value["token"] = json!(token);

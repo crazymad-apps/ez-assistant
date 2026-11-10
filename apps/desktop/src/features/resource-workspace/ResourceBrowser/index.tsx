@@ -11,6 +11,7 @@ export const ResourceBrowser = observer(function ResourceBrowser(props: Readonly
   controller: BrowserController;
   active: boolean;
   viewport_ref: Ref<HTMLDivElement>;
+  on_connect_app?: () => void;
 }>) {
   const browser = props.controller;
   const [address, setAddress] = useState(browser.url);
@@ -56,6 +57,7 @@ export const ResourceBrowser = observer(function ResourceBrowser(props: Readonly
           placeholder="输入网址" ref={address_input} spellCheck={false} type="text" value={address}
         />
         <InlineIconButton disabled={!browser.url} icon="external-link" label="在系统浏览器中打开" onClick={openInSystem} />
+        <Button size="small" variant="text" disabled={!browser.url || !props.on_connect_app} onClick={props.on_connect_app}>作为应用连接</Button>
         {browser.loading && <div className={styles.progress} role="progressbar" aria-label="网页加载中" />}
       </form>
       {notice && <div className={styles.notice} role="status">

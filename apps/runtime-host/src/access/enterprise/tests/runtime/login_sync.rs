@@ -76,6 +76,7 @@ async fn install(
                 format: PluginArchiveFormat::TarGzip,
                 origin: PluginPackageOrigin::Center {
                     center_id: CENTER_ID.into(),
+                    organization_id: Some(ORGANIZATION_ID.into()),
                 },
                 expected_active_sha256: None,
             }],

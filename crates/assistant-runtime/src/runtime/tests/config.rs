@@ -197,6 +197,7 @@ async fn provider_changes_affect_future_runs_and_invalid_global_config_does_not_
 
     runtime
         .update_provider(assistant_protocol::UpdateProviderRequest {
+            source: assistant_protocol::ModelSelectionSource::Local,
             provider_instance_id: test_model_selection("fixture").provider_instance_id,
             connection: model_fixture::provider("unused").connection,
             credential: assistant_protocol::ProviderCredentialChange::Replace(
@@ -332,6 +333,7 @@ async fn model_currentness_conflict_atomically_commits_the_failed_input() {
         .expect("model preparation entered store");
     runtime
         .update_provider(assistant_protocol::UpdateProviderRequest {
+            source: assistant_protocol::ModelSelectionSource::Local,
             provider_instance_id: test_model_selection("fixture").provider_instance_id,
             connection: model_fixture::provider("unused").connection,
             credential: assistant_protocol::ProviderCredentialChange::Replace(
@@ -437,6 +439,7 @@ async fn provider_queries_are_redacted_and_invalid_updates_do_not_overwrite_stor
     assert!(
         runtime
             .update_provider(assistant_protocol::UpdateProviderRequest {
+                source: assistant_protocol::ModelSelectionSource::Local,
                 provider_instance_id: before[0].provider_instance_id.clone(),
                 connection: invalid,
                 credential: assistant_protocol::ProviderCredentialChange::Replace(
@@ -535,6 +538,7 @@ async fn deleting_an_idle_session_provider_preserves_history_and_requires_resele
         .await
         .unwrap();
     let selection = assistant_protocol::ModelSelection {
+        source: assistant_protocol::ModelSelectionSource::Local,
         provider_instance_id: replacement.provider_instance_id,
         model_id: "fixture".into(),
     };

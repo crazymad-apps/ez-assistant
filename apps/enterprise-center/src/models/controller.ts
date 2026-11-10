@@ -32,7 +32,7 @@ import { page, queryFields } from '../validation.js';
 import { ModelsService } from './service.js';
 
 @Controller('api')
-@Access('admin')
+@Access('organization')
 @ApiTags('models')
 @ApiDefaultResponse({ type: CenterErrorResponse, description: '身份、参数、配置冲突或服务失败；不返回凭据与上游正文' })
 export class ModelsController {
@@ -142,6 +142,7 @@ export class ModelsController {
   }
 
   @Get('model-settings')
+  @Access('scoped-admin')
   @ApiOperation({ operationId: 'getModelSettings' })
   @ApiOkResponse({ type: ModelSettings })
   settings(@Req() r: AuthenticatedRequest) {
@@ -149,14 +150,16 @@ export class ModelsController {
   }
 
   @Put('model-settings')
+  @Access('scoped-admin')
   @ApiOperation({ operationId: 'saveModelSettings' })
   @ApiBody({ type: SaveModelSettings })
   @ApiOkResponse({ type: ModelSettings })
-  setDefault(@Body() body: unknown, @Req() r: AuthenticatedRequest) {
-    return this.models.setDefault(r.token, body, r.id);
+  saveSettings(@Body() body: unknown, @Req() r: AuthenticatedRequest) {
+    return this.models.saveSettings(r.token, body, r.id);
   }
 
   @Get('model-templates')
+  @Access('system')
   @ApiOperation({ operationId: 'getModelTemplateStatus' })
   @ApiOkResponse({ type: TemplateStatus })
   templates() {
@@ -164,6 +167,7 @@ export class ModelsController {
   }
 
   @Post('model-templates/reload')
+  @Access('system')
   @HttpCode(200)
   @ApiOperation({ operationId: 'reloadModelTemplates' })
   @ApiBody({ schema: { type: 'object', additionalProperties: false } })
@@ -173,7 +177,7 @@ export class ModelsController {
   }
 
   @Get('runtime/model-configuration')
-  @Access('authenticated')
+  @Access('member')
   @ApiOperation({ operationId: 'getRuntimeModelConfiguration' })
   @ApiOkResponse({ type: RuntimeModelConfiguration })
   runtime(@Req() r: AuthenticatedRequest) {

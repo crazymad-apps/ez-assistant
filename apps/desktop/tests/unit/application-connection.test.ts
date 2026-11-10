@@ -29,6 +29,7 @@ vi.mock("../../src/stores/RootStore", () => ({ RootStore: class {
   local_connection = this.connection;
   settings = { open: vi.fn(), close: vi.fn(), showNotice: vi.fn() };
   dispose = vi.fn();
+  retryLocalConnection = vi.fn();
   connect = vi.fn(async (bootstrap: RuntimeBootstrap) => { runInAction(() => { this.connection.state = "connected"; this.connection.address = bootstrap.base_url; }); await resources.restore(); });
 } }));
 import { RootStore } from "../../src/stores/RootStore";
@@ -130,12 +131,15 @@ describe("Desktop connection entry and switching", () => {
     await entry.connectDesktop(null, "", false);
     expect(entry.error).toBe("Runtime 启动超时");
     expect(entry.local_state).toBe("failed");
+    expect(native.prepare).toHaveBeenCalledOnce();
+    expect(native.connect).not.toHaveBeenCalled();
     await entry.startLocal();
     expect(entry.local_state).toBe("ready");
     expect(entry.local_error).toBeNull();
     expect(entry.error).toBeNull();
     await entry.connectDesktop(null, "", false);
     expect(entry.phase).toBe("workspace");
+    expect(native.prepare).toHaveBeenCalledOnce();
     entry.dispose();
   });
   it("silently starts local Runtime but waits for explicit selection", async () => {
@@ -585,17 +589,65 @@ describe("login options configuration lifecycle", () => {
     entry.dispose();
   });
 
-  it("closes workspace settings on disconnect and does not reopen them on ordinary recovery", async () => {
+  it("retains the workspace and settings through disconnect and readiness recovery", async () => {
     const entry = new ApplicationConnectionStore(new RootStore());
     await entry.initialize(); await entry.connectDesktop(null, "", false);
     const root = entry.current!;
     vi.mocked(root.settings.close).mockClear();
     runInAction(() => { root.connection.state = "disconnected"; });
-    expect(entry.phase).toBe("entry");
-    expect(root.settings.close).toHaveBeenCalled();
+    expect(entry.phase).toBe("workspace");
+    expect(root.settings.close).not.toHaveBeenCalled();
+    for (const state of ["reconnecting", "connecting"] as const) {
+      runInAction(() => { root.connection.state = state; });
+      expect(entry.phase).toBe("workspace");
+      expect(entry.current).toBe(root);
+    }
     runInAction(() => { root.connection.state = "connected"; });
     expect(entry.phase).toBe("workspace");
     expect(root.settings.open).not.toHaveBeenCalled();
+    entry.dispose();
+  });
+});
+
+
+describe("network failures preserve authentication", () => {
+  it.each([new TypeError("Failed to fetch"), { code: "center_unavailable", message: "offline" }])("preserves the connected Host and Web identity on failed focus checks: %s", async (failure) => {
+    native.desktop = false;
+    const entry = new ApplicationConnectionStore(new RootStore());
+    await entry.initialize();
+    const root = entry.current!;
+    const session = entry.session;
+    web.bootstrap.mockRejectedValueOnce(failure);
+    await entry.recheckSession();
+    expect(entry.phase).toBe("workspace");
+    expect(entry.current).toBe(root);
+    expect(entry.session).toBe(session);
+    expect(root.dispose).not.toHaveBeenCalled();
+    expect(root.local_connection.state).toBe("connected");
+    expect(root.retryLocalConnection).not.toHaveBeenCalled();
+    await entry.recheckSession();
+    expect(entry.current).toBe(root);
+    entry.dispose();
+  });
+
+  it("still clears Web identity on explicit expiry", async () => {
+    native.desktop = false;
+    const entry = new ApplicationConnectionStore(new RootStore());
+    await entry.initialize();
+    const root = entry.current!;
+    web.bootstrap.mockRejectedValueOnce({ code: "authentication_required", message: "expired" });
+    await entry.recheckSession();
+    expect(entry.phase).toBe("login");
+    expect(entry.session).toBeNull();
+    expect(root.dispose).toHaveBeenCalledOnce();
+    entry.dispose();
+  });
+
+  it("still leaves the workspace for an explicit Host stop", async () => {
+    const entry = new ApplicationConnectionStore(new RootStore());
+    await entry.connectDesktop(null, "", false);
+    runInAction(() => { entry.current!.local_connection.state = "stopping_runtime"; });
+    expect(entry.phase).toBe("entry");
     entry.dispose();
   });
 });

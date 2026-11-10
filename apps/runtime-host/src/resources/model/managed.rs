@@ -69,6 +69,16 @@ impl CenterModelLoader {
         Ok((domain, login))
     }
 
+    async fn verify_personal_login(&self) -> Result<(), CenterError> {
+        let domain = self
+            .domain
+            .upgrade()
+            .ok_or(CenterError::InvalidCredentials)?;
+        self.credentials
+            .verify_personal_model_login(&self.key, &domain)
+            .await
+    }
+
     /// 每个页面只等待共享结果，取消等待者不取消用户域拥有的网络任务。
     pub(crate) async fn refresh(&self) -> RuntimeResult<()> {
         let mut completion = self.completions.subscribe();
@@ -180,19 +190,51 @@ impl ModelServiceFactory for CenterModelServiceFactory {
         ModelSource::External
     }
 
+    fn ensure_available(&self) -> RuntimeResult<()> {
+        self.loader
+            .login()
+            .map(|_| ())
+            .map_err(|_| RuntimeError::InvalidRequest {
+                reason: "企业登录已失效，请重新登录。",
+            })
+    }
+
+    fn ensure_editable(&self) -> RuntimeResult<()> {
+        self.ensure_available()
+    }
+
+    fn discover_models<'a>(
+        &'a self,
+        request: assistant_runtime::ModelDiscoveryRequest<'a>,
+    ) -> assistant_runtime::ModelDiscoveryFuture<'a> {
+        Box::pin(async move {
+            self.loader.verify_personal_login().await.map_err(|error| {
+                assistant_runtime::ModelDiscoveryError::with_source(
+                    assistant_runtime::ModelDiscoveryErrorKind::Authentication,
+                    error,
+                )
+            })?;
+            self.local.discover_models(request).await
+        })
+    }
+
     fn create_model(
         &self,
         request: ModelServiceFactoryRequest<'_>,
     ) -> Result<agent_model::ModelServiceBundle, ModelServiceFactoryError> {
-        let captured = request
-            .external_configuration
-            .ok_or_else(|| {
-                ModelServiceFactoryError::new("external model configuration is required")
-            })?
-            .clone();
-        let transport =
-            transport::CenterModelTransport::new(self.loader.clone(), captured, &request)?;
-        self.local
-            .create_with_transport(request, Some(Arc::new(transport)))
+        let transport: Arc<dyn agent_openai_compatible::Transport> =
+            if let Some(captured) = request.external_configuration {
+                Arc::new(transport::CenterModelTransport::new(
+                    self.loader.clone(),
+                    captured.clone(),
+                    &request,
+                )?)
+            } else {
+                Arc::new(transport::PersonalModelTransport::new(
+                    self.loader.clone(),
+                    &request,
+                )?)
+            };
+        self.local.create_with_transport(request, Some(transport))
     }
 }

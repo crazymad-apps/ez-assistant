@@ -587,6 +587,7 @@ impl AssistantRuntime {
             })
             .await
             .map_err(|source| RuntimeError::from_store("delete session", source))?;
+        self.ui_tools.retire_session(&request.session_id);
         self.sessions
             .write()
             .map_err(|_| RuntimeError::InternalStateUnavailable {
@@ -808,6 +809,7 @@ impl AssistantRuntime {
             state.lifecycle = SessionLifecycle::Archived;
             state.archived_at_ms = Some(changed_at_ms);
         }
+        self.ui_tools.retire_session(&request.session_id);
         self.publish(assistant_protocol::RuntimeEvent::SessionChanged {
             session_id: request.session_id,
         });
@@ -1001,7 +1003,7 @@ impl AssistantRuntime {
         &self,
         request: SetSessionModelRequest,
     ) -> RuntimeResult<SetSessionModelResult> {
-        self.ensure_model_editable()?;
+        self.model_factory.ensure_available()?;
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
         let snapshot = self.config_registry.snapshot()?;
@@ -1039,6 +1041,14 @@ impl AssistantRuntime {
         let context_management_mode = prepared
             .as_ref()
             .map(|prepared| prepared.model.context_management_mode());
+        if self.model_factory.configuration_source() == crate::ModelSource::External
+            && let Some(mode @ agent_model::ContextManagementMode::LocalSummary) =
+                context_management_mode
+        {
+            session
+                .prepare_journal_for_mode(self.store.as_ref(), mode, true)
+                .await?;
+        }
         let server_history_key = {
             let state = session.lock_state()?;
             if state.model_selection == model_selection
@@ -1377,6 +1387,7 @@ impl AssistantRuntime {
             &config,
             &self.config_registry,
             RunCompilationResources {
+                plugin: self.plugin.clone(),
                 attachments: self.attachments.clone(),
                 shell: None,
                 skill_catalog: self.current_skill_catalog(&session).await?,

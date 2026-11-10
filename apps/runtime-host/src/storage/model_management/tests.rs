@@ -28,6 +28,7 @@ fn fixed(id: &str, output: u64) -> ModelFixedConfig {
     ModelFixedConfig {
         origin: assistant_protocol::ModelConfigOrigin::Online,
         selection: ModelSelection {
+            source: assistant_protocol::ModelSelectionSource::Local,
             provider_instance_id: ProviderInstanceId::new(id).unwrap(),
             model_id: "org/model-same".into(),
         },
@@ -375,7 +376,13 @@ fn history_binding_changes_are_atomic_selective_and_survive_reopen() {
         ]
     );
     engine
-        .put_model_fixed_config(fixed("one", 2048), Some("fixed-epoch".into()))
+        .put_model_fixed_config(
+            fixed("one", 2048),
+            Some(assistant_runtime::FixedModelHistoryInvalidation {
+                key: "fixed-epoch".into(),
+                includes_default_followers: true,
+            }),
+        )
         .unwrap();
     let changed = keys(&engine);
     assert_eq!(
@@ -389,7 +396,13 @@ fn history_binding_changes_are_atomic_selective_and_survive_reopen() {
     // Force a failed invalidation after the fixed row write. Both updates must roll back.
     assert!(
         engine
-            .put_model_fixed_config(fixed("one", 3072), Some(String::new()))
+            .put_model_fixed_config(
+                fixed("one", 3072),
+                Some(assistant_runtime::FixedModelHistoryInvalidation {
+                    key: String::new(),
+                    includes_default_followers: true
+                })
+            )
             .is_err()
     );
     assert_eq!(keys(&engine), changed);
@@ -429,7 +442,13 @@ fn history_binding_changes_are_atomic_selective_and_survive_reopen() {
         Some("fixed-epoch")
     );
     reopened
-        .reset_model_fixed_config(model.selection, Some("reset-epoch".into()))
+        .reset_model_fixed_config(
+            model.selection,
+            Some(assistant_runtime::FixedModelHistoryInvalidation {
+                key: "reset-epoch".into(),
+                includes_default_followers: true,
+            }),
+        )
         .unwrap();
     assert_eq!(
         keys(&reopened),

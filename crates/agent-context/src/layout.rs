@@ -56,7 +56,7 @@ impl ContextLayout {
         Some((head, vec![ContextBlock::user_turn(tail)], user.id.clone()))
     }
 
-    /// 校验快照并按 System prefix、Context Summary 和完整 User Turn 分块。
+    /// 校验快照并按 System prefix、Context Summary、无 User 起点的前缀及 User Turn 分块。
     pub fn build(snapshot: &ConversationSnapshot) -> Result<Self, ContextLayoutError> {
         snapshot
             .validate_tool_exchange_pairs()
@@ -102,9 +102,10 @@ impl ContextLayout {
                     conversation_started = true;
                     if let Some((_, turn)) = &mut current_turn {
                         turn.push(message.clone());
-                    } else if matches!(message, ConversationMessage::Assistant(assistant) if assistant.parts.first().is_some_and(|part| matches!(part,
-                        AssistantPart::ProviderState(state) if state.context_effect() == Some(agent_types::ProviderContextEffect::ReplacePriorContext)
-                    ))) {
+                    } else if matches!(message, ConversationMessage::Assistant(_)) {
+                        // 最近压缩点可能位于轮内；原生转本地后，不透明窗口被移除，
+                        // 后缀仍可从 Assistant 开始。复用上下文块承接，不能补 User 或回读旧历史。
+                        // 工具交换已在入口严格校验，允许这种前缀不会放过孤立结果或未闭合调用。
                         current_turn =
                             Some((ContextBlockKind::ProviderContext, vec![message.clone()]));
                     } else {
@@ -167,7 +168,8 @@ impl ContextLayout {
 /// 可压缩历史中的原子块类别。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ContextBlockKind {
-    /// 原生完整窗口可直接开始有效上下文，不伪造 User 锚点。
+    /// 无 User 起点的有效前缀：原生完整窗口或其移除后留下的 Assistant／工具交换。
+    /// 不伪造 User 锚点，遇到真实 User 后按普通轮次继续分块。
     ProviderContext,
     /// 先前压缩生成的摘要；再次滚动时进入 head。
     ContextSummary,
@@ -276,7 +278,7 @@ pub enum ContextLayoutError {
     /// 有效快照最多包含一条最新 Context Summary。
     #[error("conversation contains more than one context summary")]
     DuplicateContextSummary,
-    /// Assistant/Tool 消息必须归属于一个 User Turn。
+    /// 无 User 起点的前缀必须从 Assistant 开始，不能从孤立 Tool Result 开始。
     #[error("assistant or tool message appears outside a user turn")]
     MessageOutsideUserTurn,
 }
@@ -565,12 +567,6 @@ mod tests {
             Err(ContextLayoutError::SystemAfterConversationStart)
         );
 
-        let assistant_without_user = ConversationSnapshot::new(vec![assistant("assistant_1")]);
-        assert_eq!(
-            ContextLayout::build(&assistant_without_user),
-            Err(ContextLayoutError::MessageOutsideUserTurn)
-        );
-
         let duplicate_summary = ConversationSnapshot::new(vec![
             ConversationMessage::ContextSummary(ContextSummaryMessage {
                 retained_user_message_id: None,
@@ -616,6 +612,50 @@ mod tests {
             ContextLayout::build(&misplaced_summary),
             Err(ContextLayoutError::MisplacedContextSummary)
         );
+    }
+
+    #[test]
+    fn assistant_prefix_after_compaction_keeps_closed_exchanges_before_recent_user() {
+        for prefix in [
+            vec![assistant("answer")],
+            vec![tool_call("call", "lookup"), tool_result("result", "lookup")],
+        ] {
+            let prefix_only = ContextLayout::build(&ConversationSnapshot::new(prefix.clone()))
+                .expect("a native cutoff suffix may not yet contain a new user");
+            assert_eq!(prefix_only.blocks()[0].messages(), prefix);
+            let recent = vec![user("recent"), assistant("recent-answer")];
+            let mut messages = prefix.clone();
+            messages.extend(recent.clone());
+            let layout = ContextLayout::build(&ConversationSnapshot::new(messages))
+                .expect("compaction suffix does not require a synthetic user");
+            let partition = layout.partition(1);
+            assert_eq!(partition.compressible_head().len(), 1);
+            assert_eq!(partition.compressible_head()[0].messages(), prefix);
+            assert_eq!(partition.protected_tail().len(), 1);
+            assert_eq!(partition.protected_tail()[0].messages(), recent);
+        }
+    }
+
+    #[test]
+    fn assistant_prefix_still_rejects_incomplete_and_unmatched_tools() {
+        let call_id = ToolCallId::new("lookup").unwrap();
+        for (messages, error) in [
+            (
+                vec![tool_call("call", "lookup"), user("recent")],
+                ConversationValidationError::MissingToolResult {
+                    call_id: call_id.clone(),
+                },
+            ),
+            (
+                vec![tool_result("result", "lookup"), user("recent")],
+                ConversationValidationError::ToolResultWithoutCall { call_id },
+            ),
+        ] {
+            assert_eq!(
+                ContextLayout::build(&ConversationSnapshot::new(messages)),
+                Err(ContextLayoutError::InvalidConversation(error))
+            );
+        }
     }
 
     #[test]

@@ -120,7 +120,14 @@ export function ResourceImageViewer(
             },
           }}
         >
-          <img alt={props.alt} draggable={false} src={image.src} width={image.width} height={image.height} />
+          <img
+            className={props.media_type === 'image/png' ? styles.transparency_background : undefined}
+            alt={props.alt}
+            draggable={false}
+            src={image.src}
+            width={image.width}
+            height={image.height}
+          />
         </TransformComponent>
       </TransformWrapper>
       <div className={styles.toolbar} role="toolbar" aria-label="图片缩放">

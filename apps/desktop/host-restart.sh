@@ -66,4 +66,5 @@ async function stop() {
 stop().catch(error => { console.error(error.message); process.exitCode = 1; });
 NODE
 
+export EZ_ASSISTANT_DEV_HOST=1
 exec node scripts/run-cargo.mjs run -p assistant-runtime-host -- launch --runtime-home "$EZ_ASSISTANT_RUNTIME_HOME"

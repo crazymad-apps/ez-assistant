@@ -41,7 +41,7 @@ describe("Runtime switch form", () => {
       connection.error = "初始化失败，请重试。";
       connection.session = {
         token: null, expires_at_ms: 0, instance_id: "fixture", mode: "enterprise", kind: "user",
-        identity: { center_id: "fixture", user_id: 1, username: "tester", display_name: "超级管理员" },
+        identity: { center_id: "fixture", organization_id: "org-fixture", organization_name: "测试组织", user_id: 1, username: "tester", display_name: "超级管理员" },
         login_context: "fixture",
       };
     });

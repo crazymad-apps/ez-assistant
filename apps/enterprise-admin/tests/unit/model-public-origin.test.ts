@@ -13,8 +13,9 @@ it('地址和默认模型独立提交，携带当前身份且不提交另一项�
       body: { public_origin: 'http://localhost:7320' },
     }),
   );
-  await modelApi.setDefault('current-token', null);
-  expect(sdk.saveModelSettings).toHaveBeenLastCalledWith(expect.objectContaining({ body: { default_model: null } }));
+  const policy = { revision: null, default_model: null, allowed_models: [], allow_member_selection: false };
+  await modelApi.savePolicy('current-token', policy);
+  expect(sdk.saveModelSettings).toHaveBeenLastCalledWith(expect.objectContaining({ body: { policy } }));
   await modelApi.setPublicOrigin('current-token', null);
   expect(sdk.saveModelSettings).toHaveBeenLastCalledWith(expect.objectContaining({ body: { public_origin: null } }));
 });

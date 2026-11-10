@@ -36,7 +36,10 @@ it.skipIf(process.env.CENTER_WS_HOST_TEST !== '1')(
     const center_id = randomUUID(),
       providerId = randomUUID(),
       binding = 'b'.repeat(64);
-    const identity = { center_id, user };
+    const identity = {
+      center_id, user, legacy_organization_id: center_id, expires_at: '2099-01-01T00:00:00Z',
+      scope: { kind: 'organization' as const, organization_id: center_id, can_manage: false },
+    };
     const credentials = { ...identity, token: `ct_${'a'.repeat(64)}`, llm_key: `cl_${'a'.repeat(64)}` };
     const parameters = {
       ...emptyParameters(),
@@ -85,7 +88,8 @@ it.skipIf(process.env.CENTER_WS_HOST_TEST !== '1')(
     const identities = new IdentityService();
     vi.spyOn(identities, 'llmIdentity').mockImplementation(async (key) => {
       if (key !== credentials.llm_key) throw new ControlError('llm_key_invalid');
-      return identity;
+      return { ...identity, session: { jti: 'fixture', issuer: center_id, userId: user.id, expires: 4070908800,
+        scope: { kind: 'organization', organization_id: center_id } } };
     });
     const models = new ModelsService(identities, undefined, new ModelTemplates());
     vi.spyOn(models, 'admit').mockImplementation(async (_key, _selection, _protocol, _test, history) => {
@@ -93,6 +97,7 @@ it.skipIf(process.env.CENTER_WS_HOST_TEST !== '1')(
         throw new ControlError('managed_model_configuration_stale');
       return {
         provider: {
+          organization_id: center_id,
           provider_instance_id: providerId,
           api_key: '',
           server_history_key: 'test',
@@ -148,8 +153,8 @@ it.skipIf(process.env.CENTER_WS_HOST_TEST !== '1')(
     });
     const app = Fastify();
     app.get('/api/info', async () => ({
-      protocol_version: 4,
-      min_protocol_version: 4,
+      protocol_version: 6,
+      min_protocol_version: 6,
       capabilities: ['managed_models', 'llm_proxy'],
     }));
     app.post('/api/auth/login', async () => credentials);
@@ -159,17 +164,20 @@ it.skipIf(process.env.CENTER_WS_HOST_TEST !== '1')(
     app.get('/api/runtime/plugins', async () => []);
     let origin: string;
     app.get('/api/runtime/model-configuration', async () => ({
-      state: 'ready',
       center_id,
-      endpoint: `${origin}/api/llm/providers/${providerId}/v1`,
-      provider_type: 'openai',
-      provider_display_name: 'probe',
-      protocol: 'open_ai_responses',
-      model_id: 'm',
-      parameters,
-      server_history_enabled: true,
-      server_history_support: 'supported',
-      server_history_binding: binding,
+      organization_id: center_id,
+      allow_member_selection: false,
+      default_model: { provider_instance_id: providerId, model_id: 'm' },
+      providers: [{
+        provider_instance_id: providerId,
+        endpoint: `${origin}/api/llm/providers/${providerId}/v1`,
+        provider_type: 'openai',
+        provider_display_name: 'probe',
+        protocol: 'open_ai_responses',
+        server_history_enabled: true,
+        server_history_support: 'supported',
+        models: [{ state: 'ready', model_id: 'm', parameters, server_history_binding: binding }],
+      }],
     }));
     proxy.install(app);
     origin = await app.listen({ host: '127.0.0.1', port: 0 });

@@ -84,7 +84,7 @@ impl RuntimeBootstrapCoordinator {
                 if !instance_lock_released(&coordinator.runtime_home)? {
                     return Err(instance_changed());
                 }
-                coordinator.launch_from(&executable).await?;
+                coordinator.launch_from(&executable, false).await?;
                 let bootstrap = coordinator.wait_for_start().await?;
                 let discovery = read_discovery(&coordinator.runtime_home)?;
                 if discovery.executable_path.as_ref() != Some(&executable)

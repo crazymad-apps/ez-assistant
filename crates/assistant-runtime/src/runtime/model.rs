@@ -383,6 +383,9 @@ impl ImageInspector for AuxiliaryVisionInspector {
                                     .provider_instance_id
                                     .as_str()
                                     .to_owned(),
+                                model_source: (self.selection.source
+                                    == assistant_protocol::ModelSelectionSource::Organization)
+                                    .then(|| "organization".to_owned()),
                                 model_id: self.selection.model_id.clone(),
                                 elapsed_ms: u64::try_from(started_at.elapsed().as_millis())
                                     .unwrap_or(u64::MAX),
@@ -459,6 +462,8 @@ impl RequestPreparingModelService {
         {
             return Ok(request.clone());
         }
+        // 完整压缩窗口属于当前组织 Store 中的会话历史；配置指纹变化不改变其可回放性。
+        // 临时响应 ID 的绑定与失效回退由 Adapter 处理，不能据此拒绝已提交窗口。
         let Some((store, owner)) = &self.native_history else {
             return Ok(request.clone());
         };
@@ -855,6 +860,7 @@ pub(super) struct RunAuthorizationInput {
 
 /// 队列驱动与历史重入共同传入的 Run 装配资源；收敛参数数量并明确哪些能力来自 Runtime。
 pub(super) struct RunCompilationResources<'a> {
+    pub(super) plugin: Arc<crate::plugin::PluginManager>,
     pub(super) attachments: Arc<
         std::sync::RwLock<
             std::collections::BTreeMap<assistant_protocol::AttachmentId, crate::StoredAttachment>,
@@ -1341,6 +1347,14 @@ pub(super) async fn compile_run_agent(
     let can_speak = compiled.model.capabilities().tool_calls
         && session.role()? == crate::SessionRole::Controller;
     let mut tool_assembly = RunToolAssembly::default();
+    let card_publisher = crate::cards::CardPublisher::new(
+        session.clone(),
+        authorization.run_id.clone(),
+        resources.store.clone(),
+        resources.plugin.clone(),
+        authorization.events.clone(),
+    );
+    let mut child_mcp_call_tool = None;
     tool_assembly.contribute(RunToolContribution::frozen(base_tools.clone()));
     // child 的辅助识图在获得独立 owner 后加入，不能复用父会话绑定的工具句柄。
     let mut child_base_tools = if has_auxiliary_vision {
@@ -1349,6 +1363,12 @@ pub(super) async fn compile_run_agent(
         base_tools.clone()
     };
     if compiled.model.capabilities().tool_calls {
+        tool_assembly.contribute(
+            RunToolContribution::tool(crate::cards::PublishCardTool(card_publisher.clone()))
+                .map_err(|_| RuntimeError::InternalStateUnavailable {
+                    component: "card tool definition",
+                })?,
+        );
         // 管理工具只进入父 Run，不受连接目录或 mcp_scope 限制，也不复制到 child_base_tools。
         if resources.mcp_management.available() {
             tool_assembly.contribute(RunToolContribution::frozen(
@@ -1400,16 +1420,19 @@ pub(super) async fn compile_run_agent(
                     component: "MCP discovery tool definition",
                 })?,
             );
+            let call_tool = CallMcpTool::new(
+                resources.mcp_registry.clone(),
+                mcp_scope.clone(),
+                image_directory,
+                resources.mcp_image_materializer.clone(),
+            );
+            child_mcp_call_tool = Some(call_tool.clone());
             mcp_tools.contribute(
-                RunToolContribution::tool(CallMcpTool::new(
-                    resources.mcp_registry.clone(),
-                    mcp_scope.clone(),
-                    image_directory,
-                    resources.mcp_image_materializer.clone(),
-                ))
-                .map_err(|_| RuntimeError::InternalStateUnavailable {
-                    component: "MCP call tool definition",
-                })?,
+                RunToolContribution::tool(call_tool.with_cards(card_publisher.clone())).map_err(
+                    |_| RuntimeError::InternalStateUnavailable {
+                        component: "MCP call tool definition",
+                    },
+                )?,
             );
             let mcp_tools =
                 mcp_tools
@@ -1417,11 +1440,11 @@ pub(super) async fn compile_run_agent(
                     .map_err(|_| RuntimeError::InternalStateUnavailable {
                         component: "MCP gateway tool assembly",
                     })?;
-            child_base_tools = child_base_tools.try_merge(mcp_tools.clone()).map_err(|_| {
-                RuntimeError::InternalStateUnavailable {
+            child_base_tools = child_base_tools
+                .try_merge(mcp_tools.clone().without_tool("call_mcp_tool"))
+                .map_err(|_| RuntimeError::InternalStateUnavailable {
                     component: "child MCP tool assembly",
-                }
-            })?;
+                })?;
             tool_assembly.contribute(RunToolContribution::frozen(mcp_tools));
         }
         if session.role()? == crate::SessionRole::Controller {
@@ -1548,6 +1571,8 @@ pub(super) async fn compile_run_agent(
         );
         let delegation_controller =
             Arc::new(ParentDelegationController::new(ParentDelegationResources {
+                card_publisher: card_publisher.clone(),
+                mcp_call_tool: child_mcp_call_tool,
                 context_management_mode: model_config.context_management_mode(),
                 context_window_tokens: compiled.model.context_window_tokens(),
                 session: session.clone(),
@@ -1660,10 +1685,19 @@ fn compile_resolved_model_service_with_history(
         .active()
         .ok_or(RuntimeError::ConfigurationUnavailable)?;
     let transport = active.transport();
-    let state_binding = state_owner
-        .or(Some("unbound"))
-        .zip(model_config.server_history_key.as_deref())
-        .map(|(owner, key)| format!("{owner}:{key}"));
+    // 新产出的原生状态仍记录当前作用域；该标记不限制已提交完整窗口的回放。
+    // 普通续接的 Session 周期独立，响应 ID 继续按原绑定规则失效。
+    let state_binding = if model_factory.configuration_source() == crate::ModelSource::External {
+        model_config
+            .provider_state_key
+            .as_deref()
+            .map(|key| format!("{routing_id}:{key}"))
+    } else {
+        state_owner
+            .or(Some("unbound"))
+            .zip(model_config.server_history_key.as_deref())
+            .map(|(owner, key)| format!("{owner}:{key}"))
+    };
     let history_binding = history_owner
         .filter(|_| model_config.server_history_enabled)
         .zip(model_config.server_history_key.as_deref())
@@ -1922,6 +1956,109 @@ mod tests {
                     status: Some(400),
                 })
             })
+        }
+    }
+
+    #[tokio::test]
+    async fn restored_native_window_survives_configuration_fingerprint_changes() {
+        let previous_scope = "a".repeat(64);
+        let snapshot = ConversationSnapshot::new(vec![ConversationMessage::Assistant(
+            agent_types::AssistantMessage {
+                id: MessageId::new("native-fixture").unwrap(),
+                purpose: agent_types::AssistantMessagePurpose::ContextCompaction,
+                model: agent_types::ModelIdentity::new(
+                    agent_types::ProviderId::new("openai").unwrap(),
+                    "same-model",
+                ),
+                parts: vec![agent_types::AssistantPart::ProviderState(
+                    agent_types::OpaqueProviderState::new_context_replacement(
+                        agent_types::ProviderId::new("openai").unwrap(),
+                        agent_types::ProtocolId::new("openai.responses").unwrap(),
+                        "responses.compacted_window",
+                        "application/json",
+                        1,
+                        previous_scope.clone(),
+                        serde_json::to_vec(&serde_json::json!({
+                            "object": "response.compaction",
+                            "id": "legacy-window",
+                            "created_at": 0,
+                            "output": [
+                                {"type": "message", "role": "user", "content": [
+                                    {"type": "input_text", "text": "Keep the task constraints"}
+                                ]},
+                                {"type": "compaction", "encrypted_content": "synthetic-state"}
+                            ]
+                        }))
+                        .unwrap(),
+                    )
+                    .unwrap(),
+                )],
+                finish_reason: agent_types::FinishReason::Stop,
+                usage: None,
+            },
+        )]);
+        let request = ModelRequest {
+            system: SystemPromptSnapshot::default(),
+            conversation: snapshot,
+            tools: Vec::new(),
+            tool_choice: ToolChoice::None,
+            generation: GenerationConfig::default(),
+            reasoning: None,
+            provider_options: ProviderOptions::new(),
+        };
+        // 模拟从旧版持久历史恢复；配置变化不能丢弃或改写已提交的窗口。
+        let request = ModelRequest {
+            conversation: serde_json::from_slice(
+                &serde_json::to_vec(&request.conversation).unwrap(),
+            )
+            .unwrap(),
+            ..request
+        };
+        for fingerprint in [previous_scope, "b".repeat(64)] {
+            let ConversationMessage::Assistant(mut completed) =
+                request.conversation.messages[0].clone()
+            else {
+                unreachable!();
+            };
+            completed.id = MessageId::new("continued-turn").unwrap();
+            completed.purpose = agent_types::AssistantMessagePurpose::ModelResponse;
+            completed.parts = vec![agent_types::AssistantPart::Text(agent_types::TextPart {
+                id: PartId::new("continued-text").unwrap(),
+                text: "continued".into(),
+            })];
+            let model = Arc::new(
+                agent_testkit::ScriptedModelService::completing(
+                    ModelCapabilities::default(),
+                    8192,
+                    completed.clone(),
+                )
+                .with_context_policy(
+                    agent_model::ContextPolicy::ServerCompaction {
+                        threshold_tokens: std::num::NonZeroU64::MIN,
+                        state_scope_fingerprint: fingerprint,
+                    },
+                ),
+            );
+            let service = RequestPreparingModelService {
+                inner: model.clone(),
+                preprocessor: None,
+                native_history: None,
+                measurement_session: None,
+                session_binding: None,
+                input_token_count_supported: true,
+                tool_image_directory: String::new(),
+            };
+            let prepared = service.prepare_request(&request).await.unwrap();
+            assert_eq!(prepared.conversation, request.conversation);
+            let turn = agent_model::collect_model_turn(
+                &service,
+                request.clone(),
+                ModelCallContext::default(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(turn, completed);
+            assert_eq!(model.take_requests()[0].conversation, request.conversation);
         }
     }
 

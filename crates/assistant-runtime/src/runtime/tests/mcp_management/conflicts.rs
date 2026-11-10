@@ -114,7 +114,7 @@ async fn collision_fixture() -> (AssistantRuntime, Arc<MemoryMcpSource>, Arc<Mem
         let expected_phase = operation.phase;
         operation.phase = phase;
         let change = if phase == PluginOperationPhase::Cleaning {
-            PluginRecordChange::Upsert(StoredPlugin {
+            PluginRecordChange::Upsert(Box::new(StoredPlugin {
                 name: "example".into(),
                 source: PluginSource::Upload,
                 active_version: Some("1.0.0".into()),
@@ -126,7 +126,7 @@ async fn collision_fixture() -> (AssistantRuntime, Arc<MemoryMcpSource>, Arc<Mem
                 market_status: None,
                 created_at_ms: 1,
                 updated_at_ms: 1,
-            })
+            }))
         } else {
             PluginRecordChange::Keep
         };

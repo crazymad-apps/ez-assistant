@@ -85,7 +85,7 @@ function nextBucket(date: Date, granularity: 'hour' | 'day' | 'month'): Date {
   return new Date(local.getTime() - 8 * 3600000);
 }
 
-export async function queryUsage(manager: EntityManager, value: unknown): Promise<UsagePage> {
+export async function queryUsage(manager: EntityManager, organizationId: string, value: unknown): Promise<UsagePage> {
   const input = queryFields(value, [
     'from', 'to', 'user_id', 'provider_instance_id', 'model_id', 'kind', 'outcome', 'granularity', 'group_by', 'limit', 'offset',
   ]);
@@ -102,8 +102,8 @@ export async function queryUsage(manager: EntityManager, value: unknown): Promis
     if (starts.length === 1000) invalid();
     starts.push(bucket.toISOString());
   }
-  const conditions = ['started_at >= $1', 'started_at < $2'];
-  const params: unknown[] = [from, to];
+  const conditions = ['started_at >= $1', 'started_at < $2', 'organization_id = $3'];
+  const params: unknown[] = [from, to, organizationId];
   const add = (sql: string, argument: unknown) => {
     params.push(argument);
     conditions.push(`${sql} $${params.length}`);
@@ -126,7 +126,7 @@ export async function queryUsage(manager: EntityManager, value: unknown): Promis
     const trend = await tx.query(`SELECT ${expression} AS start, ${aggregates()} ${filtered} GROUP BY start ORDER BY start`, params) as (RawTotals & { start: Date })[];
     const groups = await tx.query(`SELECT ${selectKey}, MAX(username) AS username, MAX(provider_name) AS provider_name, ${aggregates()} ${filtered} GROUP BY ${groupKey} ORDER BY SUM(total_tokens) DESC NULLS LAST, ${groupKey} LIMIT ${limit} OFFSET ${offset}`, params) as (RawTotals & { user_id: number | null; username: string | null; provider_instance_id: string | null; provider_name: string | null; model_id: string | null })[];
     const counts = await tx.query(`SELECT COUNT(*)::integer AS total FROM (SELECT 1 ${filtered} GROUP BY ${groupKey}) g`, params) as { total: number }[];
-    const settings = await tx.query('SELECT index_retention_days, usage_available_from FROM public.llm_recording_settings WHERE singleton = true') as { index_retention_days: number; usage_available_from: Date }[];
+    const settings = await tx.query('SELECT index_retention_days, usage_available_from FROM public.llm_recording_settings WHERE organization_id = $1', [organizationId]) as { index_retention_days: number; usage_available_from: Date }[];
     return [summary, trend, groups, counts, settings] as const;
   });
   const settings = settingsRows[0];
@@ -153,7 +153,7 @@ export async function queryUsage(manager: EntityManager, value: unknown): Promis
   };
 }
 
-export async function usageModels(manager: EntityManager, value: unknown): Promise<UsageModelOption[]> {
+export async function usageModels(manager: EntityManager, organizationId: string, value: unknown): Promise<UsageModelOption[]> {
   const input = queryFields(value, ['search']);
   const search = input.search === undefined ? '' : text(input.search, 128, true);
   const escaped = search.replace(/[\\%_]/g, '\\$&');
@@ -161,9 +161,9 @@ export async function usageModels(manager: EntityManager, value: unknown): Promi
     `SELECT DISTINCT ON (provider_instance_id, model_id) provider_instance_id, model_id,
       COALESCE(provider_name, '未知服务商') AS provider_name
      FROM public.llm_calls
-     WHERE provider_instance_id IS NOT NULL AND model_id IS NOT NULL
+     WHERE organization_id = $2 AND provider_instance_id IS NOT NULL AND model_id IS NOT NULL
        AND (provider_name ILIKE $1 ESCAPE '\\' OR model_id ILIKE $1 ESCAPE '\\')
      ORDER BY provider_instance_id, model_id, started_at DESC LIMIT 100`,
-    [`%${escaped}%`],
+    [`%${escaped}%`, organizationId],
   ) as Promise<UsageModelOption[]>;
 }

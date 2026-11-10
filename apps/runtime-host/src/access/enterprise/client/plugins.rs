@@ -87,18 +87,18 @@ impl CenterClient {
     pub(crate) async fn resolve_plugin(
         &self,
         token: &SecretValue,
-        center_id: &str,
+        key: &crate::access::enterprise::UserKey,
         name: &str,
         expected: Option<String>,
     ) -> Result<PluginPackageSelection, PluginCenterError> {
-        self.resolve_plugin_with_requirements(token, center_id, name, expected, &[], &[])
+        self.resolve_plugin_with_requirements(token, key, name, expected, &[], &[])
             .await
     }
 
     pub(crate) async fn resolve_plugin_with_requirements(
         &self,
         token: &SecretValue,
-        center_id: &str,
+        key: &crate::access::enterprise::UserKey,
         name: &str,
         expected: Option<String>,
         required_skills: &[String],
@@ -147,7 +147,8 @@ impl CenterClient {
             size_bytes: result.package.size_bytes,
             format: result.package.archive_format,
             origin: PluginPackageOrigin::Center {
-                center_id: center_id.to_owned(),
+                center_id: key.center_id.clone(),
+                organization_id: Some(key.organization_id.clone()),
             },
             expected_active_sha256: expected,
         })
@@ -273,7 +274,11 @@ mod tests {
         let selection = client
             .resolve_plugin_with_requirements(
                 &token,
-                "center-test",
+                &crate::access::enterprise::UserKey {
+                    center_id: "center-test".into(),
+                    organization_id: "org-test".into(),
+                    user_id: 1,
+                },
                 "document-tools",
                 None,
                 &["document-review".into()],
@@ -285,7 +290,8 @@ mod tests {
         assert_eq!(
             selection.origin,
             PluginPackageOrigin::Center {
-                center_id: "center-test".into()
+                center_id: "center-test".into(),
+                organization_id: Some("org-test".into()),
             }
         );
         let response = client.download_plugin(&token, &selection).await.unwrap();

@@ -78,9 +78,13 @@ impl RuntimeTasks {
         self.tracker.close();
     }
 
+    pub(super) async fn wait(&self, maximum_wait: Duration) -> bool {
+        timeout(maximum_wait, self.tracker.wait()).await.is_ok()
+    }
+
     /// 返回 `true` 表示全部任务优雅退出；`false` 表示超时后已中止剩余 supervisor。
     pub(super) async fn wait_or_abort(&self, maximum_wait: Duration) -> bool {
-        if timeout(maximum_wait, self.tracker.wait()).await.is_ok() {
+        if self.wait(maximum_wait).await {
             return true;
         }
 

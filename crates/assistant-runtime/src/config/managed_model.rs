@@ -3,8 +3,9 @@
 use agent_model::{GenerationConfig, ToolChoiceCapabilities, ToolImageProjection};
 use agent_types::ProviderId;
 use assistant_protocol::{
-    ModelFeatureSupport, ModelParameters, ModelReasoningMode, ModelSelection, ModelTokenLimit,
-    ModelToolImageProjection, ProviderConnection, ProviderProtocolPreference, ProviderType,
+    ModelFeatureSupport, ModelParameters, ModelReasoningMode, ModelSelection, ModelSelectionSource,
+    ModelTokenLimit, ModelToolImageProjection, ProviderConnection, ProviderProtocolPreference,
+    ProviderType,
 };
 
 use super::{
@@ -34,13 +35,18 @@ impl PreparedModel {
             return Err(RuntimeError::ConfigurationConflict);
         }
         let current = registry.managed_models()?;
-        let provider = &self.provider;
-        if !current
-            .providers
-            .get(&provider.provider_instance_id)
-            .is_some_and(|current| Arc::ptr_eq(current, provider))
-            || (self.follows_default
-                && current.settings.default_model.as_ref() != Some(&self.selection))
+        let is_current = if let Some(captured) = &self.model.external_configuration {
+            current
+                .organization_model(&self.selection)
+                .and_then(|item| item.as_ref().ok())
+                .is_some_and(|configuration| Arc::ptr_eq(configuration, captured))
+        } else {
+            current
+                .providers
+                .get(&self.provider.provider_instance_id)
+                .is_some_and(|provider| Arc::ptr_eq(provider, &self.provider))
+        };
+        if !is_current || (self.follows_default && current.default_model() != Some(&self.selection))
         {
             return Err(RuntimeError::ConfigurationConflict);
         }
@@ -49,16 +55,31 @@ impl PreparedModel {
 }
 
 impl super::ConfigRegistry {
-    fn compile_selected_model(
+    // 捕获和编译同一个组织模型对象，避免参数与后到刷新里的连接／绑定混装。
+    fn prepare_organization_model(
         &self,
-        provider: &StoredProvider,
-        selection: &ModelSelection,
-        parameters: &ModelParameters,
-        generation: &GenerationConfig,
-    ) -> RuntimeResult<ResolvedModelConfig> {
-        let mut model = compile_managed_model(provider, selection, parameters, generation)?;
-        model.external_configuration = self.managed_models()?.external.clone();
-        Ok(model)
+        selection: ModelSelection,
+        active: &Arc<super::ResolvedConfig>,
+        follows_default: bool,
+    ) -> RuntimeResult<PreparedModel> {
+        let configuration = self.organization_configuration(&selection)?;
+        let provider = configuration.provider();
+        let mut model = compile_managed_model(
+            &provider,
+            &selection,
+            configuration.parameters(),
+            active.generation(),
+        )?;
+        model.external_configuration = Some(configuration);
+        let prepared = PreparedModel {
+            selection,
+            provider,
+            model,
+            follows_default,
+            active: active.clone(),
+        };
+        prepared.ensure_current(self)?;
+        Ok(prepared)
     }
 
     /// 旁路操作只读取已有固定参数；不进行在线发现，缺配置由用户重新选择或补齐。
@@ -74,6 +95,9 @@ impl super::ConfigRegistry {
         let selection = self
             .effective_model_selection(requested)?
             .ok_or_else(|| invalid("当前会话没有可用模型，请手动选择模型。"))?;
+        if selection.source == ModelSelectionSource::Organization {
+            return self.prepare_organization_model(selection, active, requested.is_none());
+        }
         let (selection, provider) = {
             let models = self.managed_models()?;
             let provider = models
@@ -90,7 +114,7 @@ impl super::ConfigRegistry {
                 invalid("当前会话没有可复用的模型参数，请重新选择模型或保存固定配置。")
             })?;
         let prepared = PreparedModel {
-            model: self.compile_selected_model(
+            model: compile_managed_model(
                 &provider,
                 &selection,
                 &fixed.parameters,
@@ -120,6 +144,9 @@ impl super::ConfigRegistry {
         let selection = self
             .effective_model_selection(requested)?
             .ok_or_else(|| invalid("尚未选择模型，请配置默认模型或为当前会话选择模型。"))?;
+        if selection.source == ModelSelectionSource::Organization {
+            return self.prepare_organization_model(selection, active, requested.is_none());
+        }
         let (selection, provider) = {
             let settings = self.managed_models()?;
             let provider = settings
@@ -152,8 +179,7 @@ impl super::ConfigRegistry {
                 .parameters
             }
         };
-        let model =
-            self.compile_selected_model(&provider, &selection, &parameters, active.generation())?;
+        let model = compile_managed_model(&provider, &selection, &parameters, active.generation())?;
         let prepared = PreparedModel {
             selection,
             provider,
@@ -320,6 +346,14 @@ pub(crate) fn compile_managed_model(
                 .map_or(output, |budget| budget.min(output)),
         );
     }
+    let provider_state_key = if parameters.server_compaction_enabled {
+        use sha2::{Digest, Sha256};
+        let scope = serde_json::to_vec(&(selection, parameters, &provider.server_history_key))
+            .map_err(|_| RuntimeError::ConfigurationUnavailable)?;
+        Some(format!("{:x}", Sha256::digest(scope)))
+    } else {
+        None
+    };
     Ok(ResolvedModelConfig {
         context_management_mode: if parameters.server_compaction_enabled {
             agent_model::ContextManagementMode::ServerCompaction
@@ -342,6 +376,7 @@ pub(crate) fn compile_managed_model(
         } else {
             None
         },
+        provider_state_key,
         external_configuration: None,
         display_name: selection.model_id.clone(),
         protocol,

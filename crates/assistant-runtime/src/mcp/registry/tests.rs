@@ -36,6 +36,8 @@ struct FixtureConnection {
     close_failed: AtomicBool,
     block_call: AtomicBool,
     call_started: Notify,
+    ui_read_started: Notify,
+    ui_blocked: AtomicBool,
 }
 
 impl FixtureConnection {
@@ -47,6 +49,8 @@ impl FixtureConnection {
             close_failed: AtomicBool::new(false),
             block_call: AtomicBool::new(false),
             call_started: Notify::new(),
+            ui_read_started: Notify::new(),
+            ui_blocked: AtomicBool::new(false),
         })
     }
 
@@ -103,6 +107,28 @@ impl McpConnection for FixtureConnection {
                         "fixture call is unavailable",
                     ))
                 })
+        })
+    }
+
+    fn read_ui_resource(
+        &self,
+        uri: String,
+        cancellation: CancellationToken,
+    ) -> McpConnectionFuture<'_, assistant_protocol::McpUiResource> {
+        Box::pin(async move {
+            self.ui_read_started.notify_one();
+            if self.ui_blocked.load(Ordering::SeqCst) {
+                cancellation.cancelled().await;
+                return Err(McpConnectionError::new(
+                    McpConnectionFailureKind::Cancelled,
+                    "cancelled",
+                ));
+            }
+            Ok(assistant_protocol::McpUiResource {
+                uri,
+                html: "<!doctype html>".into(),
+                ui: None,
+            })
         })
     }
 
@@ -167,7 +193,74 @@ fn tool(schema: Value) -> McpToolDefinition {
             "properties": {"id": {"type": "integer"}}
         })),
         annotations: Some(json!({"destructiveHint": true})),
+        meta: None,
     }
+}
+
+#[tokio::test]
+async fn app_only_tools_are_hidden_and_cannot_be_called_by_guessed_name() {
+    let mut hidden = tool(json!({"type":"object"}));
+    hidden.meta = Some(json!({"ui":{"resourceUri":"ui://fixture/card","visibility":["app"]}}));
+    let connection = FixtureConnection::new(vec![hidden]);
+    connection.with_call(McpRawCallResult {
+        content: vec![],
+        structured_content: None,
+        is_error: false,
+        meta: None,
+    });
+    let registry = test_registry(FixtureFactory::new(vec![connection.clone()]));
+    registry
+        .refresh(
+            candidate(server(1)),
+            None,
+            McpRuntimeConfig::test_default(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("refresh")
+        .finish()
+        .await;
+    assert!(registry.catalog_snapshot().unwrap()[0].tools.is_empty());
+    let error = registry
+        .resolve(
+            &McpServerKey::new("github").unwrap(),
+            "create_issue",
+            json!({}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, McpCallFailureKind::CatalogChanged);
+    assert!(!error.remote_may_have_executed);
+    assert_eq!(connection.calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn result_meta_never_enters_model_projection() {
+    let schema = McpSchemaEngine::new(1);
+    let compiled = schema
+        .compile_tool(tool(json!({"type":"object"})))
+        .await
+        .unwrap();
+    let projected = project_result(
+        McpRawCallResult {
+            content: vec![McpRawContent::Text {
+                text: "safe result".into(),
+            }],
+            structured_content: None,
+            is_error: false,
+            meta: Some(json!({"private_token":"ui-private-must-not-enter-model"})),
+        },
+        &compiled,
+        &schema,
+        None,
+        &UnavailableMcpImageMaterializer,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let text = serde_json::to_string(&projected.content).unwrap();
+    assert!(text.contains("safe result"));
+    assert!(!text.contains("ui-private"));
 }
 
 fn server(fingerprint: u8) -> McpServerConfig {
@@ -261,6 +354,7 @@ async fn single_request_failures_keep_connection_for_next_explicit_call() {
             }],
             structured_content: Some(json!({"id": 1})),
             is_error: false,
+            meta: None,
         });
         let registry = test_registry(FixtureFactory::new(vec![connection.clone()]));
         registry
@@ -473,6 +567,10 @@ async fn retiring_plugin_package_closes_idle_connection_before_file_change() {
     configured.plugin_name = Some("example-tools".into());
     configured.plugin_sha256 = Some("a".repeat(64));
     let key = configured.server_key.clone();
+    let target = assistant_protocol::McpServerTarget {
+        source: configured.source.clone(),
+        server_key: key.clone(),
+    };
     registry
         .refresh(
             candidate(configured),
@@ -484,6 +582,10 @@ async fn retiring_plugin_package_closes_idle_connection_before_file_change() {
         .expect("initial")
         .finish()
         .await;
+    let binding = registry
+        .bind_app(&target, None, Some(&"a".repeat(64)))
+        .unwrap();
+    let page_lifetime = binding.lifetime().unwrap();
     assert!(
         registry
             .retire_plugin_package("example-tools", &"b".repeat(64))
@@ -493,6 +595,17 @@ async fn retiring_plugin_package_closes_idle_connection_before_file_change() {
             .is_empty()
     );
     assert_eq!(old.closed.load(Ordering::SeqCst), 0);
+    assert!(!page_lifetime.is_cancelled());
+    registry.revoke_plugin_app_bindings("other-plugin");
+    assert!(!page_lifetime.is_cancelled());
+    registry.revoke_plugin_app_bindings("example-tools");
+    assert!(page_lifetime.is_cancelled());
+    assert!(registry.current(&key).expect("registry").is_some());
+    assert!(
+        registry
+            .bind_app(&target, None, Some(&"a".repeat(64)))
+            .is_none()
+    );
     assert_eq!(
         registry
             .retire_plugin_package("example-tools", &"a".repeat(64))
@@ -501,6 +614,11 @@ async fn retiring_plugin_package_closes_idle_connection_before_file_change() {
         (vec![key.clone()], false)
     );
     assert!(registry.current(&key).expect("registry").is_none());
+    assert!(
+        registry
+            .resolve_app(&binding, "create_issue", Map::new())
+            .is_err()
+    );
     assert_eq!(old.closed.load(Ordering::SeqCst), 1);
 }
 
@@ -668,6 +786,7 @@ async fn long_description_warnings_do_not_block_loading_or_calls_and_clear_on_re
         }],
         structured_content: Some(json!({"id":1})),
         is_error: false,
+        meta: None,
     });
     let short = FixtureConnection::new(vec![tool(json!({"type":"object"}))]);
     let registry = test_registry(FixtureFactory::new(vec![connection.clone(), short]));
@@ -742,6 +861,111 @@ async fn long_description_warnings_do_not_block_loading_or_calls_and_clear_on_re
 }
 
 #[tokio::test]
+async fn result_projection_deduplicates_only_equivalent_structured_text() {
+    let schema = McpSchemaEngine::new(1);
+    let compiled = schema
+        .compile_tool(tool(json!({"type": "object"})))
+        .await
+        .expect("compile");
+    let structured = json!({"id": 1, "items": ["a", "b"]});
+    let equivalent = " {\n\"items\": [\"a\", \"b\"], \"id\": 1\n} ";
+    for (structured_content, texts, retained) in [
+        (Some(structured.clone()), vec![equivalent], vec![]),
+        (
+            Some(structured.clone()),
+            vec![
+                "created",
+                equivalent,
+                "{\"id\":2}",
+                "{invalid JSON",
+                equivalent,
+            ],
+            vec!["created", "{\"id\":2}", "{invalid JSON"],
+        ),
+        (
+            Some(structured.clone()),
+            vec!["{\"id\":1,\"items\":[\"b\",\"a\"]}", "Result: {\"id\":1}"],
+            vec!["{\"id\":1,\"items\":[\"b\",\"a\"]}", "Result: {\"id\":1}"],
+        ),
+        (
+            None,
+            vec![equivalent, equivalent],
+            vec![equivalent, equivalent],
+        ),
+    ] {
+        let expected = retained
+            .into_iter()
+            .map(|text| ToolResultPart::text(text.to_owned()))
+            .chain(structured_content.clone().map(ToolResultPart::json))
+            .collect::<Vec<_>>();
+        for is_error in [false, true] {
+            let result = result::project_result(
+                McpRawCallResult {
+                    content: texts
+                        .iter()
+                        .map(|text| McpRawContent::Text {
+                            text: (*text).to_owned(),
+                        })
+                        .collect(),
+                    structured_content: structured_content.clone(),
+                    is_error,
+                    meta: None,
+                },
+                &compiled,
+                &schema,
+                None,
+                &UnavailableMcpImageMaterializer,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("project");
+            assert_eq!(result.content.as_parts(), expected);
+            assert_eq!(result.is_error, is_error);
+            assert!(result.remote_may_have_executed);
+        }
+    }
+}
+
+#[tokio::test]
+async fn result_projection_keeps_limits_and_schema_validation_for_duplicate_content() {
+    let schema = McpSchemaEngine::new(1);
+    let compiled = schema
+        .compile_tool(tool(json!({"type": "object"})))
+        .await
+        .expect("compile");
+    for (structured, expected) in [
+        (
+            json!({"id": "invalid"}),
+            McpCallFailureKind::UnsupportedResult,
+        ),
+        (
+            json!({"id": 1, "text": "x".repeat(1024 * 1024)}),
+            McpCallFailureKind::ResultLimit,
+        ),
+    ] {
+        let failure = result::project_result(
+            McpRawCallResult {
+                content: vec![McpRawContent::Text {
+                    text: structured.to_string(),
+                }],
+                structured_content: Some(structured),
+                is_error: false,
+                meta: None,
+            },
+            &compiled,
+            &schema,
+            None,
+            &UnavailableMcpImageMaterializer,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("reject invalid or oversized result");
+        assert_eq!(failure.kind, expected);
+        assert!(failure.remote_may_have_executed);
+    }
+}
+
+#[tokio::test]
 async fn refresh_compiles_schema_and_call_projects_ordered_content() {
     let connection = FixtureConnection::new(vec![tool(json!({
         "type": "object",
@@ -764,6 +988,7 @@ async fn refresh_compiles_schema_and_call_projects_ordered_content() {
         ],
         structured_content: Some(json!({"id": 1})),
         is_error: false,
+        meta: None,
     });
     let registry = test_registry(FixtureFactory::new(vec![connection.clone()]));
     let refresh = registry
@@ -843,6 +1068,7 @@ async fn fixed_gateway_freezes_real_identity_and_preserves_remote_error_content(
         }],
         structured_content: None,
         is_error: true,
+        meta: None,
     });
     let registry = Arc::new(test_registry(FixtureFactory::new(vec![connection])));
     registry
@@ -997,6 +1223,7 @@ async fn unsupported_content_reports_that_remote_may_have_executed() {
         content: vec![McpRawContent::Audio],
         structured_content: None,
         is_error: false,
+        meta: None,
     });
     let registry = test_registry(FixtureFactory::new(vec![connection]));
     registry
@@ -1108,4 +1335,77 @@ async fn plugin_retirement_reports_close_failure() {
             .1
     );
     assert_eq!(connection.closed.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn ui_reads_require_declared_source_and_retirement_rejects_inflight_results() {
+    let mut ui_tool = tool(json!({"type":"object"}));
+    ui_tool.meta = Some(json!({"ui":{"resourceUri":"ui://fixture/card"}}));
+    let connection = FixtureConnection::new(vec![ui_tool]);
+    let next = FixtureConnection::new(vec![]);
+    let registry = Arc::new(test_registry(FixtureFactory::new(vec![
+        connection.clone(),
+        next,
+    ])));
+    registry
+        .refresh(
+            candidate(server(1)),
+            None,
+            McpRuntimeConfig::test_default(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .finish()
+        .await;
+    let target = assistant_protocol::McpServerTarget {
+        source: assistant_protocol::McpServerSource::User,
+        server_key: McpServerKey::new("github").unwrap(),
+    };
+    assert!(
+        registry
+            .read_ui_resource(&target, "ui://fixture/card", CancellationToken::new())
+            .await
+            .is_ok()
+    );
+    assert!(
+        registry
+            .read_ui_resource(&target, "ui://fixture/unknown", CancellationToken::new())
+            .await
+            .is_err()
+    );
+    let wrong = assistant_protocol::McpServerTarget {
+        source: assistant_protocol::McpServerSource::Plugin("wrong".into()),
+        ..target.clone()
+    };
+    assert!(
+        registry
+            .read_ui_resource(&wrong, "ui://fixture/card", CancellationToken::new())
+            .await
+            .is_err()
+    );
+    connection.ui_blocked.store(true, Ordering::SeqCst);
+    // 清除上一次成功读取的 Notify permit，再等待真正的在途读取进入 Adapter。
+    connection.ui_read_started.notified().await;
+    let reader = registry.clone();
+    let request = tokio::spawn(async move {
+        reader
+            .read_ui_resource(&target, "ui://fixture/card", CancellationToken::new())
+            .await
+    });
+    connection.ui_read_started.notified().await;
+    registry
+        .refresh(
+            candidate(server(2)),
+            None,
+            McpRuntimeConfig::test_default(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .finish()
+        .await;
+    assert!(request.await.unwrap().is_err());
+    assert_eq!(connection.closed.load(Ordering::SeqCst), 1);
+    registry.shutdown().await.unwrap();
 }

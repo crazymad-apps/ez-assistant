@@ -136,6 +136,19 @@ impl LocalRuntimeStore {
         }
     }
 
+    pub(crate) async fn bind_plugin_organization(
+        &self,
+        key: crate::access::enterprise::UserKey,
+        legacy_home: bool,
+    ) -> Result<(), StoreError> {
+        self.request(|reply| Command::BindPluginOrganization {
+            key,
+            legacy_home,
+            reply,
+        })
+        .await
+    }
+
     async fn enqueue(&self, command: Command) -> Result<(), StoreError> {
         use std::sync::atomic::Ordering;
 
@@ -204,6 +217,54 @@ impl LocalRuntimeStore {
 }
 
 impl RuntimeStore for LocalRuntimeStore {
+    fn publish_message_card(
+        &self,
+        card: assistant_runtime::NewMessageCard,
+    ) -> StoreFuture<'_, assistant_runtime::StoredMessageCard> {
+        Box::pin(async move {
+            self.request(|reply| Command::PublishMessageCard { card, reply })
+                .await
+        })
+    }
+    fn list_message_cards(
+        &self,
+        request: assistant_protocol::ListMessageCardsRequest,
+    ) -> StoreFuture<'_, assistant_protocol::ListMessageCardsResult> {
+        Box::pin(async move {
+            self.request(|reply| Command::ListMessageCards { request, reply })
+                .await
+        })
+    }
+    fn get_message_card(
+        &self,
+        owner: assistant_protocol::ConversationOwner,
+        card_id: String,
+    ) -> StoreFuture<'_, Option<assistant_runtime::StoredMessageCard>> {
+        Box::pin(async move {
+            self.request(|reply| Command::GetMessageCard {
+                owner,
+                card_id,
+                reply,
+            })
+            .await
+        })
+    }
+    fn save_message_card_snapshot(
+        &self,
+        write: assistant_runtime::MessageCardSnapshotWrite,
+    ) -> StoreFuture<'_, assistant_protocol::SaveMessageCardSnapshotResult> {
+        Box::pin(async move {
+            self.request(|reply| Command::SaveMessageCardSnapshot { write, reply })
+                .await
+        })
+    }
+    fn queued_input_ids(&self) -> StoreFuture<'_, Vec<assistant_protocol::InputId>> {
+        Box::pin(async move {
+            self.request(|reply| Command::QueuedInputIds { reply })
+                .await
+        })
+    }
+
     fn load_conversation_history(
         &self,
         owner: assistant_protocol::ConversationOwner,
@@ -410,7 +471,7 @@ impl RuntimeStore for LocalRuntimeStore {
     fn put_model_fixed_config(
         &self,
         config: assistant_protocol::ModelFixedConfig,
-        server_history_key: Option<String>,
+        server_history_key: Option<assistant_runtime::FixedModelHistoryInvalidation>,
     ) -> StoreFuture<'_, ()> {
         Box::pin(async move {
             self.request(|reply| Command::PutModelFixedConfig {
@@ -424,7 +485,7 @@ impl RuntimeStore for LocalRuntimeStore {
     fn reset_model_fixed_config(
         &self,
         selection: assistant_protocol::ModelSelection,
-        server_history_key: Option<String>,
+        server_history_key: Option<assistant_runtime::FixedModelHistoryInvalidation>,
     ) -> StoreFuture<'_, ()> {
         Box::pin(async move {
             self.request(|reply| Command::ResetModelFixedConfig {

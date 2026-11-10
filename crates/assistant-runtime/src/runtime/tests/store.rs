@@ -281,6 +281,35 @@ impl FaultInjectingStore {
 }
 
 impl RuntimeStore for FaultInjectingStore {
+    fn publish_message_card(
+        &self,
+        card: crate::NewMessageCard,
+    ) -> StoreFuture<'_, crate::StoredMessageCard> {
+        self.inner.publish_message_card(card)
+    }
+    fn list_message_cards(
+        &self,
+        request: assistant_protocol::ListMessageCardsRequest,
+    ) -> StoreFuture<'_, assistant_protocol::ListMessageCardsResult> {
+        self.inner.list_message_cards(request)
+    }
+    fn get_message_card(
+        &self,
+        owner: assistant_protocol::ConversationOwner,
+        id: String,
+    ) -> StoreFuture<'_, Option<crate::StoredMessageCard>> {
+        self.inner.get_message_card(owner, id)
+    }
+    fn save_message_card_snapshot(
+        &self,
+        write: crate::MessageCardSnapshotWrite,
+    ) -> StoreFuture<'_, assistant_protocol::SaveMessageCardSnapshotResult> {
+        self.inner.save_message_card_snapshot(write)
+    }
+    fn queued_input_ids(&self) -> StoreFuture<'_, Vec<assistant_protocol::InputId>> {
+        self.inner.queued_input_ids()
+    }
+
     fn load_conversation_history(
         &self,
         owner: assistant_protocol::ConversationOwner,
@@ -400,7 +429,7 @@ impl RuntimeStore for FaultInjectingStore {
     fn put_model_fixed_config(
         &self,
         config: assistant_protocol::ModelFixedConfig,
-        server_history_key: Option<String>,
+        server_history_key: Option<crate::FixedModelHistoryInvalidation>,
     ) -> StoreFuture<'_, ()> {
         self.inner
             .put_model_fixed_config(config, server_history_key)
@@ -408,7 +437,7 @@ impl RuntimeStore for FaultInjectingStore {
     fn reset_model_fixed_config(
         &self,
         selection: assistant_protocol::ModelSelection,
-        server_history_key: Option<String>,
+        server_history_key: Option<crate::FixedModelHistoryInvalidation>,
     ) -> StoreFuture<'_, ()> {
         self.inner
             .reset_model_fixed_config(selection, server_history_key)

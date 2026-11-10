@@ -52,6 +52,7 @@ function renderPage(installed: InstalledPluginSnapshot | null, cleanup_blocked =
     settings: { mcp: new McpSettingsStore(() => runtime) },
     local_runtime_client: { command, listPluginConfigFiles: vi.fn(async () => ({ files: [] })) },
     local_connection: { capabilities: { mode: "enterprise" } },
+    local_projection: { application: null, is_stale: true },
   } as unknown as RootStore;
   render(<AppMessageProvider><RootStoreProvider store={store}><PluginSettingsPage onDirtyChange={vi.fn()} /></RootStoreProvider></AppMessageProvider>);
   return command;

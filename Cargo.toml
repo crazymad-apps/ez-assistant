@@ -21,15 +21,21 @@ members = [
     "tools/runtime-harness",
     "tools/safety-demo",
 ]
+exclude = ["vendor/wry", "vendor/tauri-plugin-updater"]
 resolver = "3"
+
+# Windows 必须在 Tauri 凭据初始化前落实 main-frame 标记；来源、补丁与移除条件见 vendor/README.md。
+[patch.crates-io]
+wry = { path = "vendor/wry", version = "=0.55.1" }
+tauri-plugin-updater = { path = "vendor/tauri-plugin-updater", version = "=2.12.0" }
 
 [workspace.package]
 edition = "2024"
 license = "MIT"
-version = "0.32.1"
+version = "0.33.0"
 
 [workspace.metadata.ez-assistant]
-min_compatible_version = "0.32.1"
+min_compatible_version = "0.33.0"
 
 [workspace.dependencies]
 sha2 = "0.10.9"
@@ -91,3 +97,7 @@ unsafe_code = "forbid"
 debug = "line-tables-only"
 split-debuginfo = "packed"
 incremental = false
+
+# Host 启动和桌面发现会校验完整可执行文件。开发版也需要优化 SHA-256。
+[profile.dev.package."sha2:0.10.9"]
+opt-level = 3

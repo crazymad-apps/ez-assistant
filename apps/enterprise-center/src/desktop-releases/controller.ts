@@ -14,7 +14,7 @@ import { DesktopReleaseService } from './service.js';
 import { IdentityError } from '../identity/errors.js';
 
 @Controller('api')
-@Access('admin')
+@Access('system')
 @ApiTags('desktop-releases')
 @ApiExtraModels(SiteContent)
 @ApiDefaultResponse({ type: CenterErrorResponse, description: '权限、发布状态或文件校验失败' })
@@ -55,7 +55,7 @@ export class DesktopReleasesController {
   get(@Param('version') version: string, @Req() request: AuthenticatedRequest) { return this.releases.get(version, request.token); }
 
   @Post('desktop-releases/packages')
-  @Access('admin', 'desktop_release_uploaded')
+  @Access('system', 'desktop_release_uploaded')
   @RouteConfig({ desktopReleaseUpload: true })
   @ApiOperation({ operationId: 'uploadDesktopRelease', summary: '上传平台安装文件，新建草稿或覆盖同版本平台文件并保留发布状态' })
   @ApiConsumes('multipart/form-data')
@@ -75,7 +75,7 @@ export class DesktopReleasesController {
   }
 
   @Put('desktop-releases/:version/notes')
-  @Access('admin', 'desktop_release_notes_changed')
+  @Access('system', 'desktop_release_notes_changed')
   @RouteConfig({ desktopReleaseNotes: true })
   @ApiOperation({ operationId: 'updateDesktopReleaseNotes', summary: '修改更新说明' })
   @ApiParam({ name: 'version' })
@@ -86,7 +86,7 @@ export class DesktopReleasesController {
   }
 
   @Put('desktop-releases/:version/targets/:target/publication')
-  @Access('admin', 'desktop_release_publication_changed')
+  @Access('system', 'desktop_release_publication_changed')
   @ApiOperation({ operationId: 'setDesktopReleasePublication', summary: '发布或撤回一个平台' })
   @ApiParam({ name: 'version' })
   @ApiParam({ name: 'target' })

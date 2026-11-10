@@ -742,6 +742,24 @@
 }
 
 // 模型管理页面共用行、表单和参考表；长模型 ID 在窄窗口中仍可辨认。
+.models_home { display: grid; min-width: 0; align-content: start; gap: 16px; > p { margin: 0; } }
+.model_defaults { min-width: 0; border: 1px solid var(--ez-border); border-radius: var(--ez-radius-medium); }
+.model_selection { min-width: 0; padding: 8px 12px; + .model_selection { border-top: 1px solid var(--ez-border); } }
+.model_selection_row {
+  display: flex; min-width: 0; min-height: var(--ez-control-height-default); align-items: center; justify-content: space-between; gap: 16px;
+  > strong { flex: 0 0 auto; font-weight: 500; }
+}
+.model_selection_value { min-width: 0; max-width: 65%; color: var(--ez-text-secondary); text-align: right; overflow-wrap: anywhere; }
+.model_selection_value .vision_model_select {
+  max-width: 100%; padding: 0 10px; border: 1px solid var(--ez-border-strong); border-radius: var(--ez-radius-small);
+  color: var(--ez-text-secondary); background: var(--ez-surface); font-size: var(--ez-font-base);
+  &:hover:not(:disabled) { color: var(--ez-text); background: var(--ez-surface-subtle); }
+  &:focus-visible { @include fields.focus-border; }
+}
+.model_selection_issue { margin: 6px 0 0; color: var(--ez-warning-text); font-size: var(--ez-font-small); }
+.model_group_messages { display: grid; gap: 6px; padding: 12px; color: var(--ez-warning-text); font-size: var(--ez-font-small); > p { margin: 0; } }
+.model_empty { margin: 0; padding: 12px 32px; color: var(--ez-text-muted); }
+
 .model_rows {
   display: grid;
   margin-block: 12px;
@@ -755,6 +773,21 @@
     > span { display: grid; min-width: 0; gap: 4px; overflow-wrap: anywhere; }
     small { color: var(--ez-text-muted); font-size: var(--ez-font-small); }
   }
+}
+.model_provider_rows {
+  margin: 0;
+  > button {
+    min-height: 48px; padding: 10px 12px 10px 32px;
+    border-radius: 0;
+    &:last-child { border-bottom: 0; border-radius: 0 0 var(--ez-radius-medium) var(--ez-radius-medium); }
+    strong { font-weight: 600; }
+    small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    > svg { flex: 0 0 auto; color: var(--ez-text-muted); }
+  }
+}
+@media (max-width: 560px) {
+  .model_selection_row { flex-wrap: wrap; gap: 6px 12px; }
+  .model_selection_value { max-width: 100%; margin-left: auto; }
 }
 .model_section_heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 20px; h4 { margin: 0; } }
 .model_search { width: 100%; min-height: var(--ez-control-height); margin-top: 10px; padding: 0 10px; border: 1px solid var(--ez-border-strong); border-radius: var(--ez-radius-small); background: var(--ez-surface); color: var(--ez-text); &:focus { @include fields.focus-border; } }

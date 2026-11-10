@@ -1,3 +1,4 @@
+import { UiResources } from './UiResources';
 import { ManagedServerEditor } from "./ManagedServerEditor";
 import { copyText } from "../../../../platform/clipboard";
 import { observer } from "mobx-react-lite";
@@ -111,6 +112,7 @@ const IndependentServerEditor = observer(function IndependentServerEditor(props:
       </div>
       {props.server && priorityLabel(props.server) && <p role="status">{priorityLabel(props.server)}；当前配置保留，可继续编辑。</p>}
       <p>测试不会保存或应用配置。本地命令以当前用户权限启动，请确认来源可信。</p>
+      {props.server && <UiResources server={props.server} />}
       <div className={styles.actions}>
         <button disabled={busy || settings.testing} onClick={() => { const server = candidate(); if (server) void settings.test(server); }} type="button">测试连接</button>
         {settings.testing && <button onClick={() => settings.cancelTest()} type="button">取消测试</button>}

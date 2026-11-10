@@ -5,7 +5,7 @@ export const requestLimit = 32 * 1024 * 1024;
 const totalLimit = 128 * 1024 * 1024;
 
 /** 只提取准入字段；原始 Buffer 始终用于出站，避免重编码改变数字和未知字段。 */
-export type RequestModel = { model: string; stream: boolean; store?: boolean; previous_response_id?: string | null };
+export type RequestModel = { external_history?: true; streaming_compaction?: true; model: string; stream: boolean; store?: boolean; previous_response_id?: string | null };
 
 export type ModelOperation = 'generation' | 'compact' | 'input_tokens';
 
@@ -33,8 +33,16 @@ export function requestModel(body: Buffer, operation: ModelOperation = 'generati
     ))
   )
     throw new ControlError('llm_request_invalid');
+  // 仅末尾唯一 trigger 的无状态显式压缩进入既有 compact 准入；不放开自动压缩或普通生成混用。
+  const triggers = Array.isArray(object.input) ? object.input.filter(item => item && typeof item === 'object' && item.type === 'compaction_trigger') : [];
+  const streamingCompaction = operation === 'generation' && triggers.length === 1 &&
+    object.input instanceof Array && object.input.at(-1) === triggers[0] &&
+    Object.keys(triggers[0]).every(key => key === 'type') && object.stream === true && object.store === false &&
+    !Object.hasOwn(object, 'previous_response_id') &&
+    Object.keys(object).every(key => ['model', 'input', 'instructions', 'stream', 'store'].includes(key)) &&
+    (object.instructions === undefined || typeof object.instructions === 'string');
   if (Object.hasOwn(object, 'context_management') || Object.hasOwn(object, 'compaction_trigger') ||
-    (Array.isArray(object.input) && object.input.some(item => item && typeof item === 'object' && item.type === 'compaction_trigger')))
+    (triggers.length > 0 && !streamingCompaction))
     throw new ControlError('llm_request_invalid');
   if (operation !== 'generation') {
     if (object.stream !== undefined || Object.hasOwn(object, 'store') || Object.hasOwn(object, 'previous_response_id') || !Array.isArray(object.input))
@@ -61,12 +69,16 @@ export function requestModel(body: Buffer, operation: ModelOperation = 'generati
       while (/\s/.test(text[next] ?? '') && next < text.length) next++;
       if (text[next] !== ':') continue;
       const key: string = JSON.parse(text.slice(start, i + 1));
-      if (!['model', 'stream', 'store', 'previous_response_id', 'input', 'instructions', 'context_management', 'compaction_trigger'].includes(key)) continue;
+      if (!['model', 'stream', 'store', 'previous_response_id', 'input', 'instructions', 'context_management', 'compaction_trigger', 'conversation'].includes(key)) continue;
       if (keys.has(key)) throw new ControlError('llm_request_invalid');
       keys.add(key);
     }
   }
+  const externalHistory = object.conversation != null || (Array.isArray(object.input) &&
+    object.input.some(item => item && typeof item === 'object' && item.type === 'item_reference'));
   return {
+    ...(externalHistory ? { external_history: true as const } : {}),
+    ...(streamingCompaction ? { streaming_compaction: true as const } : {}),
     model: object.model, stream: object.stream === true,
     ...(Object.hasOwn(object, 'store') ? { store: object.store as boolean } : {}),
     ...(Object.hasOwn(object, 'previous_response_id') ? { previous_response_id: object.previous_response_id as string | null } : {}),

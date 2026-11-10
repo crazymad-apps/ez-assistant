@@ -1,3 +1,4 @@
+import { singleModelPolicy } from '../support/model-policy.js';
 import { randomUUID, createHash } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
@@ -166,7 +167,7 @@ it('正式双协议直连与企业下发代理使用同一本机方言，覆盖 
     }
     await personal.command('set_default_model', { selection: localSelection });
     await personal.command('set_auxiliary_vision_model', { selection: { ...localSelection, model_id: 'vision-fixture' } });
-    await center('PUT', 'model-settings', { default_model: remoteSelection });
+    await center('PUT', 'model-settings', singleModelPolicy(await center('GET', 'model-settings'), remoteSelection));
     if (!enterprise.child || enterprise.child.exitCode !== null) await enterprise.start();
     await enterprise.command('refresh_model_source');
     const remoteSettings = await enterprise.command<{ default_model: Selection }>('get_model_settings');

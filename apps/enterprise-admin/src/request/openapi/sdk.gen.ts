@@ -2,7 +2,7 @@
 
 import { type Client, type ClientMeta, formDataBodySerializer, type Options as Options2, type RequestResult, type TDataShape } from './client';
 import { client } from './client.gen';
-import type { ApplyHostDeviceData, ApplyHostDeviceErrors, ApplyHostDeviceResponses, ChangeOwnPasswordData, ChangeOwnPasswordErrors, ChangeOwnPasswordResponses, CreateAgentData, CreateAgentErrors, CreateAgentResponses, CreateModelProviderData, CreateModelProviderErrors, CreateModelProviderResponses, CreateUserData, CreateUserErrors, CreateUserResponses, DeleteAgentData, DeleteAgentErrors, DeleteAgentResponses, DeleteModelProviderData, DeleteModelProviderErrors, DeleteModelProviderResponses, DeleteUserData, DeleteUserErrors, DeleteUserResponses, DiscoverDesktopUpdateData, DiscoverDesktopUpdateErrors, DiscoverDesktopUpdateResponses, DownloadDesktopReleaseData, DownloadDesktopReleaseErrors, DownloadDesktopReleaseResponses, DownloadRuntimePluginPackageData, DownloadRuntimePluginPackageErrors, DownloadRuntimePluginPackageResponses, EndHostRegistrationData, EndHostRegistrationErrors, EndHostRegistrationResponses, GetAdminFeedbackData, GetAdminFeedbackErrors, GetAdminFeedbackResponses, GetAgentData, GetAgentErrors, GetAgentResponses, GetCenterInfoData, GetCenterInfoErrors, GetCenterInfoResponses, GetCurrentIdentityData, GetCurrentIdentityErrors, GetCurrentIdentityResponses, GetCurrentPluginPackageData, GetCurrentPluginPackageErrors, GetCurrentPluginPackageResponses, GetDesktopReleaseData, GetDesktopReleaseErrors, GetDesktopReleaseResponses, GetHostDeviceData, GetHostDeviceErrors, GetHostDeviceResponses, GetHostRegistrationData, GetHostRegistrationErrors, GetHostRegistrationResponses, GetLlmCallData, GetLlmCallErrors, GetLlmCallResponses, GetLlmRecordingSettingsData, GetLlmRecordingSettingsErrors, GetLlmRecordingSettingsResponses, GetLlmSnapshotData, GetLlmSnapshotErrors, GetLlmSnapshotResponses, GetLlmUsageData, GetLlmUsageErrors, GetLlmUsageResponses, GetModelCatalogData, GetModelCatalogErrors, GetModelCatalogResponses, GetModelProviderData, GetModelProviderErrors, GetModelProviderResponses, GetModelProviderUsageData, GetModelProviderUsageErrors, GetModelProviderUsageResponses, GetModelSettingsData, GetModelSettingsErrors, GetModelSettingsResponses, GetModelTemplateStatusData, GetModelTemplateStatusErrors, GetModelTemplateStatusResponses, GetOwnFeedbackData, GetOwnFeedbackErrors, GetOwnFeedbackResponses, GetPluginData, GetPluginErrors, GetPluginResponses, GetPublishedDesktopReleaseData, GetPublishedDesktopReleaseErrors, GetPublishedDesktopReleaseResponses, GetRuntimeModelConfigurationData, GetRuntimeModelConfigurationErrors, GetRuntimeModelConfigurationResponses, GetRuntimePluginData, GetRuntimePluginErrors, GetRuntimePluginResponses, GetSiteChangelogData, GetSiteChangelogErrors, GetSiteChangelogResponses, GetSiteDownloadsData, GetSiteDownloadsErrors, GetSiteDownloadsResponses, HandleFeedbackData, HandleFeedbackErrors, HandleFeedbackResponses, ListAdminFeedbackData, ListAdminFeedbackErrors, ListAdminFeedbackResponses, ListAgentsData, ListAgentsErrors, ListAgentsResponses, ListDesktopReleasesData, ListDesktopReleasesErrors, ListDesktopReleasesResponses, ListFixedModelConfigurationsData, ListFixedModelConfigurationsErrors, ListFixedModelConfigurationsResponses, ListHostDevicesData, ListHostDevicesErrors, ListHostDevicesResponses, ListLlmCallsData, ListLlmCallsErrors, ListLlmCallsResponses, ListLlmUsageModelsData, ListLlmUsageModelsErrors, ListLlmUsageModelsResponses, ListManagementAuditData, ListManagementAuditErrors, ListManagementAuditResponses, ListModelProvidersData, ListModelProvidersErrors, ListModelProvidersResponses, ListOwnFeedbackData, ListOwnFeedbackErrors, ListOwnFeedbackResponses, ListPluginsData, ListPluginsErrors, ListPluginsResponses, ListRuntimeAgentsData, ListRuntimeAgentsErrors, ListRuntimeAgentsResponses, ListRuntimePluginsData, ListRuntimePluginsErrors, ListRuntimePluginsResponses, ListUsersData, ListUsersErrors, ListUsersResponses, LoginData, LoginErrors, LoginResponses, LogoutData, LogoutErrors, LogoutResponses, ManageHostDeviceData, ManageHostDeviceErrors, ManageHostDeviceResponses, PreviewDesktopReleaseNotesData, PreviewDesktopReleaseNotesErrors, PreviewDesktopReleaseNotesResponses, QueryModelConfigurationData, QueryModelConfigurationErrors, QueryModelConfigurationResponses, RefreshModelCatalogData, RefreshModelCatalogErrors, RefreshModelCatalogResponses, ReloadModelTemplatesData, ReloadModelTemplatesErrors, ReloadModelTemplatesResponses, ResetModelConfigurationData, ResetModelConfigurationErrors, ResetModelConfigurationResponses, ResetUserPasswordData, ResetUserPasswordErrors, ResetUserPasswordResponses, ResolveRuntimePluginData, ResolveRuntimePluginErrors, ResolveRuntimePluginResponses, SaveLlmRecordingSettingsData, SaveLlmRecordingSettingsErrors, SaveLlmRecordingSettingsResponses, SaveModelConfigurationData, SaveModelConfigurationErrors, SaveModelConfigurationResponses, SaveModelSettingsData, SaveModelSettingsErrors, SaveModelSettingsResponses, SetDesktopReleasePublicationData, SetDesktopReleasePublicationErrors, SetDesktopReleasePublicationResponses, SetPluginPublicationData, SetPluginPublicationErrors, SetPluginPublicationResponses, SubmitFeedbackData, SubmitFeedbackErrors, SubmitFeedbackResponses, TestModelConfigurationData, TestModelConfigurationErrors, TestModelConfigurationResponses, UpdateAgentData, UpdateAgentErrors, UpdateAgentResponses, UpdateDesktopReleaseNotesData, UpdateDesktopReleaseNotesErrors, UpdateDesktopReleaseNotesResponses, UpdateModelProviderData, UpdateModelProviderErrors, UpdateModelProviderResponses, UpdatePluginData, UpdatePluginErrors, UpdatePluginResponses, UpdateUserData, UpdateUserErrors, UpdateUserResponses, UploadDesktopReleaseData, UploadDesktopReleaseErrors, UploadDesktopReleaseResponses, UploadPluginPackageData, UploadPluginPackageErrors, UploadPluginPackageResponses } from './types.gen';
+import type { AddSystemOrganizationMemberData, AddSystemOrganizationMemberErrors, AddSystemOrganizationMemberResponses, ApplyHostDeviceData, ApplyHostDeviceErrors, ApplyHostDeviceResponses, ChangeOwnPasswordData, ChangeOwnPasswordErrors, ChangeOwnPasswordResponses, CreateAgentData, CreateAgentErrors, CreateAgentResponses, CreateModelProviderData, CreateModelProviderErrors, CreateModelProviderResponses, CreateOrganizationData, CreateOrganizationErrors, CreateOrganizationResponses, CreateUserData, CreateUserErrors, CreateUserResponses, DeleteAgentData, DeleteAgentErrors, DeleteAgentResponses, DeleteModelProviderData, DeleteModelProviderErrors, DeleteModelProviderResponses, DeleteUserData, DeleteUserErrors, DeleteUserResponses, DiscoverDesktopUpdateData, DiscoverDesktopUpdateErrors, DiscoverDesktopUpdateResponses, DownloadDesktopReleaseData, DownloadDesktopReleaseErrors, DownloadDesktopReleaseResponses, DownloadRuntimePluginPackageData, DownloadRuntimePluginPackageErrors, DownloadRuntimePluginPackageResponses, EndHostRegistrationData, EndHostRegistrationErrors, EndHostRegistrationResponses, ExchangeAccessScopeData, ExchangeAccessScopeErrors, ExchangeAccessScopeResponses, FindOrganizationMemberCandidateData, FindOrganizationMemberCandidateErrors, FindOrganizationMemberCandidateResponses, GetAdminFeedbackData, GetAdminFeedbackErrors, GetAdminFeedbackResponses, GetAgentData, GetAgentErrors, GetAgentResponses, GetCenterInfoData, GetCenterInfoErrors, GetCenterInfoResponses, GetCurrentIdentityData, GetCurrentIdentityErrors, GetCurrentIdentityResponses, GetCurrentPluginPackageData, GetCurrentPluginPackageErrors, GetCurrentPluginPackageResponses, GetDesktopReleaseData, GetDesktopReleaseErrors, GetDesktopReleaseResponses, GetHostDeviceData, GetHostDeviceErrors, GetHostDeviceResponses, GetHostRegistrationData, GetHostRegistrationErrors, GetHostRegistrationResponses, GetLlmCallData, GetLlmCallErrors, GetLlmCallResponses, GetLlmRecordingSettingsData, GetLlmRecordingSettingsErrors, GetLlmRecordingSettingsResponses, GetLlmSnapshotData, GetLlmSnapshotErrors, GetLlmSnapshotResponses, GetLlmUsageData, GetLlmUsageErrors, GetLlmUsageResponses, GetModelCatalogData, GetModelCatalogErrors, GetModelCatalogResponses, GetModelProviderData, GetModelProviderErrors, GetModelProviderResponses, GetModelProviderUsageData, GetModelProviderUsageErrors, GetModelProviderUsageResponses, GetModelSettingsData, GetModelSettingsErrors, GetModelSettingsResponses, GetModelTemplateStatusData, GetModelTemplateStatusErrors, GetModelTemplateStatusResponses, GetOwnFeedbackData, GetOwnFeedbackErrors, GetOwnFeedbackResponses, GetPluginData, GetPluginErrors, GetPluginResponses, GetPublishedDesktopReleaseData, GetPublishedDesktopReleaseErrors, GetPublishedDesktopReleaseResponses, GetRuntimeModelConfigurationData, GetRuntimeModelConfigurationErrors, GetRuntimeModelConfigurationResponses, GetRuntimePluginData, GetRuntimePluginErrors, GetRuntimePluginResponses, GetSiteChangelogData, GetSiteChangelogErrors, GetSiteChangelogResponses, GetSiteDownloadsData, GetSiteDownloadsErrors, GetSiteDownloadsResponses, HandleFeedbackData, HandleFeedbackErrors, HandleFeedbackResponses, ListAccessScopesData, ListAccessScopesErrors, ListAccessScopesResponses, ListAdminFeedbackData, ListAdminFeedbackErrors, ListAdminFeedbackResponses, ListAgentsData, ListAgentsErrors, ListAgentsResponses, ListDesktopReleasesData, ListDesktopReleasesErrors, ListDesktopReleasesResponses, ListFixedModelConfigurationsData, ListFixedModelConfigurationsErrors, ListFixedModelConfigurationsResponses, ListHostDevicesData, ListHostDevicesErrors, ListHostDevicesResponses, ListLlmCallsData, ListLlmCallsErrors, ListLlmCallsResponses, ListLlmUsageModelsData, ListLlmUsageModelsErrors, ListLlmUsageModelsResponses, ListManagementAuditData, ListManagementAuditErrors, ListManagementAuditResponses, ListModelProvidersData, ListModelProvidersErrors, ListModelProvidersResponses, ListOrganizationMembersData, ListOrganizationMembersErrors, ListOrganizationMembersResponses, ListOrganizationsData, ListOrganizationsErrors, ListOrganizationsResponses, ListOwnFeedbackData, ListOwnFeedbackErrors, ListOwnFeedbackResponses, ListPluginsData, ListPluginsErrors, ListPluginsResponses, ListRuntimeAgentsData, ListRuntimeAgentsErrors, ListRuntimeAgentsResponses, ListRuntimePluginsData, ListRuntimePluginsErrors, ListRuntimePluginsResponses, ListUsersData, ListUsersErrors, ListUsersResponses, LoginData, LoginErrors, LoginResponses, LogoutData, LogoutErrors, LogoutResponses, ManageHostDeviceData, ManageHostDeviceErrors, ManageHostDeviceResponses, PreviewDesktopReleaseNotesData, PreviewDesktopReleaseNotesErrors, PreviewDesktopReleaseNotesResponses, QueryModelConfigurationData, QueryModelConfigurationErrors, QueryModelConfigurationResponses, RefreshModelCatalogData, RefreshModelCatalogErrors, RefreshModelCatalogResponses, ReloadModelTemplatesData, ReloadModelTemplatesErrors, ReloadModelTemplatesResponses, RemoveOrganizationMemberData, RemoveOrganizationMemberErrors, RemoveOrganizationMemberResponses, RemoveSystemOrganizationMemberData, RemoveSystemOrganizationMemberErrors, RemoveSystemOrganizationMemberResponses, ResetModelConfigurationData, ResetModelConfigurationErrors, ResetModelConfigurationResponses, ResetUserPasswordData, ResetUserPasswordErrors, ResetUserPasswordResponses, ResolveRuntimePluginData, ResolveRuntimePluginErrors, ResolveRuntimePluginResponses, SaveLlmRecordingSettingsData, SaveLlmRecordingSettingsErrors, SaveLlmRecordingSettingsResponses, SaveModelConfigurationData, SaveModelConfigurationErrors, SaveModelConfigurationResponses, SaveModelSettingsData, SaveModelSettingsErrors, SaveModelSettingsResponses, SaveOrganizationMemberData, SaveOrganizationMemberErrors, SaveOrganizationMemberResponses, SetDesktopReleasePublicationData, SetDesktopReleasePublicationErrors, SetDesktopReleasePublicationResponses, SetPluginPublicationData, SetPluginPublicationErrors, SetPluginPublicationResponses, SubmitFeedbackData, SubmitFeedbackErrors, SubmitFeedbackResponses, TestModelConfigurationData, TestModelConfigurationErrors, TestModelConfigurationResponses, UpdateAgentData, UpdateAgentErrors, UpdateAgentResponses, UpdateDesktopReleaseNotesData, UpdateDesktopReleaseNotesErrors, UpdateDesktopReleaseNotesResponses, UpdateModelProviderData, UpdateModelProviderErrors, UpdateModelProviderResponses, UpdateOrganizationData, UpdateOrganizationErrors, UpdateOrganizationResponses, UpdatePluginData, UpdatePluginErrors, UpdatePluginResponses, UpdateSystemOrganizationMemberData, UpdateSystemOrganizationMemberErrors, UpdateSystemOrganizationMemberResponses, UpdateUserData, UpdateUserErrors, UpdateUserResponses, UploadDesktopReleaseData, UploadDesktopReleaseErrors, UploadDesktopReleaseResponses, UploadPluginPackageData, UploadPluginPackageErrors, UploadPluginPackageResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -28,7 +28,7 @@ export const getCenterInfo = <ThrowOnError extends boolean = false>(options?: Op
 });
 
 /**
- * 统一登录，返回内存 Token 和关联 LLM key；无 Cookie 操作
+ * 认证账号并签发未选择范围的 JWT；无 Cookie 操作
  */
 export const login = <ThrowOnError extends boolean = false>(options: Options<LoginData, ThrowOnError>): RequestResult<LoginResponses, LoginErrors, ThrowOnError> => (options.client ?? client).post<LoginResponses, LoginErrors, ThrowOnError>({
     responseType: 'json',
@@ -48,6 +48,30 @@ export const getCurrentIdentity = <ThrowOnError extends boolean = false>(options
     security: [{ scheme: 'bearer', type: 'http' }],
     url: '/api/auth/me',
     ...options
+});
+
+/**
+ * 按后台或客户端入口列出当前账号可选范围
+ */
+export const listAccessScopes = <ThrowOnError extends boolean = false>(options: Options<ListAccessScopesData, ThrowOnError>): RequestResult<ListAccessScopesResponses, ListAccessScopesErrors, ThrowOnError> => (options.client ?? client).get<ListAccessScopesResponses, ListAccessScopesErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/auth/scopes',
+    ...options
+});
+
+/**
+ * 显式选择范围，提交后撤销原 JWT；同范围不续期
+ */
+export const exchangeAccessScope = <ThrowOnError extends boolean = false>(options: Options<ExchangeAccessScopeData, ThrowOnError>): RequestResult<ExchangeAccessScopeResponses, ExchangeAccessScopeErrors, ThrowOnError> => (options.client ?? client).post<ExchangeAccessScopeResponses, ExchangeAccessScopeErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/auth/scope',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
 });
 
 /**
@@ -131,6 +155,93 @@ export const updateUser = <ThrowOnError extends boolean = false>(options: Option
 export const resetUserPassword = <ThrowOnError extends boolean = false>(options: Options<ResetUserPasswordData, ThrowOnError>): RequestResult<ResetUserPasswordResponses, ResetUserPasswordErrors, ThrowOnError> => (options.client ?? client).post<ResetUserPasswordResponses, ResetUserPasswordErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }],
     url: '/api/users/{id}/reset-password',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+export const listOrganizations = <ThrowOnError extends boolean = false>(options?: Options<ListOrganizationsData, ThrowOnError>): RequestResult<ListOrganizationsResponses, ListOrganizationsErrors, ThrowOnError> => (options?.client ?? client).get<ListOrganizationsResponses, ListOrganizationsErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/organizations',
+    ...options
+});
+
+export const createOrganization = <ThrowOnError extends boolean = false>(options: Options<CreateOrganizationData, ThrowOnError>): RequestResult<CreateOrganizationResponses, CreateOrganizationErrors, ThrowOnError> => (options.client ?? client).post<CreateOrganizationResponses, CreateOrganizationErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/organizations',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+export const updateOrganization = <ThrowOnError extends boolean = false>(options: Options<UpdateOrganizationData, ThrowOnError>): RequestResult<UpdateOrganizationResponses, UpdateOrganizationErrors, ThrowOnError> => (options.client ?? client).patch<UpdateOrganizationResponses, UpdateOrganizationErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/organizations/{id}',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+export const removeSystemOrganizationMember = <ThrowOnError extends boolean = false>(options: Options<RemoveSystemOrganizationMemberData, ThrowOnError>): RequestResult<RemoveSystemOrganizationMemberResponses, RemoveSystemOrganizationMemberErrors, ThrowOnError> => (options.client ?? client).delete<RemoveSystemOrganizationMemberResponses, RemoveSystemOrganizationMemberErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/organizations/{id}/members/{userId}',
+    ...options
+});
+
+export const updateSystemOrganizationMember = <ThrowOnError extends boolean = false>(options: Options<UpdateSystemOrganizationMemberData, ThrowOnError>): RequestResult<UpdateSystemOrganizationMemberResponses, UpdateSystemOrganizationMemberErrors, ThrowOnError> => (options.client ?? client).patch<UpdateSystemOrganizationMemberResponses, UpdateSystemOrganizationMemberErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/organizations/{id}/members/{userId}',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+export const addSystemOrganizationMember = <ThrowOnError extends boolean = false>(options: Options<AddSystemOrganizationMemberData, ThrowOnError>): RequestResult<AddSystemOrganizationMemberResponses, AddSystemOrganizationMemberErrors, ThrowOnError> => (options.client ?? client).post<AddSystemOrganizationMemberResponses, AddSystemOrganizationMemberErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/organizations/{id}/members/{userId}',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+export const listOrganizationMembers = <ThrowOnError extends boolean = false>(options?: Options<ListOrganizationMembersData, ThrowOnError>): RequestResult<ListOrganizationMembersResponses, ListOrganizationMembersErrors, ThrowOnError> => (options?.client ?? client).get<ListOrganizationMembersResponses, ListOrganizationMembersErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/organization-members',
+    ...options
+});
+
+export const findOrganizationMemberCandidate = <ThrowOnError extends boolean = false>(options: Options<FindOrganizationMemberCandidateData, ThrowOnError>): RequestResult<FindOrganizationMemberCandidateResponses, FindOrganizationMemberCandidateErrors, ThrowOnError> => (options.client ?? client).get<FindOrganizationMemberCandidateResponses, FindOrganizationMemberCandidateErrors, ThrowOnError>({
+    responseType: 'json',
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/organization-members/candidate',
+    ...options
+});
+
+export const removeOrganizationMember = <ThrowOnError extends boolean = false>(options: Options<RemoveOrganizationMemberData, ThrowOnError>): RequestResult<RemoveOrganizationMemberResponses, RemoveOrganizationMemberErrors, ThrowOnError> => (options.client ?? client).delete<RemoveOrganizationMemberResponses, RemoveOrganizationMemberErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/organization-members/{id}',
+    ...options
+});
+
+export const saveOrganizationMember = <ThrowOnError extends boolean = false>(options: Options<SaveOrganizationMemberData, ThrowOnError>): RequestResult<SaveOrganizationMemberResponses, SaveOrganizationMemberErrors, ThrowOnError> => (options.client ?? client).put<SaveOrganizationMemberResponses, SaveOrganizationMemberErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/api/organization-members/{id}',
     ...options,
     headers: {
         'Content-Type': 'application/json',

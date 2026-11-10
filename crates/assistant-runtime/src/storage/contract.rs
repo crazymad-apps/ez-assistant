@@ -78,6 +78,26 @@ pub struct LoadedSession {
 ///
 /// 该端口以业务原子操作表达 Runtime 对持久化的需求，禁止退化为通用 SQL 或键值接口。
 pub trait RuntimeStore: Send + Sync {
+    /// 核实当前 owner/Run 的 started 调用收据并原子发布；同一收据/调用只产生一张卡片。
+    fn publish_message_card(
+        &self,
+        card: crate::NewMessageCard,
+    ) -> StoreFuture<'_, crate::StoredMessageCard>;
+    /// 有界读取已加载轮次的卡片位置；不读取页面载荷或恢复执行。
+    fn list_message_cards(
+        &self,
+        request: assistant_protocol::ListMessageCardsRequest,
+    ) -> StoreFuture<'_, assistant_protocol::ListMessageCardsResult>;
+    fn get_message_card(
+        &self,
+        owner: assistant_protocol::ConversationOwner,
+        card_id: String,
+    ) -> StoreFuture<'_, Option<crate::StoredMessageCard>>;
+    /// 页面实例已由 Runtime 核实；持久事务只比较快照修订，不静默覆盖较新状态。
+    fn save_message_card_snapshot(
+        &self,
+        write: crate::MessageCardSnapshotWrite,
+    ) -> StoreFuture<'_, assistant_protocol::SaveMessageCardSnapshotResult>;
     /// 只读当前 owner 的历史值；不恢复为可执行 Run，也不以 SQL 控制行补造历史。
     fn load_conversation_history(
         &self,
@@ -148,13 +168,13 @@ pub trait RuntimeStore: Send + Sync {
     fn put_model_fixed_config(
         &self,
         config: assistant_protocol::ModelFixedConfig,
-        server_history_key: Option<String>,
+        server_history_key: Option<crate::FixedModelHistoryInvalidation>,
     ) -> StoreFuture<'_, ()>;
     /// 重置固定参数共享相同失效边界；不存在或同值操作传 None。
     fn reset_model_fixed_config(
         &self,
         selection: assistant_protocol::ModelSelection,
-        server_history_key: Option<String>,
+        server_history_key: Option<crate::FixedModelHistoryInvalidation>,
     ) -> StoreFuture<'_, ()>;
 
     /// 只查询标题；文件目录局部失败通过同一分页契约报告，不创建或恢复执行。
@@ -181,6 +201,9 @@ pub trait RuntimeStore: Send + Sync {
         &self,
         query: SessionSummaryQuery,
     ) -> StoreFuture<'_, Vec<assistant_protocol::SessionSummary>>;
+
+    /// 仅查询持久队列身份，包含尚未装配的会话。
+    fn queued_input_ids(&self) -> StoreFuture<'_, Vec<assistant_protocol::InputId>>;
 
     /// 恢复未完成提交并加载 Runtime 的结构化启动投影。
     fn load_runtime(&self) -> StoreFuture<'_, RecoveredRuntime>;

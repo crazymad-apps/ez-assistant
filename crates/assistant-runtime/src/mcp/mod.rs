@@ -28,7 +28,9 @@ pub(crate) use discovery::{
 pub use managed::ManagedMcpServerDefinition;
 #[cfg(test)]
 pub(crate) use registry::ResolvedMcpInvocation;
+pub(crate) use registry::{McpAppBinding, McpUiBinding};
 pub(crate) use registry::{McpCatalogServer, McpRegistry, McpRegistryServerProjection};
+pub(crate) use schema::compile_schema;
 pub(crate) use tool::{CallMcpTool, McpAuthorizationFacts, McpDisclosureScope, failure_code};
 
 use crate::{
@@ -196,6 +198,42 @@ pub struct McpToolDefinition {
     pub input_schema: Value,
     pub output_schema: Option<Value>,
     pub annotations: Option<Value>,
+    /// 仅供 UI 路由与可见性判断；不得序列化进入模型目录或普通日志。
+    pub meta: Option<Value>,
+}
+
+impl McpToolDefinition {
+    /// 未声明时沿标准默认同时允许 model/app；格式无效时 fail-closed。
+    pub(crate) fn model_visible(&self) -> bool {
+        self.visible_to("model")
+    }
+
+    pub(crate) fn app_visible(&self) -> bool {
+        self.visible_to("app")
+    }
+
+    fn visible_to(&self, audience: &str) -> bool {
+        self.meta
+            .as_ref()
+            .and_then(|meta| meta.get("ui"))
+            .and_then(|ui| ui.get("visibility"))
+            .is_none_or(|visibility| {
+                visibility.as_array().is_some_and(|items| {
+                    items.iter().all(|item| item == "app" || item == "model")
+                        && items.iter().any(|item| item == audience)
+                })
+            })
+    }
+
+    pub(crate) fn ui_resource_uri(&self) -> Option<&str> {
+        self.meta.as_ref()?.get("ui")?.get("resourceUri")?.as_str()
+    }
+}
+
+/// Host 已移除非 UI 项的资源目录；不包含连接凭据。
+pub struct McpUiResourcePage {
+    pub resources: Vec<assistant_protocol::McpUiResourceSummary>,
+    pub next_cursor: Option<String>,
 }
 
 pub struct McpToolPage {
@@ -259,11 +297,12 @@ impl std::error::Error for McpConnectionError {}
 pub type McpConnectionFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, McpConnectionError>> + Send + 'a>>;
 
-/// Host 已从 `rmcp` 类型转换出的单次调用结果；原始 `_meta` 不跨越边界。
+/// Host 已从 `rmcp` 类型转换出的单次调用结果；页面私有 `_meta` 与模型 content 分开，调用投影不得将它拼入正文。
 pub struct McpRawCallResult {
     pub content: Vec<McpRawContent>,
     pub structured_content: Option<Value>,
     pub is_error: bool,
+    pub meta: Option<Value>,
 }
 
 /// MCP content block 的 Runtime 私有对应类型。
@@ -307,6 +346,29 @@ pub trait McpConnection: Send + Sync {
         arguments: serde_json::Map<String, Value>,
         cancellation: CancellationToken,
     ) -> McpConnectionFuture<'_, McpRawCallResult>;
+
+    /// 无资源能力的实现返回空目录；读取则明确不支持，不做任意 URL 抓取。
+    fn list_ui_resources_page(
+        &self,
+        _cursor: Option<String>,
+        _cancellation: CancellationToken,
+    ) -> McpConnectionFuture<'_, McpUiResourcePage> {
+        Box::pin(std::future::ready(Ok(McpUiResourcePage {
+            resources: Vec::new(),
+            next_cursor: None,
+        })))
+    }
+
+    fn read_ui_resource(
+        &self,
+        _uri: String,
+        _cancellation: CancellationToken,
+    ) -> McpConnectionFuture<'_, assistant_protocol::McpUiResource> {
+        Box::pin(std::future::ready(Err(McpConnectionError::new(
+            McpConnectionFailureKind::UnsupportedExtension,
+            "MCP 服务不支持 UI 资源读取",
+        ))))
+    }
 
     fn close(&self, cancellation: CancellationToken) -> McpConnectionFuture<'_, ()>;
 }

@@ -89,10 +89,10 @@ it('未登记调用 Host → 正式目标用户域，身份复用、并发首次
   expect((await pool.query("SELECT COUNT(*) FROM pg_tables WHERE schemaname='public'")).rows[0].count).toBe('0');
   await upgradeDatabase(pool); await source.initialize();
   app = await createHttpApp({ source, origin }); await app.listen(scenario.center_port, '127.0.0.1'); await loginCenter();
-  const issued: { token: string; llm_key: string }[] = [];
+  const issued: { token: string; llm_key?: string }[] = [];
   const identities = app.get(IdentityService), prepare = identities.prepareLogin.bind(identities);
   vi.spyOn(identities, 'prepareLogin').mockImplementation(async (...args) => {
-    const login = await prepare(...args); if (args[3] === 'device_user_login') issued.push(login); return login;
+    const login = await prepare(...args); if (args[3] === 'device_user_login') issued.push(login.login); return login;
   });
   const modelReads = vi.spyOn(app.get(ModelsService), 'runtime');
   const ids: number[] = [];

@@ -66,18 +66,25 @@ async function openModel(store: RootStore) {
 }
 
 describe('provider and fixed model settings', () => {
-  it('uses the same provider, catalog and parameter views with a read-only source policy', async () => {
+  it('keeps organization settings read-only and routes a colliding personal provider to its own editor', async () => {
     const store = modelStore();
+    const organization_selection = { ...modelSelection, source: 'organization' as const };
+    store.settings.providers = [modelProvider, { ...modelProvider, source: 'organization' }];
     store.settings.model_settings = {
-      default_model: modelSelection,
+      default_model: organization_selection,
       vision_model: null,
-      management: { read_only: true, unavailable_reason: null, last_success_at_ms: 42, last_refresh_error: null },
+      management: { read_only: true,
+        allow_member_selection: false,
+        unavailable_models: [], unavailable_reason: null, last_success_at_ms: 42, last_refresh_error: null },
     };
     vi.spyOn(store.settings, 'getModelConfiguration').mockResolvedValue(detail());
     show(store);
-    expect(screen.getByRole('button', { name: '默认模型' })).toHaveTextContent(modelSelection.model_id);
-    expect(screen.queryByRole('button', { name: '添加服务商' })).not.toBeInTheDocument();
+    expect(screen.getByRole('group', { name: '组织默认模型' })).toHaveTextContent(modelSelection.model_id);
+    expect(screen.getByRole('button', { name: '添加服务商' })).toBeEnabled();
     fireEvent.click(screen.getByRole('button', { name: /测试服务商 https/ }));
+    expect(screen.getByRole('button', { name: /^编辑$/ })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: '返回' }));
+    fireEvent.click(screen.getByRole('button', { name: /^管理服务商 测试服务商$/ }));
     expect(screen.queryByRole('button', { name: /^编辑$/ })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '添加模型' })).not.toBeInTheDocument();
     fireEvent.click(await screen.findByRole('button', { name: '配置模型 fixture' }));
@@ -85,7 +92,7 @@ describe('provider and fixed model settings', () => {
     expect(screen.getByRole('button', { name: '高级能力' })).toBeEnabled();
     expect(screen.queryByRole('button', { name: '保存固定配置' })).not.toBeInTheDocument();
     expect(store.settings.getModelConfiguration).toHaveBeenCalledWith(
-      modelSelection,
+      organization_selection,
       expect.any(AbortSignal),
       'online',
     );
@@ -284,7 +291,7 @@ describe('provider and fixed model settings', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('local catalog unavailable');
     fireEvent.click(await screen.findByRole('button', { name: '编辑固定配置 fixture' }));
     expect(await screen.findByLabelText('上下文窗口（Token）')).toHaveValue('128000');
-    expect(store.settings.listFixedModels).toHaveBeenCalledWith('provider-1', 0, expect.any(AbortSignal));
+    expect(store.settings.listFixedModels).toHaveBeenCalledWith('provider-1', 0, expect.any(AbortSignal), 'local');
   });
   it('leaves missing online limits blank and saves the complete user draft', async () => {
     const store = modelStore();
@@ -398,7 +405,7 @@ describe('provider and fixed model settings', () => {
     fireEvent.click(trigger);
     expect(store.settings.listProviderModels).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('menuitem', { name: /另一服务商/ }));
-    expect(store.settings.listProviderModels).toHaveBeenCalledWith('provider-2', expect.any(AbortSignal));
+    expect(store.settings.listProviderModels).toHaveBeenCalledWith('provider-2', expect.any(AbortSignal), 'local');
     fireEvent.click(trigger);
     finish([discoveredModel('late-model')]);
     fireEvent.click(trigger);

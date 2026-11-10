@@ -12,8 +12,9 @@ use assistant_protocol::{
     GetChildTaskViewResult, GetConversationPageAroundRunRequest,
     GetConversationPageAroundRunResult, GetSessionViewRequest, GetSessionViewResult,
     GetToolDetailRequest, GetToolDetailResult, GoalId, HostAccessCommand, HostAccessStatus,
-    HostFileRequest, HostLoginRequest, HostLoginResult, HostLogoutResult, HostPasswordRequest,
-    InterruptRunRequest, InterruptRunResult, ListConversationPageRequest,
+    HostFileRequest, HostLoginRequest, HostLoginResult, HostLogoutResult, HostOrganization,
+    HostOrganizationSelection, HostOrganizationSwitchRequest, HostOrganizationSwitchResult,
+    HostPasswordRequest, InterruptRunRequest, InterruptRunResult, ListConversationPageRequest,
     ListConversationPageResult, ListHostFilesRequest, ListHostFilesResult,
     ListSessionResourceFilesRequest, ListSessionResourceFilesResult, PermissionMcpMatcher,
     PreviewSessionResourceFileRequest, PreviewSessionResourceFileResult,
@@ -42,6 +43,7 @@ fn export_all(output_directory: PathBuf) -> Result<PathBuf, Box<dyn Error>> {
     }
 
     export_roots!(
+        assistant_protocol::PluginUi,
         assistant_protocol::RuntimeCompatibilityError,
         UserTerminalControl,
         DesktopViewOpenRequest,
@@ -60,6 +62,10 @@ fn export_all(output_directory: PathBuf) -> Result<PathBuf, Box<dyn Error>> {
         DesktopUpdateContext,
         HostLoginRequest,
         HostLoginResult,
+        HostOrganization,
+        HostOrganizationSelection,
+        HostOrganizationSwitchRequest,
+        HostOrganizationSwitchResult,
         HostPasswordRequest,
         HostLogoutResult,
         RuntimeHostHealth,

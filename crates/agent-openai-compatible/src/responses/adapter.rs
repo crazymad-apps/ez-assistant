@@ -41,6 +41,8 @@ pub(crate) enum OpaqueReasoningPolicy {
 ///
 /// 字段保持 crate 私有；Runtime 只能从具名构造器出发，再注入静态目录已经验证的能力。
 pub struct ResponsesProtocolAdapter {
+    /// 仅 OpenAI 本体使用显式 trigger 的流式压缩；兼容方言保持各自既有入口。
+    pub(crate) streaming_compaction: bool,
     pub(crate) provider: ProviderId,
     pub(crate) protocol: ProtocolId,
     pub(crate) supports_temperature: bool,
@@ -70,6 +72,7 @@ impl ResponsesProtocolAdapter {
     /// 不猜测图片函数结果、reasoning 续传或额外 ToolChoice。
     pub fn openai_compatible(provider: ProviderId) -> Self {
         Self {
+            streaming_compaction: false,
             provider,
             protocol: ProtocolId::new("openai.responses").expect("static Responses protocol id"),
             supports_temperature: true,
@@ -93,6 +96,7 @@ impl ResponsesProtocolAdapter {
     /// OpenAI 官方基础方言，仅用于官方 fixture 与显式配置；是否进入随包目录由 Runtime 决定。
     pub fn openai() -> Self {
         Self {
+            streaming_compaction: true,
             function_output_shape: FunctionOutputShape::ContentParts,
             tool_image_projection: ToolImageProjection::NativeFunctionOutput,
             reasoning_summary: Some("auto"),

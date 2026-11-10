@@ -1,6 +1,7 @@
 //! MCP 活动目录、候选交换与调用租约。
 
 mod result;
+mod ui;
 use result::project_result;
 
 use std::{
@@ -73,6 +74,56 @@ pub(crate) struct ResolvedMcpInvocation {
 }
 
 impl ResolvedMcpInvocation {
+    pub(crate) fn ui_binding(&self) -> Result<Option<McpUiBinding>, ToolBindingError> {
+        let state = self.connection.upgrade().ok_or(ToolBindingError)?;
+        let tool = state.tools.get(&self.tool_name).ok_or(ToolBindingError)?;
+        let Some(uri) = tool.definition.ui_resource_uri() else {
+            return Ok(None);
+        };
+        let extension = tool
+            .definition
+            .meta
+            .as_ref()
+            .and_then(|m| m.get("ez-assistant/entry"));
+        let entry_id = extension
+            .map(|e| {
+                e.get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty() && id.len() <= 64)
+                    .map(str::to_owned)
+                    .ok_or(ToolBindingError)
+            })
+            .transpose()?;
+        let card = match extension
+            .and_then(|e| e.get("kind"))
+            .and_then(Value::as_str)
+        {
+            None if extension.is_none() => true,
+            Some("card") => true,
+            Some("app") => false,
+            _ => return Err(ToolBindingError),
+        };
+        Ok(Some(McpUiBinding {
+            target: assistant_protocol::McpServerTarget {
+                source: state.source.clone(),
+                server_key: state.server_key.clone(),
+            },
+            uri: uri.to_owned(),
+            entry_id,
+            card,
+            plugin_sha256: state.plugin_sha256.clone(),
+            fingerprint: state
+                .fingerprint
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect(),
+            title: tool
+                .definition
+                .title
+                .clone()
+                .unwrap_or_else(|| self.tool_name.clone()),
+        }))
+    }
     pub(crate) fn is_retired(&self) -> bool {
         self.connection
             .upgrade()
@@ -126,12 +177,53 @@ impl McpRefreshCommit<'_> {
     }
 }
 
-#[derive(Debug)]
 pub(crate) struct McpCallProjection {
     pub(crate) content: ToolResultContent,
     pub(crate) is_error: bool,
     /// 本类型只在 `tools/call` 已返回后构造；后续 Schema/图片投影失败不能宣称远端未执行。
     pub(crate) remote_may_have_executed: bool,
+    pub(crate) ui_result: Option<Value>,
+}
+
+/// 挂载只冻结连接身份，不持有租约，也不会延迟插件或 MCP 连接退役。
+#[derive(Clone)]
+pub(crate) struct McpAppBinding(Weak<McpServerState>);
+
+impl McpAppBinding {
+    pub(crate) fn lifetime(&self) -> Option<CancellationToken> {
+        let state = self.0.upgrade()?;
+        (!state.retired.load(Ordering::Acquire) && !state.ui_cancellation.is_cancelled())
+            .then(|| state.ui_cancellation.clone())
+    }
+}
+
+struct CompletedMcpCall {
+    raw: super::McpRawCallResult,
+    tool: Arc<CompiledMcpTool>,
+    _lease: McpServerLease,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+pub(crate) struct ToolBindingError;
+
+#[derive(Clone)]
+pub(crate) struct McpUiBinding {
+    pub(crate) target: assistant_protocol::McpServerTarget,
+    pub(crate) uri: String,
+    pub(crate) entry_id: Option<String>,
+    pub(crate) card: bool,
+    pub(crate) plugin_sha256: Option<String>,
+    pub(crate) fingerprint: String,
+    pub(crate) title: String,
+}
+
+impl std::fmt::Debug for McpCallProjection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpCallProjection")
+            .field("content", &self.content)
+            .field("is_error", &self.is_error)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -166,6 +258,64 @@ pub(crate) struct McpRegistry {
 }
 
 impl McpRegistry {
+    pub(crate) fn bind_app(
+        &self,
+        target: &assistant_protocol::McpServerTarget,
+        fingerprint: Option<&str>,
+        package_sha256: Option<&str>,
+    ) -> Option<McpAppBinding> {
+        let state = self.current(&target.server_key).ok().flatten()?;
+        if state.source != target.source
+            || state.retired.load(Ordering::Acquire)
+            || state.ui_cancellation.is_cancelled()
+            || fingerprint.is_some_and(|expected| {
+                state
+                    .fingerprint
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+                    != expected
+            })
+            || state.plugin_sha256.as_deref() != package_sha256
+            || !state
+                .tools
+                .values()
+                .any(|tool| tool.definition.app_visible())
+        {
+            return None;
+        }
+        Some(McpAppBinding(Arc::downgrade(&state)))
+    }
+
+    pub(crate) fn revoke_plugin_app_bindings(&self, name: &str) {
+        if let Ok(states) = self.servers.read() {
+            for state in states
+                .values()
+                .filter(|state| state.plugin_name.as_deref() == Some(name))
+            {
+                state.ui_cancellation.cancel();
+            }
+        }
+    }
+
+    pub(crate) fn ui_source_matches(
+        &self,
+        target: &assistant_protocol::McpServerTarget,
+        fingerprint: &str,
+    ) -> bool {
+        self.current(&target.server_key)
+            .ok()
+            .flatten()
+            .is_some_and(|s| {
+                s.source == target.source
+                    && !s.retired.load(Ordering::Acquire)
+                    && s.fingerprint
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<String>()
+                        == fingerprint
+            })
+    }
     pub(crate) fn new(
         connection_factory: Arc<dyn McpConnectionFactory>,
         events: crate::observation::ObservationCoordinator,
@@ -309,6 +459,7 @@ impl McpRegistry {
                         tools: server
                             .tools
                             .values()
+                            .filter(|tool| tool.definition.model_visible())
                             .map(|tool| tool.definition.clone())
                             .collect(),
                     })
@@ -333,6 +484,7 @@ impl McpRegistry {
                     tools: server
                         .tools
                         .values()
+                        .filter(|tool| tool.definition.model_visible())
                         .map(|tool| tool.definition.clone())
                         .collect(),
                 })
@@ -664,18 +816,48 @@ impl McpRegistry {
         arguments: Map<String, Value>,
     ) -> Result<ResolvedMcpInvocation, McpCallFailure> {
         let state = self.current(server_key)?.ok_or_else(server_unavailable)?;
+        Self::resolve_from_state(&state, tool_name, arguments, false)
+    }
+
+    pub(crate) fn resolve_app(
+        &self,
+        binding: &McpAppBinding,
+        tool_name: &str,
+        arguments: Map<String, Value>,
+    ) -> Result<ResolvedMcpInvocation, McpCallFailure> {
+        let state = binding.0.upgrade().ok_or_else(catalog_changed)?;
+        if state.ui_cancellation.is_cancelled() {
+            return Err(catalog_changed());
+        }
+        Self::resolve_from_state(&state, tool_name, arguments, true)
+    }
+
+    fn resolve_from_state(
+        state: &Arc<McpServerState>,
+        tool_name: &str,
+        arguments: Map<String, Value>,
+        app: bool,
+    ) -> Result<ResolvedMcpInvocation, McpCallFailure> {
         let tool = state
             .tools
             .get(tool_name)
             .cloned()
             .ok_or_else(catalog_changed)?;
+        let visible = if app {
+            tool.definition.app_visible()
+        } else {
+            tool.definition.model_visible()
+        };
+        if !visible || state.retired.load(Ordering::Acquire) {
+            return Err(catalog_changed());
+        }
         Ok(ResolvedMcpInvocation {
-            server_key: server_key.clone(),
+            server_key: state.server_key.clone(),
             server_display_name: state.display_name.clone(),
             tool_name: tool_name.to_owned(),
             arguments,
             untrusted_annotations: tool.definition.annotations.clone(),
-            connection: Arc::downgrade(&state),
+            connection: Arc::downgrade(state),
         })
     }
 
@@ -724,6 +906,32 @@ impl McpRegistry {
         image_materializer: &dyn McpImageMaterializer,
         cancellation: CancellationToken,
     ) -> Result<McpCallProjection, McpCallFailure> {
+        let completed = self.call_once(invocation, &cancellation).await?;
+        project_result(
+            completed.raw,
+            &completed.tool,
+            &self.schema,
+            session_tool_image_directory,
+            image_materializer,
+            &cancellation,
+        )
+        .await
+    }
+
+    pub(crate) async fn execute_app(
+        &self,
+        invocation: &ResolvedMcpInvocation,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, McpCallFailure> {
+        let completed = self.call_once(invocation, cancellation).await?;
+        result::project_app_result(completed.raw, &completed.tool, &self.schema).await
+    }
+
+    async fn call_once(
+        &self,
+        invocation: &ResolvedMcpInvocation,
+        cancellation: &CancellationToken,
+    ) -> Result<CompletedMcpCall, McpCallFailure> {
         // Run 取消应传递到调用，但工具超时不能反向取消整个 Run；后续模型仍需收到
         // remote_may_have_executed 错误并决定下一步，不得在这里重放远端请求。
         let cancellation = cancellation.child_token();
@@ -758,12 +966,16 @@ impl McpRegistry {
             })?;
         let lease = state.acquire_lease().ok_or_else(catalog_changed)?;
         let permit = tokio::select! {
+            biased;
             () = cancellation.cancelled() => return Err(cancelled(false)),
             () = state.call_cancellation.cancelled() => return Err(cancelled(false)),
             permit = state.call_limit.clone().acquire_owned() => {
                 permit.map_err(|_| server_unavailable())?
             }
         };
+        if cancellation.is_cancelled() || state.call_cancellation.is_cancelled() {
+            return Err(cancelled(false));
+        }
         let call = state.connection.call_tool_once(
             invocation.tool_name.clone(),
             invocation.arguments.clone(),
@@ -822,18 +1034,12 @@ impl McpRegistry {
                 });
             }
         };
-        let projection = project_result(
+        Ok(CompletedMcpCall {
             raw,
-            &tool,
-            &self.schema,
-            session_tool_image_directory,
-            image_materializer,
-            &cancellation,
-        )
-        .await;
-        drop(permit);
-        drop(lease);
-        projection
+            tool,
+            _lease: lease,
+            _permit: permit,
+        })
     }
 
     pub(crate) async fn shutdown(&self) -> RuntimeResult<()> {
@@ -942,6 +1148,7 @@ impl McpRegistry {
             retired: AtomicBool::new(false),
             lease_released: Notify::new(),
             call_cancellation: CancellationToken::new(),
+            ui_cancellation: CancellationToken::new(),
         }))
     }
 
@@ -1128,6 +1335,7 @@ struct McpServerState {
     retired: AtomicBool,
     lease_released: Notify,
     call_cancellation: CancellationToken,
+    ui_cancellation: CancellationToken,
 }
 
 impl McpServerState {
@@ -1147,6 +1355,8 @@ impl McpServerState {
 
     fn mark_retired(&self) {
         self.retired.store(true, Ordering::Release);
+        // 页面只授权了当前挂载的连接。普通模型调用仍沿既有连接租约完成。
+        self.ui_cancellation.cancel();
         self.call_limit.close();
         self.lease_released.notify_waiters();
     }
@@ -1206,6 +1416,7 @@ fn definition_size(definition: &McpToolDefinition) -> usize {
         .saturating_add(encoded_len(&definition.input_schema))
         .saturating_add(definition.output_schema.as_ref().map_or(0, encoded_len))
         .saturating_add(definition.annotations.as_ref().map_or(0, encoded_len))
+        .saturating_add(definition.meta.as_ref().map_or(0, encoded_len))
 }
 
 fn encoded_len(value: &Value) -> usize {

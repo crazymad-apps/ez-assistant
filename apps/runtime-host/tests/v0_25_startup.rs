@@ -10,8 +10,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-// 保留发布链，并追加同版本 F02；新库、升级与重启必须保持同一完整账本。
-const CURRENT_MIGRATION_COUNT: i64 = 14;
+// 当前发布链及具名迁移；新库、升级与重启保持同一完整账本。
+const CURRENT_MIGRATION_COUNT: i64 = 19;
 
 struct Host(Child);
 impl Drop for Host {
@@ -33,11 +33,16 @@ fn start_binary(home: &Path, binary: &Path) -> Host {
         && !home.join("data/runtime.sqlite3").exists()
     {
         fs::create_dir_all(home.join("users/_personal")).unwrap();
-        fs::write(
-            home.join("host.toml"),
-            format!("version='0.27.0'\nmode='personal'\n[host_access]\nport={port}\n"),
-        )
-        .unwrap();
+        // 重启只更换监听端口，保留 Host 已提交的布局版本与组织绑定。
+        // 把版本重写回旧值会误触发迁移，掩盖此处要验证的数据库启动行为。
+        let path = home.join("host.toml");
+        let text = fs::read_to_string(&path).unwrap_or_else(|error| {
+            assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+            "version='0.27.0'\nmode='personal'\n[host_access]\n".into()
+        });
+        let mut configuration: toml_edit::DocumentMut = text.parse().unwrap();
+        configuration["host_access"]["port"] = toml_edit::value(i64::from(port));
+        fs::write(path, configuration.to_string()).unwrap();
         if !home.join("users/_personal/config.toml").exists() {
             fs::write(
                 home.join("users/_personal/config.toml"),
@@ -334,7 +339,7 @@ fn released_v0251_host_refuses_upgraded_database_without_changing_data_files() {
                 |r| r.get::<_, String>(0)
             )
             .unwrap(),
-        "0.32.1"
+        "0.33.0"
     );
     let backup_dir = fs::read_dir(home.path().join("backups/host-layout"))
         .unwrap()
@@ -559,7 +564,7 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
         .unwrap();
     assert_eq!(health["database_version"], env!("CARGO_PKG_VERSION"));
     // 数据库最低 Host 与应用协议 minimum 独立；F02 文件历史切换要求新的存储下限。
-    assert_eq!(health["min_compatible_host_version"], "0.32.1");
+    assert_eq!(health["min_compatible_host_version"], "0.33.0");
     let configuration =
         fs::read_to_string(home.path().join("users/_personal/config.toml")).unwrap();
     assert!(!configuration.contains("default_model"));
@@ -626,7 +631,7 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
             .unwrap(),
         0
     );
-    assert_eq!(database.query_row("SELECT COUNT(*) FROM sessions WHERE model_provider_instance_id IS NULL AND model_id IS NULL", [], |row| row.get::<_,i64>(0)).unwrap(), 1);
+    assert_eq!(database.query_row("SELECT COUNT(*) FROM sessions WHERE model_provider_instance_id IS NULL AND model_id IS NULL AND model_source='local'", [], |row| row.get::<_,i64>(0)).unwrap(), 1);
     drop(database);
     drop(host);
     let mut host = Host(

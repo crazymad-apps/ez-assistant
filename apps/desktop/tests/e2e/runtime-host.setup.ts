@@ -42,8 +42,12 @@ server_names = []
   );
 
   const executable = process.env.EZ_ASSISTANT_E2E_HOST_BINARY ?? resolve(process.cwd(), `../../target/debug/ez-assistant-runtime${process.platform === "win32" ? ".exe" : ""}`);
+  const ui_fixture = process.env.EZ_ASSISTANT_E2E_MCP_APPS === "1" ? {
+    ui_fixture: { command: process.platform === "win32" ? "python" : "python3", args: ["-u", resolve(process.cwd(), "../runtime-host/tests/fixtures/mcp_ui_server.py")] },
+  } : {};
   // 只在隔离 Runtime Home 中启用安全 stdio fixture，不读取或变更用户 MCP 配置。
   await writeFile(join(runtime_home, "mcp.json"), JSON.stringify({ mcpServers: {
+    ...ui_fixture,
     local_fixture: {
       command: process.platform === "win32" ? "python" : "python3", args: ["-u", resolve(process.cwd(), "../runtime-host/tests/fixtures/mcp_stdio_server.py")],
       displayName: "MCP fixture", description: "Two safe fixture tools",
@@ -194,7 +198,18 @@ async function startFakeProvider(): Promise<FakeProvider> {
       if (!Array.isArray(message.content)) return "";
       return message.content.map((part: { text?: string }) => part.text ?? "").join("\n");
     }).findLast((text) => text.startsWith("F05_RESOURCES\n"));
-    if (resource_text) {
+    if ((marker === 'F03_CARD' || marker === 'F03_MCP_CARD' || marker === 'F03_APPS_CARD') && !has_tool_result) {
+      const name=marker!=='F03_MCP_CARD'?'publish_card':'call_mcp_tool';
+      const args=marker==='F03_APPS_CARD'?{plugin:'ui-link-fixture',entry:'counter',arguments:{count:JSON.stringify(body.messages?.findLast(message=>message.role==='user')?.content).includes('TWO')?2:1,app_plugin:'ui-link-fixture'}}:marker==='F03_CARD'?{plugin:'ui-fixture',entry:'counter',arguments:{count:1}}:{server:'ui_fixture',tool:'show_card',arguments:{value:'card input'}};
+      const inputs = marker === 'F03_CARD'
+        ? [args, { plugin: 'ui-fixture', entry: 'counter', arguments: { count: 7 } }]
+        : [args];
+      const tool_calls = inputs.map((input, index) => ({
+        index, id: `card-${response_id}-${index}`, type: 'function', function: { name, arguments: JSON.stringify(input) },
+      }));
+      frames=[{id:response_id,model:'offline-model',choices:[{index:0,delta:{role:'assistant',tool_calls},finish_reason:null}]},
+        {id:response_id,model:'offline-model',choices:[{index:0,delta:{},finish_reason:'tool_calls'}]}];
+    } else if (resource_text) {
       frames = textFrames(response_id, resource_text.slice("F05_RESOURCES\n".length));
     } else if (feedback_index >= 0 && !feedback_completed) {
       const mode = JSON.stringify(body.messages?.[feedback_index]).includes("F04_END") ? "end_turn" : "wait";
@@ -266,7 +281,7 @@ type ProviderMessage = Readonly<{ role?: string; content?: unknown }>;
 type ProviderRequest = Readonly<{ messages?: readonly ProviderMessage[] }>;
 
 function latestMarker(body: string): string {
-  const markers = ["FIRST_CASE", "BLOCK_FOR_QUEUE", "QUEUED_CASE", "TOOL_CASE", "DELEGATE_CASE", "MCP_CASE", "PRIVATE_CASE", "C05_STREAM", "F02_STREAM"];
+  const markers = ["FIRST_CASE", "BLOCK_FOR_QUEUE", "QUEUED_CASE", "TOOL_CASE", "DELEGATE_CASE", "MCP_CASE", "PRIVATE_CASE", "C05_STREAM", "F02_STREAM", 'F03_CARD', 'F03_MCP_CARD', 'F03_APPS_CARD'];
   return markers
     .flatMap((marker) => {
       const position = body.lastIndexOf(marker);

@@ -28,7 +28,7 @@ export const ProviderSettingsPage = observer(function ProviderSettingsPage(
   }>,
 ) {
   const settings = useRootStore().settings;
-  const read_only = settings.model_settings.management?.read_only ?? false;
+  const read_only = props.provider.source === 'organization';
   const [catalog, setCatalog] = useState<ProviderModelCatalogSnapshot | null>(null);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -53,27 +53,30 @@ export const ProviderSettingsPage = observer(function ProviderSettingsPage(
   const fixed_request = useRef<AbortController | null>(null);
   const busy = settings.pending_action !== null;
   const provider_id = props.provider.provider_instance_id;
+  const source = props.provider.source;
   const loadCatalog = useCallback(async () => {
     online_request.current?.abort();
     const request = new AbortController();
     online_request.current = request;
     setCatalog(null);
     setError(null);
+    setRefreshing(false);
     setLoading(true);
     try {
-      const result = await settings.loadProviderModelCatalog(provider_id, request.signal);
+      const result = await settings.loadProviderModelCatalog(provider_id, request.signal, source);
       if (!request.signal.aborted) setCatalog(result);
     } catch (failure: unknown) {
       if (!request.signal.aborted) setError(failure instanceof Error ? failure.message : '读取模型列表失败。');
     } finally {
       if (!request.signal.aborted) setLoading(false);
     }
-  }, [provider_id, settings]);
+  }, [provider_id, settings, source]);
   const refreshCatalog = useCallback(async () => {
     online_request.current?.abort();
     const request = new AbortController();
     online_request.current = request;
     setError(null);
+    setLoading(false);
     setRefreshing(true);
     try {
       const result = await settings.refreshProviderModels(provider_id, request.signal);
@@ -92,14 +95,14 @@ export const ProviderSettingsPage = observer(function ProviderSettingsPage(
     setFixedError(null);
     setFixedLoading(true);
     try {
-      const records = await settings.listAllFixedModels(provider_id, request.signal);
+      const records = await settings.listAllFixedModels(provider_id, request.signal, source);
       if (!request.signal.aborted) setFixed(records);
     } catch (failure: unknown) {
       if (!request.signal.aborted) setFixedError(failure instanceof Error ? failure.message : '读取固定配置失败。');
     } finally {
       if (!request.signal.aborted) setFixedLoading(false);
     }
-  }, [provider_id, settings]);
+  }, [provider_id, settings, source]);
   useEffect(() => {
     void loadCatalog();
     void loadFixed();
@@ -167,8 +170,10 @@ export const ProviderSettingsPage = observer(function ProviderSettingsPage(
       <dl className={styles.model_details}>
         <dt>类型</dt>
         <dd>{provider_labels[props.provider.connection.provider_type]}</dd>
-        <dt>服务地址</dt>
-        <dd>{props.provider.connection.endpoint}</dd>
+        {!read_only && <>
+          <dt>服务地址</dt>
+          <dd>{props.provider.connection.endpoint}</dd>
+        </>}
         <dt>凭据</dt>
         <dd>{read_only ? '由配置源管理' : props.provider.has_api_key ? '已设置' : '未设置'}</dd>
         <dt>服务端历史续接</dt>
@@ -206,10 +211,10 @@ export const ProviderSettingsPage = observer(function ProviderSettingsPage(
           <Button onClick={() => void loadCatalog()}>重试读取</Button>
         </p>
       )}
-      {!loading && catalog?.refreshed_at_ms == null && catalog?.diagnostic == null && (
-        <p>暂无模型，可使用固定模型或点击“刷新在线模型”。</p>
+      {!loading && !error && catalog?.refreshed_at_ms == null && catalog?.diagnostic == null && (
+        <p>{read_only ? '暂无可用企业模型。' : '暂无模型，可使用固定模型或点击“刷新在线模型”。'}</p>
       )}
-      {!loading && catalog?.refreshed_at_ms != null && visible.length === 0 && <p>没有匹配的模型。</p>}
+      {!loading && !error && catalog?.refreshed_at_ms != null && visible.length === 0 && <p>没有匹配的模型。</p>}
       {fixed_loading && <p role="status">正在读取固定状态…</p>}
       {fixed_error && (
         <p role="alert">
@@ -224,7 +229,7 @@ export const ProviderSettingsPage = observer(function ProviderSettingsPage(
             model_id={model.model_id}
             display_name={model.display_name}
             label={`配置模型 ${model.model_id}`}
-            onSelect={() => props.onModel({ provider_instance_id: provider_id, model_id: model.model_id })}
+            onSelect={() => props.onModel({ source: props.provider.source, provider_instance_id: provider_id, model_id: model.model_id })}
           >
             <ModelStatusTags
               origin={fixed_origins.get(model.model_id) ?? 'online'}

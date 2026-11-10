@@ -248,3 +248,15 @@ it('请求头只透传白名单原值，缺失不生成；重复、控制字符�
     ['x-opencode-session', 'bad\0header'],
   ]) expect(() => requestHeaders(values)).toThrow('模型请求格式无效');
 });
+
+it('OpenAI 显式流式压缩仅接受末尾唯一 trigger，协商头按固定值透传', () => {
+  const body = { model: 'm', stream: true, store: false, input: [{ role: 'user', content: 'task' }, { type: 'compaction_trigger' }] };
+  expect(requestModel(Buffer.from(JSON.stringify(body)))).toEqual({ model: 'm', stream: true, store: false, streaming_compaction: true });
+  for (const patch of [
+    { input: [{ type: 'compaction_trigger' }, { role: 'user', content: 'next' }] },
+    { input: [{ type: 'compaction_trigger' }, { type: 'compaction_trigger' }] },
+    { store: true }, { stream: false }, { previous_response_id: null }, { tools: [] }, { context_management: [] },
+  ]) expect(() => requestModel(Buffer.from(JSON.stringify({ ...body, ...patch })))).toThrow();
+  expect(requestHeaders(['x-codex-beta-features', 'remote_compaction_v2'])).toEqual({ 'x-codex-beta-features': 'remote_compaction_v2' });
+  expect(() => requestHeaders(['x-codex-beta-features', 'other'])).toThrow();
+});

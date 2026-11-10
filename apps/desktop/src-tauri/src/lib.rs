@@ -185,6 +185,7 @@ pub fn run() {
                 runtime_bootstrap::upgrade::upgrade_runtime,
                 runtime_connection::begin_runtime_connection,
                 runtime_connection::connect_runtime_target,
+                runtime_connection::switch_runtime_organization,
                 runtime_connection::probe_runtime_target,
                 runtime_connection::manage_local_host,
                 runtime_connection::registration::manage_host_registration,

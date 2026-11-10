@@ -6,6 +6,8 @@ import { createResourceMenu } from "../../native-bridge/resourceMenu";
 /** 系统菜单可直接覆盖原生子 WebView，打开时不需要隐藏网页。 */
 export function ResourceAddMenu(props: Readonly<{
   workspace_available: boolean;
+  app_available?: boolean;
+  on_app?: () => void;
   terminal_available?: boolean;
   desktop_available?: boolean;
   on_desktop?: () => void;
@@ -42,9 +44,10 @@ export function ResourceAddMenu(props: Readonly<{
         () => { if (mounted.current) callbacks.current.on_browser(); },
         () => { if (mounted.current) callbacks.current.on_terminal?.(); },
         () => { if (mounted.current) callbacks.current.on_desktop?.(); },
+        () => { if (mounted.current) callbacks.current.on_app?.(); },
       ).catch((failure: unknown) => { menu.current = null; throw failure; });
       void menu.current.then(async (value) => {
-        if (mounted.current) await value.popup(callbacks.current.workspace_available, anchor, callbacks.current.terminal_available ?? false, callbacks.current.desktop_available ?? false);
+        if (mounted.current) await value.popup(callbacks.current.workspace_available, anchor, callbacks.current.terminal_available ?? false, callbacks.current.desktop_available ?? false, callbacks.current.app_available ?? false);
       }).catch((failure: unknown) => {
         callbacks.current.on_error(failure);
       }).finally(() => {

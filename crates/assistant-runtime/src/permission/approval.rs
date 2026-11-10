@@ -23,7 +23,7 @@ use agent_tools::{
 use assistant_protocol::{
     AgentVariant, ApprovalDecision, ApprovalId, ApprovalMode, ApprovalSnapshot, ApprovalStatus,
     ChildTaskId, RunId, RuntimeEvent, SessionId, ToolApprovalSubject, ToolInputProjection,
-    ToolInputSnapshot, WorkspaceId,
+    ToolInputSnapshot, UiAppScope, UiToolApproval, WorkspaceId,
 };
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -44,11 +44,68 @@ use crate::{
     runtime::tool_input_projection::project_tool_input,
 };
 
-struct PendingApproval {
+struct RunApproval {
     snapshot: ApprovalSnapshot,
     invocation: ResolvedToolInvocation,
     // sender 只允许被成功的决策路径取走一次。删除 Registry 项本身不代表 Core 已收到决策。
     sender: Option<oneshot::Sender<ApprovalSignal>>,
+}
+
+enum PendingApproval {
+    Run(Box<RunApproval>),
+    App {
+        approval: UiToolApproval,
+        sender: oneshot::Sender<ApprovalSignal>,
+    },
+}
+
+impl PendingApproval {
+    fn run(&self) -> Option<&RunApproval> {
+        match self {
+            Self::Run(entry) => Some(entry),
+            Self::App { .. } => None,
+        }
+    }
+
+    fn run_mut(&mut self) -> Option<&mut RunApproval> {
+        match self {
+            Self::Run(entry) => Some(entry),
+            Self::App { .. } => None,
+        }
+    }
+}
+
+/// 与现有审批共用待决 Registry。页面退役、超时或任务中止时回收待决项。
+pub(crate) struct AppApprovalWait {
+    registry: Arc<ApprovalRegistry>,
+    approval_id: ApprovalId,
+    receiver: oneshot::Receiver<ApprovalSignal>,
+}
+
+impl AppApprovalWait {
+    pub(crate) fn id(&self) -> &ApprovalId {
+        &self.approval_id
+    }
+
+    pub(crate) async fn allowed(&mut self) -> bool {
+        matches!(
+            (&mut self.receiver).await,
+            Ok(ApprovalSignal::User(ApprovalDecision::AllowOnce))
+        )
+    }
+}
+
+impl Drop for AppApprovalWait {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.registry.lock_state()
+            && matches!(
+                state.entries.get(&self.approval_id),
+                Some(PendingApproval::App { .. })
+            )
+        {
+            state.entries.remove(&self.approval_id);
+        }
+    }
 }
 
 enum ApprovalSignal {
@@ -78,6 +135,7 @@ pub(crate) struct ApprovalRegistry {
 struct ApprovalRegistryState {
     entries: BTreeMap<ApprovalId, PendingApproval>,
     revisions: BTreeMap<SessionId, u64>,
+    closed: bool,
 }
 
 impl ApprovalRegistryState {
@@ -94,19 +152,102 @@ impl ApprovalRegistry {
         }
     }
 
+    pub(crate) fn register_app(
+        self: &Arc<Self>,
+        app_title: String,
+        scope: UiAppScope,
+        facts: &McpAuthorizationFacts,
+    ) -> RuntimeResult<AppApprovalWait> {
+        let input = project_tool_input(
+            "call_mcp_tool",
+            &serde_json::json!({"arguments": &facts.invocation.arguments}),
+            Some(&facts.identity()),
+        );
+        if input.truncated {
+            return Err(RuntimeError::InvalidRequest {
+                reason: "app approval input exceeds the safe display limit",
+            });
+        }
+        let approval_id = approval_id()?;
+        let mut state = self.lock_state()?;
+        if state.closed || facts.invocation.is_retired() {
+            return Err(RuntimeError::McpServerUnavailable);
+        }
+        let (sender, receiver) = oneshot::channel();
+        state.entries.insert(
+            approval_id.clone(),
+            PendingApproval::App {
+                approval: UiToolApproval {
+                    approval_id: approval_id.clone(),
+                    app_title,
+                    scope,
+                    input,
+                },
+                sender,
+            },
+        );
+        Ok(AppApprovalWait {
+            registry: self.clone(),
+            approval_id,
+            receiver,
+        })
+    }
+
+    pub(crate) fn app_approval(
+        &self,
+        approval_id: &ApprovalId,
+    ) -> RuntimeResult<Option<UiToolApproval>> {
+        Ok(match self.lock_state()?.entries.get(approval_id) {
+            Some(PendingApproval::App { approval, .. }) => Some(approval.clone()),
+            _ => None,
+        })
+    }
+
+    pub(crate) fn decide_app(
+        &self,
+        approval_id: &ApprovalId,
+        decision: ApprovalDecision,
+    ) -> RuntimeResult<()> {
+        if !matches!(
+            decision,
+            ApprovalDecision::AllowOnce | ApprovalDecision::Deny
+        ) {
+            return Err(RuntimeError::PermissionScopeUnavailable);
+        }
+        let expired = || RuntimeError::ApprovalExpired {
+            approval_id: approval_id.clone(),
+        };
+        let mut state = self.lock_state()?;
+        if !matches!(
+            state.entries.get(approval_id),
+            Some(PendingApproval::App { .. })
+        ) {
+            return Err(expired());
+        }
+        let Some(PendingApproval::App { sender, .. }) = state.entries.remove(approval_id) else {
+            return Err(expired());
+        };
+        sender
+            .send(ApprovalSignal::User(decision))
+            .map_err(|_| expired())
+    }
+
+    pub(crate) fn app_approval_ids(&self) -> RuntimeResult<Vec<ApprovalId>> {
+        Ok(self
+            .lock_state()?
+            .entries
+            .iter()
+            .filter(|(_, entry)| matches!(entry, PendingApproval::App { .. }))
+            .map(|(id, _)| id.clone())
+            .collect())
+    }
+
     fn register(
         &self,
         context: ApprovalContext,
         invocation: &ResolvedToolInvocation,
     ) -> RuntimeResult<(ApprovalSnapshot, oneshot::Receiver<ApprovalSignal>)> {
-        let approval_id = ApprovalId::new(id::generate("a").map_err(|_| {
-            RuntimeError::InternalStateUnavailable {
-                component: "approval id random source",
-            }
-        })?)
-        .map_err(|_| RuntimeError::InternalStateUnavailable {
-            component: "approval id generator",
-        })?;
+        let approval_id = approval_id()?;
         let mcp_identity = invocation
             .facts::<McpAuthorizationFacts>()
             .map(McpAuthorizationFacts::identity);
@@ -152,6 +293,11 @@ impl ApprovalRegistry {
         };
         let (sender, receiver) = oneshot::channel();
         let mut state = self.lock_state()?;
+        if state.closed {
+            return Err(RuntimeError::RuntimeNotRunning {
+                lifecycle: assistant_protocol::RuntimeLifecycle::ShuttingDown,
+            });
+        }
         let entries = &mut state.entries;
         // 与刷新失效共用 entries 锁：刷新前登记的旧审批会被移除，刷新后迟到登记直接拒绝。
         // 这里只读冻结连接的原子退役标记，不反向获取 MCP Registry 锁。
@@ -163,11 +309,11 @@ impl ApprovalRegistry {
         }
         entries.insert(
             approval_id,
-            PendingApproval {
+            PendingApproval::Run(Box::new(RunApproval {
                 snapshot: snapshot.clone(),
                 invocation: invocation.clone(),
                 sender: Some(sender),
-            },
+            })),
         );
         state.bump_revision(&snapshot.session_id);
         Ok((snapshot, receiver))
@@ -175,6 +321,18 @@ impl ApprovalRegistry {
 
     pub(crate) fn list(&self, session_id: &SessionId) -> RuntimeResult<Vec<ApprovalSnapshot>> {
         self.list_with_revision(session_id).map(|(items, _)| items)
+    }
+
+    pub(crate) fn close_if_covered(
+        &self,
+        confirmed: &std::collections::BTreeSet<ApprovalId>,
+    ) -> RuntimeResult<bool> {
+        let mut state = self.lock_state()?;
+        if !state.entries.keys().all(|id| confirmed.contains(id)) {
+            return Ok(false);
+        }
+        state.closed = true;
+        Ok(true)
     }
 
     /// 一次复制同一临界区内的列表与 revision，不能分别读取再拼接。
@@ -191,6 +349,7 @@ impl ApprovalRegistry {
                 state
                     .entries
                     .values()
+                    .filter_map(PendingApproval::run)
                     .filter(|entry| &entry.snapshot.session_id == session_id)
                     .map(|entry| entry.snapshot.clone())
                     .collect::<Vec<_>>(),
@@ -213,6 +372,7 @@ impl ApprovalRegistry {
         let entries = &state.entries;
         Ok(entries
             .values()
+            .filter_map(PendingApproval::run)
             .filter(|entry| &entry.snapshot.session_id == session_id)
             .min_by(|left, right| {
                 left.snapshot
@@ -232,6 +392,7 @@ impl ApprovalRegistry {
         let entries = &mut state.entries;
         let requested = entries
             .get(approval_id)
+            .and_then(PendingApproval::run)
             .filter(|entry| &entry.snapshot.session_id == session_id)
             .ok_or_else(|| RuntimeError::ApprovalNotFound {
                 approval_id: approval_id.clone(),
@@ -243,6 +404,7 @@ impl ApprovalRegistry {
         }
         let head = entries
             .values()
+            .filter_map(PendingApproval::run)
             .filter(|entry| &entry.snapshot.session_id == session_id)
             .min_by(|left, right| {
                 left.snapshot
@@ -258,6 +420,7 @@ impl ApprovalRegistry {
         }
         let entry = entries
             .get_mut(approval_id)
+            .and_then(PendingApproval::run_mut)
             .expect("approval existence checked above");
         // Pending -> Resolving 是审批的并发占用点。后到的重复决策必须失败，不能覆盖
         // 正在执行的权限文件写入或把另一个 decision 发送给 Core。
@@ -273,6 +436,7 @@ impl ApprovalRegistry {
         let entries = &mut state.entries;
         let entry = entries
             .get_mut(approval_id)
+            .and_then(PendingApproval::run_mut)
             .ok_or_else(|| RuntimeError::ApprovalExpired {
                 approval_id: approval_id.clone(),
             })?;
@@ -291,12 +455,9 @@ impl ApprovalRegistry {
     ) -> RuntimeResult<ApprovalSnapshot> {
         let mut state = self.lock_state()?;
         let mut entry =
-            state
-                .entries
-                .remove(approval_id)
-                .ok_or_else(|| RuntimeError::ApprovalExpired {
-                    approval_id: approval_id.clone(),
-                })?;
+            remove_run(&mut state, approval_id).ok_or_else(|| RuntimeError::ApprovalExpired {
+                approval_id: approval_id.clone(),
+            })?;
         let snapshot = entry.snapshot.clone();
         state.bump_revision(&snapshot.session_id);
         // 先从 Registry 移除，再发送决策。发送成功后该 approval 不应再被查询或二次处理；
@@ -320,12 +481,9 @@ impl ApprovalRegistry {
     ) -> RuntimeResult<ApprovalSnapshot> {
         let mut state = self.lock_state()?;
         let mut entry =
-            state
-                .entries
-                .remove(approval_id)
-                .ok_or_else(|| RuntimeError::ApprovalExpired {
-                    approval_id: approval_id.clone(),
-                })?;
+            remove_run(&mut state, approval_id).ok_or_else(|| RuntimeError::ApprovalExpired {
+                approval_id: approval_id.clone(),
+            })?;
         let snapshot = entry.snapshot.clone();
         state.bump_revision(&snapshot.session_id);
         entry
@@ -343,10 +501,7 @@ impl ApprovalRegistry {
 
     fn cancel(&self, approval_id: &ApprovalId) -> RuntimeResult<Option<ApprovalSnapshot>> {
         let mut state = self.lock_state()?;
-        let removed = state
-            .entries
-            .remove(approval_id)
-            .map(|entry| entry.snapshot);
+        let removed = remove_run(&mut state, approval_id).map(|entry| entry.snapshot);
         if let Some(approval) = &removed {
             state.bump_revision(&approval.session_id);
         }
@@ -362,7 +517,7 @@ impl ApprovalRegistry {
         let mut state = self.lock_state()?;
         let entries = &mut state.entries;
         let mut approvals = Vec::new();
-        for entry in entries.values_mut() {
+        for entry in entries.values_mut().filter_map(PendingApproval::run_mut) {
             if &entry.snapshot.session_id == session_id
                 && &entry.snapshot.run_id == run_id
                 && entry.snapshot.status == ApprovalStatus::Pending
@@ -385,7 +540,9 @@ impl ApprovalRegistry {
         let mut state = self.lock_state()?;
         let entries = &mut state.entries;
         for approval in approvals {
-            if let Some(entry) = entries.get_mut(&approval.approval_id)
+            if let Some(entry) = entries
+                .get_mut(&approval.approval_id)
+                .and_then(PendingApproval::run_mut)
                 && entry.snapshot.status == ApprovalStatus::Resolving
             {
                 entry.snapshot.status = ApprovalStatus::Pending;
@@ -406,12 +563,17 @@ impl ApprovalRegistry {
         let entries = &mut state.entries;
         let mut removed = Vec::new();
         for approval in approvals {
-            let matches = entries.get(&approval.approval_id).is_some_and(|entry| {
-                entry.snapshot.status == ApprovalStatus::Resolving
-                    && entry.snapshot.session_id == approval.session_id
-                    && entry.snapshot.run_id == approval.run_id
-            });
-            if matches && let Some(entry) = entries.remove(&approval.approval_id) {
+            let matches = entries
+                .get(&approval.approval_id)
+                .and_then(PendingApproval::run)
+                .is_some_and(|entry| {
+                    entry.snapshot.status == ApprovalStatus::Resolving
+                        && entry.snapshot.session_id == approval.session_id
+                        && entry.snapshot.run_id == approval.run_id
+                });
+            if matches
+                && let Some(PendingApproval::Run(entry)) = entries.remove(&approval.approval_id)
+            {
                 removed.push(entry.snapshot);
             }
         }
@@ -436,6 +598,7 @@ impl ApprovalRegistry {
         let ids = entries
             .iter()
             .filter_map(|(id, entry)| {
+                let entry = entry.run()?;
                 let matches = entry.snapshot.status == ApprovalStatus::Pending
                     && entry
                         .invocation
@@ -451,7 +614,7 @@ impl ApprovalRegistry {
             .collect::<Vec<_>>();
         let mut removed = Vec::with_capacity(ids.len());
         for id in ids {
-            let Some(mut entry) = entries.remove(&id) else {
+            let Some(PendingApproval::Run(mut entry)) = entries.remove(&id) else {
                 continue;
             };
             if let Some(sender) = entry.sender.take() {
@@ -471,6 +634,21 @@ impl ApprovalRegistry {
             .map_err(|_| RuntimeError::InternalStateUnavailable {
                 component: "approval registry",
             })
+    }
+}
+
+fn approval_id() -> RuntimeResult<ApprovalId> {
+    let error = || RuntimeError::InternalStateUnavailable {
+        component: "approval id generator",
+    };
+    ApprovalId::new(id::generate("a").map_err(|_| error())?).map_err(|_| error())
+}
+
+fn remove_run(state: &mut ApprovalRegistryState, approval_id: &ApprovalId) -> Option<RunApproval> {
+    state.entries.get(approval_id)?.run()?;
+    match state.entries.remove(approval_id)? {
+        PendingApproval::Run(entry) => Some(*entry),
+        PendingApproval::App { .. } => None,
     }
 }
 

@@ -21,7 +21,7 @@ import { queryFields } from '../validation.js';
 import { CallManagement } from './management.js';
 
 @Controller('api')
-@Access('admin')
+@Access('organization')
 @ApiTags('llm-calls')
 @ApiDefaultResponse({ type: CenterErrorResponse, description: '身份、参数或存储失败' })
 export class CallsController {

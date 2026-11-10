@@ -8,8 +8,10 @@ fn target(port: u16) -> Target {
     Target {
         client: CenterClient::new(format!("http://127.0.0.1:{port}")).unwrap(),
         center_id: "11111111-1111-4111-8111-111111111111".into(),
+        organization_id: "22222222-2222-4222-8222-222222222222".into(),
         enrollment: Some(Enrollment {
             center_id: "11111111-1111-4111-8111-111111111111".into(),
+            organization_id: Some("22222222-2222-4222-8222-222222222222".into()),
             id: "device".into(),
             secret: SecretValue::new("a".repeat(64)),
             name: "test".into(),
@@ -37,7 +39,7 @@ async fn info(listener: &TcpListener) {
             .to_ascii_lowercase()
             .contains("authorization:")
     );
-    let body = r#"{"center_id":"11111111-1111-4111-8111-111111111111","protocol_version":4,"min_protocol_version":4}"#;
+    let body = r#"{"center_id":"11111111-1111-4111-8111-111111111111","protocol_version":6,"min_protocol_version":6}"#;
     socket
         .write_all(
             format!(
@@ -56,10 +58,10 @@ async fn handshake(
     info(&listener).await;
     let (tcp, _) = listener.accept().await.unwrap();
     let mut ws = accept_async(tcp).await.unwrap();
-    ws.send(Message::Text(serde_json::json!({"type":"hello", "protocol_version":2, "center_id":"11111111-1111-4111-8111-111111111111", "registration_id":"device"}).to_string().into())).await.unwrap();
+    ws.send(Message::Text(serde_json::json!({"type":"hello", "protocol_version":3, "organization_id":"22222222-2222-4222-8222-222222222222", "center_id":"11111111-1111-4111-8111-111111111111", "registration_id":"device"}).to_string().into())).await.unwrap();
     assert!(matches!(ws.next().await, Some(Ok(Message::Text(_)))));
     ws.send(Message::Text(
-        r#"{"type":"registration_changed","protocol_version":2}"#.into(),
+        r#"{"type":"registration_changed","protocol_version":3}"#.into(),
     ))
     .await
     .unwrap();
@@ -136,7 +138,7 @@ async fn silent_center_times_out_even_when_notifications_arrive() {
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(30)).await;
     ws.send(Message::Text(
-        r#"{"type":"registration_changed","protocol_version":2}"#.into(),
+        r#"{"type":"registration_changed","protocol_version":3}"#.into(),
     ))
     .await
     .unwrap();
@@ -157,7 +159,7 @@ async fn incompatible_hello_never_becomes_online() {
     let (tcp, _) = listener.accept().await.unwrap();
     let mut ws = accept_async(tcp).await.unwrap();
     ws.send(Message::Text(
-        r#"{"type":"hello","protocol_version":99,"center_id":"11111111-1111-4111-8111-111111111111","registration_id":"device"}"#
+        r#"{"type":"hello","protocol_version":99,"organization_id":"22222222-2222-4222-8222-222222222222","center_id":"11111111-1111-4111-8111-111111111111","registration_id":"device"}"#
             .into(),
     ))
     .await

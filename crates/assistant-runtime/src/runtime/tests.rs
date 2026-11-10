@@ -49,6 +49,7 @@ use crate::{
 
 const TEST_CONFIG: &str = "schema_version = 1\n";
 
+mod cards;
 mod external_model;
 mod feedback;
 mod mcp_management;
@@ -1003,6 +1004,7 @@ mod model_management;
 // 显式的新模型引用夹具；不解析或转换旧 TOML 模型 key。
 fn test_model_selection(model_id: &str) -> assistant_protocol::ModelSelection {
     assistant_protocol::ModelSelection {
+        source: assistant_protocol::ModelSelectionSource::Local,
         provider_instance_id: assistant_protocol::ProviderInstanceId::new("provider-fixture")
             .unwrap(),
         model_id: model_id.to_owned(),

@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{config_source::LocalConfigSource, http::HttpState};
 use config::{AccessDocument, load, same_endpoint, save, validate};
-pub(crate) use credentials::{AccessPermit, Credentials};
+pub(crate) use credentials::{AccessPermit, Credentials, LoginSession, digest};
 
 pub(crate) fn validate_layout_configuration(contents: &str) -> Result<(), AccessError> {
     config::validate_layout_configuration(contents)
@@ -77,6 +77,7 @@ struct RegistrationRequest {
 struct CenterBindingRequest {
     url: String,
     id: String,
+    legacy_organization_id: String,
     reply: oneshot::Sender<Result<(), AccessError>>,
 }
 
@@ -123,10 +124,20 @@ impl HostAccessHandle {
             assistant_protocol::HostMode::Personal
         }
     }
-    async fn bind_center(&self, url: String, id: String) -> Result<(), AccessError> {
+    async fn bind_center(
+        &self,
+        url: String,
+        id: String,
+        legacy_organization_id: String,
+    ) -> Result<(), AccessError> {
         let (reply, receive) = oneshot::channel();
         self.binding
-            .try_send(CenterBindingRequest { url, id, reply })
+            .try_send(CenterBindingRequest {
+                url,
+                id,
+                legacy_organization_id,
+                reply,
+            })
             .map_err(|_| AccessError::Busy)?;
         receive.await.map_err(|_| AccessError::Unavailable)?
     }
@@ -269,7 +280,7 @@ impl HostAccessService {
                 },
                 request = self.binding.recv() => {
                     let Some(request) = request else { break; };
-                    let result = self.bind_center(&request.url, &request.id).await;
+                    let result = self.bind_center(&request.url, &request.id, &request.legacy_organization_id).await;
                     let _ = request.reply.send(result);
                 },
                 request = self.commands.recv() => {
@@ -310,7 +321,12 @@ impl HostAccessService {
     }
 
     /// 与 Host 配置操作共用 actor；文件 CAS 检查外部改动，不覆盖另一个中心的绑定。
-    async fn bind_center(&self, url: &str, id: &str) -> Result<(), AccessError> {
+    async fn bind_center(
+        &self,
+        url: &str,
+        id: &str,
+        legacy_organization_id: &str,
+    ) -> Result<(), AccessError> {
         let mut document = load(self.source.as_ref()).await?;
         let host = crate::host_configuration::parse(&document.document.to_string())
             .map_err(AccessError::Invalid)?;
@@ -318,11 +334,17 @@ impl HostAccessService {
         if host.mode != assistant_protocol::HostMode::Enterprise
             || center.center_url != url
             || center.center_id.as_deref().is_some_and(|bound| bound != id)
+            || host
+                .legacy_organizations
+                .get(id)
+                .is_some_and(|bound| bound != legacy_organization_id)
         {
             return Err(enterprise::CenterError::IdentityMismatch.into());
         }
-        if center.center_id.is_none() {
+        if center.center_id.is_none() || !host.legacy_organizations.contains_key(id) {
             document.document["enterprise"]["center_id"] = toml_edit::value(id);
+            document.document["legacy_organizations"][id] =
+                toml_edit::value(legacy_organization_id);
             save(self.source.as_ref(), document).await?;
         }
         Ok(())

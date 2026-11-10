@@ -31,7 +31,7 @@ export function ModelSettingsPopover(props: ModelSettingsPopoverProps) {
   const categories: SettingsCascadeCategory[] = [];
   if (props.effort_options.length > 0) {
     const options: SettingsCascadeOption[] = [
-      { value: "default", label: "默认", description: "使用当前模型的默认思考强度" },
+      { value: "default", label: "默认" },
       ...props.effort_options.map((option) => ({ value: option.key, label: option.label })),
     ];
     categories.push({

@@ -67,6 +67,8 @@ describe("Desktop control height contract", () => {
         // 图片缩略图和代理开关有独立的内容/轨道尺寸，不是普通单行按钮。
         if (path.endsWith("ConversationView/index.module.scss") && selector.trim() === ".user_images button") continue;
         if (path.endsWith("AppShell/index.module.scss") && selector.trim() === ".proxy_control button") continue;
+        // 服务商列表行含名称与地址两行内容，保留内容型最小高度，不按单行按钮约束。
+        if (path.endsWith("SettingsDialog/index.module.scss") && selector.trim() === ".model_provider_rows > button") continue;
         if (/(?:^|;)\s*(?:min-)?height:\s*\d+(?:\.\d+)?px\s*;/.test(body)) violations.push(`${path}: ${selector.trim()}`);
       }
     }

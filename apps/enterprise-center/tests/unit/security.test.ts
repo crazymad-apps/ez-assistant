@@ -9,7 +9,7 @@ import { IdentityError } from '../../dist/identity/errors.js';
 
 const origin = 'https://center.example';
 
-function fixture(mode?: 'public' | 'optional' | 'admin', method = 'GET') {
+function fixture(mode?: 'public' | 'optional' | 'system' | 'account', method = 'GET') {
   class Endpoint {}
   if (mode) Access(mode)(Endpoint);
   const request = { method, headers: {}, id: 'request' } as AuthenticatedRequest;
@@ -29,15 +29,17 @@ function fixture(mode?: 'public' | 'optional' | 'admin', method = 'GET') {
     role: 'user' as const,
     is_super_admin: false,
   };
+  const scope = { kind: 'system' as const, can_manage: true };
+  const projection = { center_id: 'center', legacy_organization_id: 'legacy', expires_at: '2099-01-01T00:00:00Z', scope };
   const me = vi.spyOn(identity, 'me').mockImplementation(async (token) => {
     if (token !== 'valid') throw new IdentityError(401, 'TOKEN_INVALID');
-    return { center_id: 'center', user };
+    return { ...projection, user };
   });
-  return { context, request, me, user, guard: new HttpSecurity(identity) };
+  return { context, request, me, user, projection, guard: new HttpSecurity(identity) };
 }
 
-it('默认接口必须登录；只接受 Bearer，不从 Cookie 或 URL 取 Token', async () => {
-  const f = fixture();
+it('账号接口必须登录；只接受 Bearer，不从 Cookie 或 URL 取 Token', async () => {
+  const f = fixture('account');
   f.request.headers = { cookie: 'token=valid' };
   await expect(f.guard.canActivate(f.context)).rejects.toMatchObject({ code: 'TOKEN_INVALID' });
   f.request.headers.authorization = 'Bearer valid';
@@ -63,17 +65,17 @@ it.each(['public', 'optional'] as const)('%s 允许跨域但不跳过 JSON 检�
 });
 
 it('管理员规则读取用户权限，超级管理员标记同样生效', async () => {
-  const f = fixture('admin');
+  const f = fixture('system');
   f.request.headers = { origin: 'https://client.example', 'sec-fetch-site': 'cross-site' };
   f.request.headers.authorization = 'Bearer valid';
   await expect(f.guard.canActivate(f.context)).rejects.toMatchObject({ code: 'ADMIN_REQUIRED' });
-  f.me.mockResolvedValue({ center_id: 'center', user: { ...f.user, role: 'admin' } });
+  f.me.mockResolvedValue({ ...f.projection, user: { ...f.user, role: 'system_admin' } });
   await expect(f.guard.canActivate(f.context)).resolves.toBe(true);
-  f.me.mockResolvedValue({ center_id: 'center', user: { ...f.user, is_super_admin: true } });
+  f.me.mockResolvedValue({ ...f.projection, user: { ...f.user, is_super_admin: true } });
   await expect(f.guard.canActivate(f.context)).resolves.toBe(true);
 });
 
-it('模型管理拒绝普通用户，Runtime 配置接口允许已登录用户', async () => {
+it('系统范围不能读组织模型管理与 Runtime 配置', async () => {
   const f = fixture();
   f.request.headers.authorization = 'Bearer valid';
   const context = {
@@ -83,8 +85,8 @@ it('模型管理拒绝普通用户，Runtime 配置接口允许已登录用户',
 
     getHandler: () => ModelsController.prototype.list,
   } as ExecutionContext;
-  await expect(f.guard.canActivate(context)).rejects.toMatchObject({ code: 'ADMIN_REQUIRED' });
+  await expect(f.guard.canActivate(context)).rejects.toMatchObject({ code: 'SCOPE_DENIED' });
   await expect(
     f.guard.canActivate({ ...context, getHandler: () => ModelsController.prototype.runtime } as ExecutionContext),
-  ).resolves.toBe(true);
+  ).rejects.toMatchObject({ code: 'SCOPE_DENIED' });
 });

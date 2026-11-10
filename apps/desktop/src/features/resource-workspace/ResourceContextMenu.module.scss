@@ -3,15 +3,21 @@
   z-index: var(--ez-z-popover);
   display: grid;
   min-width: 188px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  overflow: auto;
   padding: 5px;
   border: 1px solid var(--ez-border-strong);
   border-radius: var(--ez-radius-medium);
   background: var(--ez-surface);
   box-shadow: var(--ez-shadow-popover);
+
+  &[data-position-ready="false"] { visibility: hidden; }
 }
 
 .menu button {
-  min-height: var(--ez-control-height-default);
+  height: auto;
+  min-height: var(--ez-menu-row-height);
   padding: 0 9px;
   border: 0;
   border-radius: 5px;

@@ -61,9 +61,9 @@ it('PATCH 只修改显式字段，管理重置不收旧密码', () => {
 });
 it('用户查询只接受单值、有界分页和精确布尔值', () => {
   expect(userQuery({})).toEqual({ limit: 20, offset: 0 });
-  expect(userQuery({ search: ' %_', role: 'admin', enabled: 'false', limit: '100', offset: '1000000' })).toEqual({
+  expect(userQuery({ search: ' %_', role: 'system_admin', enabled: 'false', limit: '100', offset: '1000000' })).toEqual({
     search: '%_',
-    role: 'admin',
+    role: 'system_admin',
     enabled: false,
     limit: 100,
     offset: 1000000,
@@ -109,7 +109,7 @@ it('审计详情 ID 校验并参数化传入现有只读查询', async () => {
   } as unknown as EntityManager;
   expect(await audits.list(manager, auditQuery({ id }))).toEqual({ total: 0, items: [] });
   expect(calls[0]?.[0]).toContain('id=$8');
-  expect(calls[0]?.[1]).toEqual([null, null, null, null, null, 20, 0, Number(id)]);
+  expect(calls[0]?.[1]).toEqual([null, null, null, null, null, 20, 0, Number(id), null]);
 });
 it('审计详情只投影普通字段，不回传任意 JSON 或秘密', () => {
   expect(

@@ -24,10 +24,13 @@ export class ConnectionStore {
   last_connected_at_ms: number | null = null;
   last_error_code: string | null = null;
   is_stale = true;
+  center_available: boolean | null = null;
 
   constructor() {
     makeObservable(this, {
       state: observable,
+      center_available: observable,
+      setCenterAvailability: action,
       startup: observableRef,
       markStartup: action,
       error_message: observable,
@@ -47,6 +50,10 @@ export class ConnectionStore {
     });
   }
 
+  setCenterAvailability(available: boolean): void {
+    this.center_available = available;
+  }
+
   markStartup(health: RuntimeHostHealth): void {
     this.startup = health;
     this.state = "connecting";
@@ -55,6 +62,7 @@ export class ConnectionStore {
   }
 
   beginInitialConnection(): void {
+    this.center_available = null;
     this.state = "starting_runtime";
     this.startup = null;
     this.error_message = null;
@@ -63,6 +71,7 @@ export class ConnectionStore {
   }
 
   beginReconnect(): void {
+    this.center_available = null;
     this.state = "reconnecting";
     this.error_message = null;
     this.last_error_code = null;
@@ -86,6 +95,7 @@ export class ConnectionStore {
   }
 
   markDisconnected(message: string, code = "connection_interrupted"): void {
+    this.center_available = null;
     this.state = "disconnected";
     this.error_message = message;
     this.last_error_code = code;
@@ -107,6 +117,7 @@ export class ConnectionStore {
   }
 
   markRuntimeStopped(): void {
+    this.center_available = null;
     this.state = "runtime_stopped";
     this.error_message = null;
     this.instance_id = null;

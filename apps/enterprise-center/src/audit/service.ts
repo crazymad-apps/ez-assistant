@@ -3,6 +3,7 @@ import type { AuditDetails, AuditPage, AuditQuery } from '../contracts/audit.js'
 import { audits } from './repository.js';
 import { IdentityError } from '../identity/errors.js';
 import { invalid, page, queryBoolean, queryFields, recordId } from '../validation.js';
+import { feedbackStatuses } from '../contracts/feedback.js';
 import { parsePublicOrigin } from '../models/parameters.js';
 
 export function auditQuery(value: unknown): AuditQuery & { limit: number; offset: number } {
@@ -42,7 +43,7 @@ export function auditDetails(value: unknown): AuditDetails {
       enabled: unknown = Reflect.get(source, 'enabled');
     result[key] = {
       ...(typeof name === 'string' && [...name].length <= 64 ? { display_name: name } : {}),
-      ...(role === 'user' || role === 'admin' ? { role } : {}),
+      ...(role === 'user' || role === 'admin' || role === 'system_admin' ? { role } : {}),
       ...(typeof enabled === 'boolean' ? { enabled } : {}),
     };
   }
@@ -73,8 +74,15 @@ export function auditDetails(value: unknown): AuditDetails {
     if (typeof source[key] === 'number' && Number.isInteger(source[key]) && source[key] >= 0 && source[key] <= 256)
       result[key] = source[key];
 
+  if (isUuid(source.feedback_id)) result.feedback_id = source.feedback_id;
+  for (const field of ['status', 'previous_status'] as const) {
+    const status = feedbackStatuses.find(item => item === source[field]);
+    if (status) result[field] = status;
+  }
+  if (isUuid(source.device_id)) result.device_id = source.device_id;
+  if (source.mode === 'off' || source.mode === 'anomalies' || source.mode === 'all') result.mode = source.mode;
   if (isUuid(source.call_id)) result.call_id = source.call_id;
-  if (source.side === 'request' || source.side === 'response') result.side = source.side;
+  if (source.side === 'request' || source.side === 'response' || source.side === 'upstream_failure') result.side = source.side;
   if (typeof source.enabled === 'boolean') result.enabled = source.enabled;
   for (const key of ['content_retention_days', 'index_retention_days'] as const) {
     const days = source[key];
@@ -89,6 +97,7 @@ export function auditDetails(value: unknown): AuditDetails {
   else if (typeof source.public_origin === 'string') {
     try { result.public_origin = parsePublicOrigin(source.public_origin); } catch { /* 不透出非法或带凭据的人工审计内容。 */ }
   }
+  if (typeof source.allow_member_selection === 'boolean') result.allow_member_selection = source.allow_member_selection;
   if (source.default_model === null) result.default_model = null;
   else if (source.default_model && typeof source.default_model === 'object') {
     const selection = source.default_model as Record<string, unknown>;
@@ -101,9 +110,9 @@ export function auditDetails(value: unknown): AuditDetails {
 export class AuditService {
   constructor(private readonly source?: DataSource) {}
 
-  async list(input: ReturnType<typeof auditQuery>): Promise<AuditPage> {
+  async list(input: ReturnType<typeof auditQuery>, organizationId?: string): Promise<AuditPage> {
     if (!this.source) throw new IdentityError(503, 'SERVICE_UNAVAILABLE');
-    const row = await audits.list(this.source.manager, input);
+    const row = await audits.list(this.source.manager, input, organizationId);
     return {
       items: row.items.map((item) => ({
         ...item,

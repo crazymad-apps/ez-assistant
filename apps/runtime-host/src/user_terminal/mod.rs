@@ -160,6 +160,21 @@ fn observe(result: Option<Result<Result<(), TerminalError>, tokio::task::JoinErr
 }
 
 impl UserTerminals {
+    pub(crate) async fn active_ids(
+        &self,
+        user: &crate::access::enterprise::UserKey,
+    ) -> std::collections::BTreeSet<String> {
+        self.entries
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, entry)| {
+                entry.origin.user.as_ref() == Some(user) && !entry.domain.is_cancelled()
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
     pub(crate) fn submit(&self, task: ConnectionTask) -> Result<(), TerminalError> {
         if self.shutdown.is_cancelled() {
             return Err(failure("Host 正在关闭。"));

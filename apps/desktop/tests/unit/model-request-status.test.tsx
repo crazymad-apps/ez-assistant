@@ -28,7 +28,8 @@ describe('model request feedback', () => {
 
   it('explains exhaustion and stream interruption from persisted safe diagnostics', () => {
     expect(runFailureMessage(null, 'model_execution_failed', 'model execution failed before stream establishment (kind=service_unavailable, attempts=6, retries=5, output_observed=false)')).toContain('已尝试 6 次，未能恢复');
-    expect(runFailureMessage(null, 'model_execution_failed', 'model execution failed after stream establishment (kind=stream_interrupted, attempts=1, retries=0, output_observed=true)')).toContain('已停止自动重试');
+    expect(runFailureMessage(null, 'model_execution_failed', 'model execution failed after stream establishment (kind=stream_interrupted, attempts=1, retries=0, output_observed=true)')).toBe('模型响应意外中断，请检查已有结果后继续。');
+    expect(runFailureMessage(null, 'model_execution_failed', 'model execution failed after stream establishment (kind=connection, attempts=6, retries=5, output_observed=false)')).toBe('已尝试 6 次，未能恢复。无法连接模型服务，请检查网络和服务地址。');
     expect(runFailureMessage(null, 'model_execution_failed', 'private API key')).not.toContain('private');
   });
 });

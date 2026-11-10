@@ -1,23 +1,31 @@
 import { useState } from 'react';
 import { PlusOutlined } from '@ant-design/icons';
 import { Button, Switch, Table, Tag, Typography } from 'antd';
-import type { HostDeviceGrant, IdentityUser } from '../../../request/openapi';
+import type { HostDeviceGrant, IdentityUser, OrganizationMember } from '../../../request/openapi';
 import { AddUserDialog } from './AddUserDialog';
 import styles from './index.module.scss';
 
 /** 授权表保存完整草稿，候选搜索和翻页不改变已添加用户。 */
+type GrantedUser = Pick<IdentityUser, 'id' | 'username' | 'display_name' | 'enabled'>;
+
 export function UserGrants(props: {
   users: HostDeviceGrant[];
-  identities: IdentityUser[];
+  identities: GrantedUser[];
   disabled: boolean;
   onChange: (users: HostDeviceGrant[]) => void;
 }) {
   const [adding, setAdding] = useState(false);
-  const [addedIdentities, setAddedIdentities] = useState<IdentityUser[]>([]);
+  const [addedIdentities, setAddedIdentities] = useState<GrantedUser[]>([]);
   const identity = (id: number) =>
     props.identities.find((user) => user.id === id) ?? addedIdentities.find((user) => user.id === id);
 
-  function add(user: IdentityUser) {
+  function add(member: OrganizationMember) {
+    const user = {
+      id: member.user_id,
+      username: member.username,
+      display_name: member.display_name,
+      enabled: member.enabled && member.account_enabled,
+    };
     if (
       props.disabled ||
       !user.enabled ||

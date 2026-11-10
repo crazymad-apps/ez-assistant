@@ -38,9 +38,13 @@ export function useAuditData() {
   }, [list, query, attempt]);
   const findActors = useMemo(
     () => async (search: string, signal: AbortSignal) => {
-      const page = await api.users(token, { search: search || undefined, limit: 20, offset: 0 }, signal);
+      const query = { search: search || undefined, limit: 20, offset: 0 };
+      const items =
+        adminStore.scope?.kind === 'system'
+          ? (await api.users(token, query, signal)).items
+          : (await api.members(token, query, signal)).items.map((member) => ({ ...member, id: member.user_id }));
       if (adminStore.token !== token || signal.aborted) return [];
-      return page.items.map((user) => ({ value: user.id, label: `${user.display_name} · ${user.username}` }));
+      return items.map((user) => ({ value: user.id, label: `${user.display_name} · ${user.username}` }));
     },
     [token],
   );

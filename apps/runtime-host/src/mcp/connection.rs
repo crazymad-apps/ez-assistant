@@ -3,6 +3,7 @@
 #[cfg(test)]
 mod handshake_tests;
 mod startup_diagnostic;
+mod ui;
 #[cfg(windows)]
 mod windows;
 
@@ -82,7 +83,7 @@ const INHERITED_ENVIRONMENT: &[&str] = &[
     "SSL_CERT_DIR",
 ];
 
-type ClientService = RunningService<RoleClient, ()>;
+type ClientService = RunningService<RoleClient, rmcp::model::ClientInfo>;
 
 pub(crate) struct HostMcpConnectionFactory {
     runtime_home: PathBuf,
@@ -232,8 +233,32 @@ impl McpConnection for HostMcpConnection {
                     "MCP 工具结果超过大小限制",
                 ));
             }
+            if result.meta.as_ref().is_some_and(|meta| {
+                serde_json::to_vec(meta).map_or(true, |bytes| bytes.len() > 256 * 1024)
+            }) {
+                return Err(connection_error(
+                    McpConnectionFailureKind::ToolCall,
+                    "MCP UI 私有结果超过大小限制",
+                ));
+            }
             Ok(convert_call_result(result))
         })
+    }
+
+    fn list_ui_resources_page(
+        &self,
+        cursor: Option<String>,
+        cancellation: CancellationToken,
+    ) -> McpConnectionFuture<'_, assistant_runtime::McpUiResourcePage> {
+        Box::pin(self.list_ui_page(cursor, cancellation))
+    }
+
+    fn read_ui_resource(
+        &self,
+        uri: String,
+        cancellation: CancellationToken,
+    ) -> McpConnectionFuture<'_, assistant_protocol::McpUiResource> {
+        Box::pin(self.read_ui(uri, cancellation))
     }
 
     fn close(&self, cancellation: CancellationToken) -> McpConnectionFuture<'_, ()> {
@@ -464,7 +489,7 @@ where
 {
     tokio::select! {
         () = cancellation.cancelled() => Err(cancelled_error()),
-        result = ().serve_with_lifecycle(transport, lifecycle()) => result.map_err(|_| {
+        result = ui::client_info().serve_with_lifecycle(transport, lifecycle()) => result.map_err(|_| {
             connection_error(
                 McpConnectionFailureKind::Protocol,
                 "MCP 连接初始化失败：服务未完成协议握手，请检查服务配置、启动环境及协议兼容性",
@@ -561,6 +586,7 @@ fn convert_tool(tool: rmcp::model::Tool) -> McpToolDefinition {
         annotations: tool
             .annotations
             .and_then(|annotations| serde_json::to_value(annotations).ok()),
+        meta: tool.meta.map(|meta| serde_json::Value::Object(meta.0)),
     }
 }
 
@@ -569,6 +595,7 @@ fn convert_call_result(result: rmcp::model::CallToolResult) -> McpRawCallResult 
         content: result.content.into_iter().map(convert_content).collect(),
         structured_content: result.structured_content,
         is_error: result.is_error.unwrap_or(false),
+        meta: result.meta.map(|meta| serde_json::Value::Object(meta.0)),
     }
 }
 

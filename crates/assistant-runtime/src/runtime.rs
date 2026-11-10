@@ -2,6 +2,7 @@
 
 mod approval;
 mod attachment;
+mod cards;
 mod channel;
 mod compaction;
 mod connection_validation;
@@ -17,6 +18,8 @@ mod mcp;
 mod memory;
 pub(crate) mod model;
 mod model_management;
+mod ui;
+mod ui_tools;
 pub use model_management::ExternalModelPublication;
 mod permission;
 pub(crate) mod product;
@@ -29,6 +32,7 @@ mod session_loading;
 mod session_management;
 mod shell;
 mod shutdown;
+pub use shutdown::ShutdownWork;
 mod skills;
 pub(crate) mod tasks;
 mod title;
@@ -108,6 +112,8 @@ pub struct AssistantRuntime {
     session_loader: Arc<session_loading::SessionLoader>,
     devices: RwLock<BTreeMap<DeviceId, crate::PairedDevice>>,
     delete_confirmations: Mutex<BTreeMap<DeleteConfirmationToken, PendingDeleteConfirmation>>,
+    card_instances: AsyncMutex<BTreeMap<String, cards::MountedCard>>,
+    ui_tools: Arc<ui_tools::UiTools>,
     store: Arc<dyn RuntimeStore>,
     operation_gate: Arc<AsyncRwLock<()>>,
     model_binding_gate: Arc<AsyncRwLock<()>>,
@@ -293,6 +299,8 @@ impl AssistantRuntime {
             session_loader,
             devices: RwLock::new(recovered.devices),
             delete_confirmations: Mutex::new(BTreeMap::new()),
+            card_instances: AsyncMutex::new(BTreeMap::new()),
+            ui_tools: Arc::new(ui_tools::UiTools::default()),
             store,
             operation_gate: Arc::new(AsyncRwLock::new(())),
             model_binding_gate: Arc::new(AsyncRwLock::new(())),

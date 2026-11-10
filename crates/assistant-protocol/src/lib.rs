@@ -18,9 +18,21 @@ mod host_registration;
 pub use host_network::{
     HostNetworkCapability, HostNetworkCommand, HostNetworkDevice, HostNetworkResult,
 };
+mod card;
 mod id;
 mod materialization;
 mod mcp;
+pub use card::{
+    ListMessageCardsRequest, ListMessageCardsResult, MessageCardSnapshot, MessageCardSource,
+    MessageCardSummary, MountMessageCardRequest, MountMessageCardResult, ReleaseMessageCardRequest,
+    SaveMessageCardSnapshotRequest, SaveMessageCardSnapshotResult,
+};
+mod ui;
+pub use mcp::{
+    ListMcpUiResourcesRequest, ListMcpUiResourcesResult, McpUiCsp, McpUiResource,
+    McpUiResourceMeta, McpUiResourceSummary, ReadMcpUiResourceRequest, ReadMcpUiResourceResult,
+};
+pub use ui::*;
 mod memory;
 mod model_management;
 mod permission;
@@ -51,7 +63,9 @@ pub use host_registration::{
 pub use host_access::{
     DesktopUpdateContext, HostAccessCommand, HostAccessConfiguration, HostAccessScheme,
     HostAccessStatus, HostIdentityKind, HostListenerState, HostLoginRequest, HostLoginResult,
-    HostLogoutResult, HostMode, HostPasswordRequest, HostUserIdentity,
+    HostLogoutResult, HostMode, HostOrganization, HostOrganizationSelection,
+    HostOrganizationSwitchRequest, HostOrganizationSwitchResult, HostPasswordRequest,
+    HostUserIdentity,
 };
 
 pub use command::{
@@ -231,11 +245,12 @@ pub use model_management::{
     ListFixedModelConfigsRequest, ListProvidersRequest, ModelCatalogDiagnosticCode,
     ModelConfigOrigin, ModelConfigurationDetail, ModelConfigurationSource,
     ModelConfigurationSummary, ModelDiscoveryFormat, ModelFeatureSupport, ModelFixedConfig,
-    ModelManagementStatus, ModelParameters, ModelReasoningMode, ModelSelection, ModelSettings,
-    ModelTokenLimit, ModelToolChoiceSupport, ModelToolImageProjection, ProviderConnection,
-    ProviderCredentialChange, ProviderModelCatalogSnapshot, ProviderProtocolPreference,
-    ProviderRequest, ProviderSessionUsage, ProviderSummary, ProviderType, ProviderUsage,
-    SaveModelFixedConfigRequest, UpdateProviderRequest,
+    ModelManagementStatus, ModelParameters, ModelReasoningMode, ModelSelection,
+    ModelSelectionSource, ModelSettings, ModelTokenLimit, ModelToolChoiceSupport,
+    ModelToolImageProjection, ProviderConnection, ProviderCredentialChange,
+    ProviderModelCatalogSnapshot, ProviderProtocolPreference, ProviderRequest,
+    ProviderSessionUsage, ProviderSummary, ProviderType, ProviderUsage,
+    SaveModelFixedConfigRequest, UnavailableOrganizationModel, UpdateProviderRequest,
 };
 
 pub use feedback::{

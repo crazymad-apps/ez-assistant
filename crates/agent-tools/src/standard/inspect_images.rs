@@ -31,6 +31,8 @@ pub struct ResolvedInspectImagesInput {
 pub struct InspectImagesOutput {
     text: String,
     model_provider: String,
+    #[serde(skip)]
+    model_source: Option<String>,
     model_id: String,
     elapsed_ms: u64,
     usage: Option<agent_types::TokenUsage>,
@@ -135,6 +137,7 @@ impl Tool for InspectImagesTool {
             Ok(InspectImagesOutput {
                 text: result.text,
                 model_provider: result.model_provider,
+                model_source: result.model_source,
                 model_id: result.model_id,
                 elapsed_ms: result.elapsed_ms,
                 usage: result.usage,
@@ -145,6 +148,7 @@ impl Tool for InspectImagesTool {
     fn execution_metadata(output: &Self::Output) -> Option<agent_types::ToolExecutionMetadata> {
         Some(agent_types::ToolExecutionMetadata {
             model_provider: Some(output.model_provider.clone()),
+            model_source: output.model_source.clone(),
             model_id: Some(output.model_id.clone()),
             elapsed_ms: Some(output.elapsed_ms),
             usage: output.usage.clone(),
@@ -180,6 +184,7 @@ mod tests {
                 Ok(ImageInspection {
                     text: format!("inspected {}", request.goal),
                     model_provider: "provider-instance".to_owned(),
+                    model_source: None,
                     model_id: "org/vision:latest".to_owned(),
                     elapsed_ms: 12,
                     usage: None,
@@ -307,6 +312,7 @@ mod tests {
         let output = InspectImagesOutput {
             text: "finding".to_owned(),
             model_provider: "provider-instance".to_owned(),
+            model_source: None,
             model_id: "org/vision:latest".to_owned(),
             elapsed_ms: 12,
             usage: None,

@@ -183,7 +183,7 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
         <ContextSectionLayout>
           <ContextSection is_open={sectionIsOpen("session")} on_toggle={() => toggleSection("session")} title="草稿设置">
             <dl className={styles.definition_list}>
-              <div><dt>模型</dt><dd>{formatModelIdentity(draft_model, application?.providers ?? [])}</dd></div>
+              <div><dt>模型</dt><dd>{formatModelIdentity(draft_model, application?.providers ?? [], Boolean(application?.model_settings.management))}</dd></div>
               <div><dt>执行方式</dt><dd>{formatVariant(new_session_draft.variant)} · {formatApprovalMode(new_session_draft.approval_mode)}</dd></div>
             </dl>
           </ContextSection>
@@ -258,11 +258,11 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
             <dl className={styles.definition_list}>
               <div><dt>状态</dt><dd>{store.feedback.waiting(session.session_id) ? "等待回复" : sessionStatusLabel(
                 session.lifecycle,
-                session_view?.active_run?.status,
+                store.live_execution.activeRunStatus(session.session_id, session_view?.active_run),
                 session_view?.approvals.items.length ?? 0,
                 session.resume_required,
               )}</dd></div>
-              <div><dt>模型</dt><dd>{formatModelIdentity(model, application?.providers ?? [])}</dd></div>
+              <div><dt>模型</dt><dd>{formatModelIdentity(model, application?.providers ?? [], Boolean(application?.model_settings.management))}</dd></div>
               <div><dt>图片理解</dt><dd>{imageHandlingLabel(session_view?.composer_capabilities.image_handling)}</dd></div>
               <div><dt>执行方式</dt><dd>{formatVariant(session.current_variant)} · {formatApprovalMode(session.approval_mode)}</dd></div>
               <div><dt>消息</dt><dd>{session.message_count}</dd></div>

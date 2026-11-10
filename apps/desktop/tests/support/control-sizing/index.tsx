@@ -1,6 +1,11 @@
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { SelectionPopover } from "../../../src/components/SelectionPopover";
+import { SettingsCascadePopover } from "../../../src/components/SettingsCascadePopover";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "../../../src/components/DropdownMenu";
+import { OrganizationMenu } from "../../../src/features/runtime-access/AccountMenu/OrganizationMenu";
+import type { ApplicationConnectionStore } from "../../../src/features/runtime-access/ApplicationConnectionStore";
+import type { HostUserIdentity } from "@ez-assistant/protocol";
 import { Icon } from "../../../src/components/Icon";
 import mcp from "../../../src/features/settings/SettingsDialog/McpSettingsPage/index.module.scss";
 import settings from "../../../src/features/settings/SettingsDialog/index.module.scss";
@@ -14,6 +19,14 @@ import styles from "./index.module.scss";
 // 只使用生产控件与样式，不装配 Runtime、不读取用户配置，供浏览器与 E2E 复用。
 applyDocumentTheme(DEFAULT_THEME_ID);
 
+const organization_connection = {
+  pending: false,
+  organization_switch: { phase: "options", organizations: [{ id: "other", name: "开发验收组织" }] },
+  openOrganizationSwitch: () => Promise.resolve(),
+  previewOrganizationSwitch: () => Promise.resolve(),
+} as unknown as ApplicationConnectionStore;
+const organization_identity = { organization_id: "current", organization_name: "默认组织" } as HostUserIdentity;
+
 function ControlSizingFixture() {
   const [open, setOpen] = useState("");
   const [value, setValue] = useState("保持原值");
@@ -23,6 +36,42 @@ function ControlSizingFixture() {
     <nav aria-label="缩放">
       {[1, 1.25, 1.5].map((factor) => <button key={factor} onClick={() => setScale(factor)}>{factor * 100}%</button>)}
     </nav>
+    <section>
+      <h2>级联选项宽度</h2>
+      <SettingsCascadePopover
+        aria_label="自适应选项"
+        trigger_content="模型选项"
+        trigger_class_name=""
+        open={open === "cascade"}
+        on_open_change={(next) => setOpen(next ? "cascade" : "")}
+        initial_category={null}
+        primary_actions={[{ label: "跟随组织默认", selected: true, on_select: () => Promise.resolve(true) }]}
+        footer_content={<button role="menuitem" type="button">菜单操作</button>}
+        categories={[
+          { id: "short", label: "短选项", text: "k3" },
+          { id: "medium", label: "中等选项", text: "model-with-a-medium-length-name" },
+          { id: "long", label: "超长选项", text: "very-long-model-identifier-".repeat(8) },
+        ].map(({ id, label, text }) => ({
+          id, label, selected: text, value_label: "", hide_title: id !== "medium",
+          options: [
+            { value: text, label: text, description: id === "long" ? "较长的模型说明".repeat(16) : undefined },
+            ...(id === "short" ? [{ value: "k3.1-pro", label: "k3.1-pro" }] : []),
+          ],
+          on_select: () => Promise.resolve(true),
+        }))}
+      />
+    </section>
+    <section>
+      <h2>组织菜单行高</h2>
+      <DropdownMenu>
+        <DropdownMenuTrigger>组织菜单</DropdownMenuTrigger>
+        <DropdownMenuContent aria-label="组织菜单">
+          <OrganizationMenu connection={organization_connection} identity={organization_identity} />
+          <DropdownMenuItem>设置</DropdownMenuItem>
+          <DropdownMenuItem disabled>禁用操作</DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </section>
     {(["small", "default", "large"] as const).map((size) => <section className={mcp.editor} data-testid={`size-${size}`} key={size}>
       <h2>{size}</h2>
       <div className={styles.row}>

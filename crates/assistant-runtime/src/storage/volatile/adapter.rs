@@ -1,6 +1,50 @@
 use super::*;
 
 impl RuntimeStore for VolatileRuntimeStore {
+    fn publish_message_card(
+        &self,
+        card: crate::NewMessageCard,
+    ) -> StoreFuture<'_, crate::StoredMessageCard> {
+        VolatileRuntimeStore::publish_message_card(self, card)
+    }
+    fn list_message_cards(
+        &self,
+        request: assistant_protocol::ListMessageCardsRequest,
+    ) -> StoreFuture<'_, assistant_protocol::ListMessageCardsResult> {
+        VolatileRuntimeStore::list_message_cards(self, request)
+    }
+    fn get_message_card(
+        &self,
+        owner: assistant_protocol::ConversationOwner,
+        card_id: String,
+    ) -> StoreFuture<'_, Option<crate::StoredMessageCard>> {
+        VolatileRuntimeStore::get_message_card(self, owner, card_id)
+    }
+    fn save_message_card_snapshot(
+        &self,
+        write: crate::MessageCardSnapshotWrite,
+    ) -> StoreFuture<'_, assistant_protocol::SaveMessageCardSnapshotResult> {
+        VolatileRuntimeStore::save_message_card_snapshot(self, write)
+    }
+    fn queued_input_ids(&self) -> StoreFuture<'_, Vec<assistant_protocol::InputId>> {
+        Box::pin(async move {
+            let state = self.lock()?;
+            Ok(state
+                .inputs
+                .values()
+                .filter(|input| input.state == StoredInputState::Queued)
+                .map(|input| input.input_id.clone())
+                .chain(
+                    state
+                        .session_commands
+                        .values()
+                        .filter(|command| command.state == StoredSessionCommandState::Queued)
+                        .map(|command| command.input_id.clone()),
+                )
+                .collect())
+        })
+    }
+
     fn load_conversation_history(
         &self,
         owner: ConversationOwner,
@@ -89,7 +133,7 @@ impl RuntimeStore for VolatileRuntimeStore {
     fn put_model_fixed_config(
         &self,
         config: assistant_protocol::ModelFixedConfig,
-        server_history_key: Option<String>,
+        server_history_key: Option<crate::FixedModelHistoryInvalidation>,
     ) -> StoreFuture<'_, ()> {
         VolatileRuntimeStore::put_model_fixed_config(self, config, server_history_key)
     }
@@ -97,7 +141,7 @@ impl RuntimeStore for VolatileRuntimeStore {
     fn reset_model_fixed_config(
         &self,
         selection: assistant_protocol::ModelSelection,
-        server_history_key: Option<String>,
+        server_history_key: Option<crate::FixedModelHistoryInvalidation>,
     ) -> StoreFuture<'_, ()> {
         VolatileRuntimeStore::reset_model_fixed_config(self, selection, server_history_key)
     }

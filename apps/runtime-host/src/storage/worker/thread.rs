@@ -27,6 +27,22 @@ pub(super) fn run_worker(
 
     while let Some(command) = receiver.blocking_recv() {
         match command {
+            Command::PublishMessageCard { card, reply } => {
+                let _ = reply.send(engine.publish_message_card(card));
+            }
+            Command::ListMessageCards { request, reply } => {
+                let _ = reply.send(engine.list_message_cards(request));
+            }
+            Command::GetMessageCard {
+                owner,
+                card_id,
+                reply,
+            } => {
+                let _ = reply.send(engine.get_message_card(owner, card_id));
+            }
+            Command::SaveMessageCardSnapshot { write, reply } => {
+                let _ = reply.send(engine.save_message_card_snapshot(write));
+            }
             Command::LoadFeedback { session_id, reply } => {
                 let _ = reply.send(engine.load_feedback(&session_id));
             }
@@ -38,6 +54,13 @@ pub(super) fn run_worker(
             }
             Command::MutateCustomAgent { mutation, reply } => {
                 let _ = reply.send(engine.mutate_custom_agent(mutation));
+            }
+            Command::BindPluginOrganization {
+                key,
+                legacy_home,
+                reply,
+            } => {
+                let _ = reply.send(engine.bind_plugin_organization(&key, legacy_home));
             }
             Command::ListPlugins { reply } => {
                 let _ = reply.send(engine.list_plugins());
@@ -136,6 +159,9 @@ pub(super) fn run_worker(
             }
             Command::QuerySessionSummaries { query, reply } => {
                 let _ = reply.send(engine.query_session_summaries(query));
+            }
+            Command::QueuedInputIds { reply } => {
+                let _ = reply.send(engine.queued_input_ids());
             }
             Command::LoadRuntime { reply } => {
                 let _ = reply.send(engine.load_runtime());

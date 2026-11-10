@@ -286,6 +286,13 @@ impl RuntimeToolAuthorizer {
         {
             return ToolAuthorization::Allow;
         }
+        // 发布只写当前执行的声明卡片，后端工具能力仍走独立授权链。
+        if invocation
+            .facts::<crate::cards::CardAuthorizationFacts>()
+            .is_some()
+        {
+            return ToolAuthorization::Allow;
+        }
         // WorkPlan 是 Session 内部结构化状态，不触及 OS、网络或 Host 基础设施；只有
         // Runtime 私有工具能构造该 facts，因此不进入用户审批和通用权限匹配。
         if invocation.facts::<WorkPlanAuthorizationFacts>().is_some() {

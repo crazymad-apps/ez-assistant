@@ -1,9 +1,11 @@
 .section { min-width: 0; margin: 0; }
+.header { display: flex; min-width: 0; align-items: center; gap: 12px; }
+.actions { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }
 
 // 折叠头是内容标题，不继承表单操作按钮的高度、边框和内边距。
-.section > .trigger {
+.header > .trigger {
   display: flex; align-items: center; gap: 6px;
-  width: 100%; max-width: 100%; height: auto; min-height: 24px;
+  flex: 1 1 auto; min-width: 0; max-width: 100%; height: auto; min-height: 24px;
   margin: 0; padding: 0; border: 0; border-radius: 0;
   background: transparent; color: var(--ez-text); font: inherit; line-height: 1.4;
   text-align: left; cursor: pointer;
@@ -16,4 +18,18 @@
 .body {
   display: grid; gap: 12px; padding-top: 12px;
   > p { margin: 0; }
+}
+
+.section[data-variant="outlined"] {
+  border: 1px solid var(--ez-border);
+  border-radius: var(--ez-radius-medium);
+  background: var(--ez-surface);
+  > .header {
+    padding: 8px 12px;
+    border-radius: inherit;
+    background: var(--ez-surface-subtle);
+  }
+  &[data-open="true"] > .header { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+  .trigger { min-height: var(--ez-control-height-default); font-weight: 600; }
+  .body { gap: 0; padding-top: 0; border-top: 1px solid var(--ez-border); }
 }

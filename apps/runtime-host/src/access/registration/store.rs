@@ -43,6 +43,8 @@ impl TryFrom<StoredIdentity> for Identity {
 #[serde(deny_unknown_fields)]
 pub(super) struct Enrollment {
     pub center_id: String,
+    #[serde(default)]
+    pub organization_id: Option<String>,
     pub id: String,
     pub secret: SecretValue,
     pub name: String,
@@ -82,6 +84,7 @@ impl Store {
                         center != &e.center_id
                             || !valid_id(&e.id)
                             || !valid_id(&e.center_id)
+                            || e.organization_id.as_ref().is_some_and(|id| !valid_id(id))
                             || e.secret.expose().len() != 64
                             || !e
                                 .secret

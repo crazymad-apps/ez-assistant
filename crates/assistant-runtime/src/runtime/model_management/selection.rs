@@ -32,6 +32,15 @@ impl AssistantRuntime {
         purpose: SelectionPurpose,
     ) -> RuntimeResult<ModelSettings> {
         self.ensure_model_editable()?;
+        self.model_factory.ensure_available()?;
+        if matches!(purpose, SelectionPurpose::Default) {
+            if self.managed_models()?.source == crate::ModelSource::External {
+                return Err(invalid("组织默认模型由企业中心管理。"));
+            }
+            if let Some(selection) = &selection {
+                Self::require_local_model(selection.source)?;
+            }
+        }
         self.ensure_running()?;
         let captured = if let Some(selection) = &selection {
             validate_selection(selection)?;
@@ -61,7 +70,7 @@ impl AssistantRuntime {
             SelectionPurpose::AuxiliaryVision => &mut settings.vision_model,
         };
         if *target == selection {
-            return Ok(settings);
+            return self.get_model_settings();
         }
         *target = selection;
         let server_history_key = if matches!(purpose, SelectionPurpose::Default) {
@@ -73,11 +82,17 @@ impl AssistantRuntime {
             None
         };
         self.store
-            .save_model_settings(settings.clone(), server_history_key.clone())
+            .save_model_settings(
+                ModelSettings {
+                    management: None,
+                    ..settings.clone()
+                },
+                server_history_key.clone(),
+            )
             .await
             .map_err(|e| RuntimeError::from_store("save model selection", e))?;
         self.event_sender.publish_transition(|| {
-            self.managed_models_mut()?.settings = settings.clone();
+            self.managed_models_mut()?.settings = settings;
             // 写门阻止新 Run 编译；当前 Run 保留冻结配置，后续执行读取已提交的新周期。
             if let Some(key) = server_history_key {
                 for session in self
@@ -96,6 +111,6 @@ impl AssistantRuntime {
             }
             Ok(((), Some(RuntimeEvent::ConfigChanged)))
         })?;
-        Ok(settings)
+        self.get_model_settings()
     }
 }

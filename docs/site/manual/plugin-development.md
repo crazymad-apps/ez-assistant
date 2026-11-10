@@ -6,8 +6,8 @@ applies_to: 'Runtime 0.28.0+'
 ---
 
 本页面向插件开发者，说明 EZ Assistant 插件的目录、文件和打包规则。
-安装已有插件请阅读[安装与使用插件](plugins.md)。插件使用 EZ Assistant 的 `format_version: 1`
-清单；开发、安装和执行都以当前连接的 Runtime（Host）及其平台为准。
+安装已有插件请阅读[安装与使用插件](plugins.md)。纯 Skill 和 MCP 插件可使用 v1 清单。
+卡片与应用入口需要 v2 清单及 Host 0.33.0 或更高版本。开发、安装和执行以当前连接的 Host 及其平台为准。
 
 ## 源码目录与安装包 {#structure}
 
@@ -84,7 +84,7 @@ licenses/
   不带 `v`、预发布后缀或构建后缀。前者是插件版本，后者是所需最低 Host 版本。
 - `platforms` 中 `os` 可为 `macos`、`windows`、`linux`，`arch` 可为 `x64`、`arm64`。
   这里只说明清单格式支持的值，实际支持范围由插件内容与目标平台验证确定。
-- `skills`、`mcp` 填能力名称，不填路径；每组名称不重复，至少声明一个 Skill 或 MCP。
+- `skills`、`mcp` 填能力名称。每组名称必须唯一，v1 清单至少声明一个 Skill 或 MCP，v2 也可仅声明界面入口。
   每项都必须有对应目录与入口，未声明的 Skill／MCP 目录不打入包。
 - MCP 服务名以小写英文字母开头，后续可用小写英文字母、数字、点、下划线和连字符，最长 64 字符。
 - `configuration` 声明用户参数，每项包含 `name`、`label`、`required`、`secret`。
@@ -149,6 +149,16 @@ Windows 的描述符和运行时分别放在 `server.windows-x64.json`、`runtim
   错误语义与 Skill 和示例保持一致，变更时核对已有调用方。
 - 程序、解释器和依赖随目标平台包准备好，安装或运行时不隐式下载依赖。CAD 等外部软件
   通过清单声明并由用户配置，不能把“插件安装成功”当作外部软件已可用。
+
+## 卡片与应用入口 {#ui-entries}
+
+v2 清单通过 `ui.entries` 声明界面。`kind: "card"` 在消息中展示，`kind: "app"` 在右侧资源栏展示。`resource` 指向 `resources/` 下的 UTF-8 HTML，或已声明 MCP 服务提供的 `ui://` 资源。两个入口可以引用同一资源，各自拥有独立页面状态。使用 `input_schema` 约束输入，并在 `capabilities` 中声明需要的能力。
+
+轻量插件可让 Agent 调用 `publish_card`，参数包含插件名、卡片入口 ID 和 `arguments`。MCP 工具在 `_meta.ui.resourceUri` 指定 UI 资源，并用 `_meta["ez-assistant/entry"]` 的 `id` 和 `kind` 绑定包内入口。页面按 MCP Apps 握手，Host 根据入口及挂载来源公布实际支持的能力。
+
+需要恢复页面状态时，为卡片声明 `snapshot_schema`。页面可提交最新快照，升级时通过 `readable_snapshot_schemas` 列出仍能读取的旧格式。页面工具调用走所属 MCP 服务的可见性和 Host 权限校验。外部应用入口接受 HTTP 和 HTTPS 地址，连接前需确认来源，能否嵌入还取决于浏览器和站点策略。
+
+可在独立插件仓库查看 `app-card-counter` 与 `mcp-apps-counter`。这两套离线样例分别演示轻量发布、应用关联、快照，以及 MCP 发布、页面工具和私有结果。轻量样例 HTML 也可用本地 HTTP 服务托管以验证外部应用。
 
 ## 安装后的目录与写入规则 {#runtime-directories}
 

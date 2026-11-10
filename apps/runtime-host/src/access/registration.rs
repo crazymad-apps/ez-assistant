@@ -38,6 +38,18 @@ impl HostAccessService {
         }
         let configured = host.enterprise.as_ref().and_then(|e| e.center_id.clone());
         let center_id = configured.as_deref().unwrap_or_default();
+        let legacy_org = host.legacy_organizations.get(center_id).map(String::as_str);
+        if let Some(key) = permit.user_key()
+            && let Some(enrollment) = store
+                .identity
+                .as_ref()
+                .and_then(|i| i.registrations.get(center_id))
+            && enrollment.intent != Intent::Closed
+            && enrollment.organization_id.as_deref().or(legacy_org)
+                != Some(key.organization_id.as_str())
+        {
+            return Err(AccessError::NetworkDenied);
+        }
         let applying = matches!(command, Command::Apply { .. });
         let client = self
             .center
@@ -54,7 +66,7 @@ impl HostAccessService {
                     "设备名称须为 1—80 个字符且不含控制字符。",
                 ));
             }
-            self.credentials.verify_enterprise(&mut permit).await?;
+            let verified = self.credentials.verify_enterprise(&mut permit).await?;
             client
                 .as_ref()
                 .ok_or(AccessError::Unavailable)?
@@ -79,6 +91,7 @@ impl HostAccessService {
                     center_id.clone(),
                     Enrollment {
                         center_id,
+                        organization_id: Some(verified.organization_id),
                         id: store::new_id()?,
                         secret: store::new_secret()?,
                         name: name.clone(),
@@ -125,26 +138,35 @@ impl HostAccessService {
             return Ok(result);
         }
         let client = client.ok_or(AccessError::Unavailable)?;
+        let organization_id = e
+            .organization_id
+            .as_deref()
+            .or(legacy_org)
+            .ok_or(AccessError::Unavailable)?;
         let outcome = self
-            .synchronize(&client, identity, e, &mut permit, applying)
+            .synchronize(&client, identity, e, organization_id, &mut permit, applying)
             .await;
         match outcome {
             Ok(reply) => {
-                let terminal = reply
-                    .device
-                    .as_ref()
-                    .is_some_and(|d| d.status.is_terminal());
-                result.device = reply.device;
-                if terminal && e.intent != Intent::Closed {
-                    store
+                let update = reply.device.as_ref().is_some_and(|d| {
+                    e.organization_id.is_none()
+                        || (d.status.is_terminal() && e.intent != Intent::Closed)
+                });
+                if update {
+                    let device = reply.device.as_ref().ok_or(AccessError::Unavailable)?;
+                    let enrollment = store
                         .identity
                         .as_mut()
                         .and_then(|i| i.registrations.get_mut(center_id))
-                        .ok_or(AccessError::Unavailable)?
-                        .intent = Intent::Closed;
+                        .ok_or(AccessError::Unavailable)?;
+                    enrollment.organization_id = Some(device.organization_id.clone());
+                    if device.status.is_terminal() {
+                        enrollment.intent = Intent::Closed;
+                        result.intent = Some(Intent::Closed);
+                    }
                     store.save().await?;
-                    result.intent = Some(Intent::Closed);
                 }
+                result.device = reply.device;
             }
             Err(error) => {
                 result.error = Some(error.protocol_info());
@@ -159,13 +181,14 @@ impl HostAccessService {
         client: &CenterClient,
         identity: &Identity,
         e: &Enrollment,
+        organization_id: &str,
         permit: &mut AccessPermit,
         applying: bool,
     ) -> Result<RegistrationReply, AccessError> {
         let mut reply = client
             .registration(&e.center_id, &e.id, &e.secret, None)
             .await?;
-        check_reply(&reply, identity, e)?;
+        check_reply(&reply, identity, e, organization_id)?;
         if reply.device.is_none()
             && (applying || matches!(e.intent, Intent::Exit | Intent::Withdraw))
         {
@@ -173,7 +196,10 @@ impl HostAccessService {
             self.credentials.verify_enterprise(permit).await?;
             let key = permit.user_key().ok_or(AccessError::Unauthorized)?;
             let (current, token, center_id) = self.credentials.current_agent_center(key)?;
-            if current.url != client.url || center_id != e.center_id {
+            if current.url != client.url
+                || center_id != e.center_id
+                || key.organization_id != organization_id
+            {
                 return Err(super::enterprise::CenterError::IdentityMismatch.into());
             }
             permit.check()?;
@@ -181,7 +207,7 @@ impl HostAccessService {
                 "center_id":e.center_id, "id":e.id, "installation_id":identity.installation_id,
                 "secret":e.secret, "name":e.name, "platform":e.platform, "host_version":e.host_version,
             })).await?;
-            check_reply(&reply, identity, e)?;
+            check_reply(&reply, identity, e, organization_id)?;
         }
         if matches!(e.intent, Intent::Withdraw | Intent::Exit)
             && reply
@@ -201,7 +227,7 @@ impl HostAccessService {
                     }),
                 )
                 .await?;
-            check_reply(&reply, identity, e)?;
+            check_reply(&reply, identity, e, organization_id)?;
         }
         Ok(reply)
     }
@@ -210,12 +236,14 @@ fn check_reply(
     reply: &RegistrationReply,
     identity: &Identity,
     e: &Enrollment,
+    organization_id: &str,
 ) -> Result<(), AccessError> {
     if reply.center_id != e.center_id
-        || reply
-            .device
-            .as_ref()
-            .is_some_and(|d| d.id != e.id || d.installation_id != identity.installation_id)
+        || reply.device.as_ref().is_some_and(|d| {
+            d.id != e.id
+                || d.installation_id != identity.installation_id
+                || d.organization_id != organization_id
+        })
     {
         return Err(super::enterprise::CenterError::IdentityMismatch.into());
     }

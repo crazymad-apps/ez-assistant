@@ -8,6 +8,10 @@ use super::{StoreError, StoreErrorKind};
 pub enum PluginSource {
     Upload,
     Center(String),
+    Organization {
+        center_id: String,
+        organization_id: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -137,7 +141,7 @@ pub struct StoredPluginOperation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PluginRecordChange {
     Keep,
-    Upsert(StoredPlugin),
+    Upsert(Box<StoredPlugin>),
     Remove(String),
 }
 
@@ -265,6 +269,8 @@ impl StoredPlugin {
             || !json_object(&self.parameters_json)
             || !json_object(&self.software_paths_json)
             || matches!(&self.source, PluginSource::Center(id) if id.is_empty())
+            || matches!(&self.source, PluginSource::Organization { center_id, organization_id }
+                if center_id.is_empty() || organization_id.is_empty())
         {
             return Err(invalid_plugin());
         }

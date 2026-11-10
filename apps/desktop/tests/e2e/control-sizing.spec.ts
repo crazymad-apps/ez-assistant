@@ -180,3 +180,155 @@ test("single-line controls share border-box height tokens at all sizes and scale
   await expect(page.getByRole("option", { name: /替换/ })).toBeVisible();
   expect((await page.getByRole("option", { name: /替换/ }).boundingBox())!.height).toBeGreaterThan(32);
 });
+
+test("cascade options fit their content within shared bounds and wrap at the available edge", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto("/tests/support/control-sizing/index.html");
+  const trigger = page.getByRole("button", { name: "自适应选项", exact: true });
+  const widths: number[] = [];
+  for (const label of ["短选项", "中等选项", "超长选项"]) {
+    await trigger.click();
+    await page.getByRole("menuitem", { name: label, exact: true }).click();
+    const panel = page.getByRole("menu", { name: label, exact: true });
+    await expect(panel).toBeVisible();
+    await expect.poll(async () => (await panel.boundingBox())!.y
+      - await page.getByRole("menu", { name: "自适应选项", exact: true })
+        .evaluate(element => element.parentElement!.getBoundingClientRect().top)).toBeCloseTo(0, 1);
+    const box = (await panel.boundingBox())!;
+    expect(box.width).toBeGreaterThanOrEqual(160);
+    expect(box.width).toBeLessThanOrEqual(340);
+    expect(box.x).toBeGreaterThanOrEqual(8);
+    expect(box.x + box.width).toBeLessThanOrEqual(1272);
+    widths.push(box.width);
+    if (label === "超长选项") {
+      const text = await panel.locator("b").evaluate(element => {
+        const first_character = document.createRange();
+        first_character.setStart(element.firstChild!, 0);
+        first_character.setEnd(element.firstChild!, 1);
+        return {
+          height: element.getBoundingClientRect().height,
+          line_height: first_character.getBoundingClientRect().height,
+          scroll_width: element.scrollWidth,
+          client_width: element.clientWidth,
+        };
+      });
+      expect(text.height).toBeGreaterThan(text.line_height);
+      expect(text.scroll_width).toBeLessThanOrEqual(text.client_width);
+    }
+    await trigger.click();
+    await expect(trigger).toHaveAttribute("aria-expanded", "false");
+  }
+  expect(widths[0]).toBe(160);
+  expect(widths[1]).toBeGreaterThan(widths[0]);
+  expect(widths[2]).toBeGreaterThanOrEqual(widths[1]);
+
+  // 中间宽度仍保留侧向面板，但其最大宽度须跟随实际可用空间。
+  await page.setViewportSize({ width: 470, height: 800 });
+  await trigger.click();
+  await page.getByRole("menuitem", { name: "超长选项", exact: true }).click();
+  const panel = page.getByRole("menu", { name: "超长选项", exact: true });
+  await expect(panel).toHaveAttribute("data-side", "right");
+  await expect.poll(async () => ((await panel.boundingBox())!.x + (await panel.boundingBox())!.width)).toBeLessThanOrEqual(462);
+
+  await page.setViewportSize({ width: 360, height: 800 });
+  await expect(panel).toHaveAttribute("data-side", "inline");
+  await expect(panel.getByRole("button", { name: "返回一级" })).toBeVisible();
+  const narrow = (await panel.boundingBox())!;
+  expect(narrow.x).toBeGreaterThanOrEqual(8);
+  expect(narrow.x + narrow.width).toBeLessThanOrEqual(352);
+  await panel.getByRole("button", { name: "返回一级" }).click();
+  await expect(page.getByRole("menuitem", { name: "超长选项", exact: true })).toBeFocused();
+  await trigger.click();
+
+  // 左侧展开仍按容器顶部对齐；靠近底部时，视口约束优先于对齐。
+  await page.setViewportSize({ width: 1280, height: 500 });
+  await trigger.evaluate(element => Object.assign(element.parentElement!.style, { position: "fixed", right: "20px", bottom: "20px" }));
+  await trigger.click();
+  await page.getByRole("menuitem", { name: "超长选项", exact: true }).click();
+  await expect(panel).toHaveAttribute("data-side", "left");
+  await expect.poll(async () => (await panel.boundingBox())!.y).toBeGreaterThanOrEqual(8);
+  await expect.poll(async () => {
+    const box = (await panel.boundingBox())!;
+    return box.y + box.height;
+  }).toBeLessThanOrEqual(492);
+});
+
+test("single-line cascade, selection and organization menu rows share the default height", async ({ page }) => {
+  await page.goto("/tests/support/control-sizing/index.html");
+  for (const { width, row_height } of [{ width: 1280, row_height: 32 }, { width: 720, row_height: 40 }]) {
+    await page.setViewportSize({ width, height: 1000 });
+    if (row_height !== 32) {
+      await page.locator("html").evaluate((element, height) => element.style.setProperty("--ez-menu-row-height", `${height}px`), row_height);
+    }
+    const trigger = page.getByRole("button", { name: "自适应选项", exact: true });
+    await trigger.click();
+    await page.getByRole("menuitem", { name: "短选项", exact: true }).click();
+    for (const row of [
+      page.getByRole("menuitemradio", { name: "跟随组织默认", exact: true }),
+      page.getByRole("menuitem", { name: "短选项", exact: true }),
+      page.getByRole("menuitemradio", { name: "k3", exact: true }),
+      page.getByRole("menuitem", { name: "菜单操作", exact: true }),
+    ]) {
+      expect((await row.boundingBox())!.height).toBe(row_height);
+      await row.hover();
+      expect((await row.boundingBox())!.height).toBe(row_height);
+    }
+    const default_row = (await page.getByRole("menuitemradio", { name: "跟随组织默认", exact: true }).boundingBox())!;
+    const category_row = (await page.getByRole("menuitem", { name: "短选项", exact: true }).boundingBox())!;
+    expect(category_row.y - default_row.y - default_row.height).toBeCloseTo(0, 1);
+    await expect(page.getByRole("menu", { name: "自适应选项", exact: true }).getByRole("separator")).toBeVisible();
+    const first_model = (await page.getByRole("menuitemradio", { name: "k3", exact: true }).boundingBox())!;
+    expect((await page.getByRole("menuitemradio", { name: "k3.1-pro", exact: true }).boundingBox())!.y
+      - first_model.y - first_model.height).toBeCloseTo(0, 1);
+    await trigger.click();
+
+    await page.getByRole("button", { name: "default选择", exact: true }).click();
+    const options = page.getByRole("listbox").getByRole("option");
+    expect((await options.first().boundingBox())!.height).toBe(row_height);
+    expect((await options.last().boundingBox())!.height).toBeGreaterThan(row_height);
+    const first_option = (await options.first().boundingBox())!;
+    expect((await options.last().boundingBox())!.y - first_option.y - first_option.height).toBeCloseTo(0, 1);
+    await page.keyboard.press("Escape");
+
+    await page.getByRole("button", { name: "组织菜单", exact: true }).click();
+    const menu = page.getByRole("menu", { name: "组织菜单", exact: true });
+    const header = menu.getByRole("menuitem", { name: "切换组织，当前组织：默认组织", exact: true });
+    await header.click();
+    const option = menu.getByRole("menuitem", { name: "开发验收组织", exact: true });
+    await expect(option).toBeVisible();
+    // 折叠容器不能在末个选项下附加一截背景，造成子选项看起来更高。
+    await expect(menu.getByRole("group", { name: "可切换组织" })).toHaveCSS("padding-bottom", "0px");
+    for (const row of [header, option, menu.getByRole("menuitem", { name: "设置", exact: true }), menu.getByRole("menuitem", { name: "禁用操作", exact: true })]) {
+      expect((await row.boundingBox())!.height).toBe(row_height);
+    }
+    const header_box = (await header.boundingBox())!;
+    expect((await option.boundingBox())!.y - header_box.y - header_box.height).toBeCloseTo(0, 1);
+    await page.keyboard.press("Escape");
+  }
+});
+
+test("repeated pointer clicks expand the category while keyboard entry focuses an option", async ({ page }) => {
+  await page.goto("/tests/support/control-sizing/index.html");
+  const trigger = page.getByRole("button", { name: "自适应选项", exact: true });
+  await trigger.click();
+  const category = page.getByRole("menuitem", { name: "短选项", exact: true });
+  await category.dblclick();
+  const selected = page.getByRole("menuitemradio", { name: "k3", exact: true });
+  await expect(category).toBeFocused();
+  await expect(selected).toHaveAttribute("data-active", "false");
+  await expect(selected).toHaveAttribute("aria-checked", "true");
+  await expect(trigger).toHaveAttribute("aria-expanded", "true");
+
+  await category.press("ArrowRight");
+  await expect(selected).toBeFocused();
+  await category.click();
+  await expect(category).toBeFocused();
+  await expect(selected).toHaveAttribute("data-active", "false");
+
+  await category.press("ArrowRight");
+  await selected.press("ArrowDown");
+  const other = page.getByRole("menuitemradio", { name: "k3.1-pro", exact: true });
+  await expect(other).toBeFocused();
+  await other.click();
+  await expect(trigger).toHaveAttribute("aria-expanded", "false");
+});

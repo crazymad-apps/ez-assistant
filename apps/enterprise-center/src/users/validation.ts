@@ -1,13 +1,13 @@
 import type { CreateUserRequest, UpdateUserRequest, UserQuery } from '../contracts/users.js';
 import { password, username } from '../identity/validation.js';
-import { fields, invalid, page, queryBoolean, queryFields } from '../validation.js';
+import { fields, invalid, page, queryBoolean, queryFields, uuid } from '../validation.js';
 
 function displayName(value: unknown): string {
   if (typeof value !== 'string' || !value.trim() || [...value].length > 64
     || [...value].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)) invalid();
   return value.trim();
 }
-function role(value: unknown): 'user' | 'admin' { if (value !== 'user' && value !== 'admin') invalid(); return value; }
+function role(value: unknown): 'user' | 'system_admin' { if (value !== 'user' && value !== 'system_admin') invalid(); return value; }
 function enabled(value: unknown): boolean { if (typeof value !== 'boolean') invalid(); return value; }
 export function createUserInput(value: unknown): CreateUserRequest {
   const input = fields(value, ['username', 'display_name', 'role', 'enabled', 'password']);
@@ -24,9 +24,10 @@ export function updateUserInput(value: unknown): UpdateUserRequest {
 export function resetPasswordInput(value: unknown): string { return password(fields(value, ['new_password']).new_password, true); }
 
 export function userQuery(value: unknown): UserQuery & { limit: number; offset: number } {
-  const input = queryFields(value, ['search', 'role', 'enabled', 'limit', 'offset']);
+  const input = queryFields(value, ['search', 'role', 'enabled', 'limit', 'offset', 'organization_id']);
   if (input.search !== undefined && [...input.search].length > 64) invalid();
   return { ...page(input), ...(input.search === undefined ? {} : { search: input.search.trim() }),
+    ...(input.organization_id === undefined ? {} : { organization_id: uuid(input.organization_id) }),
     ...(input.role === undefined ? {} : { role: role(input.role) }),
     ...(input.enabled === undefined ? {} : { enabled: queryBoolean(input.enabled) }) };
 }

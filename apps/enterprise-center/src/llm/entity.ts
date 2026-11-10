@@ -9,7 +9,7 @@ export type UsageState = 'pending' | 'available' | 'partial' | 'unavailable';
 
 @Entity({ schema: 'public', name: 'llm_recording_settings', synchronize: false })
 export class RecordingEntity {
-  @PrimaryColumn('boolean') singleton!: boolean;
+  @PrimaryColumn('uuid') organization_id!: string;
   @Column('text') mode!: RecordingMode;
   @Column('integer') content_retention_days!: number;
   @Column('integer') index_retention_days!: number;
@@ -19,6 +19,8 @@ export class RecordingEntity {
 @Entity({ schema: 'public', name: 'llm_calls', synchronize: false })
 export class CallEntity {
   @PrimaryColumn('uuid') id!: string;
+  @Column('uuid') organization_id!: string;
+  @Column({ type: 'text', nullable: true, select: false }) continuation_digest!: string | null;
   @Column({ type: 'integer', nullable: true }) user_id!: number | null;
   @Column({ type: 'text', nullable: true }) username!: string | null;
   @Column({ type: 'uuid', nullable: true }) provider_instance_id!: string | null;

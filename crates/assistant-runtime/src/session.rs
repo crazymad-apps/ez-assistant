@@ -97,6 +97,7 @@ pub(crate) struct SessionState {
     /// 当前进程中唯一有效的标题旁路调用。
     pub(crate) active_title_generation: Option<ActiveSessionTitleGeneration>,
     pub(crate) is_faulted: bool,
+    pub(crate) tool_cleanup_unconfirmed: bool,
     pub(crate) updated_at_ms: i64,
     pub(crate) archived_at_ms: Option<i64>,
     pub(crate) work_plan: Option<WorkPlan>,
@@ -267,6 +268,7 @@ impl SessionController {
                 automatic_title_pending: stored.automatic_title_pending,
                 active_title_generation: None,
                 is_faulted: false,
+                tool_cleanup_unconfirmed: false,
                 updated_at_ms: stored.updated_at_ms,
                 archived_at_ms: stored.archived_at_ms,
                 work_plan: None,
@@ -436,6 +438,7 @@ impl SessionController {
                 automatic_title_pending: stored.automatic_title_pending,
                 active_title_generation: None,
                 is_faulted: !is_conversation_available,
+                tool_cleanup_unconfirmed: false,
                 updated_at_ms: stored.updated_at_ms,
                 archived_at_ms: stored.archived_at_ms,
                 work_plan,
@@ -774,8 +777,11 @@ impl SessionController {
         &self,
         store: &dyn RuntimeStore,
         mode: agent_model::ContextManagementMode,
+        strict_native_context: bool,
     ) -> RuntimeResult<Option<InMemoryJournal>> {
-        {
+        let check_native =
+            strict_native_context && mode == agent_model::ContextManagementMode::LocalSummary;
+        if !check_native {
             let state = self.lock_state()?;
             if state.context_management_mode == Some(mode) {
                 return Ok(None);
@@ -796,6 +802,21 @@ impl SessionController {
             .load_execution_window(&self.id)
             .await
             .map_err(|source| RuntimeError::from_store("prepare context mode", source))?;
+        // 切到本地摘要前核对可靠窗口；不能把压缩点前的历史从实际请求静默丢掉。
+        if check_native {
+            if window.conversation.messages.iter().any(|message| matches!(message,
+                agent_types::ConversationMessage::Assistant(assistant) if assistant.parts.iter().any(|part| matches!(part,
+                    agent_types::AssistantPart::ProviderState(state) if state.context_effect().is_some()
+                ))
+            )) {
+                return Err(RuntimeError::InvalidRequest {
+                    reason: "当前会话仍依赖原生压缩上下文，请使用原模型或新建会话。",
+                });
+            }
+            if self.lock_state()?.context_management_mode == Some(mode) {
+                return Ok(None);
+            }
+        }
         window.conversation = context_for_mode(&window.conversation, Some(mode));
         Ok(Some(InMemoryJournal::from_window(window)))
     }

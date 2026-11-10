@@ -6,7 +6,6 @@ import { IdentityError } from '../identity/errors.js';
 import { requestCredential } from '../security.js';
 import type { ModelsService } from '../models/service.js';
 import type { ModelSelection, Protocol } from '../contracts/models.js';
-import type { IdentityUser } from '../contracts/identity.js';
 import { uuid } from '../models/parameters.js';
 import type { ModelOperation } from './body.js';
 import { RequestBodies, requestModel } from './body.js';
@@ -51,7 +50,8 @@ export class ModelProxy {
   private readonly pending = new Set<Promise<unknown>>();
   private readonly websocket: ResponsesWebsocket;
   private readonly unsubscribe: (() => void)[];
-  private readonly bridgeRequests = new Set<{ user: number; provider: string; abort: AbortController }>();
+  private readonly requests = new Map<AbortController, string>();
+  private readonly bridgeRequests = new Set<{ provider: string; abort: AbortController }>();
 
   constructor(
     private readonly identities: IdentityService,
@@ -61,11 +61,10 @@ export class ModelProxy {
   ) {
     this.websocket = new ResponsesWebsocket(options.websocket);
     this.unsubscribe = [
-      identities.onRevoked((user) => {
-        for (const request of this.bridgeRequests)
-          if (user === null || request.user === user)
-            request.abort.abort(new DOMException('identity_revoked', 'AbortError'));
-        this.websocket.revokeUser(user);
+      identities.onSessionRevoked((session) => {
+        for (const [abort, jti] of this.requests)
+          if (jti === session.jti) abort.abort(new DOMException('identity_revoked', 'AbortError'));
+        this.websocket.revokeSession(session.jti);
       }),
       models.onHistoryInvalidated((provider) => {
         for (const request of this.bridgeRequests)
@@ -109,7 +108,6 @@ export class ModelProxy {
 
   async execute(input: {
     key: string;
-    user: IdentityUser;
     selection: ModelSelection;
     protocol: Protocol;
     body: Buffer;
@@ -124,145 +122,183 @@ export class ModelProxy {
     sent?: () => void;
   }) {
     return this.run(async () => {
-      const signal = AbortSignal.any([input.signal, this.shutdown.signal]);
-      signal.throwIfAborted();
-      const recording = await this.records.begin({
-        user_id: input.user.id,
-        username: input.user.username,
-        provider_instance_id: input.selection.provider_instance_id,
-        model_id: input.selection.model_id,
-        kind:
-          input.operation === 'compact'
-            ? 'context_compaction'
-            : input.operation === 'input_tokens'
-              ? 'input_tokens'
-              : input.kind,
-        protocol: input.protocol,
-      });
-      input.admitted?.(recording);
-      recording.request?.append(input.body);
-      let status: number | null = null;
-      let upstream = false;
-      let transferSignal = signal;
-      const bridgeRequest = {
-        user: input.user.id,
-        provider: input.selection.provider_instance_id,
-        abort: new AbortController(),
-      };
+      const subject = input.kind === 'admin_test'
+        ? await this.identities.write(manager => this.identities.requireOrganizationAdmin(manager, input.key))
+        : await this.identities.llmIdentity(input.key).then(({ user, scope, session }) => ({
+            user, organizationId: scope.organization_id!, session,
+          })).catch((error: unknown) => {
+            if (error instanceof IdentityError && error.status === 401) throw new ControlError('llm_key_invalid');
+            throw error;
+          });
+      const cancelled = new AbortController();
+      this.requests.set(cancelled, subject.session.jti);
       try {
-        const parsed = requestModel(input.body, input.operation);
-        if (parsed.model !== input.selection.model_id) throw new ControlError('llm_request_invalid');
-        // 先登记准入等待期，覆盖异步准入结束到实际建连间的配置/主体撤销。
-        // 只有最终走 WS 的请求使用此取消信号，不改变普通 HTTP 的生命周期。
-        this.bridgeRequests.add(bridgeRequest);
-        const route = await this.models.admit(input.key, input.selection, input.protocol, input.kind === 'admin_test', {
-          request: parsed,
-          binding: input.historyBinding,
-          operation: input.operation,
-        });
-        signal.throwIfAborted();
-        recording.row.provider_name = route.provider.connection.display_name;
-        if (input.operation !== 'input_tokens')
-          recording.usage = new UsageObserver(input.protocol, route.provider.connection.provider_type);
-        recording.observation = new ResponseObserver(recording.row, recording.usage);
-        signal.throwIfAborted();
-        const bridge =
-          route.provider.connection.responses_transport === 'websocket' &&
-          input.protocol === 'open_ai_responses' &&
-          input.operation !== 'input_tokens' &&
-          input.kind === 'proxy';
-        recording.row.response_source = bridge
-          ? input.operation === 'compact'
-            ? 'websocket_compact'
-            : 'websocket_bridge'
-          : 'upstream_http';
-        if (!bridge) this.bridgeRequests.delete(bridgeRequest);
-        transferSignal = bridge ? AbortSignal.any([signal, bridgeRequest.abort.signal]) : signal;
-        transferSignal.throwIfAborted();
-        upstream = !bridge;
-        // 仅已准入的业务接续转换协议；HTTP 与辅助调用继续保留原始 Buffer。
-        const transferInput = {
-          endpoint: route.provider.connection.endpoint,
-          protocol: input.protocol,
-          operation: input.operation,
-          apiKey: route.provider.api_key,
-          requestHeaders: input.requestHeaders,
-          body: input.body,
-          signal: transferSignal,
-          connectTimeout: this.options.connectTimeout ?? 10000,
-          idleTimeout: this.options.idleTimeout ?? 300000,
-
-          sent: () => {
-            input.body = Buffer.alloc(0);
-            input.sent?.();
-          },
-
-          sink: {
-            headers: (code: number, headers: IncomingHttpHeaders) => {
-              status = code;
-              recording.headers(headers);
-              input.sink.headers(code, headers);
-            },
-
-            chunk: async (chunk: Buffer, signal: AbortSignal) => {
-              recording.chunk(chunk);
-              await input.sink.chunk(chunk, signal);
-            },
-          },
-        };
-        const result = bridge
-          ? await this.websocket[input.operation === 'compact' ? 'compact' : 'transfer']({
-              ...transferInput,
-              user: input.user.id,
-              provider: input.selection.provider_instance_id,
-              binding: input.historyBinding ?? '',
-              finish: input.finish,
-              failureFrame: (chunk: Buffer) => recording.failureFrame(chunk),
-              started: () => {
-                upstream = true;
-              },
-            })
-          : await transfer(transferInput);
-        if (!bridge) await input.finish?.(signal);
-        await recording.settle(result >= 200 && result < 300 ? 'forwarded' : 'upstream_error', result, null);
-        return { call_id: recording.row.id, http_status: result };
-      } catch (error) {
-        const abortReason = transferSignal.reason instanceof DOMException ? transferSignal.reason.message : '';
-        const cancellation = [
-          'center_shutdown',
-          'identity_revoked',
-          'bridge_configuration_changed',
-          'downstream_closed',
-          'test_timeout',
-          'test_response_limit',
-        ].includes(abortReason)
-          ? abortReason
-          : 'cancelled';
-        const reason = transferSignal.aborted
-          ? cancellation
-          : error instanceof ControlError
-            ? error.code
-            : error instanceof WebsocketResponseError
-              ? 'response_error'
-              : error instanceof TransferError
-                ? error.reason
-                : transferSignal.aborted
-                  ? 'cancelled'
-                  : 'center_failure';
-        const recordedStatus =
-          status ?? (error instanceof ControlError || error instanceof WebsocketResponseError ? error.status : null);
-        let outcome: 'upstream_error' | 'interrupted' | 'rejected' =
-          upstream || transferSignal.aborted ? 'interrupted' : 'rejected';
-        if (error instanceof WebsocketResponseError) {
-          outcome = 'upstream_error';
-          // 此错误是桥接控制响应；实际失败证据由 failureFrame 独立保存。
-        }
-        await recording.settle(outcome, recordedStatus, reason);
-        throw error;
+        return await this.executeForSubject(input, subject, cancelled.signal);
       } finally {
-        this.bridgeRequests.delete(bridgeRequest);
+        this.requests.delete(cancelled);
       }
     });
+  }
+
+  private async executeForSubject(
+    input: Parameters<ModelProxy['execute']>[0],
+    subject: { user: { id: number; username: string }; organizationId: string; session: { jti: string } },
+    cancelled: AbortSignal,
+  ) {
+    const signal = AbortSignal.any([input.signal, this.shutdown.signal, cancelled]);
+    signal.throwIfAborted();
+    const parsed = requestModel(input.body, input.operation);
+    if (parsed.streaming_compaction && input.protocol !== 'open_ai_responses') throw new ControlError('llm_request_invalid');
+    // 业务操作与传输路径分离：V2 仍发 /responses，但权限、配置绑定和费用归属 compact。
+    const operation = parsed.streaming_compaction ? 'compact' : input.operation;
+    const recording = await this.records.begin({
+      organization_id: subject.organizationId,
+      user_id: subject.user.id,
+      username: subject.user.username,
+      provider_instance_id: input.selection.provider_instance_id,
+      model_id: input.selection.model_id,
+      kind:
+        operation === 'compact'
+          ? 'context_compaction'
+          : input.operation === 'input_tokens'
+            ? 'input_tokens'
+            : input.kind,
+      protocol: input.protocol,
+    });
+    input.admitted?.(recording);
+    recording.request?.append(input.body);
+    let status: number | null = null;
+    let upstream = false;
+    let transferSignal = signal;
+    const bridgeRequest = {
+      provider: input.selection.provider_instance_id,
+      abort: new AbortController(),
+    };
+    try {
+      if (parsed.model !== input.selection.model_id) throw new ControlError('llm_request_invalid');
+      // 先登记准入等待期，覆盖异步准入结束到实际建连间的配置/主体撤销。
+      // 只有最终走 WS 的请求使用此取消信号，不改变普通 HTTP 的生命周期。
+      this.bridgeRequests.add(bridgeRequest);
+      const route = await this.models.admit(input.key, input.selection, input.protocol, input.kind === 'admin_test', {
+        request: parsed,
+        binding: input.historyBinding,
+        operation,
+      });
+      signal.throwIfAborted();
+      recording.row.provider_name = route.provider.connection.display_name;
+      if (input.operation !== 'input_tokens')
+        recording.usage = new UsageObserver(input.protocol, route.provider.connection.provider_type);
+      recording.observation = new ResponseObserver(recording.row, recording.usage);
+      signal.throwIfAborted();
+      const bridge =
+        route.provider.connection.responses_transport === 'websocket' &&
+        input.protocol === 'open_ai_responses' &&
+        input.operation !== 'input_tokens' &&
+        input.kind === 'proxy';
+      const httpContinuation = !bridge && operation === 'generation' && parsed.store === true
+        ? input.historyBinding : undefined;
+      if (httpContinuation && parsed.previous_response_id &&
+        !await this.records.hasContinuation(subject.organizationId, httpContinuation, parsed.previous_response_id))
+        throw new ControlError('previous_response_not_found');
+      recording.row.response_source = bridge
+        ? input.operation === 'compact'
+          ? 'websocket_compact'
+          : 'websocket_bridge'
+        : 'upstream_http';
+      if (!bridge) this.bridgeRequests.delete(bridgeRequest);
+      transferSignal = bridge ? AbortSignal.any([signal, bridgeRequest.abort.signal]) : signal;
+      transferSignal.throwIfAborted();
+      upstream = !bridge;
+      // 仅已准入的业务接续转换协议；HTTP 与辅助调用继续保留原始 Buffer。
+      const transferInput = {
+        endpoint: route.provider.connection.endpoint,
+        protocol: input.protocol,
+        operation: input.operation,
+        apiKey: route.provider.api_key,
+        requestHeaders: input.requestHeaders,
+        body: input.body,
+        signal: transferSignal,
+        connectTimeout: this.options.connectTimeout ?? 10000,
+        idleTimeout: this.options.idleTimeout ?? 300000,
+
+        sent: () => {
+          input.body = Buffer.alloc(0);
+          input.sent?.();
+        },
+
+        sink: {
+          headers: (code: number, headers: IncomingHttpHeaders) => {
+            status = code;
+            recording.headers(headers);
+            input.sink.headers(code, headers);
+          },
+
+          chunk: async (chunk: Buffer, signal: AbortSignal) => {
+            recording.chunk(chunk);
+            await input.sink.chunk(chunk, signal);
+          },
+        },
+      };
+      const result = bridge
+        ? await this.websocket[input.operation === 'compact' ? 'compact' : 'transfer']({
+            ...transferInput,
+            user: subject.user.id,
+            organizationId: subject.organizationId,
+            sessionId: subject.session.jti,
+            provider: input.selection.provider_instance_id,
+            binding: input.historyBinding ?? '',
+            finish: input.finish,
+            failureFrame: (chunk: Buffer) => recording.failureFrame(chunk),
+            started: () => {
+              upstream = true;
+            },
+          })
+        : await transfer(transferInput);
+      if (!bridge) {
+        if (httpContinuation && result >= 200 && result < 300) {
+          const responseId = recording.observation?.continuationId();
+          if (responseId) await this.records.saveContinuation(recording.row, httpContinuation, responseId);
+        }
+        await input.finish?.(signal);
+      }
+      await recording.settle(result >= 200 && result < 300 ? 'forwarded' : 'upstream_error', result, null);
+      return { call_id: recording.row.id, http_status: result };
+    } catch (error) {
+      const abortReason = transferSignal.reason instanceof DOMException ? transferSignal.reason.message : '';
+      const cancellation = [
+        'center_shutdown',
+        'identity_revoked',
+        'bridge_configuration_changed',
+        'downstream_closed',
+        'test_timeout',
+        'test_response_limit',
+      ].includes(abortReason)
+        ? abortReason
+        : 'cancelled';
+      const reason = transferSignal.aborted
+        ? cancellation
+        : error instanceof ControlError
+          ? error.code
+          : error instanceof WebsocketResponseError
+            ? 'response_error'
+            : error instanceof TransferError
+              ? error.reason
+              : transferSignal.aborted
+                ? 'cancelled'
+                : 'center_failure';
+      const recordedStatus =
+        status ?? (error instanceof ControlError || error instanceof WebsocketResponseError ? error.status : null);
+      let outcome: 'upstream_error' | 'interrupted' | 'rejected' =
+        upstream || transferSignal.aborted ? 'interrupted' : 'rejected';
+      if (error instanceof WebsocketResponseError) {
+        outcome = 'upstream_error';
+        // 此错误是桥接控制响应；实际失败证据由 failureFrame 独立保存。
+      }
+      await recording.settle(outcome, recordedStatus, reason);
+      throw error;
+    } finally {
+      this.bridgeRequests.delete(bridgeRequest);
+    }
   }
 
   install(app: FastifyInstance): void {
@@ -274,7 +310,7 @@ export class ModelProxy {
     });
     app.register((scope) => {
       const bodies = new RequestBodies();
-      const authenticated = new WeakMap<FastifyRequest, { key: string; user: IdentityUser }>();
+      const authenticated = new WeakMap<FastifyRequest, string>();
       bodies.install(scope);
       scope.setErrorHandler((error, request, reply) => {
         bodies.release(request);
@@ -297,8 +333,8 @@ export class ModelProxy {
         )
           throw new ControlError('llm_request_invalid');
         try {
-          const identity = await this.identities.llmIdentity(key ?? '');
-          authenticated.set(request, { key: key ?? '', user: identity.user });
+          await this.identities.llmIdentity(key ?? '');
+          authenticated.set(request, key!);
         } catch (error) {
           throw new ControlError(
             error instanceof IdentityError && error.status === 401 ? 'llm_key_invalid' : 'llm_proxy_unavailable',
@@ -321,7 +357,7 @@ export class ModelProxy {
           } catch {
             throw new ControlError('llm_request_invalid');
           }
-          const { key, user } = authenticated.get(request)!;
+          const key = authenticated.get(request)!;
           authenticated.delete(request);
           const cancelled = new AbortController();
 
@@ -334,7 +370,6 @@ export class ModelProxy {
           try {
             await this.execute({
               key,
-              user,
               selection: { provider_instance_id: providerId, model_id: parsed.model },
               protocol,
               body,

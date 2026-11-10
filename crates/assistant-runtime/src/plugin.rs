@@ -51,6 +51,24 @@ pub enum PluginFileError {
 
 /// Host 只执行明确的单包文件/网络动作；是否生效始终由 Store 事务决定。
 pub trait PluginFilePort: Send + Sync {
+    /// 仅读取已核实包摘要内的单文件 UI；调用期间由 Runtime 持有短期包租约。
+    fn read_ui_html(
+        &self,
+        _name: String,
+        _sha256: String,
+        _path: String,
+    ) -> BoxFuture<'_, Result<String, PluginFileError>> {
+        Box::pin(async { Err(PluginFileError::Unavailable) })
+    }
+    /// 读取当前包声明的图标，投影为仅用于客户端图片元素的数据 URL。
+    fn read_ui_icon(
+        &self,
+        _name: String,
+        _sha256: String,
+        _path: String,
+    ) -> BoxFuture<'_, Result<String, PluginFileError>> {
+        Box::pin(async { Err(PluginFileError::Unavailable) })
+    }
     fn mcp_candidates(
         &self,
         _plugins: Vec<StoredPlugin>,
@@ -150,6 +168,63 @@ pub(crate) struct PluginManager {
 }
 
 impl PluginManager {
+    /// 取得当前已启用且配置完整的声明与短期包租约；不缓存旧包代码。
+    pub(crate) async fn ui_entry(
+        &self,
+        name: &str,
+        id: &str,
+    ) -> RuntimeResult<(assistant_protocol::PluginUiEntry, PluginUseLease, String)> {
+        let lease = self.use_package(name).await?;
+        let plugin = self
+            .store
+            .list_plugins()
+            .await
+            .map_err(storage)?
+            .into_iter()
+            .find(|p| p.name == name && p.active_sha256.as_deref() == Some(&lease.sha256))
+            .ok_or(RuntimeError::PluginPackageUnavailable)?;
+        let projected = project_plugin(plugin.clone(), PluginPackageState::Available);
+        if projected
+            .configuration
+            .iter()
+            .any(|f| f.required && !f.is_set)
+            || projected.external_software.iter().any(|f| !f.is_set)
+        {
+            return Err(RuntimeError::PluginPackageUnavailable);
+        }
+        let manifest: serde_json::Value =
+            serde_json::from_str(plugin.active_manifest_json.as_deref().unwrap_or(""))
+                .map_err(|_| RuntimeError::PluginPackageUnavailable)?;
+        let ui: assistant_protocol::PluginUi =
+            serde_json::from_value(manifest.get("ui").cloned().unwrap_or_default())
+                .map_err(|_| RuntimeError::PluginPackageUnavailable)?;
+        let entry = ui
+            .entries
+            .into_iter()
+            .find(|e| e.id == id)
+            .ok_or(RuntimeError::PluginPackageUnavailable)?;
+        Ok((entry, lease, projected.settings_revision))
+    }
+
+    pub(crate) async fn read_ui_html(
+        &self,
+        lease: &PluginUseLease,
+        path: String,
+    ) -> RuntimeResult<String> {
+        self.files()?
+            .read_ui_html(lease.name.clone(), lease.sha256.clone(), path)
+            .await
+            .map_err(|_| RuntimeError::PluginPackageUnavailable)
+    }
+
+    pub(crate) async fn read_ui_icon(&self, lease: &PluginUseLease, path: &str) -> Option<String> {
+        self.files()
+            .ok()?
+            .read_ui_icon(lease.name.clone(), lease.sha256.clone(), path.to_owned())
+            .await
+            .ok()
+    }
+
     /// 从 Store 读取本用户当前包及参数，再由 Host 交回声明和安全文件来源。
     /// 管理查询保留禁用／损坏定义；此处不持长期包租约，修改和候选安装须重新核对来源。
     pub(crate) async fn mcp_candidates(&self) -> RuntimeResult<PluginMcpDiscovery> {
@@ -1187,7 +1262,7 @@ impl PluginManager {
             self.advance(
                 PluginOperationPhase::Committing,
                 operation,
-                PluginRecordChange::Upsert(plugin),
+                PluginRecordChange::Upsert(Box::new(plugin)),
             )
             .await?;
             drop(_commit);
@@ -1269,13 +1344,13 @@ impl PluginManager {
         let plugin_change = if request.clear_data {
             PluginRecordChange::Remove(request.name)
         } else {
-            PluginRecordChange::Upsert(StoredPlugin {
+            PluginRecordChange::Upsert(Box::new(StoredPlugin {
                 active_version: None,
                 active_sha256: None,
                 active_manifest_json: None,
                 updated_at_ms: now_ms(),
                 ..old
-            })
+            }))
         };
         self.advance(PluginOperationPhase::Committing, operation, plugin_change)
             .await?;
@@ -1535,6 +1610,10 @@ fn project_plugin(
         external_software,
         skills: declared_names(manifest.as_ref(), "skills"),
         mcp: declared_names(manifest.as_ref(), "mcp"),
+        ui: manifest
+            .as_ref()
+            .and_then(|manifest| manifest.get("ui"))
+            .and_then(|ui| serde_json::from_value(ui.clone()).ok()),
     }
 }
 
@@ -1614,13 +1693,31 @@ fn origin(source: &PluginSource) -> PluginPackageOrigin {
         PluginSource::Upload => PluginPackageOrigin::Upload,
         PluginSource::Center(center_id) => PluginPackageOrigin::Center {
             center_id: center_id.clone(),
+            organization_id: None,
+        },
+        PluginSource::Organization {
+            center_id,
+            organization_id,
+        } => PluginPackageOrigin::Center {
+            center_id: center_id.clone(),
+            organization_id: Some(organization_id.clone()),
         },
     }
 }
 fn store_source(origin: &PluginPackageOrigin) -> PluginSource {
     match origin {
         PluginPackageOrigin::Upload => PluginSource::Upload,
-        PluginPackageOrigin::Center { center_id } => PluginSource::Center(center_id.clone()),
+        PluginPackageOrigin::Center {
+            center_id,
+            organization_id: None,
+        } => PluginSource::Center(center_id.clone()),
+        PluginPackageOrigin::Center {
+            center_id,
+            organization_id: Some(organization_id),
+        } => PluginSource::Organization {
+            center_id: center_id.clone(),
+            organization_id: organization_id.clone(),
+        },
     }
 }
 fn matches_expected(old: &Option<StoredPlugin>, selection: &PluginPackageSelection) -> bool {
@@ -1664,7 +1761,7 @@ fn update_missing_required_config(old: Option<&StoredPlugin>, manifest: &str) ->
         })
 }
 fn validate_install(request: &BeginPluginInstallRequest) -> RuntimeResult<()> {
-    if request.packages.is_empty() || request.packages.len() > 64 || request.packages.iter().any(|item| !valid_name(&item.name) || !valid_sha(&item.sha256) || item.expected_active_sha256.as_deref().is_some_and(|sha| !valid_sha(sha)) || item.version.is_empty() || item.version.len() > 80 || item.size_bytes == 0 || item.size_bytes > 2 * 1024 * 1024 * 1024 || matches!(&item.origin, PluginPackageOrigin::Center { center_id } if center_id.is_empty())) { return Err(invalid()); }
+    if request.packages.is_empty() || request.packages.len() > 64 || request.packages.iter().any(|item| !valid_name(&item.name) || !valid_sha(&item.sha256) || item.expected_active_sha256.as_deref().is_some_and(|sha| !valid_sha(sha)) || item.version.is_empty() || item.version.len() > 80 || item.size_bytes == 0 || item.size_bytes > 2 * 1024 * 1024 * 1024 || matches!(&item.origin, PluginPackageOrigin::Center { center_id, organization_id } if center_id.is_empty() || organization_id.as_ref().is_some_and(String::is_empty))) { return Err(invalid()); }
     if request
         .packages
         .iter()
@@ -1873,6 +1970,7 @@ mod tests {
             format: PluginArchiveFormat::TarGzip,
             origin: PluginPackageOrigin::Center {
                 center_id: "center-test".into(),
+                organization_id: None,
             },
             expected_active_sha256: expected,
         }

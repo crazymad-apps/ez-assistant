@@ -35,6 +35,9 @@ function fixture() {
   });
   const repository = {
     findOneByOrFail: vi.fn(async () => ({ ...settings })),
+    findOneBy: vi.fn(async () => ({ ...settings })),
+    find: vi.fn(async () => [{ provider_instance_id: settings.provider_instance_id, model_id: settings.model_id }]),
+    upsert: vi.fn(async (value: Partial<ModelSettingsEntity>) => { Object.assign(settings, value); }),
     update: vi.fn(async (_where: unknown, value: Partial<ModelSettingsEntity>) => {
       Object.assign(settings, value);
       return { affected: 1, raw: [], generatedMaps: [] };
@@ -44,6 +47,13 @@ function fixture() {
   const identity = new IdentityService();
   vi.spyOn(identity, 'write').mockImplementation(async work => work(manager));
   vi.spyOn(identity, 'requireAdmin').mockResolvedValue(Object.assign(new UserEntity(), { id: 1 }));
+  const organizationId = 'test-org';
+  const orgIdentity = { organizationId, user: Object.assign(new UserEntity(), { id: 1 }) };
+  vi.spyOn(identity, 'scope').mockImplementation(async () => ({
+    scope: { kind: 'system' },
+  }) as Awaited<ReturnType<IdentityService['scope']>>);
+  vi.spyOn(identity, 'requireOrganizationAdmin').mockResolvedValue(orgIdentity as unknown as Awaited<ReturnType<IdentityService['requireOrganizationAdmin']>>);
+  vi.spyOn(identity, 'requireOrganizationMember').mockResolvedValue(orgIdentity as unknown as Awaited<ReturnType<IdentityService['requireOrganizationMember']>>);
   vi.spyOn(identity, 'audit').mockResolvedValue();
   vi.spyOn(identity, 'me').mockResolvedValue({ center_id: 'stable-center', user: { id: 1 } } as Awaited<ReturnType<IdentityService['me']>>);
   const provider = Object.assign(new ProviderEntity(), {
@@ -66,17 +76,16 @@ it('独立保存地址，运行时和新服务实例读取持久值，不修改�
   const { settings, repository, renew, makeService } = fixture();
   const service = makeService();
   expect((await service.settings('admin')).public_origin).toBe('http://127.0.0.1:7320');
-  const saved = await service.setDefault('admin', { public_origin: 'http://localhost:7320/' }, 'request');
-  expect(saved.default_model?.model_id).toBe('model');
+  const saved = await service.saveSettings('admin', { public_origin: 'http://localhost:7320/' }, 'request');
+  expect(saved.policy).toBeNull();
   expect(repository.update).toHaveBeenCalledExactlyOnceWith({ singleton: true }, { public_origin: 'http://localhost:7320' });
   expect(settings.model_id).toBe('model');
   expect(renew).not.toHaveBeenCalled();
   const restarted = makeService();
-  expect((await restarted.runtime('user')).endpoint).toBe(`http://localhost:7320/api/llm/providers/${settings.provider_instance_id}/v1`);
+  expect((await restarted.runtime('user')).providers[0]?.endpoint).toBe(`http://localhost:7320/api/llm/providers/${settings.provider_instance_id}/v1`);
   expect((await restarted.runtime('user')).center_id).toBe('stable-center');
-  await restarted.setDefault('admin', { default_model: null }, 'request');
   expect(settings.public_origin).toBe('http://localhost:7320');
-  await restarted.setDefault('admin', { public_origin: null }, 'request');
+  await restarted.saveSettings('admin', { public_origin: null }, 'request');
   expect((await restarted.settings('admin')).public_origin).toBe('http://127.0.0.1:7320');
 });
 
@@ -84,9 +93,9 @@ it('非法地址、混合草稿和非管理员请求均不落库', async () => {
   const { repository, identity, makeService } = fixture();
   const service = makeService();
   for (const body of [{}, { public_origin: 'ftp://center.example' }, { public_origin: 'http://localhost:7320', default_model: null }]) {
-    expect(() => service.setDefault('admin', body, 'request')).toThrow();
+    expect(() => service.saveSettings('admin', body, 'request')).toThrow();
   }
   vi.mocked(identity.requireAdmin).mockRejectedValue(new Error('unauthorized'));
-  await expect(service.setDefault('user', { public_origin: 'http://localhost:7320' }, 'request')).rejects.toThrow('unauthorized');
+  await expect(service.saveSettings('user', { public_origin: 'http://localhost:7320' }, 'request')).rejects.toThrow('unauthorized');
   expect(repository.update).not.toHaveBeenCalled();
 });

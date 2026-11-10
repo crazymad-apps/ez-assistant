@@ -4,7 +4,7 @@ import type { RecordingSettings, ModelTestResult } from '../request/openapi';
 import { modelApi } from '../request/models';
 import type { ModelSelection, SaveProviderWritable as SaveProvider, SaveModelConfiguration } from '../request/openapi';
 import { api, failure } from '../request/api';
-import type { IdentityUser } from '../request/openapi';
+import type { IdentityResponse, IdentityUser, ScopeSelection, ScopeView } from '../request/openapi';
 import { userView } from '../model';
 import type { UserView, UserDraft } from '../model';
 import { clearTokenCookie, readTokenCookie, writeTokenCookie } from './token-cookie';
@@ -15,17 +15,22 @@ import { clearTokenCookie, readTokenCookie, writeTokenCookie } from './token-coo
  */
 export class AdminStore {
   user?: IdentityUser;
+  scope?: ScopeView;
   token = '';
   notice = '';
   logoutState: 'none' | 'pending' | 'failed' = 'none';
   busy = false;
   restoreState: 'none' | 'pending' | 'failed' = 'none';
   private identityRequest?: AbortController;
+  private expiryTimer?: ReturnType<typeof setTimeout>;
   private loginAttempt?: object;
+  private scopeExchange?: { token: string; invalidated: boolean };
 
   constructor() {
     makeObservable<this, 'clear' | 'write'>(this, {
       user: observable.ref,
+      scope: observable.ref,
+      exchangeScope: action.bound,
       token: observable,
       notice: observable,
       logoutState: observable,
@@ -52,7 +57,6 @@ export class AdminStore {
       refreshModels: action.bound,
       saveModel: action.bound,
       resetModel: action.bound,
-      setDefaultModel: action.bound,
       setModelPublicOrigin: action.bound,
       reloadModelTemplates: action.bound,
       manage: action.bound,
@@ -66,12 +70,30 @@ export class AdminStore {
   private clear(notice = '', forgetToken = true) {
     if (forgetToken) clearTokenCookie(this.token);
     this.loginAttempt = undefined;
+    this.scopeExchange = undefined;
+    clearTimeout(this.expiryTimer);
     this.identityRequest?.abort();
     this.user = undefined;
+    this.scope = undefined;
     this.token = '';
     this.logoutState = 'none';
+    this.busy = false;
     this.notice = notice;
     this.restoreState = 'none';
+  }
+
+  private applyIdentity(identity: IdentityResponse) {
+    this.user = identity.user;
+    this.scope = identity.scope;
+    clearTimeout(this.expiryTimer);
+    const token = this.token;
+    const remaining = Date.parse(identity.expires_at) - Date.now();
+    if (Number.isFinite(remaining)) {
+      this.expiryTimer = setTimeout(
+        () => this.invalidateIdentity(token, '登录已到期，请重新登录。'),
+        Math.max(0, Math.min(remaining, 7 * 24 * 60 * 60 * 1000)),
+      );
+    }
   }
 
   dispose() {
@@ -85,7 +107,13 @@ export class AdminStore {
 
   invalidateIdentity(token: string, notice: string) {
     // 迟到的旧 Token 失败不能清空另一身份；页面投影随路由守卫卸载，不由本方法逐个清理。
-    if (token && this.valid(token)) this.clear(notice);
+    if (!token || !this.valid(token)) return;
+    if (this.scopeExchange?.token === token) {
+      // 其他请求可能先观察到换发已提交。等换发响应决定当前凭据。
+      this.scopeExchange.invalidated = true;
+      return;
+    }
+    this.clear(notice);
   }
 
   async login(username: string, password: string): Promise<string | undefined> {
@@ -103,20 +131,10 @@ export class AdminStore {
         }
         return '登录页面已关闭，请重新登录。';
       }
-      if (!result.user.enabled || (!result.user.is_super_admin && result.user.role !== 'admin')) {
-        // 普通用户后台误入只撤销本次新 Token，不影响其 Runtime 的其他登录。
-        try {
-          await api.logout(result.token);
-        } catch {
-          return '此账号无后台权限；本次登录退出尚未确认，请联系管理员。';
-        }
-        return '此账号无管理后台权限，请通过 Runtime 登录。';
-      }
       runInAction(() => {
         this.clear();
         this.token = result.token;
-        this.user = result.user;
-        writeTokenCookie(result.token);
+        this.applyIdentity(result);
       });
     } catch (error) {
       return failure(error).text;
@@ -137,24 +155,74 @@ export class AdminStore {
     this.identityRequest?.abort();
     const request = new AbortController();
     this.identityRequest = request;
-    if (!this.user) this.restoreState = 'pending';
+    if (!this.user || this.restoreState === 'failed') this.restoreState = 'pending';
     try {
       const identity = await api.me(token, request.signal);
       runInAction(() => {
         if (this.valid(token) && !request.signal.aborted && this.identityRequest === request) {
-          if (!identity.user.enabled || (!identity.user.is_super_admin && identity.user.role !== 'admin'))
-            this.clear('管理权限已变更，请通过 Runtime 登录。');
-          else {
-            this.user = identity.user;
-            this.restoreState = 'none';
+          if (!identity.user.enabled) {
+            this.clear('账号已停用。');
+            return;
           }
+          if (!this.user && identity.scope.kind === 'unselected') {
+            // 旧版本可能把首次选择前的临时凭据写进了 Cookie。
+            this.clear();
+            return;
+          }
+          this.applyIdentity(identity);
+          this.restoreState = 'none';
         }
       });
     } catch {
       // 身份失效由统一拦截器处理；恢复失败保留凭据与原路由，只允许重试身份查询。
       runInAction(() => {
-        if (this.valid(token) && !request.signal.aborted && this.identityRequest === request && !this.user)
+        if (
+          this.valid(token) &&
+          !request.signal.aborted &&
+          this.identityRequest === request &&
+          this.restoreState === 'pending'
+        )
           this.restoreState = 'failed';
+      });
+    }
+  }
+
+  async exchangeScope(target: Omit<ScopeSelection, 'entry'>): Promise<string | undefined> {
+    const token = this.token;
+    if (!token || !this.valid(token) || this.busy) return '当前操作尚未结束。';
+    this.identityRequest?.abort();
+    this.busy = true;
+    const exchange = { token, invalidated: false };
+    this.scopeExchange = exchange;
+    try {
+      const result = await api.exchange(token, target);
+      if (!this.valid(token) || this.scopeExchange !== exchange) return '登录状态已变更。';
+      runInAction(() => {
+        this.token = result.token;
+        this.applyIdentity(result);
+        writeTokenCookie(result.token);
+      });
+    } catch (error) {
+      const problem = failure(error);
+      if (this.scopeExchange !== exchange) return problem.text;
+      if (problem.code === 'TOKEN_INVALID') {
+        runInAction(() => this.clear(problem.text));
+      } else if (exchange.invalidated || problem.code === undefined || problem.code === 'SERVICE_UNAVAILABLE') {
+        // 可能已提交换发。核验原 Token 前遮蔽旧工作区，保留原凭据用于恢复。
+        runInAction(() => {
+          this.scopeExchange = undefined;
+          this.restoreState = 'pending';
+          this.busy = false;
+        });
+        await this.verifyIdentity();
+      }
+      return problem.text;
+    } finally {
+      runInAction(() => {
+        if (this.scopeExchange === exchange) {
+          this.scopeExchange = undefined;
+          this.busy = false;
+        }
       });
     }
   }
@@ -250,10 +318,6 @@ export class AdminStore {
 
   resetModel(selection: ModelSelection) {
     return this.write((token) => modelApi.reset(token, selection));
-  }
-
-  setDefaultModel(selection: ModelSelection | null) {
-    return this.write((token) => modelApi.setDefault(token, selection));
   }
 
   setModelPublicOrigin(origin: string | null) {

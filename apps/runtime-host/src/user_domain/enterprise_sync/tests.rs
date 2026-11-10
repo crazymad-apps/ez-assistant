@@ -17,6 +17,7 @@ fn automatic_updates_never_downgrade_or_replace_equal_versions() {
         format: assistant_protocol::PluginArchiveFormat::TarGzip,
         origin: PluginPackageOrigin::Center {
             center_id: "center".into(),
+            organization_id: None,
         },
         expected_active_sha256: Some("old".into()),
     };

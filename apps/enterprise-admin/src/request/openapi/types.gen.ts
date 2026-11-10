@@ -57,27 +57,55 @@ export type IdentityUser = {
     id: number;
     username: string;
     display_name: string;
-    role: 'user' | 'admin';
+    role: 'user' | 'system_admin';
     is_super_admin: boolean;
     enabled: boolean;
 };
 
+export type ScopeView = {
+    kind: 'unselected' | 'system' | 'organization';
+    /**
+     * 仅 organization 范围携带
+     */
+    organization_id?: string;
+    name?: string;
+    code?: string;
+    enabled?: boolean;
+    member_role?: 'member' | 'admin';
+    can_manage: boolean;
+};
+
 export type LoginResponse = {
     center_id: string;
+    legacy_organization_id: string;
     user: IdentityUser;
+    scope: ScopeView;
+    expires_at: string;
     /**
-     * 用于 Bearer 身份认证；仅内存保存，退出、撤销或中心重启后失效
+     * 有效期固定 7 天的 JWT。撤销或中心重启后立即失效。
      */
     token: string;
     /**
-     * 仅供后续 LLM 代理使用，随本次 token 一起撤销；不用于身份 API
+     * 仅有效组织成员的客户端范围签发，随 JWT 撤销
      */
-    llm_key: string;
+    llm_key?: string;
 };
 
 export type IdentityResponse = {
     center_id: string;
+    legacy_organization_id: string;
     user: IdentityUser;
+    scope: ScopeView;
+    expires_at: string;
+};
+
+export type ScopeSelection = {
+    kind: 'unselected' | 'system' | 'organization';
+    /**
+     * 仅 organization 范围携带
+     */
+    organization_id?: string;
+    entry: 'admin' | 'client';
 };
 
 export type PasswordRequest = {
@@ -88,13 +116,25 @@ export type PasswordRequest = {
     new_password: string;
 };
 
+export type UserOrganization = {
+    id: string;
+    name: string;
+    code: string;
+    role: 'admin' | 'member';
+    enabled: boolean;
+};
+
 export type UserRecord = {
     id: number;
     username: string;
     display_name: string;
-    role: 'user' | 'admin';
+    role: 'user' | 'system_admin';
     is_super_admin: boolean;
     enabled: boolean;
+    /**
+     * 全局账号列表携带组织关系
+     */
+    organizations?: Array<UserOrganization>;
     created_at: string;
     updated_at: string;
 };
@@ -112,13 +152,13 @@ export type CreateUserRequest = {
      */
     username: string;
     display_name: string;
-    role: 'user' | 'admin';
+    role: 'user' | 'system_admin';
     enabled: boolean;
 };
 
 export type UpdateUserRequest = {
     display_name?: string;
-    role?: 'user' | 'admin';
+    role?: 'user' | 'system_admin';
     enabled?: boolean;
 };
 
@@ -127,6 +167,58 @@ export type ResetPasswordRequest = {
      * 至少 6 位，包含英文字母和数字；最多 512 UTF-8 字节；不收原密码，目标可为自己或超级管理员
      */
     new_password: string;
+};
+
+export type Organization = {
+    id: string;
+    code: string;
+    name: string;
+    enabled: boolean;
+};
+
+export type CreateOrganization = {
+    code: string;
+    name: string;
+    administrator_user_id: number;
+};
+
+export type UpdateOrganization = {
+    code: string;
+    name: string;
+    enabled: boolean;
+};
+
+export type UpdateMember = {
+    role?: 'member' | 'admin';
+    enabled?: boolean;
+};
+
+export type SaveMember = {
+    role: 'member' | 'admin';
+    enabled: boolean;
+};
+
+export type OrganizationMember = {
+    role: 'member' | 'admin';
+    enabled: boolean;
+    user_id: number;
+    username: string;
+    display_name: string;
+    account_enabled: boolean;
+};
+
+export type MemberPage = {
+    items: Array<OrganizationMember>;
+    total: number;
+    limit: number;
+    offset: number;
+};
+
+export type MemberCandidate = {
+    id: number;
+    username: string;
+    display_name: string;
+    enabled: boolean;
 };
 
 export type PluginPlatform = {
@@ -141,7 +233,7 @@ export type ModelSelection = {
 
 export type AuditUserFields = {
     display_name?: string;
-    role?: 'user' | 'admin';
+    role?: 'user' | 'admin' | 'system_admin';
     enabled?: boolean;
 };
 
@@ -160,6 +252,7 @@ export type AuditDetails = {
     previous_sha256?: string;
     skill_count?: number;
     mcp_count?: number;
+    device_id?: string;
     call_id?: string;
     side?: 'request' | 'response' | 'upstream_failure';
     mode?: 'off' | 'anomalies' | 'all';
@@ -169,6 +262,7 @@ export type AuditDetails = {
     provider_instance_id?: string;
     model_id?: string;
     model_count?: number;
+    allow_member_selection?: boolean;
     count?: number;
     default_model?: ModelSelection | null;
     public_origin?: string | null;
@@ -233,6 +327,7 @@ export type SaveProvider = {
 export type ProviderUsage = {
     fixed_config_count: number;
     default_model: boolean;
+    allowed_model_ids: Array<string>;
 };
 
 export type ModelConfigurationSummary = {
@@ -327,18 +422,32 @@ export type SaveModelConfiguration = {
     parameters: ModelParameters;
 };
 
-export type ModelSettings = {
+export type ModelPolicy = {
     default_model: ModelSelection | null;
-    public_origin: string | null;
+    allowed_models: Array<ModelSelection>;
+    allow_member_selection: boolean;
+    revision: string | null;
+};
+
+export type ModelAvailability = {
+    provider_instance_id: string;
+    model_id: string;
     state: 'ready' | 'unavailable';
     reason: string | null;
-    configuration: ModelConfiguration | null;
+    display_name: string | null;
+    origin: 'online' | 'manual';
+};
+
+export type ModelSettings = {
+    policy: ModelPolicy | null;
+    public_origin: string | null;
+    availability: Array<ModelAvailability>;
 };
 
 export type SaveModelSettings = {
-    default_model?: ModelSelection | null;
+    policy?: ModelPolicy;
     /**
-     * 客户端模型访问地址；null 恢复部署地址。与 default_model 分别提交。
+     * 客户端模型访问地址；null 恢复部署地址。与组织策略分别提交。
      */
     public_origin?: string | null;
 };
@@ -350,19 +459,31 @@ export type TemplateStatus = {
     error: string | null;
 };
 
-export type RuntimeModelConfiguration = {
+export type RuntimeModelItem = {
+    model_id: string;
     state: 'ready' | 'unavailable';
+    reason: string | null;
+    parameters: ModelParameters | null;
+    server_history_binding: string | null;
+};
+
+export type RuntimeModelProvider = {
+    provider_instance_id: string;
+    provider_type: 'openai' | 'sub2api' | 'opencode' | 'deepseek' | 'dashscope_api' | 'dashscope_plan' | 'moonshot' | 'zhipu' | 'vllm' | 'local';
+    provider_display_name: string | null;
+    endpoint: string;
+    protocol: 'open_ai_responses' | 'open_ai_chat_completions';
+    server_history_enabled: boolean;
+    server_history_support: 'unknown' | 'supported' | 'unsupported';
+    models: Array<RuntimeModelItem>;
+};
+
+export type RuntimeModelConfiguration = {
     center_id: string;
-    reason?: string;
-    endpoint?: string;
-    provider_type?: 'openai' | 'sub2api' | 'opencode' | 'deepseek' | 'dashscope_api' | 'dashscope_plan' | 'moonshot' | 'zhipu' | 'vllm' | 'local';
-    provider_display_name?: string;
-    protocol?: 'open_ai_responses' | 'open_ai_chat_completions';
-    model_id?: string;
-    parameters?: ModelParameters;
-    server_history_enabled?: boolean;
-    server_history_support?: 'unknown' | 'supported' | 'unsupported';
-    server_history_binding?: string | null;
+    organization_id: string;
+    allow_member_selection: boolean;
+    default_model: ModelSelection | null;
+    providers: Array<RuntimeModelProvider>;
 };
 
 export type UsageTotals = {
@@ -781,6 +902,7 @@ export type ApplyHostDevice = {
 };
 
 export type HostDeviceSummary = {
+    organization_id: string;
     /**
      * 管理员列表中的当前授权人数
      */
@@ -824,6 +946,7 @@ export type HostDeviceGrant = {
 };
 
 export type HostDeviceDetail = {
+    organization_id: string;
     /**
      * 管理员列表中的当前授权人数
      */
@@ -1041,7 +1164,7 @@ export type CreateUserRequestWritable = {
      */
     username: string;
     display_name: string;
-    role: 'user' | 'admin';
+    role: 'user' | 'system_admin';
     enabled: boolean;
     /**
      * 至少 6 位，包含英文字母和数字；最多 512 UTF-8 字节
@@ -1135,6 +1258,52 @@ export type GetCurrentIdentityResponses = {
 
 export type GetCurrentIdentityResponse = GetCurrentIdentityResponses[keyof GetCurrentIdentityResponses];
 
+export type ListAccessScopesData = {
+    body?: never;
+    path?: never;
+    query: {
+        entry: 'admin' | 'client';
+    };
+    url: '/api/auth/scopes';
+};
+
+export type ListAccessScopesErrors = {
+    /**
+     * 400 输入无效；401 身份失败；403 权限拒绝；409 状态变化；429 限流；503 服务不可用
+     */
+    default: CenterErrorResponse;
+};
+
+export type ListAccessScopesError = ListAccessScopesErrors[keyof ListAccessScopesErrors];
+
+export type ListAccessScopesResponses = {
+    200: Array<ScopeView>;
+};
+
+export type ListAccessScopesResponse = ListAccessScopesResponses[keyof ListAccessScopesResponses];
+
+export type ExchangeAccessScopeData = {
+    body: ScopeSelection;
+    path?: never;
+    query?: never;
+    url: '/api/auth/scope';
+};
+
+export type ExchangeAccessScopeErrors = {
+    /**
+     * 400 输入无效；401 身份失败；403 权限拒绝；409 状态变化；429 限流；503 服务不可用
+     */
+    default: CenterErrorResponse;
+};
+
+export type ExchangeAccessScopeError = ExchangeAccessScopeErrors[keyof ExchangeAccessScopeErrors];
+
+export type ExchangeAccessScopeResponses = {
+    200: LoginResponse;
+};
+
+export type ExchangeAccessScopeResponse = ExchangeAccessScopeResponses[keyof ExchangeAccessScopeResponses];
+
 export type LogoutData = {
     body: {
         [key: string]: never;
@@ -1187,11 +1356,12 @@ export type ListUsersData = {
     query?: {
         limit?: number;
         offset?: number;
+        organization_id?: string;
         /**
          * 账号或显示名称的字面子串，不解释 SQL 通配符
          */
         search?: string;
-        role?: 'user' | 'admin';
+        role?: 'user' | 'system_admin';
         enabled?: boolean;
     };
     url: '/api/users';
@@ -1305,6 +1475,250 @@ export type ResetUserPasswordResponses = {
 };
 
 export type ResetUserPasswordResponse = ResetUserPasswordResponses[keyof ResetUserPasswordResponses];
+
+export type ListOrganizationsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/organizations';
+};
+
+export type ListOrganizationsErrors = {
+    /**
+     * 400 请求无效；401 登录失效；403 范围拒绝；409 状态冲突
+     */
+    default: CenterErrorResponse;
+};
+
+export type ListOrganizationsError = ListOrganizationsErrors[keyof ListOrganizationsErrors];
+
+export type ListOrganizationsResponses = {
+    200: Array<Organization>;
+};
+
+export type ListOrganizationsResponse = ListOrganizationsResponses[keyof ListOrganizationsResponses];
+
+export type CreateOrganizationData = {
+    body: CreateOrganization;
+    path?: never;
+    query?: never;
+    url: '/api/organizations';
+};
+
+export type CreateOrganizationErrors = {
+    /**
+     * 400 请求无效；401 登录失效；403 范围拒绝；409 状态冲突
+     */
+    default: CenterErrorResponse;
+};
+
+export type CreateOrganizationError = CreateOrganizationErrors[keyof CreateOrganizationErrors];
+
+export type CreateOrganizationResponses = {
+    201: Organization;
+};
+
+export type CreateOrganizationResponse = CreateOrganizationResponses[keyof CreateOrganizationResponses];
+
+export type UpdateOrganizationData = {
+    body: UpdateOrganization;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/api/organizations/{id}';
+};
+
+export type UpdateOrganizationErrors = {
+    /**
+     * 400 请求无效；401 登录失效；403 范围拒绝；409 状态冲突
+     */
+    default: CenterErrorResponse;
+};
+
+export type UpdateOrganizationError = UpdateOrganizationErrors[keyof UpdateOrganizationErrors];
+
+export type UpdateOrganizationResponses = {
+    200: Organization;
+};
+
+export type UpdateOrganizationResponse = UpdateOrganizationResponses[keyof UpdateOrganizationResponses];
+
+export type RemoveSystemOrganizationMemberData = {
+    body?: never;
+    path: {
+        id: string;
+        userId: string;
+    };
+    query?: never;
+    url: '/api/organizations/{id}/members/{userId}';
+};
+
+export type RemoveSystemOrganizationMemberErrors = {
+    /**
+     * 400 请求无效；401 登录失效；403 范围拒绝；409 状态冲突
+     */
+    default: CenterErrorResponse;
+};
+
+export type RemoveSystemOrganizationMemberError = RemoveSystemOrganizationMemberErrors[keyof RemoveSystemOrganizationMemberErrors];
+
+export type RemoveSystemOrganizationMemberResponses = {
+    204: void;
+};
+
+export type RemoveSystemOrganizationMemberResponse = RemoveSystemOrganizationMemberResponses[keyof RemoveSystemOrganizationMemberResponses];
+
+export type UpdateSystemOrganizationMemberData = {
+    body: UpdateMember;
+    path: {
+        id: string;
+        userId: string;
+    };
+    query?: never;
+    url: '/api/organizations/{id}/members/{userId}';
+};
+
+export type UpdateSystemOrganizationMemberErrors = {
+    /**
+     * 400 请求无效；401 登录失效；403 范围拒绝；409 状态冲突
+     */
+    default: CenterErrorResponse;
+};
+
+export type UpdateSystemOrganizationMemberError = UpdateSystemOrganizationMemberErrors[keyof UpdateSystemOrganizationMemberErrors];
+
+export type UpdateSystemOrganizationMemberResponses = {
+    200: SaveMember;
+};
+
+export type UpdateSystemOrganizationMemberResponse = UpdateSystemOrganizationMemberResponses[keyof UpdateSystemOrganizationMemberResponses];
+
+export type AddSystemOrganizationMemberData = {
+    body: SaveMember;
+    path: {
+        id: string;
+        userId: string;
+    };
+    query?: never;
+    url: '/api/organizations/{id}/members/{userId}';
+};
+
+export type AddSystemOrganizationMemberErrors = {
+    /**
+     * 400 请求无效；401 登录失效；403 范围拒绝；409 状态冲突
+     */
+    default: CenterErrorResponse;
+};
+
+export type AddSystemOrganizationMemberError = AddSystemOrganizationMemberErrors[keyof AddSystemOrganizationMemberErrors];
+
+export type AddSystemOrganizationMemberResponses = {
+    201: SaveMember;
+};
+
+export type AddSystemOrganizationMemberResponse = AddSystemOrganizationMemberResponses[keyof AddSystemOrganizationMemberResponses];
+
+export type ListOrganizationMembersData = {
+    body?: never;
+    path?: never;
+    query?: {
+        limit?: number;
+        offset?: number;
+        active_only?: boolean;
+        search?: string;
+        role?: 'member' | 'admin';
+        enabled?: boolean;
+    };
+    url: '/api/organization-members';
+};
+
+export type ListOrganizationMembersErrors = {
+    /**
+     * 400 请求无效；401 登录失效；403 范围拒绝；409 状态冲突
+     */
+    default: CenterErrorResponse;
+};
+
+export type ListOrganizationMembersError = ListOrganizationMembersErrors[keyof ListOrganizationMembersErrors];
+
+export type ListOrganizationMembersResponses = {
+    200: MemberPage;
+};
+
+export type ListOrganizationMembersResponse = ListOrganizationMembersResponses[keyof ListOrganizationMembersResponses];
+
+export type FindOrganizationMemberCandidateData = {
+    body?: never;
+    path?: never;
+    query: {
+        username: string;
+    };
+    url: '/api/organization-members/candidate';
+};
+
+export type FindOrganizationMemberCandidateErrors = {
+    /**
+     * 400 请求无效；401 登录失效；403 范围拒绝；409 状态冲突
+     */
+    default: CenterErrorResponse;
+};
+
+export type FindOrganizationMemberCandidateError = FindOrganizationMemberCandidateErrors[keyof FindOrganizationMemberCandidateErrors];
+
+export type FindOrganizationMemberCandidateResponses = {
+    200: MemberCandidate;
+};
+
+export type FindOrganizationMemberCandidateResponse = FindOrganizationMemberCandidateResponses[keyof FindOrganizationMemberCandidateResponses];
+
+export type RemoveOrganizationMemberData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/api/organization-members/{id}';
+};
+
+export type RemoveOrganizationMemberErrors = {
+    /**
+     * 400 请求无效；401 登录失效；403 范围拒绝；409 状态冲突
+     */
+    default: CenterErrorResponse;
+};
+
+export type RemoveOrganizationMemberError = RemoveOrganizationMemberErrors[keyof RemoveOrganizationMemberErrors];
+
+export type RemoveOrganizationMemberResponses = {
+    204: void;
+};
+
+export type RemoveOrganizationMemberResponse = RemoveOrganizationMemberResponses[keyof RemoveOrganizationMemberResponses];
+
+export type SaveOrganizationMemberData = {
+    body: SaveMember;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/api/organization-members/{id}';
+};
+
+export type SaveOrganizationMemberErrors = {
+    /**
+     * 400 请求无效；401 登录失效；403 范围拒绝；409 状态冲突
+     */
+    default: CenterErrorResponse;
+};
+
+export type SaveOrganizationMemberError = SaveOrganizationMemberErrors[keyof SaveOrganizationMemberErrors];
+
+export type SaveOrganizationMemberResponses = {
+    204: void;
+};
+
+export type SaveOrganizationMemberResponse = SaveOrganizationMemberResponses[keyof SaveOrganizationMemberResponses];
 
 export type ListManagementAuditData = {
     body?: never;

@@ -54,7 +54,14 @@ impl RunModelDiagnostics {
 
     /// 标记已经有正文或 reasoning 增量进入 Runtime 观察投影。
     pub(crate) fn mark_output_observed(&self) {
-        self.lock_state().output_observed = true;
+        let mut state = self.lock_state();
+        state.output_observed = true;
+        state.request = None;
+    }
+
+    /// 收到工具调用代表模型已经交付响应，但不等同于正文输出。
+    pub(crate) fn mark_tool_observed(&self) {
+        self.lock_state().request = None;
     }
 
     /// AgentEvent 与 delta 共用同一有序通道，以 StepStarted 清除上一 Step 的可见输出事实。
@@ -146,7 +153,8 @@ impl ModelAttemptObserver for RunModelDiagnostics {
                         let mut state = self.lock_state();
                         state.attempt = attempt;
                         state.stream_established = true;
-                        state.request = None;
+                        // HTTP 建流不代表已有模型响应；实际正文、推理或工具到达后才清除等待态。
+                        state.request = Some(ModelRequestStatus::Requesting { attempt });
                     }
                     RuntimeEvent::ModelStreamEstablished {
                         session_id: self.session_id.clone(),

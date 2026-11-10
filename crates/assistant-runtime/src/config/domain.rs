@@ -224,6 +224,7 @@ impl fmt::Debug for ModelSecret {
 pub struct ResolvedModelConfig {
     pub(super) context_management_mode: agent_model::ContextManagementMode,
     pub(crate) server_history_key: Option<String>,
+    pub(crate) provider_state_key: Option<String>,
     pub(crate) server_history_enabled: bool,
     pub(crate) input_token_count_supported: bool,
     pub(crate) external_configuration: Option<std::sync::Arc<super::ExternalModelConfiguration>>,

@@ -18,7 +18,7 @@ export function ManualModelPage(props: Readonly<{
   return <SettingsPageContainer title="添加模型" on_back={props.onBack}>
     <form className={styles.form} onSubmit={(event) => {
       event.preventDefault();
-      if (normalized_id) setSelection({ provider_instance_id: props.provider.provider_instance_id, model_id: normalized_id });
+      if (normalized_id) setSelection({ source: 'local', provider_instance_id: props.provider.provider_instance_id, model_id: normalized_id });
     }}>
       <div className={shared.model_form}>
         <label>模型 ID

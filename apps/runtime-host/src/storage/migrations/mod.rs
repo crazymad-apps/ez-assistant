@@ -26,6 +26,8 @@ mod v0_30_0;
 mod v0_31_0;
 mod v0_32_0;
 mod v0_32_1;
+mod v0_32_2;
+mod v0_33_0;
 
 #[cfg(test)]
 use std::fs;
@@ -145,6 +147,10 @@ fn product_manifest() -> Vec<Migration> {
     entries.push(f02_history::entry());
     entries.push(f02_history::queue_claim_entry());
     entries.push(usage_snapshots::entry());
+    entries.push(v0_32_2::entry());
+    entries.push(v0_33_0::entry());
+    entries.push(v0_33_0::model_sources_entry());
+    entries.push(v0_33_0::message_cards_entry());
     entries
 }
 

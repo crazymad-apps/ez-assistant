@@ -53,6 +53,10 @@ impl UserResources {
     }
 
     pub(super) async fn shutdown(&mut self) -> bool {
+        self.shutdown_for_switch(false).await
+    }
+
+    pub(super) async fn shutdown_for_switch(&mut self, strict: bool) -> bool {
         self.cancellation.cancel();
         let models = if let Some(mut task) = self.model_task.take() {
             match tokio::time::timeout(std::time::Duration::from_secs(10), &mut task).await {
@@ -66,7 +70,11 @@ impl UserResources {
         } else {
             true
         };
-        let runtime = if let Some(runtime) = &self.runtime {
+        let runtime = if let Some(runtime) = &self.runtime
+            && strict
+        {
+            runtime.finish_confirmed_shutdown().await.is_ok()
+        } else if let Some(runtime) = &self.runtime {
             runtime
                 .shutdown(ShutdownRuntimeRequest::default())
                 .await
@@ -120,6 +128,17 @@ pub(super) async fn initialize(
         }
     });
     owner.store = Some(store.clone());
+    if let Some((_, key)) = &owner.plugin_center {
+        let legacy_name = format!("{}_{}", key.center_id, key.user_id);
+        let legacy_home = user_home
+            .file_name()
+            .is_some_and(|name| name == legacy_name.as_str());
+        store
+            .bind_plugin_organization(key.clone(), legacy_home)
+            .await
+            .map_err(|_| InitializationFailed)?;
+    }
+
     // 数据库准入完成后才准备业务资源与 Recall 密钥；后续失败显式关闭已拥有的存储 worker。
     let prepared = (|| {
         let model_factory: Arc<dyn assistant_runtime::ModelServiceFactory> = match &owner.models {

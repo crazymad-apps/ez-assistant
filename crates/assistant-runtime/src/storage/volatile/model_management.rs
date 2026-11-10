@@ -147,7 +147,7 @@ impl VolatileRuntimeStore {
     pub(super) fn put_model_fixed_config(
         &self,
         config: assistant_protocol::ModelFixedConfig,
-        server_history_key: Option<String>,
+        server_history_key: Option<crate::FixedModelHistoryInvalidation>,
     ) -> StoreFuture<'_, ()> {
         Box::pin(async move {
             crate::validate_fixed_model_parameters(&config.parameters).map_err(|_| {
@@ -185,7 +185,7 @@ impl VolatileRuntimeStore {
     pub(super) fn reset_model_fixed_config(
         &self,
         selection: assistant_protocol::ModelSelection,
-        server_history_key: Option<String>,
+        server_history_key: Option<crate::FixedModelHistoryInvalidation>,
     ) -> StoreFuture<'_, ()> {
         Box::pin(async move {
             let mut state = self.lock()?;
@@ -200,19 +200,18 @@ impl VolatileRuntimeStore {
 fn invalidate_fixed_history(
     state: &mut State,
     selection: &assistant_protocol::ModelSelection,
-    key: Option<String>,
+    history: Option<crate::FixedModelHistoryInvalidation>,
 ) {
-    let Some(key) = key else {
-        return;
-    };
+    let Some(history) = history else { return };
+    let default = state
+        .model_settings
+        .default_model
+        .as_ref()
+        .filter(|_| history.includes_default_followers);
     for session in state.sessions.values_mut() {
-        if session
-            .model_selection
-            .as_ref()
-            .or(state.model_settings.default_model.as_ref())
-            == Some(selection)
-        {
-            session.server_history_key = Some(key.clone());
+        let selected = session.model_selection.as_ref().or(default);
+        if selected == Some(selection) {
+            session.server_history_key = Some(history.key.clone());
         }
     }
 }

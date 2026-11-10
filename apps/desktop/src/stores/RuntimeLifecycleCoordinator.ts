@@ -103,6 +103,7 @@ export class RuntimeLifecycleCoordinator {
     if (this.#connect_promise) {
       return this.#connect_promise;
     }
+    this.#clearReconnectTimer();
     if (bootstrap) this.#selected_bootstrap = bootstrap;
     const generation = ++this.#lifecycle_generation;
     this.dependencies.connection.beginInitialConnection();
@@ -441,7 +442,7 @@ export class RuntimeLifecycleCoordinator {
         });
       } catch (error) {
         const failure = normalizeFailure(error);
-        if (["authentication_required", "login_context_changed", "component_mismatch", "center_protocol_incompatible"].includes(failure.code)) throw error;
+        if (["authentication_required", "login_context_changed", "component_mismatch", "center_protocol_incompatible"].includes(failure.code) || error instanceof TypeError) throw error;
         // 初始化失败只由用户显式重试，不能让通用断线重连反复执行初始化。
         throw new RuntimeClientError("runtime_startup_failed", failure.message);
       }
@@ -468,6 +469,9 @@ export class RuntimeLifecycleCoordinator {
               this.#applyEvent(event);
             }
           },
+          onCenterStatus: (available) => {
+            if (this.#isActiveGeneration(generation) && this.#client === client) this.dependencies.connection.setCenterAvailability(available);
+          },
           onDeviceGatewayEvent: () => { if (this.#isActiveGeneration(generation) && this.#client === client) this.dependencies.refresh_device_gateway(); },
           onGap: () => {
             if (this.#isActiveGeneration(generation) && this.#client === client) {
@@ -493,7 +497,14 @@ export class RuntimeLifecycleCoordinator {
       if (stream_closed) throw new Error("事件连接已中断。");
       if (buffer_overflow) throw new Error("事件同步积压，请重新连接。");
       if (!this.#isActiveGeneration(generation) || this.#client !== client) { event_abort.abort(); client.dispose(); return; }
-      runInAction(() => this.dependencies.projection.applyApplicationSnapshot(application.snapshot));
+      runInAction(() => {
+        // 企业用户 Runtime 可在同一 Host 内重新装配，Host instance_id 不能代表事件代际。
+        // 新订阅的基线就绪后清理旧 owner 水位和易失运行态，避免拒收序号重新开始的快照。
+        // 保留导航和草稿；详情随后从本次连接重新读取。
+        this.dependencies.projection.resetForInstance();
+        this.dependencies.live_execution.clear();
+        this.dependencies.projection.applyApplicationSnapshot(application.snapshot);
+      });
       snapshot_loaded = true;
       for (const event of applicationEventsAfter(application.snapshot.observed_sequence, buffered_events)) this.#applyEvent(event);
       runInAction(() => {
@@ -640,6 +651,8 @@ export class RuntimeLifecycleCoordinator {
     if (!this.#eventIsInOwnerSnapshot(envelope)) this.dependencies.live_execution.buffer(envelope);
     this.dependencies.on_event?.(envelope);
     const event = envelope.event;
+    if (event.type === 'message_cards_changed') this.dependencies.projection.invalidateMessageCards(false);
+    if (event.type === 'plugin_catalog_changed' || event.type === 'mcp_registry_changed' || event.type === 'config_changed') this.dependencies.projection.invalidateMessageCards(true);
     if (event.type === "session_title_generation_finished") {
       this.dependencies.on_title_generation_finished(
         event.session_id,
@@ -752,7 +765,8 @@ export class RuntimeLifecycleCoordinator {
   #scheduleReconnect(): void {
     if (
       this.#disposed
-      || this.#reconnect_attempt >= MAX_AUTOMATIC_RECONNECTS
+      || (this.#reconnect_attempt >= MAX_AUTOMATIC_RECONNECTS
+        && !["connection_interrupted", "runtime_unavailable"].includes(this.dependencies.connection.last_error_code ?? ""))
       || this.dependencies.connection.state === "component_mismatch"
       || ["authentication_required", "login_context_changed", "runtime_initialization_failed", "storage_unavailable", "center_protocol_incompatible"].includes(this.dependencies.connection.last_error_code ?? "")
       || this.dependencies.connection.last_error_code === "runtime_startup_failed"
@@ -760,8 +774,8 @@ export class RuntimeLifecycleCoordinator {
     ) {
       return;
     }
-    const delay = 500 * 2 ** this.#reconnect_attempt + Math.round(Math.random() * 180);
-    this.#reconnect_attempt += 1;
+    const delay = Math.min(30_000, 500 * 2 ** this.#reconnect_attempt) + Math.round(Math.random() * 180);
+    this.#reconnect_attempt = Math.min(this.#reconnect_attempt + 1, 6);
     this.#clearReconnectTimer();
     this.#reconnect_timer = window.setTimeout(() => {
       this.#reconnect_timer = null;

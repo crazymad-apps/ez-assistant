@@ -45,7 +45,11 @@ impl CustomAgentDirectorySource for HostAgentDirectorySource {
             if current_center_id != center_id || current_token.expose() != token.expose() {
                 return Err(RuntimeError::ConfigurationUnavailable);
             }
-            Ok(CenterCustomAgentDirectory { center_id, agents })
+            Ok(CenterCustomAgentDirectory {
+                center_id,
+                organization_id: Some(self.key.organization_id.clone()),
+                agents,
+            })
         })
     }
 
@@ -69,7 +73,7 @@ impl CustomAgentDirectorySource for HostAgentDirectorySource {
             let selected = center
                 .resolve_plugin_with_requirements(
                     &token,
-                    &center_id,
+                    &self.key,
                     &name,
                     None,
                     &required_skills,

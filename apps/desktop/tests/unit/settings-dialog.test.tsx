@@ -83,13 +83,15 @@ describe('SettingsDialog model management', () => {
     appearance.dispose(); store.dispose();
   });
 
-  it('shows managed model status and refresh without local editing controls', async () => {
+  it('shows organization model status and refresh alongside personal editing controls', async () => {
     const store = settingsStore();
     store.settings.model_settings = {
-      default_model: { provider_instance_id: 'managed', model_id: 'center-model' },
+      default_model: { source: 'organization', provider_instance_id: 'managed', model_id: 'center-model' },
       vision_model: null,
       management: {
         read_only: true,
+        allow_member_selection: false,
+        unavailable_models: [],
         unavailable_reason: null,
         last_success_at_ms: 42,
         last_refresh_error: '中心暂不可达',
@@ -97,17 +99,22 @@ describe('SettingsDialog model management', () => {
     };
     const refresh = vi.spyOn(store.settings, 'refreshModelSource').mockResolvedValue(true);
     renderDialog(store);
-    expect(screen.getByRole('button', { name: '默认模型' })).toHaveTextContent('center-model');
+    expect(screen.getByRole('group', { name: '组织默认模型' })).toHaveTextContent('center-model');
     expect(screen.getByText('刷新失败：中心暂不可达')).toBeVisible();
-    expect(screen.queryByRole('button', { name: '添加服务商' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '添加服务商' })).toBeEnabled();
+    const organization_section = screen.getByRole('button', { name: '企业模型' });
+    fireEvent.click(organization_section);
     fireEvent.click(screen.getByRole('button', { name: '刷新配置' }));
     expect(refresh).toHaveBeenCalledTimes(1);
+    expect(organization_section).toHaveAttribute('aria-expanded', 'false');
     runInAction(() => {
       store.settings.model_settings = {
         default_model: null,
         vision_model: null,
         management: {
           read_only: true,
+        allow_member_selection: false,
+        unavailable_models: [],
           unavailable_reason: '管理员尚未配置默认模型。',
           last_success_at_ms: 43,
           last_refresh_error: null,
@@ -949,7 +956,7 @@ describe('SettingsDialog model management', () => {
     fireEvent.click(await screen.findByRole('menuitem', { name: /测试服务商/ }));
     fireEvent.click(await screen.findByRole('menuitemradio', { name: /online-model/ }));
     await waitFor(() =>
-      expect(set_vision).toHaveBeenCalledWith({ provider_instance_id: 'provider-1', model_id: 'online-model' }),
+      expect(set_vision).toHaveBeenCalledWith({ source: 'local' as const, provider_instance_id: 'provider-1', model_id: 'online-model' }),
     );
   });
 
@@ -1152,7 +1159,7 @@ function modelSession(active_run_id: string | null): SessionSummary {
   return {
     session_id: 'session-1',
     title: '模型引用会话',
-    model_selection: { provider_instance_id: 'provider-1', model_id: 'secondary' },
+    model_selection: { source: 'local' as const, provider_instance_id: 'provider-1', model_id: 'secondary' },
     lifecycle: 'active',
     role: 'standard',
     current_variant: 'build',
@@ -1222,6 +1229,7 @@ function renderDialog(store: RootStore, appearance = new AppearanceStore()) {
 
 function onlineProvider(): import('@ez-assistant/protocol').ProviderSummary {
   return {
+    source: 'local' as const,
     provider_instance_id: 'provider-1',
     has_api_key: true,
     connection: {

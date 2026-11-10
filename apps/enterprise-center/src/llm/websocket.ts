@@ -3,7 +3,7 @@ import WebSocket from 'ws';
 import type { RawData } from 'ws';
 import { ControlError } from './errors.js';
 import { TransferError, upstreamUrl } from './transport.js';
-import type { TransferSink } from './transport.js';
+import type { ProxyRequestHeaders, TransferSink } from './transport.js';
 
 export type WebsocketLimits = {
   idleMs?: number;
@@ -15,6 +15,8 @@ export type WebsocketLimits = {
 type Chain = {
   socket: WebSocket;
   user: number;
+  organizationId?: string;
+  sessionId?: string;
   binding: string;
   provider: string;
   id?: string;
@@ -24,10 +26,13 @@ type Chain = {
 };
 type Input = {
   user: number;
+  organizationId?: string;
+  sessionId?: string;
   binding: string;
   provider: string;
   endpoint: string;
   apiKey: string;
+  requestHeaders?: ProxyRequestHeaders;
   body: Buffer;
   signal: AbortSignal;
   connectTimeout: number;
@@ -73,6 +78,10 @@ export class ResponsesWebsocket {
     for (const chain of this.chains) if (user === null || chain.user === user) this.discard(chain);
   }
 
+  revokeSession(sessionId: string): void {
+    for (const chain of this.chains) if (chain.sessionId === sessionId) this.discard(chain);
+  }
+
   revokeProvider(provider: string): void {
     for (const chain of this.chains) if (chain.provider === provider) this.discard(chain);
   }
@@ -99,8 +108,8 @@ export class ResponsesWebsocket {
     this.idleTimer.unref();
   }
 
-  private reserve(user: number): void {
-    const owned = [...this.chains].filter((chain) => chain.user === user);
+  private reserve(user: number, organizationId?: string): void {
+    const owned = [...this.chains].filter((chain) => chain.user === user && chain.organizationId === organizationId);
     const userFull = owned.length >= (this.limits.maxPerUser ?? 32);
     const full = this.chains.size >= (this.limits.maxConnections ?? 256);
     if (!userFull && !full) return;
@@ -113,17 +122,20 @@ export class ResponsesWebsocket {
   }
 
   private async open(input: Input): Promise<Chain> {
-    this.reserve(input.user);
+    this.reserve(input.user, input.organizationId);
     const url = upstreamUrl(input.endpoint, 'open_ai_responses');
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
     const socket = new WebSocket(url, {
-      headers: input.apiKey ? { authorization: `Bearer ${input.apiKey}` } : {},
+      headers: { ...input.requestHeaders, ...(input.apiKey ? { authorization: `Bearer ${input.apiKey}` } : {}) },
       followRedirects: false,
       perMessageDeflate: false,
       maxPayload: this.limits.maxBufferBytes ?? 16 * 1024 * 1024,
       handshakeTimeout: input.connectTimeout,
     });
-    const chain: Chain = { socket, user: input.user, binding: input.binding, provider: input.provider, busy: true };
+    const chain: Chain = {
+      socket, user: input.user, organizationId: input.organizationId, sessionId: input.sessionId,
+      binding: input.binding, provider: input.provider, busy: true,
+    };
     this.chains.add(chain);
     // 空闲时断线立即撤销映射；连接错误不改变持久能力配置。
     socket.on('error', () => this.discard(chain));
@@ -197,6 +209,8 @@ export class ResponsesWebsocket {
       if (
         !found ||
         found.user !== input.user ||
+        found.organizationId !== input.organizationId ||
+        found.sessionId !== input.sessionId ||
         found.binding !== input.binding ||
         found.socket.readyState !== WebSocket.OPEN
       )

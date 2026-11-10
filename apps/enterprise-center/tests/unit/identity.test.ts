@@ -1,4 +1,8 @@
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
+import { CenterTokens } from '../../dist/identity/token.js';
+import { IdentityService } from '../../dist/identity/service.js';
+import { randomUUID } from 'node:crypto';
+import type { EntityManager } from 'typeorm';
 import { Passwords } from '../../dist/identity/password.js';
 import { fields } from '../../dist/validation.js';
 import { loginInput, LoginLimiter, passwordInput } from '../../dist/identity/validation.js';
@@ -54,10 +58,41 @@ it('OpenAPI 准确定义统一 Bearer 身份契约，离线装配不提供身份
     expect(document.security).toEqual([{ tokenBearer: [] }]);
     expect(document.paths['/api/auth/login']?.post?.security).toEqual([]);
     expect(Object.keys(document.components?.securitySchemes ?? {})).toEqual(['tokenBearer']);
-    expect(document.components?.schemas?.LoginResponse).toMatchObject({ required: expect.arrayContaining(['token', 'llm_key']) });
+    expect(document.components?.schemas?.LoginResponse).toMatchObject({ required: expect.arrayContaining(['token', 'scope', 'expires_at']) });
     expect(document.components?.schemas?.IdentityResponse).not.toHaveProperty('properties.token');
     const response = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: '123456' } });
     expect(response.statusCode).toBe(503);
     expect(response.body).not.toContain('123456');
   } finally { await app.close(); }
+});
+
+it('JWT 到期即拒绝，且定时撤销稳定的连接 owner', async () => {
+  const center = randomUUID();
+  const tokens = new CenterTokens();
+  const identity = new IdentityService();
+  const manager = { getRepository: () => ({ findOneByOrFail: async () => ({
+    center_id: center, legacy_organization_id: randomUUID(),
+  }) }) } as unknown as EntityManager;
+  const notify = vi.fn();
+  identity.onSessionRevoked(notify);
+  vi.spyOn(identity, 'audit').mockResolvedValue();
+  vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+  try {
+    const prepared = await identity.prepareLogin(manager, {
+      id: 1, role: 'user', enabled: true, is_super_admin: false, username: 'test-user', display_name: 'Test',
+    }, randomUUID());
+    identity.publishLogin(prepared);
+    const owner = await identity.scope(prepared.login.token);
+    expect(await identity.scope(prepared.login.token)).toBe(owner);
+    await expect(tokens.verify(prepared.login.token)).rejects.toMatchObject({ code: 'TOKEN_INVALID' });
+    vi.advanceTimersByTime(604799000);
+    await expect(identity.scope(prepared.login.token)).resolves.toBe(owner);
+    expect(notify).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1000);
+    expect(notify).toHaveBeenCalledExactlyOnceWith(owner);
+    await expect(identity.scope(prepared.login.token)).rejects.toMatchObject({ code: 'TOKEN_INVALID' });
+  } finally {
+    identity.onModuleDestroy();
+    vi.useRealTimers();
+  }
 });

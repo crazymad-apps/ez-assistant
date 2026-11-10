@@ -6,7 +6,7 @@ import { DownOutlined, IdcardOutlined, LockOutlined, LogoutOutlined, UserOutline
 import { PasswordDialog } from '../../../features/account/PasswordDialog';
 import { ProfileDialog } from '../../../features/account/ProfileDialog';
 import adminStore from '../../../stores/AdminStore';
-import styles from './index.module.scss';
+import styles from '../header-menu.module.scss';
 
 /** 用户菜单拥有账号弹窗与离开确认；只在已通过身份守卫的页面布局内挂载。 */
 export const UserMenu = observer(function UserMenu() {
@@ -43,7 +43,7 @@ export const UserMenu = observer(function UserMenu() {
       >
         <Button
           type="text"
-          className={styles.account_button}
+          className={styles.menu_button}
           disabled={store.busy}
           onClick={(event) => {
             // 菜单项关闭即消失，账号弹窗应回到常驻的账号按钮。

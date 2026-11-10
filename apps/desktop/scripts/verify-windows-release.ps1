@@ -48,9 +48,23 @@ try {
     Read-MsiRows 'SELECT `Directory`, `Directory_Parent` FROM `Directory`' 2 | ForEach-Object { $directories[$_[0]] = $_[1] }
     if ($directories['INSTALLDIR'] -ne 'LocalAppDataFolder') { throw 'Installation root must be LocalAppDataFolder.' }
     $files = @(Read-MsiRows 'SELECT `File`, `FileName` FROM `File`' 2)
-    $names = @($files | ForEach-Object { ($_[1] -split '\|')[-1] })
-    if ($names.Count -ne 2 -or $names -notcontains 'ez-assistant-desktop.exe' -or $names -notcontains 'ez-assistant-runtime.exe') {
-        throw 'MSI must contain exactly the Desktop and Runtime Host executables.'
+    $expectedFiles = @{
+        'Path' = 'ez-assistant-desktop.exe'
+        'Bin_ez_assistant_runtime.exe' = 'ez-assistant-runtime.exe'
+        'Bin_ez_assistant_desktop_capture.exe' = 'ez-assistant-desktop-capture.exe'
+        'RuntimeToolsRipgrep' = 'rg.exe'
+        'RuntimeToolsLicenseMit' = 'LICENSE-MIT'
+        'RuntimeToolsUnlicense' = 'UNLICENSE'
+        'RuntimeToolsCopying' = 'COPYING'
+    }
+    if ($files.Count -ne $expectedFiles.Count) { throw "Unexpected MSI File table size: $($files.Count)." }
+    $fileIds = @($files | ForEach-Object { $_[0] })
+    if (@(Compare-Object -ReferenceObject @($expectedFiles.Keys | Sort-Object) -DifferenceObject @($fileIds | Sort-Object) -CaseSensitive).Count -ne 0) {
+        throw 'MSI File table IDs do not match the expected payload set.'
+    }
+    foreach ($file in $files) {
+        $name = ($file[1] -split '\|')[-1]
+        if ($name -cne $expectedFiles[$file[0]]) { throw "Unexpected MSI payload name for File ID $($file[0]): $name" }
     }
     $components = @(Read-MsiRows 'SELECT `Component`, `Attributes` FROM `Component`' 2)
     foreach ($component in $components) {
@@ -60,19 +74,34 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "MSI extraction failed: $LASTEXITCODE" }
     $expectedMachine = if ($Architecture -eq 'x64') { 0x8664 } else { 0xaa64 }
     $payloads = @(Get-ChildItem -LiteralPath (Join-Path $inspection 'File') -File -Recurse)
-    if ($payloads.Count -ne 2) { throw "Expected Desktop and Host payloads; found $($payloads.Count)." }
-    $desktopId = ($files | Where-Object { ($_[1] -split '\|')[-1] -eq 'ez-assistant-desktop.exe' })[0]
-    foreach ($file in $payloads) {
+    $expectedPayloadIds = @($expectedFiles.Keys)
+    if ($payloads.Count -ne $expectedPayloadIds.Count) { throw "Expected $($expectedPayloadIds.Count) extracted payloads; found $($payloads.Count)." }
+    $payloadIds = @($payloads | ForEach-Object { $_.Name })
+    if (@(Compare-Object -ReferenceObject @($expectedPayloadIds | Sort-Object) -DifferenceObject @($payloadIds | Sort-Object) -CaseSensitive).Count -ne 0) {
+        throw 'Extracted MSI payload IDs do not match the File table.'
+    }
+    $peIds = @('Path', 'Bin_ez_assistant_runtime.exe', 'Bin_ez_assistant_desktop_capture.exe', 'RuntimeToolsRipgrep')
+    $licenseIds = @('RuntimeToolsLicenseMit', 'RuntimeToolsUnlicense', 'RuntimeToolsCopying')
+    foreach ($fileId in $licenseIds) {
+        $license = @($payloads | Where-Object { $_.Name -ceq $fileId })
+        if ($license.Count -ne 1 -or $license[0].Length -le 0) { throw "Missing or empty license payload: $fileId" }
+    }
+    $desktopId = 'Path'
+    foreach ($fileId in $peIds) {
+        $file = @($payloads | Where-Object { $_.Name -ceq $fileId })
+        if ($file.Count -ne 1) { throw "Expected exactly one executable payload: $fileId" }
+        $file = $file[0]
         $stream = [IO.File]::OpenRead($file.FullName)
         try {
             $header = New-Object byte[] 4096
             $length = $stream.Read($header, 0, $header.Length)
             $offset = [BitConverter]::ToInt32($header, 60)
-            if ($length -lt 64 -or $offset -lt 0 -or $offset + 6 -gt $length -or
+            if ($length -lt 64 -or $offset -lt 0 -or $offset -gt ($length - 6) -or
                 [BitConverter]::ToUInt16($header, 0) -ne 0x5a4d -or
                 [BitConverter]::ToUInt32($header, $offset) -ne 0x4550 -or
                 [BitConverter]::ToUInt16($header, $offset + 4) -ne $expectedMachine) { throw "Wrong PE architecture: $($file.Name)" }
-            if ($file.Name -eq $desktopId -and [BitConverter]::ToUInt16($header, $offset + 24 + 68) -ne 2) {
+            if ($file.Name -ceq $desktopId -and ($offset -gt ($length - (24 + 70)) -or
+                [BitConverter]::ToUInt16($header, $offset + 24 + 68) -ne 2)) {
                 throw 'Desktop must use the Windows GUI subsystem, not the console subsystem.'
             }
         } finally { $stream.Dispose() }
@@ -88,7 +117,7 @@ try {
     $byteEncoding = [Text.Encoding]::GetEncoding(28591)
     $webIndex = $byteEncoding.GetString([IO.File]::ReadAllBytes($indexPath))
     # Host embeds the unmodified index; Tauri transforms/compresses its own assets.
-    $hostId = ($files | Where-Object { ($_[1] -split '\|')[-1] -eq 'ez-assistant-runtime.exe' })[0]
+    $hostId = 'Bin_ez_assistant_runtime.exe'
     $hostPayload = @($payloads | Where-Object { $_.Name -eq $hostId })
     if ($hostPayload.Count -ne 1) { throw 'Extracted Host payload is missing or ambiguous.' }
     foreach ($file in $hostPayload) {
@@ -96,7 +125,7 @@ try {
             throw "Built Web index is missing from payload: $($file.Name)"
         }
     }
-    Write-Output "Verified MSI $Architecture $Version`: current-user scope, version, both PE architectures, GUI subsystem, no external VC++ runtime DLL, and Host embedded Web."
+    Write-Output "Verified MSI $Architecture $Version`: current-user scope, version, all four PE payload architectures, GUI subsystem, no external VC++ runtime DLL, and Host embedded Web."
 } finally {
     if ($database) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($database) }
     [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($installer)

@@ -61,7 +61,46 @@ pub(crate) struct ManagedModels {
         BTreeMap<assistant_protocol::ProviderInstanceId, Arc<crate::StoredProvider>>,
     pub(crate) settings: assistant_protocol::ModelSettings,
     pub(crate) source: super::ModelSource,
-    pub(crate) external: Option<Arc<super::ExternalModelConfiguration>>,
+    pub(crate) external: Option<super::ExternalModelSet>,
+}
+
+impl ManagedModels {
+    pub(crate) fn default_model(&self) -> Option<&assistant_protocol::ModelSelection> {
+        match self.source {
+            super::ModelSource::Local => self.settings.default_model.as_ref(),
+            super::ModelSource::External => self.external.as_ref()?.default_model.as_ref(),
+        }
+    }
+
+    pub(crate) fn settings_view(&self) -> assistant_protocol::ModelSettings {
+        let mut settings = self.settings.clone();
+        settings.default_model = self.default_model().cloned();
+        if let Some(status) = &mut settings.management
+            && let Some(external) = &self.external
+        {
+            status.unavailable_reason = external.reason();
+            status.allow_member_selection = external.allow_member_selection;
+            status.unavailable_models = external
+                .models
+                .iter()
+                .filter_map(|(selection, model)| {
+                    let reason = *model.as_ref().err()?;
+                    Some(assistant_protocol::UnavailableOrganizationModel {
+                        selection: selection.clone(),
+                        reason: reason.to_owned(),
+                    })
+                })
+                .collect();
+        }
+        settings
+    }
+
+    pub(crate) fn organization_model(
+        &self,
+        selection: &assistant_protocol::ModelSelection,
+    ) -> Option<&Result<Arc<super::ExternalModelConfiguration>, &'static str>> {
+        self.external.as_ref()?.models.get(selection)
+    }
 }
 
 /// Runtime 的唯一配置状态所有者。

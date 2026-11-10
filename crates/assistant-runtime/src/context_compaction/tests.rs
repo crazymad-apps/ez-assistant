@@ -10,10 +10,12 @@ use agent_openai_compatible::{
     BearerCredential, ChatProtocolAdapter, OpenAiChatCompletionsService, OpenAiResponsesService,
     ResponsesProtocolAdapter, TransportTimeouts,
 };
+use agent_testkit::ScriptedModelService;
 use agent_types::{
     AssistantMessage, AssistantMessagePurpose, AssistantPart, FinishReason, InternalContextPart,
-    MessageId, ModelIdentity, PartId, ProviderId, TextPart, ToolCall, ToolCallId, ToolDefinition,
-    ToolMessage, ToolName, ToolResult, ToolResultContent, ToolResultStatus, UserMessage, UserPart,
+    MessageId, ModelIdentity, OpaqueProviderState, PartId, ProtocolId, ProviderId, TextPart,
+    ToolCall, ToolCallId, ToolDefinition, ToolMessage, ToolName, ToolResult, ToolResultContent,
+    ToolResultStatus, UserMessage, UserPart,
 };
 use serde_json::{Value, json};
 use tokio::{
@@ -23,6 +25,138 @@ use tokio::{
 };
 
 use super::*;
+
+#[tokio::test]
+async fn local_compaction_after_model_switch_preserves_latest_native_cutoff() {
+    let mut history = source_history();
+    let recent = history.messages[2].clone();
+    let mut suffix = history.messages[3..].to_vec();
+    let ConversationMessage::Tool(result) = &mut suffix[1] else {
+        unreachable!();
+    };
+    result.result.content = ToolResultContent::text("post-boundary detail ".repeat(500));
+    suffix.push(recent.clone());
+
+    let native = |id: &str| {
+        ConversationMessage::Assistant(AssistantMessage {
+            id: MessageId::new(id).unwrap(),
+            purpose: AssistantMessagePurpose::ContextCompaction,
+            model: ModelIdentity::new(ProviderId::new("old-provider").unwrap(), "old-model"),
+            parts: vec![AssistantPart::ProviderState(
+                OpaqueProviderState::new_routed(
+                    ProviderId::new("old-provider").unwrap(),
+                    ProtocolId::new("openai.responses").unwrap(),
+                    "responses.compacted_window",
+                    "application/json",
+                    1,
+                    None,
+                    "a".repeat(64),
+                    b"{}".to_vec(),
+                )
+                .unwrap()
+                .with_context_effect(agent_types::ProviderContextEffect::ReplacePriorContext)
+                .unwrap(),
+            )],
+            finish_reason: FinishReason::Stop,
+            usage: None,
+        })
+    };
+    history.messages.truncate(2);
+    history.messages.push(native("earlier-native"));
+    let mut between = recent.clone();
+    let ConversationMessage::User(user) = &mut between else {
+        unreachable!();
+    };
+    user.id = MessageId::new("before-latest-native").unwrap();
+    history.messages.push(between);
+    history.messages.push(native("latest-native"));
+    history.messages.extend(suffix.clone());
+    history.validate_tool_exchange_pairs().unwrap();
+    let source = crate::execution_context_from_product_history(&history);
+    assert_eq!(source.messages, suffix);
+
+    for entry in ["manual", "parent", "child"] {
+        let model = Arc::new(ScriptedModelService::completing(
+            ModelCapabilities::default(),
+            128_000,
+            AssistantMessage {
+                id: MessageId::new("new-summary").unwrap(),
+                purpose: AssistantMessagePurpose::ModelResponse,
+                model: ModelIdentity::new(ProviderId::new("new-provider").unwrap(), "new-model"),
+                parts: vec![AssistantPart::Text(TextPart {
+                    id: PartId::new("summary-text").unwrap(),
+                    text: "short summary".into(),
+                })],
+                finish_reason: FinishReason::Stop,
+                usage: None,
+            },
+        ));
+        let system = SystemPromptSnapshot::new(vec!["frozen instruction".into()]);
+        let request = ModelRequestConfig::default();
+        let replacement = if entry == "manual" {
+            let compactor = RuntimeContextCompactor::for_manual(model.clone(), system, request);
+            let ManualCompactionCandidate::Replacement { conversation, .. } = compactor
+                .compact_manual(source.clone(), history.clone(), CancellationToken::new())
+                .await
+                .expect("manual compaction accepts the native cutoff suffix")
+            else {
+                panic!("native suffix contains compressible history")
+            };
+            conversation
+        } else {
+            let normal = ModelRequest {
+                system: system.clone(),
+                conversation: source.clone(),
+                tools: vec![],
+                tool_choice: ToolChoice::None,
+                generation: request.generation,
+                reasoning: request.reasoning,
+                provider_options: request.provider_options,
+            };
+            let compactor = if entry == "parent" {
+                RuntimeContextCompactor::for_parent(model.clone(), system)
+            } else {
+                RuntimeContextCompactor::for_child(model.clone(), system)
+            };
+            compactor
+                .compact(
+                    source.clone(),
+                    history.clone(),
+                    normal,
+                    CancellationToken::new(),
+                )
+                .await
+                .expect("automatic compaction accepts the native cutoff suffix")
+        };
+        assert!(matches!(
+            replacement.messages[0],
+            ConversationMessage::ContextSummary(_)
+        ));
+        assert_eq!(&replacement.messages[1..], std::slice::from_ref(&recent));
+        let merged = crate::merge_context_replacement_with_product_history(&history, &replacement)
+            .expect("complete product history can accept the new local summary");
+        assert_eq!(
+            &merged.messages[..history.messages.len() - 1],
+            &history.messages[..history.messages.len() - 1]
+        );
+        assert_eq!(
+            crate::execution_context_from_product_history(&merged),
+            replacement
+        );
+        merged.validate_tool_exchange_pairs().unwrap();
+        let requests = model.take_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            &requests[0].conversation.messages[..source.messages.len()],
+            source.messages
+        );
+        assert_eq!(
+            requests[0].conversation.messages.len(),
+            source.messages.len() + 1
+        );
+        assert!(requests[0].tools.is_empty());
+    }
+}
 
 #[tokio::test]
 async fn local_summary_chat_http_requests_match_across_manual_parent_and_child() {

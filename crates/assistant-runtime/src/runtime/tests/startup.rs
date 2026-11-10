@@ -391,3 +391,150 @@ async fn startup_and_summary_pages_do_not_hydrate_history_and_first_load_is_sing
     assert_eq!(store.full_load_count(), 0);
     assert_eq!(store.conversation_load_count(), 0);
 }
+
+#[tokio::test]
+async fn confirmed_shutdown_rechecks_added_work_and_preserves_the_queue_on_reopen() {
+    let store = Arc::new(FaultInjectingStore::healthy());
+    let config = || RuntimeConfig::new(NonZeroUsize::new(32).expect("capacity"));
+    let runtime = runtime_with_store(empty_model(), store.clone(), config()).await;
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("session")
+        .session
+        .session_id;
+    let empty = runtime.preview_shutdown().await.expect("idle preview");
+    assert_eq!(empty.counts(), (0, 0, 0));
+
+    let session = runtime.session_for_test(&session_id).await;
+    session.lock_state().expect("state").queue_paused_by_user = true;
+    runtime
+        .submit_input(SubmitInputRequest {
+            session_id: session_id.clone(),
+            message: "keep for explicit resume".to_owned(),
+            variant: assistant_protocol::AgentVariant::Build,
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+        })
+        .await
+        .expect("queue input");
+
+    assert!(
+        !runtime
+            .begin_confirmed_shutdown(&empty)
+            .await
+            .expect("recheck")
+    );
+    assert_eq!(runtime.lifecycle().unwrap(), RuntimeLifecycle::Running);
+    let confirmed = runtime.preview_shutdown().await.expect("work preview");
+    assert_eq!(confirmed.counts(), (0, 0, 1));
+    assert!(
+        runtime
+            .begin_confirmed_shutdown(&confirmed)
+            .await
+            .expect("confirm")
+    );
+    assert!(
+        runtime
+            .resume_session(assistant_protocol::ResumeSessionRequest {
+                session_id: session_id.clone()
+            })
+            .await
+            .is_err()
+    );
+    runtime
+        .finish_confirmed_shutdown()
+        .await
+        .expect("strict close");
+    assert_eq!(runtime.lifecycle().unwrap(), RuntimeLifecycle::Stopped);
+
+    let reopened = runtime_with_store(empty_model(), store, config()).await;
+    assert_eq!(
+        reopened
+            .preview_shutdown()
+            .await
+            .expect("unloaded queue preview")
+            .counts(),
+        (0, 0, 1)
+    );
+    let restored = reopened
+        .prepared_session(&session_id)
+        .await
+        .expect("restored session");
+    let state = restored.lock_state().expect("restored session");
+    assert!(state.resume_required);
+    assert_eq!(state.queue_item_ids.len(), 1);
+    assert!(state.active_run.is_none());
+}
+
+#[tokio::test]
+async fn confirmed_shutdown_timeout_does_not_abort_work_or_report_closed() {
+    let mut config = RuntimeConfig::new(NonZeroUsize::new(32).expect("capacity"));
+    config.shutdown_timeout = Duration::from_millis(50);
+    let runtime = runtime_with_store(
+        empty_model(),
+        Arc::new(FaultInjectingStore::healthy()),
+        config,
+    )
+    .await;
+    let release = Arc::new(Notify::new());
+    let task_release = release.clone();
+    runtime.tasks.spawn(
+        async move {
+            task_release.notified().await;
+        },
+        async {},
+    );
+    let work = runtime.preview_shutdown().await.expect("preview");
+    assert!(
+        runtime
+            .begin_confirmed_shutdown(&work)
+            .await
+            .expect("confirm")
+    );
+
+    assert!(runtime.finish_confirmed_shutdown().await.is_err());
+    assert_eq!(runtime.lifecycle().unwrap(), RuntimeLifecycle::ShuttingDown);
+    assert!(runtime.has_background_work());
+    release.notify_one();
+    runtime
+        .finish_confirmed_shutdown()
+        .await
+        .expect("strict close after the task exits");
+}
+
+#[tokio::test]
+async fn confirmed_shutdown_refuses_to_release_a_domain_with_unconfirmed_tool_cleanup() {
+    let runtime = runtime_with_store(
+        empty_model(),
+        Arc::new(FaultInjectingStore::healthy()),
+        RuntimeConfig::new(NonZeroUsize::new(32).expect("capacity")),
+    )
+    .await;
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("session")
+        .session
+        .session_id;
+    runtime
+        .session_for_test(&session_id)
+        .await
+        .lock_state()
+        .expect("session state")
+        .tool_cleanup_unconfirmed = true;
+    let work = runtime.preview_shutdown().await.expect("preview");
+
+    assert!(
+        runtime
+            .begin_confirmed_shutdown(&work)
+            .await
+            .expect("confirmation")
+    );
+    assert!(runtime.finish_confirmed_shutdown().await.is_err());
+    assert_eq!(runtime.lifecycle().unwrap(), RuntimeLifecycle::ShuttingDown);
+}

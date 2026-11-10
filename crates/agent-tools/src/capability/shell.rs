@@ -46,6 +46,8 @@ pub enum ShellToolError {
     InvalidInput { message: String },
     #[error("io error: {message}")]
     Io { message: String },
+    #[error("shell process cleanup could not be confirmed: {message}")]
+    CleanupUnconfirmed { message: String },
     #[error("shell execution timed out")]
     TimedOut {
         stdout: String,

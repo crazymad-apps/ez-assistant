@@ -16,6 +16,7 @@ fn home() -> tempfile::TempDir {
 fn enrollment(intent: Intent) -> Enrollment {
     Enrollment {
         center_id: new_id().unwrap(),
+        organization_id: Some(new_id().unwrap()),
         id: new_id().unwrap(),
         secret: new_secret().unwrap(),
         name: "本机".into(),
@@ -27,7 +28,7 @@ fn enrollment(intent: Intent) -> Enrollment {
 async fn center(id: &str) -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
-    let body = serde_json::json!({"center_id":id,"protocol_version":4,"min_protocol_version":4})
+    let body = serde_json::json!({"center_id":id,"protocol_version":6,"min_protocol_version":6})
         .to_string();
     let task = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();

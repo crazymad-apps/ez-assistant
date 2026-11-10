@@ -20,7 +20,7 @@ vi.mock("../../src/runtime-client/RuntimeClient", () => ({
     instance_id: string; address: string; capabilities: RuntimeBootstrap["capabilities"];
     constructor(bootstrap: RuntimeBootstrap) { this.instance_id = bootstrap.instance_id; this.address = bootstrap.base_url; this.capabilities = bootstrap.capabilities; }
     command(command: unknown, options?: unknown) { return transport.command(this.address, command, options); }
-    connectEvents(callbacks: unknown) { transport.events(this.address, callbacks); return Promise.resolve({ closed: new Promise<void>(() => undefined) }); }
+    connectEvents(callbacks: unknown) { return Promise.resolve(transport.events(this.address, callbacks) ?? { closed: new Promise<void>(() => undefined) }); }
     waitUntilReady(receive: unknown) { return transport.ready(receive); }
     dispose() {}
   },
@@ -509,7 +509,7 @@ describe("selected Runtime lifecycle", () => {
     await coordinator.connect(bootstrap("http://a"));
     navigation.selectSession("older", false);
     const older: SessionSummary = {
-      session_id: "older", title: "Older", model_selection: { provider_instance_id: "provider-1", model_id: "fixture" }, lifecycle: "active", role: "standard",
+      session_id: "older", title: "Older", model_selection: { source: 'local' as const, provider_instance_id: "provider-1", model_id: "fixture" }, lifecycle: "active", role: "standard",
       current_variant: "build", approval_mode: "ask", workspace_id: null, active_run_id: null,
       message_count: 0, queued_input_count: 0, resume_required: false, created_at_ms: 1, updated_at_ms: 1,
       archived_at_ms: null, is_pinned: false, title_origin: "user", pending_approval_count: 0,
@@ -632,4 +632,144 @@ it("preserves a required-update rejection and stops automatic business reconnect
     await vi.advanceTimersByTimeAsync(10000);
     expect(transport.refresh).not.toHaveBeenCalled();
   } finally { vi.useRealTimers(); }
+});
+
+
+describe("network recovery beyond the initial retries", () => {
+  it.each(["runtime_unavailable"])("keeps retrying %s and restores the same connection", async (code) => {
+    vi.useFakeTimers();
+    const { coordinator, connection, projection } = create();
+    await coordinator.connect(bootstrap("http://a"));
+    const previous = projection.application;
+    transport.refresh.mockRejectedValue({ code, message: "offline" });
+    coordinator.retryConnection();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(transport.refresh.mock.calls.length).toBeGreaterThan(3);
+    expect(transport.refresh.mock.calls.length).toBeLessThan(15);
+    expect(projection.application).toBe(previous);
+    expect(connection.state).toBe("disconnected");
+    transport.refresh.mockImplementation(async (value: RuntimeBootstrap) => value);
+    await vi.advanceTimersByTimeAsync(31_000);
+    expect(connection.state).toBe("connected");
+    expect(transport.bootstrap).not.toHaveBeenCalled();
+    expect(transport.events).toHaveBeenCalledTimes(2);
+    const calls = transport.refresh.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(transport.refresh).toHaveBeenCalledTimes(calls);
+  });
+
+  it("retries transport failure during readiness instead of treating it as failed initialization", async () => {
+    vi.useFakeTimers();
+    const { coordinator, connection } = create();
+    transport.ready.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    await coordinator.connect(bootstrap("http://a"));
+    expect(connection.last_error_code).toBe("runtime_unavailable");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(connection.state).toBe("connected");
+  });
+
+  it.each(["authentication_required", "login_context_changed", "runtime_initialization_failed", "storage_unavailable", "runtime_unavailable"])("stops recovery on explicit %s", async (code) => {
+    vi.useFakeTimers();
+    const { coordinator } = create();
+    transport.ready.mockRejectedValueOnce({ code, message: "rejected" });
+    await coordinator.connect(bootstrap("http://a"));
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(transport.refresh).not.toHaveBeenCalled();
+  });
+
+  it.each(["dispose", "stop", "switch"])("cancels pending recovery after %s", async (action) => {
+    vi.useFakeTimers();
+    const { coordinator, connection } = create();
+    transport.ready.mockRejectedValueOnce(new TypeError("offline"));
+    await coordinator.connect(bootstrap("http://a"));
+    if (action === "dispose") coordinator.dispose();
+    else if (action === "stop") coordinator.prepareForNativeRuntimeMutation("stop");
+    else await coordinator.connect(bootstrap("http://b"));
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(transport.refresh).not.toHaveBeenCalled();
+    if (action === "switch") expect(connection.address).toBe("http://b");
+  });
+});
+
+
+it("recovers an interrupted event stream without replaying business commands", async () => {
+  vi.useFakeTimers();
+  const { coordinator, connection } = create();
+  let disconnect!: () => void;
+  transport.events.mockReturnValueOnce({ closed: new Promise<void>((resolve) => { disconnect = resolve; }) });
+  await coordinator.connect(bootstrap("http://a"));
+  disconnect();
+  await vi.advanceTimersByTimeAsync(1_000);
+  expect(connection.state).toBe("connected");
+  expect(transport.events).toHaveBeenCalledTimes(2);
+  expect(transport.command.mock.calls.every(([, command]) => command.type === "get_application_snapshot")).toBe(true);
+});
+
+
+it.each([0, 150])("replaces old running state after a same-Host user Runtime restart at sequence %s", async (sequence) => {
+  vi.useFakeTimers();
+  const { coordinator, connection, projection, navigation, live_execution } = create();
+  transport.command.mockImplementation(async (address, command) => {
+    if (command.type === "get_application_snapshot") {
+      const response = result(address);
+      response.payload.snapshot.observed_sequence = 100;
+      response.payload.snapshot.value.active_sessions = [{ ...summary("s"), active_run_id: "r" }];
+      return response;
+    }
+    return sessionResult("s", "before outage", activeRun(), 100);
+  });
+  await coordinator.connect(bootstrap("http://a"));
+  expect(live_execution.runForSession("s")?.status).toBe("running");
+  transport.command.mockImplementation(async (address, command) => {
+    if (command.type === "get_application_snapshot") {
+      const response = result(address);
+      response.payload.snapshot.observed_sequence = sequence;
+      response.payload.snapshot.value.active_sessions = [summary("s")];
+      return response;
+    }
+    return sessionResult("s", "after recovery", null, sequence);
+  });
+  coordinator.retryConnection();
+  await vi.advanceTimersByTimeAsync(1_000);
+  expect(connection.state).toBe("connected");
+  expect(navigation.selected_session_id).toBe("s");
+  expect(projection.session_views.get("s")?.session.title).toBe("after recovery");
+  expect(projection.session_views.get("s")?.active_run).toBeNull();
+  expect(live_execution.runForSession("s")).toBeNull();
+  expect(projection.sessionSnapshotSequence("s")).toBe(sequence);
+});
+
+
+it("keeps center availability independent from local queries and model retries", async () => {
+  vi.useFakeTimers();
+  const { liveRunStatusLabel } = await import("../../src/features/conversation/ConversationView/conversationRows");
+  const { coordinator, connection, projection, live_execution } = create();
+  transport.command.mockImplementation(async (address, command) => {
+    if (command.type === "get_application_snapshot") {
+      const response = result(address);
+      response.payload.snapshot.value.active_sessions = [{ ...summary("s"), active_run_id: "r" }];
+      return response;
+    }
+    return sessionResult("s", "network test", activeRun());
+  });
+  await coordinator.connect(bootstrap("http://a"));
+  const callbacks = transport.events.mock.calls.at(-1)![1] as { onEvent: (event: unknown) => void; onCenterStatus: (available: boolean) => void };
+  callbacks.onCenterStatus(false);
+  expect(connection.center_available).toBe(false);
+  const emit = (sequence: number, event: unknown) => callbacks.onEvent({ sequence, emitted_at_ms: sequence, event });
+  emit(1, { type: "conversation_committed", owner: { type: "main_session", session_id: "s" }, generation: 1 });
+  emit(2, { type: "step_committed", owner: { type: "main_session", session_id: "s" }, generation: 1, step: 1 });
+  await vi.advanceTimersByTimeAsync(100);
+  expect(projection.conversationLoadState("s", null)?.status).toBe("idle");
+  emit(3, { type: "model_attempt_failed", session_id: "s", run_id: "r", attempt: 1, kind: "stream_interrupted", will_retry: true });
+  emit(4, { type: "model_retry_scheduled", session_id: "s", run_id: "r", next_attempt: 2, delay_ms: 1000 });
+  live_execution.flush();
+  expect(connection.state).toBe("connected");
+  expect(liveRunStatusLabel(live_execution.runForSession("s")!)).toContain("等待 1 秒后进行第 2 次尝试");
+  emit(5, { type: "model_attempt_started", session_id: "s", run_id: "r", attempt: 2 });
+  live_execution.flush();
+  expect(liveRunStatusLabel(live_execution.runForSession("s")!)).toContain("正在重新连接模型 · 第 2 次尝试");
+  callbacks.onCenterStatus(true);
+  expect(connection.center_available).toBe(true);
+  expect(transport.events).toHaveBeenCalledTimes(1);
 });

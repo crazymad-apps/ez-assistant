@@ -144,8 +144,7 @@ pub(super) async fn route(
     if state
         .access
         .credentials
-        .verify_enterprise(&mut permit)
-        .await
+        .bind_enterprise_access(&mut permit)
         .is_err()
     {
         return failure(Some(&device), "network_access_denied", false);

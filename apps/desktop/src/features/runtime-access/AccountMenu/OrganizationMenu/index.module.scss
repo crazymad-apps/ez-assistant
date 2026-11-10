@@ -1,0 +1,52 @@
+$label-inset: 32px; // 菜单项的 8px 内边距、15px 图标和 9px 间距。
+
+.divider {
+  margin-block: 4px 3px;
+  border-top: 1px solid var(--ez-border);
+}
+
+.organization {
+  border-radius: var(--ez-radius-small);
+
+  &:has(.options) { background: var(--ez-surface-subtle); }
+}
+
+.organization_row,
+.option {
+  > span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  > svg { flex: 0 0 auto; }
+}
+
+.disclosure {
+  margin-inline-start: auto;
+  color: var(--ez-text-muted);
+  transition: transform var(--ez-motion-collapse-enter) var(--ez-ease-standard);
+}
+
+.organization_row[aria-expanded="true"] {
+  color: var(--ez-text);
+
+  .disclosure { transform: rotate(180deg); }
+}
+
+.options {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.options .option {
+  padding-inline-start: $label-inset;
+}
+
+.status {
+  padding: 6px 8px;
+  padding-inline-start: $label-inset;
+  color: var(--ez-text-muted);
+  font-size: var(--ez-font-small);
+}

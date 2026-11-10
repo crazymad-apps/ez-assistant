@@ -326,10 +326,14 @@ impl HostPluginFiles {
         progress: &Arc<dyn Fn(u64) + Send + Sync>,
     ) -> Result<(), PluginFileError> {
         let (credentials, user) = self.center.as_ref().ok_or(PluginFileError::Unavailable)?;
-        let PluginPackageOrigin::Center { center_id } = &selection.origin else {
+        let PluginPackageOrigin::Center {
+            center_id,
+            organization_id,
+        } = &selection.origin
+        else {
             return Err(PluginFileError::Invalid);
         };
-        if &user.center_id != center_id {
+        if &user.center_id != center_id || organization_id.as_ref() != Some(&user.organization_id) {
             return Err(PluginFileError::Invalid);
         }
         let (client, token) = credentials
@@ -377,9 +381,128 @@ impl HostPluginFiles {
         file.sync_all().await.map_err(unavailable)?;
         Ok(())
     }
+
+    async fn read_ui_file(
+        &self,
+        name: String,
+        sha256: String,
+        path: String,
+        limit: usize,
+    ) -> Result<Vec<u8>, PluginFileError> {
+        let user_root = self.user_root.clone();
+        tokio::task::spawn_blocking(move || {
+            use std::io::Read as _;
+            if !path.starts_with("resources/")
+                || path.len() > 1024
+                || path.contains(['\\', '\0'])
+                || path
+                    .split('/')
+                    .any(|p| p.is_empty() || p == "." || p == "..")
+            {
+                return Err(PluginFileError::Invalid);
+            }
+            let root = PluginPaths::prepare(&user_root)
+                .map_err(unavailable)?
+                .package(&name, &sha256)
+                .map_err(unavailable)?;
+            // 所有包内路径分量都拒绝链接／reparse；打开最终文件时再施加平台 no-follow。
+            let mut ancestor = user_root.clone();
+            for part in root
+                .strip_prefix(&user_root)
+                .map_err(|_| PluginFileError::Invalid)?
+                .components()
+            {
+                ancestor.push(part);
+                let metadata = fs::symlink_metadata(&ancestor).map_err(unavailable)?;
+                if !metadata.is_dir() || crate::platform::is_reparse_or_link(&metadata) {
+                    return Err(PluginFileError::Invalid);
+                }
+            }
+            let mut current = root.clone();
+            for component in std::iter::once("").chain(path.split('/')) {
+                if !component.is_empty() {
+                    current.push(component);
+                }
+                let metadata = fs::symlink_metadata(&current).map_err(unavailable)?;
+                if crate::platform::is_reparse_or_link(&metadata) {
+                    return Err(PluginFileError::Invalid);
+                }
+            }
+            if !current
+                .canonicalize()
+                .map_err(unavailable)?
+                .starts_with(root.canonicalize().map_err(unavailable)?)
+            {
+                return Err(PluginFileError::Invalid);
+            }
+            let mut options = fs::OpenOptions::new();
+            options.read(true);
+            crate::platform::apply_read_no_follow(&mut options);
+            let file = options.open(&current).map_err(unavailable)?;
+            let metadata = file.metadata().map_err(unavailable)?;
+            if !metadata.is_file() || metadata.len() > limit as u64 {
+                return Err(PluginFileError::Invalid);
+            }
+            let mut bytes = Vec::new();
+            file.take(limit as u64 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(unavailable)?;
+            if bytes.len() > limit {
+                return Err(PluginFileError::Invalid);
+            }
+            Ok(bytes)
+        })
+        .await
+        .map_err(|_| PluginFileError::Unavailable)?
+    }
 }
 
 impl PluginFilePort for HostPluginFiles {
+    fn read_ui_html(
+        &self,
+        name: String,
+        sha256: String,
+        path: String,
+    ) -> BoxFuture<'_, Result<String, PluginFileError>> {
+        Box::pin(async move {
+            if !path.ends_with(".html") {
+                return Err(PluginFileError::Invalid);
+            }
+            let bytes = self
+                .read_ui_file(name, sha256, path, 2 * 1024 * 1024)
+                .await?;
+            String::from_utf8(bytes).map_err(|_| PluginFileError::Invalid)
+        })
+    }
+
+    fn read_ui_icon(
+        &self,
+        name: String,
+        sha256: String,
+        path: String,
+    ) -> BoxFuture<'_, Result<String, PluginFileError>> {
+        Box::pin(async move {
+            use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+            let mime = match Path::new(&path)
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(str::to_ascii_lowercase)
+                .as_deref()
+            {
+                Some("svg") => "image/svg+xml",
+                Some("png") => "image/png",
+                Some("jpg" | "jpeg") => "image/jpeg",
+                Some("webp") => "image/webp",
+                Some("gif") => "image/gif",
+                Some("ico") => "image/x-icon",
+                _ => return Err(PluginFileError::Invalid),
+            };
+            let bytes = self.read_ui_file(name, sha256, path, 256 * 1024).await?;
+            Ok(format!("data:{mime};base64,{}", STANDARD.encode(bytes)))
+        })
+    }
+
     fn mcp_candidates(
         &self,
         plugins: Vec<StoredPlugin>,

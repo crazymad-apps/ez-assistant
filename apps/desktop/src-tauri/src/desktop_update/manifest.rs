@@ -43,7 +43,7 @@ pub(super) struct Artifact {
 struct Announcement {
     version: String,
     notes: String,
-    url: Url,
+    url: String,
     signature: String,
     manifest: String,
     manifest_signature: String,
@@ -208,17 +208,35 @@ impl VerifiedManifest {
             return Err(UpdateError::InvalidPackage);
         }
         let artifact = updater[0].clone();
+        // 响应只提供资源路径；网络目标始终来自已选 Host 的企业中心。
+        // 旧绝对 URL 的主机可能因部署地址变更而过期，不将它作为第二份中心配置。
+        let reference = &announcement.url;
+        if reference.starts_with("//")
+            || reference.contains('\\')
+            || reference.chars().any(char::is_whitespace)
+        {
+            return Err(UpdateError::InvalidPackage);
+        }
+        let resolved = source
+            .center
+            .join(reference)
+            .map_err(|_| UpdateError::InvalidPackage)?;
+        let url = source.endpoint(&format!(
+            "{target}/releases/{}/files/updater",
+            manifest.version
+        ))?;
         if artifact.signature.as_deref() != Some(&announcement.signature)
             || !(if target.starts_with("windows-") {
                 artifact.name.ends_with(".msi")
             } else {
                 artifact.name.ends_with(".app.tar.gz")
             })
-            || announcement.url
-                != source.endpoint(&format!(
-                    "{target}/releases/{}/files/updater",
-                    manifest.version
-                ))?
+            || !matches!(resolved.scheme(), "http" | "https")
+            || !resolved.username().is_empty()
+            || resolved.password().is_some()
+            || resolved.query().is_some()
+            || resolved.fragment().is_some()
+            || resolved.path() != url.path()
         {
             return Err(UpdateError::InvalidPackage);
         }
@@ -228,7 +246,7 @@ impl VerifiedManifest {
         Ok(Self {
             version: manifest.version,
             notes: announcement.notes,
-            url: announcement.url,
+            url,
             manifest_sha256: digest,
             artifact,
         })

@@ -1,10 +1,11 @@
 import { parseDocument } from 'yaml';
 import { isIP } from 'node:net';
+import { Ajv2020 } from 'ajv/dist/2020.js';
 import { invalidPackage } from './errors.js';
 
 export type Platform = { os: 'macos' | 'windows' | 'linux'; arch: 'x64' | 'arm64' };
 export type PluginManifest = {
-  format_version: 1;
+  format_version: 1 | 2;
   name: string;
   display_name: string;
   description: string;
@@ -21,6 +22,20 @@ export type PluginManifest = {
     download_url?: string;
     platforms?: Platform[];
   }[];
+  ui?: { entries: PluginUiEntry[] };
+};
+
+export type PluginUiEntry = {
+  id: string;
+  title: string;
+  kind: 'card' | 'app';
+  resource: { type: 'package'; path: string } | { type: 'mcp'; server: string; uri: string };
+  icon?: string;
+  input_schema: Record<string, unknown>;
+  capabilities: string[];
+  csp: Record<'connectDomains' | 'resourceDomains' | 'frameDomains' | 'baseUriDomains', string[]>;
+  snapshot_schema?: string;
+  readable_snapshot_schemas: string[];
 };
 
 export const pluginName = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -87,14 +102,20 @@ export function parseManifest(input: Buffer): PluginManifest {
   try { raw = record(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(input))); }
   catch { throw invalidPackage(); }
   fields(raw, ['format_version', 'name', 'display_name', 'description', 'version', 'platforms',
-    'min_host_version', 'skills', 'mcp', 'configuration', 'external_software']);
-  if (raw.format_version !== 1) throw invalidPackage();
+    'min_host_version', 'skills', 'mcp', 'configuration', 'external_software'], ['ui']);
+  if (raw.format_version !== 1 && raw.format_version !== 2 ||
+      raw.format_version === 1 && raw.ui !== undefined || raw.format_version === 2 && raw.ui === undefined)
+    throw invalidPackage();
   const name = text(raw.name, 64);
   if (!pluginName.test(name)) throw invalidPackage();
   const skillNames = names(raw.skills, 256, pluginName);
   if (skillNames.some(name => Buffer.byteLength(name) > 64)) throw invalidPackage();
   const mcpNames = names(raw.mcp, 256, serverName);
-  if (!skillNames.length && !mcpNames.length) throw invalidPackage();
+  const ui = raw.ui === undefined ? undefined : parseUi(raw.ui, mcpNames);
+  const minimum = version(raw.min_host_version);
+  const [major, minor] = minimum.split('.').map(Number);
+  if (raw.format_version === 2 && major === 0 && minor! < 33 || !skillNames.length && !mcpNames.length && !ui)
+    throw invalidPackage();
   if (!Array.isArray(raw.configuration) || raw.configuration.length > 128 ||
       !Array.isArray(raw.external_software) || raw.external_software.length > 128) throw invalidPackage();
   const configuration = raw.configuration.map(item => {
@@ -124,11 +145,105 @@ export function parseManifest(input: Buffer): PluginManifest {
   });
   if (new Set(externalSoftware.map(item => item.name)).size !== externalSoftware.length) throw invalidPackage();
   return {
-    format_version: 1, name, display_name: text(raw.display_name, 128),
+    format_version: raw.format_version, name, display_name: text(raw.display_name, 128),
     description: text(raw.description, 4096, true, true), version: version(raw.version),
-    platforms: declaredPlatforms, min_host_version: version(raw.min_host_version),
+    platforms: declaredPlatforms, min_host_version: minimum,
     skills: skillNames, mcp: mcpNames, configuration, external_software: externalSoftware,
+    ...(ui ? { ui } : {}),
   };
+}
+
+const uiIdentifier = /^[A-Za-z0-9._-]{1,64}$/;
+const uiCapabilities = ['save-snapshot', 'open-app', 'post-message', 'set-composer-draft', 'call-tool'];
+const cspFields = ['connectDomains', 'resourceDomains', 'frameDomains', 'baseUriDomains'] as const;
+
+function uiPath(value: unknown): string {
+  const path = text(value, 1024);
+  if (Buffer.byteLength(path) > 1024 || !path.startsWith('resources/') || path.includes('\\') || /[\u0000-\u001f\u007f-\u009f]/.test(path) ||
+      path.split('/').some(part => !part || part === '.' || part === '..')) throw invalidPackage();
+  return path;
+}
+
+/** UI 只接受离线 2020-12 Schema；编译不读取远端引用，预算与 Host 的现有编译器一致。 */
+function uiSchema(input: unknown): Record<string, unknown> {
+  const schema = record(input);
+  if (Buffer.byteLength(JSON.stringify(schema)) > 128 * 1024 || schema.$schema !== undefined &&
+      schema.$schema !== 'https://json-schema.org/draft/2020-12/schema') throw invalidPackage();
+  let nodes = 0;
+  const visit = (value: unknown, depth: number): void => {
+    if (++nodes > 4096 || depth > 64) throw invalidPackage();
+    if (Array.isArray(value)) { value.forEach(item => visit(item, depth + 1)); return; }
+    if (!value || typeof value !== 'object') return;
+    for (const [key, item] of Object.entries(value)) {
+      if (['$ref', '$dynamicRef', '$recursiveRef'].includes(key) &&
+          (typeof item !== 'string' || !item.startsWith('#'))) throw invalidPackage();
+      if (key === 'pattern' && typeof item === 'string' && Buffer.byteLength(item) > 4096 ||
+          key === 'patternProperties' && item && typeof item === 'object' &&
+          Object.keys(item).some(pattern => Buffer.byteLength(pattern) > 4096)) throw invalidPackage();
+      visit(item, depth + 1);
+    }
+  };
+  visit(schema, 1);
+  try { new Ajv2020({ strict: false, validateFormats: false, logger: false }).compile(schema); }
+  catch { throw invalidPackage(); }
+  return schema;
+}
+
+function parseUi(input: unknown, servers: string[]): { entries: PluginUiEntry[] } {
+  const ui = record(input);
+  fields(ui, ['entries']);
+  if (!Array.isArray(ui.entries) || !ui.entries.length || ui.entries.length > 128) throw invalidPackage();
+  const ids = new Set<string>();
+  const entries = ui.entries.map((raw): PluginUiEntry => {
+    const item = record(raw);
+    fields(item, ['id', 'title', 'kind', 'resource', 'input_schema'],
+      ['icon', 'capabilities', 'csp', 'snapshot_schema', 'readable_snapshot_schemas']);
+    const id = text(item.id, 64);
+    if (!uiIdentifier.test(id) || ids.has(id) || item.kind !== 'card' && item.kind !== 'app') throw invalidPackage();
+    ids.add(id);
+    const resource = record(item.resource);
+    let target: PluginUiEntry['resource'];
+    if (resource.type === 'package') {
+      fields(resource, ['type', 'path']);
+      const path = uiPath(resource.path);
+      if (!path.endsWith('.html')) throw invalidPackage();
+      target = { type: 'package', path };
+    } else {
+      fields(resource, ['type', 'server', 'uri']);
+      if (resource.type !== 'mcp' || typeof resource.server !== 'string' || !servers.includes(resource.server)) throw invalidPackage();
+      const uri = text(resource.uri, 1024);
+      if (!uri.startsWith('ui://') || Buffer.byteLength(uri) > 1024 || /[\u007f-\u009f]/.test(uri)) throw invalidPackage();
+      target = { type: 'mcp', server: resource.server, uri };
+    }
+    const capabilities = names(item.capabilities === undefined ? [] : item.capabilities, 5, /^(save-snapshot|open-app|post-message|set-composer-draft|call-tool)$/);
+    if (capabilities.some(capability => !uiCapabilities.includes(capability))) throw invalidPackage();
+    const snapshot_schema = item.snapshot_schema == null ? undefined : text(item.snapshot_schema, 64);
+    const readable = names(item.readable_snapshot_schemas === undefined ? [] : item.readable_snapshot_schemas, 32, uiIdentifier);
+    if (item.kind === 'card' && (!snapshot_schema || !uiIdentifier.test(snapshot_schema)) ||
+        item.kind === 'app' && (snapshot_schema !== undefined || readable.length > 0)) throw invalidPackage();
+    const csp = record(item.csp === undefined ? {} : item.csp);
+    // 与标准 MCP CSP 一样，未知扩展不赋予任何网络能力。
+    const projected = {} as PluginUiEntry['csp'];
+    for (const key of cspFields) {
+      if (csp[key] !== undefined && (!Array.isArray(csp[key]) || csp[key].length > 32)) throw invalidPackage();
+      projected[key] = (csp[key] ?? [] as unknown[]) as string[];
+      for (const value of projected[key]) {
+        if (typeof value !== 'string' || value.length > 2048 || /[^\x20-\x7e]|['";*]/.test(value)) throw invalidPackage();
+        let origin: URL;
+        try { origin = new URL(value); } catch { throw invalidPackage(); }
+        if (origin.protocol !== 'https:' && !(key === 'connectDomains' && origin.protocol === 'wss:') ||
+            origin.username || origin.password || origin.pathname !== '/' || origin.search || origin.hash || origin.origin !== value)
+          throw invalidPackage();
+      }
+    }
+    const title = text(item.title, 128);
+    if (/[\u007f-\u009f]/.test(title)) throw invalidPackage();
+    return { id, title, kind: item.kind, resource: target,
+      ...(item.icon == null ? {} : { icon: uiPath(item.icon) }),
+      input_schema: uiSchema(item.input_schema), capabilities, csp: projected,
+      ...(snapshot_schema === undefined ? {} : { snapshot_schema }), readable_snapshot_schemas: readable };
+  });
+  return { entries };
 }
 
 /** Skill 仅检查受限 frontmatter 与声明名称，正文留在原包中，中心不执行其指令。 */

@@ -75,7 +75,7 @@ export class CallManagement {
   }
 
   async list(token: string | undefined, value: unknown): Promise<CallPage> {
-    await this.identities.requireAdmin(this.manager, token);
+    const { organizationId } = await this.identities.requireOrganizationAdmin(this.manager, token);
     const input = queryFields(value, [
       'id',
       'user_id',
@@ -100,7 +100,8 @@ export class CallManagement {
 
     const limit = integer('limit', 50, 1, 200),
       offset = integer('offset', 0, 0, 1000000);
-    const query = this.manager.getRepository(CallEntity).createQueryBuilder('c');
+    const query = this.manager.getRepository(CallEntity).createQueryBuilder('c')
+      .where('c.organization_id = :organizationId', { organizationId });
     for (const key of ['id', 'provider_instance_id'])
       if (input[key] !== undefined) query.andWhere(`c.${key} = :${key}`, { [key]: uuid(input[key]) });
     if (input.user_id !== undefined) query.andWhere('c.user_id = :user', { user: recordId(input.user_id) });
@@ -133,41 +134,41 @@ export class CallManagement {
       .skip(offset)
       .take(limit)
       .getManyAndCount();
-    await this.identities.requireAdmin(this.manager, token);
+    await this.identities.requireOrganizationAdmin(this.manager, token);
     return { items: rows.map(view), total, limit, offset };
   }
 
-  private async row(id: string) {
-    const row = await this.manager.getRepository(CallEntity).findOneBy({ id: uuid(id) });
+  private async row(organizationId: string, id: string) {
+    const row = await this.manager.getRepository(CallEntity).findOneBy({ id: uuid(id), organization_id: organizationId });
     if (!row) throw new IdentityError(404, 'CALL_NOT_FOUND');
     return row;
   }
 
   async get(token: string | undefined, id: string): Promise<CallDetails> {
-    await this.identities.requireAdmin(this.manager, token);
-    const row = await this.row(id);
-    await this.identities.requireAdmin(this.manager, token);
+    const { organizationId } = await this.identities.requireOrganizationAdmin(this.manager, token);
+    const row = await this.row(organizationId, id);
+    await this.identities.requireOrganizationAdmin(this.manager, token);
     return view(row);
   }
 
   async usage(token: string | undefined, value: unknown): Promise<UsagePage> {
-    await this.identities.requireAdmin(this.manager, token);
-    const result = await queryUsage(this.manager, value);
-    await this.identities.requireAdmin(this.manager, token);
+    const { organizationId } = await this.identities.requireOrganizationAdmin(this.manager, token);
+    const result = await queryUsage(this.manager, organizationId, value);
+    await this.identities.requireOrganizationAdmin(this.manager, token);
     return result;
   }
 
   async usageModels(token: string | undefined, value: unknown): Promise<UsageModelOption[]> {
-    await this.identities.requireAdmin(this.manager, token);
-    const result = await usageModels(this.manager, value);
-    await this.identities.requireAdmin(this.manager, token);
+    const { organizationId } = await this.identities.requireOrganizationAdmin(this.manager, token);
+    const result = await usageModels(this.manager, organizationId, value);
+    await this.identities.requireOrganizationAdmin(this.manager, token);
     return result;
   }
 
   async settings(token?: string): Promise<RecordingSettings> {
-    await this.identities.requireAdmin(this.manager, token);
-    const { mode, content_retention_days, index_retention_days } = await this.proxy.records.settings();
-    await this.identities.requireAdmin(this.manager, token);
+    const { organizationId } = await this.identities.requireOrganizationAdmin(this.manager, token);
+    const { mode, content_retention_days, index_retention_days } = await this.proxy.records.settings(organizationId);
+    await this.identities.requireOrganizationAdmin(this.manager, token);
     return { mode, content_retention_days, index_retention_days };
   }
 
@@ -186,7 +187,7 @@ export class CallManagement {
       index_retention_days > 3650
     )
       invalid();
-    await this.identities.requireAdmin(this.manager, token);
+    await this.identities.requireOrganizationAdmin(this.manager, token);
     const selectedMode = enumeration(mode, recordingModes);
     if (selectedMode !== 'off') {
       try {
@@ -197,15 +198,15 @@ export class CallManagement {
     }
     const settings = { mode: selectedMode, content_retention_days, index_retention_days };
     await this.identities.write(async (manager) => {
-      const user = await this.identities.requireAdmin(manager, token);
-      const previous = await manager.getRepository(RecordingEntity).findOneByOrFail({ singleton: true });
+      const { user, organizationId } = await this.identities.requireOrganizationAdmin(manager, token);
+      const previous = await manager.getRepository(RecordingEntity).findOneByOrFail({ organization_id: organizationId });
       const boundary =
         index_retention_days < previous.index_retention_days
           ? new Date(Math.max(previous.usage_available_from.getTime(), Date.now() - index_retention_days * 86400000))
           : previous.usage_available_from;
       await manager
         .getRepository(RecordingEntity)
-        .update({ singleton: true }, { ...settings, usage_available_from: boundary });
+        .update({ organization_id: organizationId }, { ...settings, usage_available_from: boundary });
       await this.identities.audit(
         manager,
         'llm_recording_settings_changed',
@@ -214,18 +215,19 @@ export class CallManagement {
         undefined,
         null,
         settings,
+        organizationId,
       );
     });
     return settings;
   }
 
   async snapshot(token: string | undefined, id: string, side: Side, requestId: string): Promise<SnapshotContent> {
-    await this.identities.requireAdmin(this.manager, token);
+    const { organizationId } = await this.identities.requireOrganizationAdmin(this.manager, token);
     // 大正文读、Base64 和审计等待共用两个槽；忙时立即拒绝，不建立无界任务队列。
     if (this.reading >= 2) throw new IdentityError(503, 'SNAPSHOT_READ_BUSY');
     this.reading++;
     try {
-      const row = await this.row(id);
+      const row = await this.row(organizationId, id);
       let result: SnapshotContent = { ...snapshotView(row, side), text: null, body_base64: null };
       if (result.state === 'complete' || result.state === 'partial') {
         const found = await this.proxy.records.files.read(row.id, row.started_at, side);
@@ -255,11 +257,11 @@ export class CallManagement {
         }
       }
       await this.identities.write(async (manager) => {
-        const user = await this.identities.requireAdmin(manager, token);
+        const { user, organizationId } = await this.identities.requireOrganizationAdmin(manager, token);
         await this.identities.audit(manager, 'llm_snapshot_viewed', requestId, user.id, undefined, null, {
           call_id: row.id,
           side,
-        });
+        }, organizationId);
       });
       return result;
     } finally {
@@ -277,7 +279,6 @@ export class CallManagement {
           provider_instance_id: uuid(input.provider_instance_id),
           model_id: text(input.model_id, 1024),
         };
-        const user = await this.identities.requireAdmin(this.manager, token);
         const provider = await this.models.get(token, selection.provider_instance_id);
         // 后台不生成 OpenCode 方言或临时会话身份；目录发现不代表推理验证。
         if (provider.connection.provider_type === 'opencode')
@@ -336,7 +337,6 @@ export class CallManagement {
         try {
           const result = await this.proxy.execute({
             key: token!,
-            user,
             selection,
             protocol,
             body: Buffer.from(JSON.stringify(body)),

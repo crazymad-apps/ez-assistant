@@ -16,24 +16,24 @@ export class AgentsService {
     return this.source.manager;
   }
 
-  private async row(manager: EntityManager, name: string): Promise<CustomAgentEntity> {
-    const found = await manager.getRepository(CustomAgentEntity).findOneBy({ name });
+  private async row(manager: EntityManager, organizationId: string, name: string): Promise<CustomAgentEntity> {
+    const found = await manager.getRepository(CustomAgentEntity).findOneBy({ organization_id: organizationId, name });
     if (!found) throw new AgentError(404, 'AGENT_NOT_FOUND');
     return found;
   }
 
-  private async facts(manager: EntityManager) {
-    const plugins = await manager.getRepository(PluginEntity).find();
-    const packages = await manager.getRepository(PluginPackageEntity).find();
+  private async facts(manager: EntityManager, organizationId: string) {
+    const plugins = await manager.getRepository(PluginEntity).findBy({ organization_id: organizationId });
+    const packages = await manager.getRepository(PluginPackageEntity).findBy({ organization_id: organizationId });
     return { plugins, packages };
   }
 
   /** 管理列表只返回摘要和即时诊断，不复制完整提示词到列表响应。 */
   list(token: string | undefined): Promise<AgentSummary[]> {
     return this.identity.write(async manager => {
-      await this.identity.requireAdmin(manager, token);
-      const agents = await manager.getRepository(CustomAgentEntity).find({ order: { name: 'ASC' } });
-      const { plugins, packages } = await this.facts(manager);
+      const { organizationId } = await this.identity.requireOrganizationAdmin(manager, token);
+      const agents = await manager.getRepository(CustomAgentEntity).find({ where: { organization_id: organizationId }, order: { name: 'ASC' } });
+      const { plugins, packages } = await this.facts(manager, organizationId);
       return agents.map(row => {
         const config = agentConfig(row);
         return { name: row.name, description: row.description,
@@ -46,9 +46,9 @@ export class AgentsService {
   get(name: string, token: string | undefined): Promise<{ body: AgentDetail; etag: string }> {
     agentName(name);
     return this.identity.write(async manager => {
-      await this.identity.requireAdmin(manager, token);
-      const config = agentConfig(await this.row(manager, name));
-      const { plugins, packages } = await this.facts(manager);
+      const { organizationId } = await this.identity.requireOrganizationAdmin(manager, token);
+      const config = agentConfig(await this.row(manager, organizationId, name));
+      const { plugins, packages } = await this.facts(manager, organizationId);
       return { body: { ...config, diagnostics: diagnoseAgent(config, plugins, packages) },
         etag: agentEtag(config) };
     });
@@ -57,15 +57,15 @@ export class AgentsService {
   /** 企业用户取得完整配置；不把诊断当作 Host 已安装/就绪结论。 */
   runtimeList(token: string | undefined): Promise<AgentConfig[]> {
     return this.identity.write(async manager => {
-      await this.identity.requireUser(manager, token);
-      return (await manager.getRepository(CustomAgentEntity).find({ order: { name: 'ASC' } }))
+      const { organizationId } = await this.identity.requireOrganizationMember(manager, token);
+      return (await manager.getRepository(CustomAgentEntity).find({ where: { organization_id: organizationId }, order: { name: 'ASC' } }))
         .map(agentConfig);
     });
   }
 
   /** 仅新增的插件来源引用要求被至少一个当前包声明；旧失效引用可原样保留。 */
-  private async validateNewReferences(manager: EntityManager, next: AgentConfig, before?: AgentConfig): Promise<void> {
-    const packages = await manager.getRepository(PluginPackageEntity).find();
+  private async validateNewReferences(manager: EntityManager, organizationId: string, next: AgentConfig, before?: AgentConfig): Promise<void> {
+    const packages = await manager.getRepository(PluginPackageEntity).findBy({ organization_id: organizationId });
     for (const kind of ['skills', 'mcp'] as const) {
       for (const item of next[kind]) {
         if (!item.plugin || before?.[kind].some(previous =>
@@ -81,14 +81,14 @@ export class AgentsService {
   }> {
     const input = agentInput(value);
     return this.identity.write(async manager => {
-      const actor = await this.identity.requireAdmin(manager, token);
+      const { organizationId, user: actor } = await this.identity.requireOrganizationAdmin(manager, token);
       const repo = manager.getRepository(CustomAgentEntity);
-      if (await repo.findOneBy({ name: input.name })) throw new AgentError(409, 'AGENT_EXISTS');
-      await this.validateNewReferences(manager, input);
+      if (await repo.findOneBy({ organization_id: organizationId, name: input.name })) throw new AgentError(409, 'AGENT_EXISTS');
+      await this.validateNewReferences(manager, organizationId, input);
       const now = new Date();
-      await repo.save(repo.create({ ...input, created_at: now, updated_at: now }));
+      await repo.save(repo.create({ ...input, organization_id: organizationId, created_at: now, updated_at: now }));
       await this.identity.audit(manager, 'agent_created', requestId, actor.id, undefined, null,
-        { name: input.name, skill_count: input.skills.length, mcp_count: input.mcp.length });
+        { name: input.name, skill_count: input.skills.length, mcp_count: input.mcp.length }, organizationId);
       return { body: input, etag: agentEtag(input) };
     });
   }
@@ -99,12 +99,12 @@ export class AgentsService {
     const input = agentInput(value);
     if (input.name !== name) throw new IdentityError(400, 'INVALID_REQUEST');
     return this.identity.write(async manager => {
-      const actor = await this.identity.requireAdmin(manager, token);
-      const row = await this.row(manager, name);
+      const { organizationId, user: actor } = await this.identity.requireOrganizationAdmin(manager, token);
+      const row = await this.row(manager, organizationId, name);
       const before = agentConfig(row);
       requireAgentEtag(ifMatch, agentEtag(before));
       if (agentEtag(input) !== agentEtag(before)) {
-        await this.validateNewReferences(manager, input, before);
+        await this.validateNewReferences(manager, organizationId, input, before);
         row.description = input.description;
         row.prompt = input.prompt;
         row.skills = input.skills;
@@ -112,7 +112,7 @@ export class AgentsService {
         row.updated_at = new Date();
         await manager.getRepository(CustomAgentEntity).save(row);
         await this.identity.audit(manager, 'agent_updated', requestId, actor.id, undefined, null,
-          { name, skill_count: input.skills.length, mcp_count: input.mcp.length });
+          { name, skill_count: input.skills.length, mcp_count: input.mcp.length }, organizationId);
       }
       return { body: input, etag: agentEtag(input) };
     });
@@ -122,12 +122,12 @@ export class AgentsService {
     requestId: string): Promise<void> {
     agentName(name);
     return this.identity.write(async manager => {
-      const actor = await this.identity.requireAdmin(manager, token);
-      const row = await this.row(manager, name);
+      const { organizationId, user: actor } = await this.identity.requireOrganizationAdmin(manager, token);
+      const row = await this.row(manager, organizationId, name);
       requireAgentEtag(ifMatch, agentEtag(row));
       await manager.getRepository(CustomAgentEntity).remove(row);
       // 删除配置不改写插件、其他 Agent 引用或 Host 已有会话。
-      await this.identity.audit(manager, 'agent_deleted', requestId, actor.id, undefined, null, { name });
+      await this.identity.audit(manager, 'agent_deleted', requestId, actor.id, undefined, null, { name }, organizationId);
     });
   }
 }

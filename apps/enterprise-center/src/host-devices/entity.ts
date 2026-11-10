@@ -5,6 +5,7 @@ import type { DeviceStatus } from '../contracts/host-devices.js';
 @Entity({ schema: 'public', name: 'host_devices', synchronize: false })
 export class HostDeviceEntity {
   @PrimaryColumn('uuid') id!: string;
+  @Column('uuid') organization_id!: string;
   @Column('uuid') installation_id!: string;
   @Column('text', { select: false }) credential_hash!: string;
   @Column('text') name!: string;
@@ -19,6 +20,7 @@ export class HostDeviceEntity {
 @Entity({ schema: 'public', name: 'host_device_users', synchronize: false })
 export class HostDeviceUserEntity {
   @PrimaryColumn('uuid') device_id!: string;
+  @Column('uuid') organization_id!: string;
   @PrimaryColumn('integer') user_id!: number;
   @Column('boolean') desktop_view!: boolean;
   @Column('boolean') desktop_control!: boolean;

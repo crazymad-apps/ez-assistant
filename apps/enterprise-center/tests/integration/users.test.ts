@@ -241,7 +241,7 @@ it('普通用户/无凭据/LLM key 不能管理用户或读取审计，失败审
   for (const path of ['/api/users', '/api/audit']) {
     expect((await request(f, alice.token, 'GET', path)).statusCode).toBe(403);
     expect((await request(f, 'missing', 'GET', path)).statusCode).toBe(401);
-    expect((await request(f, root.llm_key, 'GET', path)).statusCode).toBe(401);
+    expect((await request(f, root.llm_key!, 'GET', path)).statusCode).toBe(401);
   }
   expect((await reset(f, alice.token, root.user.id)).statusCode).toBe(403);
   expect((await patch(f, alice.token, user.id, { role: 'admin' })).statusCode).toBe(403);
@@ -260,7 +260,7 @@ it('管理重置可覆盖自己、其他管理员与超级管理员，无旧密�
   expect((await reset(f, manager.token, root.user.id)).statusCode).toBe(204);
   for (const auth of [root, otherRoot]) {
     expect((await me(f, auth.token)).statusCode).toBe(200);
-    await expect(f.app.get(IdentityService).llmIdentity(auth.llm_key)).resolves.toMatchObject({ user: auth.user });
+    await expect(f.app.get(IdentityService).llmIdentity(auth.llm_key!)).resolves.toMatchObject({ user: auth.user });
   }
   expect((await me(f, manager.token)).statusCode).toBe(200);
   const freshRoot = await login(f, 'admin', 'reset-password-123');
@@ -307,7 +307,7 @@ it('停用/启用和角色变更撤销全部旧Token，不复活旧key；显示�
   expect((await me(f, a.token)).statusCode).toBe(401);
   expect((await me(f, b.token)).statusCode).toBe(401);
   expect((await patch(f, root.token, user.id, { enabled: true })).statusCode).toBe(200);
-  await expect(f.app.get(IdentityService).llmIdentity(a.llm_key)).rejects.toMatchObject({ code: 'TOKEN_INVALID' });
+  await expect(f.app.get(IdentityService).llmIdentity(a.llm_key!)).rejects.toMatchObject({ code: 'TOKEN_INVALID' });
   const c = await login(f, 'alice', password);
   expect((await patch(f, root.token, user.id, { role: 'admin' })).statusCode).toBe(200);
   expect((await me(f, c.token)).statusCode).toBe(401);

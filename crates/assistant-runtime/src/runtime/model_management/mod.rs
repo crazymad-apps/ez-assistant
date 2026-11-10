@@ -42,20 +42,22 @@ impl AssistantRuntime {
         self.ensure_running()?;
         let models = self.managed_models()?;
         Ok((
-            models
-                .providers
-                .values()
-                .map(|value| provider::summary(value))
-                .collect(),
-            models.settings.clone(),
+            provider::provider_summaries(&models),
+            models.settings_view(),
         ))
     }
 
     pub(super) fn ensure_model_editable(&self) -> RuntimeResult<()> {
-        if self.managed_models()?.source == crate::ModelSource::External {
-            return Err(invalid("模型配置由外部来源管理。"));
-        }
         self.model_factory.ensure_editable()
+    }
+
+    pub(super) fn require_local_model(
+        source: assistant_protocol::ModelSelectionSource,
+    ) -> RuntimeResult<()> {
+        if source != assistant_protocol::ModelSelectionSource::Local {
+            return Err(invalid("组织模型配置由企业中心管理。"));
+        }
+        Ok(())
     }
 
     pub(super) fn provider(&self, id: &ProviderInstanceId) -> RuntimeResult<Arc<StoredProvider>> {

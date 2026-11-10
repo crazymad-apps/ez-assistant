@@ -80,7 +80,9 @@ it('旧 Admin 缺传输字段不能覆盖 WebSocket，显式切换才保存并�
   });
   // Manager 和仓储方法仅为内存夹具；不初始化 DataSource、不执行 SQL。
   vi.spyOn(identity, 'write').mockImplementation(async work => work({} as EntityManager));
-  vi.spyOn(identity, 'requireAdmin').mockResolvedValue(Object.assign(new UserEntity(), { id: 1 }));
+  vi.spyOn(identity, 'requireOrganizationAdmin').mockResolvedValue({
+    organizationId: 'test-org', user: Object.assign(new UserEntity(), { id: 1 }),
+  } as unknown as Awaited<ReturnType<IdentityService['requireOrganizationAdmin']>>);
   vi.spyOn(identity, 'audit').mockResolvedValue();
   vi.spyOn(models, 'provider').mockResolvedValue(row);
   const update = vi.spyOn(models, 'update').mockImplementation(async (_manager, next) => {

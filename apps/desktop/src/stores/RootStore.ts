@@ -116,6 +116,14 @@ export class RootStore {
     | { device: string | null; mode: "edit"; workspace_id: WorkspaceId }
   > | null = null;
   composer_pending = false;
+  app_composer_handler: { resources: ResourceWorkspaceStore; scope: string; request: (text: string, active: () => boolean, signal: AbortSignal) => Promise<void> } | null = null;
+  async requestAppComposerDraft(resources: ResourceWorkspaceStore, scope: string, text: string, active: () => boolean, signal: AbortSignal): Promise<void> {
+    const current = () => active() && !this.composer_pending && !this.reading_projection.is_stale && this.reading_resources === resources && this.reading_scope === scope;
+    const handler = this.app_composer_handler;
+    if (!current() || !handler || handler.resources !== resources || handler.scope !== scope) throw new Error("请先回到来源会话的输入框");
+    await handler.request(text,current,signal);
+  }
+
   interaction_error: string | null = null;
   pending_queue_input_id: InputId | null = null;
   pending_approval_id: ApprovalId | null = null;
@@ -138,6 +146,7 @@ export class RootStore {
   #preferences_save_timer: number | null = null;
   #preferences_initialization: Promise<void> | null = null;
   #initial_connection: Promise<void> | null = null;
+  #bootstrap_mode: RuntimeBootstrap['capabilities']['mode'] | undefined;
   #pending_snapshot: ResourceWorkspaceSnapshot | null = null;
   readonly pins = new DesktopPinsStore((pins) => this.flushPreferences(pins));
   #workspace_snapshot: DesktopWorkspaceSnapshot | null = null;
@@ -222,7 +231,9 @@ export class RootStore {
           const saved = this.#workspace_snapshot?.devices.find((item) => item.device === device);
           if (!saved) return;
           runInAction(() => { context.sidebar.expanded_workspaces.replace(saved.expanded); });
-          if (saved.defaults) context.drafts.applyDefaults(saved.defaults.approval, saved.defaults.model);
+          if (saved.defaults) {
+            context.drafts.applyDefaults(saved.defaults.approval, this.#bootstrap_mode === 'enterprise' ? null : saved.defaults.model);
+          }
         },
         retain: () => { this.#workspace_snapshot = this.captureDesktopWorkspace(); },
       });
@@ -343,7 +354,7 @@ export class RootStore {
       state: this,
     });
     this.#provider_defaults_disposer = reaction(
-      () => this.local_projection.application?.providers.map((provider) => provider.provider_instance_id).join("\n") ?? null,
+      () => this.local_projection.application?.providers.map((provider) => `${provider.source ?? 'local'}:${provider.provider_instance_id}`).join("\n") ?? null,
       () => this.#discardUnavailableDefaultModel(),
     );
     makeObservable(this, {
@@ -520,8 +531,13 @@ export class RootStore {
 
   async #connectAndRestore(bootstrap?: RuntimeBootstrap): Promise<void> {
     this.#disposed = false;
+    this.#bootstrap_mode = bootstrap?.capabilities.mode;
     await this.initializePreferences();
     if (this.#disposed) return;
+    // 企业新草稿始终从组织默认起步。旧版桌面偏好里的选择不属于该草稿。
+    if (this.#bootstrap_mode === 'enterprise') {
+      runInAction(() => this.new_session_drafts.applyDefaults(this.new_session_drafts.default_approval_mode, null));
+    }
     if (!this.navigation.selected_session_id && !this.navigation.selected_draft_key) {
       this.new_session_drafts.open("unbound");
       this.navigation.selectDraft("unbound");
@@ -1301,8 +1317,9 @@ export class RootStore {
   }
 
   async setSessionModel(session_id: SessionId, model_selection: ModelSelection | null): Promise<boolean> {
+    const client = this.runtime_client;
     const succeeded = await this.#session_management.setSessionModel(session_id, model_selection);
-    if (succeeded && this.files.desktop) {
+    if (succeeded && client === this.runtime_client && this.files.desktop && !this.projection.application?.model_settings.management) {
       runInAction(() => this.new_session_drafts.applyDefaults(
         this.new_session_drafts.default_approval_mode,
         model_selection,
@@ -1314,7 +1331,7 @@ export class RootStore {
 
   setNewSessionDraftModel(key: NewSessionDraftKey, model_selection: ModelSelection | null): void {
     this.new_session_drafts.updateModel(key, model_selection);
-    if (!this.files.desktop) return;
+    if (!this.files.desktop || this.projection.application?.model_settings.management) return;
     this.new_session_drafts.applyDefaults(
       this.new_session_drafts.default_approval_mode,
       model_selection,
@@ -1799,7 +1816,7 @@ export class RootStore {
     const application = this.local_projection.application;
     const selection = this.local_new_session_drafts.default_model_selection;
     if (!application || !selection || application.providers.some(
-      (provider) => provider.provider_instance_id === selection.provider_instance_id,
+      (provider) => provider.provider_instance_id === selection.provider_instance_id && (provider.source ?? 'local') === selection.source,
     )) return;
     runInAction(() => {
       this.local_new_session_drafts.discardUnavailableDefaultModel(selection);

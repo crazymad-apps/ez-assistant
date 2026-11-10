@@ -43,17 +43,51 @@ pub(super) async fn login(
             let Some(client) = state.access.center() else {
                 return access_error(AccessError::Invalid("当前 Host 不是企业模式。"));
             };
+            let selection = match credentials
+                .begin_enterprise_login(&client, username, password, native)
+                .await
+            {
+                Ok(selection) => selection,
+                Err(error) => return access_error(error),
+            };
+            let mut response = Json(HostLoginResult {
+                token: None,
+                expires_at_ms: 0,
+                instance_id: state.instance_id.to_string(),
+                mode: state.access.mode(),
+                kind: HostIdentityKind::User,
+                identity: None,
+                login_context: None,
+                organization_selection: Some(selection),
+            })
+            .into_response();
+            response
+                .headers_mut()
+                .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            return response;
+        }
+        HostLoginRequest::EnterpriseSelect {
+            selection_token,
+            organization_id,
+        } => {
+            match credentials.selection_native(&selection_token) {
+                Ok(false) => {
+                    if let Err(error) = require_same_origin(&state, &headers) {
+                        return error.into_response();
+                    }
+                }
+                Ok(true) => {}
+                Err(error) => return access_error(error),
+            }
             credentials
-                .enterprise_login(
-                    &client,
+                .select_enterprise_organization(
                     &state.access,
-                    username,
-                    password,
+                    selection_token,
+                    organization_id,
                     compatibility.clone(),
                     &state.shutdown,
                 )
                 .await
-                .map(|(token, session)| (token, session, native))
         }
         HostLoginRequest::Password { password, native } => {
             if state.access.center().is_some() {
@@ -195,6 +229,7 @@ fn project_session(state: &HttpState, permit: &AccessPermit) -> HostLoginResult 
         },
         identity: state.access.credentials.identity(permit),
         login_context: permit.login_context(),
+        organization_selection: None,
     }
 }
 
@@ -279,4 +314,148 @@ pub(super) fn access_error(error: AccessError) -> Response {
         Json(serde_json::json!({"error": {"code": code, "message": error.to_string()}})),
     )
         .into_response()
+}
+
+pub(super) const ORGANIZATION_SWITCH_PATH: &str = "/auth/organization-switch";
+
+pub(super) async fn organization_switch(
+    State(state): State<HttpState>,
+    Extension(permit): Extension<Option<AccessPermit>>,
+    headers: HeaderMap,
+    request: Result<Json<assistant_protocol::HostOrganizationSwitchRequest>, JsonRejection>,
+) -> Response {
+    use crate::{access::digest, user_domain::SwitchOutcome};
+    use assistant_protocol::{
+        HostOrganizationSwitchRequest as Request, HostOrganizationSwitchResult as Result,
+    };
+    use axum::http::header::AUTHORIZATION;
+
+    let Ok(Json(request)) = request else {
+        return access_error(AccessError::Invalid("组织切换请求格式无效。"));
+    };
+    let native = headers.contains_key(AUTHORIZATION);
+    if !native && let Err(error) = require_same_origin(&state, &headers) {
+        return error.into_response();
+    }
+    let Some(domains) = &state.domains else {
+        return access_error(AccessError::Unavailable);
+    };
+
+    // 只有状态查询可携带刚被替换的会话。其他操作仍需有效登录及页面上下文。
+    let outcome = if let Request::Status { operation_id } = request {
+        let token = if native {
+            headers
+                .get(AUTHORIZATION)
+                .and_then(|header| header.to_str().ok())
+                .and_then(|header| header.strip_prefix("Bearer "))
+        } else {
+            super::auth::session_cookie(&headers, &cookie_name(state.secure, &headers))
+                .ok()
+                .flatten()
+        };
+        let Some(token) = token else {
+            return access_error(AccessError::Unauthorized);
+        };
+        match domains.switch_status(&operation_id, digest(token)) {
+            Some(outcome) => outcome,
+            None if permit.is_some() => SwitchOutcome::Changed,
+            None => return access_error(AccessError::Unauthorized),
+        }
+    } else {
+        let Some(permit) = permit.filter(|permit| permit.user_key().is_some()) else {
+            return access_error(AccessError::Unauthorized);
+        };
+        if !native
+            && headers
+                .get("x-ez-login-context")
+                .and_then(|value| value.to_str().ok())
+                != permit.login_context().as_deref()
+        {
+            return access_error(AccessError::Conflict);
+        }
+        match request {
+            Request::Options | Request::Preview { .. } => {
+                let (_, organizations) =
+                    match state.access.credentials.switch_organizations(&permit).await {
+                        Ok(value) => value,
+                        Err(error) => return access_error(error),
+                    };
+                if let Request::Preview { organization_id } = request {
+                    let Some(organization) = organizations
+                        .into_iter()
+                        .find(|org| org.id == organization_id)
+                    else {
+                        return access_error(AccessError::Conflict);
+                    };
+                    return match domains
+                        .preview_switch(&permit, organization, &state.terminals)
+                        .await
+                    {
+                        Ok(result) => switch_response(result),
+                        Err(error) => super::error::HttpError::from_domain(error).into_response(),
+                    };
+                }
+                return switch_response(Result::Options { organizations });
+            }
+            Request::Confirm { operation_id } => {
+                match domains.confirm_switch(state.clone(), permit, &operation_id) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        return super::error::HttpError::from_domain(error).into_response();
+                    }
+                }
+            }
+            Request::Resume { operation_id } => {
+                return match domains.resume_after_switch(&permit, &operation_id).await {
+                    Ok(()) => switch_response(Result::Resumed),
+                    Err(error) => super::error::HttpError::from_domain(error).into_response(),
+                };
+            }
+            Request::Status { .. } => unreachable!("status is handled separately"),
+        }
+    };
+    let result = match outcome {
+        SwitchOutcome::Changed => Result::Changed,
+        SwitchOutcome::Stopping => Result::Stopping,
+        SwitchOutcome::Exchanging => Result::Exchanging,
+        SwitchOutcome::StopFailed => Result::StopFailed,
+        SwitchOutcome::ExchangeFailed => Result::ExchangeFailed,
+        SwitchOutcome::Reauthenticate => Result::Reauthenticate,
+        SwitchOutcome::Switched(token, session) => {
+            if !session.valid() {
+                return switch_response(Result::Reauthenticate);
+            }
+            let permit = AccessPermit::new(false, Some(session), state.connections.clone());
+            let mut login = project_session(&state, &permit);
+            if login.identity.is_none() {
+                return switch_response(Result::Reauthenticate);
+            }
+            let expires_at_ms = login.expires_at_ms;
+            login.token = native.then(|| token.clone());
+            let mut response = switch_response(Result::Switched { login });
+            if !native {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|time| time.as_millis() as u64)
+                    .unwrap_or(expires_at_ms);
+                set_cookie(
+                    &mut response,
+                    state.secure,
+                    &headers,
+                    token.expose(),
+                    expires_at_ms.saturating_sub(now_ms) / 1000,
+                );
+            }
+            return response;
+        }
+    };
+    switch_response(result)
+}
+
+fn switch_response(result: assistant_protocol::HostOrganizationSwitchResult) -> Response {
+    let mut response = Json(result).into_response();
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }

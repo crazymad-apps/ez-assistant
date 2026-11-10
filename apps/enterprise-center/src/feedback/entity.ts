@@ -5,6 +5,7 @@ import type { FeedbackEnvironment, FeedbackKind, FeedbackSource, FeedbackStatus 
 @Entity({ schema: 'public', name: 'feedback', synchronize: false })
 export class FeedbackEntity {
   @PrimaryColumn('uuid') id!: string;
+  @Column('uuid') organization_id!: string;
   @Column('integer') owner_user_id!: number;
   @Column('text') owner_username!: string;
   @Column('text') owner_display_name!: string;

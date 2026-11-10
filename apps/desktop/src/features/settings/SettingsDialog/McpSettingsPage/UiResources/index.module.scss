@@ -1,0 +1,10 @@
+.resources {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+.entries {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}

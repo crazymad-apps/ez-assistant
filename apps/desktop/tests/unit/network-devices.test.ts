@@ -208,7 +208,7 @@ it("keeps device drafts separate and transfers local file selections only to an 
   runInAction(() => { root.network.available = true; root.network.devices = [A, B].map((id) => ({ id, name: id, platform: "test", online: true, enabled: true, desktop_view: false, desktop_control: false })); });
   root.openNewSessionDraft();
   root.local_new_session_drafts.updateText("unbound", "本机未发送内容");
-  root.local_new_session_drafts.updateModel("unbound", { provider_instance_id: "local-model", model_id: "only-here" });
+  root.local_new_session_drafts.updateModel("unbound", { source: 'local' as const, provider_instance_id: "local-model", model_id: "only-here" });
   const selection = await root.local_files.stageClipboardImage(new File(["bytes"], "image.png", { type: "image/png" }));
   root.local_new_session_drafts.updateAttachments("unbound", [{ ...selection, media_type: "image/png", origin: "clipboard", state: "selected", attachment_id: null, operation_id: null, error: null }]);
   root.switchDraftDevice(A);

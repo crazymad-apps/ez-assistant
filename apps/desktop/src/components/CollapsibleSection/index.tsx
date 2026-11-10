@@ -5,14 +5,17 @@ import styles from "./index.module.scss";
 
 /** 触发头与内容共享展开状态、键盘语义和既有 Collapse 生命周期。 */
 export function CollapsibleSection(props: Readonly<{
-  title: string; children: ReactNode; defaultOpen?: boolean;
+  title: string; children: ReactNode; defaultOpen?: boolean; actions?: ReactNode; variant?: "plain" | "outlined";
 }>) {
   const [open, setOpen] = useState(props.defaultOpen ?? false);
   const content_id = useId();
-  return <section className={styles.section}>
-    <button type="button" className={styles.trigger} aria-expanded={open} aria-controls={content_id} onClick={() => setOpen(!open)}>
-      <Icon name={open ? "chevron-down" : "chevron-right"} size={14} /><span>{props.title}</span>
-    </button>
+  return <section className={styles.section} data-variant={props.variant ?? "plain"} data-open={open}>
+    <header className={styles.header}>
+      <button type="button" className={styles.trigger} aria-expanded={open} aria-controls={content_id} onClick={() => setOpen(!open)}>
+        <Icon name={open ? "chevron-down" : "chevron-right"} size={14} /><span>{props.title}</span>
+      </button>
+      {props.actions && <div className={styles.actions}>{props.actions}</div>}
+    </header>
     <Collapse id={content_id} open={open}><div className={styles.body}>{props.children}</div></Collapse>
   </section>;
 }

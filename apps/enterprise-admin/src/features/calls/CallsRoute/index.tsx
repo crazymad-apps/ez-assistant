@@ -2,7 +2,21 @@ import { callKindLabel } from '../callKindLabel';
 import { useCallback, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
 import dayjs from 'dayjs';
-import { Alert, Button, Card, DatePicker, Form, Input, InputNumber, Pagination, Select, Space, Table } from 'antd';
+import {
+  Alert,
+  Button,
+  Card,
+  DatePicker,
+  Form,
+  Input,
+  InputNumber,
+  Pagination,
+  Select,
+  Space,
+  Table,
+  Typography,
+  theme,
+} from 'antd';
 import type { TableProps } from 'antd';
 import { observer } from 'mobx-react-lite';
 import type { ListLlmCallsData, CallDetails } from '../../../request/openapi';
@@ -16,6 +30,7 @@ import styles from './index.module.scss';
 type Query = NonNullable<ListLlmCallsData['query']>;
 
 export const CallsRoute = observer(function CallsRoute() {
+  const { token } = theme.useToken();
   const [searchParams, setSearchParams] = useSearchParams();
   const [draft, setDraft] = useState<Query>(() => {
     const initial: Query = { limit: 50, offset: 0 };
@@ -126,18 +141,18 @@ export const CallsRoute = observer(function CallsRoute() {
         title="模型调用记录"
         className={styles.card}
         extra={
-          <Button disabled={!settings.value} onClick={() => setSettingsOpen(true)}>
-            记录策略
-          </Button>
+          <Space>
+            {settings.value && (
+              <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+                当前正文留存：{recordingLabels[settings.value.mode]}
+              </Typography.Text>
+            )}
+            <Button disabled={!settings.value} onClick={() => setSettingsOpen(true)}>
+              记录策略
+            </Button>
+          </Space>
         }
       >
-        {settings.value && (
-          <Alert
-            type="info"
-            title={`当前正文留存：${recordingLabels[settings.value.mode]}；每条调用以开始时的策略为准。`}
-            action={settings.value.mode === 'off' && <Button onClick={() => setSettingsOpen(true)}>设置采集</Button>}
-          />
-        )}
         <Form
           layout="inline"
           className={styles.filters}

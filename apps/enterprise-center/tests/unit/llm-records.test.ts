@@ -12,15 +12,28 @@ import { ModelsService } from '../../dist/models/service.js';
 import { ModelTemplates } from '../../dist/models/templates.js';
 import { IdentityService } from '../../dist/identity/service.js';
 
+const organizationId = randomUUID();
+function proxyIdentity(identities: IdentityService) {
+  const centerId = randomUUID();
+  const scope = { kind: 'organization' as const, organization_id: organizationId };
+  const expires = Math.floor(Date.now() / 1000) + 300;
+  const session = { jti: randomUUID(), userId: 1, issuer: centerId, scope, expires };
+  const user = { id: 1, username: 'u', display_name: 'u', role: 'user' as const, is_super_admin: false, enabled: true };
+  vi.spyOn(identities, 'llmIdentity').mockResolvedValue({ session, user, center_id: centerId,
+    legacy_organization_id: organizationId, scope: { ...scope, can_manage: false },
+    expires_at: new Date(expires * 1000).toISOString() });
+  identities.publishLogin({ session } as Parameters<IdentityService['publishLogin']>[0]);
+}
+
 it('最小索引无法建立时不准入或发送上游', async () => {
   const identity = new IdentityService();
+  proxyIdentity(identity);
   const models = new ModelsService(identity, undefined, new ModelTemplates());
   const admit = vi.spyOn(models, 'admit');
   const proxy = new ModelProxy(identity, models, new CallRecords(undefined, new SnapshotFiles()), {});
   await expect(
     proxy.execute({
       key: 'test',
-      user: { id: 1, username: 'test', display_name: 'test', role: 'admin', is_super_admin: false, enabled: true },
       selection: { provider_instance_id: randomUUID(), model_id: 'model' },
       protocol: 'open_ai_responses',
       body: Buffer.from('{"model":"m","store":false}'),
@@ -54,13 +67,14 @@ it('文件已发布而索引未结算时恢复为 unknown/partial；清理先文
   // 仅替换 ORM 方法模拟故障；此 DataSource 从不 initialize/connect，不访问任何数据库。
   const source = createDataSource({ url: 'postgresql://unused@127.0.0.1/unused' });
   const repository = source.getRepository(CallEntity);
-  vi.spyOn(source.getRepository(RecordingEntity), 'findOneByOrFail').mockResolvedValue({
-    singleton: true,
+  vi.spyOn(source.getRepository(RecordingEntity), 'existsBy').mockResolvedValue(true);
+  vi.spyOn(source.getRepository(RecordingEntity), 'find').mockResolvedValue([{
+    organization_id: organizationId,
     mode: 'all',
     content_retention_days: 7,
     index_retention_days: 90,
     usage_available_from: new Date('2020-01-01T00:00:00Z'),
-  });
+  }]);
   const getMany = vi.fn().mockResolvedValueOnce([row]).mockResolvedValueOnce([]);
   const query = {
     where: vi.fn().mockReturnThis(),
@@ -120,10 +134,12 @@ it('服务关闭取消正在转发的上游，并等待唯一一次索引结算�
     .spyOn(source.getRepository(CallEntity), 'update')
     .mockResolvedValue({ affected: 1, raw: [], generatedMaps: [] });
   const identities = new IdentityService();
+  proxyIdentity(identities);
   const models = new ModelsService(identities, undefined, new ModelTemplates());
   const selection = { provider_instance_id: randomUUID(), model_id: 'm' };
   vi.spyOn(models, 'admit').mockResolvedValue({
     provider: {
+      organization_id: organizationId,
       ...selection,
       api_key: '',
       connection: {
@@ -163,7 +179,6 @@ it('服务关闭取消正在转发的上游，并等待唯一一次索引结算�
   });
   const pending = proxy.execute({
     key: 'test',
-    user: { id: 1, username: 'u', display_name: 'u', role: 'admin', is_super_admin: false, enabled: true },
     selection,
     protocol: 'open_ai_responses',
     body: Buffer.from('{"model":"m","store":false}'),
@@ -194,6 +209,7 @@ it('准入等待期间主体撤销不能遗漏，WS 不得在撤销之后建连'
   const { CallRecording } = await import('../../dist/llm/records.js');
   const { emptyParameters } = await import('../../dist/models/parameters.js');
   const identities = new IdentityService();
+  proxyIdentity(identities);
   const models = new ModelsService(identities, undefined, new ModelTemplates());
   const records = new CallRecords(undefined, new SnapshotFiles());
   const record = new CallRecording(
@@ -217,6 +233,7 @@ it('准入等待期间主体撤销不能遗漏，WS 不得在撤销之后建连'
     await gate;
     return {
       provider: {
+      organization_id: organizationId,
         provider_instance_id: selection.provider_instance_id,
         api_key: '',
         server_history_key: 'key',
@@ -252,7 +269,6 @@ it('准入等待期间主体撤销不能遗漏，WS 不得在撤销之后建连'
   try {
     const pending = proxy.execute({
       key: 'test',
-      user: { id: 1, username: 'u', display_name: 'u', role: 'user', is_super_admin: false, enabled: true },
       selection,
       protocol: 'open_ai_responses',
       body: Buffer.from('{"model":"m","stream":true,"store":true,"input":[]}'),

@@ -55,3 +55,10 @@ pub fn stored_model_catalog_is_valid(models: &[DiscoveredModel]) -> bool {
                 .is_none_or(|name| name.len() <= 256 && !name.chars().any(char::is_control))
     })
 }
+
+/// 固定参数提交时替换受影响会话的续接周期。企业默认由组织提供，个人参数不会触及跟随者。
+#[derive(Clone)]
+pub struct FixedModelHistoryInvalidation {
+    pub key: String,
+    pub includes_default_followers: bool,
+}

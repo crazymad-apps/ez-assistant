@@ -1,0 +1,50 @@
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+}
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--ez-border);
+}
+.toolbar > span {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.toolbar small {
+  color: var(--ez-text-muted);
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.approval {
+  padding: 16px;
+  overflow-wrap: anywhere;
+}
+.surface {
+  flex: 1;
+  min-height: 0;
+}
+.surface > section {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.surface > section > div {
+  flex: 1;
+  min-height: 0;
+}
+.surface iframe {
+  height: 100% !important;
+  min-height: 0;
+  max-height: none;
+}

@@ -1,0 +1,49 @@
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--ez-z-modal);
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--ez-overlay);
+}
+.dialog {
+  width: min(480px, 100%);
+  max-height: 80vh;
+  overflow: auto;
+  border: 1px solid var(--ez-border);
+  border-radius: var(--ez-radius-medium);
+  padding: 20px;
+  background: var(--ez-surface);
+  box-shadow: var(--ez-shadow-shell);
+}
+.dialog h2 {
+  margin: 0 0 16px;
+  font-size: var(--ez-font-large);
+}
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+.list {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+.entry {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  text-align: left;
+}
+.origin {
+  color: var(--ez-text-muted);
+  font-size: var(--ez-font-small);
+  overflow-wrap: anywhere;
+}
+.field {
+  width: 100%;
+}

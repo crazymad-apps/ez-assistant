@@ -128,6 +128,7 @@ async fn create(runtime: &AssistantRuntime) -> ModelSelection {
             .contains("private-provider-key")
     );
     ModelSelection {
+        source: assistant_protocol::ModelSelectionSource::Local,
         provider_instance_id: provider.provider_instance_id,
         model_id: "org/model".into(),
     }
@@ -220,6 +221,7 @@ async fn provider_edit_is_not_blocked_by_discovery_and_late_result_is_rejected()
     tokio::time::timeout(
         Duration::from_secs(1),
         runtime.update_provider(UpdateProviderRequest {
+            source: assistant_protocol::ModelSelectionSource::Local,
             provider_instance_id: selection.provider_instance_id,
             connection: connection(),
             credential: ProviderCredentialChange::Unchanged,
@@ -311,6 +313,7 @@ async fn only_discovery_input_changes_mark_an_existing_catalog_stale() {
     display_only.protocol_preference = ProviderProtocolPreference::Responses;
     runtime
         .update_provider(UpdateProviderRequest {
+            source: assistant_protocol::ModelSelectionSource::Local,
             provider_instance_id: selection.provider_instance_id.clone(),
             connection: display_only.clone(),
             credential: ProviderCredentialChange::Unchanged,
@@ -328,6 +331,7 @@ async fn only_discovery_input_changes_mark_an_existing_catalog_stale() {
     display_only.models_path = "/v1/other-models".into();
     runtime
         .update_provider(UpdateProviderRequest {
+            source: assistant_protocol::ModelSelectionSource::Local,
             provider_instance_id: selection.provider_instance_id.clone(),
             connection: display_only,
             credential: ProviderCredentialChange::Unchanged,
@@ -446,6 +450,7 @@ async fn provider_change_rejects_fixed_capabilities_that_the_target_protocol_can
     responses.protocol_preference = ProviderProtocolPreference::Responses;
     runtime
         .update_provider(UpdateProviderRequest {
+            source: assistant_protocol::ModelSelectionSource::Local,
             provider_instance_id: selection.provider_instance_id.clone(),
             connection: responses.clone(),
             credential: ProviderCredentialChange::Unchanged,
@@ -475,6 +480,7 @@ async fn provider_change_rejects_fixed_capabilities_that_the_target_protocol_can
     assert!(
         runtime
             .update_provider(UpdateProviderRequest {
+                source: assistant_protocol::ModelSelectionSource::Local,
                 provider_instance_id: selection.provider_instance_id.clone(),
                 connection: vllm,
                 credential: ProviderCredentialChange::Clear,
@@ -609,6 +615,7 @@ async fn late_selection_after_provider_change_never_commits_stale_reference() {
     changed.endpoint = "https://changed.example.test/v1".into();
     runtime
         .update_provider(UpdateProviderRequest {
+            source: assistant_protocol::ModelSelectionSource::Local,
             provider_instance_id: selection.provider_instance_id.clone(),
             connection: changed,
             credential: ProviderCredentialChange::Unchanged,
@@ -1003,6 +1010,7 @@ async fn personal_history_policy_is_validated_and_binding_survives_only_unchange
         .unwrap();
     runtime
         .update_provider(UpdateProviderRequest {
+            source: assistant_protocol::ModelSelectionSource::Local,
             provider_instance_id: id.clone(),
             connection: config.clone(),
             credential: ProviderCredentialChange::Unchanged,
@@ -1014,6 +1022,7 @@ async fn personal_history_policy_is_validated_and_binding_survives_only_unchange
         Some(original.as_str())
     );
     let selection = ModelSelection {
+        source: assistant_protocol::ModelSelectionSource::Local,
         provider_instance_id: id.clone(),
         model_id: "org/model".into(),
     };
@@ -1053,6 +1062,7 @@ async fn personal_history_policy_is_validated_and_binding_survives_only_unchange
     config.server_history_enabled = false;
     runtime
         .update_provider(UpdateProviderRequest {
+            source: assistant_protocol::ModelSelectionSource::Local,
             provider_instance_id: id.clone(),
             connection: config.clone(),
             credential: ProviderCredentialChange::Unchanged,
@@ -1066,6 +1076,7 @@ async fn personal_history_policy_is_validated_and_binding_survives_only_unchange
     config.server_history_enabled = true;
     runtime
         .update_provider(UpdateProviderRequest {
+            source: assistant_protocol::ModelSelectionSource::Local,
             provider_instance_id: id.clone(),
             connection: config.clone(),
             credential: ProviderCredentialChange::Unchanged,
@@ -1081,6 +1092,7 @@ async fn personal_history_policy_is_validated_and_binding_survives_only_unchange
     assert_ne!(enabled, original);
     runtime
         .update_provider(UpdateProviderRequest {
+            source: assistant_protocol::ModelSelectionSource::Local,
             provider_instance_id: id.clone(),
             connection: config,
             credential: ProviderCredentialChange::Replace(assistant_protocol::SecretValue::new(
@@ -1111,6 +1123,7 @@ async fn history_model_switch_epochs_survive_aba_and_default_switches_only_affec
         .await
         .unwrap();
     let a = ModelSelection {
+        source: assistant_protocol::ModelSelectionSource::Local,
         provider_instance_id: provider.provider_instance_id,
         model_id: "A".into(),
     };
@@ -1323,6 +1336,7 @@ async fn same_model_reapplication_changes_frozen_mode_and_invalidates_history() 
         .await
         .unwrap();
     let selection = ModelSelection {
+        source: assistant_protocol::ModelSelectionSource::Local,
         provider_instance_id: provider.provider_instance_id,
         model_id: "native-model".into(),
     };

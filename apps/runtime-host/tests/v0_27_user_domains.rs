@@ -13,6 +13,7 @@ use std::{
 };
 
 const CENTER: &str = "01234567-89ab-4cde-8f01-23456789abcd";
+const ORGANIZATION: &str = "01234567-89ab-4cde-8f01-23456789abce";
 struct Host(Child);
 impl Drop for Host {
     fn drop(&mut self) {
@@ -20,8 +21,16 @@ impl Drop for Host {
         let _ = self.0.wait();
     }
 }
+fn organization_scope() -> Value {
+    json!({"kind":"organization","organization_id":ORGANIZATION,"name":"Fixture organization","enabled":true,"member_role":"member"})
+}
 fn identity(id: u64) -> Value {
-    json!({"center_id": CENTER, "user": {"id": id, "username": format!("user{id}"), "display_name": format!("User {id}"), "role":"user", "is_super_admin":false, "enabled":true}})
+    let expires_at = (time::OffsetDateTime::now_utc() + time::Duration::hours(1))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    json!({"center_id": CENTER, "legacy_organization_id":ORGANIZATION,
+        "scope":organization_scope(), "expires_at":expires_at,
+        "user": {"id": id, "username": format!("user{id}"), "display_name": format!("User {id}"), "role":"user", "is_super_admin":false, "enabled":true}})
 }
 fn request(
     client: &reqwest::Client,
@@ -52,6 +61,16 @@ async fn login(client: &reqwest::Client, url: &str, user: &str) -> String {
         .await
         .unwrap();
     assert_eq!(response.status(), 200);
+    let pending = response.json::<Value>().await.unwrap();
+    assert!(pending["token"].is_null());
+    let response = request(client, url, "/auth/login", "")
+        .json(&json!({"method":"enterprise_select",
+            "selection_token":pending["organization_selection"]["selection_token"],
+            "organization_id":ORGANIZATION}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
     response.json::<Value>().await.unwrap()["token"]
         .as_str()
         .unwrap()
@@ -75,17 +94,40 @@ async fn real_process_has_no_personal_fallback_and_routes_events_to_its_user() {
     let center_router = Router::new()
         .route(
             "/api/info",
-            get(|| async { Json(json!({"protocol_version":4,"min_protocol_version":4})) }),
+            get(|| async {
+                Json(json!({"protocol_version":6,"min_protocol_version":6,"center_id":CENTER}))
+            }),
         )
         .route(
             "/api/auth/login",
             post(|RequestJson(body): RequestJson<Value>| async move {
                 let id = if body["username"] == "bob" { 2 } else { 1 };
                 let mut result = identity(id);
-                result["token"] = json!(format!("ct_{id:064x}"));
-                result["llm_key"] = json!(format!("cl_{id:064x}"));
+                result["token"] = json!(format!("pending.user.{id}"));
+                result["scope"] = json!({"kind":"unselected"});
                 Json(result)
             }),
+        )
+        .route(
+            "/api/auth/scopes",
+            get(|| async { Json(json!([organization_scope()])) }),
+        )
+        .route(
+            "/api/auth/scope",
+            post(
+                |headers: HeaderMap, RequestJson(body): RequestJson<Value>| async move {
+                    assert_eq!(body["organization_id"], ORGANIZATION);
+                    let id = if headers["authorization"].to_str().unwrap().ends_with('2') {
+                        2
+                    } else {
+                        1
+                    };
+                    let mut result = identity(id);
+                    result["token"] = json!(format!("selected.user.{id}"));
+                    result["llm_key"] = json!(format!("cl_{id:064x}"));
+                    Json(result)
+                },
+            ),
         )
         .route(
             "/api/auth/me",
@@ -240,9 +282,9 @@ async fn real_process_has_no_personal_fallback_and_routes_events_to_its_user() {
     .await
     .unwrap();
     for id in [1, 2] {
-        let db = home
-            .path()
-            .join(format!("users/{CENTER}_{id}/data/runtime.sqlite3"));
+        let db = home.path().join(format!(
+            "users/{CENTER}_{ORGANIZATION}_{id}/data/runtime.sqlite3"
+        ));
         let connection =
             rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
                 .unwrap();
@@ -263,8 +305,11 @@ async fn real_process_has_no_personal_fallback_and_routes_events_to_its_user() {
             let directories = prompt.parts().last().unwrap();
             assert!(directories.starts_with("<runtime_directories>"));
             assert!(directories.contains("<runtime_mode>enterprise</runtime_mode>"));
-            assert!(directories.contains(&format!("{CENTER}_{id}")));
-            assert!(!directories.contains(&format!("{CENTER}_{}", if id == 1 { 2 } else { 1 })));
+            assert!(directories.contains(&format!("{CENTER}_{ORGANIZATION}_{id}")));
+            assert!(!directories.contains(&format!(
+                "{CENTER}_{ORGANIZATION}_{}",
+                if id == 1 { 2 } else { 1 }
+            )));
             assert!(!directories.contains("users/_personal"));
         }
         let own: String = connection

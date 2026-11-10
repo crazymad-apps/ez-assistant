@@ -124,8 +124,8 @@ export function liveRunStatusLabel(run: LiveRunProjection): string {
   if (run.status === "running" && request?.type === "retry_waiting") {
     return `连接异常，等待 ${Math.ceil(request.delay_ms / 1_000)} 秒后进行第 ${request.next_attempt} 次尝试`;
   }
-  if (run.status === "running" && request?.type === "requesting" && request.attempt > 1) {
-    return `正在重新连接模型 · 第 ${request.attempt} 次尝试`;
+  if (run.status === "running" && request?.type === "requesting") {
+    return request.attempt > 1 ? `正在重新连接模型 · 第 ${request.attempt} 次尝试` : "等待模型响应";
   }
   return runStatusLabel(run.status);
 }
@@ -140,7 +140,7 @@ export function runFailureMessage(
     authentication: "模型认证失败，请检查 API Key 和访问权限。",
     connection: "无法连接模型服务，请检查网络和服务地址。",
     timeout: "模型响应超时，请稍后重试。",
-    stream_interrupted: "模型响应意外中断，已停止自动重试。请检查已有结果后继续。",
+    stream_interrupted: "模型响应意外中断，请检查已有结果后继续。",
     provider_rejected: "模型服务拒绝了本次请求，请检查模型能力与请求参数。",
     rate_limited: "模型服务请求过于频繁，请稍后重试。",
     service_unavailable: "模型服务暂时不可用，请稍后重试。",
@@ -155,9 +155,6 @@ export function runFailureMessage(
     : null;
   const reason = kind ?? diagnostics?.[2];
   const message = reason ? kind_message[reason as ModelFailureKind] : null;
-  if (diagnostics?.[1] === "after") {
-    return "模型响应中断，已停止自动重试。请检查已有结果后继续。";
-  }
   if (message) {
     return diagnostics && Number(diagnostics[3]) > 1
       ? `已尝试 ${diagnostics[3]} 次，未能恢复。${message}`

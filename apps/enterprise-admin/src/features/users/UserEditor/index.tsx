@@ -1,6 +1,6 @@
 import { passwordRule } from '../../passwords/validation';
 import { useState } from 'react';
-import { Alert, App, Descriptions, Form, Input, Modal, Radio, Tag } from 'antd';
+import { Alert, App, Descriptions, Form, Input, Modal, Switch, Tag } from 'antd';
 import type { UserView, UserDraft } from '../../../model';
 import styles from './index.module.scss';
 
@@ -10,9 +10,11 @@ type UserEditorProps = Readonly<{
   onSave: (draft: UserDraft, user?: UserView) => Promise<string | undefined>;
 }>;
 
+type UserForm = Omit<UserDraft, 'role'> & { systemAdmin: boolean; confirmPassword: string };
+
 /** 创建/编辑用户弹窗：表单较小，不再占用二级页面；底部按钮使用 Modal 原生 footer。 */
 export function UserEditor(props: UserEditorProps) {
-  const [form] = Form.useForm<UserDraft & { confirmPassword: string }>();
+  const [form] = Form.useForm<UserForm>();
   const { modal } = App.useApp();
   const [error, setError] = useState<string>();
   const [pending, setPending] = useState(false);
@@ -24,13 +26,15 @@ export function UserEditor(props: UserEditorProps) {
     }
     modal.confirm({ title: '放弃尚未保存的修改？', okText: '放弃修改', cancelText: '继续编辑', onOk: props.onBack });
   }
-  function save(values: UserDraft) {
+  function save({ username, displayName, password, systemAdmin }: UserForm) {
+    const requestedRole = systemAdmin ? 'system_admin' : 'user';
+    const role = props.user?.superAdmin ? props.user.role : requestedRole;
     const commit = async () => {
       if (pending) return;
       setPending(true);
       setError(undefined);
       try {
-        const result = await props.onSave(values, props.user);
+        const result = await props.onSave({ username, displayName, password, role }, props.user);
         if (result) {
           setError(result);
           form.resetFields(['password', 'confirmPassword']);
@@ -39,9 +43,9 @@ export function UserEditor(props: UserEditorProps) {
         setPending(false);
       }
     };
-    if (props.user && values.role !== props.user.role) {
+    if (props.user && role !== props.user.role) {
       modal.confirm({
-        title: `修改 ${props.user.username} 的角色？`,
+        title: `${systemAdmin ? '授予' : '撤销'} ${props.user.username} 的系统管理员权限？`,
         content: '该用户的全部登录将失效。',
         okText: '确认修改',
         cancelText: '取消',
@@ -86,7 +90,11 @@ export function UserEditor(props: UserEditorProps) {
         onFinish={save}
         requiredMark={false}
         disabled={pending}
-        initialValues={props.user ?? { role: 'user' }}
+        initialValues={{
+          username: props.user?.username,
+          displayName: props.user?.displayName,
+          systemAdmin: props.user?.superAdmin || props.user?.role === 'system_admin',
+        }}
       >
         <Form.Item
           name="username"
@@ -108,14 +116,8 @@ export function UserEditor(props: UserEditorProps) {
         >
           <Input placeholder="例如 张三" />
         </Form.Item>
-        <Form.Item name="role" label="用户角色">
-          <Radio.Group
-            className={styles.role_options}
-            options={[
-              { value: 'user', label: '普通用户', disabled: props.user?.superAdmin && props.user.role === 'admin' },
-              { value: 'admin', label: '管理员' },
-            ]}
-          />
+        <Form.Item name="systemAdmin" label="系统管理员" valuePropName="checked">
+          <Switch disabled={props.user?.superAdmin} />
         </Form.Item>
         {!props.user && (
           <>

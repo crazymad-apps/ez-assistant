@@ -67,7 +67,11 @@ pub(crate) fn projected_evidence(source: &Path, paths: &Relocation) -> Result<se
     copy_connection(&source, &mut expected)?;
     expected.pragma_update(None, "foreign_keys", true)?;
     let entries = layout_manifest(&expected)?;
-    let versions = validate_manifest(env!("CARGO_PKG_VERSION"), &entries)?;
+    let target = entries
+        .last()
+        .ok_or(MigrationError::InvalidManifest)?
+        .version;
+    let versions = validate_manifest(target, &entries)?;
     let completed = completed_prefix(&expected, &versions, &entries)?;
     for (index, migration) in entries.iter().enumerate().skip(completed) {
         apply_version(
@@ -105,15 +109,13 @@ pub(crate) fn upgrade(home: &Path, paths: &Relocation) -> Result<()> {
     let connection = admit(&home.join(DATA_DIRECTORY).join(DATABASE_FILE))?
         .ok_or(MigrationError::InvalidPath)?;
     let entries = layout_manifest(&connection)?;
+    // 旧布局先完成既有 SQL 前缀；F02 文件迁移及后续发布登记仍由正常启动推进。
+    let target = entries
+        .last()
+        .ok_or(MigrationError::InvalidManifest)?
+        .version;
     connection.close().map_err(|(_, error)| error)?;
-    migrate_layout_with_progress(
-        home,
-        env!("CARGO_PKG_VERSION"),
-        &entries,
-        |_| {},
-        Some(paths),
-    )
-    .map(|_| ())
+    migrate_layout_with_progress(home, target, &entries, |_| {}, Some(paths)).map(|_| ())
 }
 
 // 布局投影只计算确定性的 SQL 迁移；F02 文件准备在布局正式发布后的常规启动执行。

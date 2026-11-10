@@ -439,19 +439,20 @@ export class SettingsStore {
   async loadProviderModelCatalog(
     provider_instance_id: ProviderInstanceId,
     signal?: AbortSignal,
+    source: ProviderSummary["source"] = "local",
   ): Promise<ProviderModelCatalogSnapshot> {
     const client = this.requireClient();
     if (!client) throw new Error('运行时尚未连接。');
     const result = await client.command(
-      { type: 'list_provider_models', payload: { provider_instance_id } },
+      { type: 'list_provider_models', payload: { source, provider_instance_id } },
       { signal },
     );
     if (client !== this.dependencies.get_client()) throw new Error('运行时连接已切换，请重试。');
     return result.payload;
   }
 
-  async listProviderModels(provider_instance_id: ProviderInstanceId, signal?: AbortSignal): Promise<DiscoveredModel[]> {
-    return (await this.loadProviderModelCatalog(provider_instance_id, signal)).models;
+  async listProviderModels(provider_instance_id: ProviderInstanceId, signal?: AbortSignal, source: ProviderSummary["source"] = "local"): Promise<DiscoveredModel[]> {
+    return (await this.loadProviderModelCatalog(provider_instance_id, signal, source)).models;
   }
 
   async refreshProviderModels(
@@ -461,7 +462,7 @@ export class SettingsStore {
     const client = this.requireClient();
     if (!client) throw new Error('运行时尚未连接。');
     const result = await client.command(
-      { type: 'refresh_provider_models', payload: { provider_instance_id } },
+      { type: 'refresh_provider_models', payload: { source: 'local', provider_instance_id } },
       { signal },
     );
     if (client !== this.dependencies.get_client()) throw new Error('运行时连接已切换，请重试。');
@@ -567,7 +568,7 @@ export class SettingsStore {
     let saved: ProviderSummary | null = null;
     const applied = await this.runAction('provider:save', async () => {
       const result = provider_instance_id
-        ? await client.command({ type: 'update_provider', payload: { provider_instance_id, connection, credential } })
+        ? await client.command({ type: 'update_provider', payload: { source: 'local', provider_instance_id, connection, credential } })
         : await client.command({ type: 'create_provider', payload: { connection, credential } });
       if (client !== this.dependencies.get_client()) throw new Error('运行时连接已切换，请重新读取设置。');
       if (result.payload.connection.server_history_enabled !== connection.server_history_enabled
@@ -578,7 +579,9 @@ export class SettingsStore {
       this.invalidateModelRead();
       runInAction(() => {
         this.providers = [
-          ...this.providers.filter((item) => item.provider_instance_id !== result.payload.provider_instance_id),
+          ...this.providers.filter((item) =>
+            item.source !== result.payload.source || item.provider_instance_id !== result.payload.provider_instance_id,
+          ),
           result.payload,
         ];
         this.showNotice('服务商已保存。');
@@ -591,7 +594,7 @@ export class SettingsStore {
   async getProviderUsage(provider_instance_id: ProviderInstanceId, signal?: AbortSignal): Promise<ProviderUsage> {
     const client = this.requireClient();
     if (!client) throw new Error('运行时尚未连接。');
-    const result = await client.command({ type: 'get_provider_usage', payload: { provider_instance_id } }, { signal });
+    const result = await client.command({ type: 'get_provider_usage', payload: { source: 'local', provider_instance_id } }, { signal });
     if (client !== this.dependencies.get_client()) throw new Error('运行时连接已切换，请重新读取影响。');
     return result.payload;
   }
@@ -600,11 +603,13 @@ export class SettingsStore {
     const client = this.requireClient();
     if (!client) return false;
     return this.runAction('provider:delete', async () => {
-      const result = await client.command({ type: 'delete_provider', payload: { provider_instance_id } });
+      const result = await client.command({ type: 'delete_provider', payload: { source: 'local', provider_instance_id } });
       if (client !== this.dependencies.get_client()) throw new Error('运行时连接已切换，请重新读取设置。');
       this.invalidateModelRead();
       runInAction(() => {
-        this.providers = this.providers.filter((item) => item.provider_instance_id !== provider_instance_id);
+        this.providers = this.providers.filter((item) =>
+          item.source !== 'local' || item.provider_instance_id !== provider_instance_id,
+        );
         this.showNotice(
           `服务商已删除，已删除 ${result.payload.fixed_config_count} 条固定配置；${result.payload.session_count} 个显式引用会话需重选模型。${result.payload.default_model ? '默认模型需重选。' : ''}${result.payload.vision_model ? '辅助识图模型需重选。' : ''}`,
         );
@@ -645,11 +650,12 @@ export class SettingsStore {
     provider_instance_id: ProviderInstanceId,
     offset: number,
     signal?: AbortSignal,
+    source: ProviderSummary["source"] = "local",
   ): Promise<ModelFixedConfig[]> {
     const client = this.requireClient();
     if (!client) throw new Error('运行时尚未连接。');
     const result = await client.command(
-      { type: 'list_fixed_model_configs', payload: { provider_instance_id, offset, limit: 20 } },
+      { type: 'list_fixed_model_configs', payload: { source, provider_instance_id, offset, limit: 20 } },
       { signal },
     );
     if (client !== this.dependencies.get_client()) throw new Error('运行时连接已切换，请重试。');
@@ -659,10 +665,11 @@ export class SettingsStore {
   async listAllFixedModels(
     provider_instance_id: ProviderInstanceId,
     signal?: AbortSignal,
+    source: ProviderSummary["source"] = "local",
   ): Promise<ModelFixedConfig[]> {
     const records: ModelFixedConfig[] = [];
     for (let offset = 0; !signal?.aborted; offset += 20) {
-      const page = await this.listFixedModels(provider_instance_id, offset, signal);
+      const page = await this.listFixedModels(provider_instance_id, offset, signal, source);
       records.push(...page);
       if (page.length < 20) break;
     }

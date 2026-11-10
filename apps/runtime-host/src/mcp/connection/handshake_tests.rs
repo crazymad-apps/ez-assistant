@@ -2,7 +2,7 @@
 
 use std::{sync::Mutex, time::Duration};
 
-use axum::{Json, Router, body::Body, http::Response, routing::post};
+use axum::{Json, Router, body::Body, http::Response, response::IntoResponse, routing::post};
 use rmcp::model::ErrorCode;
 use serde_json::{Value, json};
 
@@ -32,6 +32,86 @@ fn sse(message: Value) -> Response<Body> {
             ": keepalive\r\n\r\nevent: message\r\ndata: {message}\r\n\r\n"
         )))
         .expect("SSE response")
+}
+
+#[tokio::test]
+async fn ui_capabilities_metadata_and_resources_cross_the_real_adapter() {
+    let negotiated = Arc::new(Mutex::new(Value::Null));
+    let observed = negotiated.clone();
+    let router = Router::new().route("/mcp", post(move |Json(request): Json<Value>| {
+        let observed = observed.clone();
+        async move {
+            let result = match request["method"].as_str().unwrap() {
+                "server/discover" => return sse(json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32601,"message":"legacy fixture"}})),
+                "initialize" => {
+                    *observed.lock().unwrap() = request["params"]["capabilities"].clone();
+                    json!({"protocolVersion":"2025-11-25","capabilities":{"tools":{},"resources":{}},"serverInfo":{"name":"ui","version":"1"}})
+                },
+                "notifications/initialized" => return Response::builder().status(202).body(Body::empty()).unwrap(),
+                "tools/list" => json!({"tools":[{"name":"view","inputSchema":{"type":"object"},"_meta":{"ui":{"resourceUri":"ui://fixture/card","visibility":["app"]},"ez-assistant/entry":{"id":"card","kind":"card"}}}]}),
+                "tools/call" => json!({"content":[{"type":"text","text":"model content"}],"_meta":{"private":"only UI"}}),
+                "resources/list" => json!({"resources":[{"uri":"file:///private","name":"hidden"},{"uri":"ui://fixture/card","name":"card","mimeType":"text/html;profile=mcp-app"}]}),
+                "resources/read" => json!({"contents":[{"uri":request["params"]["uri"],"mimeType":"text/html;profile=mcp-app","blob":"PCFkb2N0eXBlIGh0bWw+","_meta":{"ui":{"csp":{"connectDomains":["https://api.example.test"]}},"private":"not resource UI config"}}]}),
+                method => panic!("unexpected {method}"),
+            };
+            Json(json!({"jsonrpc":"2.0","id":request["id"],"result":result})).into_response()
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let uri = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await });
+    let service = connect(uri).await.unwrap();
+    let connection = HostMcpConnection {
+        service: RwLock::new(Some(service)),
+    };
+    let tools = connection
+        .list_tools_page(None, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        tools.tools[0].meta.as_ref().unwrap()["ui"]["visibility"],
+        json!(["app"])
+    );
+    assert_eq!(
+        tools.tools[0].meta.as_ref().unwrap()["ez-assistant/entry"]["id"],
+        "card"
+    );
+    let result = connection
+        .call_tool_once(
+            "view".into(),
+            serde_json::Map::new(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.meta.unwrap()["private"], "only UI");
+    let page = connection
+        .list_ui_resources_page(None, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(page.resources.len(), 1);
+    let resource = connection
+        .read_ui_resource("ui://fixture/card".into(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(resource.html, "<!doctype html>");
+    assert_eq!(
+        resource.ui.unwrap().csp.unwrap().connect_domains,
+        ["https://api.example.test"]
+    );
+    assert!(
+        connection
+            .read_ui_resource("https://example.test/".into(), CancellationToken::new())
+            .await
+            .is_err()
+    );
+    connection.close(CancellationToken::new()).await.unwrap();
+    assert_eq!(
+        negotiated.lock().unwrap()["extensions"]["io.modelcontextprotocol/ui"]["mimeTypes"],
+        json!(["text/html;profile=mcp-app"])
+    );
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
 }
 
 #[tokio::test]

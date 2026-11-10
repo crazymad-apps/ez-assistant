@@ -1,0 +1,19 @@
+.notice {
+  display: flex;
+  min-height: 36px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 6px 18px;
+  border-bottom: 1px solid var(--ez-border);
+  color: var(--ez-text-secondary);
+  background: var(--ez-surface-subtle);
+  font-size: var(--ez-font-small);
+
+  button {
+    border: 0;
+    color: var(--ez-primary);
+    background: transparent;
+    font-weight: 600;
+  }
+}

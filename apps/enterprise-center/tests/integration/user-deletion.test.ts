@@ -76,7 +76,7 @@ it('旧结构迁移保留审计；删除回滚、凭据失效、历史归属与�
   expect(revoked).toContain(user.id); unsubscribe();
   for (const credentials of [owner, second]) {
     expect((await request(credentials.token, 'GET', '/api/auth/me')).statusCode).toBe(401);
-    await expect(identity.llmIdentity(credentials.llm_key)).rejects.toMatchObject({ code: 'TOKEN_INVALID' });
+    await expect(identity.llmIdentity(credentials.llm_key!)).rejects.toMatchObject({ code: 'TOKEN_INVALID' });
   }
   expect((await request(admin.token, 'DELETE', `/api/users/${user.id}`)).statusCode).toBe(404);
   expect((await app.inject({method:'POST',url:'/api/auth/login',payload:{username:user.username,password}})).statusCode).toBe(401);

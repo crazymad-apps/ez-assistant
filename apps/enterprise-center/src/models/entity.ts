@@ -4,6 +4,7 @@ import type { CatalogModel, ModelParameters, ProviderConnection } from '../contr
 @Entity({ schema: 'public', name: 'providers', synchronize: false })
 export class ProviderEntity {
   @PrimaryColumn('uuid') provider_instance_id!: string;
+  @Column('uuid') organization_id!: string;
   @Column('jsonb') connection!: ProviderConnection;
   @Column({ type: 'text', select: false }) api_key!: string;
   @Column({ type: 'text', select: false, nullable: true }) server_history_key!: string | null;
@@ -21,8 +22,16 @@ export class FixedConfigEntity {
 }
 @Entity({ schema: 'public', name: 'model_settings', synchronize: false })
 export class ModelSettingsEntity {
-  @PrimaryColumn('boolean') singleton!: boolean;
+  @PrimaryColumn('uuid') organization_id!: string;
   @Column({ type: 'uuid', nullable: true }) provider_instance_id!: string | null;
   @Column({ type: 'text', nullable: true }) model_id!: string | null;
-  @Column({ type: 'text', nullable: true }) public_origin!: string | null;
+  @Column('boolean') allow_member_selection!: boolean;
+  @Column({ type: 'uuid', nullable: true }) revision!: string | null;
+}
+
+@Entity({ schema: 'public', name: 'organization_models', synchronize: false })
+export class OrganizationModelEntity {
+  @PrimaryColumn('uuid') organization_id!: string;
+  @PrimaryColumn('uuid') provider_instance_id!: string;
+  @PrimaryColumn('text') model_id!: string;
 }

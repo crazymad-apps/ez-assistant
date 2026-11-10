@@ -17,9 +17,11 @@ import { CenterErrorResponse } from './contracts/error.js';
 import { createOpenApiDocument } from './openapi.js';
 import { safeError } from './errors.js';
 import { IdentityController } from './identity/controller.js';
-import { IdentityService } from './identity/service.js';
+import { IdentityService, isSystemAdmin } from './identity/service.js';
 import { IdentityError } from './identity/errors.js';
 import { Access, HttpSecurity, requestCredential } from './security.js';
+import { OrganizationsController, MembersController } from './organizations/controller.js';
+import { OrganizationsService } from './organizations/service.js';
 import { UsersController } from './users/controller.js';
 import { UsersService } from './users/service.js';
 import { AuditController } from './audit/controller.js';
@@ -78,8 +80,7 @@ class InfoController {
       software_version: version,
       protocol_version: enterpriseProtocol.current,
       min_protocol_version: enterpriseProtocol.minimum,
-      // M1 市场分发和 M2 完整 Agent 配置读取均已通过真实 HTTP 验证。
-      capabilities: ['managed_models', 'llm_proxy', 'plugin_market', 'managed_agents', 'feedback', 'host_registration'],
+      capabilities: ['organization_scopes', 'managed_models', 'llm_proxy', 'plugin_market', 'managed_agents', 'feedback', 'host_registration', 'host_network'],
     };
   }
 }
@@ -89,6 +90,8 @@ class InfoController {
     InfoController,
     IdentityController,
     UsersController,
+    OrganizationsController,
+    MembersController,
     AuditController,
     ModelsController,
     CallsController,
@@ -171,6 +174,7 @@ export async function createHttpApp(
         { provide: HostDevicesService, useValue: devices },
         { provide: HostNetwork, useValue: network },
         { provide: FeedbackService, useValue: new FeedbackService(identities, identity?.source) },
+        { provide: OrganizationsService, useValue: new OrganizationsService(identities, identity?.source) },
         { provide: UsersService, useValue: new UsersService(identities, identity?.source) },
         { provide: AuditService, useValue: new AuditService(identity?.source) },
         { provide: PluginService, useValue: new PluginService(identities, identity?.source, pluginFiles) },
@@ -204,10 +208,9 @@ export async function createHttpApp(
     return payload;
   });
   try {
-    if (identity) await records.initialize();
-    proxy.install(adapter.getInstance());
-    network.install(adapter.getInstance());
     const fastify = adapter.getInstance();
+    proxy.install(fastify);
+    network.install(fastify);
     await fastify.register(multipart, { limits: { fields: 2, files: 2, parts: 4, fileSize: 512 * 1024 * 1024, fieldSize: 96 * 1024 } });
     // 原样交给上传 owner 逐块接收；通用 JSON bodyLimit 不适用于完整归档。
     fastify.addContentTypeParser(['application/zip', 'application/gzip'], (_request, body, done) => {
@@ -239,17 +242,23 @@ export async function createHttpApp(
           return reply.status(400).send(httpFailure(400, request.id));
         return;
       }
+      let actor: Awaited<ReturnType<IdentityService['me']>> | undefined;
       try {
         // 在读取大包正文前先鉴权，拒绝请求不占用包暂存与扫描资源。
         const token = requestCredential(request, !desktopUpload, desktopUpload);
         if (request.headers['content-encoding'] && request.headers['content-encoding'] !== 'identity')
           throw new IdentityError(400, 'INVALID_REQUEST');
-        const user = (await identities.me(token)).user;
-        if (!user.is_super_admin && user.role !== 'admin') throw new IdentityError(403, 'ADMIN_REQUIRED');
+        actor = await identities.me(token);
+        const { user, scope } = actor;
+        if (desktopUpload) {
+          if (scope.kind !== 'system' || !isSystemAdmin(user)) throw new IdentityError(403, 'ADMIN_REQUIRED');
+        } else if (scope.kind !== 'organization' || !scope.can_manage) {
+          throw new IdentityError(403, 'SCOPE_DENIED');
+        }
         request.raw.socket.setTimeout(60000);
       } catch (error) {
         const failure = error instanceof IdentityError ? error : new IdentityError(503, 'SERVICE_UNAVAILABLE');
-        if (failure.status < 500) await identities.rejection(desktopUpload ? 'desktop_release_uploaded' : 'plugin_package_uploaded', request.id, failure);
+        if (failure.status < 500) await identities.rejection(desktopUpload ? 'desktop_release_uploaded' : 'plugin_package_uploaded', request.id, failure, actor?.user.id, desktopUpload ? undefined : actor?.scope.organization_id);
         return reply.status(failure.status).send({ error: { code: failure.code, message: failure.message, request_id: request.id } });
       }
     });
@@ -290,6 +299,7 @@ export async function createHttpApp(
     if (identity?.pluginRoot) await pluginFiles.initialize();
     if (identity?.desktopReleaseRoot) await releaseFiles.initialize();
     await releases.initialize();
+    await records.initialize();
     // Fastify 解析错误也由 Nest 的异常层转入全局过滤器，不重复覆盖同 scope 的 handler。
     await adapter.getInstance().ready();
     return app;

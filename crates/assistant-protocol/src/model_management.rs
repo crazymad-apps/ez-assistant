@@ -127,10 +127,24 @@ pub struct ProviderModelCatalogSnapshot {
     pub diagnostic: Option<ModelCatalogDiagnosticCode>,
 }
 
-/// 二元模型身份，model_id 保留服务商原值，不拼接成配置 key。
+/// 模型配置权威来源。旧本地引用缺省为 Local。
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, TS,
+)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "assistant-protocol.ts")]
+pub enum ModelSelectionSource {
+    #[default]
+    Local,
+    Organization,
+}
+
+/// 模型身份由来源、服务商和原始 model_id 共同确定。
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ModelSelection {
+    #[serde(default)]
+    pub source: ModelSelectionSource,
     pub provider_instance_id: ProviderInstanceId,
     pub model_id: String,
 }
@@ -280,6 +294,8 @@ pub enum ProviderCredentialChange {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ProviderSummary {
+    #[serde(default)]
+    pub source: ModelSelectionSource,
     pub provider_instance_id: ProviderInstanceId,
     pub connection: ProviderConnection,
     pub has_api_key: bool,
@@ -303,6 +319,18 @@ pub struct ModelManagementStatus {
     pub unavailable_reason: Option<String>,
     pub last_success_at_ms: Option<i64>,
     pub last_refresh_error: Option<String>,
+    /// 组织已下发但当前无法执行的引用，保留原因供选择界面显示。
+    #[serde(default)]
+    pub unavailable_models: Vec<UnavailableOrganizationModel>,
+    #[serde(default)]
+    pub allow_member_selection: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct UnavailableOrganizationModel {
+    pub selection: ModelSelection,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -385,6 +413,8 @@ pub struct CreateProviderRequest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct UpdateProviderRequest {
+    #[serde(default)]
+    pub source: ModelSelectionSource,
     pub provider_instance_id: ProviderInstanceId,
     pub connection: ProviderConnection,
     pub credential: ProviderCredentialChange,
@@ -392,11 +422,15 @@ pub struct UpdateProviderRequest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ProviderRequest {
+    #[serde(default)]
+    pub source: ModelSelectionSource,
     pub provider_instance_id: ProviderInstanceId,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ListFixedModelConfigsRequest {
+    #[serde(default)]
+    pub source: ModelSelectionSource,
     pub provider_instance_id: ProviderInstanceId,
     pub offset: u32,
     pub limit: u32,

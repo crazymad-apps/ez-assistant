@@ -3,7 +3,9 @@
 //! 本模块使用业务操作表达 Runtime 对存储的需求，不暴露 SQL、路径、文件 offset 或
 //! SQLite 实体。正式本地实现由 Runtime Host 装配；Runtime crate 不依赖具体数据库。
 
+mod card;
 mod child_task;
+pub use card::{MessageCardSnapshotWrite, NewMessageCard, StoredMessageCard, message_card_owner};
 mod contract;
 mod conversation;
 mod custom_agent;
@@ -86,6 +88,6 @@ pub use workspace::{
 };
 
 pub use model_management::{
-    ProviderModelCatalogReplacement, StoredModelCatalog, StoredProvider,
-    stored_model_catalog_is_valid,
+    FixedModelHistoryInvalidation, ProviderModelCatalogReplacement, StoredModelCatalog,
+    StoredProvider, stored_model_catalog_is_valid,
 };

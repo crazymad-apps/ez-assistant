@@ -71,6 +71,7 @@
   吸收仍在 recent tail 中的模型调用用量。
 - `ContextLayout::build` 只做共享结构校验和原子分块；Rolling Summary 的
   `minimum_recent_user_turns` 只在 `partition` 时参与 head/tail 边界计算。
+- 最近可靠压缩点后的有效窗口允许从 Assistant 或闭合工具交换开始，包括原生转本地后去除不透明窗口的后缀；布局复用 ProviderContext 块，不补造 User、不向前展开历史，完整工具交换校验仍先于分块。遇到后续真实 User 后继续按普通轮次保护近期尾部。
 - `ContextLayout` 不按 `TranscriptVisibility` 过滤消息；隐藏 Runtime User Message 与可见 User
   Message 使用同一 user role 和 Turn 结构进入模型上下文，产品转录过滤属于 Runtime/Host 投影职责。
 - 每条规范 `UserMessage` 都开始一个 User Turn；可见用户输入、隐藏 Runtime continuation 与内部

@@ -24,7 +24,7 @@ pub(in crate::access::enterprise::tests) async fn configuration(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
     Json(if response.is_null() {
-        json!({"state":"unavailable","center_id":CENTER_ID,"reason":"not_selected"})
+        empty_configuration()
     } else {
         response
     })
@@ -36,10 +36,11 @@ pub(in crate::access::enterprise::tests) async fn proxy(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    mock.proxy_requests
-        .lock()
-        .unwrap()
-        .push((token(&headers), body.clone()));
+    let request_number = {
+        let mut requests = mock.proxy_requests.lock().unwrap();
+        requests.push((token(&headers), body.clone()));
+        requests.len()
+    };
     let scripted = mock.proxy_script.lock().unwrap().pop_front();
     if let Some(response) = scripted {
         return response;
@@ -59,12 +60,21 @@ pub(in crate::access::enterprise::tests) async fn proxy(
             .into_response();
     }
     if body.get("messages").is_some() {
-        return format!("data: {{\"id\":\"test\",\"model\":{},\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"OK\"}},\"finish_reason\":null}}]}}\n\ndata: {{\"id\":\"test\",\"model\":{},\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n", body["model"], body["model"]).into_response();
+        return format!("data: {{\"id\":\"test-{request_number}\",\"model\":{},\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"OK\"}},\"finish_reason\":null}}]}}\n\ndata: {{\"id\":\"test-{request_number}\",\"model\":{},\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n", body["model"], body["model"]).into_response();
     }
     include_str!(
         "../../../../../../../crates/agent-openai-compatible/fixtures/responses/openai/text.sse"
     )
     .into_response()
+}
+
+const MODEL_PROVIDER: &str = "01234567-89ab-4cde-8f01-23456789abcd";
+
+fn empty_configuration() -> Value {
+    json!({
+        "center_id": CENTER_ID, "organization_id": organization_scope()["organization_id"],
+        "allow_member_selection": false, "default_model": null, "providers": [],
+    })
 }
 
 fn set_configuration(f: &Fixture, model: &str, responses: bool, window: u64) {
@@ -76,11 +86,16 @@ fn set_configuration(f: &Fixture, model: &str, responses: bool, window: u64) {
     };
     let origin = f.state.access.center().unwrap().url;
     *f.mock.model_configuration.lock().unwrap() = json!({
-        "state":"ready", "center_id": CENTER_ID,
-        "endpoint": format!("{origin}/api/llm/providers/01234567-89ab-4cde-8f01-23456789abcd/v1"),
-        "provider_type":"openai", "provider_display_name":"测试服务商", "protocol": if responses { "open_ai_responses" } else { "open_ai_chat_completions" },
-        "model_id":model, "parameters": parameters,
-        "server_history_enabled":false,"server_history_support":"unknown","server_history_binding":null,
+        "center_id": CENTER_ID, "organization_id": organization_scope()["organization_id"],
+        "allow_member_selection": false, "default_model": { "provider_instance_id": MODEL_PROVIDER, "model_id": model },
+        "providers": [{
+            "provider_instance_id": MODEL_PROVIDER,
+            "endpoint": format!("{origin}/api/llm/providers/{MODEL_PROVIDER}/v1"),
+            "provider_type":"openai", "provider_display_name":"测试服务商",
+            "protocol": if responses { "open_ai_responses" } else { "open_ai_chat_completions" },
+            "server_history_enabled":false,"server_history_support":"unknown",
+            "models": [{ "state": "ready", "model_id": model, "parameters": parameters, "server_history_binding": null }],
+        }],
     });
 }
 
@@ -97,15 +112,18 @@ async fn refresh(f: &Fixture, token: &str) -> ModelSettings {
 }
 
 async fn validate(f: &Fixture, token: &str) -> ValidateModelConnectionResult {
+    let selection = f
+        .services(token)
+        .await
+        .runtime
+        .get_model_settings()
+        .unwrap()
+        .default_model
+        .unwrap();
     let response = f
         .command(
             token,
-            RuntimeCommand::ValidateModelConnection(ValidateModelConnectionRequest {
-                selection: ModelSelection {
-                    provider_instance_id: ProviderInstanceId::new("old-local".to_owned()).unwrap(),
-                    model_id: "old-model".to_owned(),
-                },
-            }),
+            RuntimeCommand::ValidateModelConnection(ValidateModelConnectionRequest { selection }),
         )
         .await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -188,14 +206,15 @@ async fn managed_models_switch_protocol_and_refresh_without_resending_rejected_c
         runtime
             .get_model_settings()
             .unwrap()
-            .default_model
-            .is_none()
+            .management
+            .unwrap()
+            .unavailable_reason
+            .is_some()
     );
     assert_eq!(f.mock.proxy_requests.lock().unwrap().len(), 4);
 
     f.mock.model_unavailable.store(false, Ordering::SeqCst);
-    *f.mock.model_configuration.lock().unwrap() =
-        json!({"state":"unavailable","center_id":CENTER_ID,"reason":"not_selected"});
+    *f.mock.model_configuration.lock().unwrap() = empty_configuration();
     assert!(refresh(&f, &alice).await.default_model.is_none());
     f.stop().await;
 }
@@ -255,7 +274,9 @@ async fn old_key_rejection_does_not_log_out_new_login_and_current_key_rejection_
         runtime
             .validate_model_connection(ValidateModelConnectionRequest {
                 selection: ModelSelection {
-                    provider_instance_id: ProviderInstanceId::new("managed".to_owned()).unwrap(),
+                    source: assistant_protocol::ModelSelectionSource::Organization,
+                    provider_instance_id: ProviderInstanceId::new(MODEL_PROVIDER.to_owned())
+                        .unwrap(),
                     model_id: "model-a".to_owned(),
                 },
             })
@@ -277,7 +298,9 @@ async fn old_key_rejection_does_not_log_out_new_login_and_current_key_rejection_
             &latest,
             RuntimeCommand::ValidateModelConnection(ValidateModelConnectionRequest {
                 selection: ModelSelection {
-                    provider_instance_id: ProviderInstanceId::new("managed".to_owned()).unwrap(),
+                    source: assistant_protocol::ModelSelectionSource::Organization,
+                    provider_instance_id: ProviderInstanceId::new(MODEL_PROVIDER.to_owned())
+                        .unwrap(),
                     model_id: "model-a".to_owned(),
                 },
             }),
@@ -429,11 +452,11 @@ async fn managed_history_recovers_stream_break_expired_id_and_temporary_503_over
     set_configuration(&f, "gpt-test", true, 128_000);
     {
         let mut config = f.mock.model_configuration.lock().unwrap();
-        config["parameters"]["tool_calls"] = json!("supported");
-        config["parameters"]["tool_choice"] = json!({"auto":"supported","none":"supported","required":"supported","named":"supported"});
-        config["server_history_enabled"] = json!(true);
-        config["server_history_support"] = json!("supported");
-        config["server_history_binding"] = json!("a".repeat(64));
+        config["providers"][0]["models"][0]["parameters"]["tool_calls"] = json!("supported");
+        config["providers"][0]["models"][0]["parameters"]["tool_choice"] = json!({"auto":"supported","none":"supported","required":"supported","named":"supported"});
+        config["providers"][0]["server_history_enabled"] = json!(true);
+        config["providers"][0]["server_history_support"] = json!("supported");
+        config["providers"][0]["models"][0]["server_history_binding"] = json!("a".repeat(64));
     }
     let alice = f.login("alice").await;
     refresh(&f, &alice).await;
@@ -568,11 +591,13 @@ async fn sub2api_default_capabilities_execute_through_enterprise_factory() {
     set_configuration(&f, "gemini-4-argon-high", true, 272000);
     {
         let mut configuration = f.mock.model_configuration.lock().unwrap();
-        configuration["provider_type"] = json!("sub2api");
-        configuration["parameters"]["max_output_tokens"] = json!({"state":"unknown"});
-        configuration["parameters"]["streaming"] = json!("unknown");
-        configuration["parameters"]["image_input"] = json!("unsupported");
-        configuration["parameters"]["reasoning_efforts"] = json!({});
+        configuration["providers"][0]["provider_type"] = json!("sub2api");
+        configuration["providers"][0]["models"][0]["parameters"]["max_output_tokens"] =
+            json!({"state":"unknown"});
+        configuration["providers"][0]["models"][0]["parameters"]["streaming"] = json!("unknown");
+        configuration["providers"][0]["models"][0]["parameters"]["image_input"] =
+            json!("unsupported");
+        configuration["providers"][0]["models"][0]["parameters"]["reasoning_efforts"] = json!({});
     }
     let alice = f.login("alice").await;
     let settings = refresh(&f, &alice).await;
@@ -598,4 +623,390 @@ async fn sub2api_default_capabilities_execute_through_enterprise_factory() {
         assert!(!requests[0].1["tools"].as_array().unwrap().is_empty());
     }
     f.stop().await;
+}
+
+#[tokio::test]
+async fn managed_request_retry_and_exhaustion_are_independent_of_center_verification_failure() {
+    for exhausted in [false, true] {
+        let mut f = Fixture::with_domains(true, None).await;
+        // 仅本用例新建的隔离用户配置：缩短退避，仍走正式重试与持久终态路径。
+        std::fs::write(f.home.path().join(format!("users/{CENTER_ID}_1/config.toml")),
+            "schema_version=1\n[runtime.model_retry]\nretry_on=['unavailable']\ndelays_ms=[1,1]\nmax_retry_after_ms=10\n").unwrap();
+        set_configuration(&f, "request-recovery", true, 8192);
+        let alice = f.login("alice").await;
+        refresh(&f, &alice).await;
+        let services = f.services(&alice).await;
+        let runtime = &services.runtime;
+        let session = runtime
+            .create_session(CreateSessionRequest::default())
+            .await
+            .unwrap()
+            .session
+            .session_id;
+        runtime
+            .rename_session(RenameSessionRequest {
+                session_id: session.clone(),
+                title: "request recovery".into(),
+            })
+            .await
+            .unwrap();
+        let held = Arc::new(Held::default());
+        *f.mock.proxy_hold.lock().unwrap() = Some(held.clone());
+        *f.mock.proxy_control.lock().unwrap() = Some((503, "llm_proxy_unavailable".into()));
+        let run = submit_recovery_test(runtime, &session).await;
+        tokio::time::timeout(Duration::from_secs(5), held.started.notified())
+            .await
+            .unwrap();
+        f.mock.unavailable.store(true, Ordering::SeqCst);
+        assert_eq!(f.session(&alice).await.status(), StatusCode::OK);
+        if exhausted {
+            for _ in 0..2 {
+                f.mock.proxy_script.lock().unwrap().push_back(
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        [("x-ez-center-control", "1")],
+                        Json(json!({"error":{"code":"llm_proxy_unavailable"}})),
+                    )
+                        .into_response(),
+                );
+            }
+        }
+        held.release.notify_one();
+        let terminal = recovery_terminal(runtime, &session, &run).await;
+        assert_eq!(
+            terminal.status,
+            if exhausted {
+                RunStatus::Failed
+            } else {
+                RunStatus::Completed
+            }
+        );
+        assert_eq!(
+            f.mock.proxy_requests.lock().unwrap().len(),
+            if exhausted { 3 } else { 2 }
+        );
+        assert_eq!(runtime.lifecycle().unwrap(), RuntimeLifecycle::Running);
+        let view = runtime
+            .get_session_view(GetSessionViewRequest {
+                session_id: session,
+            })
+            .await
+            .unwrap();
+        assert!(view.snapshot.value.active_run.is_none());
+        if exhausted {
+            assert_eq!(
+                terminal.error.unwrap().code,
+                RuntimeErrorCode::ModelExecutionFailed
+            );
+        }
+        f.mock.unavailable.store(false, Ordering::SeqCst);
+        assert_eq!(f.ready(&alice).await.status(), StatusCode::NO_CONTENT);
+        assert!(Arc::ptr_eq(&services, &f.services(&alice).await));
+        f.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn stalled_and_broken_model_streams_emit_retries_while_center_checks_fail() {
+    for stalled in [true, false] {
+        let mut f = Fixture::with_domains(true, None).await;
+        // 新建隔离夹具缩短空闲期限；重试仍使用正式 HTTP Transport 和 Runtime observer。
+        std::fs::write(f.home.path().join(format!("users/{CENTER_ID}_1/config.toml")),
+            "schema_version=1\n[runtime.model_transport]\nconnect_timeout_ms=50\nrequest_timeout_ms=200\n[runtime.model_retry]\nretry_on=['connection','timeout']\ndelays_ms=[10,10]\nmax_retry_after_ms=10\n").unwrap();
+        set_configuration(&f, "stream-retry", true, 8192);
+        let alice = f.login("alice").await;
+        refresh(&f, &alice).await;
+        let services = f.services(&alice).await;
+        let runtime = &services.runtime;
+        let session = runtime
+            .create_session(CreateSessionRequest::default())
+            .await
+            .unwrap()
+            .session
+            .session_id;
+        runtime
+            .rename_session(RenameSessionRequest {
+                session_id: session.clone(),
+                title: "stream failure".into(),
+            })
+            .await
+            .unwrap();
+        for _ in 0..3 {
+            let stream = async_stream::stream! {
+                yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b": connected\n\n"));
+                if stalled { std::future::pending::<()>().await; }
+                else { tokio::time::sleep(Duration::from_millis(50)).await; }
+                yield Err(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "test stream reset"));
+            };
+            f.mock.proxy_script.lock().unwrap().push_back(
+                Response::builder()
+                    .header("content-type", "text/event-stream")
+                    .body(axum::body::Body::from_stream(stream))
+                    .unwrap(),
+            );
+        }
+        let mut events = runtime.subscribe_event_envelopes();
+        f.mock.unavailable.store(true, Ordering::SeqCst);
+        assert_eq!(f.session(&alice).await.status(), StatusCode::OK);
+        let run = submit_recovery_test(runtime, &session).await;
+        let (retries, failure) = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut retries = Vec::new();
+            loop {
+                match events.recv().await.unwrap().event {
+                    RuntimeEvent::ModelRetryScheduled {
+                        run_id,
+                        next_attempt,
+                        ..
+                    } if run_id == run => retries.push(next_attempt),
+                    RuntimeEvent::RunFinished {
+                        run_id,
+                        status,
+                        error,
+                        ..
+                    } if run_id == run => {
+                        assert_eq!(status, RunStatus::Failed);
+                        break (retries, error.unwrap());
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(retries, vec![2, 3], "stalled={stalled}, {failure:?}");
+        assert_eq!(f.mock.proxy_requests.lock().unwrap().len(), 3);
+        assert!(
+            failure.message.contains("attempts=3, retries=2"),
+            "{failure:?}"
+        );
+        f.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn organization_and_personal_session_selection_route_and_survive_domain_restart() {
+    use assistant_protocol::{
+        CreateProviderRequest, ModelSelectionSource, ProviderConnection, ProviderCredentialChange,
+        ProviderProtocolPreference, ProviderType, SaveModelFixedConfigRequest, SecretValue,
+        SetSessionModelRequest,
+    };
+
+    let mut f = Fixture::with_domains(true, None).await;
+    set_configuration(&f, "org-default", false, 8192);
+    {
+        let mut configuration = f.mock.model_configuration.lock().unwrap();
+        configuration["allow_member_selection"] = json!(true);
+        let mut second = configuration["providers"][0]["models"][0].clone();
+        second["model_id"] = json!("shared-model");
+        configuration["providers"][0]["models"]
+            .as_array_mut()
+            .unwrap()
+            .push(second);
+        let models = configuration["providers"][0]["models"]
+            .as_array_mut()
+            .unwrap();
+        let prototype = models[0].clone();
+        for index in 0..110 {
+            let mut model = prototype.clone();
+            model["model_id"] = json!(format!("fixture-model-{index}"));
+            models.push(model);
+        }
+        assert!(configuration.to_string().len() > 65_536);
+    }
+    let personal = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/v1", personal.local_addr().unwrap());
+    let router = Router::new()
+        .route("/v1/chat/completions", post(proxy))
+        .with_state(f.mock.clone());
+    let upstream = tokio::spawn(async move { axum::serve(personal, router).await.unwrap() });
+    let alice = f.login("alice").await;
+    let settings = refresh(&f, &alice).await;
+    let default = settings.default_model.unwrap();
+    let organization = ModelSelection {
+        model_id: "shared-model".to_owned(),
+        ..default.clone()
+    };
+    let services = f.services(&alice).await;
+    let response = f
+        .command(
+            &alice,
+            RuntimeCommand::CreateProvider(CreateProviderRequest {
+                connection: ProviderConnection {
+                    display_name: "个人隔离测试".to_owned(),
+                    provider_type: ProviderType::Openai,
+                    endpoint,
+                    protocol_preference: ProviderProtocolPreference::ChatCompletions,
+                    models_path: String::new(),
+                    discovery_format: ProviderType::Openai.discovery_format(),
+                    server_history_enabled: false,
+                    server_history_support_override: None,
+                },
+                credential: ProviderCredentialChange::Replace(SecretValue::new(
+                    "fixture-personal-key".to_owned(),
+                )),
+            }),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let personal = ModelSelection {
+        source: ModelSelectionSource::Local,
+        provider_instance_id: services
+            .runtime
+            .list_providers()
+            .unwrap()
+            .into_iter()
+            .find(|provider| provider.source == ModelSelectionSource::Local)
+            .unwrap()
+            .provider_instance_id,
+        model_id: organization.model_id.clone(),
+    };
+    let params: ModelParameters = serde_json::from_value(
+        f.mock.model_configuration.lock().unwrap()["providers"][0]["models"][0]["parameters"]
+            .clone(),
+    )
+    .unwrap();
+    let result = f
+        .command(
+            &alice,
+            RuntimeCommand::SaveModelFixedConfig(SaveModelFixedConfigRequest {
+                origin: ModelConfigOrigin::Manual,
+                selection: personal.clone(),
+                parameters: params,
+            }),
+        )
+        .await;
+    assert_eq!(result.status(), StatusCode::OK);
+    let denied = f
+        .command(
+            &alice,
+            RuntimeCommand::DeleteProvider(assistant_protocol::ProviderRequest {
+                source: ModelSelectionSource::Organization,
+                provider_instance_id: organization.provider_instance_id.clone(),
+            }),
+        )
+        .await;
+    assert!(!denied.status().is_success());
+    let session = services
+        .runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    services
+        .runtime
+        .rename_session(RenameSessionRequest {
+            session_id: session.clone(),
+            title: "双来源".to_owned(),
+        })
+        .await
+        .unwrap();
+    let run = submit_recovery_test(&services.runtime, &session).await;
+    let terminal = recovery_terminal(&services.runtime, &session, &run).await;
+    assert_eq!(
+        terminal.status,
+        RunStatus::Completed,
+        "{:?}",
+        terminal.error
+    );
+    for selection in [organization.clone(), personal.clone()] {
+        let result = f
+            .command(
+                &alice,
+                RuntimeCommand::SetSessionModel(SetSessionModelRequest {
+                    session_id: session.clone(),
+                    model_selection: Some(selection),
+                }),
+            )
+            .await;
+        assert_eq!(
+            result.status(),
+            StatusCode::OK,
+            "{}",
+            result.text().await.unwrap()
+        );
+        let run = submit_recovery_test(&services.runtime, &session).await;
+        let terminal = recovery_terminal(&services.runtime, &session, &run).await;
+        assert_eq!(
+            terminal.status,
+            RunStatus::Completed,
+            "{:?}",
+            terminal.error
+        );
+    }
+    {
+        let requests = f.mock.proxy_requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].1["model"], "org-default");
+        assert_eq!(requests[1].1["model"], "shared-model");
+        assert_eq!(requests[0].0, requests[1].0);
+        assert!(requests[0].0.starts_with("cl_"));
+        assert_eq!(requests[2].1["model"], "shared-model");
+        assert_eq!(requests[2].0, "fixture-personal-key");
+    }
+    *f.mock.model_configuration.lock().unwrap() = empty_configuration();
+    assert!(refresh(&f, &alice).await.default_model.is_none());
+    let withdrawn = f
+        .command(
+            &alice,
+            RuntimeCommand::SetSessionModel(SetSessionModelRequest {
+                session_id: session.clone(),
+                model_selection: Some(organization),
+            }),
+        )
+        .await;
+    assert!(!withdrawn.status().is_success());
+    assert!(
+        f.request(reqwest::Method::POST, "/auth/logout", Some(&alice))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    stopped(&services.runtime).await;
+    let logged_in = f.login("alice").await;
+    let restored = f.services(&logged_in).await;
+    let summaries = restored
+        .runtime
+        .get_application_snapshot(Default::default())
+        .await
+        .unwrap()
+        .snapshot
+        .value;
+    assert_eq!(
+        summaries
+            .active_sessions
+            .iter()
+            .find(|item| item.session_id == session)
+            .unwrap()
+            .model_selection
+            .as_ref(),
+        Some(&personal)
+    );
+    let run = submit_recovery_test(&restored.runtime, &session).await;
+    assert_eq!(
+        recovery_terminal(&restored.runtime, &session, &run)
+            .await
+            .status,
+        RunStatus::Completed
+    );
+    assert_eq!(
+        f.mock.proxy_requests.lock().unwrap().last().unwrap().0,
+        "fixture-personal-key"
+    );
+    // 已发往个人上游的请求数是撤权前后唯一的副作用证据。
+    let before_revoke = f.mock.proxy_requests.lock().unwrap().len();
+    f.mock.tokens.lock().unwrap().clear();
+    let _ = restored
+        .runtime
+        .validate_model_connection(ValidateModelConnectionRequest {
+            selection: personal,
+        })
+        .await;
+    assert_eq!(f.mock.proxy_requests.lock().unwrap().len(), before_revoke);
+    assert_eq!(f.ready(&logged_in).await.status(), StatusCode::UNAUTHORIZED);
+    f.stop().await;
+    upstream.abort();
+    let _ = upstream.await;
 }

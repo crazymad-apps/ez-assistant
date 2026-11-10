@@ -11,6 +11,24 @@ use super::{
 };
 
 impl StorageEngine {
+    pub(super) fn queued_input_ids(&self) -> StorageResult<Vec<assistant_protocol::InputId>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT input_id FROM inputs WHERE state = 'queued'")
+            .map_err(|source| internal_error("queued inputs could not be queried", source))?;
+        statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|source| internal_error("queued inputs could not be read", source))?
+            .map(|row| {
+                let id = row.map_err(|source| {
+                    internal_error("queued input id could not be read", source)
+                })?;
+                assistant_protocol::InputId::new(id)
+                    .map_err(|_| invalid_data("queued input id is invalid"))
+            })
+            .collect()
+    }
+
     /// 当前 owner 无待提交尾帧，SQL 已只装配真实队列和控制；将可靠文件事实加入只读恢复投影。
     /// 历史选择补齐已消费 Input 的内存值，不回写 SQL、不注册历史 Run／child，也不发布事件。
     /// 调用者持有 Store worker，失败由所属会话读取报告，不把不完整文件降为缺省值。
@@ -75,6 +93,17 @@ impl StorageEngine {
         &mut self,
         id: &SessionId,
     ) -> StorageResult<LoadedSession> {
+        let exists: bool = self
+            .connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE session_id = ?1)",
+                [id.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(|error| internal_error("session existence could not be checked", error))?;
+        if !exists {
+            return Ok(LoadedSession::default());
+        }
         self.repair_session_resources_scoped(Some(id))?;
         self.recover_attachments_scoped(Some(id))?;
         self.recover_session_history_operations_scoped(Some(id))?;
@@ -213,7 +242,7 @@ impl StorageEngine {
             assistant_protocol::SessionRoleSnapshot::Controller => "controller",
         });
         let mut statement = self.connection.prepare(
-            "SELECT s.session_id, s.title, json_array(s.model_provider_instance_id, s.model_id), s.reasoning_effort,
+            "SELECT s.session_id, s.title, json_array(s.model_provider_instance_id, s.model_id, s.model_source), s.reasoning_effort,
                     s.lifecycle, s.role, s.proxy_controller_session_id, s.proxy_changed_at_ms,
                     s.pc_output_device_id, d.display_name, s.current_variant, s.approval_mode,
                     r.workspace_id, s.message_count, s.created_at_ms, s.updated_at_ms,

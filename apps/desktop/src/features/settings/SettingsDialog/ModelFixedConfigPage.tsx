@@ -41,7 +41,7 @@ export const ModelFixedConfigPage = observer(function ModelFixedConfigPage(
   }>,
 ) {
   const settings = useRootStore().settings;
-  const read_only = settings.model_settings.management?.read_only ?? false;
+  const read_only = props.selection.source === 'organization';
   const [detail, setDetail] = useState<ModelConfigurationDetail | null>(null);
   const [parameters, setParameters] = useState<ModelParameters | null>(null);
   const [tokens, setTokens] = useState<TokenDraft | null>(null);

@@ -286,7 +286,7 @@ async fn controller_speak_automatically_splits_long_text_without_repeating_it() 
         .await
         .expect("paired device");
     let accepted = runtime
-        .submit_session_input(device_session_input(
+        .submit_started_session_input(device_session_input(
             controller.session.session_id.clone(),
             DeviceInputSource {
                 device_id: device.device_id.clone(),
@@ -430,7 +430,7 @@ async fn automatic_speak_stops_remaining_segments_when_user_takes_over() {
         .await
         .expect("paired device");
     let accepted = runtime
-        .submit_session_input(device_session_input(
+        .submit_started_session_input(device_session_input(
             controller.session.session_id.clone(),
             DeviceInputSource {
                 device_id: device.device_id,

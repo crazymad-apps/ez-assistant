@@ -674,6 +674,7 @@ mod tests {
             input_schema,
             output_schema: None,
             annotations: None,
+            meta: None,
         }
     }
 

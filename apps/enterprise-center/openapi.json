@@ -71,7 +71,7 @@
           }
         },
         "security": [],
-        "summary": "统一登录，返回内存 Token 和关联 LLM key；无 Cookie 操作",
+        "summary": "认证账号并签发未选择范围的 JWT；无 Cookie 操作",
         "tags": [
           "identity"
         ]
@@ -104,6 +104,96 @@
           }
         },
         "summary": "查询本人和中心身份，不重复返回凭据",
+        "tags": [
+          "identity"
+        ]
+      }
+    },
+    "/api/auth/scopes": {
+      "get": {
+        "operationId": "listAccessScopes",
+        "parameters": [
+          {
+            "name": "entry",
+            "required": true,
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "admin",
+                "client"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ScopeView"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "400 输入无效；401 身份失败；403 权限拒绝；409 状态变化；429 限流；503 服务不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "按后台或客户端入口列出当前账号可选范围",
+        "tags": [
+          "identity"
+        ]
+      }
+    },
+    "/api/auth/scope": {
+      "post": {
+        "operationId": "exchangeAccessScope",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScopeSelection"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "400 输入无效；401 身份失败；403 权限拒绝；409 状态变化；429 限流；503 服务不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "显式选择范围，提交后撤销原 JWT；同范围不续期",
         "tags": [
           "identity"
         ]
@@ -213,6 +303,15 @@
             }
           },
           {
+            "name": "organization_id",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
             "name": "search",
             "required": false,
             "in": "query",
@@ -230,7 +329,7 @@
               "type": "string",
               "enum": [
                 "user",
-                "admin"
+                "system_admin"
               ]
             }
           },
@@ -445,6 +544,499 @@
         "summary": "管理员为任意用户重置密码（包括自己和超级管理员），不校验原密码；保留目标已有 Token/key",
         "tags": [
           "users"
+        ]
+      }
+    },
+    "/api/organizations": {
+      "get": {
+        "operationId": "listOrganizations",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Organization"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "400 请求无效；401 登录失效；403 范围拒绝；409 状态冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "organizations"
+        ]
+      },
+      "post": {
+        "operationId": "createOrganization",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateOrganization"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Organization"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "400 请求无效；401 登录失效；403 范围拒绝；409 状态冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "organizations"
+        ]
+      }
+    },
+    "/api/organizations/{id}": {
+      "patch": {
+        "operationId": "updateOrganization",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateOrganization"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Organization"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "400 请求无效；401 登录失效；403 范围拒绝；409 状态冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "organizations"
+        ]
+      }
+    },
+    "/api/organizations/{id}/members/{userId}": {
+      "patch": {
+        "operationId": "updateSystemOrganizationMember",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "userId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateMember"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SaveMember"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "400 请求无效；401 登录失效；403 范围拒绝；409 状态冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "organizations"
+        ]
+      },
+      "post": {
+        "operationId": "addSystemOrganizationMember",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "userId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveMember"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SaveMember"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "400 请求无效；401 登录失效；403 范围拒绝；409 状态冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "organizations"
+        ]
+      },
+      "delete": {
+        "operationId": "removeSystemOrganizationMember",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "userId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "default": {
+            "description": "400 请求无效；401 登录失效；403 范围拒绝；409 状态冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "organizations"
+        ]
+      }
+    },
+    "/api/organization-members": {
+      "get": {
+        "operationId": "listOrganizationMembers",
+        "parameters": [
+          {
+            "name": "limit",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20,
+              "type": "number"
+            }
+          },
+          {
+            "name": "offset",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "minimum": 0,
+              "maximum": 1000000,
+              "default": 0,
+              "type": "number"
+            }
+          },
+          {
+            "name": "active_only",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "search",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "maxLength": 64,
+              "type": "string"
+            }
+          },
+          {
+            "name": "role",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "member",
+                "admin"
+              ]
+            }
+          },
+          {
+            "name": "enabled",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemberPage"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "400 请求无效；401 登录失效；403 范围拒绝；409 状态冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "organizations"
+        ]
+      }
+    },
+    "/api/organization-members/candidate": {
+      "get": {
+        "operationId": "findOrganizationMemberCandidate",
+        "parameters": [
+          {
+            "name": "username",
+            "required": true,
+            "in": "query",
+            "schema": {
+              "minLength": 3,
+              "maxLength": 64,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemberCandidate"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "400 请求无效；401 登录失效；403 范围拒绝；409 状态冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "organizations"
+        ]
+      }
+    },
+    "/api/organization-members/{id}": {
+      "put": {
+        "operationId": "saveOrganizationMember",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveMember"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "default": {
+            "description": "400 请求无效；401 登录失效；403 范围拒绝；409 状态冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "organizations"
+        ]
+      },
+      "delete": {
+        "operationId": "removeOrganizationMember",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "default": {
+            "description": "400 请求无效；401 登录失效；403 范围拒绝；409 状态冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CenterErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "summary": "",
+        "tags": [
+          "organizations"
         ]
       }
     },
@@ -3854,7 +4446,7 @@
   },
   "info": {
     "title": "Enterprise Center API",
-    "description": "企业中心已实现的 HTTP 接口；软件版本不代表 Runtime 版本。",
+    "description": "企业中心 HTTP 接口。F01 M0 仅开放身份、组织与系统管理入口，尚未组织化的业务暂不可用。",
     "version": "0.1.0",
     "contact": {}
   },
@@ -3866,7 +4458,7 @@
         "scheme": "bearer",
         "bearerFormat": "JWT",
         "type": "http",
-        "description": "ct_ 内存 Token；不接受 cl_ LLM key 或 Cookie；中心重启需重新登录"
+        "description": "有效期 7 天；中心重启需重新登录。凭据仅从 Bearer 请求头读取。"
       }
     },
     "schemas": {
@@ -3986,7 +4578,7 @@
             "type": "string",
             "enum": [
               "user",
-              "admin"
+              "system_admin"
             ]
           },
           "is_super_admin": {
@@ -4005,6 +4597,47 @@
           "enabled"
         ]
       },
+      "ScopeView": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "unselected",
+              "system",
+              "organization"
+            ]
+          },
+          "organization_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "仅 organization 范围携带"
+          },
+          "name": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "member_role": {
+            "type": "string",
+            "enum": [
+              "member",
+              "admin"
+            ]
+          },
+          "can_manage": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "kind",
+          "can_manage"
+        ]
+      },
       "LoginResponse": {
         "type": "object",
         "properties": {
@@ -4012,25 +4645,37 @@
             "type": "string",
             "format": "uuid"
           },
+          "legacy_organization_id": {
+            "type": "string",
+            "format": "uuid"
+          },
           "user": {
             "$ref": "#/components/schemas/IdentityUser"
           },
+          "scope": {
+            "$ref": "#/components/schemas/ScopeView"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
           "token": {
             "type": "string",
-            "pattern": "^ct_[a-f0-9]{64}$",
-            "description": "用于 Bearer 身份认证；仅内存保存，退出、撤销或中心重启后失效"
+            "description": "有效期固定 7 天的 JWT。撤销或中心重启后立即失效。"
           },
           "llm_key": {
             "type": "string",
             "pattern": "^cl_[a-f0-9]{64}$",
-            "description": "仅供后续 LLM 代理使用，随本次 token 一起撤销；不用于身份 API"
+            "description": "仅有效组织成员的客户端范围签发，随 JWT 撤销"
           }
         },
         "required": [
           "center_id",
+          "legacy_organization_id",
           "user",
-          "token",
-          "llm_key"
+          "scope",
+          "expires_at",
+          "token"
         ]
       },
       "IdentityResponse": {
@@ -4040,13 +4685,56 @@
             "type": "string",
             "format": "uuid"
           },
+          "legacy_organization_id": {
+            "type": "string",
+            "format": "uuid"
+          },
           "user": {
             "$ref": "#/components/schemas/IdentityUser"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ScopeView"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
           }
         },
         "required": [
           "center_id",
-          "user"
+          "legacy_organization_id",
+          "user",
+          "scope",
+          "expires_at"
+        ]
+      },
+      "ScopeSelection": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "unselected",
+              "system",
+              "organization"
+            ]
+          },
+          "organization_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "仅 organization 范围携带"
+          },
+          "entry": {
+            "type": "string",
+            "enum": [
+              "admin",
+              "client"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "entry"
         ]
       },
       "PasswordRequest": {
@@ -4074,6 +4762,38 @@
           "new_password"
         ]
       },
+      "UserOrganization": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "admin",
+              "member"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "code",
+          "role",
+          "enabled"
+        ]
+      },
       "UserRecord": {
         "type": "object",
         "properties": {
@@ -4093,7 +4813,7 @@
             "type": "string",
             "enum": [
               "user",
-              "admin"
+              "system_admin"
             ]
           },
           "is_super_admin": {
@@ -4101,6 +4821,13 @@
           },
           "enabled": {
             "type": "boolean"
+          },
+          "organizations": {
+            "description": "全局账号列表携带组织关系",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UserOrganization"
+            }
           },
           "created_at": {
             "type": "string",
@@ -4166,7 +4893,7 @@
             "type": "string",
             "enum": [
               "user",
-              "admin"
+              "system_admin"
             ]
           },
           "enabled": {
@@ -4202,7 +4929,7 @@
             "type": "string",
             "enum": [
               "user",
-              "admin"
+              "system_admin"
             ]
           },
           "enabled": {
@@ -4225,6 +4952,192 @@
         },
         "required": [
           "new_password"
+        ]
+      },
+      "Organization": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "code": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "code",
+          "name",
+          "enabled"
+        ]
+      },
+      "CreateOrganization": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "administrator_user_id": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "code",
+          "name",
+          "administrator_user_id"
+        ]
+      },
+      "UpdateOrganization": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "code",
+          "name",
+          "enabled"
+        ]
+      },
+      "UpdateMember": {
+        "type": "object",
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": [
+              "member",
+              "admin"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        }
+      },
+      "SaveMember": {
+        "type": "object",
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": [
+              "member",
+              "admin"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "role",
+          "enabled"
+        ]
+      },
+      "OrganizationMember": {
+        "type": "object",
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": [
+              "member",
+              "admin"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "user_id": {
+            "type": "number"
+          },
+          "username": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "account_enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "role",
+          "enabled",
+          "user_id",
+          "username",
+          "display_name",
+          "account_enabled"
+        ]
+      },
+      "MemberPage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OrganizationMember"
+            }
+          },
+          "total": {
+            "type": "number"
+          },
+          "limit": {
+            "type": "number"
+          },
+          "offset": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ]
+      },
+      "MemberCandidate": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "number"
+          },
+          "username": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "username",
+          "display_name",
+          "enabled"
         ]
       },
       "PluginPlatform": {
@@ -4277,7 +5190,8 @@
             "type": "string",
             "enum": [
               "user",
-              "admin"
+              "admin",
+              "system_admin"
             ]
           },
           "enabled": {
@@ -4366,6 +5280,10 @@
             "minimum": 0,
             "maximum": 256
           },
+          "device_id": {
+            "type": "string",
+            "format": "uuid"
+          },
           "call_id": {
             "type": "string",
             "format": "uuid"
@@ -4405,6 +5323,9 @@
           "model_count": {
             "type": "number",
             "minimum": 0
+          },
+          "allow_member_selection": {
+            "type": "boolean"
           },
           "count": {
             "type": "number",
@@ -4668,11 +5589,18 @@
           },
           "default_model": {
             "type": "boolean"
+          },
+          "allowed_model_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         },
         "required": [
           "fixed_config_count",
-          "default_model"
+          "default_model",
+          "allowed_model_ids"
         ]
       },
       "ModelConfigurationSummary": {
@@ -5087,7 +6015,7 @@
           "parameters"
         ]
       },
-      "ModelSettings": {
+      "ModelPolicy": {
         "type": "object",
         "properties": {
           "default_model": {
@@ -5099,9 +6027,37 @@
               }
             ]
           },
-          "public_origin": {
+          "allowed_models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelSelection"
+            }
+          },
+          "allow_member_selection": {
+            "type": "boolean"
+          },
+          "revision": {
             "type": "string",
+            "format": "uuid",
             "nullable": true
+          }
+        },
+        "required": [
+          "default_model",
+          "allowed_models",
+          "allow_member_selection",
+          "revision"
+        ]
+      },
+      "ModelAvailability": {
+        "type": "object",
+        "properties": {
+          "provider_instance_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "model_id": {
+            "type": "string"
           },
           "state": {
             "type": "string",
@@ -5114,40 +6070,67 @@
             "type": "string",
             "nullable": true
           },
-          "configuration": {
-            "nullable": true,
-            "type": "object",
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/ModelConfiguration"
-              }
-            ]
+          "display_name": {
+            "type": "string",
+            "nullable": true
+          },
+          "origin": {
+            "type": "string",
+            "enum": [
+              "online",
+              "manual"
+            ],
+            "nullable": true
           }
         },
         "required": [
-          "default_model",
-          "public_origin",
+          "provider_instance_id",
+          "model_id",
           "state",
           "reason",
-          "configuration"
+          "display_name",
+          "origin"
         ]
       },
-      "SaveModelSettings": {
+      "ModelSettings": {
         "type": "object",
         "properties": {
-          "default_model": {
+          "policy": {
             "nullable": true,
             "type": "object",
             "allOf": [
               {
-                "$ref": "#/components/schemas/ModelSelection"
+                "$ref": "#/components/schemas/ModelPolicy"
               }
             ]
           },
           "public_origin": {
             "type": "string",
+            "nullable": true
+          },
+          "availability": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelAvailability"
+            }
+          }
+        },
+        "required": [
+          "policy",
+          "public_origin",
+          "availability"
+        ]
+      },
+      "SaveModelSettings": {
+        "type": "object",
+        "properties": {
+          "policy": {
+            "$ref": "#/components/schemas/ModelPolicy"
+          },
+          "public_origin": {
+            "type": "string",
             "nullable": true,
-            "description": "客户端模型访问地址；null 恢复部署地址。与 default_model 分别提交。"
+            "description": "客户端模型访问地址；null 恢复部署地址。与组织策略分别提交。"
           }
         }
       },
@@ -5176,9 +6159,12 @@
           "error"
         ]
       },
-      "RuntimeModelConfiguration": {
+      "RuntimeModelItem": {
         "type": "object",
         "properties": {
+          "model_id": {
+            "type": "string"
+          },
           "state": {
             "type": "string",
             "enum": [
@@ -5186,15 +6172,38 @@
               "unavailable"
             ]
           },
-          "center_id": {
+          "reason": {
+            "type": "string",
+            "nullable": true
+          },
+          "parameters": {
+            "nullable": true,
+            "type": "object",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ModelParameters"
+              }
+            ]
+          },
+          "server_history_binding": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "model_id",
+          "state",
+          "reason",
+          "parameters",
+          "server_history_binding"
+        ]
+      },
+      "RuntimeModelProvider": {
+        "type": "object",
+        "properties": {
+          "provider_instance_id": {
             "type": "string",
             "format": "uuid"
-          },
-          "reason": {
-            "type": "string"
-          },
-          "endpoint": {
-            "type": "string"
           },
           "provider_type": {
             "type": "string",
@@ -5209,9 +6218,14 @@
               "zhipu",
               "vllm",
               "local"
-            ]
+            ],
+            "nullable": true
           },
           "provider_display_name": {
+            "type": "string",
+            "nullable": true
+          },
+          "endpoint": {
             "type": "string"
           },
           "protocol": {
@@ -5219,13 +6233,8 @@
             "enum": [
               "open_ai_responses",
               "open_ai_chat_completions"
-            ]
-          },
-          "model_id": {
-            "type": "string"
-          },
-          "parameters": {
-            "$ref": "#/components/schemas/ModelParameters"
+            ],
+            "nullable": true
           },
           "server_history_enabled": {
             "type": "boolean"
@@ -5238,14 +6247,60 @@
               "unsupported"
             ]
           },
-          "server_history_binding": {
-            "type": "string",
-            "nullable": true
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RuntimeModelItem"
+            }
           }
         },
         "required": [
-          "state",
-          "center_id"
+          "provider_instance_id",
+          "provider_type",
+          "provider_display_name",
+          "endpoint",
+          "protocol",
+          "server_history_enabled",
+          "server_history_support",
+          "models"
+        ]
+      },
+      "RuntimeModelConfiguration": {
+        "type": "object",
+        "properties": {
+          "center_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "organization_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "allow_member_selection": {
+            "type": "boolean"
+          },
+          "default_model": {
+            "nullable": true,
+            "type": "object",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ModelSelection"
+              }
+            ]
+          },
+          "providers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RuntimeModelProvider"
+            }
+          }
+        },
+        "required": [
+          "center_id",
+          "organization_id",
+          "allow_member_selection",
+          "default_model",
+          "providers"
         ]
       },
       "UsageTotals": {
@@ -7116,6 +8171,10 @@
       "HostDeviceSummary": {
         "type": "object",
         "properties": {
+          "organization_id": {
+            "type": "string",
+            "format": "uuid"
+          },
           "user_count": {
             "type": "number",
             "description": "管理员列表中的当前授权人数"
@@ -7167,6 +8226,7 @@
           }
         },
         "required": [
+          "organization_id",
           "id",
           "installation_id",
           "name",
@@ -7266,6 +8326,10 @@
       "HostDeviceDetail": {
         "type": "object",
         "properties": {
+          "organization_id": {
+            "type": "string",
+            "format": "uuid"
+          },
           "user_count": {
             "type": "number",
             "description": "管理员列表中的当前授权人数"
@@ -7329,6 +8393,7 @@
           }
         },
         "required": [
+          "organization_id",
           "id",
           "installation_id",
           "name",

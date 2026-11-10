@@ -10,6 +10,7 @@ vi.mock('../../src/request/api', async (importOriginal) => ({
   api: {
     login: vi.fn(),
     logout: vi.fn(),
+    exchange: vi.fn(),
     me: vi.fn(),
     users: vi.fn(),
     audit: vi.fn(),
@@ -25,13 +26,20 @@ const user: UserRecord = {
   id: 1,
   username: 'admin',
   display_name: '管理员',
-  role: 'admin',
+  role: 'system_admin',
   enabled: true,
   is_super_admin: true,
   created_at: '2026-09-18T00:00:00Z',
   updated_at: '2026-09-18T00:00:00Z',
 };
-const login: LoginResponse = { center_id: 'center-id', user, token: 'token-a', llm_key: 'never-retain-this-key' };
+const login: LoginResponse = {
+  center_id: 'center-id',
+  legacy_organization_id: 'legacy-id',
+  user,
+  token: 'token-a',
+  scope: { kind: 'unselected', can_manage: false },
+  expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+};
 const draft = { username: 'new-user', displayName: '新用户', role: 'user' as const, password: 'test-password' };
 
 function deferred<T>() {
@@ -62,12 +70,12 @@ beforeEach(() => {
 });
 
 describe('身份与凭证隔离', () => {
-  it('普通用户误入只撤销新签发 Token，不展示后台', async () => {
+  it('普通全局角色先取得未选范围，管理资格交由服务端范围列表判定', async () => {
     vi.mocked(api.login).mockResolvedValue({ ...login, user: { ...user, role: 'user', is_super_admin: false } });
     const store = new AdminStore();
-    expect(await store.login('ordinary', 'password')).toContain('Runtime');
-    expect(api.logout).toHaveBeenCalledWith('token-a');
-    expect(store.user).toBeUndefined();
+    expect(await store.login('ordinary', 'password')).toBeUndefined();
+    expect(api.logout).not.toHaveBeenCalled();
+    expect(store.scope).toEqual(login.scope);
   });
   it('超级管理员只认标记，不绑定角色或账号', async () => {
     vi.mocked(api.login).mockResolvedValue({ ...login, user: { ...user, username: 'another', role: 'user' } });
@@ -149,7 +157,7 @@ describe('写入闭环', () => {
   it('修改本人名称同步顶栏身份；不错误退出', async () => {
     const store = await signedIn();
     vi.mocked(api.update).mockResolvedValue({ ...user, display_name: '新名称' });
-    await store.saveUser({ ...draft, role: 'admin' }, userView(user));
+    await store.saveUser({ ...draft, role: 'system_admin' }, userView(user));
     expect(store.currentUser?.displayName).toBe('新名称');
     expect(store.token).toBe(login.token);
   });
@@ -159,8 +167,8 @@ describe('写入闭环', () => {
     vi.mocked(api.me).mockReturnValue(old.promise);
     const pending = store.verifyIdentity();
     vi.mocked(api.update).mockResolvedValue({ ...user, display_name: '最新名称' });
-    await store.saveUser({ ...draft, role: 'admin' }, userView(user));
-    old.resolve({ center_id: login.center_id, user });
+    await store.saveUser({ ...draft, role: 'system_admin' }, userView(user));
+    old.resolve({ ...login, user });
     await pending;
     expect(store.currentUser?.displayName).toBe('最新名称');
   });
@@ -181,4 +189,32 @@ it('删除结果未知不清除当前身份，也不自动重试', async () => {
   expect(await store.deleteUser(userView({ ...user, is_super_admin: false }))).toContain('结果未确认');
   expect(api.remove).toHaveBeenCalledTimes(1);
   expect(store.token).toBe(login.token);
+});
+
+it('换发响应前后都丢弃旧 Token 的失效响应，并使用新范围身份', async () => {
+  const store = await signedIn();
+  const result = deferred<LoginResponse>();
+  vi.mocked(api.exchange).mockReturnValue(result.promise);
+  const exchange = store.exchangeScope({ kind: 'system' });
+  store.invalidateIdentity(login.token, '旧登录失效');
+  expect(store.token).toBe(login.token);
+  result.resolve({ ...login, token: 'token-b', scope: { kind: 'system', can_manage: true } });
+  await exchange;
+  store.invalidateIdentity(login.token, '迟到的旧登录失效');
+  expect(store.token).toBe('token-b');
+  expect(store.scope?.kind).toBe('system');
+});
+
+it('后台闲置到期时清除当前范围，并提示重新登录', async () => {
+  vi.useFakeTimers();
+  try {
+    vi.mocked(api.login).mockResolvedValue({ ...login, expires_at: new Date(Date.now() + 1000).toISOString() });
+    const store = await signedIn();
+    vi.advanceTimersByTime(1000);
+    expect(store.token).toBe('');
+    expect(store.scope).toBeUndefined();
+    expect(store.notice).toContain('到期');
+  } finally {
+    vi.useRealTimers();
+  }
 });

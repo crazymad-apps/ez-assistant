@@ -1161,20 +1161,23 @@ fn cleanup_home() -> tempfile::TempDir {
 fn product_upgrade_removes_only_its_backup_after_verified_success() {
     use assistant_protocol::RuntimeHostStartupStage;
     let home = cleanup_home();
-    align(home.path(), |_| {}).unwrap();
-    let source = db(home.path());
-    source
-        .execute_batch("DROP TABLE conversation_usage_snapshots")
+    let entries = product_manifest();
+    // 按发布版本截取旧库，不依赖当前版本追加了多少个 Feature 迁移。
+    let boundary = entries
+        .iter()
+        .position(|entry| entry.version == "0.33.0")
         .unwrap();
-    assert_eq!(
-        source
-            .execute(
-                "DELETE FROM schema_migrations WHERE migration_key='conversation_usage_snapshots_v1'",
-                []
-            )
-            .unwrap(),
-        1
-    );
+    let previous = &entries[..boundary];
+    migrate(home.path(), "0.32.2", previous).unwrap();
+    let source = db(home.path());
+    source.execute_batch("
+        INSERT INTO sessions(session_id,title,model_provider_instance_id,model_id,system_prompt_json,skill_catalog_json,lifecycle,body_generation,message_count,created_at_ms,updated_at_ms)
+        VALUES ('legacy-managed','legacy managed','managed','shared-model','[]','{}','active',1,0,1,1),
+               ('personal','personal','provider-fixture','shared-model','[]','{}','active',1,0,1,1),
+               ('following','following',NULL,NULL,'[]','{}','active',1,0,1,1);
+        UPDATE model_settings SET vision_provider_instance_id='managed', vision_model_id='image-model'
+        WHERE singleton_key=1;
+    ").unwrap();
     let expected = backup::evidence(&source).unwrap();
     let ledger_rows: i64 = source
         .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
@@ -1240,28 +1243,83 @@ fn product_upgrade_removes_only_its_backup_after_verified_success() {
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row
                 .get::<_, i64>(0))
             .unwrap(),
-        ledger_rows + 1
+        ledger_rows + 3
     );
     assert_eq!(
         source
             .query_row(
-                "SELECT COUNT(*) FROM schema_migrations WHERE migration_key='conversation_usage_snapshots_v1'",
+                "SELECT COUNT(*) FROM schema_migrations WHERE version='0.33.0'",
                 [],
                 |row| row.get::<_, i64>(0)
             )
             .unwrap(),
-        1
+        3
     );
     let mut actual = backup::evidence(&source).unwrap();
     let mut original = expected;
+    actual.tables.remove("message_cards").unwrap();
+    assert_eq!(
+        source
+            .query_row("SELECT COUNT(*) FROM message_cards", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0,
+        "upgrade creates the card store without replaying historical tools"
+    );
     actual.tables.remove("schema_migrations");
-    actual.tables.remove("conversation_usage_snapshots");
     original.tables.remove("schema_migrations");
+    actual.tables.remove("database_compatibility");
+    original.tables.remove("database_compatibility");
+    assert_eq!(
+        compatibility::read(&source).unwrap(),
+        Some(parse_version("0.33.0").unwrap())
+    );
+    for (table, expected_count) in [("sessions", 3), ("model_settings", 1)] {
+        actual.tables.remove(table).unwrap();
+        original.tables.remove(table).unwrap();
+        assert_eq!(
+            source
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            expected_count
+        );
+    }
+    let selections = source.prepare("SELECT session_id, model_provider_instance_id, model_id, model_source FROM sessions ORDER BY session_id")
+        .unwrap().query_map([], |row| Ok((
+            row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?, row.get::<_, String>(3)?,
+        ))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    assert_eq!(
+        selections,
+        vec![
+            ("following".into(), None, None, "local".into()),
+            (
+                "legacy-managed".into(),
+                Some("managed".into()),
+                Some("shared-model".into()),
+                "organization".into()
+            ),
+            (
+                "personal".into(),
+                Some("provider-fixture".into()),
+                Some("shared-model".into()),
+                "local".into()
+            ),
+        ]
+    );
+    assert_eq!(source.query_row("SELECT vision_provider_instance_id, vision_model_id, vision_model_source FROM model_settings WHERE singleton_key=1", [], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+    }).unwrap(), ("managed".into(), "image-model".into(), "organization".into()));
     assert_eq!(
         actual.tables, original.tables,
         "existing table rows and fields remain unchanged"
     );
     drop(source);
+    assert!(matches!(
+        migrate(home.path(), "0.32.2", previous),
+        Err(MigrationError::HostTooOld)
+    ));
     align(home.path(), |stage| {
         assert_ne!(stage.stage, RuntimeHostStartupStage::DatabaseBackup)
     })
@@ -1273,21 +1331,16 @@ fn product_upgrade_removes_only_its_backup_after_verified_success() {
 #[test]
 fn product_upgrade_failure_preserves_verified_backup_and_source() {
     let home = cleanup_home();
-    align(home.path(), |_| {}).unwrap();
-    let source = db(home.path());
-    source
-        .execute_batch("DROP TABLE conversation_usage_snapshots")
+    let entries = product_manifest();
+    // 按发布版本截取旧库，不依赖当前版本追加了多少个 Feature 迁移。
+    let boundary = entries
+        .iter()
+        .position(|entry| entry.version == "0.33.0")
         .unwrap();
-    assert_eq!(
-        source
-            .execute(
-                "DELETE FROM schema_migrations WHERE migration_key='conversation_usage_snapshots_v1'",
-                []
-            )
-            .unwrap(),
-        1
-    );
-    source.execute_batch("CREATE TRIGGER fail_upgrade_fixture BEFORE INSERT ON schema_migrations WHEN NEW.migration_key='conversation_usage_snapshots_v1' BEGIN SELECT RAISE(ABORT,'isolated migration fixture'); END;").unwrap();
+    let previous = &entries[..boundary];
+    migrate(home.path(), "0.32.2", previous).unwrap();
+    let source = db(home.path());
+    source.execute_batch("CREATE TRIGGER fail_upgrade_fixture BEFORE INSERT ON schema_migrations WHEN NEW.version='0.33.0' BEGIN SELECT RAISE(ABORT,'isolated migration fixture'); END;").unwrap();
     let expected = backup::evidence(&source).unwrap();
     drop(source);
     let error = align(home.path(), |_| {}).unwrap_err();
@@ -1311,7 +1364,7 @@ fn product_upgrade_failure_preserves_verified_backup_and_source() {
     assert_eq!(
         source
             .query_row(
-                "SELECT COUNT(*) FROM schema_migrations WHERE migration_key='conversation_usage_snapshots_v1'",
+                "SELECT COUNT(*) FROM schema_migrations WHERE version='0.33.0'",
                 [],
                 |row| row.get::<_, i64>(0)
             )

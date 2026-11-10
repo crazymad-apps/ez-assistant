@@ -42,7 +42,7 @@ describe("ToolDetailDialog", () => {
     render(<ToolDetailDialog detail={detailView({
       tool_name: "inspect_images",
       image_inspection: {
-        auxiliary_model: { provider_instance_id: "provider-instance", model_id: "org/vision:latest" },
+        auxiliary_model: { source: 'local' as const, provider_instance_id: "provider-instance", model_id: "org/vision:latest" },
         elapsed_ms: 12,
         usage: null,
       },

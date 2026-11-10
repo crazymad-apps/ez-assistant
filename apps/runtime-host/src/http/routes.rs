@@ -25,8 +25,8 @@ pub(crate) fn router(state: HttpState) -> Router {
     let services = from_fn_with_state(state.clone(), auth::bind_user_services);
     let login_context = from_fn(auth::require_login_context);
     let user_identity = from_fn_with_state(state.clone(), auth::reject_enterprise_bootstrap);
-    let enterprise = from_fn_with_state(state.clone(), auth::verify_enterprise);
-    // 所有用户业务共用这一顺序：拒绝旧页面 → 排除企业管理凭据 → 复核用户登录。
+    let enterprise = from_fn_with_state(state.clone(), auth::bind_enterprise_access);
+    // 所有用户业务共用这一顺序：拒绝旧页面 → 排除企业管理凭据 → 绑定本地用户登录。
     // require_login 由下方 authenticated 组统一挂载，保证这些层拿到有效身份。
     let user_access = (
         login_context.clone(),
@@ -154,6 +154,14 @@ pub(crate) fn router(state: HttpState) -> Router {
         .route_layer(from_fn(auth::require_login));
 
     let api = authenticated
+        .route(
+            login::ORGANIZATION_SWITCH_PATH,
+            post(login::organization_switch).layer((
+                version.clone(),
+                request_body.clone(),
+                DefaultBodyLimit::max(4096),
+            )),
+        )
         // 登录允许匿名或过期 Cookie；具体登录方式的同源检查与凭据交换由 handler 负责。
         .route(
             "/auth/login",
@@ -189,10 +197,13 @@ pub(crate) fn router(state: HttpState) -> Router {
             super::diagnostics::observe,
         ));
 
+    let sandbox = Router::new()
+        .route("/ui/sandbox-proxy", get(super::ui_sandbox::serve))
+        .layer(from_fn_with_state(state.clone(), auth::authorize_sandbox));
     let pages = Router::new()
         .fallback(web::serve)
         .layer(from_fn_with_state(state.clone(), auth::authorize_page));
-    api.merge(pages).with_state(state)
+    api.merge(pages).merge(sandbox).with_state(state)
 }
 
 // 外部 HTTP 与组网内部入口共用同一组业务路由，凭据解析只在各自外层完成。

@@ -67,11 +67,13 @@ pub(crate) struct CallMcpToolOutput {
     is_error: bool,
 }
 
+#[derive(Clone)]
 pub(crate) struct CallMcpTool {
     registry: Arc<McpRegistry>,
     scope: McpDisclosureScope,
     session_tool_image_directory: Option<String>,
     image_materializer: Arc<dyn McpImageMaterializer>,
+    cards: Option<crate::cards::CardPublisher>,
 }
 
 impl CallMcpTool {
@@ -86,7 +88,13 @@ impl CallMcpTool {
             scope,
             session_tool_image_directory,
             image_materializer,
+            cards: None,
         }
+    }
+
+    pub(crate) fn with_cards(mut self, cards: crate::cards::CardPublisher) -> Self {
+        self.cards = Some(cards);
+        self
     }
 }
 
@@ -143,17 +151,59 @@ impl Tool for CallMcpTool {
         context: ToolContext,
     ) -> ToolExecuteFuture<'a, Self::Output> {
         Box::pin(async move {
-            let projection = self
+            let binding = if self.cards.is_some() {
+                input
+                    .ui_binding()
+                    .map_err(|_| ToolError::invalid_input("MCP UI entry metadata invalid"))?
+            } else {
+                None
+            };
+            if let (Some(publisher), Some(binding)) = (&self.cards, &binding) {
+                publisher
+                    .validate_mcp(binding)
+                    .await
+                    .map_err(|_| ToolError::invalid_input("MCP UI entry unavailable"))?;
+            }
+            let mut projection = self
                 .registry
                 .execute(
                     &input,
                     self.session_tool_image_directory.as_deref(),
                     self.image_materializer.as_ref(),
-                    context.cancellation,
+                    context.cancellation.clone(),
                 )
                 .await
                 .map_err(execution_failure)?;
             debug_assert!(projection.remote_may_have_executed);
+            if let (Some(publisher), Some(binding)) = (&self.cards, binding.filter(|b| b.card)) {
+                let saved = if let Some(result) = projection.ui_result.take() {
+                    if input.is_retired() {
+                        false
+                    } else {
+                        publisher
+                            .publish_mcp(
+                                binding,
+                                Value::Object(input.arguments.clone()),
+                                result,
+                                &context,
+                            )
+                            .await
+                            .is_ok()
+                    }
+                } else {
+                    false
+                };
+                if !saved {
+                    // 业务已执行；保留结果并明确 UI 保存失败，绝不为了补卡片重放远端调用。
+                    let mut parts = projection.content.into_parts();
+                    parts.push(agent_types::ToolResultPart::text(
+                        "业务结果已返回，卡片未保存。不要重复执行业务工具；请核对当前入口和连接。",
+                    ));
+                    projection.content = ToolResultContent::parts(parts).map_err(|_| {
+                        ToolError::execution("MCP UI publication failed after business result")
+                    })?;
+                }
+            }
             Ok(CallMcpToolOutput {
                 content: projection.content,
                 is_error: projection.is_error,
@@ -187,6 +237,8 @@ fn execution_failure(failure: McpCallFailure) -> ToolError {
             "instance_path": failure.instance_path,
             "keyword": failure.keyword,
             "remote_may_have_executed": failure.remote_may_have_executed,
+            "cleanup_unconfirmed": failure.remote_may_have_executed
+                && matches!(failure.kind, McpCallFailureKind::Cancelled | McpCallFailureKind::RequestFailed),
         }),
     )
 }

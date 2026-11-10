@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { runInAction } from "mobx";
 import { describe, expect, it, vi } from "vitest";
 import { AccountMenu } from "../../src/features/runtime-access/AccountMenu";
@@ -40,12 +40,13 @@ describe("AccountMenu", () => {
       connection.phase = "workspace";
       connection.session = {
         token: null, expires_at_ms: 0, instance_id: "fixture", mode: "enterprise", kind: "user",
-        identity: { center_id: "fixture", user_id: 1, username: "tester", display_name: "测试用户" },
+        identity: { center_id: "fixture", organization_id: "org-fixture", organization_name: "测试组织", user_id: 1, username: "tester", display_name: "测试用户" },
         login_context: "fixture",
       };
     });
     const view = render(<AccountMenu connection={connection} />);
-    fireEvent.click(screen.getByRole("button", { name: "账号与 Runtime" }));
+    const trigger = screen.getByRole("button", { name: "账号与 Runtime" });
+    fireEvent.click(within(trigger).getByText("测试用户", { exact: true }));
     expect(screen.getByRole("menuitem", { name: "反馈中心" })).toBeEnabled();
     fireEvent.click(screen.getByRole("menuitem", { name: "反馈中心" }));
     expect(show).toHaveBeenCalledOnce();
@@ -54,6 +55,55 @@ describe("AccountMenu", () => {
     expect(screen.getByRole("menuitem", { name: "反馈中心" })).toBeDisabled();
     view.unmount();
     show.mockRestore();
+    connection.dispose();
+  });
+
+  it("expands the organization options inside the account menu and closes it on selection", () => {
+    const root = new RootStore();
+    const connection = new ApplicationConnectionStore(root);
+    const read = vi.spyOn(connection, "openOrganizationSwitch").mockImplementation(async () => {
+      runInAction(() => {
+        connection.organization_switch = {
+          phase: "options",
+          organizations: [{ id: "other-org", name: "另一个组织" }],
+        };
+      });
+    });
+    const preview = vi.spyOn(connection, "previewOrganizationSwitch").mockResolvedValue();
+    runInAction(() => {
+      connection.current = root;
+      connection.phase = "workspace";
+      connection.session = {
+        token: null, expires_at_ms: 0, instance_id: "fixture", mode: "enterprise", kind: "user",
+        identity: { center_id: "fixture", organization_id: "org-fixture", organization_name: "测试组织", user_id: 1, username: "tester", display_name: "测试用户" },
+        login_context: "fixture",
+      };
+    });
+    const view = render(<AccountMenu connection={connection} />);
+    const trigger = screen.getByRole("button", { name: "账号与 Runtime" });
+    expect(screen.queryByText("测试组织")).not.toBeInTheDocument();
+    fireEvent.click(trigger);
+    const menu = screen.getByRole("menu", { name: "账号菜单" });
+    expect(read).not.toHaveBeenCalled();
+    const organization = within(menu).getByRole("menuitem", { name: "切换组织，当前组织：测试组织" });
+    fireEvent.click(organization);
+    expect(organization).toHaveAttribute("aria-expanded", "true");
+    const choices = within(menu).getByRole("group", { name: "可切换组织" });
+    expect(organization).toHaveTextContent("测试组织");
+    expect(within(choices).getByRole("menuitem", { name: "另一个组织" })).toBeInTheDocument();
+    expect(within(choices).queryByText("测试组织")).not.toBeInTheDocument();
+    fireEvent.click(organization);
+    expect(organization).toHaveAttribute("aria-expanded", "false");
+    expect(within(menu).queryByRole("group", { name: "可切换组织" })).not.toBeInTheDocument();
+    organization.focus();
+    fireEvent.keyDown(organization, { key: "ArrowDown" });
+    expect(within(menu).getByRole("menuitem", { name: "设置" })).toHaveFocus();
+    fireEvent.click(organization);
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "另一个组织" }));
+    expect(preview).toHaveBeenCalledWith("other-org");
+    expect(screen.queryByRole("menu", { name: "账号菜单" })).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+    view.unmount();
     connection.dispose();
   });
 

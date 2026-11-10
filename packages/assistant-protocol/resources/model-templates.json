@@ -1694,6 +1694,150 @@
     "provider_type": "dashscope_plan"
   },
   {
+    "checked_on": "2026-11-05",
+    "document": "https://www.kimi.com/code/docs/kimi-code/models.html",
+    "model_id": "k3.1-pro",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1048576
+      },
+      "default_reasoning_effort": "high",
+      "image_input": "supported",
+      "max_output_tokens": {
+        "state": "unknown"
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "high": "high",
+        "low": "low",
+        "max": "max"
+      },
+      "reasoning_mode": "always",
+      "streaming": "supported",
+      "tool_calls": "supported"
+    },
+    "protocol_parameters": {},
+    "provider_type": "moonshot"
+  },
+  {
+    "checked_on": "2026-11-05",
+    "document": "https://www.kimi.com/code/docs/kimi-code/models.html",
+    "model_id": "k3.1-pro-highspeed",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1048576
+      },
+      "default_reasoning_effort": "high",
+      "image_input": "supported",
+      "max_output_tokens": {
+        "state": "unknown"
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "high": "high",
+        "low": "low",
+        "max": "max"
+      },
+      "reasoning_mode": "always",
+      "streaming": "supported",
+      "tool_calls": "supported"
+    },
+    "protocol_parameters": {},
+    "provider_type": "moonshot"
+  },
+  {
+    "checked_on": "2026-11-05",
+    "document": "https://platform.kimi.com/docs/guide/kimi-k3-1-pro-quickstart",
+    "model_id": "kimi-k3.1-pro",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1048576
+      },
+      "default_reasoning_effort": "max",
+      "image_input": "supported",
+      "max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "high": "high",
+        "low": "low",
+        "max": "max"
+      },
+      "reasoning_mode": "always",
+      "streaming": "supported",
+      "tool_calls": "supported"
+    },
+    "protocol_parameters": {
+      "open_ai_chat_completions": {
+        "tool_choice": {
+          "auto": "supported",
+          "named": "unsupported",
+          "none": "supported",
+          "required": "supported"
+        }
+      },
+      "open_ai_responses": {
+        "tool_choice": {
+          "auto": "supported",
+          "named": "unsupported",
+          "none": "unsupported",
+          "required": "unsupported"
+        }
+      }
+    },
+    "provider_type": "moonshot"
+  },
+  {
+    "checked_on": "2026-11-05",
+    "document": "https://platform.kimi.com/docs/guide/kimi-k3-1-pro-quickstart",
+    "model_id": "kimi-k3.1-pro-highspeed",
+    "parameters": {
+      "context_window_tokens": {
+        "state": "known",
+        "value": 1048576
+      },
+      "default_reasoning_effort": "max",
+      "image_input": "supported",
+      "max_output_tokens": {
+        "state": "known",
+        "value": 131072
+      },
+      "reasoning": "supported",
+      "reasoning_efforts": {
+        "high": "high",
+        "low": "low",
+        "max": "max"
+      },
+      "reasoning_mode": "always",
+      "streaming": "supported",
+      "tool_calls": "supported"
+    },
+    "protocol_parameters": {
+      "open_ai_chat_completions": {
+        "tool_choice": {
+          "auto": "supported",
+          "named": "unsupported",
+          "none": "supported",
+          "required": "supported"
+        }
+      },
+      "open_ai_responses": {
+        "tool_choice": {
+          "auto": "supported",
+          "named": "unsupported",
+          "none": "unsupported",
+          "required": "unsupported"
+        }
+      }
+    },
+    "provider_type": "moonshot"
+  },
+  {
     "checked_on": "2026-09-09",
     "document": "https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/config-files",
     "model_id": "k3",

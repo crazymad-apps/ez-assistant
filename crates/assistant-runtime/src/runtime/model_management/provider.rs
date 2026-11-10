@@ -1,25 +1,9 @@
 use super::*;
 
 impl AssistantRuntime {
-    /// 启动恢复仅加载连接和全局选择，固定参数按二元键读取；不得导入旧 TOML 模型。
+    /// 启动先恢复本地服务商和已保存选择。组织集合随后由宿主发布，不从个人存储推导。
     pub async fn restore_model_settings(&self) -> RuntimeResult<()> {
         let _gate = self.model_binding_gate.write().await;
-        if self.model_factory.configuration_source() == crate::ModelSource::External {
-            let mut state = self.managed_models_mut()?;
-            state.source = crate::ModelSource::External;
-            state.external = None;
-            state.providers.clear();
-            state.settings = ModelSettings {
-                management: Some(assistant_protocol::ModelManagementStatus {
-                    read_only: true,
-                    unavailable_reason: Some("正在获取模型配置。".to_owned()),
-                    last_success_at_ms: None,
-                    last_refresh_error: None,
-                }),
-                ..Default::default()
-            };
-            return Ok(());
-        }
         let providers = self
             .store
             .load_providers()
@@ -35,23 +19,30 @@ impl AssistantRuntime {
             .into_iter()
             .map(|p| (p.provider_instance_id.clone(), Arc::new(p)))
             .collect();
+        state.source = self.model_factory.configuration_source();
         state.settings = settings;
+        if state.source == crate::ModelSource::External {
+            state.settings.management = Some(assistant_protocol::ModelManagementStatus {
+                read_only: true,
+                unavailable_reason: Some("正在获取组织模型配置。".to_owned()),
+                last_success_at_ms: None,
+                last_refresh_error: None,
+                unavailable_models: Vec::new(),
+                allow_member_selection: false,
+            });
+        }
         Ok(())
     }
 
     pub fn list_providers(&self) -> RuntimeResult<Vec<ProviderSummary>> {
         self.ensure_running()?;
-        Ok(self
-            .managed_models()?
-            .providers
-            .values()
-            .map(|provider| summary(provider))
-            .collect())
+        let models = self.managed_models()?;
+        Ok(provider_summaries(&models))
     }
 
     pub fn get_model_settings(&self) -> RuntimeResult<ModelSettings> {
         self.ensure_running()?;
-        Ok(self.managed_models()?.settings.clone())
+        Ok(self.managed_models()?.settings_view())
     }
 
     pub async fn create_provider(
@@ -100,6 +91,7 @@ impl AssistantRuntime {
         request: UpdateProviderRequest,
     ) -> RuntimeResult<ProviderSummary> {
         self.ensure_model_editable()?;
+        Self::require_local_model(request.source)?;
         validate_connection(&request.connection)?;
         let _operation = self.operation_gate.read().await;
         let _gate = self.model_binding_gate.write().await;
@@ -194,10 +186,32 @@ impl AssistantRuntime {
 
 pub(super) fn summary(provider: &StoredProvider) -> ProviderSummary {
     ProviderSummary {
+        source: assistant_protocol::ModelSelectionSource::Local,
         provider_instance_id: provider.provider_instance_id.clone(),
         connection: provider.connection.clone(),
         has_api_key: !provider.api_key.expose().is_empty(),
     }
+}
+
+pub(super) fn provider_summaries(models: &ManagedModels) -> Vec<ProviderSummary> {
+    let mut providers: Vec<_> = models
+        .providers
+        .values()
+        .map(|provider| summary(provider))
+        .collect();
+    if let Some(external) = &models.external {
+        let mut seen = std::collections::BTreeSet::new();
+        for (selection, model) in &external.models {
+            if let Ok(model) = model
+                && seen.insert(&selection.provider_instance_id)
+            {
+                let mut provider = summary(&model.provider());
+                provider.source = assistant_protocol::ModelSelectionSource::Organization;
+                providers.push(provider);
+            }
+        }
+    }
+    providers
 }
 
 fn discovery_connection_changed(

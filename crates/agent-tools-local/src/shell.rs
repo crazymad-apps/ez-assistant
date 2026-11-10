@@ -180,13 +180,20 @@ impl LocalShell {
         ));
 
         let deadline = Instant::now() + request.timeout;
-        let process_completion = wait_for_parent(&mut child, deadline, &cancellation).await?;
+        let process_completion = match wait_for_parent(&mut child, deadline, &cancellation).await {
+            Ok(completion) => completion,
+            Err(error) => {
+                cleanup_after_setup_failure(&mut child).await?;
+                abort_and_settle_output(stdout_task, stderr_task, output_task).await?;
+                return Err(error);
+            }
+        };
         match process_completion {
             ProcessCompletion::Exited(status) => {
                 if request.process_mode == ShellProcessMode::Managed {
                     process::terminate_and_wait(&mut child)
                         .await
-                        .map_err(|error| ShellToolError::Io {
+                        .map_err(|error| ShellToolError::CleanupUnconfirmed {
                             message: format!(
                                 "clean up managed shell process tree after parent exit failed: {error}"
                             ),
@@ -216,7 +223,7 @@ impl LocalShell {
                     }
                     OutputCompletion::TimedOut(output) => {
                         process::terminate_and_wait(&mut child).await.map_err(|error| {
-                            ShellToolError::Io {
+                            ShellToolError::CleanupUnconfirmed {
                                 message: format!(
                                     "terminate shell process tree during output settlement failed: {error}"
                                 ),
@@ -230,7 +237,7 @@ impl LocalShell {
                     }
                     OutputCompletion::Cancelled => {
                         process::terminate_and_wait(&mut child).await.map_err(|error| {
-                            ShellToolError::Io {
+                            ShellToolError::CleanupUnconfirmed {
                                 message: format!(
                                     "terminate cancelled shell process tree during output settlement failed: {error}"
                                 ),
@@ -243,7 +250,7 @@ impl LocalShell {
             ProcessCompletion::TimedOut => {
                 process::terminate_and_wait(&mut child)
                     .await
-                    .map_err(|error| ShellToolError::Io {
+                    .map_err(|error| ShellToolError::CleanupUnconfirmed {
                         message: format!("terminate timed out shell process tree failed: {error}"),
                     })?;
                 let output = abort_and_settle_output(stdout_task, stderr_task, output_task).await?;
@@ -256,7 +263,7 @@ impl LocalShell {
             ProcessCompletion::Cancelled => {
                 process::terminate_and_wait(&mut child)
                     .await
-                    .map_err(|error| ShellToolError::Io {
+                    .map_err(|error| ShellToolError::CleanupUnconfirmed {
                         message: format!("terminate cancelled shell process tree failed: {error}"),
                     })?;
                 abort_and_settle_output(stdout_task, stderr_task, output_task).await?;
@@ -349,7 +356,7 @@ async fn cleanup_after_setup_failure(child: &mut ManagedChild) -> Result<(), She
     process::terminate_and_wait(child)
         .await
         .map(|_| ())
-        .map_err(|error| ShellToolError::Io {
+        .map_err(|error| ShellToolError::CleanupUnconfirmed {
             message: format!("clean up shell after pipe setup failure failed: {error}"),
         })
 }

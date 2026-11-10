@@ -1,4 +1,4 @@
-import { useId, useLayoutEffect, useRef, useState } from 'react';
+import { useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import type {
   AssistantMessageSnapshot,
   ChildTaskTreeItemSnapshot,
@@ -23,6 +23,7 @@ export function ProcessingTurn(
     messages: readonly AssistantMessageSnapshot[];
     live_run: LiveRunProjection | null;
     child_tasks: readonly ChildTaskTreeItemSnapshot[];
+    cards?: ReactNode;
     task?: { status: RunStatus; created_at_ms: number; started_at_ms?: number | null; finished_at_ms: number | null };
     awaiting_feedback?: boolean;
     awaiting_approval?: boolean;
@@ -179,7 +180,10 @@ export function ProcessingTurn(
           {error}
         </p>
       )}
-      <div className={styles.reply}>{reply.map(renderEntry)}</div>
+      <div className={styles.reply}>
+        {reply.map(renderEntry)}
+        {props.cards}
+      </div>
       {!active && last && (
         <div className={shared.message_actions}>
           <button

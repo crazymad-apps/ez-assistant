@@ -1,7 +1,7 @@
 //! 外部模型状态只在 Runtime 内存生效；旧选择、旧 Arc 和本地 Store 均不能成为旁路。
 
 use super::*;
-use crate::{ExternalModelConfiguration, ModelSource};
+use crate::{ExternalModelConfiguration, ExternalModelSet, ModelSource};
 
 struct ExternalFactory;
 
@@ -35,7 +35,7 @@ async fn fixture_with_store(store: Arc<dyn RuntimeStore>) -> AssistantRuntime {
     )
     .await
     .unwrap();
-    // Store 刻意保留历史个人连接、默认与固定值，外部恢复必须忽略它们。
+    // 个人配置仍从原 Store 恢复；组织发布只改变组织部分。
     model_fixture::seed(&runtime, "local-secret-must-not-be-used").await;
     runtime
         .config_registry
@@ -46,6 +46,7 @@ async fn fixture_with_store(store: Arc<dyn RuntimeStore>) -> AssistantRuntime {
 fn configuration(model: &str) -> Arc<ExternalModelConfiguration> {
     Arc::new(
         ExternalModelConfiguration::new(
+            test_model_selection("fixture").provider_instance_id,
             model_fixture::provider("").connection,
             model.to_owned(),
             model_fixture::parameters(),
@@ -58,8 +59,17 @@ fn configuration(model: &str) -> Arc<ExternalModelConfiguration> {
 
 async fn publish(runtime: &AssistantRuntime, value: Arc<ExternalModelConfiguration>) {
     let mut gate = runtime.external_model_publication().await.unwrap();
-    gate.publish(Some(value), "", 42).unwrap();
+    gate.publish(model_set(value), 42).unwrap();
     gate.finish();
+}
+
+fn model_set(value: Arc<ExternalModelConfiguration>) -> ExternalModelSet {
+    let selection = value.selection().clone();
+    ExternalModelSet {
+        default_model: Some(selection.clone()),
+        allow_member_selection: false,
+        models: [(selection, Ok(value))].into(),
+    }
 }
 
 #[tokio::test]
@@ -81,6 +91,7 @@ async fn application_read_keeps_its_frozen_model_inputs_during_deferred_external
         connection.display_name = "New managed provider".to_owned();
         let next = Arc::new(
             ExternalModelConfiguration::new(
+                test_model_selection("fixture").provider_instance_id,
                 connection,
                 "new-model".to_owned(),
                 model_fixture::parameters(),
@@ -90,7 +101,7 @@ async fn application_read_keeps_its_frozen_model_inputs_during_deferred_external
             .unwrap(),
         );
         let mut publication = runtime.external_model_publication().await.unwrap();
-        publication.publish(Some(next), "", 43).unwrap();
+        publication.publish(model_set(next), 43).unwrap();
         // 模拟 Host 在身份锁内提交后尚未 finish；快照不能持读门等通知而互锁，
         // 也不能把已经复制的旧 Provider 与晚到的新默认选择重新拼接。
         assert_eq!(runtime.event_sender.sequence(), before);
@@ -123,7 +134,14 @@ async fn application_read_keeps_its_frozen_model_inputs_during_deferred_external
         .snapshot;
     assert!(next.observed_sequence > before);
     assert_eq!(
-        next.value.providers[0].connection.display_name,
+        next.value
+            .providers
+            .iter()
+            .find(|provider| provider.source
+                == assistant_protocol::ModelSelectionSource::Organization)
+            .unwrap()
+            .connection
+            .display_name,
         "New managed provider"
     );
     assert_eq!(
@@ -137,73 +155,73 @@ async fn application_read_keeps_its_frozen_model_inputs_during_deferred_external
 }
 
 #[tokio::test]
-async fn external_preparation_ignores_local_store_and_historical_selection() {
+async fn organization_and_local_selections_keep_distinct_credentials_even_with_identical_ids() {
     let runtime = fixture().await;
-    assert!(runtime.list_providers().unwrap().is_empty());
     let snapshot = runtime.config_registry.snapshot().unwrap();
-    let historical = test_model_selection("fixture");
-    assert!(matches!(
+    let personal = test_model_selection("fixture");
+    assert!(
+        runtime
+            .get_model_settings()
+            .unwrap()
+            .default_model
+            .is_none()
+    );
+    publish(&runtime, configuration("fixture")).await;
+    let providers = runtime.list_providers().unwrap();
+    assert_eq!(providers.len(), 2);
+    assert_eq!(
+        providers[0].provider_instance_id,
+        providers[1].provider_instance_id
+    );
+    let organization = runtime.get_model_settings().unwrap().default_model.unwrap();
+    let catalog = runtime
+        .list_organization_provider_models(organization.provider_instance_id.clone())
+        .unwrap();
+    assert_eq!(catalog.models[0].model_id, organization.model_id);
+    let local = runtime
+        .config_registry
+        .prepare_model(&snapshot, Some(&personal), runtime.store.as_ref())
+        .await
+        .unwrap();
+    assert_eq!(local.selection, personal);
+    assert_eq!(local.model.api_key(), "local-secret-must-not-be-used");
+    assert!(local.model.external_configuration.is_none());
+    let remote = runtime
+        .config_registry
+        .configured_model(&snapshot, None, runtime.store.as_ref())
+        .await
+        .unwrap();
+    assert_eq!(remote.selection, organization);
+    assert!(remote.model.api_key().is_empty());
+    assert!(remote.model.external_configuration.is_some());
+    assert_eq!(
+        runtime
+            .store
+            .load_model_settings()
+            .await
+            .unwrap()
+            .default_model,
+        Some(personal.clone())
+    );
+    publish(&runtime, configuration("new-default")).await;
+    assert!(local.ensure_current(&runtime.config_registry).is_ok());
+    assert!(remote.ensure_current(&runtime.config_registry).is_err());
+    assert!(
         runtime
             .config_registry
-            .prepare_model(&snapshot, Some(&historical), runtime.store.as_ref())
-            .await,
-        Err(RuntimeError::InvalidRequest { .. })
-    ));
-    publish(&runtime, configuration("managed-model")).await;
-    let providers = runtime.list_providers().unwrap();
-    assert_eq!(providers.len(), 1);
-    let selection = runtime.get_model_settings().unwrap().default_model.unwrap();
-    assert_eq!(
-        selection.provider_instance_id,
-        providers[0].provider_instance_id
+            .prepare_model(&snapshot, Some(&organization), runtime.store.as_ref())
+            .await
+            .is_err()
     );
-    let catalog = runtime
-        .list_provider_models(selection.provider_instance_id.clone())
-        .await
-        .unwrap();
-    assert_eq!(catalog.models[0].model_id, selection.model_id);
-    let detail = runtime
-        .get_model_configuration(assistant_protocol::GetModelConfigurationRequest {
-            selection: selection.clone(),
-            origin: assistant_protocol::ModelConfigOrigin::Online,
-        })
-        .await
-        .unwrap();
-    assert_eq!(detail.parameters, model_fixture::parameters());
-    let fixed = runtime
-        .list_fixed_model_configs(assistant_protocol::ListFixedModelConfigsRequest {
-            provider_instance_id: selection.provider_instance_id,
-            offset: 0,
-            limit: 20,
-        })
-        .await
-        .unwrap();
-    assert_eq!(fixed.len(), 1);
-    assert_eq!(fixed[0].parameters, detail.parameters);
-
-    for configured in [false, true] {
-        let prepared = if configured {
-            runtime
-                .config_registry
-                .configured_model(&snapshot, Some(&historical), runtime.store.as_ref())
-                .await
-        } else {
-            runtime
-                .config_registry
-                .prepare_model(&snapshot, Some(&historical), runtime.store.as_ref())
-                .await
-        }
-        .unwrap();
-        assert_eq!(prepared.selection.model_id, "managed-model");
-        assert_eq!(prepared.selection.provider_instance_id.as_str(), "managed");
-        assert!(prepared.model.api_key().is_empty());
-        assert!(prepared.model.external_configuration.is_some());
-    }
-    let stored = runtime.store.load_model_settings().await.unwrap();
-    assert_eq!(stored.default_model, Some(historical));
-    assert!(stored.management.is_none());
-    assert!(runtime.get_model_settings().unwrap().vision_model.is_none());
-    assert!(runtime.ensure_model_editable().is_err());
+    assert_eq!(
+        runtime
+            .config_registry
+            .prepare_model(&snapshot, Some(&personal), runtime.store.as_ref())
+            .await
+            .unwrap()
+            .selection,
+        personal
+    );
     runtime
         .shutdown(ShutdownRuntimeRequest::default())
         .await
@@ -245,13 +263,9 @@ async fn replacement_invalidates_prepared_arc_and_old_rejection_cannot_clear_new
     assert!(gate.invalidate(&current, "配置已失效").unwrap());
     gate.refresh_failed("网络不可达").unwrap();
     gate.finish();
-    assert!(
-        runtime
-            .get_model_settings()
-            .unwrap()
-            .default_model
-            .is_none()
-    );
+    let settings = runtime.get_model_settings().unwrap();
+    assert_eq!(settings.default_model.as_ref(), Some(current.selection()));
+    assert_eq!(settings.management.unwrap().unavailable_models.len(), 1);
     assert!(matches!(
         runtime
             .config_registry
@@ -261,7 +275,15 @@ async fn replacement_invalidates_prepared_arc_and_old_rejection_cannot_clear_new
     ));
     publish(&runtime, configuration("new-model")).await;
     let mut gate = runtime.external_model_publication().await.unwrap();
-    gate.publish(None, "管理员尚未配置模型", 43).unwrap();
+    gate.publish(
+        ExternalModelSet {
+            default_model: None,
+            allow_member_selection: false,
+            models: Default::default(),
+        },
+        43,
+    )
+    .unwrap();
     gate.finish();
     let status = runtime.get_model_settings().unwrap().management.unwrap();
     assert!(status.unavailable_reason.is_some());

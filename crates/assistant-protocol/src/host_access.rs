@@ -108,6 +108,11 @@ pub enum HostLoginRequest {
         password: SecretValue,
         native: bool,
     },
+    EnterpriseSelect {
+        #[ts(type = "string")]
+        selection_token: SecretValue,
+        organization_id: String,
+    },
     Password {
         #[ts(type = "string")]
         password: SecretValue,
@@ -133,6 +138,9 @@ pub struct HostLoginResult {
     pub identity: Option<HostUserIdentity>,
     /// 当前 Host 登录的非秘密标识，用于发现同源 Cookie 被其他页面替换。
     pub login_context: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub organization_selection: Option<HostOrganizationSelection>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -152,11 +160,66 @@ pub enum HostIdentityKind {
     User,
 }
 
+/// 登录前短期选择凭据，只能在 Host 上交换，不能作为工作区会话。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct HostOrganizationSelection {
+    #[ts(type = "string")]
+    pub selection_token: SecretValue,
+    pub organizations: Vec<HostOrganization>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum HostOrganizationSwitchRequest {
+    Options,
+    Preview { organization_id: String },
+    Confirm { operation_id: String },
+    Status { operation_id: String },
+    Resume { operation_id: String },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum HostOrganizationSwitchResult {
+    Options {
+        organizations: Vec<HostOrganization>,
+    },
+    Confirm {
+        operation_id: String,
+        organization: HostOrganization,
+        tasks: usize,
+        approvals: usize,
+        queued: usize,
+    },
+    Changed,
+    Stopping,
+    Exchanging,
+    StopFailed,
+    ExchangeFailed,
+    Reauthenticate,
+    Switched {
+        login: HostLoginResult,
+    },
+    Resumed,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct HostOrganization {
+    pub id: String,
+    pub name: String,
+}
+
 /// Host 核实后的本人身份，不包含企业后端凭据。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct HostUserIdentity {
     pub center_id: String,
+    pub organization_id: String,
+    pub organization_name: String,
     pub user_id: i32,
     pub username: String,
     pub display_name: String,

@@ -559,3 +559,29 @@ RuntimeHostHealth 增加可选 progress（completed／total），既有启动阶
 ## v0.32.1 MCP 来源优先级投影
 
 `McpServerSnapshot.shadowed_by` 是可选的同名选用来源，只描述当前配置选择，保留原 enabled 意图及真实 runtime_state。由 Runtime 同次归并生成，Desktop 与 Agent 管理查询使用同一字段；不写入历史或 SQL。来源排序固定为用户、插件标识升序、内置，权限仍按 server_key。
+
+## v0.33.0 F02 M1 双来源模型引用
+
+模型引用由来源、Provider 和原始模型 ID 共同组成，旧本地引用缺省为 `local`。Provider 摘要和读取请求携带来源，管理状态可投影组织失效项及原因。应用软件兼容下限沿用 0.33.0，企业中心集合协议为 6。凭据和原生状态绑定留在 Host 与 Runtime 的内部接口。
+
+
+## v0.33.0 F03 M0 MCP UI 资源契约
+
+- `ListMcpUiResources`／`ReadMcpUiResource` 使用完整 `McpServerTarget`，不接受用户域、HTML 或任意 URL。HTML、URI 与标准 UI CSP 是读取结果；HTML／私有数据不进入 Debug。
+- Rust 为唯一协议源，TS 由既有 exporter 生成；CSP 字段沿标准 camelCase，缺失来源列表按空处理。本步不新增存储格式或独立兼容下限，页面工具调用与卡片持久化按后续里程碑开放。
+
+## v0.33.0 F03 M1 消息卡片契约
+
+- `PluginUi` 是包 v2 的声明契约，安装摘要可选投影该声明；HTML 仍只由受控挂载／资源读取返回。
+- List／Mount／ReleaseMessageCard 与 SaveMessageCardSnapshot 使用完整 ConversationOwner；变化事件只有 owner，不带页面数据。挂载结果和快照 DTO 的 Debug 隐去 HTML、参数与私有载荷。
+- Store CAS 冲突返回已保存修订和快照，客户端不得把冲突记为保存成功；TS 仍由 Rust exporter 唯一生成，不引入 SDK 或数据库依赖。
+
+## v0.33.0 F03 M2 应用入口契约
+
+- `ListUiApps`／`ReadUiApp` 只携带有类型的来源与应用入口，独立 MCP 必须带完整 target 和资源 URI。资源 HTML、定位参数不进入普通 Debug；目录不返回代码。挂载卡片可投影当前入口能力声明，能力协商由受信任客户端按实际实现完成。
+
+## v0.33.0 F03 M3 页面工具
+
+`ReadUiApp` 可在实际挂载时接收会话或草稿作用域并返回短期工具句柄。MCP 卡片复用挂载实例 ID。受信客户端使用 `UiTool` 接纳、读取、决定、取消或释放调用。app 审批携带真实应用标题、作用域和脱敏参数，工具结果与页面参数使用脱敏 Debug。协议不持久保存调用句柄。
+
+`UiTool` 启动可携带受信客户端从当前沙箱确认的单次 `user_gesture`，字段缺省时沿用普通页面请求的授权流程。

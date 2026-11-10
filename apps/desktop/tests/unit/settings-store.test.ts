@@ -85,7 +85,7 @@ describe("SettingsStore connection validation", () => {
       command: async () => ({
         type: "validate_model_connection",
         payload: {
-          selection: { provider_instance_id: "provider-1", model_id: "qwen3.8-max" },
+          selection: { source: 'local' as const, provider_instance_id: "provider-1", model_id: "qwen3.8-max" },
           outcome: {
             status: "failed",
             failure: {
@@ -102,7 +102,7 @@ describe("SettingsStore connection validation", () => {
       refresh_application: async () => undefined,
     });
 
-    const result = await store.validateModel({ provider_instance_id: "provider-1", model_id: "qwen3.8-max" });
+    const result = await store.validateModel({ source: 'local' as const, provider_instance_id: "provider-1", model_id: "qwen3.8-max" });
 
     expect(result?.outcome.status).toBe("failed");
     expect(store.error_message).toBe("API Key 无效或无权访问该模型，请检查凭据。");
@@ -129,8 +129,8 @@ describe("SettingsStore model catalog", () => {
     expect(await store.listProviderModels("provider-1")).toEqual(snapshot.models);
     expect(await store.refreshProviderModels("provider-1")).toEqual(snapshot);
     expect(commands).toEqual([
-      { type: "list_provider_models", payload: { provider_instance_id: "provider-1" } },
-      { type: "refresh_provider_models", payload: { provider_instance_id: "provider-1" } },
+      { type: "list_provider_models", payload: { source: 'local', provider_instance_id: "provider-1" } },
+      { type: "refresh_provider_models", payload: { source: 'local', provider_instance_id: "provider-1" } },
     ]);
   });
 });
@@ -305,7 +305,7 @@ describe("SettingsStore model writes", () => {
     expect(store.notice_message).toContain("28 个显式引用会话");
     expect(store.notice_message).toContain("默认模型需重选");
     expect(store.notice_message).toContain("辅助识图模型需重选");
-    expect(command).toHaveBeenCalledExactlyOnceWith({ type: "delete_provider", payload: { provider_instance_id: "provider-1" } });
+    expect(command).toHaveBeenCalledExactlyOnceWith({ type: "delete_provider", payload: { source: 'local', provider_instance_id: "provider-1" } });
   });
   it("rejects a save response that silently drops the requested continuation policy", async () => {
     const command = vi.fn(async () => ({ type: "update_provider", payload: modelProvider }));

@@ -704,3 +704,87 @@ mod tests {
         assert!(json.contains("\"tool_name\":\"create_issue\""));
     }
 }
+
+/// 经过 MIME、URI 与容量校验的 MCP Apps 资源。HTML 不进入模型或会话历史。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct McpUiResourceSummary {
+    #[serde(default)]
+    pub entries: Vec<crate::PluginUiEntry>,
+    pub uri: String,
+    pub name: String,
+    pub title: Option<String>,
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct McpUiResource {
+    pub uri: String,
+    pub html: String,
+    /// MCP 的 UI 配置；不含结果私有载荷或任意服务端 metadata。
+    pub ui: Option<McpUiResourceMeta>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ListMcpUiResourcesRequest {
+    pub target: McpServerTarget,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ListMcpUiResourcesResult {
+    pub resources: Vec<McpUiResourceSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ReadMcpUiResourceRequest {
+    pub target: McpServerTarget,
+    pub uri: String,
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ReadMcpUiResourceResult {
+    pub resource: McpUiResource,
+}
+
+// HTML 与 UI 私有数据不出现在 Command Debug 或诊断中。
+impl std::fmt::Debug for McpUiResource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpUiResource")
+            .field("uri", &self.uri)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for ReadMcpUiResourceResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReadMcpUiResourceResult")
+            .finish_non_exhaustive()
+    }
+}
+
+/// 标准资源 CSP 声明；页面容器必须逐项校验来源后再构造策略。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(rename_all = "camelCase")]
+pub struct McpUiCsp {
+    #[serde(default)]
+    pub connect_domains: Vec<String>,
+    #[serde(default)]
+    pub resource_domains: Vec<String>,
+    #[serde(default)]
+    pub frame_domains: Vec<String>,
+    #[serde(default)]
+    pub base_uri_domains: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(rename_all = "camelCase")]
+pub struct McpUiResourceMeta {
+    pub csp: Option<McpUiCsp>,
+    pub prefers_border: Option<bool>,
+}

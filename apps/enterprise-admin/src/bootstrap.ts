@@ -24,13 +24,17 @@ export function bootstrap() {
       if (isAxiosError(error) && !error.config?.signal?.aborted) {
         const result = failure(error);
         const authorization = error.config?.headers.get('Authorization');
-        if (
-          (result.code === 'TOKEN_INVALID' || result.code === 'ADMIN_REQUIRED') &&
-          typeof authorization === 'string' &&
-          authorization.startsWith('Bearer ')
-        ) {
-          // 迟到的旧 Token 失败不能清空另一身份；断网及普通业务错误不触发退出。
-          store.invalidateIdentity(authorization.slice(7), result.text);
+        if (typeof authorization === 'string' && authorization.startsWith('Bearer ')) {
+          const token = authorization.slice(7);
+          if (result.code === 'TOKEN_INVALID') {
+            store.invalidateIdentity(token, result.text);
+          } else if (
+            result.code === 'SCOPE_DENIED' &&
+            token === store.token &&
+            !error.config?.url?.startsWith('/api/auth/')
+          ) {
+            void store.verifyIdentity();
+          }
         }
       }
       // 让原调用方区分读取失败和写入结果不明，不在全局重复弹 Toast 或重试请求。

@@ -326,6 +326,7 @@ impl ObservationState {
     fn observe(&mut self, event: &RuntimeEvent) {
         use RuntimeEvent::*;
         let (session_id, application) = match event {
+            MessageCardsChanged { owner } => (Some(crate::message_card_owner(owner).0), false),
             RuntimeShuttingDown => (None, true),
             ConfigChanged => {
                 self.configuration = self.sequence;

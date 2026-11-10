@@ -80,7 +80,11 @@ impl AssistantRuntime {
         }
         let mode = prepared.model.context_management_mode();
         if let Some(journal) = session
-            .prepare_journal_for_mode(self.store.as_ref(), mode)
+            .prepare_journal_for_mode(
+                self.store.as_ref(),
+                mode,
+                self.model_factory.configuration_source() == crate::ModelSource::External,
+            )
             .await?
         {
             let (model_selection, reasoning_effort, server_history_key) = {

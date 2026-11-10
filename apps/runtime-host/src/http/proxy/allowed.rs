@@ -77,7 +77,16 @@ pub(super) fn allowed(request: &CommandRequest) -> bool {
         | PrepareCustomAgent(_)
         | ListSkills(_)
         | GetSkillDetail(_)
-        | ListMcpServerOptions(_) => true,
+        | ListMcpServerOptions(_)
+        | ListMcpUiResources(_)
+        | ListUiApps
+        | ReadUiApp(_)
+        | UiTool(_)
+        | ListMessageCards(_)
+        | MountMessageCard(_)
+        | ReleaseMessageCard(_)
+        | SaveMessageCardSnapshot(_)
+        | ReadMcpUiResource(_) => true,
         SubmitSessionCommand(request) => matches!(
             request.command,
             SessionCommand::AgentShellSwitch { .. }

@@ -57,6 +57,7 @@ use crate::{
 };
 
 mod adapter;
+mod card;
 mod child_task;
 mod context;
 mod conversation;
@@ -135,6 +136,8 @@ impl InputIdentity {
 
 #[derive(Default)]
 struct State {
+    message_cards: BTreeMap<String, crate::StoredMessageCard>,
+    next_card_position: u64,
     feedback: BTreeMap<String, assistant_protocol::FeedbackRequestSnapshot>,
     default_agent_shell: Option<assistant_protocol::ShellKind>,
     providers: BTreeMap<assistant_protocol::ProviderInstanceId, crate::StoredProvider>,

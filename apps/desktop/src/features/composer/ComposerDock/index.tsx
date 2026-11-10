@@ -1,3 +1,4 @@
+import { AppComposerDraftReceiver } from '../../mcp-apps/AppComposerDraftReceiver';
 import { observer } from 'mobx-react-lite';
 import { useEffect, useRef, useState } from 'react';
 import type {
@@ -22,6 +23,7 @@ import { Dialog } from '../../../components/Dialog';
 import { draftKeyForWorkspace, type NewSessionDraft, type NewSessionDraftKey } from '../../../stores/NewSessionDraftStore';
 import { useRootStore } from '../../../stores/RootStoreContext';
 import { FeedbackPanel } from '../../feedback/FeedbackPanel';
+import { modelSelectionIssue, modelSelectionLabel } from '../../settings';
 import { ApprovalWorkspace, isAllowDecision } from './ApprovalWorkspace';
 import { ComposerNotice } from './ComposerNotice';
 import { AttachmentDetailDialog } from './AttachmentDetailDialog';
@@ -70,6 +72,7 @@ const SessionComposerDock = observer(function SessionComposerDock({
   const session_id = store.navigation.selected_session_id;
   const session_view = session_id ? store.projection.session_views.get(session_id) : undefined;
   const session = session_view?.session;
+  const active_run_id = session ? store.live_execution.activeRunId(session.session_id, session.active_run_id) : null;
   const feedback = session_id ? store.feedback.waiting(session_id) : undefined;
   const [draft, setDraft] = useState('');
   const [goal_armed, setGoalArmed] = useState(false);
@@ -189,12 +192,12 @@ const SessionComposerDock = observer(function SessionComposerDock({
   }
 
   const is_archived = session.lifecycle === 'archived';
-  const is_idle_for_model = !session.active_run_id && session_view.queue.items.length === 0;
+  const is_idle_for_model = !active_run_id && session_view.queue.items.length === 0;
   const selected_model = session_view.composer_capabilities.selected_model ?? null;
   const model_error = session_view.composer_capabilities.model_error;
   const model_required = selected_model === null || Boolean(model_error);
   const is_control_command = parseSessionCommand(draft).type !== 'not_command';
-  const queue_presentation = queuePresentation(session_view.queue, session.active_run_id);
+  const queue_presentation = queuePresentation(session_view.queue, active_run_id);
   const manual_compaction = session.active_compaction?.trigger.type === 'manual' ? session.active_compaction : null;
   const compaction_command_pending = store.pending_compaction_session_id === session.session_id;
   // 窗口占用由 Runtime 根据当前有效上下文计算，不能用旧 step 或累计用量取最大值。
@@ -210,7 +213,7 @@ const SessionComposerDock = observer(function SessionComposerDock({
       return;
     }
     if (
-      session!.active_run_id ||
+      active_run_id ||
       session!.queued_input_count > 0 ||
       session!.pending_approval_count > 0 ||
       session!.active_child_count > 0 ||
@@ -424,7 +427,7 @@ const SessionComposerDock = observer(function SessionComposerDock({
   const goal_stops_from_primary =
     !compaction_cancels_from_primary && !has_composer_content && goal?.state === 'running';
   const run_interrupts_from_primary =
-    !has_composer_content && !goal_stops_from_primary && Boolean(session.active_run_id);
+    !has_composer_content && !goal_stops_from_primary && Boolean(active_run_id);
   const primary_action_available =
     compaction_cancels_from_primary || has_composer_content || goal_stops_from_primary || run_interrupts_from_primary;
   const primary_action = resolvePrimaryAction(
@@ -459,90 +462,90 @@ const SessionComposerDock = observer(function SessionComposerDock({
 
   return (
     <div className={styles.dock}>
-      {!read_only && session_id && store.feedback.errors.has(session_id) && <ComposerNotice tone="error"
-        action={{ label: '重试', onClick: () => void store.feedback.refresh(session_id) }}>
-        无法读取问答状态：{store.feedback.errors.get(session_id)}
-      </ComposerNotice>}
-      {!read_only && session_view.work_plan && session_view.work_plan.items.length > 0 && (
-        <TodoSummary
-          on_open_change={(open) => updateActiveOverlay('todo', open)}
-          open={active_overlay === 'todo'}
-          running={Boolean(session.active_run_id)}
-          work_plan={session_view.work_plan}
-        />
-      )}
-      {model_error && (
-        <ComposerNotice
-          tone="error"
-          action={{
-            label: application?.model_settings.management?.read_only ? '查看模型' : '配置模型',
-            onClick: () => store.settings.open('models'),
-          }}
-        >
-          {model_error.code === 'configuration_unavailable'
-            ? '模型配置尚未就绪，请查看模型设置。'
-            : model_error.message}
-        </ComposerNotice>
-      )}
-      {store.interaction_error && (
-        <ComposerNotice tone="error" dismiss={{ label: '关闭错误提示', onClick: () => store.clearInteractionError() }}>
-          {store.interaction_error}
-        </ComposerNotice>
-      )}
-      {store.session_notice?.session_id === session.session_id && (
-        <ComposerNotice
-          tone={store.session_notice.tone}
-          action={
-            store.session_notice.action === 'retry_title'
-              ? { label: '重试', onClick: () => void store.generateSessionTitle(session.session_id) }
-              : undefined
-          }
-          dismiss={{ label: '关闭状态提示', onClick: () => store.clearSessionNotice(session.session_id) }}
-        >
-          {store.session_notice.message}
-        </ComposerNotice>
-      )}
-      {!read_only && session_view.title_generation?.trigger === 'manual' && (
-        <div className={styles.compaction_status} role="status">
-          <span className={styles.loading_ring} />
-          <strong>正在生成标题</strong>
-        </div>
-      )}
-      {!read_only && goal && (
-        <GoalStatusRow
-          goal={goal}
-          on_clear={() => store.clearGoal(session.session_id, goal.goal_id, goal.generation)}
-          on_open_change={(open) => setExpandedDrawer(open ? 'goal' : null)}
-          on_resume={() => store.resumeGoal(session.session_id, goal.goal_id, goal.generation)}
-          on_stop={() => store.stopGoal(session.session_id, goal.goal_id, goal.generation)}
-          open={expanded_drawer === 'goal'}
-          pending={store.composer_pending || is_archived}
-        />
-      )}
-      {approval && approval_minimized && (
-        <button className={styles.approval_restore} onClick={() => setApprovalMinimized(false)} type="button">
-          <Icon name="shield" size={16} />
-          <span>等待审批</span>
-          <b>{session_view.approvals.items.length}</b>
-          <Icon name="chevron-down" size={14} />
-        </button>
-      )}
-      {!read_only && queue_presentation.visible && (
-        <QueueDrawer
-          goal={goal}
-          open={expanded_drawer === 'queue'}
-          on_open_change={(open) => setExpandedDrawer(open ? 'queue' : null)}
-          queue={session_view.queue}
-          presentation={queue_presentation}
-          session_id={session.session_id}
-        />
-      )}
-      {!read_only && session.active_compaction && (
-        <div className={styles.compaction_status} role="status">
-          <span className={styles.loading_ring} />
-          <strong>{compactionStatusLabel(session.active_compaction.trigger)}</strong>
-        </div>
-      )}
+      <div className={styles.composer_top}>
+        {!read_only && session_id && store.feedback.errors.has(session_id) && <ComposerNotice tone="error"
+          action={{ label: '重试', onClick: () => void store.feedback.refresh(session_id) }}>
+          无法读取问答状态：{store.feedback.errors.get(session_id)}
+        </ComposerNotice>}
+        {!read_only && session_view.work_plan && session_view.work_plan.items.length > 0 && (
+          <TodoSummary
+            on_open_change={(open) => updateActiveOverlay('todo', open)}
+            open={active_overlay === 'todo'}
+            running={Boolean(active_run_id)}
+            work_plan={session_view.work_plan}
+          />
+        )}
+        {model_error && (
+          <ComposerNotice
+            tone="error"
+            action={{
+              label: '配置模型',
+              onClick: () => store.settings.open('models'),
+            }}
+          >
+            {model_error.message}
+          </ComposerNotice>
+        )}
+        {store.interaction_error && (
+          <ComposerNotice tone="error" dismiss={{ label: '关闭错误提示', onClick: () => store.clearInteractionError() }}>
+            {store.interaction_error}
+          </ComposerNotice>
+        )}
+        {store.session_notice?.session_id === session.session_id && (
+          <ComposerNotice
+            tone={store.session_notice.tone}
+            action={
+              store.session_notice.action === 'retry_title'
+                ? { label: '重试', onClick: () => void store.generateSessionTitle(session.session_id) }
+                : undefined
+            }
+            dismiss={{ label: '关闭状态提示', onClick: () => store.clearSessionNotice(session.session_id) }}
+          >
+            {store.session_notice.message}
+          </ComposerNotice>
+        )}
+        {!read_only && session_view.title_generation?.trigger === 'manual' && (
+          <div className={styles.compaction_status} role="status">
+            <span className={styles.loading_ring} />
+            <strong>正在生成标题</strong>
+          </div>
+        )}
+        {!read_only && goal && (
+          <GoalStatusRow
+            goal={goal}
+            on_clear={() => store.clearGoal(session.session_id, goal.goal_id, goal.generation)}
+            on_open_change={(open) => setExpandedDrawer(open ? 'goal' : null)}
+            on_resume={() => store.resumeGoal(session.session_id, goal.goal_id, goal.generation)}
+            on_stop={() => store.stopGoal(session.session_id, goal.goal_id, goal.generation)}
+            open={expanded_drawer === 'goal'}
+            pending={store.composer_pending || is_archived}
+          />
+        )}
+        {approval && approval_minimized && (
+          <button className={styles.approval_restore} onClick={() => setApprovalMinimized(false)} type="button">
+            <Icon name="shield" size={16} />
+            <span>等待审批</span>
+            <b>{session_view.approvals.items.length}</b>
+            <Icon name="chevron-down" size={14} />
+          </button>
+        )}
+        {!read_only && queue_presentation.visible && (
+          <QueueDrawer
+            goal={goal}
+            open={expanded_drawer === 'queue'}
+            on_open_change={(open) => setExpandedDrawer(open ? 'queue' : null)}
+            queue={session_view.queue}
+            presentation={queue_presentation}
+            session_id={session.session_id}
+          />
+        )}
+        {!read_only && session.active_compaction && (
+          <div className={styles.compaction_status} role="status">
+            <span className={styles.loading_ring} />
+            <strong>{compactionStatusLabel(session.active_compaction.trigger)}</strong>
+          </div>
+        )}
+      </div>
       {approval && !approval_minimized ? (
         <ApprovalWorkspace
           approval={approval}
@@ -661,6 +664,7 @@ const SessionComposerDock = observer(function SessionComposerDock({
               )}
             </div>
           )}
+          <AppComposerDraftReceiver text={draft} has_other_content={has_composer_content} on_fill={setDraft} />
           <textarea
             aria-label="输入消息"
             disabled={
@@ -693,6 +697,7 @@ const SessionComposerDock = observer(function SessionComposerDock({
             <Tooltip content="添加附件">
               <Button
                 aria-label="添加附件"
+                className={styles.attachment_button}
                 disabled={
                   store.composer_pending ||
                   attachment_flow.pending ||
@@ -729,7 +734,10 @@ const SessionComposerDock = observer(function SessionComposerDock({
               effort={session.reasoning_effort ?? null}
               effort_options={session_view.composer_capabilities.reasoning_effort_options}
               initial_category={model_initial_category}
-              model_display_name={selected_model ? modelDisplayName(application, selected_model) : '选择模型'}
+              model_display_name={composerModelLabel(
+                application, session.model_selection, selected_model,
+                Boolean(model_error),
+              )}
               selection={session.model_selection}
               providers={application?.providers ?? []}
               model_switch_disabled_reason={is_idle_for_model ? undefined : '存在活动运行或排队输入时不能切换模型'}
@@ -762,8 +770,8 @@ const SessionComposerDock = observer(function SessionComposerDock({
                   void submitDraft();
                 } else if (goal_stops_from_primary && goal) {
                   void store.stopGoal(session.session_id, goal.goal_id, goal.generation);
-                } else if (session.active_run_id) {
-                  void store.interruptRun(session.session_id, session.active_run_id);
+                } else if (active_run_id) {
+                  void store.interruptRun(session.session_id, active_run_id);
                 }
               }}
               type="button"
@@ -914,14 +922,16 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
     draft?.selected_agent?.source.type === 'center' ? draft.selected_agent.source.center_id : null,
     draft?.workspace_id, store.runtime_client]);
 
-  const draft_model = application?.model_settings.management?.read_only
-    ? (application?.model_settings.default_model ?? null)
-    : (draft?.model_selection ?? application?.model_settings.default_model ?? null);
+  const draft_model = draft?.model_selection ?? application?.model_settings.default_model ?? null;
+  const management = application?.model_settings.management;
+  const model_issue = management && draft_model
+    ? modelSelectionIssue(draft_model, application.providers, application.model_settings)
+    : management?.unavailable_reason;
   const effort_options = useDraftModelEfforts(draft_model, active_overlay === 'model');
 
   if (!draft) return null;
   const current_draft = draft;
-  const model_required = draft_model === null;
+  const model_required = draft_model === null || Boolean(model_issue);
   const can_send = Boolean(draft.text.trim() || draft.attachments.length || draft.quotes.length);
   const unresolved = draft.materialization_attempt !== null;
   const active_workspaces = application?.workspaces.filter((workspace) => workspace.lifecycle === 'active') ?? [];
@@ -1074,6 +1084,7 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
       store.showInteractionError('发送第一条消息后，可在会话中使用刷新指令');
       return;
     }
+    if (model_required) return;
     const selection = current_draft.selected_agent;
     const client = store.runtime_client;
     if (selection && client) {
@@ -1128,115 +1139,117 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
 
   return (
     <div className={`${styles.dock} ${styles.new_session_dock}`}>
-      {store.interaction_error && (
-        <ComposerNotice tone="error" dismiss={{ label: '关闭错误提示', onClick: () => store.clearInteractionError() }}>
-          {store.interaction_error}
-        </ComposerNotice>
-      )}
-      {unresolved && <ComposerNotice tone="warning">首次发送结果待确认。草稿和附件已冻结；重试会先查询原请求。</ComposerNotice>}
-      <Dialog
-        aria_label="草稿目标冲突"
-        backdrop_class_name={styles.draft_conflict_backdrop}
-        dialog_class_name={styles.draft_conflict_dialog}
-        on_close={() => setConflictTarget(null)}
-        open={conflict_target !== null}
-      >
-        <h3>该项目已有草稿</h3>
-        <p>当前内容不会覆盖已有草稿。你可以取消切换，或打开目标草稿；当前草稿会保留。</p>
-        <footer>
-          <Button onClick={() => setConflictTarget(null)} variant="outlined">取消</Button>
-          <Button onClick={() => {
-            const target = conflict_target;
-            setConflictTarget(null);
-            store.openNewSessionDraft(target || null);
-          }} variant="primary">打开目标草稿</Button>
-        </footer>
-      </Dialog>
-      {store.runtime_client && agent_install && <PluginOperationDialog key={`${agent_install.revision}:${agent_request.current}`} client={store.runtime_client}
-        intent={{ type: 'install', packages: agent_install.install_candidates }} on_close={() => { setAgentInstall(null); }}
-        on_complete={() => { store.showInteractionError('插件已安装。请关闭进度窗后再次发送，系统会重新核对依赖。'); }}
-        on_retry={() => void retryAgentInstall()} />}
-      <Dialog
-        aria_label="应用快捷入口"
-        backdrop_class_name={styles.draft_conflict_backdrop}
-        dialog_class_name={styles.draft_conflict_dialog}
-        on_close={() => setQuickActionConfirmation(null)}
-        open={quick_action_confirmation !== null}
-      >
-        <h3>应用「{quick_action_confirmation?.action.label}」？</h3>
-        <p>{quick_action_confirmation?.changes.join('；')}。当前附件和已有文字会保留。</p>
-        <footer>
-          <Button onClick={() => setQuickActionConfirmation(null)} variant="outlined">取消</Button>
-          <Button onClick={() => {
-            const pending = quick_action_confirmation;
-            if (pending) applyQuickAction(pending.action, pending.resolved, pending.owner);
-          }} variant="primary">确认应用</Button>
-        </footer>
-      </Dialog>
-      <div className={styles.draft_intro}>
-        <h1>今天想完成什么？</h1>
-        <p>选择项目，或直接描述你想完成的任务。</p>
-        <div className={styles.draft_quick_actions} aria-label="新会话快捷入口">
-          {QUICK_ACTIONS.map((action) => <button disabled={quick_actions_disabled} key={action.id}
-            onClick={() => void selectQuickAction(action)} type="button">
-            <Icon name={action.icon} size={17} />{action.label}
-          </button>)}
-        </div>
-      </div>
-      {draft.selected_agent && agent_preparing && <ComposerNotice tone="neutral">正在检查智能体依赖…</ComposerNotice>}
-      {draft.selected_agent && agent_preparation && agent_preparation.dependencies.some((item) => agentDependencyBlocksSession(item.status)) &&
-        <ComposerNotice tone="warning">
-          <div className={styles.agent_dependencies}>
-            <span>智能体依赖待处理：{agent_preparation.dependencies.filter((item) => agentDependencyBlocksSession(item.status)).map((item) => `${item.kind} ${item.reference.name}（${agentDependencyLabel(item.status)}）`).join('、')}</span>
-            <div className={styles.agent_dependency_actions}>
-              {!store.remote_device && agent_preparation.install_candidates.length > 0 && <Button onClick={() => setAgentInstall(agent_preparation)} size="small" variant="text">下载缺少的插件</Button>}
-              {!store.remote_device && <Button onClick={() => store.settings.open('plugins')} size="small" variant="text">管理插件</Button>}
-              <Button disabled={agent_preparing} onClick={() => void retryAgentInstall()} size="small" variant="text">重新检查依赖</Button>
-            </div>
+      <div className={styles.composer_top}>
+        {store.interaction_error && (
+          <ComposerNotice tone="error" dismiss={{ label: '关闭错误提示', onClick: () => store.clearInteractionError() }}>
+            {store.interaction_error}
+          </ComposerNotice>
+        )}
+        {unresolved && <ComposerNotice tone="warning">首次发送结果待确认。草稿和附件已冻结；重试会先查询原请求。</ComposerNotice>}
+        <Dialog
+          aria_label="草稿目标冲突"
+          backdrop_class_name={styles.draft_conflict_backdrop}
+          dialog_class_name={styles.draft_conflict_dialog}
+          on_close={() => setConflictTarget(null)}
+          open={conflict_target !== null}
+        >
+          <h3>该项目已有草稿</h3>
+          <p>当前内容不会覆盖已有草稿。你可以取消切换，或打开目标草稿；当前草稿会保留。</p>
+          <footer>
+            <Button onClick={() => setConflictTarget(null)} variant="outlined">取消</Button>
+            <Button onClick={() => {
+              const target = conflict_target;
+              setConflictTarget(null);
+              store.openNewSessionDraft(target || null);
+            }} variant="primary">打开目标草稿</Button>
+          </footer>
+        </Dialog>
+        {store.runtime_client && agent_install && <PluginOperationDialog key={`${agent_install.revision}:${agent_request.current}`} client={store.runtime_client}
+          intent={{ type: 'install', packages: agent_install.install_candidates }} on_close={() => { setAgentInstall(null); }}
+          on_complete={() => { store.showInteractionError('插件已安装。请关闭进度窗后再次发送，系统会重新核对依赖。'); }}
+          on_retry={() => void retryAgentInstall()} />}
+        <Dialog
+          aria_label="应用快捷入口"
+          backdrop_class_name={styles.draft_conflict_backdrop}
+          dialog_class_name={styles.draft_conflict_dialog}
+          on_close={() => setQuickActionConfirmation(null)}
+          open={quick_action_confirmation !== null}
+        >
+          <h3>应用「{quick_action_confirmation?.action.label}」？</h3>
+          <p>{quick_action_confirmation?.changes.join('；')}。当前附件和已有文字会保留。</p>
+          <footer>
+            <Button onClick={() => setQuickActionConfirmation(null)} variant="outlined">取消</Button>
+            <Button onClick={() => {
+              const pending = quick_action_confirmation;
+              if (pending) applyQuickAction(pending.action, pending.resolved, pending.owner);
+            }} variant="primary">确认应用</Button>
+          </footer>
+        </Dialog>
+        <div className={styles.draft_intro}>
+          <h1>今天想完成什么？</h1>
+          <p>选择项目，或直接描述你想完成的任务。</p>
+          <div className={styles.draft_quick_actions} aria-label="新会话快捷入口">
+            {QUICK_ACTIONS.map((action) => <button disabled={quick_actions_disabled} key={action.id}
+              onClick={() => void selectQuickAction(action)} type="button">
+              <Icon name={action.icon} size={17} />{action.label}
+            </button>)}
           </div>
-        </ComposerNotice>}
-      {draft.selected_agent && !agent_preparing && !agent_preparation &&
-        <ComposerNotice tone="warning" action={{ label: '重新检查依赖', onClick: () => void retryAgentInstall() }}>暂未取得智能体依赖状态。</ComposerNotice>}
-      <section aria-label="新会话项目选项" className={`${styles.secondary_drawer} ${styles.draft_context_drawer}`}>
-        <DevicePicker disabled={quick_actions_disabled} />
-        <WorkspacePicker
-            disabled={quick_actions_disabled}
-            has_draft={(workspace_id) => store.new_session_drafts.hasDraft(draftKeyForWorkspace(workspace_id))
-              && draft_key !== draftKeyForWorkspace(workspace_id)}
-            on_create={() => store.addWorkspace()}
-            on_open_change={(open) => { setWorkspacePickerOpen(open); if (open) setAgentPickerOpen(false); }}
-            on_select={(workspace_id) => {
-              if (!store.moveNewSessionDraft(draft_key, workspace_id, attachment_flow.pending))
-                setConflictTarget(workspace_id ?? '');
+        </div>
+        {draft.selected_agent && agent_preparing && <ComposerNotice tone="neutral">正在检查智能体依赖…</ComposerNotice>}
+        {draft.selected_agent && agent_preparation && agent_preparation.dependencies.some((item) => agentDependencyBlocksSession(item.status)) &&
+          <ComposerNotice tone="warning">
+            <div className={styles.agent_dependencies}>
+              <span>智能体依赖待处理：{agent_preparation.dependencies.filter((item) => agentDependencyBlocksSession(item.status)).map((item) => `${item.kind} ${item.reference.name}（${agentDependencyLabel(item.status)}）`).join('、')}</span>
+              <div className={styles.agent_dependency_actions}>
+                {!store.remote_device && agent_preparation.install_candidates.length > 0 && <Button onClick={() => setAgentInstall(agent_preparation)} size="small" variant="text">下载缺少的插件</Button>}
+                {!store.remote_device && <Button onClick={() => store.settings.open('plugins')} size="small" variant="text">管理插件</Button>}
+                <Button disabled={agent_preparing} onClick={() => void retryAgentInstall()} size="small" variant="text">重新检查依赖</Button>
+              </div>
+            </div>
+          </ComposerNotice>}
+        {draft.selected_agent && !agent_preparing && !agent_preparation &&
+          <ComposerNotice tone="warning" action={{ label: '重新检查依赖', onClick: () => void retryAgentInstall() }}>暂未取得智能体依赖状态。</ComposerNotice>}
+        <section aria-label="新会话项目选项" className={`${styles.secondary_drawer} ${styles.draft_context_drawer}`}>
+          <DevicePicker disabled={quick_actions_disabled} />
+          <WorkspacePicker
+              disabled={quick_actions_disabled}
+              has_draft={(workspace_id) => store.new_session_drafts.hasDraft(draftKeyForWorkspace(workspace_id))
+                && draft_key !== draftKeyForWorkspace(workspace_id)}
+              on_create={() => store.addWorkspace()}
+              on_open_change={(open) => { setWorkspacePickerOpen(open); if (open) setAgentPickerOpen(false); }}
+              on_select={(workspace_id) => {
+                if (!store.moveNewSessionDraft(draft_key, workspace_id, attachment_flow.pending))
+                  setConflictTarget(workspace_id ?? '');
+              }}
+              open={workspace_picker_open}
+              selected_workspace_id={draft.workspace_id}
+              workspaces={active_workspaces}
+          />
+          <ContextPicker
+            action_icon="settings" action_label="管理智能体" dialog_label="选择智能体"
+            disabled={quick_actions_disabled} icon="bot" label="智能体"
+            empty_text={agent_loading ? '正在读取智能体…' : undefined}
+            notice={agent_center_unavailable ? '企业目录暂不可读取，当前仅显示最后一次有效结果。' : undefined}
+            on_action={store.remote_device ? undefined : () => store.settings.open('agents')}
+            on_open_change={(open) => { setAgentPickerOpen(open); if (open) setWorkspacePickerOpen(false); }}
+            on_select={(value) => {
+              const agent = agent_options.find((item) => agentOptionValue({ name: item.config.name, source: item.source }) === value);
+              if (value === null || agent) store.new_session_drafts.updateSelectedAgent(draft_key,
+                agent ? { name: agent.config.name, source: agent.source } : null);
             }}
-            open={workspace_picker_open}
-            selected_workspace_id={draft.workspace_id}
-            workspaces={active_workspaces}
-        />
-        <ContextPicker
-          action_icon="settings" action_label="管理智能体" dialog_label="选择智能体"
-          disabled={quick_actions_disabled} icon="bot" label="智能体"
-          empty_text={agent_loading ? '正在读取智能体…' : undefined}
-          notice={agent_center_unavailable ? '企业目录暂不可读取，当前仅显示最后一次有效结果。' : undefined}
-          on_action={store.remote_device ? undefined : () => store.settings.open('agents')}
-          on_open_change={(open) => { setAgentPickerOpen(open); if (open) setWorkspacePickerOpen(false); }}
-          on_select={(value) => {
-            const agent = agent_options.find((item) => agentOptionValue({ name: item.config.name, source: item.source }) === value);
-            if (value === null || agent) store.new_session_drafts.updateSelectedAgent(draft_key,
-              agent ? { name: agent.config.name, source: agent.source } : null);
-          }}
-          open={agent_picker_open}
-          options={agent_options.map((agent) => ({
-            value: agentOptionValue({ name: agent.config.name, source: agent.source }),
-            label: agent.config.name,
-            hints: [agent.source.type === 'center' ? '企业' : '个人'],
-            search_text: `${agent.config.name} ${agent.config.description}`,
-          }))}
-          selected={draft.selected_agent ? { value: agentOptionValue(draft.selected_agent),
-            label: draft.selected_agent.name, search_text: draft.selected_agent.name } : null}
-          trigger_label="选择智能体"
-        />
-      </section>
+            open={agent_picker_open}
+            options={agent_options.map((agent) => ({
+              value: agentOptionValue({ name: agent.config.name, source: agent.source }),
+              label: agent.config.name,
+              hints: [agent.source.type === 'center' ? '企业' : '个人'],
+              search_text: `${agent.config.name} ${agent.config.description}`,
+            }))}
+            selected={draft.selected_agent ? { value: agentOptionValue(draft.selected_agent),
+              label: draft.selected_agent.name, search_text: draft.selected_agent.name } : null}
+            trigger_label="选择智能体"
+          />
+        </section>
+      </div>
       <section className={styles.composer}>
         <SlashCommandMenu
           active_index={slash_active_index}
@@ -1282,6 +1295,7 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
             }}
           />
         )}
+        {model_issue && <ComposerNotice tone="error">{model_issue}</ComposerNotice>}
         <ComposerAttachmentContext
           attachments={attachment_flow.attachments}
           on_remove={attachment_flow.remove}
@@ -1334,7 +1348,8 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
             )}
           </div>
         )}
-        <textarea
+        <AppComposerDraftReceiver text={draft.text} has_other_content={draft.attachments.length > 0 || draft.quotes.length > 0} on_fill={(text) => drafts.updateText(draft_key,text)} />
+          <textarea
           aria-label="输入消息"
           disabled={
             model_required ||
@@ -1365,6 +1380,7 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
           <Tooltip content="添加附件">
             <Button
               aria-label="添加附件"
+              className={styles.attachment_button}
               disabled={store.composer_pending || attachment_flow.pending || unresolved}
               iconOnly
               onClick={() => void attachment_flow.choose()}
@@ -1396,7 +1412,7 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
             effort={draft.reasoning_effort}
             effort_options={effort_options}
             initial_category={null}
-            model_display_name={draft_model ? modelDisplayName(application, draft_model) : '选择模型'}
+            model_display_name={composerModelLabel(application, draft.model_selection, draft_model, Boolean(model_issue))}
             selection={draft.model_selection}
             providers={application?.providers ?? []}
             on_effort_change={(effort) => {
@@ -1664,12 +1680,18 @@ function resizeTextarea(textarea: HTMLTextAreaElement | null) {
   textarea.style.height = `${Math.min(line_height * 8, Math.max(line_height * 2, textarea.scrollHeight))}px`;
 }
 
-function modelDisplayName(
+function composerModelLabel(
   application: ReturnType<typeof useRootStore>['projection']['application'],
-  selection: import('@ez-assistant/protocol').ModelSelection,
+  explicit: import('@ez-assistant/protocol').ModelSelection | null,
+  effective: import('@ez-assistant/protocol').ModelSelection | null,
+  unavailable: boolean,
 ): string {
-  const provider = application?.providers.find((item) => item.provider_instance_id === selection.provider_instance_id);
-  return `${provider?.connection.display_name ?? '服务商已删除'} / ${selection.model_id}`;
+  const enterprise = Boolean(application?.model_settings.management);
+  const selection = explicit ?? effective;
+  const label = selection ? modelSelectionLabel(selection, application?.providers ?? [], enterprise && Boolean(explicit)) : '';
+  const follow = enterprise && !explicit;
+  const description = follow ? ['跟随组织默认', label].filter(Boolean).join(' · ') : label || '选择模型';
+  return unavailable ? `${description}（不可用）` : description;
 }
 
 function attachmentStateLabel(attachment: ComposerAttachment): string {

@@ -27,6 +27,7 @@ export class HostDeviceState {
 }
 
 export class HostDeviceSummary {
+  @ApiProperty({ format: 'uuid' }) organization_id!: string;
   @ApiPropertyOptional({ description: '管理员列表中的当前授权人数' }) user_count?: number;
   @ApiProperty({ format: 'uuid' }) id!: string;
   @ApiProperty({ format: 'uuid' }) installation_id!: string;

@@ -62,6 +62,18 @@ pub(super) async fn authorize_page(
     }
 }
 
+/// 沙箱只承载固定静态代码，Cookie/Bearer 不得触发身份绑定或改变响应。
+/// 保留真实 TCP、Host、远程访问开关等网络边界，绝不取得用户 ReadyServices。
+pub(super) async fn authorize_sandbox(
+    State(state): State<HttpState>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    request.headers_mut().remove(AUTHORIZATION);
+    request.headers_mut().remove(axum::http::header::COOKIE);
+    authorize_page(State(state), request, next).await
+}
+
 /// 所有 API 的最外层：包括错误响应在内统一补充 CORS，并在业务鉴权前结束合法预检。
 /// 这里允许缺少登录；是否必须登录由路由组的 `require_login` 决定。
 pub(super) async fn authorize(
@@ -169,9 +181,9 @@ pub(super) async fn reject_enterprise_bootstrap(
     next.run(request).await
 }
 
-/// 复核后把更新的 permit 交给后续处理；Host 管理身份不持有 Center 登录。
+/// 绑定本地企业身份的撤销域；中心在线核验由保活与新凭证签发负责。
 /// 退出不经过此层，确保中心离线或凭据失效时仍能在本机结束任务与登录。
-pub(super) async fn verify_enterprise(
+pub(super) async fn bind_enterprise_access(
     State(state): State<HttpState>,
     Extension(mut permit): Extension<AccessPermit>,
     mut request: Request,
@@ -180,11 +192,7 @@ pub(super) async fn verify_enterprise(
     let verification = request_phase(RequestPhase::EnterpriseVerification);
     if state.access.center().is_some()
         && !permit.native
-        && let Err(error) = state
-            .access
-            .credentials
-            .verify_enterprise(&mut permit)
-            .await
+        && let Err(error) = state.access.credentials.bind_enterprise_access(&mut permit)
     {
         return super::login::access_error(error);
     }
@@ -368,13 +376,19 @@ pub(super) fn authorize_request(
             .map(|session| AccessPermit::new(false, Some(session), connections.clone()))
     });
     // 登录页允许携带已过期 Cookie 重新输入密码；显式 Bearer 无效则拒绝。
-    if bearer.is_some() && permit.is_none() {
+    if bearer.is_some()
+        && permit.is_none()
+        && request.uri().path() != super::login::ORGANIZATION_SWITCH_PATH
+    {
         return Err(HttpError::unauthorized());
     }
     Ok((origin, permit))
 }
 
-fn session_cookie<'a>(headers: &'a HeaderMap, name: &str) -> Result<Option<&'a str>, HttpError> {
+pub(super) fn session_cookie<'a>(
+    headers: &'a HeaderMap,
+    name: &str,
+) -> Result<Option<&'a str>, HttpError> {
     let mut found = None;
     for header in headers.get_all(COOKIE) {
         let header = header.to_str().map_err(|_| HttpError::unauthorized())?;

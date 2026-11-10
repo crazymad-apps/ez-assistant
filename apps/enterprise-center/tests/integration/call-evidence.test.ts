@@ -1,3 +1,4 @@
+import { singleModelPolicy, defaultHistoryModel } from '../support/model-policy.js';
 import { createServer } from 'node:http';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
@@ -177,7 +178,7 @@ it.skipIf(!process.env.CENTER_F03_SCENARIO)(
         input_token_count_support: 'supported',
       };
       await api('model-configuration', 'PUT', { ...selected, origin: 'manual', parameters });
-      await api('model-settings', 'PUT', { default_model: selected });
+      await api('model-settings', 'PUT', singleModelPolicy(await api('model-settings'), selected));
       await api(
         'users',
         'POST',
@@ -190,7 +191,7 @@ it.skipIf(!process.env.CENTER_F03_SCENARIO)(
       const proxy = app.get(ModelProxy);
       const call = async (scenario: string, operation = 'responses') => {
         mode = scenario;
-        const configuration = await api('runtime/model-configuration');
+        const configuration = defaultHistoryModel(await api('runtime/model-configuration'));
         const response = await fetch(`${origin}/api/llm/providers/${provider.provider_instance_id}/v1/${operation}`, {
           method: 'POST',
           headers: {

@@ -762,7 +762,7 @@ describe("ComposerDock", () => {
     await user.keyboard("{Enter}");
     await user.click(await screen.findByRole("menuitem", { name: /测试服务商/ }));
     await user.click(await screen.findByRole("menuitemradio", { name: /alternate/ }));
-    await waitFor(() => expect(set_model).toHaveBeenCalledWith("session-1", { provider_instance_id: "provider-1", model_id: "alternate" }));
+    await waitFor(() => expect(set_model).toHaveBeenCalledWith("session-1", { source: 'local' as const, provider_instance_id: "provider-1", model_id: "alternate" }));
     await waitFor(() => expect(screen.queryByRole("menuitemradio", { name: /alternate/ })).not.toBeInTheDocument());
 
     await user.type(input, "/mode");
@@ -1175,7 +1175,7 @@ describe("ComposerDock", () => {
     const store = renderComposer({
       composer_capabilities: {
         model_error: null,
-      selected_model: { provider_instance_id: "provider-1", model_id: "fixture" },
+      selected_model: { source: 'local' as const, provider_instance_id: "provider-1", model_id: "fixture" },
         reasoning_effort_options: [
           { key: "low", label: "较少" },
           { key: "max", label: "最大" },
@@ -1274,7 +1274,7 @@ describe("ComposerDock", () => {
     expect(screen.getByRole("menuitemradio", { name: "默认模型" })).toHaveAttribute("aria-checked", "true");
     expect(screen.getByRole("menuitemradio", { name: /alternate/ })).toHaveAttribute("aria-checked", "false");
     await user.click(await screen.findByRole("menuitemradio", { name: /alternate/ }));
-    expect(set_model).toHaveBeenCalledWith("session-1", { provider_instance_id: "provider-1", model_id: "alternate" });
+    expect(set_model).toHaveBeenCalledWith("session-1", { source: 'local' as const, provider_instance_id: "provider-1", model_id: "alternate" });
   });
 
   it("repositions the settings submenu from measured DOM dimensions", async () => {
@@ -1303,7 +1303,7 @@ describe("ComposerDock", () => {
 
     viewport_height = 700;
     fireEvent(window, new Event("resize"));
-    await waitFor(() => expect(secondary).toHaveStyle({ top: "-6px" }));
+    await waitFor(() => expect(secondary).toHaveStyle({ top: "0px" }));
   });
 
   it("arms /goal once, ignores Escape and preserves the tag after a failed submit", async () => {
@@ -1311,7 +1311,7 @@ describe("ComposerDock", () => {
     const store = renderComposer({
       composer_capabilities: {
         model_error: null,
-      selected_model: { provider_instance_id: "provider-1", model_id: "fixture" },
+      selected_model: { source: 'local' as const, provider_instance_id: "provider-1", model_id: "fixture" },
         reasoning_effort_options: [],
         image_handling: "unavailable",
         goal_supported: false,
@@ -1469,7 +1469,7 @@ describe("ComposerDock", () => {
       goal: goalSnapshot("running"),
       composer_capabilities: {
         model_error: null,
-      selected_model: { provider_instance_id: "provider-1", model_id: "fixture" },
+      selected_model: { source: 'local' as const, provider_instance_id: "provider-1", model_id: "fixture" },
         reasoning_effort_options: [],
         image_handling: "unavailable",
         goal_supported: true,
@@ -1646,7 +1646,7 @@ function sessionView(overrides: Readonly<{
     conversation_generation: 1,
     composer_capabilities: overrides.composer_capabilities ?? {
       model_error: null,
-      selected_model: { provider_instance_id: "provider-1", model_id: "fixture" },
+      selected_model: { source: 'local' as const, provider_instance_id: "provider-1", model_id: "fixture" },
       reasoning_effort_options: [],
       image_handling: "unavailable",
       goal_supported: false,
@@ -1708,7 +1708,7 @@ function sessionSummary(): SessionSummary {
   return {
     session_id: "session-1",
     title: "交互测试",
-    model_selection: { provider_instance_id: "provider-1", model_id: "fixture" },
+    model_selection: { source: 'local' as const, provider_instance_id: "provider-1", model_id: "fixture" },
     lifecycle: "active",
     role: "standard",
     current_variant: "build",

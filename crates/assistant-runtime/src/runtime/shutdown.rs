@@ -1,9 +1,10 @@
 //! Runtime 关闭编排：停止准入、取消任务、有界结算并释放 Store。
 
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use assistant_protocol::{
-    RuntimeEvent, RuntimeLifecycle, ShutdownRuntimeRequest, ShutdownRuntimeResult,
+    ApprovalId, ChildTaskId, GoalId, InputId, RunId, RuntimeEvent, RuntimeLifecycle, SessionId,
+    ShutdownRuntimeRequest, ShutdownRuntimeResult, StopGoalRequest,
 };
 use tokio::time::timeout;
 
@@ -14,7 +15,208 @@ use crate::{
     session::SessionController,
 };
 
+/// Runtime 工作快照仅用于判断关闭影响，任务事实继续由各领域 owner 持有。
+#[derive(Default)]
+pub struct ShutdownWork {
+    tasks: BTreeSet<ShutdownTask>,
+    approvals: BTreeSet<ApprovalId>,
+    queued: BTreeSet<InputId>,
+}
+
+#[derive(Eq, Ord, PartialEq, PartialOrd)]
+enum ShutdownTask {
+    Run(RunId, u32),
+    Child(ChildTaskId),
+    Goal(GoalId, u64),
+    Command(InputId),
+    Compaction(SessionId, String),
+    Title(SessionId, String),
+    AppCall(String, String),
+}
+
+impl ShutdownWork {
+    pub fn counts(&self) -> (usize, usize, usize) {
+        (self.tasks.len(), self.approvals.len(), self.queued.len())
+    }
+
+    fn covered_by(&self, confirmed: &Self) -> bool {
+        self.tasks.is_subset(&confirmed.tasks)
+            && self.approvals.is_subset(&confirmed.approvals)
+            && self.queued.is_subset(&confirmed.queued)
+    }
+}
+
 impl AssistantRuntime {
+    pub async fn preview_shutdown(&self) -> RuntimeResult<ShutdownWork> {
+        let _operation = self.operation_gate.write().await;
+        self.ensure_running()?;
+        let sessions = self.shutdown_sessions()?;
+        let mut mutations = Vec::with_capacity(sessions.len());
+        for session in &sessions {
+            mutations.push(session.mutation().await);
+        }
+        self.shutdown_work(&sessions).await
+    }
+
+    /// 在同一个接纳边界比较实际工作并关闭入口。只完成的工作允许从快照中移除。
+    pub async fn begin_confirmed_shutdown(&self, confirmed: &ShutdownWork) -> RuntimeResult<bool> {
+        let _operation = self.operation_gate.write().await;
+        self.ensure_running()?;
+        let sessions = self.shutdown_sessions()?;
+        let mut mutations = Vec::with_capacity(sessions.len());
+        for session in &sessions {
+            mutations.push(session.mutation().await);
+        }
+        if !self.shutdown_work(&sessions).await?.covered_by(confirmed)
+            || !self
+                .approval_registry
+                .close_if_covered(&confirmed.approvals)?
+        {
+            return Ok(false);
+        }
+        self.begin_shutdown()?;
+        // 在释放队列领取的 Session 门禁前，阻止正在准备的输入和后续队列项启动。
+        self.root_cancellation.cancel();
+        Ok(true)
+    }
+
+    /// 与普通进程关闭共用资源关闭路径。超时、未结算或故障状态均不能作为交接成功。
+    pub async fn finish_confirmed_shutdown(&self) -> RuntimeResult<()> {
+        let _operation = self.operation_gate.write().await;
+        let lifecycle = self.lifecycle()?;
+        if lifecycle != RuntimeLifecycle::ShuttingDown {
+            return Err(RuntimeError::RuntimeNotRunning { lifecycle });
+        }
+        let sessions = self.shutdown_sessions()?;
+        for cancellation in self
+            .request_active_run_cancellation(sessions.clone())
+            .await?
+        {
+            cancellation.cancel();
+        }
+        if !self.tasks.wait(self.config.shutdown_timeout).await {
+            return Err(RuntimeError::InternalStateUnavailable {
+                component: "runtime work shutdown timed out",
+            });
+        }
+        for session in &sessions {
+            let state = session.lock_state()?;
+            if state.is_faulted
+                || state.tool_cleanup_unconfirmed
+                || state.active_run.is_some()
+                || state.executing_command.is_some()
+                || state.active_compaction.is_some()
+                || state.active_title_generation.is_some()
+                || state
+                    .journal
+                    .as_ref()
+                    .is_some_and(crate::journal::InMemoryJournal::has_pending)
+                || self.child_tasks.active_count_for_session(session.id())? != 0
+                || !self.approval_registry.list(session.id())?.is_empty()
+            {
+                return Err(RuntimeError::InternalStateUnavailable {
+                    component: "runtime work settlement",
+                });
+            }
+        }
+        for session in &sessions {
+            let goal = session.lock_state()?.goal.clone();
+            if let Some(goal) =
+                goal.filter(|goal| matches!(goal.state, crate::goal::GoalState::Running))
+            {
+                self.stop_goal_in_session(
+                    StopGoalRequest {
+                        session_id: session.id().clone(),
+                        goal_id: goal.id,
+                        expected_generation: goal.generation,
+                    },
+                    session,
+                )
+                .await?;
+            }
+        }
+        self.shutdown_mcp_with_timeout().await?;
+        self.shutdown_store_with_timeout().await?;
+        self.set_stopped()
+    }
+
+    async fn shutdown_work(
+        &self,
+        sessions: &[Arc<SessionController>],
+    ) -> RuntimeResult<ShutdownWork> {
+        let mut work = ShutdownWork {
+            queued: self
+                .store
+                .queued_input_ids()
+                .await
+                .map_err(|source| {
+                    RuntimeError::from_store("read queued work before shutdown", source)
+                })?
+                .into_iter()
+                .collect(),
+            ..ShutdownWork::default()
+        };
+        for session in sessions {
+            let state = session.lock_state()?;
+            if let Some(run) = &state.active_run {
+                let snapshot = state
+                    .runs
+                    .get(&run.run_id)
+                    .ok_or(RuntimeError::InternalStateUnavailable {
+                        component: "active run record",
+                    })?
+                    .snapshot();
+                work.queued.remove(&snapshot.input_id);
+                work.tasks
+                    .insert(ShutdownTask::Run(run.run_id.clone(), snapshot.attempt));
+            }
+            if let Some(goal) = &state.goal
+                && matches!(goal.state, crate::goal::GoalState::Running)
+            {
+                work.tasks
+                    .insert(ShutdownTask::Goal(goal.id.clone(), goal.generation));
+            }
+            if let Some(command) = &state.executing_command {
+                work.queued.remove(command);
+                work.tasks.insert(ShutdownTask::Command(command.clone()));
+            }
+            if let Some(compaction) = &state.active_compaction {
+                work.tasks.insert(ShutdownTask::Compaction(
+                    session.id().clone(),
+                    compaction.snapshot.compaction_id.clone(),
+                ));
+            }
+            if let Some(title) = &state.active_title_generation {
+                work.tasks.insert(ShutdownTask::Title(
+                    session.id().clone(),
+                    title.task_id.clone(),
+                ));
+            }
+            work.tasks.extend(
+                self.child_tasks
+                    .list_for_session(session.id())?
+                    .into_iter()
+                    .filter(|child| !child.status.is_terminal())
+                    .map(|child| ShutdownTask::Child(child.child_task_id)),
+            );
+            work.approvals.extend(
+                self.approval_registry
+                    .list(session.id())?
+                    .into_iter()
+                    .map(|approval| approval.approval_id),
+            );
+        }
+        work.tasks.extend(
+            self.ui_tools
+                .active_ids()?
+                .into_iter()
+                .map(|(instance, request)| ShutdownTask::AppCall(instance, request)),
+        );
+        work.approvals
+            .extend(self.approval_registry.app_approval_ids()?);
+        Ok(work)
+    }
+
     /// 与正在准备/接纳的业务操作串行后再检查任务，避免客户端到期时抢先关闭尚在接纳的工作。
     pub async fn request_shutdown_if_unused(
         &self,
@@ -63,14 +265,7 @@ impl AssistantRuntime {
 
         // Run 已停止或完成强制结算后才 retire MCP；这样已取得的调用 lease 有机会先归零，
         // Registry 关闭也不会与 Store shutdown 争抢工具可靠事实。
-        let mcp_result = tokio::time::timeout(
-            self.config.shutdown_timeout,
-            self.mcp_service.registry.shutdown(),
-        )
-        .await
-        .unwrap_or(Err(RuntimeError::InternalStateUnavailable {
-            component: "MCP shutdown timed out",
-        }));
+        let mcp_result = self.shutdown_mcp_with_timeout().await;
 
         // 即使强制结算失败，也必须尝试 flush/join Store；非终态 Run 会在下次启动时
         // 按持久事实恢复，不能因为前一步错误把 worker 永久留给当前 Runtime。
@@ -102,12 +297,27 @@ impl AssistantRuntime {
         if first_transition {
             self.publish(RuntimeEvent::RuntimeShuttingDown);
         }
+        self.shutdown_sessions()
+    }
+
+    fn shutdown_sessions(&self) -> RuntimeResult<Vec<Arc<SessionController>>> {
         self.sessions
             .read()
             .map_err(|_| RuntimeError::InternalStateUnavailable {
                 component: "session registry",
             })
             .map(|sessions| sessions.values().cloned().collect())
+    }
+
+    async fn shutdown_mcp_with_timeout(&self) -> RuntimeResult<()> {
+        timeout(
+            self.config.shutdown_timeout,
+            self.mcp_service.registry.shutdown(),
+        )
+        .await
+        .unwrap_or(Err(RuntimeError::InternalStateUnavailable {
+            component: "MCP shutdown timed out",
+        }))
     }
 
     async fn request_active_run_cancellation(

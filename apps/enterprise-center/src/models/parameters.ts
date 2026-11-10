@@ -2,6 +2,7 @@ import type { ModelParameters, Protocol, ProviderConnection, Support, TokenLimit
 import { supports, efforts, providerTypes, preferences } from '../contracts/models.js';
 import { fields, invalid } from '../validation.js';
 import { serverHistorySupport } from './history.js';
+export { uuid } from '../validation.js';
 
 const limits = [
   'context_window_tokens',
@@ -66,12 +67,6 @@ export function parsePublicOrigin(value: unknown): string {
     (input !== url.origin && input !== `${url.origin}/`)
   ) invalid();
   return url.origin;
-}
-
-export function uuid(value: unknown): string {
-  if (typeof value !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value))
-    invalid();
-  return value;
 }
 
 export function parseParameters(value: unknown, partial = false, base = emptyParameters()): ModelParameters {

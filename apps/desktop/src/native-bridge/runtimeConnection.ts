@@ -1,4 +1,4 @@
-import type { HostAccessCommand, HostAccessStatus, HostMode, RuntimeHostCapabilities } from "@ez-assistant/protocol";
+import type { HostAccessCommand, HostAccessStatus, HostMode, HostOrganizationSelection, HostOrganizationSwitchRequest, HostOrganizationSwitchResult, RuntimeHostCapabilities } from "@ez-assistant/protocol";
 import { invoke, type InvokeArgs, type InvokeOptions } from "@tauri-apps/api/core";
 import type { RuntimeBootstrap } from "./runtimeBootstrap";
 
@@ -13,9 +13,14 @@ export async function beginRuntimeConnection(): Promise<string> {
   binding_id = null;
   return invoke<string>("begin_runtime_connection");
 }
-export async function connectRuntimeTarget(binding: string, origin: string | null, password: string, remember: boolean, username = ""): Promise<{ bootstrap: RuntimeBootstrap; warning: string | null }> {
-  const result = await invoke<{ bootstrap: RuntimeBootstrap; warning: string | null }>("connect_runtime_target", { bindingId: binding, origin, password, remember, username });
-  return { ...result, bootstrap: { ...result.bootstrap, binding_id: binding, target_kind: origin === null ? "local" : "remote" } };
+export async function connectRuntimeTarget(
+  binding: string, origin: string | null, password: string, remember: boolean, username = "",
+  selection?: { selectionToken: string; organizationId: string },
+): Promise<{ bootstrap: RuntimeBootstrap | null; organization_selection?: HostOrganizationSelection | null; warning: string | null }> {
+  const result = await invoke<{ bootstrap: RuntimeBootstrap | null; organization_selection?: HostOrganizationSelection | null; warning: string | null }>(
+    "connect_runtime_target", { bindingId: binding, origin, password, remember, username, ...selection },
+  );
+  return { ...result, bootstrap: result.bootstrap && { ...result.bootstrap, binding_id: binding, target_kind: origin === null ? "local" : "remote" } };
 }
 export function activateRuntimeBinding(bootstrap: RuntimeBootstrap): void {
   binding_id = bootstrap.binding_id ?? null;
@@ -24,6 +29,15 @@ export function activateRuntimeBinding(bootstrap: RuntimeBootstrap): void {
 export async function refreshRuntimeConnection(bootstrap: RuntimeBootstrap): Promise<RuntimeBootstrap> {
   const result = await invoke<RuntimeBootstrap>("refresh_runtime_connection", { bindingId: bootstrap.binding_id });
   return { ...result, binding_id: bootstrap.binding_id, target_kind: bootstrap.target_kind };
+}
+export async function switchRuntimeOrganization(request: HostOrganizationSwitchRequest, source: RuntimeBootstrap) {
+  const reply = await invokeRuntime<{ result: HostOrganizationSwitchResult; bootstrap: RuntimeBootstrap | null; binding_id: string | null }>(
+    "switch_runtime_organization", { request }, undefined, source.binding_id ?? null,
+  );
+  return {
+    result: reply.result,
+    bootstrap: reply.bootstrap && reply.binding_id ? { ...reply.bootstrap, binding_id: reply.binding_id, target_kind: source.target_kind } : null,
+  };
 }
 export function rememberedRuntimePassword(origin: string): Promise<string | null> {
   return invoke("remembered_runtime_password", { origin });

@@ -3,9 +3,11 @@
 mod center_url;
 
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use toml_edit::{DocumentMut, value};
 
-pub(crate) const LAYOUT_VERSION: &str = "0.27.0";
+pub(crate) const LAYOUT_VERSION: &str = "0.33.0";
+pub(crate) const PREVIOUS_LAYOUT_VERSION: &str = "0.27.0";
 pub(crate) const FILE: &str = "host.toml";
 
 pub(crate) use assistant_protocol::HostMode;
@@ -16,6 +18,8 @@ pub(crate) struct HostConfiguration {
     pub(crate) version: String,
     pub(crate) mode: HostMode,
     pub(crate) enterprise: Option<EnterpriseConfiguration>,
+    #[serde(default)]
+    pub(crate) legacy_organizations: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -26,7 +30,10 @@ pub(crate) struct EnterpriseConfiguration {
 
 pub(crate) fn parse(contents: &str) -> Result<HostConfiguration, &'static str> {
     let config: HostConfiguration = toml::from_str(contents).map_err(|_| "Host 配置无效。")?;
-    if config.version != LAYOUT_VERSION {
+    if !matches!(
+        config.version.as_str(),
+        LAYOUT_VERSION | PREVIOUS_LAYOUT_VERSION
+    ) {
         return Err("Host 目录版本不受当前程序支持。");
     }
     if config.mode == HostMode::Enterprise && config.enterprise.is_none() {
@@ -34,22 +41,34 @@ pub(crate) fn parse(contents: &str) -> Result<HostConfiguration, &'static str> {
     }
     if let Some(enterprise) = &config.enterprise {
         center_url::validate(&enterprise.center_url)?;
-        if let Some(id) = &enterprise.center_id {
-            let bytes = id.as_bytes();
-            if bytes.len() != 36
-                || bytes.iter().enumerate().any(|(i, b)| {
-                    if matches!(i, 8 | 13 | 18 | 23) {
-                        *b != b'-'
-                    } else {
-                        !b.is_ascii_digit() && !(b'a'..=b'f').contains(b)
-                    }
-                })
-            {
-                return Err("中心身份必须是小写标准 UUID。");
-            }
+        if enterprise
+            .center_id
+            .as_deref()
+            .is_some_and(|id| !valid_identity(id))
+        {
+            return Err("中心身份必须是小写标准 UUID。");
         }
     }
+    if config
+        .legacy_organizations
+        .iter()
+        .any(|(center, org)| !valid_identity(center) || !valid_identity(org))
+    {
+        return Err("历史组织绑定必须使用小写标准 UUID。");
+    }
     Ok(config)
+}
+
+fn valid_identity(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    bytes.len() == 36
+        && bytes.iter().enumerate().all(|(i, b)| {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                *b == b'-'
+            } else {
+                b.is_ascii_digit() || (b'a'..=b'f').contains(b)
+            }
+        })
 }
 
 pub(crate) fn personal_document() -> DocumentMut {

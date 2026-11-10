@@ -1,4 +1,4 @@
-import { Fragment, type ReactNode, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import { Fragment, type CSSProperties, type ReactNode, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { Button } from '../Button';
 import { Icon } from '../Icon';
 import { AnchoredOverlay } from '../AnchoredOverlay';
@@ -13,6 +13,8 @@ export type SettingsCascadeOption = Readonly<{
 }>;
 
 export type SettingsCascadeCategory = Readonly<{
+  heading_before?: string;
+  accessible_description?: string;
   separator_before?: boolean;
   hide_title?: boolean;
   disabled_reason?: string;
@@ -56,11 +58,12 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
   const secondary_ref = useRef<HTMLDivElement>(null);
   const [active_category_index, setActiveCategoryIndex] = useState(0);
   const [secondary_category_id, setSecondaryCategoryId] = useState<string | null>(null);
-  const [active_option_index, setActiveOptionIndex] = useState(0);
+  const [active_option_index, setActiveOptionIndex] = useState(-1);
+  const keyboard_category_ref = useRef<string | null>(null);
   const [selecting, setSelecting] = useState(false);
   const selecting_ref = useRef(false);
   const [selection_error, setSelectionError] = useState<string | null>(null);
-  const [secondary_position, setSecondaryPosition] = useState<SecondaryPosition>({ side: 'right', top: -6 });
+  const [secondary_position, setSecondaryPosition] = useState<SecondaryPosition>({ side: 'right', top: 0, available_width: 0 });
   const interaction = useRef({ open: props.open, epoch: 0 });
   if (interaction.current.open !== props.open)
     interaction.current = { open: props.open, epoch: interaction.current.epoch + 1 };
@@ -77,6 +80,10 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
   const trigger_disabled = props.disabled || Boolean(props.disabled_reason);
 
   useEffect(() => {
+    if (secondary_category) focusRequestedOption(secondary_category.id);
+  }, [active_category_index, props.open, secondary_category]);
+
+  useEffect(() => {
     if (!props.open) return undefined;
     setSelectionError(null);
     const categories = latest.current.categories;
@@ -86,11 +93,14 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
     const initial_index = requested_index >= 0 ? requested_index : 0;
     const requested_category = categories[initial_index];
     const can_open_requested = requested_index >= 0 && !requested_category?.disabled_reason;
+    keyboard_category_ref.current = can_open_requested ? (requested_category?.id ?? null) : null;
     if (can_open_requested) requested_category?.on_open?.();
     setActiveCategoryIndex(initial_index);
     setSecondaryCategoryId(can_open_requested ? (requested_category?.id ?? null) : null);
-    setActiveOptionIndex(selectedOptionIndex(requested_category));
+    setActiveOptionIndex(can_open_requested ? selectedOptionIndex(requested_category) : -1);
+    const focus_epoch = interaction.current.epoch;
     const focus_frame = requestAnimationFrame(() => {
+      if (!latest.current.open || interaction.current.epoch !== focus_epoch) return;
       const selector = can_open_requested
         ? `[data-setting-option-index="${selectedOptionIndex(requested_category)}"]`
         : ':is([role="menuitem"], [role="menuitemradio"]):not(:disabled):not([aria-disabled="true"])';
@@ -113,11 +123,15 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
     let position_frame = 0;
 
     function updatePosition() {
+      const primary_bounds = measured_primary.getBoundingClientRect();
+      const secondary_bounds = measured_secondary.getBoundingClientRect();
       const next = calculateSecondaryPosition(
-        measured_primary.getBoundingClientRect(),
-        measured_secondary.getBoundingClientRect(),
+        primary_bounds,
+        secondary_bounds,
+        measured_primary.clientTop,
         window.innerWidth,
         window.innerHeight,
+        Number.parseFloat(getComputedStyle(measured_primary).getPropertyValue('--settings-option-min-width')) || 0,
       );
       setSecondaryPosition((current) => (positionsEqual(current, next) ? current : next));
     }
@@ -144,6 +158,7 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
   }, [props.open, secondary_category]);
 
   function closeAndRestoreFocus() {
+    keyboard_category_ref.current = null;
     interaction.current.epoch += 1;
     props.on_open_change(false);
     setSecondaryCategoryId(null);
@@ -155,21 +170,40 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
     });
   }
 
-  function openCategory(index: number) {
+  // 只有键盘明确进入二级时才转移焦点；异步目录和重复指针点击不能替用户进入选项。
+  function focusRequestedOption(category_id: string) {
+    if (!latest.current.open || keyboard_category_ref.current !== category_id) return;
+    const categories = latest.current.categories;
+    const index = categories.findIndex((category) => category.id === category_id);
+    const category_button = overlay_ref.current?.querySelector(`[data-setting-category-index="${index}"]`);
+    if (category_button !== document.activeElement) {
+      keyboard_category_ref.current = null;
+      return;
+    }
+    const option_index = selectedOptionIndex(categories[index]);
+    const option = overlay_ref.current?.querySelector<HTMLElement>(`[data-setting-option-index="${option_index}"]`);
+    if (option) {
+      keyboard_category_ref.current = null;
+      option.focus();
+    }
+  }
+
+  function openCategory(index: number, keyboard: boolean) {
     const next = props.categories[index];
     if (!next || next.disabled_reason) return;
+    keyboard_category_ref.current = keyboard ? next.id : null;
     setActiveCategoryIndex(index);
     if (secondary_category_id !== next.id) next.on_open?.();
     interaction.current.epoch += 1;
     setSecondaryCategoryId(next.id);
-    const option_index = selectedOptionIndex(next);
-    setActiveOptionIndex(option_index);
-    requestAnimationFrame(() => {
-      overlay_ref.current?.querySelector<HTMLElement>(`[data-setting-option-index="${option_index}"]`)?.focus();
-    });
+    setActiveOptionIndex(-1);
+    focusCategory(index);
+    if (keyboard) requestAnimationFrame(() => focusRequestedOption(next.id));
   }
 
   function returnToPrimary() {
+    keyboard_category_ref.current = null;
+    setActiveOptionIndex(-1);
     setSecondaryCategoryId(null);
     requestAnimationFrame(() => focusCategory(active_category_index));
   }
@@ -211,7 +245,7 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
     }
     if (event.key === 'ArrowRight' || event.key === 'Enter') {
       event.preventDefault();
-      openCategory(index);
+      openCategory(index, true);
     }
   }
 
@@ -223,11 +257,13 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
       return;
     }
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'Home' || event.key === 'End') {
+      const enabled = options.flatMap((option, option_index) => option.disabled ? [] : [option_index]);
+      if (!enabled.length) return;
       event.preventDefault();
-      let next = event.key === 'Home' ? 0 : options.length - 1;
+      let next = event.key === 'Home' ? enabled[0] : enabled[enabled.length - 1];
       if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
         const direction = event.key === 'ArrowDown' ? 1 : -1;
-        next = (index + direction + options.length) % options.length;
+        next = enabled[(enabled.indexOf(index) + direction + enabled.length) % enabled.length];
       }
       setActiveOptionIndex(next);
       overlay_ref.current?.querySelector<HTMLElement>(`[data-setting-option-index="${next}"]`)?.focus();
@@ -267,6 +303,7 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
     <button
       aria-controls={props.open ? menu_id : undefined}
       aria-disabled={trigger_disabled || undefined}
+      aria-description={props.trigger_content}
       aria-expanded={props.open}
       aria-haspopup="menu"
       aria-label={props.aria_label}
@@ -283,6 +320,7 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
         }
       }}
       ref={trigger_ref}
+      title={props.disabled_reason ? undefined : props.trigger_content}
       type="button"
     >
       <span>{props.trigger_content}</span>
@@ -326,7 +364,7 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
         overlay_ref={overlay_ref}
         trigger_ref={trigger_ref}
       >
-        <div className={styles.settings_primary} id={menu_id} role="menu" onKeyDown={handlePrimaryMenuKeyDown}>
+        <div aria-label={props.aria_label} className={styles.settings_primary} id={menu_id} role="menu" onKeyDown={handlePrimaryMenuKeyDown}>
           {selection_error && <p role="alert">{selection_error}</p>}
           {props.primary_content && <div className={styles.primary_actions}>{props.primary_content}</div>}
           {props.primary_actions?.map((action) => (
@@ -343,20 +381,22 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
               <span>
                 <b>{action.label}</b>
               </span>
-              {action.selected && <Icon name="check" size={14} className={styles.selected_icon} />}
+              {action.selected && <Icon name="check-circle-fill" size={16} className={styles.selected_icon} />}
             </button>
           ))}
           {props.categories.map((item, index) => (
             <Fragment key={item.id}>
               {item.separator_before && <div role="separator" className={styles.separator} />}
+              {item.heading_before && <div role="presentation" className={styles.group_heading}>{item.heading_before}</div>}
               <button
+                aria-description={item.accessible_description}
                 aria-disabled={Boolean(item.disabled_reason)}
                 aria-haspopup="menu"
                 aria-expanded={secondary_category_id === item.id}
                 className={styles.settings_category}
                 data-active={active_category_index === index}
                 data-setting-category-index={index}
-                onClick={() => openCategory(index)}
+                onClick={(event) => openCategory(index, event.detail === 0)}
                 onFocus={() => setActiveCategoryIndex(index)}
                 onKeyDown={(event) => handlePrimaryKeyDown(event, index)}
                 role="menuitem"
@@ -371,7 +411,10 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
               </button>
             </Fragment>
           ))}
-          {props.footer_content && <div className={styles.primary_actions}>{props.footer_content}</div>}
+          {props.footer_content && <>
+            <div role="separator" className={styles.separator} />
+            <div className={styles.primary_actions}>{props.footer_content}</div>
+          </>}
         </div>
         {secondary_category && (
           <div
@@ -386,7 +429,10 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
                 returnToPrimary();
               }
             }}
-            style={{ top: secondary_position.top }}
+            style={{
+              top: secondary_position.top,
+              '--settings-option-available-width': `${secondary_position.available_width}px`,
+            } as CSSProperties}
           >
             {(!secondary_category.hide_title || secondary_position.side === 'inline') && (
               <header className={styles.secondary_header}>
@@ -412,6 +458,7 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
                   disabled={selecting || option.disabled}
                   key={option.value}
                   onClick={() => void selectOption(option)}
+                  onBlur={() => setActiveOptionIndex(-1)}
                   onFocus={() => setActiveOptionIndex(index)}
                   onKeyDown={(event) => handleSecondaryKeyDown(event, index)}
                   role="menuitemradio"
@@ -421,7 +468,7 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
                     <b>{option.label}</b>
                     {option.description && <small>{option.description}</small>}
                   </span>
-                  <i>{option.value === secondary_category.selected && <Icon name="check" size={14} />}</i>
+                  <i>{option.value === secondary_category.selected && <Icon name="check-circle-fill" size={16} />}</i>
                 </button>
               ))}
             </div>
@@ -433,37 +480,36 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
 }
 
 function selectedOptionIndex(category: SettingsCascadeCategory | undefined): number {
-  if (!category) return 0;
-  return Math.max(
-    0,
-    category.options.findIndex((option) => option.value === category.selected),
-  );
+  if (!category) return -1;
+  const selected = category.options.findIndex((option) => !option.disabled && option.value === category.selected);
+  return selected >= 0 ? selected : category.options.findIndex((option) => !option.disabled);
 }
 
 type SecondaryPosition = Readonly<{
   side: 'left' | 'right' | 'inline';
   top: number;
+  available_width: number;
 }>;
 
 function calculateSecondaryPosition(
   primary: DOMRect,
   secondary: DOMRect,
+  primary_border_top: number,
   viewport_width: number,
   viewport_height: number,
+  minimum_width: number,
 ): SecondaryPosition {
   const viewport_padding = 8;
   const gap = 6;
   const room_right = viewport_width - primary.right - gap - viewport_padding;
   const room_left = primary.left - gap - viewport_padding;
-  const minimum_width = viewport_width <= 720 ? 180 : 220;
-  if (Math.max(room_left, room_right) < minimum_width) return { side: 'inline', top: 0 };
+  if (Math.max(room_left, room_right) < minimum_width) return { side: 'inline', top: 0, available_width: primary.width };
   const side = secondary.width <= room_right || room_right >= room_left ? 'right' : 'left';
-  const preferred_viewport_top = primary.top - gap;
   const maximum_viewport_top = Math.max(viewport_padding, viewport_height - secondary.height - viewport_padding);
-  const viewport_top = Math.min(Math.max(viewport_padding, preferred_viewport_top), maximum_viewport_top);
-  return { side, top: viewport_top - primary.top };
+  const viewport_top = Math.min(Math.max(viewport_padding, primary.top), maximum_viewport_top);
+  return { side, top: viewport_top - primary.top - primary_border_top, available_width: side === 'right' ? room_right : room_left };
 }
 
 function positionsEqual(current: SecondaryPosition, next: SecondaryPosition): boolean {
-  return current.side === next.side && current.top === next.top;
+  return current.side === next.side && current.top === next.top && current.available_width === next.available_width;
 }

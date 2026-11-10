@@ -1,8 +1,9 @@
-import { Outlet } from 'react-router';
+import { ScopedOutlet } from '../IdentityRoutes';
 import { Button, Layout } from 'antd';
 import { HomeOutlined } from '@ant-design/icons';
 import { NavigationMenu } from './NavigationMenu';
 import { PageBreadcrumb } from './PageBreadcrumb';
+import { ScopeMenu } from './ScopeMenu';
 import { UserMenu } from './UserMenu';
 import styles from './index.module.scss';
 
@@ -27,6 +28,7 @@ export function PageLayout() {
           >
             首页
           </Button>
+          <ScopeMenu />
           <UserMenu />
         </div>
       </Layout.Header>
@@ -36,7 +38,7 @@ export function PageLayout() {
         </Layout.Sider>
         <Layout.Content className={styles.content}>
           <PageBreadcrumb />
-          <Outlet />
+          <ScopedOutlet />
         </Layout.Content>
       </Layout>
     </Layout>

@@ -1,6 +1,17 @@
 import { isAxiosError } from 'axios';
 import * as sdk from './openapi/sdk.gen';
-import type { CreateUserData, UpdateUserRequest, ListUsersData, ListManagementAuditData } from './openapi';
+import type {
+  CreateUserData,
+  UpdateUserRequest,
+  ListUsersData,
+  ListManagementAuditData,
+  ScopeSelection,
+  CreateOrganization,
+  UpdateOrganization,
+  UpdateMember,
+  SaveMember,
+  ListOrganizationMembersData,
+} from './openapi';
 
 export type UserQuery = NonNullable<ListUsersData['query']>;
 export type AuditQuery = NonNullable<ListManagementAuditData['query']>;
@@ -19,6 +30,45 @@ export const api = {
     (await sdk.login({ body: { username, password }, throwOnError: true })).data,
 
   me: async (token: string, signal?: AbortSignal) => (await sdk.getCurrentIdentity(options(token, signal))).data,
+
+  scopes: async (token: string, signal: AbortSignal) =>
+    (await sdk.listAccessScopes({ ...options(token, signal), query: { entry: 'admin' } })).data,
+
+  exchange: async (token: string, target: Omit<ScopeSelection, 'entry'>) =>
+    (await sdk.exchangeAccessScope({ ...options(token), body: { ...target, entry: 'admin' } })).data,
+
+  organizations: async (token: string, signal: AbortSignal) =>
+    (await sdk.listOrganizations(options(token, signal))).data,
+
+  createOrganization: async (token: string, body: CreateOrganization) =>
+    (await sdk.createOrganization({ ...options(token), body })).data,
+
+  updateOrganization: async (token: string, id: string, body: UpdateOrganization) =>
+    (await sdk.updateOrganization({ ...options(token), path: { id }, body })).data,
+
+  updateSystemOrganizationMember: async (token: string, id: string, userId: number, body: UpdateMember) =>
+    (await sdk.updateSystemOrganizationMember({ ...options(token), path: { id, userId: String(userId) }, body })).data,
+
+  addSystemOrganizationMember: async (token: string, id: string, userId: number, body: SaveMember) =>
+    (await sdk.addSystemOrganizationMember({ ...options(token), path: { id, userId: String(userId) }, body })).data,
+
+  removeSystemOrganizationMember: async (token: string, id: string, userId: number) => {
+    await sdk.removeSystemOrganizationMember({ ...options(token), path: { id, userId: String(userId) } });
+  },
+
+  members: async (token: string, query: ListOrganizationMembersData['query'], signal: AbortSignal) =>
+    (await sdk.listOrganizationMembers({ ...options(token, signal), query })).data,
+
+  memberCandidate: async (token: string, username: string, signal: AbortSignal) =>
+    (await sdk.findOrganizationMemberCandidate({ ...options(token, signal), query: { username } })).data,
+
+  saveMember: async (token: string, id: number, body: SaveMember) => {
+    await sdk.saveOrganizationMember({ ...options(token), path: { id: String(id) }, body });
+  },
+
+  removeMember: async (token: string, id: number) => {
+    await sdk.removeOrganizationMember({ ...options(token), path: { id: String(id) } });
+  },
 
   logout: async (token: string) => {
     await sdk.logout({ ...options(token), body: {} });
@@ -74,10 +124,17 @@ const errors: Record<string, string> = {
   SNAPSHOT_ROOT_UNAVAILABLE: '快照目录未配置或不可用，请检查中心配置。',
   MODEL_TEST_REQUIRES_CLIENT: 'OpenCode 推理测试请在客户端使用已保存配置执行；目录刷新只验证模型列表。',
   MODEL_NOT_FOUND: '模型或服务商不存在，请刷新目录或保存固定配置。',
+  MODEL_POLICY_CONFLICT: '组织模型配置已变更，请重新读取后编辑。',
   MODEL_CONFIGURATION_CHANGED: '服务商连接已变化，请重新刷新。',
   MODEL_CONFIGURATION_INVALID: '模型参数不完整或能力组合无效，请检查参数。',
   MODEL_DISCOVERY_FAILED: '在线模型刷新失败，保留上次成功结果。',
   MODEL_TEMPLATES_INVALID: '模板读取或校验失败，继续使用已有有效模板。',
+  SCOPE_DENIED: '当前范围无权执行此操作。',
+  ORGANIZATION_ADMIN_REQUIRED: '请先指定另一位有效组织管理员。',
+  ORGANIZATION_CODE_EXISTS: '组织编码已使用。',
+  ORGANIZATION_DISABLED: '该组织已停用，无法添加成员。',
+  ORGANIZATION_MEMBER_NOT_FOUND: '该用户尚未加入此组织。',
+  ORGANIZATION_MEMBER_EXISTS: '该用户已加入此组织，请重新打开组织归属查看。',
   AUTH_FAILED: '账号或密码错误，或账号不可用。',
   TOKEN_INVALID: '登录已失效，请重新登录。',
   ADMIN_REQUIRED: '此账号无管理后台权限，请通过 Runtime 登录。',

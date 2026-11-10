@@ -2,8 +2,9 @@
 
 use assistant_protocol::{ModelFixedConfig, ModelSelection, ProviderInstanceId};
 
-use super::{ConfigRegistry, ModelSource};
+use super::{ConfigRegistry, ExternalModelConfiguration};
 use crate::{RuntimeError, RuntimeResult, RuntimeStore};
+use std::sync::Arc;
 
 impl ConfigRegistry {
     pub(crate) fn effective_model_selection(
@@ -11,17 +12,26 @@ impl ConfigRegistry {
         requested: Option<&ModelSelection>,
     ) -> RuntimeResult<Option<ModelSelection>> {
         let state = self.managed_models()?;
-        let requested = if state
-            .settings
-            .management
-            .as_ref()
-            .is_some_and(|policy| policy.read_only)
-        {
-            None
-        } else {
-            requested
-        };
-        Ok(requested.or(state.settings.default_model.as_ref()).cloned())
+        Ok(requested.or_else(|| state.default_model()).cloned())
+    }
+
+    pub(crate) fn organization_configuration(
+        &self,
+        selection: &ModelSelection,
+    ) -> RuntimeResult<Arc<ExternalModelConfiguration>> {
+        if selection.provider_instance_id.as_str() == "managed" {
+            return Err(RuntimeError::InvalidRequest {
+                reason: "旧企业模型缺少可确认的服务商，请重新选择模型。",
+            });
+        }
+        let state = self.managed_models()?;
+        match state.organization_model(selection) {
+            Some(Ok(configuration)) => Ok(configuration.clone()),
+            Some(Err(reason)) => Err(RuntimeError::InvalidRequest { reason }),
+            None => Err(RuntimeError::InvalidRequest {
+                reason: "所选组织模型当前不可用，请刷新组织配置或重新选择。",
+            }),
+        }
     }
 
     pub(crate) async fn fixed_model(
@@ -29,14 +39,8 @@ impl ConfigRegistry {
         selection: ModelSelection,
         store: &dyn RuntimeStore,
     ) -> RuntimeResult<Option<ModelFixedConfig>> {
-        let remote = {
-            let state = self.managed_models()?;
-            (state.source == ModelSource::External).then(|| state.external.clone())
-        };
-        if let Some(configuration) = remote {
-            return Ok(configuration
-                .filter(|value| value.selection() == &selection)
-                .map(|value| value.fixed()));
+        if selection.source == assistant_protocol::ModelSelectionSource::Organization {
+            return Ok(Some(self.organization_configuration(&selection)?.fixed()));
         }
         store
             .get_model_fixed_config(selection)
@@ -51,19 +55,6 @@ impl ConfigRegistry {
         limit: u32,
         store: &dyn RuntimeStore,
     ) -> RuntimeResult<Vec<ModelFixedConfig>> {
-        let remote = {
-            let state = self.managed_models()?;
-            (state.source == ModelSource::External).then(|| state.external.clone())
-        };
-        if let Some(configuration) = remote {
-            return Ok(configuration
-                .into_iter()
-                .filter(|value| value.selection().provider_instance_id == provider)
-                .skip(offset as usize)
-                .take(limit as usize)
-                .map(|value| value.fixed())
-                .collect());
-        }
         store
             .list_model_fixed_configs(provider, offset, limit)
             .await

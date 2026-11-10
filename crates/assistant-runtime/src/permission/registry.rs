@@ -262,6 +262,50 @@ impl PermissionCoordinator {
         }))
     }
 
+    /// 页面使用当前 owner 的 MCP 规则。页面没有 Agent 变体，显式拒绝优先，
+    /// 仅覆盖所有变体的 Allow 才能直接放行页面。没有匹配规则时使用本次交互的默认值。
+    pub(crate) fn mcp_page_effect(
+        &self,
+        scopes: &[PermissionFileScope],
+        server_key: &assistant_protocol::McpServerKey,
+        tool_name: &str,
+        default: super::PermissionEffect,
+    ) -> RuntimeResult<super::PermissionEffect> {
+        use super::{PermissionEffect, PermissionMatcher, matcher::mcp_matcher_matches};
+        use assistant_protocol::AgentVariant;
+
+        let mut loads = self.snapshot(scopes)?;
+        loads.sort_by(|a, b| b.scope.cmp(&a.scope));
+        let mut effective = None;
+        for load in loads {
+            let document = load
+                .document
+                .as_ref()
+                .ok_or(RuntimeError::PermissionFileInvalid)?;
+            let mut layer = None;
+            for rule in &document.rules {
+                if !matches!(&rule.matcher, PermissionMatcher::Mcp(matcher) if mcp_matcher_matches(matcher, server_key, tool_name))
+                {
+                    continue;
+                }
+                match rule.effect {
+                    PermissionEffect::Deny => return Ok(PermissionEffect::Deny),
+                    PermissionEffect::Ask => layer = Some(PermissionEffect::Ask),
+                    PermissionEffect::Allow
+                        if layer.is_none()
+                            && rule.variants.contains(&AgentVariant::Build)
+                            && rule.variants.contains(&AgentVariant::Plan) =>
+                    {
+                        layer = Some(PermissionEffect::Allow)
+                    }
+                    PermissionEffect::Allow => {}
+                }
+            }
+            effective = effective.or(layer);
+        }
+        Ok(effective.unwrap_or(default))
+    }
+
     /// 将交互审批产生的一条或多条 exact Allow 作为一次 CAS 变更可靠写入。
     pub(crate) async fn append_allow_rules(
         &self,

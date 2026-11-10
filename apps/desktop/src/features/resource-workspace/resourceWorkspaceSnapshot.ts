@@ -1,3 +1,4 @@
+import { normalizeAppTarget, type AppTarget } from "../mcp-apps/appLinks";
 import { hostFileUri, isAbsoluteHostPath } from "../../runtime-client/hostFilePath";
 import type { ResourceHandle, ResourceTab } from "./ResourceWorkspaceStore";
 import type { ResourceViewState } from "./resourceViewState";
@@ -7,6 +8,7 @@ import type { SessionResourceLocator } from "@ez-assistant/protocol";
 /** 只保存重建描述，不保存 controller、原生句柄、文件内容或终端命令/输出。 */
 export type SavedResourceTab = Readonly<{
   page: { type: "context" | "workspace" }
+    | { type: "app"; target: AppTarget; instance_key?: string }
     | { type: "browser"; url: string; title: string }
     | { type: "terminal"; source: TerminalSource }
     | { type: "resource"; name: string; source: ResourceHandle["source"]; line: number | null };
@@ -112,6 +114,13 @@ function source(value: unknown): boolean {
 function page(value: unknown): boolean {
   if (!record(value)) return false;
   if (value.type === "context" || value.type === "workspace") return true;
+  if (value.type === "app") {
+    try {
+      if (!record(value.target) || (value.instance_key !== undefined && (typeof value.instance_key !== "string" || value.instance_key.length > 64))) return false;
+      normalizeAppTarget(value.target as AppTarget, []);
+      return true;
+    } catch { return false; }
+  }
   if (value.type === "browser") return text(value.url) && text(value.title)
     && (!value.url || /^https?:\/\//.test(value.url));
   if (value.type === "terminal") return record(value.source) && ((value.source.type === "workspace" && text(value.source.workspace_id))

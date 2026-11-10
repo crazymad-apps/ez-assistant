@@ -31,3 +31,8 @@ export function page(input: Record<string, string>): { limit: number; offset: nu
   return { limit: parse('limit', 20, 1, 100), offset: parse('offset', 0, 0, 1000000) };
 }
 export function queryBoolean(value: string): boolean { if (value !== 'true' && value !== 'false') invalid(); return value === 'true'; }
+
+export function uuid(value: unknown): string {
+  if (typeof value !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(value)) invalid();
+  return value;
+}

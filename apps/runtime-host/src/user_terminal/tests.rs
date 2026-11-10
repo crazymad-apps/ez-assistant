@@ -144,10 +144,12 @@ async fn identical_session_ids_only_close_the_matching_user_terminal() {
     let terminals = UserTerminalService::new();
     let sid = SessionId::new("same-session").unwrap();
     let alice = UserKey {
+        organization_id: "00000000-0000-4000-8000-000000000010".into(),
         center_id: "center".into(),
         user_id: 1,
     };
     let bob = UserKey {
+        organization_id: "00000000-0000-4000-8000-000000000010".into(),
         center_id: "center".into(),
         user_id: 2,
     };

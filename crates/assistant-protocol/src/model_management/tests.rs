@@ -6,6 +6,7 @@ use crate::{RuntimeCommand, RuntimeCommandResult, SetDefaultModelRequest};
 fn provider_and_fixed_configuration_commands_round_trip() {
     let provider_instance_id = ProviderInstanceId::new("provider-1").unwrap();
     let selection = ModelSelection {
+        source: ModelSelectionSource::Local,
         provider_instance_id: provider_instance_id.clone(),
         model_id: "vendor/model:latest".into(),
     };
@@ -20,11 +21,13 @@ fn provider_and_fixed_configuration_commands_round_trip() {
         server_history_support_override: None,
     };
     let provider = ProviderSummary {
+        source: ModelSelectionSource::Local,
         provider_instance_id: provider_instance_id.clone(),
         connection: connection.clone(),
         has_api_key: true,
     };
     let request = ProviderRequest {
+        source: ModelSelectionSource::Local,
         provider_instance_id: provider_instance_id.clone(),
     };
     let parameters = ModelParameters {
@@ -66,6 +69,7 @@ fn provider_and_fixed_configuration_commands_round_trip() {
         (
             "update_provider",
             RuntimeCommand::UpdateProvider(UpdateProviderRequest {
+                source: ModelSelectionSource::Local,
                 provider_instance_id: provider_instance_id.clone(),
                 connection,
                 credential: ProviderCredentialChange::Unchanged,
@@ -154,6 +158,7 @@ fn provider_and_fixed_configuration_commands_round_trip() {
         (
             "list_fixed_model_configs",
             RuntimeCommand::ListFixedModelConfigs(ListFixedModelConfigsRequest {
+                source: ModelSelectionSource::Local,
                 provider_instance_id,
                 offset: 20,
                 limit: 20,

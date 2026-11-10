@@ -1,3 +1,4 @@
+import { ResourceApp } from "../ResourceApp";
 import { ResourceDesktop } from "../ResourceDesktop";
 import { revealFileLabel } from "../../../platform/fileManager";
 import { observer } from "mobx-react-lite";
@@ -79,6 +80,7 @@ export const ResourcePage = observer(function ResourcePage(props: Readonly<{
   }
 
   function renderTabContent() {
+    if (tab.type === "app") { const controller = store.apps.get(tab.appId); if (controller) return <ResourceApp controller={controller} workspace={store} group={group} />; }
     if (tab.type === "desktop") { const controller = store.desktops.get(tab.desktopId); if (controller) return <ResourceDesktop controller={controller} active={active} />; }
     if (tab.type === "terminal") {
       const controller = store.terminals.get(tab.terminalId);
@@ -87,6 +89,7 @@ export const ResourcePage = observer(function ResourcePage(props: Readonly<{
     if (tab.type === "browser") {
       const controller = store.browsers.get(tab.browserId);
       if (controller) return <ResourceBrowser controller={controller} active={active}
+        on_connect_app={() => { try { store.openApp({type:"external",url:controller.url},{},undefined,group); } catch (error) { root_store.showInteractionError(error instanceof Error ? error.message : "无法连接应用"); } }}
         viewport_ref={(element) => {
           if (element) viewports.current.set(tab.browserId, element);
           else viewports.current.delete(tab.browserId);

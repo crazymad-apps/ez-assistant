@@ -6,7 +6,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 
 export const supportsNativeResourceMenu = isTauri;
 
-export async function createResourceMenu(on_workspace: () => void, on_browser: () => void, on_terminal?: () => void, on_desktop?: () => void) {
+export async function createResourceMenu(on_workspace: () => void, on_browser: () => void, on_terminal?: () => void, on_desktop?: () => void, on_app?: () => void) {
   const items: IconMenuItem[] = [];
   let menu: Menu | undefined;
   try {
@@ -14,6 +14,7 @@ export async function createResourceMenu(on_workspace: () => void, on_browser: (
     items.push(await IconMenuItem.new({ text: "浏览器", icon: NativeIcon.Network, action: on_browser }));
     items.push(await IconMenuItem.new({ text: "终端", icon: NativeIcon.Computer, enabled: false, action: on_terminal }));
     items.push(await IconMenuItem.new({ text: "远程桌面", icon: NativeIcon.Computer, enabled: false, action: on_desktop }));
+    items.push(await IconMenuItem.new({ text: "应用", icon: NativeIcon.Advanced, enabled: false, action: on_app }));
     menu = await Menu.new({ items });
   } catch (failure) {
     await Promise.allSettled(items.map((item) => item.close()));
@@ -21,10 +22,11 @@ export async function createResourceMenu(on_workspace: () => void, on_browser: (
   }
   const native_menu = menu;
   return {
-    async popup(workspace_available: boolean, anchor: Readonly<{ x: number; y: number }>, terminal_available = false, desktop_available = false): Promise<void> {
+    async popup(workspace_available: boolean, anchor: Readonly<{ x: number; y: number }>, terminal_available = false, desktop_available = false, app_available = false): Promise<void> {
       await items[0]!.setEnabled(workspace_available);
       await items[2]!.setEnabled(terminal_available);
       await items[3]!.setEnabled(desktop_available);
+      await items[4]!.setEnabled(app_available);
       const window = getCurrentWindow();
       const view = getCurrentWebview();
       const [size, position, scale] = await Promise.all([view.size(), view.position(), window.scaleFactor()]);

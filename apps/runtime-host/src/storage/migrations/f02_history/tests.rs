@@ -4,8 +4,16 @@ use std::fs;
 
 use agent_types::{ConversationMessage, MessageId, PartId, TextPart, UserMessage, UserPart};
 
-use super::super::{backup, compatibility, manifest, migrate, product_manifest};
+use super::super::{backup, compatibility, manifest, migrate};
 use super::*;
+
+// 本组验证已发布的 0.32.1 同版本迁移，不随新的 release 登记扩大目标版本。
+fn product_manifest() -> Vec<super::super::Migration> {
+    super::super::product_manifest()
+        .into_iter()
+        .take_while(|entry| entry.version != "0.32.2")
+        .collect()
+}
 
 fn fixture() -> tempfile::TempDir {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.runtime-test");

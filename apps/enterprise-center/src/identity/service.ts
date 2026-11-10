@@ -5,6 +5,7 @@ import type {
   IdentityResponse,
   IdentityUser,
   LoginRequest,
+  ScopeView,
   PasswordRequest,
 } from '../contracts/identity.js';
 import { IdentityError } from './errors.js';
@@ -13,6 +14,9 @@ import { LoginLimiter } from './validation.js';
 import { CenterIdentityEntity } from './entity.js';
 import { users } from '../users/repository.js';
 import { audits } from '../audit/repository.js';
+import { organizations } from '../organizations/repository.js';
+import { CenterTokens, sameScope } from './token.js';
+import type { Scope } from './token.js';
 
 function publicUser(user: IdentityUser): IdentityUser {
   return {
@@ -25,14 +29,31 @@ function publicUser(user: IdentityUser): IdentityUser {
   };
 }
 
-export type LoginScope = Readonly<{ userId: number }>;
+export type LoginScope = Readonly<{
+  jti: string;
+  userId: number;
+  issuer: string;
+  scope: Scope;
+  expires: number;
+  llmKey?: string;
+}>;
 
-/** 单实例进程拥有 Token；不持久化、不计算摘要、不设 TTL，关闭或重启全部失效。 */
+export function isSystemAdmin(user: IdentityUser): boolean {
+  return user.is_super_admin || user.role === 'system_admin';
+}
+
+type Entry = 'admin' | 'client';
+type PreparedLogin = { login: LoginResponse; session: LoginScope };
+
+/** 单实例进程拥有 Token；私有签名密钥与有效会话不持久化，关闭或重启全部失效。 */
 export class IdentityService {
   readonly passwords = new Passwords();
   readonly limiter = new LoginLimiter();
+  private readonly jwt = new CenterTokens();
+  private expiry?: NodeJS.Timeout;
   private readonly tokens = new Map<string, LoginScope>();
   private readonly llmKeys = new Map<string, string>();
+  private readonly organizationRevoked = new Set<(id: string) => void>();
   private readonly sessionRevoked = new Set<(scope: LoginScope) => void>();
   private pendingWrite: Promise<void> = Promise.resolve();
   private readonly revoked = new Set<(user: number | null) => void>();
@@ -45,9 +66,8 @@ export class IdentityService {
   }
 
   onModuleDestroy(): void {
-    for (const scope of this.tokens.values()) for (const notify of this.sessionRevoked) notify(scope);
-    this.tokens.clear();
-    this.llmKeys.clear();
+    for (const jti of this.tokens.keys()) this.revoke(jti);
+    clearTimeout(this.expiry);
     for (const notify of this.revoked) notify(null);
   }
 
@@ -63,21 +83,64 @@ export class IdentityService {
     this.sessionRevoked.add(notify);
     return () => { this.sessionRevoked.delete(notify); };
   }
-  scope(token: string): LoginScope {
-    const scope = this.tokens.get(token);
-    if (!scope) throw new IdentityError(401, 'TOKEN_INVALID');
-    return scope;
+  onOrganizationRevoked(notify: (id: string) => void): () => void {
+    this.organizationRevoked.add(notify);
+    return () => { this.organizationRevoked.delete(notify); };
   }
-  /** 仅由已核实的组网访问在身份事务中调用；普通登录与受控签发共用同一凭据事实。 */
-  async prepareLogin(client: EntityManager, user: IdentityUser, requestId: string, action = 'login'): Promise<LoginResponse> {
+
+  async scope(token?: string): Promise<LoginScope> {
+    const claims = await this.jwt.verify(token);
+    const session = this.tokens.get(claims.jti);
+    if (!session || session.userId !== claims.userId || session.issuer !== claims.issuer ||
+      session.expires !== claims.expires || !sameScope(session.scope, claims.scope))
+      throw new IdentityError(401, 'TOKEN_INVALID');
+    this.assertActive(session);
+    return session;
+  }
+
+  private assertActive(session: LoginScope) {
+    if (this.tokens.get(session.jti) !== session || session.expires * 1000 <= Date.now())
+      throw new IdentityError(401, 'TOKEN_INVALID');
+  }
+
+  async prepareLogin(
+    client: EntityManager, user: IdentityUser, requestId: string, action = 'login',
+    scope: Scope = { kind: 'unselected' }, issueKey = false,
+  ): Promise<PreparedLogin> {
     const center = await client.getRepository(CenterIdentityEntity).findOneByOrFail({ singleton: true });
-    const token = `ct_${randomBytes(32).toString('hex')}`, llm_key = `cl_${randomBytes(32).toString('hex')}`;
-    await this.audit(client, action, requestId, user.id);
-    return { center_id: center.center_id, user: publicUser(user), token, llm_key };
+    const view = await this.scopeView(client, user, scope);
+    const { token, jti, expires } = await this.jwt.issue(center.center_id, user.id, scope);
+    const llmKey = issueKey ? `cl_${randomBytes(32).toString('hex')}` : undefined;
+    const session = { jti, expires, issuer: center.center_id, userId: user.id, scope, llmKey };
+    await this.audit(client, action, requestId, user.id, undefined, user.id, {},
+      scope.kind === 'organization' ? scope.organization_id : undefined);
+    return { session, login: this.loginResponse(center, user, view, session, token) };
   }
-  publishLogin(login: LoginResponse) {
-    this.tokens.set(login.token, { userId: login.user.id });
-    this.llmKeys.set(login.llm_key, login.token);
+
+  private loginResponse(center: CenterIdentityEntity, user: IdentityUser, scope: ScopeView, session: LoginScope, token: string): LoginResponse {
+    return {
+      center_id: center.center_id, legacy_organization_id: center.legacy_organization_id, user: publicUser(user),
+      scope, expires_at: new Date(session.expires * 1000).toISOString(), token,
+      ...(session.llmKey ? { llm_key: session.llmKey } : {}),
+    };
+  }
+
+  publishLogin({ session }: PreparedLogin) {
+    this.tokens.set(session.jti, session);
+    if (session.llmKey) this.llmKeys.set(session.llmKey, session.jti);
+    this.scheduleExpiry();
+  }
+
+  private scheduleExpiry() {
+    clearTimeout(this.expiry);
+    let nearest = Infinity;
+    for (const session of this.tokens.values()) nearest = Math.min(nearest, session.expires * 1000);
+    if (!Number.isFinite(nearest)) return;
+    this.expiry = setTimeout(() => {
+      const now = Date.now();
+      for (const [jti, session] of this.tokens) if (session.expires * 1000 <= now) this.revoke(jti);
+      this.scheduleExpiry();
+    }, Math.max(0, nearest - Date.now())).unref();
   }
 
   /** 串行化身份写入直到提交后的内存变更完成，避免退出/改密/登录交错复活旧凭据。
@@ -129,58 +192,150 @@ export class IdentityService {
     reason?: string,
     targetId = userId,
     details: object = {},
+    organizationId?: string,
   ): Promise<void> {
-    await audits.append(manager, action, requestId, userId, reason, targetId, details);
+    await audits.append(manager, action, requestId, userId, reason, targetId, details, organizationId);
   }
 
   /** 拒绝审计只含固定动作/原因码，不复制请求字段；审计故障不伪称记录成功。 */
-  async attempt<T>(action: string, requestId: string, work: () => Promise<T>, actorId?: number): Promise<T> {
+  async attempt<T>(action: string, requestId: string, work: () => Promise<T>, actorId?: number, organizationId?: string): Promise<T> {
     try {
       return await work();
     } catch (error) {
-      await this.rejection(action, requestId, error, actorId);
+      await this.rejection(action, requestId, error, actorId, organizationId);
       throw error;
     }
   }
 
-  async rejection(action: string, requestId: string, error: unknown, actorId?: number): Promise<void> {
+  async rejection(action: string, requestId: string, error: unknown, actorId?: number, organizationId?: string): Promise<void> {
     if (error instanceof IdentityError && error.status < 500) {
-      await this.audit(this.source.manager, action, requestId, actorId ?? null, error.code, null);
+      await this.audit(this.source.manager, action, requestId, actorId ?? null, error.code, null, {}, organizationId);
     }
   }
 
-  /** 管理写入在共用串行段内重验；HTTP Guard 的旧快照不能授权异步计算后的提交。 */
+  /** 管理写入在共用串行段内重验范围和权限。 */
   async requireAdmin(client: EntityManager, token?: string): Promise<IdentityUser> {
-    const user = await this.userForToken(client, token);
-    if (!user.is_super_admin && user.role !== 'admin') throw new IdentityError(403, 'ADMIN_REQUIRED');
+    const session = await this.scope(token);
+    const user = await this.account(client, session);
+    if (session.scope.kind !== 'system' || !isSystemAdmin(user)) throw new IdentityError(403, 'ADMIN_REQUIRED');
     return publicUser(user);
   }
 
-  /** 下载准入也须在短串行段内复查 Token 与用户启停状态。 */
+  async requireOrganizationAdmin(client: EntityManager, token?: string, systemOnly = false) {
+    const session = await this.scope(token);
+    const user = await this.account(client, session);
+    const view = await this.scopeView(client, user, session.scope);
+    this.assertActive(session);
+    if (session.scope.kind !== 'organization' || !view.can_manage || (systemOnly && !isSystemAdmin(user)))
+      throw new IdentityError(403, 'SCOPE_DENIED');
+    return { organizationId: session.scope.organization_id, user: publicUser(user), session };
+  }
+
+  async requireOrganizationMember(client: EntityManager, token?: string) {
+    const session = await this.scope(token);
+    const user = await this.account(client, session);
+    const view = await this.scopeView(client, user, session.scope);
+    this.assertActive(session);
+    if (session.scope.kind !== 'organization' || !view.member_role)
+      throw new IdentityError(403, 'SCOPE_DENIED');
+    return { organizationId: session.scope.organization_id, user: publicUser(user), session };
+  }
+
   async requireUser(client: EntityManager, token?: string): Promise<IdentityUser> {
     return publicUser(await this.userForToken(client, token));
   }
 
-  /** 仅在身份事务成功提交后调用；角色和启停变化撤销；改密与重置保留已有凭据。 */
   revokeUser(id: number): void {
-    for (const [token, userId] of this.tokens) if (userId.userId === id) this.revoke(token);
+    for (const [jti, session] of this.tokens) if (session.userId === id) this.revoke(jti);
+    this.scheduleExpiry();
     for (const notify of this.revoked) notify(id);
   }
 
-  private async userForToken(client: EntityManager, token?: string) {
-    const id = token && this.tokens.get(token)?.userId;
-    if (!id) throw new IdentityError(401, 'TOKEN_INVALID');
-    const row = await users.forIdentity(client, id);
-    // 查询期间可能已经退出；不把异步查询前的认证结果当成仍然有效。
-    if (!row?.enabled || this.tokens.get(token!)?.userId !== id) throw new IdentityError(401, 'TOKEN_INVALID');
+  revokeOrganization(id: string, userId?: number): void {
+    for (const [jti, session] of this.tokens) {
+      if (session.scope.kind === 'organization' && session.scope.organization_id === id &&
+        (userId === undefined || userId === session.userId)) this.revoke(jti);
+    }
+    if (userId === undefined) for (const notify of this.organizationRevoked) notify(id);
+    this.scheduleExpiry();
+  }
+
+  private async account(client: EntityManager, session: LoginScope) {
+    const row = await users.forIdentity(client, session.userId);
+    this.assertActive(session);
+    if (!row?.enabled) throw new IdentityError(401, 'TOKEN_INVALID');
     return row;
+  }
+
+  private async userForToken(client: EntityManager, token?: string) {
+    return this.account(client, await this.scope(token));
+  }
+
+  private async scopeView(client: EntityManager, user: IdentityUser, scope: Scope): Promise<ScopeView> {
+    if (scope.kind === 'unselected') return { ...scope, can_manage: false };
+    if (scope.kind === 'system') {
+      if (!isSystemAdmin(user)) throw new IdentityError(403, 'SCOPE_DENIED');
+      return { ...scope, can_manage: true };
+    }
+    const org = await organizations.get(client, scope.organization_id);
+    if (!org) throw new IdentityError(403, 'SCOPE_DENIED');
+    const member = await organizations.member(client, org.id, user.id);
+    const memberRole = org.enabled && member?.enabled ? member.role : undefined;
+    if (!memberRole && !isSystemAdmin(user)) throw new IdentityError(403, 'SCOPE_DENIED');
+    return { ...scope, name: org.name, code: org.code, enabled: org.enabled,
+      ...(memberRole ? { member_role: memberRole } : {}),
+      can_manage: isSystemAdmin(user) || memberRole === 'admin' };
+  }
+
+  async scopes(token: string | undefined, entry: Entry): Promise<ScopeView[]> {
+    const client = this.source.manager;
+    const session = await this.scope(token);
+    const user = await this.account(client, session);
+    const members = await organizations.forAccount(client, user.id);
+    const system = entry === 'admin' && isSystemAdmin(user);
+    const candidates = system ? await organizations.list(client) : members;
+    this.assertActive(session);
+    const roles = new Map(members.map(org => [org.id, org.member_role]));
+    const result: ScopeView[] = system ? [{ kind: 'system', can_manage: true }] : [];
+    for (const org of candidates) {
+      const memberRole = roles.get(org.id);
+      if (entry === 'admin' && !system && memberRole !== 'admin') continue;
+      result.push({ kind: 'organization', organization_id: org.id, name: org.name, code: org.code, enabled: org.enabled,
+        ...(memberRole ? { member_role: memberRole } : {}), can_manage: isSystemAdmin(user) || memberRole === 'admin' });
+    }
+    return result;
+  }
+
+  async exchange(token: string | undefined, target: Scope, entry: Entry, requestId: string): Promise<LoginResponse> {
+    if (target.kind === 'unselected') throw new IdentityError(400, 'INVALID_REQUEST');
+    const result = await this.write(async client => {
+      const old = await this.scope(token);
+      const user = await this.account(client, old);
+      const view = await this.scopeView(client, user, target);
+      if (entry === 'admin' ? !view.can_manage : !view.member_role) throw new IdentityError(403, 'SCOPE_DENIED');
+      if (sameScope(old.scope, target)) {
+        const center = await client.getRepository(CenterIdentityEntity).findOneByOrFail({ singleton: true });
+        this.assertActive(old);
+        return { old, login: this.loginResponse(center, user, view, old, token!) };
+      }
+      const next = await this.prepareLogin(client, user, requestId, 'scope_exchanged', target, entry === 'client');
+      this.assertActive(old);
+      return { old, next, login: next.login };
+    }, ({ old, next }) => {
+      if (next && this.tokens.get(old.jti) === old && old.expires * 1000 > Date.now()) {
+        this.publishLogin(next);
+        this.revoke(old.jti);
+      }
+    });
+    this.assertActive(result.next?.session ?? result.old);
+    return result.login;
   }
 
   async login(input: LoginRequest, requestId: string): Promise<LoginResponse> {
     const before = await users.byName(this.source.manager, input.username);
     const matches = await this.passwords.verify(input.password, before?.password_hash);
     if (!matches || !before?.enabled) throw new IdentityError(401, 'AUTH_FAILED');
-    return this.write(
+    const result = await this.write(
       async (client) => {
         const user = await users.byName(client, input.username);
         if (!user?.enabled) throw new IdentityError(401, 'AUTH_FAILED');
@@ -195,6 +350,7 @@ export class IdentityService {
       },
       (result) => this.publishLogin(result),
     );
+    return result.login;
   }
 
   /** 中心身份与访问地址无关；公开发现与已认证身份使用同一持久事实。 */
@@ -205,35 +361,62 @@ export class IdentityService {
   }
 
   async me(token?: string): Promise<IdentityResponse> {
-    const center_id = await this.centerId();
-    const row = await this.userForToken(this.source.manager, token);
-    return { center_id, user: publicUser(row) };
+    const client = this.source.manager;
+    const session = await this.scope(token);
+    const user = await this.account(client, session);
+    const scope = await this.scopeView(client, user, session.scope).catch((error: unknown) => {
+      if (error instanceof IdentityError && error.code === 'SCOPE_DENIED') throw new IdentityError(401, 'TOKEN_INVALID');
+      throw error;
+    });
+    const center = await client.getRepository(CenterIdentityEntity).findOneByOrFail({ singleton: true });
+    this.assertActive(session);
+    return { center_id: center.center_id, legacy_organization_id: center.legacy_organization_id, user: publicUser(user),
+      scope, expires_at: new Date(session.expires * 1000).toISOString() };
   }
 
-  /** 为后续代理保留已有的用途隔离；LLM key 只关联本次 Token，没有第二套生命周期。 */
-  async llmIdentity(key: string): Promise<IdentityResponse> {
-    return this.me(this.llmKeys.get(key));
+  /** LLM key 只关联 jti，独立校验原组织的有效成员资格。 */
+  async llmIdentity(key: string): Promise<IdentityResponse & { session: LoginScope }> {
+    const jti = this.llmKeys.get(key);
+    const session = jti ? this.tokens.get(jti) : undefined;
+    if (!session) throw new IdentityError(401, 'TOKEN_INVALID');
+    const client = this.source.manager;
+    const user = await this.account(client, session);
+    const scope = await this.scopeView(client, user, session.scope).catch((error: unknown) => {
+      if (error instanceof IdentityError && error.code === 'SCOPE_DENIED') throw new IdentityError(401, 'TOKEN_INVALID');
+      throw error;
+    });
+    const center = await client.getRepository(CenterIdentityEntity).findOneByOrFail({ singleton: true });
+    this.assertActive(session);
+    if (!scope.member_role) throw new IdentityError(401, 'TOKEN_INVALID');
+    return { center_id: center.center_id, legacy_organization_id: center.legacy_organization_id,
+      user: publicUser(user), scope, expires_at: new Date(session.expires * 1000).toISOString(), session };
   }
 
-  discardLogin(token: string): void { this.revoke(token); }
+  discardSession(session: LoginScope): void {
+    if (this.tokens.get(session.jti) === session) {
+      this.revoke(session.jti);
+      this.scheduleExpiry();
+    }
+  }
 
-  private revoke(token: string): void {
-    const scope = this.tokens.get(token);
-    this.tokens.delete(token);
-    if (scope) for (const notify of this.sessionRevoked) notify(scope);
-    for (const [key, owner] of this.llmKeys) if (owner === token) this.llmKeys.delete(key);
+  private revoke(jti: string): void {
+    const session = this.tokens.get(jti);
+    if (!session) return;
+    this.tokens.delete(jti);
+    if (session.llmKey) this.llmKeys.delete(session.llmKey);
+    for (const notify of this.sessionRevoked) notify(session);
   }
 
   async logout(token: string | undefined, requestId: string): Promise<void> {
-    await this.write(
-      async (client) => {
-        const id = token && this.tokens.get(token)?.userId;
-        if (id) await this.audit(client, 'logout', requestId, id);
-      },
-      () => {
-        if (token) this.revoke(token);
-      },
-    );
+    await this.write(async client => {
+      const session = await this.scope(token).catch(() => undefined);
+      if (session) await this.audit(client, 'logout', requestId, session.userId, undefined, session.userId, {},
+        session.scope.kind === 'organization' ? session.scope.organization_id : undefined);
+      return session;
+    }, session => {
+      if (session) this.revoke(session.jti);
+      this.scheduleExpiry();
+    });
   }
 
   async changePassword(token: string | undefined, input: PasswordRequest, requestId: string): Promise<void> {

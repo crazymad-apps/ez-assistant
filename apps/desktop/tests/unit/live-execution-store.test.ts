@@ -939,6 +939,8 @@ describe("model request progress", () => {
     send({ type: "model_attempt_started", session_id: "session-1", run_id: "run-1", attempt: 2 });
     expect(store.runForSession("session-1")?.model_request).toEqual({ type: "requesting", attempt: 2 });
     send({ type: "model_stream_established", session_id: "session-1", run_id: "run-1", attempt: 2 });
+    expect(store.runForSession("session-1")?.model_request).toEqual({ type: "requesting", attempt: 2 });
+    send({ type: "text_delta", session_id: "session-1", run_id: "run-1", step: 1, part_id: "answer", delta: "recovered" });
     expect(store.runForSession("session-1")?.model_request).toBeNull();
     const retry: RuntimeEvent = { type: "model_retry_scheduled", session_id: "session-1", run_id: "run-1", next_attempt: 2, delay_ms: 2000 };
     send(retry);
@@ -946,6 +948,9 @@ describe("model request progress", () => {
     send(retry);
     expect(store.runForSession("session-1")?.model_request).toBeNull();
     send({ type: "run_finished", session_id: "session-1", run_id: "run-1", status: "cancelled", error: null });
+    expect(store.activeRunId("session-1", "run-1")).toBeNull();
+    expect(store.activeRunId("session-1", "newer-run")).toBe("newer-run");
+    expect(store.activeRunId("session-2", "run-1")).toBe("run-1");
     send(retry);
     expect(store.runForSession("session-1")?.model_request).toBeNull();
     send({ ...retry, session_id: "session-2", run_id: "run-2" });

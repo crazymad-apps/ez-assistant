@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Alert, Button, Input, Modal, Table, Tag } from 'antd';
-import type { IdentityUser } from '../../../../request/openapi';
+import { Alert, Button, Input, Modal, Table } from 'antd';
+import type { OrganizationMember } from '../../../../request/openapi';
 import { api } from '../../../../request/api';
 import { useResourceQuery } from '../../../../request/useResourceQuery';
 
@@ -8,13 +8,14 @@ import { useResourceQuery } from '../../../../request/useResourceQuery';
 export function AddUserDialog(props: {
   selected: number[];
   disabled: boolean;
-  onAdd: (user: IdentityUser) => void;
+  onAdd: (user: OrganizationMember) => void;
   onClose: () => void;
 }) {
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
   const read = useCallback(
-    (token: string, signal: AbortSignal) => api.users(token, { search, limit: 20, offset: (page - 1) * 20 }, signal),
+    (token: string, signal: AbortSignal) =>
+      api.members(token, { search, active_only: true, limit: 20, offset: (page - 1) * 20 }, signal),
     [search, page],
   );
   const result = useResourceQuery(read);
@@ -43,9 +44,9 @@ export function AddUserDialog(props: {
       {result.error && (
         <Alert type="error" title={result.error} action={<Button onClick={result.reload}>重试</Button>} />
       )}
-      <Table<IdentityUser>
+      <Table<OrganizationMember>
         size="small"
-        rowKey="id"
+        rowKey="user_id"
         dataSource={result.value?.items ?? []}
         loading={result.loading}
         scroll={{ y: 320, x: 460 }}
@@ -61,19 +62,12 @@ export function AddUserDialog(props: {
           { title: '用户', dataIndex: 'display_name' },
           { title: '账号', dataIndex: 'username' },
           {
-            title: '状态',
-            width: 88,
-            render: (_, user) => (
-              <Tag color={user.enabled ? 'success' : 'default'}>{user.enabled ? '启用' : '已停用'}</Tag>
-            ),
-          },
-          {
             title: '操作',
             width: 90,
             fixed: 'right',
             align: 'center',
             render: (_, user) => {
-              const selected = props.selected.includes(user.id);
+              const selected = props.selected.includes(user.user_id);
               return (
                 <Button
                   size="small"

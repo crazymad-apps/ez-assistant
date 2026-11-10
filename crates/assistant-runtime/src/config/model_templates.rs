@@ -250,6 +250,7 @@ mod tests {
                 ..serde_json::from_value(serde_json::json!({"display_name":"fixture", "provider_type":"openai", "endpoint":"https://example.test/v1", "protocol_preference":"auto", "models_path":"", "discovery_format":"openai"})).unwrap()
             };
             let selection = ModelSelection {
+                source: assistant_protocol::ModelSelectionSource::Local,
                 provider_instance_id: assistant_protocol::ProviderInstanceId::new("fixture")
                     .unwrap(),
                 model_id: "gpt-6-astra".into(),

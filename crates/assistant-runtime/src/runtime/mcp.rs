@@ -18,6 +18,44 @@ use crate::{
 };
 
 impl AssistantRuntime {
+    /// 只读取本人当前活动连接的 UI 目录，不创建 Session／Run 或调用业务工具。
+    ///
+    /// # Errors
+    /// Runtime 未运行、来源不符、连接退役、读取超时或目录超限时拒绝。
+    pub async fn list_mcp_ui_resources(
+        &self,
+        request: assistant_protocol::ListMcpUiResourcesRequest,
+    ) -> RuntimeResult<assistant_protocol::ListMcpUiResourcesResult> {
+        self.ensure_running()?;
+        let resources = self
+            .mcp_service
+            .registry
+            .list_ui_resources(&request.target, self.root_cancellation.child_token())
+            .await?;
+        Ok(assistant_protocol::ListMcpUiResourcesResult { resources })
+    }
+
+    /// 从当前服务声明中读取单份有界 HTML；身份由已认证 Runtime 固定。
+    ///
+    /// # Errors
+    /// 未声明的 URI、来源不符、连接退役或资源格式/容量无效时拒绝。
+    pub async fn read_mcp_ui_resource(
+        &self,
+        request: assistant_protocol::ReadMcpUiResourceRequest,
+    ) -> RuntimeResult<assistant_protocol::ReadMcpUiResourceResult> {
+        self.ensure_running()?;
+        let resource = self
+            .mcp_service
+            .registry
+            .read_ui_resource(
+                &request.target,
+                &request.uri,
+                self.root_cancellation.child_token(),
+            )
+            .await?;
+        Ok(assistant_protocol::ReadMcpUiResourceResult { resource })
+    }
+
     pub async fn list_mcp_server_options(
         &self,
         request: ListMcpServerOptionsRequest,
@@ -906,7 +944,13 @@ impl McpManagement {
                 lifecycle: assistant_protocol::RuntimeLifecycle::ShuttingDown,
             });
         }
+        let previous_revision = request.expected_revision.clone();
         let result = self.plugin.mutate_settings(request).await?;
+        if result.plugin.settings_revision != previous_revision {
+            // 设置已提交时立即撤销页面许可，即使后续刷新失败仍保留旧 MCP 连接。
+            self.registry
+                .revoke_plugin_app_bindings(&result.plugin.name);
+        }
         if self.available {
             for name in &result.plugin.mcp {
                 if let Ok(key) = assistant_protocol::McpServerKey::new(name.clone()) {

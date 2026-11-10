@@ -35,6 +35,24 @@ use tokio::sync::oneshot;
 /// 每个变体只携带业务参数和一次性回复通道；命令按 mpsc 接收顺序在同一线程执行，
 /// 因此不得在调用方假设并行数据库事务或另存一份存储状态。
 pub(super) enum Command {
+    PublishMessageCard {
+        card: assistant_runtime::NewMessageCard,
+        reply: oneshot::Sender<Result<assistant_runtime::StoredMessageCard, StoreError>>,
+    },
+    ListMessageCards {
+        request: assistant_protocol::ListMessageCardsRequest,
+        reply: oneshot::Sender<Result<assistant_protocol::ListMessageCardsResult, StoreError>>,
+    },
+    GetMessageCard {
+        owner: assistant_protocol::ConversationOwner,
+        card_id: String,
+        reply: oneshot::Sender<Result<Option<assistant_runtime::StoredMessageCard>, StoreError>>,
+    },
+    SaveMessageCardSnapshot {
+        write: assistant_runtime::MessageCardSnapshotWrite,
+        reply:
+            oneshot::Sender<Result<assistant_protocol::SaveMessageCardSnapshotResult, StoreError>>,
+    },
     LoadConversationHistory {
         owner: assistant_protocol::ConversationOwner,
         reply: oneshot::Sender<Result<assistant_runtime::StoredConversationHistory, StoreError>>,
@@ -54,6 +72,11 @@ pub(super) enum Command {
     MutateCustomAgent {
         mutation: assistant_runtime::CustomAgentMutation,
         reply: oneshot::Sender<Result<Option<assistant_runtime::StoredCustomAgent>, StoreError>>,
+    },
+    BindPluginOrganization {
+        key: crate::access::enterprise::UserKey,
+        legacy_home: bool,
+        reply: oneshot::Sender<Result<(), StoreError>>,
     },
     ListPlugins {
         reply: oneshot::Sender<Result<Vec<assistant_runtime::StoredPlugin>, StoreError>>,
@@ -123,12 +146,12 @@ pub(super) enum Command {
     },
     PutModelFixedConfig {
         config: assistant_protocol::ModelFixedConfig,
-        server_history_key: Option<String>,
+        server_history_key: Option<assistant_runtime::FixedModelHistoryInvalidation>,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
     ResetModelFixedConfig {
         selection: assistant_protocol::ModelSelection,
-        server_history_key: Option<String>,
+        server_history_key: Option<assistant_runtime::FixedModelHistoryInvalidation>,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
 
@@ -160,6 +183,9 @@ pub(super) enum Command {
     QuerySessionSummaries {
         query: assistant_runtime::SessionSummaryQuery,
         reply: oneshot::Sender<Result<Vec<assistant_protocol::SessionSummary>, StoreError>>,
+    },
+    QueuedInputIds {
+        reply: oneshot::Sender<Result<Vec<InputId>, StoreError>>,
     },
     LoadRuntime {
         reply: oneshot::Sender<Result<RecoveredRuntime, StoreError>>,

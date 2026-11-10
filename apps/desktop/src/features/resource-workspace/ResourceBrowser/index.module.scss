@@ -48,7 +48,13 @@
   span { flex: 1; }
 }
 
-.viewport { position: relative; min-height: 0; flex: 1 1 auto; }
+.viewport {
+  position: relative;
+  min-height: 0;
+  flex: 1 1 auto;
+  // 原生子 WebView 覆盖 HTML 层，测量范围须给右栏拖拽区留出空间。
+  margin-inline-start: var(--ez-sidebar-resize-handle-width, 0px);
+}
 // 位于原生网页下面；隐藏子 WebView 时自然露出，浮层和业务页面不参与截图切换。
 .preview { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; pointer-events: none; user-select: none; }
 .progress { position: absolute; inset: auto 0 0; height: 2px; background: var(--ez-primary); }

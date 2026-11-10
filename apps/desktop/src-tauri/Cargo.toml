@@ -41,6 +41,7 @@ tokio-util = { workspace = true, features = ["io"] }
 url.workspace = true
 
 [dev-dependencies]
+tauri = { version = "=2.11.5", features = ["test"] }
 tokio = { workspace = true, features = ["test-util"] }
 
 

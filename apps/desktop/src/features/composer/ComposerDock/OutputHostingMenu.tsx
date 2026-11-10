@@ -39,7 +39,7 @@ export const OutputHostingMenu = observer(function OutputHostingMenu(props: Read
         >
           <Icon name="desktop" size={16} />
           <strong>仅在 Desktop 显示</strong>
-          {!hosting && <Icon className={styles.hosting_option_tail} name="check" size={14} />}
+          {!hosting && <Icon className={styles.hosting_option_tail} name="check-circle-fill" size={16} />}
         </DropdownMenuItem>
         {devices.map((device) => (
           <DropdownMenuItem
@@ -50,7 +50,7 @@ export const OutputHostingMenu = observer(function OutputHostingMenu(props: Read
             <Icon name="device" size={16} />
             <strong>{device.display_name}</strong>
             {hosting?.device_id === device.device_id && (
-              <Icon className={styles.hosting_option_tail} name="check" size={14} />
+              <Icon className={styles.hosting_option_tail} name="check-circle-fill" size={16} />
             )}
           </DropdownMenuItem>
         ))}

@@ -11,6 +11,7 @@ mod agent_shell;
 mod append_effect;
 mod attachment;
 mod attachment_io;
+mod card;
 mod child_task;
 mod context_replacement;
 mod conversation;

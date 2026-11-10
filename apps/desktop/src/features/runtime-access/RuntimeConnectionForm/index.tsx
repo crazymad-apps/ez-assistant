@@ -5,6 +5,7 @@ import { Icon } from "../../../components/Icon";
 import { getDesktopPlatform } from "../../../native-bridge/desktopLifecycle";
 import { rememberedRuntimePassword } from "../../../native-bridge/runtimeConnection";
 import type { ApplicationConnectionStore } from "../ApplicationConnectionStore";
+import { OrganizationLoginForm } from "../OrganizationLoginForm";
 import styles from "./index.module.scss";
 
 export const RuntimeConnectionForm = observer(function RuntimeConnectionForm({ connection, settings = false }: Readonly<{ connection: ApplicationConnectionStore; settings?: boolean }>) {
@@ -67,11 +68,15 @@ export const RuntimeConnectionForm = observer(function RuntimeConnectionForm({ c
       if (value) { setPassword(value); setRemember(true); }
     } catch { if (owner === read_owner.current) setNotice("未能读取记住的密码，请手动输入。"); }
   }
+  if (connection.organization_selection) {
+    return <OrganizationLoginForm connection={connection} className={styles.form} />;
+  }
   return <form ref={form_ref} className={styles.form} onSubmit={(event) => {
     event.preventDefault();
     if (submit_disabled) return;
     read_owner.current += 1;
     if (local_upgrade) { void connection.upgradeLocal().catch(() => undefined); return; }
+    if (connection.mode === "enterprise") setPassword("");
     void connection.connectDesktop(connection.target === "local" ? null : origin.trim(), password, remember, username);
   }}>
     <div className={styles.selector} role="group" aria-label="Runtime 目标">

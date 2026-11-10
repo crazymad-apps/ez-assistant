@@ -4,8 +4,8 @@ pub(crate) mod registration;
 
 use crate::runtime_bootstrap::{RuntimeBootstrap, RuntimeBootstrapCoordinator};
 use assistant_protocol::{
-    HostLoginRequest, HostLoginResult, HostMode, RuntimeHostCapabilities, RuntimeHostFeature,
-    SecretValue,
+    HostLoginRequest, HostLoginResult, HostMode, HostOrganizationSelection,
+    RuntimeHostCapabilities, RuntimeHostFeature, SecretValue,
 };
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
@@ -244,9 +244,7 @@ fn network_resource_command(command: &str) -> bool {
 
 impl RuntimeConnection {
     fn begin(&self) -> Result<String, ConnectionError> {
-        let mut bytes = [0u8; 16];
-        getrandom::fill(&mut bytes).map_err(|_| unavailable())?;
-        let id: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        let id = new_binding_id()?;
         let mut selected = self.selected.lock().map_err(|_| unavailable())?;
         if let Some(previous) = selected.take() {
             previous.cancellation.cancel();
@@ -317,9 +315,104 @@ impl RuntimeConnection {
     }
 }
 
+fn new_binding_id() -> Result<String, ConnectionError> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).map_err(|_| unavailable())?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+#[derive(Serialize)]
+pub(crate) struct OrganizationSwitchReply {
+    result: assistant_protocol::HostOrganizationSwitchResult,
+    bootstrap: Option<RuntimeBootstrap>,
+    binding_id: Option<String>,
+}
+
+#[tauri::command]
+pub(crate) async fn switch_runtime_organization(
+    app: AppHandle,
+    target: RuntimeTarget,
+    connection: State<'_, RuntimeConnection>,
+    updater: State<'_, crate::desktop_update::DesktopUpdater>,
+    resources: State<'_, crate::native_resource::NativeResourceBridge>,
+    browsers: State<'_, crate::browser_resource::BrowserResourceManager>,
+    request: assistant_protocol::HostOrganizationSwitchRequest,
+) -> Result<OrganizationSwitchReply, ConnectionError> {
+    use assistant_protocol::HostOrganizationSwitchResult;
+
+    let _permit = updater
+        .lifecycle_permit()
+        .await
+        .map_err(|_| failure("desktop_update_installing", "正在安装更新，请稍候。"))?;
+    let mut bootstrap = target.bootstrap().await?;
+    let response = tokio::select! {
+        biased;
+        () = target.cancellation.cancelled() => return Err(stale()),
+        response = http()?.post(format!("{}/auth/organization-switch", bootstrap.base_url))
+            .headers(crate::runtime_compatibility::headers())
+            .bearer_auth(&bootstrap.access_token).json(&request).send() => response.map_err(|error| transport_error(&error))?,
+    };
+    if !response.status().is_success() {
+        return Err(decode_login(response)
+            .await
+            .err()
+            .unwrap_or_else(unavailable));
+    }
+    let mut result: HostOrganizationSwitchResult = decode_json(response).await?;
+    target.ensure_active()?;
+    let HostOrganizationSwitchResult::Switched { login } = &mut result else {
+        return Ok(OrganizationSwitchReply {
+            result,
+            bootstrap: None,
+            binding_id: None,
+        });
+    };
+    if login.instance_id != bootstrap.instance_id || login.identity.is_none() {
+        return Err(stale());
+    }
+    let token = login.token.take().ok_or_else(unavailable)?;
+    bootstrap.access_token = token.expose().to_owned();
+    let binding_id = new_binding_id()?;
+    let previous_id = {
+        let mut selected = connection.selected.lock().map_err(|_| unavailable())?;
+        let previous = selected
+            .as_ref()
+            .filter(|selection| {
+                selection
+                    .context
+                    .as_ref()
+                    .is_some_and(|context| Arc::ptr_eq(context, &target.context))
+            })
+            .ok_or_else(stale)?;
+        let previous_id = previous.id.clone();
+        let cancellation = previous.cancellation.clone();
+        target.context.cancellation.cancel();
+        *selected = Some(Selection {
+            id: binding_id.clone(),
+            context: Some(Arc::new(TargetContext {
+                cancellation: cancellation.child_token(),
+                bootstrap: bootstrap.clone(),
+                local: target.context.local,
+                local_proof: target.context.local_proof.clone(),
+            })),
+            cancellation,
+        });
+        previous_id
+    };
+    updater.rebind_selection(&app, &previous_id, &binding_id);
+    resources.clear_target_resources();
+    browsers.close_cancelled();
+    Ok(OrganizationSwitchReply {
+        result,
+        bootstrap: Some(bootstrap),
+        binding_id: Some(binding_id),
+    })
+}
+
 #[derive(Serialize)]
 pub(crate) struct PreparedConnection {
-    bootstrap: RuntimeBootstrap,
+    bootstrap: Option<RuntimeBootstrap>,
+    organization_selection: Option<HostOrganizationSelection>,
     warning: Option<&'static str>,
 }
 
@@ -353,10 +446,12 @@ pub(crate) async fn connect_runtime_target(
     password: String,
     remember: bool,
     username: Option<String>,
+    selection_token: Option<String>,
+    organization_id: Option<String>,
 ) -> Result<PreparedConnection, ConnectionError> {
     let cancellation = connection.cancellation(&binding_id)?;
     let normalized = origin.as_deref().map(normalize_origin).transpose()?;
-    let (bootstrap, local_proof) = tokio::select! {
+    let (bootstrap, local_proof, organization_selection) = tokio::select! {
         biased;
         () = cancellation.cancelled() => return Err(stale()),
         result = async {
@@ -370,10 +465,26 @@ pub(crate) async fn connect_runtime_target(
             if updater.update_required(&binding_id) { return Err(failure("center_protocol_incompatible", "需要更新后继续使用。")); }
             let proof = management.as_ref().map(|value| value.access_token.clone());
             let bootstrap = if capabilities.mode == HostMode::Enterprise {
-                login(origin, HostLoginRequest::Enterprise { username: username.unwrap_or_default(), password: SecretValue::new(password.clone()), native: true }).await?
+                let request = match (selection_token, organization_id) {
+                    (Some(token), Some(organization_id)) => HostLoginRequest::EnterpriseSelect {
+                        selection_token: SecretValue::new(token), organization_id,
+                    },
+                    (None, None) => HostLoginRequest::Enterprise {
+                        username: username.unwrap_or_default(), password: SecretValue::new(password.clone()), native: true,
+                    },
+                    _ => return Err(unavailable()),
+                };
+                let reply = login_request(origin, &request).await?;
+                if let Some(selection) = reply.organization_selection {
+                    return Ok((None, None, Some(selection)));
+                }
+                let token = reply.token.ok_or_else(|| failure("component_mismatch", "Host 未返回原生登录凭据。"))?;
+                verify_remote(origin, token.expose()).await?
+            } else if selection_token.is_some() || organization_id.is_some() {
+                return Err(stale());
             } else if let Some(management) = management { management }
             else { remote_login(origin, &password).await? };
-            Ok::<_, ConnectionError>((bootstrap, proof))
+            Ok::<_, ConnectionError>((Some(bootstrap), proof, None))
         } => result,
     }.inspect_err(|error| {
         if error.code == "center_protocol_incompatible" {
@@ -391,6 +502,14 @@ pub(crate) async fn connect_runtime_target(
             "需要更新后继续使用。",
         ));
     }
+    let Some(bootstrap) = bootstrap else {
+        connection.cancellation(&binding_id)?;
+        return Ok(PreparedConnection {
+            bootstrap: None,
+            organization_selection,
+            warning: None,
+        });
+    };
     connection.bind_with_proof(
         &binding_id,
         bootstrap.clone(),
@@ -408,7 +527,11 @@ pub(crate) async fn connect_runtime_target(
         None
     };
     connection.cancellation(&binding_id)?;
-    Ok(PreparedConnection { bootstrap, warning })
+    Ok(PreparedConnection {
+        bootstrap: Some(bootstrap),
+        organization_selection: None,
+        warning,
+    })
 }
 
 /// 登录前选中 Host 即可发现更新；Center 地址仍由该 Host 的有效配置提供。
@@ -651,21 +774,28 @@ async fn login(
     origin: &str,
     request: HostLoginRequest,
 ) -> Result<RuntimeBootstrap, ConnectionError> {
-    let login = decode_login(
+    let login = login_request(origin, &request).await?;
+    let token = login
+        .token
+        .ok_or_else(|| failure("component_mismatch", "Host 未返回原生登录凭据。"))?;
+    verify_remote(origin, token.expose()).await
+}
+
+async fn login_request(
+    origin: &str,
+    request: &HostLoginRequest,
+) -> Result<HostLoginResult, ConnectionError> {
+    decode_login(
         http()?
             .post(format!("{origin}/auth/login"))
             .headers(crate::runtime_compatibility::headers())
-            .json(&request)
+            .json(request)
             .send()
             .await
             .map_err(|error| transport_error(&error).at_step("发送登录请求"))?,
     )
     .await
-    .map_err(|error| error.at_step("读取登录响应"))?;
-    let token = login
-        .token
-        .ok_or_else(|| failure("component_mismatch", "Host 未返回原生登录凭据。"))?;
-    verify_remote(origin, token.expose()).await
+    .map_err(|error| error.at_step("读取登录响应"))
 }
 async fn verify_remote(origin: &str, token: &str) -> Result<RuntimeBootstrap, ConnectionError> {
     verify_remote_with_client(&http()?, origin, token).await

@@ -40,7 +40,7 @@ test("Host 内嵌 Web 支持登录、设置、改密撤销和退出", async ({ p
   expect(document?.headers()["content-security-policy"]).toContain("connect-src 'self'");
   // Blob PDF 继承父页面策略；允许自身预览，仍禁止外站嵌入和 object 插件。
   const csp = document?.headers()["content-security-policy"]?.split("; ");
-  expect(csp).toEqual(expect.arrayContaining(["frame-ancestors 'self'", "frame-src blob:", "object-src 'none'"]));
+  expect(csp).toEqual(expect.arrayContaining(["frame-ancestors 'self'", "frame-src 'self' blob: http: https:", "object-src 'none'"]));
   await expect(page.getByLabel("Host 登录")).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("web-login.png"), animations: "disabled" });
   await page.getByLabel("访问密码", { exact: true }).fill("isolated-web-password");

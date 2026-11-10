@@ -8,6 +8,7 @@ fn host_namespaces_preserve_local_preferences_and_do_not_accept_credential_urls(
     let local = DesktopPreferences {
         left_sidebar_width: 300,
         last_model_selection: Some(ModelSelection {
+            source: assistant_protocol::ModelSelectionSource::Local,
             provider_instance_id: assistant_protocol::ProviderInstanceId::new("local-provider")
                 .expect("provider id"),
             model_id: "local-model".to_owned(),
@@ -19,6 +20,7 @@ fn host_namespaces_preserve_local_preferences_and_do_not_accept_credential_urls(
         left_sidebar_width: 400,
         default_approval_mode: ApprovalMode::Auto,
         last_model_selection: Some(ModelSelection {
+            source: assistant_protocol::ModelSelectionSource::Local,
             provider_instance_id: assistant_protocol::ProviderInstanceId::new("remote-provider")
                 .expect("provider id"),
             model_id: "remote-model".to_owned(),
@@ -48,6 +50,35 @@ fn host_namespaces_preserve_local_preferences_and_do_not_accept_credential_urls(
     assert!(validate_namespace("http://user:password@host.test:7240").is_err());
     assert!(validate_namespace("http://host.test:7240/#token=x").is_err());
     assert!(validate_namespace("file:///tmp").is_err());
+}
+
+#[test]
+fn organization_layouts_coexist_with_each_other_and_with_the_old_account_layout() {
+    let directory = tempdir().unwrap();
+    let host = "http://host.test:7240/users/11111111-1111-4111-8111-111111111111";
+    let scopes = [
+        (format!("{host}/7"), 312),
+        (
+            format!("{host}/22222222-2222-4222-8222-222222222222/7"),
+            340,
+        ),
+        (
+            format!("{host}/33333333-3333-4333-8333-333333333333/7"),
+            400,
+        ),
+    ];
+    for (scope, width) in &scopes {
+        let preferences = DesktopPreferences {
+            left_sidebar_width: *width,
+            ..Default::default()
+        };
+        save_namespace(directory.path(), preferences, Some(scope)).unwrap();
+    }
+    let document = load_document(directory.path()).unwrap();
+    for (scope, width) in scopes {
+        assert_eq!(document.hosts[&scope].left_sidebar_width, width);
+    }
+    assert!(validate_namespace(&format!("{host}/invalid/7")).is_err());
 }
 
 #[test]
@@ -99,6 +130,7 @@ fn preferences_round_trip_without_runtime_state() {
         close_behavior: DesktopCloseBehavior::QuitDesktop,
         default_approval_mode: ApprovalMode::Auto,
         last_model_selection: Some(ModelSelection {
+            source: assistant_protocol::ModelSelectionSource::Local,
             provider_instance_id: assistant_protocol::ProviderInstanceId::new("provider-a")
                 .expect("provider id"),
             model_id: "model-a".to_owned(),
@@ -204,6 +236,7 @@ fn invalid_device_defaults_are_rejected_instead_of_becoming_runtime_state() {
     assert!(
         validate(DesktopPreferences {
             last_model_selection: Some(ModelSelection {
+                source: assistant_protocol::ModelSelectionSource::Local,
                 provider_instance_id: assistant_protocol::ProviderInstanceId::new("provider-a")
                     .expect("provider id"),
                 model_id: "   ".to_owned(),

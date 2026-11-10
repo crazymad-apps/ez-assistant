@@ -3,6 +3,7 @@ import type { CreateUserRequest, UpdateUserRequest, UserPage, UserRecord } from 
 import { IdentityError } from '../identity/errors.js';
 import type { IdentityService } from '../identity/service.js';
 import type { userQuery } from './validation.js';
+import { organizations } from '../organizations/repository.js';
 import { users } from './repository.js';
 
 type UserRow = Omit<UserRecord, 'created_at' | 'updated_at'> & { created_at: Date; updated_at: Date };
@@ -42,8 +43,9 @@ export class UsersService {
     return row;
   }
 
-  async list(input: ReturnType<typeof userQuery>): Promise<UserPage> {
+  async list(token: string | undefined, input: ReturnType<typeof userQuery>): Promise<UserPage> {
     const row = await users.list(this.manager, input);
+    await this.identity.requireAdmin(this.manager, token);
     return {
       ...row,
       items: row.items.map((item) => ({
@@ -84,16 +86,20 @@ export class UsersService {
         if (before.is_super_admin && (input.enabled === false || (before.role !== 'user' && input.role === 'user'))) {
           throw new IdentityError(409, 'SUPER_ADMIN_PROTECTED');
         }
-        const wasAdmin = before.enabled && (before.role === 'admin' || before.is_super_admin);
-        const remainsAdmin = after.enabled && (after.role === 'admin' || after.is_super_admin);
+        const wasAdmin = before.enabled && (before.role === 'system_admin' || before.is_super_admin);
+        const remainsAdmin = after.enabled && (after.role === 'system_admin' || after.is_super_admin);
         if (wasAdmin && !remainsAdmin) {
           const count = await users.otherAdmins(client, id);
           if (!count) throw new IdentityError(409, 'LAST_ADMIN_REQUIRED');
         }
+        if (before.enabled && !after.enabled && await organizations.leavesOrganizationWithoutAdmin(client, id))
+          throw new IdentityError(409, 'ORGANIZATION_ADMIN_REQUIRED');
         const changed =
           before.display_name !== after.display_name || before.role !== after.role || before.enabled !== after.enabled;
         if (!changed) return { user: response(before), revoke: false };
         const row = (await users.update(client, id, after))!;
+        if (before.enabled && !after.enabled)
+          await client.query('DELETE FROM public.host_device_users WHERE user_id = $1', [id]);
         await this.identity.audit(client, 'user_updated', requestId, actor.id, undefined, id, {
           before: details(before),
           after: details(row),
@@ -112,8 +118,10 @@ export class UsersService {
       const actor = await this.identity.requireAdmin(client, token);
       const before = await this.target(client, id);
       if (before.is_super_admin) throw new IdentityError(409, 'SUPER_ADMIN_PROTECTED');
-      if (before.enabled && before.role === 'admin' && !await users.otherAdmins(client, id))
+      if (before.enabled && before.role === 'system_admin' && !await users.otherAdmins(client, id))
         throw new IdentityError(409, 'LAST_ADMIN_REQUIRED');
+      if (before.enabled && await organizations.leavesOrganizationWithoutAdmin(client, id))
+        throw new IdentityError(409, 'ORGANIZATION_ADMIN_REQUIRED');
       await users.remove(client, id);
       // 原 ID 永久保留在历史引用中；同名重建由 identity sequence 分配新身份。
       await this.identity.audit(client, 'user_deleted', requestId, actor.id, undefined, id, {

@@ -1178,6 +1178,13 @@ pub struct GetSystemContextResult {
 #[ts(export_to = "assistant-protocol.ts")]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum RuntimeCommand {
+    ListUiApps,
+    ReadUiApp(crate::ReadUiAppRequest),
+    UiTool(crate::UiToolRequest),
+    ListMessageCards(crate::ListMessageCardsRequest),
+    MountMessageCard(crate::MountMessageCardRequest),
+    ReleaseMessageCard(crate::ReleaseMessageCardRequest),
+    SaveMessageCardSnapshot(crate::SaveMessageCardSnapshotRequest),
     GetFeedbackSupport {},
     SubmitFeedback(crate::SubmitFeedbackRequest),
     ListSubmittedFeedback(crate::ListSubmittedFeedbackRequest),
@@ -1252,6 +1259,8 @@ pub enum RuntimeCommand {
     /// 使用未保存草稿建立并关闭一次临时候选连接。
     TestMcpServer(Box<crate::TestMcpServerRequest>),
     RefreshMcpServer(crate::RefreshMcpServerRequest),
+    ListMcpUiResources(crate::ListMcpUiResourcesRequest),
+    ReadMcpUiResource(crate::ReadMcpUiResourceRequest),
     CancelMcpServerTest(crate::CancelMcpServerTestRequest),
     /// 查询指定会话范围下可手选的 MCP Server。
     ListMcpServerOptions(crate::ListMcpServerOptionsRequest),
@@ -1389,6 +1398,13 @@ pub enum RuntimeCommand {
 #[ts(export_to = "assistant-protocol.ts")]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum RuntimeCommandResult {
+    ListUiApps(crate::ListUiAppsResult),
+    ReadUiApp(Box<crate::ReadUiAppResult>),
+    UiTool(Box<crate::UiToolState>),
+    ListMessageCards(crate::ListMessageCardsResult),
+    MountMessageCard(Box<crate::MountMessageCardResult>),
+    ReleaseMessageCard(()),
+    SaveMessageCardSnapshot(crate::SaveMessageCardSnapshotResult),
     GetFeedbackSupport(crate::FeedbackResponse<crate::FeedbackSupport>),
     SubmitFeedback(crate::FeedbackResponse<crate::SubmittedFeedback>),
     ListSubmittedFeedback(crate::FeedbackResponse<crate::SubmittedFeedbackPage>),
@@ -1443,6 +1459,8 @@ pub enum RuntimeCommandResult {
     MutateMcpConfiguration(crate::MutateMcpConfigurationResult),
     TestMcpServer(crate::TestMcpServerResult),
     RefreshMcpServer(crate::McpRefreshControlResultSnapshot),
+    ListMcpUiResources(crate::ListMcpUiResourcesResult),
+    ReadMcpUiResource(crate::ReadMcpUiResourceResult),
     CancelMcpServerTest(crate::CancelMcpServerTestResult),
     ListMcpServerOptions(crate::ListMcpServerOptionsResult),
     SubmitSessionCommand(crate::SubmitSessionCommandResult),
@@ -1686,6 +1704,7 @@ mod tests {
 
     fn model_selection() -> crate::ModelSelection {
         crate::ModelSelection {
+            source: crate::ModelSelectionSource::Local,
             provider_instance_id: crate::ProviderInstanceId::new("provider-1").expect("provider"),
             model_id: "vendor/model-1".to_owned(),
         }
@@ -1889,6 +1908,7 @@ mod tests {
             (
                 RuntimeCommand::SetAuxiliaryVisionModel(SetAuxiliaryVisionModelRequest {
                     selection: Some(crate::ModelSelection {
+                        source: crate::ModelSelectionSource::Local,
                         provider_instance_id: crate::ProviderInstanceId::new("provider-1")
                             .expect("provider"),
                         model_id: "model-1".into(),

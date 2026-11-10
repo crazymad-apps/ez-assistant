@@ -1,3 +1,4 @@
+import { defaultHistoryModel, singleModelPolicy } from '../support/model-policy.js';
 import { readFile, mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { createServer } from 'node:http';
@@ -135,7 +136,7 @@ it.skipIf(!process.env.CENTER_WS_LIFECYCLE_SCENARIO)(
           randomUUID(),
         );
       await fixed();
-      await models.setDefault(admin.token, { default_model: selection }, randomUUID());
+      await models.saveSettings(admin.token, singleModelPolicy(await models.settings(admin.token), selection), randomUUID());
       await app
         .get(CallManagement)
         .saveSettings(
@@ -148,7 +149,7 @@ it.skipIf(!process.env.CENTER_WS_LIFECYCLE_SCENARIO)(
           headers: { authorization: `Bearer ${login.token}` },
         });
         expect(response.status).toBe(200);
-        return response.json() as Promise<{ endpoint: string; server_history_binding: string }>;
+        return defaultHistoryModel(await response.json());
       };
       const send = async (
         previous?: string,

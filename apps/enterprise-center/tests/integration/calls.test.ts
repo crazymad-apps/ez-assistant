@@ -1,3 +1,4 @@
+import { singleModelPolicy } from '../support/model-policy.js';
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { createServer } from 'node:http';
@@ -98,7 +99,7 @@ it('真实 HTTP 的代理、配置测试与快照管理闭环，启动恢复保�
     await request('POST', `model-providers/${selection.provider_instance_id}/refresh`, {});
     const config = await request('POST', 'model-configuration/query', { ...selection, origin: 'online' });
     await request('PUT', 'model-configuration', { ...selection, origin: 'online', parameters: config.parameters });
-    await request('PUT', 'model-settings', { default_model: selection });
+    await request('PUT', 'model-settings', singleModelPolicy(await request('GET', 'model-settings'), selection));
     await request('PUT', 'llm-recording-settings', {
       enabled: true,
       content_retention_days: 7,

@@ -1,7 +1,7 @@
 import 'reflect-metadata';
 import { DataSource } from 'typeorm';
 import type { DatabaseConfig } from '../config.js';
-import { ProviderEntity, FixedConfigEntity, ModelSettingsEntity } from '../models/entity.js';
+import { ProviderEntity, FixedConfigEntity, ModelSettingsEntity, OrganizationModelEntity } from '../models/entity.js';
 import { DesktopReleaseEntity, DesktopReleaseTargetEntity } from '../desktop-releases/entity.js';
 import { HostDeviceEntity, HostDeviceUserEntity } from '../host-devices/entity.js';
 import { FeedbackEntity } from '../feedback/entity.js';
@@ -32,6 +32,7 @@ export function createDataSource(config: DatabaseConfig): DataSource {
       ProviderEntity,
       FixedConfigEntity,
       ModelSettingsEntity,
+      OrganizationModelEntity,
       CustomAgentEntity,
       PluginEntity,
       PluginPackageEntity,

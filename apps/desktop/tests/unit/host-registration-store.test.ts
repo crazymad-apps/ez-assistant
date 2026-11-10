@@ -62,6 +62,7 @@ describe("本机登记交互边界", () => {
       device: {
         id: "old",
         installation_id: "installation",
+        organization_id: "org-fixture",
         name: "旧名称",
         platform: "macos",
         host_version: "0.31.0",

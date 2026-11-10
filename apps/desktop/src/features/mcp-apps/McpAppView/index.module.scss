@@ -1,0 +1,23 @@
+.page {
+  position: relative;
+  min-width: 0;
+  width: 100%;
+}
+.loading_overlay {
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline-start: 12px;
+  margin: 0;
+  pointer-events: none;
+}
+.surface {
+  min-width: 0;
+  width: 100%;
+}
+.surface > iframe {
+  display: block;
+  width: 100%;
+  min-height: 240px;
+  max-height: 600px;
+  border: 0;
+}

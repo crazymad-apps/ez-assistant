@@ -17,13 +17,14 @@ type Access = {
   device: string;
   token: string;
   scope: LoginScope;
+  organizationId: string;
   capability: Capability;
   expires: number;
   resolve: (value: object) => void;
   reject: (error: Error) => void;
   sourceExpires: number;
   ready: boolean;
-  issued?: LoginResponse;
+  issued?: { login: LoginResponse; session: LoginScope };
   targetScope?: LoginScope;
   viewId?: string;
   desktop?: { prepared: boolean; offered: boolean; answered: boolean; sourceCandidates: number; targetCandidates: number };
@@ -70,6 +71,10 @@ export class NetworkAccess {
 
   changed(id: string, terminal: boolean, device?: HostDeviceDetail) {
     for (const access of this.active.values()) {
+      if (access.source.id === id && (terminal || (device && !device.enabled))) {
+        this.end(access);
+        continue;
+      }
       if (access.device !== id) continue;
       const grant = device?.users.find((u) => u.user_id === access.scope.userId);
       if (
@@ -124,8 +129,8 @@ export class NetworkAccess {
       const p = fields(payload, ['token', 'offset']);
       if (typeof p.token !== 'string' || !Number.isSafeInteger(p.offset) || (p.offset as number) < 0) invalid();
       return this.identity.write(async (manager) => {
-        const user = await this.identity.requireUser(manager, p.token as string);
-        return this.devices.directory(manager, user.id, p.offset as number);
+        const { user, organizationId } = await this.sourceIdentity(manager, connection, p.token as string);
+        return this.devices.directory(manager, organizationId, user.id, p.offset as number);
       });
     }
     if (action === 'open') return this.open(connection, payload);
@@ -167,38 +172,40 @@ export class NetworkAccess {
         async (manager) => {
           if (access.ready || access.issued) throw new IdentityError(409, 'DEVICE_CHANGED');
           const user = await this.authorize(manager, access);
-          return this.identity.prepareLogin(manager, user, randomUUID(), 'device_user_login');
+          return this.identity.prepareLogin(manager, user, randomUUID(), 'device_user_login',
+            { kind: 'organization', organization_id: access.organizationId }, true);
         },
-        (login) => {
+        (prepared) => {
           if (this.live(access)) {
-            this.identity.publishLogin(login);
-            access.issued = login;
+            this.identity.publishLogin(prepared);
+            access.issued = prepared;
           }
         },
       );
       if (!this.live(access)) throw new IdentityError(409, 'DEVICE_ACCESS_ENDED');
-      return login;
+      return login.login;
     }
     if (action === 'ready' || action === 'renew') {
       if (typeof p.target_token !== 'string') invalid();
       return this.identity.write(
         async (manager) => {
           await this.authorize(manager, access);
-          const targetUser = await this.identity.requireUser(manager, p.target_token as string);
-          if (targetUser.id !== access.scope.userId) throw new IdentityError(403, 'DEVICE_ACCESS_DENIED');
+          const target = await this.identity.requireOrganizationMember(manager, p.target_token as string);
+          if (target.user.id !== access.scope.userId || target.organizationId !== access.organizationId)
+            throw new IdentityError(403, 'DEVICE_ACCESS_DENIED');
           if (!this.live(access) || (action === 'renew' && !access.ready))
             throw new IdentityError(409, 'DEVICE_ACCESS_ENDED');
-          return { access_id: access.id, valid_for_ms: 45000 };
+          return { access_id: access.id, valid_for_ms: 45000, targetScope: target.session };
         },
         (result) => {
           if (!this.live(access)) return;
-          access.targetScope = this.identity.scope(p.target_token as string);
+          access.targetScope = result.targetScope;
           const unused = access.issued;
           access.issued = undefined;
-          if (unused && unused.token !== p.target_token) this.identity.discardLogin(unused.token);
+          if (unused && unused.login.token !== p.target_token) this.identity.discardSession(unused.session);
           access.ready = true;
           access.expires = performance.now() + 45000;
-          access.resolve(result);
+          access.resolve({ access_id: result.access_id, valid_for_ms: result.valid_for_ms });
         },
       );
     }
@@ -228,8 +235,8 @@ export class NetworkAccess {
         if (this.active.has(p.access_id as string)) throw new IdentityError(409, 'DEVICE_CHANGED');
         if (this.active.size >= 1024 || [...this.active.values()].filter((a) => a.source === source).length >= 64)
           throw new IdentityError(429, 'RATE_LIMITED');
-        const user = await this.identity.requireUser(manager, p.token as string);
-        await this.devices.allow(manager, user.id, p.device_id as string, p.capability as string);
+        const { user, organizationId, session } = await this.sourceIdentity(manager, source, p.token as string);
+        await this.devices.allow(manager, organizationId, user.id, p.device_id as string, p.capability as string);
         const view = typeof p.view_id === 'string' ? this.active.get(p.view_id) : undefined;
         if (p.capability === 'desktop_control') {
           if (!view || !this.live(view) || !view.ready || view.capability !== 'desktop_view' ||
@@ -239,6 +246,7 @@ export class NetworkAccess {
         const target = this.target(p.device_id as string);
         if (source === target) throw new IdentityError(403, 'DEVICE_ACCESS_DENIED');
         if (!source.online || !target?.online) throw new IdentityError(409, 'DEVICE_ACCESS_ENDED');
+        if (target.organizationId !== organizationId) throw new IdentityError(403, 'DEVICE_ACCESS_DENIED');
         return {
           viewId: view?.id,
           id: p.access_id as string,
@@ -246,7 +254,8 @@ export class NetworkAccess {
           target,
           device: p.device_id as string,
           token: p.token as string,
-          scope: this.identity.scope(p.token as string),
+          scope: session,
+          organizationId,
           capability: p.capability as Capability,
           expires: performance.now() + 30000,
           sourceExpires: performance.now() + 45000,
@@ -266,6 +275,7 @@ export class NetworkAccess {
             type: 'access_offer',
             access_id: access.id,
             user_id: access.scope.userId,
+            organization_id: access.organizationId,
             capability: access.capability,
             source_connection_id: source.connectionId,
             ...(access.viewId ? { view_id: access.viewId } : {}),
@@ -280,10 +290,20 @@ export class NetworkAccess {
     return result;
   }
 
+  private async sourceIdentity(manager: EntityManager, source: DeviceConnection, token: string) {
+    const caller = await this.identity.requireOrganizationMember(manager, token);
+    if (caller.organizationId !== source.organizationId)
+      throw new IdentityError(403, 'DEVICE_ACCESS_DENIED');
+    await this.devices.allowSource(manager, caller.organizationId, source.id);
+    return caller;
+  }
+
   private async authorize(manager: EntityManager, access: Access) {
     if (!this.live(access)) throw new IdentityError(409, 'DEVICE_ACCESS_ENDED');
-    const user = await this.identity.requireUser(manager, access.token);
-    await this.devices.allow(manager, user.id, access.device, access.capability);
+    const { user, organizationId, session } = await this.sourceIdentity(manager, access.source, access.token);
+    if (session !== access.scope || organizationId !== access.organizationId)
+      throw new IdentityError(403, 'DEVICE_ACCESS_DENIED');
+    await this.devices.allow(manager, organizationId, user.id, access.device, access.capability);
     if (!this.live(access)) throw new IdentityError(409, 'DEVICE_ACCESS_ENDED');
     return user;
   }
@@ -322,6 +342,7 @@ export class NetworkAccess {
       access.source.online &&
       access.target.online &&
       this.target(access.device) === access.target &&
+      Date.now() < Math.min(access.scope.expires, access.targetScope?.expires ?? Infinity) * 1000 &&
       performance.now() < Math.min(access.expires, access.sourceExpires)
     );
   }
@@ -332,7 +353,7 @@ export class NetworkAccess {
     this.streams.revoke(access.id);
     const issued = access.issued;
     access.issued = undefined;
-    if (issued) this.identity.discardLogin(issued.token);
+    if (issued) this.identity.discardSession(issued.session);
     access.reject(new IdentityError(409, 'DEVICE_ACCESS_ENDED'));
     for (const peer of new Set([access.source, access.target]))
       peer.send({ type: 'access_revoked', access_id: access.id });

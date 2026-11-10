@@ -51,6 +51,11 @@ impl SseParser {
         Ok(frames)
     }
 
+    /// 完整辅助响应必须在事件边界结束，不能静默接受被截断的终态尾部。
+    pub(crate) fn is_incomplete(&self) -> bool {
+        !self.pending.is_empty() || !self.data_lines.is_empty()
+    }
+
     /// 处理一行：空行分发、注释忽略、字段累积。
     fn process_line(&mut self, line: &[u8], frames: &mut Vec<SseFrame>) -> Result<(), ModelError> {
         // 空行：分发已累积的 data；没有 data 的事件（纯心跳等）直接丢弃。

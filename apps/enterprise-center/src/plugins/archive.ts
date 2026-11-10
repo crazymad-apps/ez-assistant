@@ -16,7 +16,7 @@ const entryLimit = 100000;
 const descriptorLimit = 1024 * 1024;
 const allowedRoot = new Set(['skills', 'mcp', 'runtimes', 'resources', 'licenses']);
 
-type Item = { type: 'file' | 'directory' | 'link'; mode: number; link?: string; chunks?: Buffer[]; size: number };
+type Item = { type: 'file' | 'directory' | 'link'; mode: number; link?: string; chunks?: Buffer[]; size: number; html_utf8?: boolean };
 
 /** 除目录尾斜杠外，路径必须已是唯一的包内规范形式；不替上传者修正逃逸或冲突路径。 */
 function cleanPath(path: string, directory = false): string {
@@ -45,6 +45,10 @@ class Index {
       !Number.isSafeInteger(expected) || expected < 0 || expected > fileLimit ||
       (mode & 0o6000) !== 0 || (type === 'directory' && expected !== 0)) throw invalidPackage();
     const item: Item = { type, mode, size: 0 };
+    // HTML 逐块校验 UTF-8，不缓存全部资源；只对 v2 实际声明的入口要求校验通过。
+    const html_decoder = type === 'file' && path.startsWith('resources/') && path.endsWith('.html')
+      ? new TextDecoder('utf-8', { fatal: true }) : null;
+    let html_valid = html_decoder !== null;
     this.entries.set(path, item);
     if (type === 'file' && descriptor(path)) item.chunks = [];
     if (type === 'link') item.chunks = [];
@@ -55,9 +59,16 @@ class Index {
         if (item.size > fileLimit || this.total > totalLimit ||
           (item.chunks && item.size > (type === 'link' ? 1024 : descriptorLimit))) throw oversizedPackage();
         if (item.chunks) item.chunks.push(Buffer.from(chunk));
+        if (html_decoder && html_valid) {
+          try { html_decoder.decode(chunk, { stream: true }); } catch { html_valid = false; }
+        }
       },
       end: () => {
         if (item.size !== expected) throw invalidPackage();
+        if (html_decoder) {
+          try { if (html_valid) html_decoder.decode(); } catch { html_valid = false; }
+          item.html_utf8 = html_valid;
+        }
         // TAR 的目标在 header.linkpath，ZIP 的目标才来自条目正文。
         if (type === 'link' && item.chunks) {
           try { item.link = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(item.chunks!)); }
@@ -127,6 +138,16 @@ class Index {
       folded.add(key);
     }
     for (const name of manifest.skills) validateSkill(this.bytes(`skills/${name}/SKILL.md`), name);
+    for (const entry of manifest.ui?.entries ?? []) {
+      if (entry.resource.type === 'package') {
+        const item = this.entries.get(entry.resource.path);
+        if (item?.type !== 'file' || item.size > 2 * 1024 * 1024 || item.html_utf8 !== true) throw invalidPackage();
+      }
+      if (entry.icon) {
+        const item = this.entries.get(entry.icon);
+        if (item?.type !== 'file' || item.size > 256 * 1024) throw invalidPackage();
+      }
+    }
     for (const name of manifest.mcp) {
       const common = `mcp/${name}/server.json`;
       if (this.entries.has(common)) validateMcp(this.bytes(common), name, manifest.platforms[0]!, manifest,

@@ -134,3 +134,23 @@ describe("event connection compatibility", () => {
     client.dispose();
   });
 });
+
+it("consumes center status without affecting Runtime event ordering or triggering a gap", async () => {
+  const fetcher = vi.fn()
+    .mockResolvedValueOnce(Response.json(bootstrap.capabilities))
+    .mockResolvedValueOnce(new Response([
+      'event: center_status\ndata: {"available":false}\n\n',
+      'event: center_status\ndata: invalid-json\n\n',
+      'event: center_status\ndata: {"available":"invalid"}\n\n',
+      'event: runtime_event\ndata: {"sequence":1,"emitted_at_ms":0,"event":{"type":"runtime_shutting_down"}}\n\n',
+      'event: center_status\ndata: {"available":true}\n\n',
+    ].join('')));
+  vi.stubGlobal("fetch", fetcher);
+  const client = new RuntimeClient(bootstrap);
+  const listener = { onEvent: vi.fn(), onDeviceGatewayEvent: vi.fn(), onGap: vi.fn(), onCenterStatus: vi.fn() };
+  await (await client.connectEvents(listener, new AbortController().signal)).closed;
+  expect(listener.onCenterStatus.mock.calls).toEqual([[false], [true]]);
+  expect(listener.onEvent).toHaveBeenCalledOnce();
+  expect(listener.onGap).not.toHaveBeenCalled();
+  client.dispose();
+});

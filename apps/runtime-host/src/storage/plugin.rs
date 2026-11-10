@@ -13,7 +13,56 @@ use super::{
     invalid_data_with_source,
 };
 
+fn source_fields(source: &PluginSource) -> (&str, Option<&str>, Option<&str>) {
+    match source {
+        PluginSource::Upload => ("upload", None, None),
+        PluginSource::Center(id) => ("center", Some(id), None),
+        PluginSource::Organization {
+            center_id,
+            organization_id,
+        } => ("center", Some(center_id), Some(organization_id)),
+    }
+}
+
 impl StorageEngine {
+    pub(super) fn bind_plugin_organization(
+        &mut self,
+        key: &crate::access::enterprise::UserKey,
+        legacy_home: bool,
+    ) -> StorageResult<()> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|source| {
+                database_write_error("plugin organization transaction could not start", source)
+            })?;
+        let invalid: bool = tx
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM plugins WHERE source_kind='center' AND
+                (source_center_id IS NOT ?1 OR (source_organization_id IS NULL AND NOT ?3)
+                 OR (source_organization_id IS NOT NULL AND source_organization_id IS NOT ?2)))",
+                params![key.center_id, key.organization_id, legacy_home],
+                |row| row.get(0),
+            )
+            .map_err(|source| {
+                invalid_data_with_source("plugin organization could not be checked", source)
+            })?;
+        if invalid {
+            return Err(conflict(
+                "plugin origin does not match the organization directory",
+            ));
+        }
+        if legacy_home {
+            tx.execute("UPDATE plugins SET source_organization_id=?1
+                WHERE source_kind='center' AND source_center_id=?2 AND source_organization_id IS NULL",
+                params![key.organization_id, key.center_id],
+            ).map_err(|source| database_write_error("legacy plugin organization could not be recorded", source))?;
+        }
+        tx.commit().map_err(|source| {
+            database_write_error("plugin organization could not be committed", source)
+        })
+    }
+
     pub(super) fn change_plugin_settings(
         &mut self,
         change: PluginSettingsChange,
@@ -25,23 +74,20 @@ impl StorageEngine {
             .map_err(|source| {
                 database_write_error("plugin settings transaction could not start", source)
             })?;
-        let (source_kind, center_id) = match &change.expected.source {
-            PluginSource::Upload => ("upload", None),
-            PluginSource::Center(id) => ("center", Some(id.as_str())),
-        };
+        let (source_kind, center_id, organization_id) = source_fields(&change.expected.source);
         let updated = tx.execute(
             "UPDATE plugins SET enabled=?1, parameters_json=?2, software_paths_json=?3, updated_at_ms=?4
              WHERE name=?5 AND source_kind=?6 AND source_center_id IS ?7
                AND active_sha256 IS ?8 AND active_version IS ?9 AND active_manifest_json IS ?10
                AND enabled=?11 AND parameters_json=?12 AND software_paths_json=?13
-               AND created_at_ms=?14 AND updated_at_ms=?15",
+               AND created_at_ms=?14 AND updated_at_ms=?15 AND source_organization_id IS ?16",
             params![i64::from(change.next.enabled), change.next.parameters_json,
                 change.next.software_paths_json, timestamp(change.next.updated_at_ms)?,
                 change.expected.name, source_kind, center_id, change.expected.active_sha256,
                 change.expected.active_version, change.expected.active_manifest_json,
                 i64::from(change.expected.enabled), change.expected.parameters_json,
                 change.expected.software_paths_json, timestamp(change.expected.created_at_ms)?,
-                timestamp(change.expected.updated_at_ms)?],
+                timestamp(change.expected.updated_at_ms)?, organization_id],
         ).map_err(|source| database_write_error("plugin settings could not be changed", source))?;
         if updated != 1 {
             return Err(conflict("plugin settings changed"));
@@ -58,7 +104,7 @@ impl StorageEngine {
             .prepare(
                 "SELECT name, source_kind, source_center_id, active_version, active_sha256,
                     active_manifest_json, enabled, parameters_json, software_paths_json,
-                    market_status, created_at_ms, updated_at_ms FROM plugins ORDER BY name",
+                    market_status, created_at_ms, updated_at_ms, source_organization_id FROM plugins ORDER BY name",
             )
             .map_err(|source| invalid_data_with_source("plugins could not be loaded", source))?;
         let rows = statement
@@ -76,6 +122,7 @@ impl StorageEngine {
                     row.get::<_, Option<String>>(9)?,
                     row.get::<_, i64>(10)?,
                     row.get::<_, i64>(11)?,
+                    row.get::<_, Option<String>>(12)?,
                 ))
             })
             .map_err(|source| invalid_data_with_source("plugins could not be loaded", source))?;
@@ -93,10 +140,15 @@ impl StorageEngine {
                 market_status,
                 created,
                 updated,
+                organization_id,
             ) = row.map_err(|source| invalid_data_with_source("plugin row is invalid", source))?;
-            let source = match (source_kind.as_str(), source_center_id) {
-                ("upload", None) => PluginSource::Upload,
-                ("center", Some(id)) => PluginSource::Center(id),
+            let source = match (source_kind.as_str(), source_center_id, organization_id) {
+                ("upload", None, None) => PluginSource::Upload,
+                ("center", Some(id), None) => PluginSource::Center(id),
+                ("center", Some(center_id), Some(organization_id)) => PluginSource::Organization {
+                    center_id,
+                    organization_id,
+                },
                 _ => return Err(invalid_data("plugin row is invalid")),
             };
             let plugin = StoredPlugin {
@@ -214,28 +266,21 @@ impl StorageEngine {
         match &update.plugin {
             PluginRecordChange::Keep => {}
             PluginRecordChange::Upsert(plugin) => {
-                if let Some((source_kind, center_id, created_at_ms)) = tx.query_row(
-                    "SELECT source_kind, source_center_id, created_at_ms FROM plugins WHERE name=?1",
+                let (source_kind, center_id, organization_id) = source_fields(&plugin.source);
+                if let Some((kind, center, organization, created_at_ms)) = tx.query_row(
+                    "SELECT source_kind, source_center_id, source_organization_id, created_at_ms FROM plugins WHERE name=?1",
                     [&plugin.name],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, i64>(2)?)),
-                ).optional().map_err(|source| invalid_data_with_source("plugin source could not be loaded", source))? {
-                    let same_source = match &plugin.source {
-                        PluginSource::Upload => source_kind == "upload" && center_id.is_none(),
-                        PluginSource::Center(id) => source_kind == "center" && center_id.as_deref() == Some(id),
-                    };
-                    if !same_source || created_at_ms != timestamp(plugin.created_at_ms)? {
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, i64>(3)?)),
+                ).optional().map_err(|source| invalid_data_with_source("plugin source could not be loaded", source))?
+                    && ((kind.as_str(), center.as_deref(), organization.as_deref()) != (source_kind, center_id, organization_id)
+                        || created_at_ms != timestamp(plugin.created_at_ms)?) {
                         return Err(conflict("plugin source or creation time changed"));
-                    }
                 }
-                let (source_kind, center_id) = match &plugin.source {
-                    PluginSource::Upload => ("upload", None),
-                    PluginSource::Center(id) => ("center", Some(id.as_str())),
-                };
                 tx.execute(
                     "INSERT INTO plugins (name, source_kind, source_center_id, active_version,
                             active_sha256, active_manifest_json, enabled, parameters_json,
-                            software_paths_json, market_status, created_at_ms, updated_at_ms)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                            software_paths_json, market_status, created_at_ms, updated_at_ms, source_organization_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                      ON CONFLICT(name) DO UPDATE SET
                         source_kind=excluded.source_kind, source_center_id=excluded.source_center_id,
                         active_version=excluded.active_version, active_sha256=excluded.active_sha256,
@@ -246,7 +291,7 @@ impl StorageEngine {
                     params![plugin.name, source_kind, center_id, plugin.active_version,
                         plugin.active_sha256, plugin.active_manifest_json, i64::from(plugin.enabled),
                         plugin.parameters_json, plugin.software_paths_json, plugin.market_status,
-                        timestamp(plugin.created_at_ms)?, timestamp(plugin.updated_at_ms)?],
+                        timestamp(plugin.created_at_ms)?, timestamp(plugin.updated_at_ms)?, organization_id],
                 ).map_err(|source| database_write_error("plugin record could not be saved", source))?;
             }
             PluginRecordChange::Remove(name) => {
@@ -430,7 +475,7 @@ mod tests {
             .advance_plugin_operation(PluginOperationUpdate {
                 expected_phase: PluginOperationPhase::Committing,
                 next: next.clone(),
-                plugin: PluginRecordChange::Upsert(plugin()),
+                plugin: PluginRecordChange::Upsert(Box::new(plugin())),
             })
             .unwrap();
         drop(engine);
@@ -491,7 +536,7 @@ mod tests {
                 .advance_plugin_operation(PluginOperationUpdate {
                     expected_phase: PluginOperationPhase::Committing,
                     next,
-                    plugin: PluginRecordChange::Upsert(plugin()),
+                    plugin: PluginRecordChange::Upsert(Box::new(plugin())),
                 })
                 .is_err()
         );

@@ -43,6 +43,8 @@ use crate::{
 
 /// 父 Run 冻结的一组子执行资源与委派配额。
 pub(crate) struct ParentDelegationController {
+    card_publisher: crate::cards::CardPublisher,
+    mcp_call_tool: Option<crate::mcp::CallMcpTool>,
     context_management_mode: agent_model::ContextManagementMode,
     session: Arc<SessionController>,
     parent_run_id: assistant_protocol::RunId,
@@ -71,6 +73,8 @@ pub(crate) struct ParentDelegationController {
 }
 
 pub(crate) struct ParentDelegationResources {
+    pub(crate) card_publisher: crate::cards::CardPublisher,
+    pub(crate) mcp_call_tool: Option<crate::mcp::CallMcpTool>,
     pub(crate) context_management_mode: agent_model::ContextManagementMode,
     pub(crate) session: Arc<SessionController>,
     pub(crate) parent_run_id: assistant_protocol::RunId,
@@ -103,6 +107,8 @@ impl ParentDelegationController {
                 .expect("u32 concurrency limit fits usize"),
         ));
         Self {
+            card_publisher: resources.card_publisher,
+            mcp_call_tool: resources.mcp_call_tool,
             context_management_mode: resources.context_management_mode,
             session: resources.session,
             parent_run_id: resources.parent_run_id,
@@ -149,6 +155,9 @@ impl ParentDelegationController {
         let child_cancellation = Arc::new(ChildTaskCancellation::child_of(&cancellation));
         let mut stored = {
             let _parent = self.session.mutation().await;
+            if cancellation.is_cancelled() {
+                return Err(ToolError::execution("parent execution was cancelled"));
+            }
             self.session.ensure_healthy().map_err(internal_tool_error)?;
             let stored = self
                 .store
@@ -447,6 +456,15 @@ impl ParentDelegationController {
                 skill_activation_latch,
             ))
             .map_err(|_| ToolError::execution("child load_skill tool could not be created"))?;
+        let child_cards = self.card_publisher.for_child(child_task_id.clone());
+        child_agent = child_agent
+            .try_with_tool(crate::cards::PublishCardTool(child_cards.clone()))
+            .map_err(|_| ToolError::execution("child card tool could not be created"))?;
+        if let Some(tool) = &self.mcp_call_tool {
+            child_agent = child_agent
+                .try_with_tool(tool.clone().with_cards(child_cards))
+                .map_err(|_| ToolError::execution("child MCP tool could not be created"))?;
+        }
         if let Some(tool) = ReadSkillReferenceTool::for_catalog(
             &self.skill_catalog,
             self.skill_package_source.clone(),

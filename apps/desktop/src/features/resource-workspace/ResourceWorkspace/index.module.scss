@@ -84,6 +84,11 @@
   }
 }
 
+.app_icon {
+  flex: 0 0 15px;
+  object-fit: contain;
+}
+
 .close_tab {
   margin-right: 2px;
   color: var(--ez-text-muted);

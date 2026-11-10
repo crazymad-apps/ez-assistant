@@ -763,13 +763,39 @@ fn bearer_access_is_origin_independent_while_cookie_access_stays_same_origin() {
 
 #[test]
 fn personal_user_cannot_change_host_identity_and_native_changes_wait_for_restart() {
+    // 保存企业地址现在会核验中心身份；使用独立端点，不依赖开发中心端口。
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let center_url = format!("http://{}", listener.local_addr().unwrap());
+    listener.set_nonblocking(true).unwrap();
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let center = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let router = axum::Router::new().route(
+                    "/api/info",
+                    axum::routing::get(|| async {
+                        axum::Json(json!({"protocol_version":6,"min_protocol_version":6,
+                    "center_id":"01234567-89ab-4cde-8f01-23456789abcd"}))
+                    }),
+                );
+                axum::serve(tokio::net::TcpListener::from_std(listener).unwrap(), router)
+                    .with_graceful_shutdown(async {
+                        let _ = stopped.await;
+                    })
+                    .await
+                    .unwrap();
+            });
+    });
     let directory = support::test_directory();
     let host = HostProcess::start(directory.path());
     let http = client();
     password(&http, &host, "fixture-password");
     let user = login(&http, host.base_url(), "fixture-password");
     let before = status(&http, &host);
-    let payload = json!({"type":"configure","payload":{"expected_revision":before["revision"],"configuration":before["configuration"],"mode":"enterprise","center_url":"http://127.0.0.1:7320"}});
+    let payload = json!({"type":"configure","payload":{"expected_revision":before["revision"],"configuration":before["configuration"],"mode":"enterprise","center_url":center_url}});
     let denied = command(&http, host.base_url(), &user, payload.clone());
     assert_eq!(denied.status(), StatusCode::CONFLICT);
     assert_eq!(
@@ -777,6 +803,8 @@ fn personal_user_cannot_change_host_identity_and_native_changes_wait_for_restart
         "operation_not_allowed"
     );
     let saved = command(&http, host.base_url(), host.access_token(), payload);
+    let _ = stop.send(());
+    center.join().unwrap();
     assert_eq!(saved.status(), StatusCode::OK);
     let saved = saved.json::<Value>().unwrap()["result"]["payload"].clone();
     assert_eq!(saved["mode"], "enterprise");

@@ -7,8 +7,11 @@ import type { UserView, LoadState } from '../../../model';
 import type { UserQuery } from '../../../request/api';
 import styles from './index.module.scss';
 
+import type { Organization } from '../../../request/openapi';
+
 type UsersPageProps = Readonly<{
   users: readonly UserView[];
+  organizations?: readonly Organization[];
   preview: LoadState;
   total: number;
   query: UserQuery;
@@ -18,6 +21,7 @@ type UsersPageProps = Readonly<{
   onRecover: () => void;
   onCreate: () => void;
   onEdit: (user: UserView) => void;
+  onEditOrganizations: (user: UserView) => void;
   onResetPassword: (user: UserView) => void;
   onDelete: (user: UserView) => Promise<void>;
   onToggle: (user: UserView) => Promise<void>;
@@ -74,7 +78,9 @@ export function UsersPage(props: UsersPageProps) {
       width: 200,
       render: (_, user) => (
         <Space size={8} wrap>
-          <Tag color={user.role === 'admin' ? 'blue' : undefined}>{user.role === 'admin' ? '管理员' : '普通用户'}</Tag>
+          <Tag color={user.role === 'system_admin' ? 'blue' : undefined}>
+            {user.role === 'system_admin' ? '系统管理员' : '普通用户'}
+          </Tag>
           {user.superAdmin && <Tag color="gold">超级管理员</Tag>}
         </Space>
       ),
@@ -85,6 +91,17 @@ export function UsersPage(props: UsersPageProps) {
       width: 96,
       render: (_, user) => (
         <Badge status={user.enabled ? 'success' : 'default'} text={user.enabled ? '启用' : '停用'} />
+      ),
+    },
+    {
+      title: '组织归属',
+      key: 'organizations',
+      width: 140,
+      align: 'center',
+      render: (_, user) => (
+        <Button type="link" size="small" disabled={props.busy} onClick={() => props.onEditOrganizations(user)}>
+          {user.organizations?.length ?? 0} 个组织
+        </Button>
       ),
     },
     // 操作列内容默认居中。
@@ -126,7 +143,7 @@ export function UsersPage(props: UsersPageProps) {
         className={styles.list_card}
         title={
           <>
-            成员列表<span className={styles.count}>{props.total} 条</span>
+            用户列表<span className={styles.count}>{props.total} 条</span>
           </>
         }
         extra={
@@ -149,7 +166,7 @@ export function UsersPage(props: UsersPageProps) {
           />
           <Space size={8}>
             <span className={styles.filter_label}>角色</span>
-            <Select<'all' | 'admin' | 'user'>
+            <Select<'all' | 'system_admin' | 'user'>
               aria-label="角色筛选"
               value={role}
               className={styles.select}
@@ -158,7 +175,7 @@ export function UsersPage(props: UsersPageProps) {
               }
               options={[
                 { value: 'all', label: '全部' },
-                { value: 'admin', label: '管理员' },
+                { value: 'system_admin', label: '系统管理员' },
                 { value: 'user', label: '普通用户' },
               ]}
             />
@@ -179,6 +196,15 @@ export function UsersPage(props: UsersPageProps) {
               ]}
             />
           </Space>
+          <Select
+            aria-label="组织筛选"
+            placeholder="全部组织"
+            allowClear
+            style={{ width: 150 }}
+            value={props.query.organization_id}
+            onChange={(organization_id) => props.onQuery({ ...props.query, organization_id, offset: 0 })}
+            options={props.organizations?.map((org) => ({ value: org.id, label: `${org.name}（${org.code}）` }))}
+          />
           <Button type="primary" onClick={search}>
             查询
           </Button>

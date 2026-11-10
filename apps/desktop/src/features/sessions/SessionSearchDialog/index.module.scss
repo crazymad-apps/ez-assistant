@@ -5,6 +5,7 @@
   z-index: var(--ez-z-modal);
   inset: 0;
   display: grid;
+  grid-template-rows: minmax(0, 1fr);
   place-items: start center;
   padding: min(14vh, 110px) 16px 24px;
   background: var(--ez-overlay);
@@ -14,7 +15,9 @@
 .dialog {
   display: grid;
   width: min(560px, calc(100vw - 32px));
-  max-height: calc(100vh - 48px);
+  // 由遮罩扣除实际上下留白后的空间约束，避免顶部偏移使弹窗超出窗口。
+  min-height: 0;
+  max-height: 100%;
   grid-template-rows: auto auto minmax(0, 1fr);
   overflow: hidden;
   border: 1px solid var(--ez-border-strong);
@@ -84,7 +87,7 @@
 }
 
 .results {
-  min-height: 120px;
+  min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 0 10px 14px;

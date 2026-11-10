@@ -7,6 +7,7 @@ export type IconName =
   | "bot"
   | "channel"
   | "check"
+  | "check-circle-fill"
   | "chevron-down"
   | "chevron-up"
   | "chevron-left"
@@ -33,6 +34,7 @@ export type IconName =
   | "message"
   | "model"
   | "more"
+  | "organization"
   | "paperclip"
   | "palette"
   | "pin"
@@ -74,6 +76,7 @@ const paths: Record<IconName, ReactNode> = {
   bot: <><rect x="4" y="6.5" width="16" height="14" rx="4" /><path d="M12 3v3.5M2 11.5v4M22 11.5v4M9 12v3M15 12v3" /></>,
   channel: <><circle cx="12" cy="12" r="2.5" /><circle cx="5" cy="5" r="2" /><circle cx="19" cy="5" r="2" /><circle cx="12" cy="21" r="2" /><path d="m10.2 10.2-3.8-3.8M13.8 10.2l3.8-3.8M12 14.5V19" /></>,
   check: <path d="m5 12 4 4L19 6" />,
+  "check-circle-fill": <path fill="currentColor" stroke="none" fillRule="evenodd" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm4.7 6.3a1 1 0 0 1 0 1.4l-5.5 5.5a1 1 0 0 1-1.4 0l-2.5-2.5a1 1 0 0 1 1.4-1.4l1.8 1.8 4.8-4.8a1 1 0 0 1 1.4 0Z" />,
   "chevron-down": <path d="m7 10 5 5 5-5" />,
   "chevron-up": <path d="m7 14 5-5 5 5" />,
   "chevron-left": <path d="m15 18-6-6 6-6" />,
@@ -105,6 +108,7 @@ const paths: Record<IconName, ReactNode> = {
   message: <><path d="M21 15a3 3 0 0 1-3 3H8l-5 4V6a3 3 0 0 1 3-3h12a3 3 0 0 1 3 3Z" /><path d="M7 8h10M7 12h7" /></>,
   model: <><path d="m12 3 9 4.5-9 4.5-9-4.5L12 3Z" /><path d="m3 12 9 4.5 9-4.5M3 16.5 12 21l9-4.5" /></>,
   more: <><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none" /></>,
+  organization: <><rect x="5" y="3.5" width="14" height="17" rx="2" /><path d="M9 8h.01M15 8h.01M9 12h.01M15 12h.01M10 20.5V16h4v4.5" /></>,
   paperclip: <path d="m20 11-8.5 8.5a5 5 0 0 1-7-7L14 3a3.5 3.5 0 0 1 5 5l-9.5 9.5a2 2 0 0 1-3-3L15 6" />,
   pin: (
     <path

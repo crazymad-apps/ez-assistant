@@ -95,7 +95,7 @@ test('F01 retries recover, survive reload, stop on cancellation and reject strea
         await page.getByText('F01 EXHAUST', { exact: true }).first().click();
         await expect(page.getByRole('alert')).toContainText('已尝试 6 次');
       }
-      if (scenario === 'STREAM') await expect(page.getByRole('alert')).toContainText('已停止自动重试');
+      if (scenario === 'STREAM') await expect(page.getByRole('alert')).toContainText('模型响应意外中断');
       const view = (await command('get_session_view', { session_id })).snapshot.value;
       expect(view.conversation.items.filter(item => item.type === 'user')).toHaveLength(1);
       expect(view.active_run).toBeNull();

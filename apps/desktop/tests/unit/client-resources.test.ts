@@ -168,7 +168,7 @@ it("closes a pending browser chooser on disposal and resolves Host references wi
 it("persists only anonymous Web layout without user resource descriptions", async () => {
   localStorage.setItem("ez-assistant:view", JSON.stringify({
     default_approval_mode: "auto",
-    last_model_selection: { provider_instance_id: "provider-1", model_id: "model-a" },
+    last_model_selection: { source: 'local' as const, provider_instance_id: "provider-1", model_id: "model-a" },
   }));
   const snapshot = {
     current_scope_key: "session:a",
@@ -217,7 +217,7 @@ it("persists only anonymous Web layout without user resource descriptions", asyn
   await saveDesktopPreferences({
     ...preferences,
     default_approval_mode: "auto",
-    last_model_selection: { provider_instance_id: "provider-1", model_id: "model-a" },
+    last_model_selection: { source: 'local' as const, provider_instance_id: "provider-1", model_id: "model-a" },
     resource_workspace: snapshot,
   });
   const saved = await loadDesktopPreferences();

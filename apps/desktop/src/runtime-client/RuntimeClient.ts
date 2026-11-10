@@ -3,7 +3,7 @@ import { compatibilityHeaders } from "@ez-assistant/protocol";
 import { hostCompatibilityError, compatibilityMessage, isCompatibilityCode } from "./compatibility";
 import { TerminalSocket, type TerminalSource, type TerminalSize, type TerminalEvent } from "./TerminalSocket";
 import type {
-  HostLoginResult, HostPasswordRequest, HostLogoutResult,
+  HostLoginResult, HostPasswordRequest, HostLogoutResult, HostOrganizationSwitchRequest, HostOrganizationSwitchResult,
   ShellKind, UserTerminalShellEntry,
   DeviceGatewayCommand,
   HostAccessCommand,
@@ -57,6 +57,8 @@ export class RuntimeClientError extends Error {
 
 export type RuntimeEventListener = {
   readonly onEvent: (event: RuntimeEventEnvelope) => void;
+  /** Host 保活结果，仅用于提示，与 Runtime 业务序列独立。 */
+  readonly onCenterStatus?: (available: boolean) => void;
   readonly onDeviceGatewayEvent: (event: DeviceGatewayEvent) => void;
   readonly onGap: () => void;
 };
@@ -66,6 +68,7 @@ export type RuntimeEventConnection = {
 };
 
 export class RuntimeClient {
+  readonly ui_client_instance_id = crypto.randomUUID();
   readonly login_context: string | null;
   readonly instance_id: string;
   readonly capabilities: RuntimeHostCapabilities;
@@ -102,6 +105,15 @@ export class RuntimeClient {
 
   #requireLocal(): void {
     if (this.target_device) throw new RuntimeClientError("remote_operation_unavailable", "此操作不支持企业组网设备。", this.target_device, "not_executed");
+  }
+
+  async switchOrganization(request: HostOrganizationSwitchRequest): Promise<HostOrganizationSwitchResult> {
+    this.#requireLocal();
+    const response = await this.#fetch(`${this.#base_url}/auth/organization-switch`, {
+      method: "POST", cache: "no-store", headers: this.#headers(true), body: JSON.stringify(request),
+    });
+    if (!response.ok) throw await decodeCommandFailure(response);
+    return await response.json() as HostOrganizationSwitchResult;
   }
 
   dispose(): void { this.#abort.abort(); }
@@ -391,13 +403,17 @@ function dispatchFrame(frame: string, listener: RuntimeEventListener): void {
     return;
   }
   try {
-    if (event_name === "runtime_event") {
+    if (event_name === "center_status") {
+      const status = JSON.parse(data.join("\n")) as { available?: unknown };
+      if (typeof status.available === "boolean") listener.onCenterStatus?.(status.available);
+    } else if (event_name === "runtime_event") {
       listener.onEvent(JSON.parse(data.join("\n")) as RuntimeEventEnvelope);
     } else if (event_name === "device_gateway_event") {
       listener.onDeviceGatewayEvent(JSON.parse(data.join("\n")) as DeviceGatewayEvent);
     }
   } catch {
-    listener.onGap();
+    // 中心提示不参与 Runtime 序列；无效展示帧不能触发业务状态重新同步。
+    if (event_name !== "center_status") listener.onGap();
   }
 }
 
@@ -481,6 +497,9 @@ const REMOTE_BUSINESS_COMMANDS = new Set<RuntimeCommand["type"]>([
   "list_skills",
   "get_skill_detail",
   "list_mcp_server_options",
+  "list_mcp_ui_resources",
+  "list_ui_apps", "read_ui_app", "ui_tool", "list_message_cards", "mount_message_card", "release_message_card", "save_message_card_snapshot",
+  "read_mcp_ui_resource",
   "submit_session_command",
   "get_permission_document",
   "replace_permission_document",

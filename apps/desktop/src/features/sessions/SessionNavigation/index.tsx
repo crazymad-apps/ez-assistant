@@ -32,7 +32,7 @@ export const SessionNavigation = observer(function SessionNavigation({ sidebar_o
           onSelect={() => void store.selectSession(item.session_id, store.network.browsing_device)}
         >
           <span>{item.title}</span>
-          {store.navigation.target_device === store.network.browsing_device && item.session_id === store.navigation.selected_session_id && <Icon name="check" size={14} />}
+          {store.navigation.target_device === store.network.browsing_device && item.session_id === store.navigation.selected_session_id && <Icon name="check-circle-fill" size={16} />}
         </DropdownMenuItem>)}
         {recent.length === 0 && <span className={styles.recent_empty}>暂无会话</span>}
       </DropdownMenuContent>

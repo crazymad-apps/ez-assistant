@@ -325,7 +325,7 @@ function SelectionPortal<T extends string>(props: Readonly<{
       window.removeEventListener("resize", updatePosition);
       document.removeEventListener("scroll", updatePosition, true);
     };
-  }, [props.match_trigger_width, props.open, props.popover_ref, props.presence.mounted, props.trigger_ref]);
+  }, [props.match_trigger_width, props.open, props.options.length, props.popover_ref, props.presence.mounted, props.trigger_ref]);
 
   if (!props.presence.mounted) return null;
 
@@ -375,7 +375,7 @@ function SelectionPortal<T extends string>(props: Readonly<{
               {option.description && <small>{option.description}</small>}
             </span>
             <span aria-hidden="true" className={styles.check_slot}>
-              {option.value === props.selected && <Icon className={styles.check} name="check" size={16} />}
+              {option.value === props.selected && <Icon className={styles.check} name="check-circle-fill" size={16} />}
             </span>
           </button>
         ))}

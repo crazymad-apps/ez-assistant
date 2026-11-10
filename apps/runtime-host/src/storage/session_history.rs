@@ -243,6 +243,14 @@ impl StorageEngine {
                     })?;
             }
             super::usage::snapshot::clear(&transaction, &clear.session_id)?;
+            if !self.allow_legacy_history {
+                transaction
+                    .execute(
+                        "DELETE FROM message_cards WHERE session_id=?1",
+                        [clear.session_id.as_str()],
+                    )
+                    .map_err(|e| database_write_error("cards could not be cleared", e))?;
+            }
             for statement in [
                 "DELETE FROM session_work_plans WHERE session_id = ?1",
                 "DELETE FROM work_plan_completion_receipts WHERE session_id = ?1",

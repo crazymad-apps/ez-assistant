@@ -485,7 +485,7 @@ function sessionSummary(
   return {
     session_id,
     title,
-    model_selection: { provider_instance_id: "provider-1", model_id: "fixture" },
+    model_selection: { source: 'local' as const, provider_instance_id: "provider-1", model_id: "fixture" },
     lifecycle: "active",
     role: "standard",
     current_variant: "build",

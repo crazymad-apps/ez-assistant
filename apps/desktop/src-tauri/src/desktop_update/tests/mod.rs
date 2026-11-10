@@ -85,6 +85,117 @@ fn announcement(source: &UpdateSource) -> serde_json::Value {
 }
 
 #[test]
+fn download_paths_use_the_selected_center_for_relative_and_legacy_absolute_urls() {
+    let source = remote_source("http://127.0.0.1:7320");
+    let key = manifest::public_key(KEY).unwrap();
+    let expected = source
+        .endpoint("darwin-aarch64/releases/0.29.1/files/updater")
+        .unwrap();
+    for reference in [
+        "/api/desktop-updates/darwin-aarch64/releases/0.29.1/files/updater",
+        "api/desktop-updates/darwin-aarch64/releases/0.29.1/files/updater",
+        expected.as_str(),
+        "https://old-center.invalid/api/desktop-updates/darwin-aarch64/releases/0.29.1/files/updater",
+    ] {
+        let mut json = announcement(&source);
+        json["url"] = serde_json::json!(reference);
+        let manifest = manifest::VerifiedManifest::read(
+            &json,
+            &key,
+            &source,
+            "darwin-aarch64",
+            "0.29.0",
+            (2, 2),
+        )
+        .unwrap();
+        assert_eq!(manifest.url, expected, "{reference}");
+    }
+    for reference in [
+        "//other.invalid/api/desktop-updates/darwin-aarch64/releases/0.29.1/files/updater",
+        "file:///api/desktop-updates/darwin-aarch64/releases/0.29.1/files/updater",
+        "https://user:password@old-center.invalid/api/desktop-updates/darwin-aarch64/releases/0.29.1/files/updater",
+        "/api/desktop-updates/windows-x86_64/releases/0.29.1/files/updater",
+        "/api/desktop-updates/darwin-aarch64/releases/0.29.2/files/updater",
+        "/api/desktop-updates/darwin-aarch64/releases/0.29.1/files/installer",
+        "/api/desktop-updates/darwin-aarch64/releases/0.29.1/files/updater?token=secret",
+        "/api/desktop-updates/darwin-aarch64/releases/0.29.1/files/updater#fragment",
+    ] {
+        let mut json = announcement(&source);
+        json["url"] = serde_json::json!(reference);
+        assert!(
+            manifest::VerifiedManifest::read(
+                &json,
+                &key,
+                &source,
+                "darwin-aarch64",
+                "0.29.0",
+                (2, 2),
+            )
+            .is_err(),
+            "{reference}"
+        );
+    }
+}
+
+#[test]
+fn validated_relative_response_creates_native_update_without_another_request() {
+    let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+    context
+        .config_mut()
+        .plugins
+        .0
+        .insert("updater".into(), serde_json::json!({"pubkey": KEY}));
+    let app = tauri::test::mock_builder()
+        .plugin(tauri_plugin_updater::Builder::new().pubkey(KEY).build())
+        .build(context)
+        .unwrap();
+    let source = remote_source("https://selected-center.invalid");
+    let key = manifest::public_key(KEY).unwrap();
+    let updater = app
+        .updater_builder()
+        .target("darwin-aarch64")
+        .endpoints(vec![source.endpoint("darwin-aarch64/0.29.0").unwrap()])
+        .unwrap()
+        .build()
+        .unwrap();
+    let mut response = announcement(&source);
+    response["url"] =
+        serde_json::json!("/api/desktop-updates/darwin-aarch64/releases/0.29.1/files/updater");
+    let verified = manifest::VerifiedManifest::read(
+        &response,
+        &key,
+        &source,
+        "darwin-aarch64",
+        "0.29.0",
+        (2, 2),
+    )
+    .unwrap();
+    response["url"] = serde_json::json!(verified.url);
+    // 不请求不可访问的占位中心，不执行 install，只核对真实 SDK 的安装候选。
+    let update = updater
+        .update_from_response(response.clone())
+        .unwrap()
+        .unwrap();
+    assert_eq!(update.download_url, verified.url);
+    assert_eq!(update.version, verified.version);
+    assert_eq!(Some(update.signature), verified.artifact.signature);
+    assert_eq!(update.raw_json["manifest"], MANIFEST);
+    assert_eq!(update.raw_json["manifest_signature"], SIGNATURE);
+    // 签名原文不变；安装前复核可以再次读取同一响应，且得到相同目标和摘要。
+    let rechecked = manifest::VerifiedManifest::read(
+        &response,
+        &key,
+        &source,
+        "darwin-aarch64",
+        "0.29.0",
+        (2, 2),
+    )
+    .unwrap();
+    assert_eq!(rechecked.url, verified.url);
+    assert_eq!(rechecked.manifest_sha256, verified.manifest_sha256);
+}
+
+#[test]
 fn signed_manifest_binds_version_target_url_and_artifact() {
     let source = remote_source("http://127.0.0.1:7320");
     let key = manifest::public_key(KEY).unwrap();

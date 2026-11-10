@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ApprovalSnapshot, ApplicationSnapshot, SessionSummary } from "@ez-assistant/protocol";
 import { RootStore } from "../../src/stores/RootStore";
@@ -14,6 +14,22 @@ afterEach(() => {
 });
 
 describe("AppShell session header", () => {
+  it("shows center health independently and clears it on recovery without reconnecting", () => {
+    const store = storeWithSessions();
+    store.local_connection.markConnected("fixture", {
+      mode: "enterprise", min_compatible_version: "0.28.0", runtime_version: "0.32.1",
+      max_command_bytes: 65536, max_attachment_bytes: null, sse: true, streaming_upload: true, features: [],
+    });
+    store.local_connection.setCenterAvailability(false);
+    renderShell(store);
+    expect(screen.getByText("企业中心暂不可达，正在自动检查连接。本地会话仍可使用。")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "重新连接" })).not.toBeInTheDocument();
+    act(() => store.local_connection.setCenterAvailability(true));
+    expect(screen.queryByText(/企业中心暂不可达/)).not.toBeInTheDocument();
+    expect(store.local_connection.state).toBe("connected");
+    store.dispose();
+  });
+
   it("keeps global pending work reachable when the entire left sidebar is collapsed", () => {
     const store = storeWithSessions();
     store.pending_notifications.setConnection("fixture", true);
@@ -52,7 +68,7 @@ describe("AppShell session header", () => {
     await waitFor(() => expect(opener).toHaveFocus());
   });
 
-  it("keeps account, Host, password, Web and reconnect actions in the bottom menu", () => {
+  it("keeps account actions in the bottom menu without the removed Host address", () => {
     const store = storeWithSessions();
     store.connection.markConnected("instance-1", {
       mode: "personal", min_compatible_version: "0.28.0", runtime_version: "0.28.0",
@@ -72,7 +88,8 @@ describe("AppShell session header", () => {
     const account = screen.getByRole("button", { name: "账号与 Runtime" });
     fireEvent.click(account);
     const menu = screen.getByRole("menu", { name: "账号菜单" });
-    expect(within(menu).getByText("本机 Host")).toBeVisible();
+    expect(within(menu).getByText("测试用户")).toBeVisible();
+    expect(within(menu).queryByText("本机 Host")).not.toBeInTheDocument();
     fireEvent.click(within(menu).getByRole("menuitem", { name: "修改密码" }));
     expect(show_password).toHaveBeenCalled();
 
@@ -435,7 +452,7 @@ function sessionSummary(session_id: string, title: string, updated_at_ms: number
   return {
     session_id,
     title,
-    model_selection: { provider_instance_id: "provider-1", model_id: "fixture" },
+    model_selection: { source: 'local' as const, provider_instance_id: "provider-1", model_id: "fixture" },
     lifecycle: "active",
     role: "standard",
     current_variant: "build",

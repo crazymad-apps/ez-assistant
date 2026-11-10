@@ -26,7 +26,7 @@ import { UsersService } from './service.js';
 import { createUserInput, resetPasswordInput, updateUserInput, userQuery } from './validation.js';
 
 @Controller('api/users')
-@Access('admin')
+@Access('system')
 @ApiTags('users')
 @ApiDefaultResponse({
   type: CenterErrorResponse,
@@ -40,20 +40,20 @@ export class UsersController {
   ) {}
 
   @Get()
-  @Access('admin', 'users_read')
+  @Access('system', 'users_read')
   @ApiOperation({ operationId: 'listUsers', summary: '管理员查询用户，按创建时间/ID 升序分页' })
   @ApiOkResponse({ type: UserPage })
   list(@Query() query: UserQuery, @Req() request: AuthenticatedRequest) {
     return this.identity.attempt(
       'users_read',
       request.id,
-      () => this.users.list(userQuery(query)),
+      () => this.users.list(request.token, userQuery(query)),
       request.identity!.user.id,
     );
   }
 
   @Post()
-  @Access('admin', 'user_created')
+  @Access('system', 'user_created')
   @ApiOperation({ operationId: 'createUser', summary: '创建普通用户或管理员，不允许传入超级管理员标记' })
   @ApiBody({ type: CreateUserRequest })
   @ApiCreatedResponse({ type: UserRecord })
@@ -67,7 +67,7 @@ export class UsersController {
   }
 
   @Patch(':id')
-  @Access('admin', 'user_updated')
+  @Access('system', 'user_updated')
   @ApiOperation({
     operationId: 'updateUser',
     summary: '编辑显示名称、角色或启用状态，至少一项；不允许改账号/超级管理员标记',
@@ -88,7 +88,7 @@ export class UsersController {
 
   @Delete(':id')
   @HttpCode(204)
-  @Access('admin', 'user_deleted')
+  @Access('system', 'user_deleted')
   @ApiOperation({ operationId: 'deleteUser', summary: '删除账号并撤销全部凭据；保留历史记录及 Host 本地数据' })
   @ApiParam({ name: 'id', schema: { type: 'integer', format: 'int32', minimum: 1, maximum: 2147483647 } })
   @ApiNoContentResponse()
@@ -99,7 +99,7 @@ export class UsersController {
 
   @Post(':id/reset-password')
   @HttpCode(204)
-  @Access('admin', 'user_password_reset')
+  @Access('system', 'user_password_reset')
   @ApiOperation({
     operationId: 'resetUserPassword',
     summary: '管理员为任意用户重置密码（包括自己和超级管理员），不校验原密码；保留目标已有 Token/key',

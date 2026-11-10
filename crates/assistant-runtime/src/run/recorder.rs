@@ -149,6 +149,25 @@ impl ExecutionRecorder for RuntimeRecorder {
     ) -> RecordFuture<'a, ExchangeCompletion> {
         Box::pin(async move {
             let _mutation = self.target.mutation().await;
+            if results.iter().any(|message| {
+                message.result.status == agent_types::ToolResultStatus::Error
+                    && message
+                        .result
+                        .content
+                        .as_single_json()
+                        .is_some_and(|value| {
+                            value["error"]["details"]["cleanup_unconfirmed"].as_bool() == Some(true)
+                        })
+            }) {
+                let session = match &self.target {
+                    RecorderTarget::Parent { session, .. }
+                    | RecorderTarget::Child { session, .. } => session,
+                };
+                session
+                    .lock_state()
+                    .map_err(|_| record_error("tool cleanup state unavailable"))?
+                    .tool_cleanup_unconfirmed = true;
+            }
             let return_to_host = match &self.target {
                 RecorderTarget::Parent { session, run_id } => session
                     .lock_state()

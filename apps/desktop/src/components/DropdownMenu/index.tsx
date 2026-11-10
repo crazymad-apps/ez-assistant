@@ -46,6 +46,7 @@ type DropdownMenuContentProps = PropsWithChildren<
 
 type DropdownMenuItemProps = PropsWithChildren<
   Omit<ButtonHTMLAttributes<HTMLButtonElement>, "onClick"> & {
+    readonly keep_open?: boolean;
     readonly onSelect?: () => void;
   }
 >;
@@ -199,9 +200,12 @@ export function DropdownMenuContent(props: DropdownMenuContentProps) {
     }
 
     updatePosition();
+    const resize_observer = new ResizeObserver(updatePosition);
+    if (content_ref.current) resize_observer.observe(content_ref.current);
     window.addEventListener("resize", updatePosition);
     document.addEventListener("scroll", updatePosition, true);
     return () => {
+      resize_observer.disconnect();
       window.removeEventListener("resize", updatePosition);
       document.removeEventListener("scroll", updatePosition, true);
     };
@@ -268,16 +272,16 @@ export function DropdownMenuContent(props: DropdownMenuContentProps) {
 
 export function DropdownMenuItem(props: DropdownMenuItemProps) {
   const menu = useDropdownMenu();
-  const { className, onSelect, ...button_props } = props;
+  const { className, keep_open, onSelect, ...button_props } = props;
 
   return (
     <button
       {...button_props}
       className={[styles.item, className].filter(Boolean).join(" ")}
       onClick={() => {
-        menu.trigger_ref.current?.focus();
+        if (!keep_open) menu.trigger_ref.current?.focus();
         onSelect?.();
-        menu.setOpen(false);
+        if (!keep_open) menu.setOpen(false);
       }}
       role="menuitem"
       type={props.type ?? "button"}
@@ -296,5 +300,6 @@ function useDropdownMenu(): DropdownMenuContextValue {
 function getMenuItems(container: HTMLElement | null): HTMLButtonElement[] {
   return container
     ? Array.from(container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)'))
+        .filter((item) => !item.closest("[inert]"))
     : [];
 }

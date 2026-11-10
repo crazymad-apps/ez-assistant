@@ -75,7 +75,7 @@ impl RuntimeBootstrapCoordinator {
                     "旧 Runtime 已停止，但安装文件发生变化。请重新打开已安装的应用完成更新。",
                 )
             })?;
-        self.launch_from(&source).await?;
+        self.launch_from(&source, false).await?;
         let bootstrap = self.wait_for_start().await?;
         let current = read_discovery(&self.runtime_home)?;
         if current.instance_id == original.instance_id

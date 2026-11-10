@@ -1,43 +1,51 @@
-//! 中心私有配置到已校验 Runtime 外部配置的适配，不泄漏原始错误体或 endpoint。
+//! 校验中心模型集合的主体和代理地址，再投影为 Runtime 的组织配置。
 
-use std::sync::Arc;
+use std::{
+    collections::BTreeMap,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use assistant_protocol::{
-    ModelFeatureSupport, ModelParameters, ProviderConnection, ProviderProtocolPreference,
-    ProviderType, SecretValue,
+    ModelFeatureSupport, ModelParameters, ModelSelection, ModelSelectionSource, ProviderConnection,
+    ProviderInstanceId, ProviderProtocolPreference, ProviderType, SecretValue,
 };
-use assistant_runtime::ExternalModelConfiguration;
+use assistant_runtime::{ExternalModelConfiguration, ExternalModelSet};
 use serde::Deserialize;
 
-use super::{CenterClient, CenterError, decode, valid_center_id};
+use super::{CenterClient, CenterError, decode, decode_with_limit, valid_center_id};
 
-pub(crate) enum ModelConfiguration {
-    Ready(Arc<ExternalModelConfiguration>),
-    Unavailable(&'static str),
+// 模型集合携带每项能力参数，保留独立有界预算，不放宽身份等其他响应。
+const MODEL_CONFIGURATION_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Deserialize)]
+struct ConfigurationResponse {
+    center_id: String,
+    organization_id: String,
+    allow_member_selection: bool,
+    default_model: Option<Selection>,
+    providers: Vec<Provider>,
 }
 
 #[derive(Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-enum ConfigurationResponse {
-    Ready {
-        center_id: String,
-        endpoint: String,
-        provider_type: ProviderType,
-        provider_display_name: String,
-        protocol: Protocol,
-        model_id: String,
-        parameters: Box<ModelParameters>,
-        server_history_enabled: bool,
-        server_history_support: ModelFeatureSupport,
-        server_history_binding: Option<String>,
-    },
-    Unavailable {
-        center_id: String,
-        reason: String,
-    },
+struct Selection {
+    provider_instance_id: ProviderInstanceId,
+    model_id: String,
 }
 
 #[derive(Deserialize)]
+struct Provider {
+    provider_instance_id: ProviderInstanceId,
+    endpoint: String,
+    provider_type: Option<ProviderType>,
+    provider_display_name: Option<String>,
+    protocol: Option<Protocol>,
+    server_history_enabled: bool,
+    server_history_support: ModelFeatureSupport,
+    models: Vec<Model>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
 enum Protocol {
     #[serde(rename = "open_ai_responses")]
     Responses,
@@ -45,12 +53,32 @@ enum Protocol {
     ChatCompletions,
 }
 
+#[derive(Deserialize)]
+struct Model {
+    model_id: String,
+    #[serde(flatten)]
+    state: ModelState,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum ModelState {
+    Ready {
+        parameters: Box<ModelParameters>,
+        server_history_binding: Option<String>,
+    },
+    Unavailable {
+        reason: String,
+    },
+}
+
 impl CenterClient {
     pub(in crate::access::enterprise) async fn model_configuration(
         &self,
         token: &SecretValue,
         expected_center: &str,
-    ) -> Result<ModelConfiguration, CenterError> {
+        expected_organization: &str,
+    ) -> Result<ExternalModelSet, CenterError> {
         #[derive(Deserialize)]
         struct Info {
             protocol_version: u32,
@@ -66,109 +94,150 @@ impl CenterClient {
         {
             return Err(CenterError::ModelCapabilityMissing);
         }
-        let response: ConfigurationResponse = decode(
+        let response: ConfigurationResponse = decode_with_limit(
             self.client
                 .get(self.endpoint("runtime/model-configuration"))
                 .bearer_auth(token.expose()),
+            MODEL_CONFIGURATION_BYTES,
         )
         .await?;
-        self.compile_model_configuration(response, expected_center)
+        self.compile_model_configuration(response, expected_center, expected_organization)
     }
 
     fn compile_model_configuration(
         &self,
         response: ConfigurationResponse,
         expected_center: &str,
-    ) -> Result<ModelConfiguration, CenterError> {
-        let identity = match &response {
-            ConfigurationResponse::Ready { center_id, .. }
-            | ConfigurationResponse::Unavailable { center_id, .. } => center_id,
-        };
-        if identity != expected_center {
+        expected_organization: &str,
+    ) -> Result<ExternalModelSet, CenterError> {
+        if response.center_id != expected_center
+            || response.organization_id != expected_organization
+        {
             return Err(CenterError::IdentityMismatch);
         }
-        match response {
-            ConfigurationResponse::Unavailable { reason, .. } => {
-                let reason = match reason.as_str() {
-                    "not_selected" => "管理员尚未配置默认模型。",
-                    "provider_deleted" => "默认模型的服务商已删除。",
-                    "model_absent" => "默认模型已不在服务商目录中。",
-                    "invalid_parameters" => "默认模型参数不完整。",
-                    _ => return Err(CenterError::Unavailable),
-                };
-                Ok(ModelConfiguration::Unavailable(reason))
+        let origin = url::Url::parse(&self.url)
+            .map_err(|_| CenterError::Unavailable)?
+            .origin();
+        let fetched_at_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|value| i64::try_from(value.as_millis()).ok())
+            .ok_or(CenterError::Unavailable)?;
+        let mut providers = std::collections::BTreeSet::new();
+        let mut models = BTreeMap::new();
+        for provider in response.providers {
+            let id = provider.provider_instance_id.clone();
+            let endpoint =
+                url::Url::parse(&provider.endpoint).map_err(|_| CenterError::Unavailable)?;
+            // 精确核对 URL 中的服务商身份；凭据只能发往当前登录中心的该服务商路由。
+            if !valid_center_id(id.as_str())
+                || endpoint.origin() != origin
+                || endpoint.path() != format!("/api/llm/providers/{}/v1", id.as_str())
+                || endpoint.query().is_some()
+                || endpoint.fragment().is_some()
+                || !endpoint.username().is_empty()
+                || endpoint.password().is_some()
+                || !providers.insert(id.clone())
+                || provider.models.is_empty()
+            {
+                return Err(CenterError::Unavailable);
             }
-            ConfigurationResponse::Ready {
-                endpoint,
-                provider_type,
-                provider_display_name,
-                protocol,
-                model_id,
-                parameters,
-                server_history_enabled,
-                server_history_support,
-                server_history_binding,
-                ..
-            } => {
-                let configured =
-                    url::Url::parse(&self.url).map_err(|_| CenterError::Unavailable)?;
-                let endpoint_url =
-                    url::Url::parse(&endpoint).map_err(|_| CenterError::Unavailable)?;
-                let provider = endpoint_url
-                    .path()
-                    .strip_prefix("/api/llm/providers/")
-                    .and_then(|path| path.strip_suffix("/v1"));
-                if endpoint_url.origin() != configured.origin()
-                    || !provider.is_some_and(valid_center_id)
-                    || endpoint_url.query().is_some()
-                    || endpoint_url.fragment().is_some()
-                    || !endpoint_url.username().is_empty()
-                    || endpoint_url.password().is_some()
-                {
-                    return Err(CenterError::Unavailable);
-                }
-                if server_history_enabled
-                    && (!matches!(protocol, Protocol::Responses)
-                        || server_history_support != ModelFeatureSupport::Supported)
-                    || server_history_binding.as_ref().is_some_and(|binding| {
-                        binding.len() != 64 || !binding.bytes().all(|byte| byte.is_ascii_hexdigit())
-                    })
-                {
-                    return Err(CenterError::Unavailable);
-                }
-                let connection = ProviderConnection {
-                    server_history_enabled,
-                    // 中心已按实际上游判定；代理 URL 不能重新猜测上游能力。
-                    server_history_support_override: match server_history_support {
-                        ModelFeatureSupport::Unknown => None,
-                        support => Some(support),
-                    },
-                    display_name: provider_display_name,
-                    discovery_format: provider_type.discovery_format(),
-                    provider_type,
-                    endpoint,
-                    protocol_preference: match protocol {
-                        Protocol::Responses => ProviderProtocolPreference::Responses,
-                        Protocol::ChatCompletions => ProviderProtocolPreference::ChatCompletions,
-                    },
-                    models_path: String::new(),
+            let connection = provider.connection();
+            for model in provider.models {
+                let selection = ModelSelection {
+                    source: ModelSelectionSource::Organization,
+                    provider_instance_id: id.clone(),
+                    model_id: model.model_id,
                 };
-                let fetched_at_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .ok()
-                    .and_then(|value| i64::try_from(value.as_millis()).ok())
-                    .ok_or(CenterError::Unavailable)?;
-                ExternalModelConfiguration::new(
-                    connection,
-                    model_id,
-                    *parameters,
-                    fetched_at_ms,
-                    server_history_binding,
-                )
-                .map(|value| ModelConfiguration::Ready(Arc::new(value)))
-                .map_err(|_| CenterError::Unavailable)
+                let entry = match model.state {
+                    ModelState::Ready {
+                        parameters,
+                        server_history_binding,
+                    } => {
+                        let binding_valid = server_history_binding.as_ref().is_none_or(|binding| {
+                            binding.len() == 64
+                                && binding.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        });
+                        connection
+                            .as_ref()
+                            .filter(|_| binding_valid)
+                            .and_then(|connection| {
+                                ExternalModelConfiguration::new(
+                                    id.clone(),
+                                    connection.clone(),
+                                    selection.model_id.clone(),
+                                    *parameters,
+                                    fetched_at_ms,
+                                    server_history_binding,
+                                )
+                                .ok()
+                            })
+                            .map(Arc::new)
+                            .ok_or("组织模型参数无效，请联系管理员。")
+                    }
+                    ModelState::Unavailable { reason } => Err(match reason.as_str() {
+                        "provider_deleted" => "组织模型的服务商已删除。",
+                        "model_absent" => "组织模型已不在服务商目录中。",
+                        "invalid_parameters" => "组织模型参数不完整。",
+                        _ => "组织模型当前不可用。",
+                    }),
+                };
+                if selection.model_id.trim().is_empty()
+                    || selection.model_id.len() > 1024
+                    || selection.model_id.chars().any(char::is_control)
+                    || models.insert(selection, entry).is_some()
+                {
+                    return Err(CenterError::Unavailable);
+                }
             }
         }
+        let default_model = response.default_model.map(|selection| ModelSelection {
+            source: ModelSelectionSource::Organization,
+            provider_instance_id: selection.provider_instance_id,
+            model_id: selection.model_id,
+        });
+        if default_model
+            .as_ref()
+            .map_or(!models.is_empty(), |default| !models.contains_key(default))
+            || (!response.allow_member_selection && models.len() > 1)
+        {
+            return Err(CenterError::Unavailable);
+        }
+        Ok(ExternalModelSet {
+            default_model,
+            allow_member_selection: response.allow_member_selection,
+            models,
+        })
+    }
+}
+
+impl Provider {
+    fn connection(&self) -> Option<ProviderConnection> {
+        let protocol = self.protocol?;
+        let provider_type = self.provider_type?;
+        if self.server_history_enabled
+            && (!matches!(protocol, Protocol::Responses)
+                || self.server_history_support != ModelFeatureSupport::Supported)
+        {
+            return None;
+        }
+        Some(ProviderConnection {
+            provider_type,
+            display_name: self.provider_display_name.clone()?,
+            endpoint: self.endpoint.clone(),
+            protocol_preference: match protocol {
+                Protocol::Responses => ProviderProtocolPreference::Responses,
+                Protocol::ChatCompletions => ProviderProtocolPreference::ChatCompletions,
+            },
+            discovery_format: provider_type.discovery_format(),
+            models_path: String::new(),
+            server_history_enabled: self.server_history_enabled,
+            // 代理地址只用于传输，续接能力由中心根据真实上游判定。
+            server_history_support_override: match self.server_history_support {
+                ModelFeatureSupport::Unknown => None,
+                support => Some(support),
+            },
+        })
     }
 }
 
@@ -177,40 +246,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn opencode_configuration_keeps_dialect_at_the_center_proxy() {
+    fn a_bad_model_remains_unavailable_without_replacing_the_rest_of_the_set() {
         const CENTER: &str = "01234567-89ab-4cde-8f01-23456789abcd";
-        let client = CenterClient::new("https://center.test".to_owned()).unwrap();
-        for protocol in ["open_ai_responses", "open_ai_chat_completions"] {
-            let wire = serde_json::json!({
-                "state": "ready", "center_id": CENTER,
-                "endpoint": format!("https://center.test/api/llm/providers/{CENTER}/v1"),
-                "provider_type": "opencode", "provider_display_name": "OpenCode",
-                "protocol": protocol, "model_id": "unaltered-id",
-                "parameters": ModelParameters {
-                    context_window_tokens: assistant_protocol::ModelTokenLimit::Known(8192.try_into().unwrap()),
-                    max_output_tokens: assistant_protocol::ModelTokenLimit::Known(1024.try_into().unwrap()),
-                    streaming: ModelFeatureSupport::Supported, ..Default::default()
-                },
-                "server_history_enabled": false, "server_history_support": "unknown",
-                "server_history_binding": null
-            });
-            let ready = client
-                .compile_model_configuration(serde_json::from_value(wire.clone()).unwrap(), CENTER)
-                .unwrap();
-            let ModelConfiguration::Ready(ready) = ready else {
-                panic!("expected ready")
-            };
-            assert_eq!(ready.model_id(), "unaltered-id");
-            let mut unknown = wire;
-            unknown["provider_type"] = serde_json::json!("future-provider");
-            assert!(serde_json::from_value::<ConfigurationResponse>(unknown).is_err());
-        }
-    }
-
-    #[test]
-    fn enterprise_history_requires_consistent_policy_capability_and_bounded_binding() {
-        const CENTER: &str = "01234567-89ab-4cde-8f01-23456789abcd";
-        let client = CenterClient::new("https://center.test".to_owned()).unwrap();
+        const ORGANIZATION: &str = "11234567-89ab-4cde-8f01-23456789abcd";
+        let client = CenterClient::new("https://center.test".into()).unwrap();
         let parameters = ModelParameters {
             context_window_tokens: assistant_protocol::ModelTokenLimit::Known(
                 8192.try_into().unwrap(),
@@ -219,98 +258,46 @@ mod tests {
             streaming: ModelFeatureSupport::Supported,
             ..Default::default()
         };
-        let valid = serde_json::json!({
-            "state":"ready", "center_id":CENTER,
-            "endpoint":format!("https://center.test/api/llm/providers/{CENTER}/v1"),
-            "provider_type":"openai", "provider_display_name":"Fixture",
-            "protocol":"open_ai_responses", "model_id":"model", "parameters":parameters,
-            "server_history_enabled":true, "server_history_support":"supported",
-            "server_history_binding":"a".repeat(64)
+        let wire = serde_json::json!({
+            "center_id": CENTER, "organization_id": ORGANIZATION, "allow_member_selection": true,
+            "default_model": { "provider_instance_id": CENTER, "model_id": "ready" },
+            "providers": [{
+                "provider_instance_id": CENTER,
+                "endpoint": format!("https://center.test/api/llm/providers/{CENTER}/v1"),
+                "provider_type": "openai", "provider_display_name": "fixture",
+                "protocol": "open_ai_responses", "server_history_enabled": false, "server_history_support": "unknown",
+                "models": [
+                    { "model_id": "ready", "state": "ready", "parameters": parameters, "server_history_binding": null },
+                    { "model_id": "removed", "state": "unavailable", "reason": "model_absent" },
+                ],
+            }],
         });
-        let compiled = client
-            .compile_model_configuration(serde_json::from_value(valid.clone()).unwrap(), CENTER)
+        let parse = |input| serde_json::from_value(input).unwrap();
+        let set = client
+            .compile_model_configuration(parse(wire.clone()), CENTER, ORGANIZATION)
             .unwrap();
-        let ModelConfiguration::Ready(compiled) = compiled else {
-            panic!("expected ready")
-        };
-        assert_eq!(
-            compiled.server_history_binding(),
-            Some("a".repeat(64).as_str())
-        );
-        for (field, value) in [
-            ("server_history_enabled", serde_json::json!(false)),
-            ("server_history_support", serde_json::json!("unknown")),
-            ("server_history_support", serde_json::json!("unsupported")),
-            ("protocol", serde_json::json!("open_ai_chat_completions")),
-            ("server_history_binding", serde_json::Value::Null),
-            (
-                "server_history_binding",
-                serde_json::json!("x\r\nmalformed"),
-            ),
-        ] {
-            let mut invalid = valid.clone();
-            invalid[field] = value;
-            assert!(
-                client
-                    .compile_model_configuration(serde_json::from_value(invalid).unwrap(), CENTER)
-                    .is_err()
-            );
-        }
-    }
-
-    #[test]
-    fn model_configuration_requires_center_identity_and_exact_trusted_proxy_origin() {
-        const CENTER: &str = "01234567-89ab-4cde-8f01-23456789abcd";
-        let client = CenterClient::new("https://center.test".to_owned()).unwrap();
-        let parameters = ModelParameters {
-            context_window_tokens: assistant_protocol::ModelTokenLimit::Known(
-                8192.try_into().unwrap(),
-            ),
-            max_output_tokens: assistant_protocol::ModelTokenLimit::Known(1024.try_into().unwrap()),
-            streaming: assistant_protocol::ModelFeatureSupport::Supported,
-            ..Default::default()
-        };
-        let configuration = |endpoint: String, center_id: &str| ConfigurationResponse::Ready {
-            center_id: center_id.to_owned(),
-            endpoint,
-            provider_type: ProviderType::Openai,
-            provider_display_name: "测试服务商".to_owned(),
-            protocol: Protocol::Responses,
-            model_id: "test-model".to_owned(),
-            parameters: Box::new(parameters.clone()),
-            server_history_enabled: false,
-            server_history_support: ModelFeatureSupport::Unknown,
-            server_history_binding: None,
-        };
-        let path = format!("/api/llm/providers/{CENTER}/v1");
+        assert_eq!(set.models.len(), 2);
         assert!(
-            client
-                .compile_model_configuration(
-                    configuration(format!("https://center.test{path}"), CENTER),
-                    CENTER
-                )
+            set.models
+                .get(set.default_model.as_ref().unwrap())
+                .unwrap()
                 .is_ok()
         );
-        for endpoint in [
-            format!("https://other.test{path}"),
-            format!("https://center.test:8443{path}"),
-            format!("https://user@center.test{path}"),
-            format!("https://center.test{path}?secret=x"),
-            format!("https://center.test{path}#fragment"),
-            "https://center.test/v1".to_owned(),
-        ] {
-            assert!(
-                client
-                    .compile_model_configuration(configuration(endpoint, CENTER), CENTER)
-                    .is_err()
-            );
-        }
+        assert!(set.models.values().any(Result::is_err));
         assert!(matches!(
-            client.compile_model_configuration(
-                configuration(format!("https://center.test{path}"), "wrong-center"),
-                CENTER
-            ),
+            client.compile_model_configuration(parse(wire.clone()), CENTER, CENTER),
             Err(CenterError::IdentityMismatch)
         ));
+        for endpoint in [
+            format!("https://other.test/api/llm/providers/{CENTER}/v1"),
+            format!("https://center.test/api/llm/providers/{ORGANIZATION}/v1"),
+        ] {
+            let mut mismatched = wire.clone();
+            mismatched["providers"][0]["endpoint"] = endpoint.into();
+            assert!(matches!(
+                client.compile_model_configuration(parse(mismatched), CENTER, ORGANIZATION),
+                Err(CenterError::Unavailable)
+            ));
+        }
     }
 }

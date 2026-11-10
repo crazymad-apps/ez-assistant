@@ -8,6 +8,22 @@ impl AssistantRuntime {
         let selection = request.selection;
         validate_selection(&selection)?;
         self.ensure_running()?;
+        if selection.source == assistant_protocol::ModelSelectionSource::Organization {
+            let model = self
+                .config_registry
+                .organization_configuration(&selection)?;
+            let fixed = model.fixed();
+            return Ok(ModelConfigurationDetail {
+                origin: fixed.origin,
+                selection,
+                parameters: fixed.parameters,
+                source: ModelConfigurationSource::Fixed,
+                updated_at_ms: Some(fixed.updated_at_ms),
+                field_sources: Default::default(),
+                template_document: None,
+                template_checked_on: None,
+            });
+        }
         let provider = self.provider(&selection.provider_instance_id)?;
         let fixed = self
             .config_registry
@@ -50,6 +66,23 @@ impl AssistantRuntime {
         request: ListFixedModelConfigsRequest,
     ) -> RuntimeResult<Vec<ModelFixedConfig>> {
         self.ensure_running()?;
+        if request.source == assistant_protocol::ModelSelectionSource::Organization {
+            let state = self.managed_models()?;
+            let Some(external) = &state.external else {
+                return Ok(Vec::new());
+            };
+            return Ok(external
+                .models
+                .iter()
+                .filter(|(selection, _)| {
+                    selection.provider_instance_id == request.provider_instance_id
+                })
+                .filter_map(|(_, model)| model.as_ref().ok())
+                .skip(request.offset as usize)
+                .take(request.limit.clamp(1, 200) as usize)
+                .map(|model| model.fixed())
+                .collect());
+        }
         let provider = self.provider(&request.provider_instance_id)?;
         let records = self
             .config_registry
@@ -69,6 +102,7 @@ impl AssistantRuntime {
         request: SaveModelFixedConfigRequest,
     ) -> RuntimeResult<ModelFixedConfig> {
         self.ensure_model_editable()?;
+        Self::require_local_model(request.selection.source)?;
         validate_selection(&request.selection)?;
         self.ensure_running()?;
         let provider = self.provider(&request.selection.provider_instance_id)?;
@@ -110,8 +144,16 @@ impl AssistantRuntime {
             parameters: request.parameters,
             updated_at_ms: super::super::now_ms()?,
         };
+        let includes_default_followers = self.managed_models()?.source == crate::ModelSource::Local;
+        let history_invalidation =
+            server_history_key
+                .clone()
+                .map(|key| crate::FixedModelHistoryInvalidation {
+                    key,
+                    includes_default_followers,
+                });
         self.store
-            .put_model_fixed_config(fixed.clone(), server_history_key.clone())
+            .put_model_fixed_config(fixed.clone(), history_invalidation)
             .await
             .map_err(|e| RuntimeError::from_store("save fixed model", e))?;
         self.invalidate_live_fixed_history(&fixed.selection, server_history_key)?;
@@ -121,6 +163,7 @@ impl AssistantRuntime {
 
     pub async fn reset_model_fixed_config(&self, selection: ModelSelection) -> RuntimeResult<()> {
         self.ensure_model_editable()?;
+        Self::require_local_model(selection.source)?;
         validate_selection(&selection)?;
         let _operation = self.operation_gate.read().await;
         let _gate = self.model_binding_gate.write().await;
@@ -139,8 +182,16 @@ impl AssistantRuntime {
         } else {
             None
         };
+        let includes_default_followers = self.managed_models()?.source == crate::ModelSource::Local;
+        let history_invalidation =
+            server_history_key
+                .clone()
+                .map(|key| crate::FixedModelHistoryInvalidation {
+                    key,
+                    includes_default_followers,
+                });
         self.store
-            .reset_model_fixed_config(selection.clone(), server_history_key.clone())
+            .reset_model_fixed_config(selection.clone(), history_invalidation)
             .await
             .map_err(|e| RuntimeError::from_store("reset fixed model", e))?;
         self.invalidate_live_fixed_history(&selection, server_history_key)?;
@@ -155,7 +206,7 @@ impl AssistantRuntime {
         let Some(key) = key else {
             return Ok(());
         };
-        let default = self.managed_models()?.settings.default_model.clone();
+        let default = self.managed_models()?.default_model().cloned();
         for session in self
             .sessions
             .read()

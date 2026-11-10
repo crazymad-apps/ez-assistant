@@ -23,6 +23,7 @@ import { mergeChildTaskItems } from "../childTaskPresentation";
 import { attachLiveTurn, groupConversationTurns, type ConversationRow } from "./conversationRows";
 import { EmptyConversation, UserMessage } from "./MessageViews";
 import { ProcessingTurn } from "./ProcessingTurn";
+import { MessageCards } from '../../message-cards';
 import { createQuotedTextSnapshot, quoteSourceRange } from "../quoteSelection";
 import { ConversationMarkdownContent } from "../../resource-workspace/ConversationMarkdownContent";
 import { isPreviewableResource } from "../../resource-workspace/ResourceWorkspaceStore";
@@ -110,9 +111,10 @@ export const ConversationView = observer(function ConversationView() {
     [child_task_id, history?.items, live_run],
   );
 
-  const owner: ConversationOwner | null = history?.owner ?? (session_id
-    ? { type: "main_session", session_id }
-    : null);
+  let owner: ConversationOwner | null = history?.owner ?? null;
+  if (!owner && session_id) owner = child_task_id
+    ? { type: "child_task", session_id, child_task_id }
+    : { type: "main_session", session_id };
   let reveal_message_id = store.navigation.conversation_anchor_message_id;
   const focus_target = store.transient_focus.target;
   if (focus_target && owner && sameConversationOwner(focus_target.owner, owner)
@@ -445,7 +447,7 @@ export const ConversationView = observer(function ConversationView() {
   }, [history?.generation, session_id]);
 
   const renderConversationRows = (rows: readonly ConversationRow[]) => (
-    rows.map((row) => {
+    rows.map((row, row_index) => {
       if (row.type === "control_result") {
         return <McpControlResult key={row.message.message_id} message={row.message} />;
       }
@@ -496,6 +498,10 @@ export const ConversationView = observer(function ConversationView() {
       : (
           <div className={styles.turn_with_tasks} key={`${history?.generation}:${row.key}`}>
             <ProcessingTurn
+              cards={owner && !rows.slice(row_index + 1).some((next) =>
+                next.type === 'assistant_turn' && (child_task_id !== null || (row.run_id !== null && next.run_id === row.run_id)))
+                ? <MessageCards owner={owner} run_id={row.run_id} message_ids={row.messages.map(message => message.message_id)} />
+                : null}
               child_tasks={!child_task_id && row.run_id
                 ? child_task_items.filter((item) => item.task.parent_run_id === row.run_id)
                 : []}

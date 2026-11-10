@@ -406,12 +406,7 @@ async fn dispatch_runtime(
                 .current_plugin_center(key)
                 .map_err(|_| RuntimeError::PluginPackageUnavailable)?;
             let selected = center
-                .resolve_plugin(
-                    &token,
-                    &key.center_id,
-                    &request.name,
-                    request.expected_active_sha256,
-                )
+                .resolve_plugin(&token, key, &request.name, request.expected_active_sha256)
                 .await
                 .map_err(|_| RuntimeError::PluginPackageUnavailable)?;
             (RuntimeCommandResult::ResolvePluginPackage(selected), false)
@@ -422,13 +417,17 @@ async fn dispatch_runtime(
                 .iter()
                 .any(|package| match &package.origin {
                     assistant_protocol::PluginPackageOrigin::Upload => false,
-                    assistant_protocol::PluginPackageOrigin::Center { center_id } => permit
-                        .user_key()
-                        .is_none_or(|key| &key.center_id != center_id),
+                    assistant_protocol::PluginPackageOrigin::Center {
+                        center_id,
+                        organization_id,
+                    } => permit.user_key().is_none_or(|key| {
+                        &key.center_id != center_id
+                            || organization_id.as_ref() != Some(&key.organization_id)
+                    }),
                 })
             {
                 return Err(RuntimeError::InvalidRequest {
-                    reason: "plugin center does not match current user",
+                    reason: "plugin organization does not match current user",
                 });
             }
             (
@@ -468,6 +467,15 @@ async fn dispatch_runtime(
             RuntimeCommandResult::UpdateProvider(runtime.update_provider(request).await?),
             false,
         ),
+        RuntimeCommand::GetProviderUsage(request)
+        | RuntimeCommand::DeleteProvider(request)
+        | RuntimeCommand::RefreshProviderModels(request)
+            if request.source == assistant_protocol::ModelSelectionSource::Organization =>
+        {
+            return Err(RuntimeError::InvalidRequest {
+                reason: "组织模型配置由企业中心管理。",
+            });
+        }
         RuntimeCommand::GetProviderUsage(request) => (
             RuntimeCommandResult::GetProviderUsage(
                 runtime
@@ -486,9 +494,13 @@ async fn dispatch_runtime(
         ),
         RuntimeCommand::ListProviderModels(request) => (
             RuntimeCommandResult::ListProviderModels(
-                runtime
-                    .list_provider_models(request.provider_instance_id)
-                    .await?,
+                if request.source == assistant_protocol::ModelSelectionSource::Organization {
+                    runtime.list_organization_provider_models(request.provider_instance_id)?
+                } else {
+                    runtime
+                        .list_provider_models(request.provider_instance_id)
+                        .await?
+                },
             ),
             false,
         ),
@@ -639,6 +651,46 @@ async fn dispatch_runtime(
             RuntimeCommandResult::MutateMcpConfiguration(
                 runtime.mutate_mcp_configuration(request).await?,
             ),
+            false,
+        ),
+        RuntimeCommand::ListMcpUiResources(request) => (
+            RuntimeCommandResult::ListMcpUiResources(runtime.list_mcp_ui_resources(request).await?),
+            false,
+        ),
+        RuntimeCommand::ListUiApps => (
+            RuntimeCommandResult::ListUiApps(runtime.list_ui_apps().await?),
+            false,
+        ),
+        RuntimeCommand::ReadUiApp(request) => (
+            RuntimeCommandResult::ReadUiApp(Box::new(runtime.read_ui_app(request).await?)),
+            false,
+        ),
+        RuntimeCommand::UiTool(request) => (
+            RuntimeCommandResult::UiTool(Box::new(services.runtime.ui_tool(request).await?)),
+            false,
+        ),
+        RuntimeCommand::ListMessageCards(request) => (
+            RuntimeCommandResult::ListMessageCards(runtime.list_message_cards(request).await?),
+            false,
+        ),
+        RuntimeCommand::MountMessageCard(request) => (
+            RuntimeCommandResult::MountMessageCard(Box::new(
+                runtime.mount_message_card(request).await?,
+            )),
+            false,
+        ),
+        RuntimeCommand::ReleaseMessageCard(request) => (
+            RuntimeCommandResult::ReleaseMessageCard(runtime.release_message_card(request).await?),
+            false,
+        ),
+        RuntimeCommand::SaveMessageCardSnapshot(request) => (
+            RuntimeCommandResult::SaveMessageCardSnapshot(
+                runtime.save_message_card_snapshot(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::ReadMcpUiResource(request) => (
+            RuntimeCommandResult::ReadMcpUiResource(runtime.read_mcp_ui_resource(request).await?),
             false,
         ),
         RuntimeCommand::RefreshMcpServer(request) => (

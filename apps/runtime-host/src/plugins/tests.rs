@@ -9,6 +9,78 @@ use sha2::{Digest, Sha256};
 use super::archive::{ArchiveFormat, prepare_archive};
 use super::paths::PluginPaths;
 
+#[test]
+fn ui_manifest_matches_shared_center_contract() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../packages/assistant-protocol/fixtures/plugin-ui.json"
+    ))
+    .unwrap();
+    for case in fixture["cases"].as_array().unwrap() {
+        let mut manifest = fixture["base"].clone();
+        for patch in case["patches"].as_array().unwrap() {
+            let path = patch["path"].as_str().unwrap();
+            if patch["remove"] == true {
+                let (parent, field) = path.rsplit_once('/').unwrap();
+                manifest
+                    .pointer_mut(parent)
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap()
+                    .remove(field);
+            } else {
+                let (parent, field) = path.rsplit_once('/').unwrap();
+                let object = manifest.pointer_mut(parent).unwrap();
+                if let Some(object) = object.as_object_mut() {
+                    object.insert(field.into(), patch["value"].clone());
+                } else {
+                    *manifest.pointer_mut(path).unwrap() = patch["value"].clone();
+                }
+            }
+        }
+        let result = super::PluginManifest::parse(&serde_json::to_vec(&manifest).unwrap());
+        assert_eq!(
+            result.is_ok(),
+            case["accept"].as_bool().unwrap(),
+            "{}",
+            case["name"]
+        );
+    }
+}
+
+#[test]
+fn ui_package_requires_declared_bounded_utf8_html() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../packages/assistant-protocol/fixtures/plugin-ui.json"
+    ))
+    .unwrap();
+    let root = test_root();
+    let archive = root.path().join("ui.zip");
+    let entries = vec![
+        (
+            "plugin.json".into(),
+            serde_json::to_vec(&fixture["base"]).unwrap(),
+        ),
+        (
+            "resources/counter.html".into(),
+            b"<!doctype html><p>Generic UI</p>".to_vec(),
+        ),
+    ];
+    zip(&archive, &entries);
+    assert!(prepare_archive(&archive, ArchiveFormat::Zip, root.path()).is_ok());
+    for bytes in [vec![0xff], vec![b'x'; 2 * 1024 * 1024 + 1]] {
+        zip(
+            &archive,
+            &[
+                (entries[0].0.clone(), entries[0].1.clone()),
+                (entries[1].0.clone(), bytes),
+            ],
+        );
+        assert!(prepare_archive(&archive, ArchiveFormat::Zip, root.path()).is_err());
+    }
+    zip(&archive, &entries[..1]);
+    assert!(prepare_archive(&archive, ArchiveFormat::Zip, root.path()).is_err());
+}
+
 fn test_root() -> tempfile::TempDir {
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.runtime-test");
     fs::create_dir_all(&base).unwrap();

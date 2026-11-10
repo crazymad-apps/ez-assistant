@@ -280,6 +280,15 @@ impl DesktopUpdater {
         Ok(selected)
     }
 
+    /// 同一 Host 内的组织换发只更换业务绑定，已有更新来源仍归属同一个 Host。
+    pub(crate) fn rebind_selection(&self, app: &AppHandle, previous: &str, next: &str) {
+        self.publish(app, |inner| {
+            if inner.snapshot.binding_id.as_deref() == Some(previous) {
+                inner.snapshot.binding_id = Some(next.to_owned());
+            }
+        });
+    }
+
     /// 从 Host 获取并冻结来源；登录失败不会清除它，来源变化则收束旧任务。
     pub(crate) async fn prepare(
         &self,
@@ -439,6 +448,27 @@ impl DesktopUpdater {
                         .join(","),
                 );
         }
+        // 先由应用读取有界响应、验签并绑定中心地址，再交给 SDK 构造安装上下文。
+        // SDK 的网络 check 会提前将 url 解析为绝对地址，无法接收中心相对路径。
+        let response = source::http()?
+            .get(endpoint.clone())
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .map_err(|_| UpdateError::Check)?;
+        if response.status() == reqwest::StatusCode::NO_CONTENT {
+            return Ok(None);
+        }
+        let mut json: serde_json::Value = source::json(response, 256 * 1024).await?;
+        let manifest = manifest::VerifiedManifest::read(
+            &json,
+            &key,
+            source,
+            target,
+            SOFTWARE_VERSION,
+            protocol,
+        )?;
+        json["url"] = serde_json::Value::String(manifest.url.to_string());
         let update = app
             .updater_builder()
             .target(target)
@@ -450,20 +480,11 @@ impl DesktopUpdater {
             .configure_client(|builder| builder.redirect(reqwest::redirect::Policy::none()))
             .build()
             .map_err(|_| UpdateError::Check)?
-            .check()
-            .await
+            .update_from_response(json)
             .map_err(|_| UpdateError::Check)?;
         let Some(update) = update else {
             return Ok(None);
         };
-        let manifest = manifest::VerifiedManifest::read(
-            &update.raw_json,
-            &key,
-            source,
-            target,
-            SOFTWARE_VERSION,
-            protocol,
-        )?;
         if update.version != manifest.version
             || update.download_url != manifest.url
             || Some(&update.signature) != manifest.artifact.signature.as_ref()

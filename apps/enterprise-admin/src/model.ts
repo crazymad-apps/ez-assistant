@@ -1,6 +1,6 @@
 import type { IdentityUser, UserRecord, AuditRecord } from './request/openapi';
 
-export type Role = 'admin' | 'user';
+export type Role = 'system_admin' | 'user';
 export type LoadState = 'normal' | 'loading' | 'failure';
 export type UserView = Readonly<{
   id: number;
@@ -10,6 +10,7 @@ export type UserView = Readonly<{
   superAdmin: boolean;
   enabled: boolean;
   createdAt: string;
+  organizations?: UserRecord['organizations'];
 }>;
 export type UserDraft = { username: string; displayName: string; role: Role; password?: string };
 export type AuditView = Readonly<{
@@ -23,6 +24,16 @@ export type AuditView = Readonly<{
   requestId: string;
 }>;
 export const actionLabels: Record<string, string> = {
+  scope_exchanged: '切换管理范围',
+  organization_created: '创建组织',
+  organization_updated: '更新组织',
+  organization_member_saved: '保存组织成员',
+  organization_member_removed: '移除组织成员',
+  device_applied: '申请设备登记',
+  device_managed: '处理设备登记与授权',
+  device_withdrawn: '撤回设备申请',
+  device_revoked: '注销设备',
+  device_user_login: '设备接入登录',
   center_initialized: '中心初始化',
   feedback_created: '提交反馈',
   feedback_handled: '处理反馈',
@@ -44,6 +55,7 @@ export const actionLabels: Record<string, string> = {
   model_configuration_saved: '保存模型固定配置',
   model_configuration_reset: '重置模型固定配置',
   model_default_changed: '更改企业默认模型',
+  model_policy_changed: '更改组织模型配置',
   model_public_origin_changed: '更改客户端模型访问地址',
   model_templates_reloaded: '重新加载模型模板',
   agent_created: '创建智能体',
@@ -65,6 +77,7 @@ export function userView(user: IdentityUser | UserRecord): UserView {
     role: user.role,
     superAdmin: user.is_super_admin,
     enabled: user.enabled,
+    organizations: 'organizations' in user ? user.organizations : undefined,
     createdAt: 'created_at' in user ? new Date(user.created_at).toLocaleString() : '—',
   };
 }
@@ -77,12 +90,17 @@ export function auditView(record: AuditRecord): AuditView {
     if (!value) continue;
     const parts = [
       value.display_name,
-      value.role === undefined ? undefined : value.role === 'admin' ? '管理员' : '普通用户',
+      value.role === undefined
+        ? undefined
+        : value.role === 'system_admin' || value.role === 'admin'
+          ? '系统管理员'
+          : '普通用户',
       value.enabled === undefined ? undefined : value.enabled ? '启用' : '停用',
     ].filter((item) => item !== undefined);
     changes.push(`${key === 'before' ? '变更前' : '变更后'}：${parts.join(' / ')}`);
   }
   const details = record.details;
+  if (details.device_id) changes.push(`设备：${details.device_id}`);
   if (details.feedback_id) changes.push(`反馈：${details.feedback_id}`);
   const feedbackStatuses: Record<string, string> = {
     pending: '待处理',
@@ -105,7 +123,12 @@ export function auditView(record: AuditRecord): AuditView {
   if (details.public_origin !== undefined)
     changes.push(details.public_origin ? `客户端模型访问地址：${details.public_origin}` : '已恢复部署地址');
   // 只拼接中心审计白名单中的 C01 摘要，不展示完整提示词或任意 JSON 字段。
-  if (details.name) changes.push(`${record.action.startsWith('agent_') ? '智能体' : '插件'}：${details.name}`);
+  if (details.name) {
+    let subject = '插件';
+    if (record.action.startsWith('agent_')) subject = '智能体';
+    if (record.action.startsWith('organization_')) subject = '组织';
+    changes.push(`${subject}：${details.name}`);
+  }
   if (details.version) changes.push(`版本：${details.version}`);
   if (details.platforms?.length)
     changes.push(`平台：${details.platforms.map((item) => `${item.os}-${item.arch}`).join('、')}`);

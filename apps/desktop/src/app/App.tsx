@@ -1,6 +1,7 @@
 import { reaction } from "mobx";
 import { applyMonacoTheme } from "../features/resource-workspace/monacoThemes";
 import { AccountDialog } from "../features/runtime-access/AccountDialog";
+import { OrganizationSwitchDialog } from "../features/runtime-access/OrganizationSwitchDialog";
 import { useEffect, useState } from "react";
 import { observer } from "mobx-react-lite";
 import { AppErrorBoundary } from "./AppErrorBoundary";
@@ -65,6 +66,7 @@ export const App = observer(function App(props: AppProps) {
         <AppErrorBoundary>
           <ApplicationConnectionContext.Provider value={connection}>
             <AccountDialog connection={connection} />
+            <OrganizationSwitchDialog connection={connection} />
             {connection.desktop && <DesktopUpdatePanel store={connection.updates} />}
             <WorkspaceTransition
               ready={connection.phase === "workspace"}

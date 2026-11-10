@@ -18,7 +18,12 @@ pub enum PluginArchiveFormat {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PluginPackageOrigin {
     Upload,
-    Center { center_id: String },
+    Center {
+        center_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        organization_id: Option<String>,
+    },
 }
 
 /// 用户确认的单个精确原包；Host 不会擅自换版本或扩大下载大小。
@@ -113,6 +118,10 @@ pub struct InstalledPluginSnapshot {
     /// 包清单声明的能力；实际可用性由 Skill/MCP 目录及其诊断决定。
     pub skills: Vec<String>,
     pub mcp: Vec<String>,
+    /// 当前包声明的 UI 入口；不包含 HTML，声明不授予页面能力。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub ui: Option<crate::PluginUi>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]

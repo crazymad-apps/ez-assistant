@@ -26,6 +26,7 @@ use super::{
 const ERROR_BODY_SAMPLE_LIMIT: usize = 2048;
 
 pub(super) mod auxiliary;
+mod compact_stream;
 
 #[derive(Debug, Error)]
 pub enum OpenAiResponsesServiceError {

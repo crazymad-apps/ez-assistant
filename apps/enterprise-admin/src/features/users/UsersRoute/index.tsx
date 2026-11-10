@@ -5,6 +5,7 @@ import { useLeaveConfirmation } from '../../../app/NavigationGuard/context';
 import adminStore from '../../../stores/AdminStore';
 import type { UserView } from '../../../model';
 import { UserEditor } from '../UserEditor';
+import { OrganizationMembershipDialog } from '../OrganizationMembershipDialog';
 import { ResetPasswordDialog } from '../../passwords/ResetPasswordDialog';
 import { UsersPage } from '../UsersPage';
 import { useUsersData } from './useUsersData';
@@ -15,19 +16,21 @@ export const UsersRoute = observer(function UsersRoute() {
   const data = useUsersData();
   const [editor, setEditor] = useState<UserView | 'new'>();
   const [passwordTarget, setPasswordTarget] = useState<UserView>();
+  const [organizationTarget, setOrganizationTarget] = useState<UserView>();
   const dialogTrigger = useRef<HTMLElement | null>(null);
-  useLeaveConfirmation(Boolean(editor || passwordTarget), () => {
+  useLeaveConfirmation(Boolean(editor || passwordTarget || organizationTarget), () => {
     setEditor(undefined);
     setPasswordTarget(undefined);
+    setOrganizationTarget(undefined);
   });
   // 弹窗按目标卸载以清除表单秘密；卸载不走 Modal 关闭动画，由页面恢复触发按钮焦点。
   // 身份失效整树卸载本页面，不把焦点送回已失效后台；列表刷新移除的按钮也不再聚焦。
   useLayoutEffect(() => {
-    if (editor || passwordTarget) return;
+    if (editor || passwordTarget || organizationTarget) return;
     const trigger = dialogTrigger.current;
     dialogTrigger.current = null;
     if (trigger?.isConnected) trigger.focus();
-  }, [editor, passwordTarget]);
+  }, [editor, passwordTarget, organizationTarget]);
 
   function rememberDialogTrigger() {
     dialogTrigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -45,6 +48,10 @@ export const UsersRoute = observer(function UsersRoute() {
         onEdit={(user) => {
           rememberDialogTrigger();
           setEditor(user);
+        }}
+        onEditOrganizations={(user) => {
+          rememberDialogTrigger();
+          setOrganizationTarget(user);
         }}
         onResetPassword={(user) => {
           rememberDialogTrigger();
@@ -74,6 +81,18 @@ export const UsersRoute = observer(function UsersRoute() {
           }
         }}
       />
+      {organizationTarget && (
+        <OrganizationMembershipDialog
+          key={organizationTarget.id}
+          user={organizationTarget}
+          organizations={data.organizations}
+          loading={data.organizationLoad.loading}
+          loadError={data.organizationLoad.error}
+          onReload={data.organizationLoad.reload}
+          onClose={() => setOrganizationTarget(undefined)}
+          onSaved={data.onRecover}
+        />
+      )}
       {editor && (
         <UserEditor
           key={editor === 'new' ? 'new' : editor.id}

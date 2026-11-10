@@ -36,7 +36,8 @@ for (const [name, value] of [["SOFTWARE_VERSION", version], ["MIN_COMPATIBLE_VER
 const migrationRoot = "../../../apps/runtime-host/src/storage/migrations/";
 const migrationSource = await read(`${migrationRoot}mod.rs`);
 const manifestBody = migrationSource.match(/fn manifest\(\) -> \[Migration; \d+\] \{([\s\S]*?)\n\}/)?.[1];
-const lastMigration = [...(manifestBody ?? "").matchAll(/(v\d+_\d+_\d+)::entry\(\)/g)].at(-1)?.[1];
+const productBody = migrationSource.match(/fn product_manifest\(\) -> Vec<Migration> \{([\s\S]*?)\n\}/)?.[1];
+const lastMigration = [...`${manifestBody ?? ""}\n${productBody ?? ""}`.matchAll(/(v\d+_\d+_\d+)::entry\(\)/g)].at(-1)?.[1];
 if (lastMigration !== `v${version.replaceAll(".", "_")}`) {
   throw new Error("Host 数据库迁移清单终点与软件版本不一致，请补齐当前版本迁移入口");
 }

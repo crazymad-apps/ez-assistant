@@ -8,19 +8,19 @@ import type { AuthenticatedRequest } from '../security.js';
 import { FeedbackService } from './service.js';
 
 @Controller('api')
-@Access('authenticated')
+@Access('member')
 @ApiTags('feedback')
 @ApiDefaultResponse({ type: CenterErrorResponse, description: '输入、身份、提交标识冲突或处理冲突' })
 export class FeedbackController {
   constructor(@Inject(FeedbackService) private readonly feedback: FeedbackService,
     @Inject(IdentityService) private readonly identity: IdentityService) {}
 
-  @Post('feedback') @HttpCode(200) @Access('authenticated', 'feedback_created')
+  @Post('feedback') @HttpCode(200) @Access('member', 'feedback_created')
   @ApiOperation({ operationId: 'submitFeedback', summary: '提交反馈；同主体同次提交返回当前原记录' })
   @ApiBody({ type: SubmitFeedbackRequest }) @ApiOkResponse({ type: FeedbackDetail })
   submit(@Body() body: unknown, @Req() request: AuthenticatedRequest) {
     return this.identity.attempt('feedback_created', request.id,
-      () => this.feedback.submit(request.token, body, request.id), request.identity?.user.id);
+      () => this.feedback.submit(request.token, body, request.id), request.identity?.user.id, request.identity?.scope.organization_id);
   }
   @Get('feedback')
   @ApiOperation({ operationId: 'listOwnFeedback', summary: '分页查询本人反馈' })
@@ -34,24 +34,24 @@ export class FeedbackController {
   get(@Param('id') id: string, @Req() request: AuthenticatedRequest) {
     return this.feedback.get(request.token, id, false);
   }
-  @Get('admin/feedback') @Access('admin')
+  @Get('admin/feedback') @Access('organization')
   @ApiOperation({ operationId: 'listAdminFeedback', summary: '管理员按状态、来源、用户及目标查询反馈' })
   @ApiQuery({ type: AdminFeedbackQuery }) @ApiOkResponse({ type: FeedbackPage })
   adminList(@Query() query: unknown, @Req() request: AuthenticatedRequest) {
     return this.feedback.list(request.token, query, true);
   }
-  @Get('admin/feedback/:id') @Access('admin')
+  @Get('admin/feedback/:id') @Access('organization')
   @ApiOperation({ operationId: 'getAdminFeedback', summary: '管理员读取反馈详情' })
   @ApiParam({ name: 'id', format: 'uuid' }) @ApiOkResponse({ type: FeedbackDetail })
   adminGet(@Param('id') id: string, @Req() request: AuthenticatedRequest) {
     return this.feedback.get(request.token, id, true);
   }
-  @Patch('admin/feedback/:id') @Access('admin', 'feedback_handled')
+  @Patch('admin/feedback/:id') @Access('organization', 'feedback_handled')
   @ApiOperation({ operationId: 'handleFeedback', summary: '比较原状态和说明后处理反馈；同值不重复记账' })
   @ApiParam({ name: 'id', format: 'uuid' }) @ApiBody({ type: HandleFeedbackRequest })
   @ApiOkResponse({ type: FeedbackDetail })
   handle(@Param('id') id: string, @Body() body: unknown, @Req() request: AuthenticatedRequest) {
     return this.identity.attempt('feedback_handled', request.id,
-      () => this.feedback.handle(request.token, id, body, request.id), request.identity?.user.id);
+      () => this.feedback.handle(request.token, id, body, request.id), request.identity?.user.id, request.identity?.scope.organization_id);
   }
 }

@@ -64,7 +64,7 @@ it('上海时区的月桶跨越短月时仍从每月一日开始', async () => {
     },
   };
   const manager = { transaction: async (_level: string, run: (value: typeof tx) => Promise<unknown>) => run(tx) } as unknown as EntityManager;
-  const page = await queryUsage(manager, {
+  const page = await queryUsage(manager, 'a548bb81-e77d-44f3-a54e-7171261e11ce', {
     from: '2026-01-31T16:00:00Z', to: '2026-04-30T16:00:00Z', granularity: 'month',
   });
   expect(page.buckets.map((bucket) => bucket.start)).toEqual([

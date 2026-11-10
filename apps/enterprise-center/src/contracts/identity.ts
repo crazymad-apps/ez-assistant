@@ -1,4 +1,4 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class LoginRequest {
   @ApiProperty({ type: String, description: '3—64 位 ASCII 账号，trim 后转小写', maxLength: 128 })
@@ -16,17 +16,46 @@ export class IdentityUser {
   @ApiProperty({ type: 'integer', format: 'int32', minimum: 1, maximum: 2147483647 }) readonly id!: number;
   @ApiProperty({ type: String }) readonly username!: string;
   @ApiProperty({ type: String }) readonly display_name!: string;
-  @ApiProperty({ enum: ['user', 'admin'] }) readonly role!: 'user' | 'admin';
+  @ApiProperty({ enum: ['user', 'system_admin'] }) readonly role!: 'user' | 'system_admin';
   @ApiProperty({ type: Boolean }) readonly is_super_admin!: boolean;
   @ApiProperty({ type: Boolean }) readonly enabled!: boolean;
 }
+export class AccessScope {
+  @ApiProperty({ enum: ['unselected', 'system', 'organization'] })
+  readonly kind!: 'unselected' | 'system' | 'organization';
+
+  @ApiPropertyOptional({ type: String, format: 'uuid', description: '仅 organization 范围携带' })
+  readonly organization_id?: string;
+}
+
+export class ScopeView extends AccessScope {
+  @ApiPropertyOptional({ type: String }) readonly name?: string;
+  @ApiPropertyOptional({ type: String }) readonly code?: string;
+  @ApiPropertyOptional({ type: Boolean }) readonly enabled?: boolean;
+  @ApiPropertyOptional({ enum: ['member', 'admin'] }) readonly member_role?: 'member' | 'admin';
+  @ApiProperty({ type: Boolean }) readonly can_manage!: boolean;
+}
+
+export class ScopeQuery {
+  @ApiProperty({ enum: ['admin', 'client'] }) readonly entry!: 'admin' | 'client';
+}
+
+export class ScopeSelection extends AccessScope {
+  @ApiProperty({ enum: ['admin', 'client'] }) readonly entry!: 'admin' | 'client';
+}
+
 export class IdentityResponse {
   @ApiProperty({ type: String, format: 'uuid' }) readonly center_id!: string;
+  @ApiProperty({ type: String, format: 'uuid' }) readonly legacy_organization_id!: string;
   @ApiProperty({ type: IdentityUser }) readonly user!: IdentityUser;
+  @ApiProperty({ type: ScopeView }) readonly scope!: ScopeView;
+  @ApiProperty({ type: String, format: 'date-time' }) readonly expires_at!: string;
 }
+
 export class LoginResponse extends IdentityResponse {
-  @ApiProperty({ type: String, pattern: '^ct_[a-f0-9]{64}$', description: '用于 Bearer 身份认证；仅内存保存，退出、撤销或中心重启后失效' })
+  @ApiProperty({ type: String, description: '有效期固定 7 天的 JWT。撤销或中心重启后立即失效。' })
   readonly token!: string;
-  @ApiProperty({ type: String, pattern: '^cl_[a-f0-9]{64}$', description: '仅供后续 LLM 代理使用，随本次 token 一起撤销；不用于身份 API' })
-  readonly llm_key!: string;
+
+  @ApiPropertyOptional({ type: String, pattern: '^cl_[a-f0-9]{64}$', description: '仅有效组织成员的客户端范围签发，随 JWT 撤销' })
+  readonly llm_key?: string;
 }

@@ -1,4 +1,5 @@
 .app_shell {
+  --ez-sidebar-resize-handle-width: 8px;
   display: grid;
   width: 100vw;
   height: 100vh;
@@ -92,10 +93,10 @@
   position: relative;
   z-index: 8;
   min-width: 0;
-  width: 8px;
+  width: var(--ez-sidebar-resize-handle-width);
   height: 100%;
-  flex: 0 0 8px;
-  margin-inline: -4px;
+  flex: 0 0 var(--ez-sidebar-resize-handle-width);
+  margin-inline: calc(var(--ez-sidebar-resize-handle-width) / -2);
   outline: 0;
   cursor: col-resize;
   touch-action: none;
@@ -114,6 +115,16 @@
   &:focus-visible::after,
   &[data-dragging="true"]::after {
     background: var(--ez-primary);
+  }
+
+  &[data-side="right"] {
+    // 命中区全部覆盖在资源栏一侧，给中栏滚动条让出完整宽度。
+    margin-inline: 0 calc(-1 * var(--ez-sidebar-resize-handle-width));
+
+    &::after {
+      inset-inline-start: 0;
+      transform: none;
+    }
   }
 }
 
@@ -437,23 +448,6 @@
 
 .connection_notice {
   grid-row: 2;
-  display: flex;
-  min-height: 36px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 6px 18px;
-  border-bottom: 1px solid var(--ez-border);
-  color: var(--ez-text-secondary);
-  background: var(--ez-surface-subtle);
-  font-size: var(--ez-font-small);
-
-  button {
-    border: 0;
-    color: var(--ez-primary);
-    background: transparent;
-    font-weight: 600;
-  }
 }
 
 .conversation_content {

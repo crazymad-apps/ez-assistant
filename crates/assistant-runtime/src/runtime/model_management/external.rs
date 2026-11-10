@@ -1,10 +1,10 @@
 //! 受信宿主发布外部模型的短提交门；与执行最终接纳使用同一模型门。
 
-use assistant_protocol::ModelSettings;
+use assistant_protocol::ModelManagementStatus;
 use tokio::sync::{RwLockReadGuard, RwLockWriteGuard};
 
 use super::*;
-use crate::{ExternalModelConfiguration, ModelSource};
+use crate::{ExternalModelConfiguration, ExternalModelSet, ModelSource};
 
 /// 宿主先获取此门，再短持凭据锁核验当前登录并同步提交。
 /// 所有状态变更仅发生在内存；释放凭据锁后调用 finish 发布通知，期间禁止 I/O。
@@ -37,40 +37,25 @@ impl AssistantRuntime {
 }
 
 impl ExternalModelPublication<'_> {
-    /// 发布已校验的权威获取结果；None 表示权威不可用，必须清除旧配置。
-    /// 不读取持久化，不联网，不自行核验宿主身份；以传入的 Arc 标识本次配置归属。
+    /// 发布已校验的集合；空集合表示中心当前无授权。个人服务商及持久选择留在原权威状态。
     ///
     /// # Errors
     /// 内存状态锁不可用时返回错误。
     pub fn publish(
         &mut self,
-        configuration: Option<Arc<ExternalModelConfiguration>>,
-        unavailable_reason: &str,
+        configuration: ExternalModelSet,
         fetched_at_ms: i64,
     ) -> RuntimeResult<()> {
         let mut state = self.runtime.managed_models_mut()?;
-        state.providers.clear();
-        if let Some(configuration) = &configuration {
-            let provider = configuration.provider();
-            state
-                .providers
-                .insert(provider.provider_instance_id.clone(), provider);
-        }
-        state.settings = ModelSettings {
-            default_model: configuration
-                .as_ref()
-                .map(|value| value.selection().clone()),
-            vision_model: None,
-            management: Some(assistant_protocol::ModelManagementStatus {
-                read_only: true,
-                unavailable_reason: configuration
-                    .is_none()
-                    .then(|| unavailable_reason.to_owned()),
-                last_success_at_ms: Some(fetched_at_ms),
-                last_refresh_error: None,
-            }),
-        };
-        state.external = configuration;
+        state.external = Some(configuration);
+        state.settings.management = Some(ModelManagementStatus {
+            read_only: true,
+            unavailable_reason: None,
+            last_success_at_ms: Some(fetched_at_ms),
+            last_refresh_error: None,
+            unavailable_models: Vec::new(),
+            allow_member_selection: false,
+        });
         self.changed = true;
         Ok(())
     }
@@ -83,22 +68,23 @@ impl ExternalModelPublication<'_> {
     pub fn invalidate(
         &mut self,
         captured: &Arc<ExternalModelConfiguration>,
-        reason: &str,
+        reason: &'static str,
     ) -> RuntimeResult<bool> {
         let mut state = self.runtime.managed_models_mut()?;
-        if !state
+        let Some(item) = state
             .external
+            .as_mut()
+            .and_then(|set| set.models.get_mut(captured.selection()))
+        else {
+            return Ok(false);
+        };
+        if !item
             .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, captured))
+            .is_ok_and(|current| Arc::ptr_eq(current, captured))
         {
             return Ok(false);
         }
-        state.external = None;
-        state.providers.clear();
-        state.settings.default_model = None;
-        if let Some(projection) = &mut state.settings.management {
-            projection.unavailable_reason = Some(reason.to_owned());
-        }
+        *item = Err(reason);
         self.changed = true;
         Ok(true)
     }

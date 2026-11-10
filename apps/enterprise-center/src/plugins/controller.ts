@@ -14,7 +14,7 @@ import { PluginError } from './errors.js';
 import { IdentityError } from '../identity/errors.js';
 
 @Controller('api')
-@Access('admin')
+@Access('organization')
 @ApiTags('plugins')
 @ApiDefaultResponse({ type: CenterErrorResponse, description: '身份、归档、存储或提交失败' })
 export class PluginsController {
@@ -88,7 +88,7 @@ export class PluginsController {
     request.raw.once('end', received);
     try {
       const result = await this.plugins.upload(body, format, request.token, request.id,
-        request.identity!.user.id, client.signal);
+        client.signal);
       return reply.status(result.result === 'created' ? 201 : 200).send(result);
     } finally {
       reply.raw.off('close', disconnect);
@@ -106,13 +106,13 @@ export class PluginsController {
   }
 
   @Get('runtime/plugins')
-  @Access('authenticated')
+  @Access('member')
   @ApiOperation({ operationId: 'listRuntimePlugins', summary: '读取在架插件目录' })
   @ApiOkResponse({ type: [PluginRecord] })
   runtimeList(@Req() request: AuthenticatedRequest) { return this.plugins.list(request.token, true); }
 
   @Get('runtime/plugins/:name')
-  @Access('authenticated')
+  @Access('member')
   @ApiOperation({ operationId: 'getRuntimePlugin', summary: '读取插件发布状态与在架版本' })
   @ApiParam({ name: 'name' })
   @ApiOkResponse({ type: PluginRecord })
@@ -122,7 +122,7 @@ export class PluginsController {
 
   @Post('runtime/plugins/:name/resolve')
   @HttpCode(200)
-  @Access('authenticated')
+  @Access('member')
   @RouteConfig({ pluginResolve: true })
   @ApiOperation({ operationId: 'resolveRuntimePlugin', summary: '按平台、Host 和能力选择当前完整包' })
   @ApiParam({ name: 'name' })
@@ -133,7 +133,7 @@ export class PluginsController {
   }
 
   @Get('runtime/plugins/:name/versions/:version/package')
-  @Access('authenticated')
+  @Access('member')
   @ApiOperation({ operationId: 'downloadRuntimePluginPackage', summary: '带当前 SHA 条件下载完整原包' })
   @ApiParam({ name: 'name' })
   @ApiParam({ name: 'version' })

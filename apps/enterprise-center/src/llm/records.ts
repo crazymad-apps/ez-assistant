@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
 import type { DataSource } from 'typeorm';
 import { CallEntity, RecordingEntity } from './entity.js';
 import type { Outcome, RecordingMode } from './entity.js';
@@ -10,6 +10,10 @@ import type { ResponseObserver } from './response-observer.js';
 import type { IncomingHttpHeaders } from 'node:http';
 
 const sides = ['request', 'response'] as const;
+
+// 复用调用索引保留期；密封摘要按身份与配置绑定，快照策略关闭时也可续接。
+const continuationDigest = (binding: string, responseId: string) =>
+  createHmac('sha256', binding).update(responseId).digest('hex');
 
 const diagnostic = () => process.stderr.write('CENTER_LLM_RECORD_FAILURE\n');
 
@@ -170,17 +174,17 @@ export class CallRecords {
     return this.source.getRepository(CallEntity);
   }
 
-  async settings(): Promise<RecordingEntity> {
+  async settings(organizationId: string): Promise<RecordingEntity> {
     if (!this.source) throw new ControlError('llm_record_unavailable');
-    return this.source.getRepository(RecordingEntity).findOneByOrFail({ singleton: true });
+    return this.source.getRepository(RecordingEntity).findOneByOrFail({ organization_id: organizationId });
   }
 
   async begin(
-    facts: Pick<CallEntity, 'user_id' | 'username' | 'provider_instance_id' | 'model_id' | 'kind' | 'protocol'>,
+    facts: Pick<CallEntity, 'organization_id' | 'user_id' | 'username' | 'provider_instance_id' | 'model_id' | 'kind' | 'protocol'>,
   ): Promise<CallRecording> {
     try {
       if (this.stopped) throw new ControlError('llm_proxy_unavailable');
-      const settings = await this.settings();
+      const settings = await this.settings(facts.organization_id);
       const row = this.repository.create({
         ...facts,
         id: randomUUID(),
@@ -206,6 +210,19 @@ export class CallRecords {
     }
   }
 
+  hasContinuation(organizationId: string, binding: string, responseId: string) {
+    return this.repository.existsBy({
+      organization_id: organizationId,
+      continuation_digest: continuationDigest(binding, responseId),
+    });
+  }
+
+  async saveContinuation(row: CallEntity, binding: string, responseId: string): Promise<void> {
+    const result = await this.repository.update({ id: row.id, organization_id: row.organization_id },
+      { continuation_digest: continuationDigest(binding, responseId) });
+    if (result.affected !== 1) throw new ControlError('llm_record_unavailable');
+  }
+
   snapshot(id: string, side: Side, value: SnapshotResult) {
     if (side === 'upstream_failure') return this.repository.update(id, { upstream_failure_snapshot: value });
     return this.repository.update(id, {
@@ -219,7 +236,7 @@ export class CallRecords {
 
   async initialize(): Promise<void> {
     if (!this.source) return;
-    if ((await this.settings()).mode !== 'off') await this.files.validate();
+    if (await this.source.getRepository(RecordingEntity).existsBy([{ mode: 'all' }, { mode: 'anomalies' }])) await this.files.validate();
     // 启动时没有活动请求，逐页恢复；任何存储异常直接停止启动，不连续扩张修复范围。
     let after = '';
     for (;;) {
@@ -275,8 +292,13 @@ export class CallRecords {
   }
 
   async cleanup(): Promise<void> {
-    const settings = await this.settings();
+    if (!this.source) return;
+    const policies = await this.source.getRepository(RecordingEntity).find();
     const now = Date.now();
+    for (const policy of policies) await this.cleanupOrganization(policy, now);
+  }
+
+  private async cleanupOrganization(settings: RecordingEntity, now: number): Promise<void> {
     const contentBefore = new Date(now - settings.content_retention_days * 86400000);
     const indexBefore = new Date(now - settings.index_retention_days * 86400000);
     const rows = await this.repository
@@ -291,6 +313,7 @@ export class CallRecords {
         "(c.request_snapshot_state NOT IN ('disabled','expired','not_received') OR c.response_snapshot_state NOT IN ('disabled','expired','not_received') OR c.upstream_failure_snapshot->>'state' NOT IN ('disabled','expired','not_received') OR (CASE WHEN c.outcome = 'unknown' THEN c.started_at ELSE c.ended_at END) < :indexBefore)",
         { indexBefore },
       )
+      .andWhere('c.organization_id = :organizationId', { organizationId: settings.organization_id })
       .orderBy('c.started_at', 'ASC')
       .take(100)
       .getMany();

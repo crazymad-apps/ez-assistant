@@ -47,7 +47,7 @@ export const users = {
   },
   otherAdmins(manager: EntityManager, id: number) {
     return manager.getRepository(UserEntity).createQueryBuilder('u').where('u.enabled = true')
-      .andWhere('(u.role = :role OR u.is_super_admin = true)', { role: 'admin' }).andWhere('u.id <> :id', { id }).getCount();
+      .andWhere('(u.role = :role OR u.is_super_admin = true)', { role: 'system_admin' }).andWhere('u.id <> :id', { id }).getCount();
   },
   async list(manager: EntityManager, input: ReturnType<typeof userQuery>) {
     // 单语句保证列表/总数同一快照（包括空页）；复杂 CTE 保留参数化 SQL，不强行拆成两个 ORM 查询。
@@ -55,10 +55,19 @@ export const users = {
       SELECT ${columns.join(',')} FROM public.users WHERE
       ($1::text IS NULL OR strpos(lower(username),lower($1))>0 OR strpos(lower(display_name),lower($1))>0)
       AND ($2::text IS NULL OR role=$2) AND ($3::boolean IS NULL OR enabled=$3)
-    ), page AS (SELECT * FROM filtered ORDER BY created_at,id LIMIT $4 OFFSET $5)
+      AND ($6::uuid IS NULL OR EXISTS (
+        SELECT 1 FROM public.organization_members WHERE organization_id=$6 AND user_id=users.id
+      ))
+    ), page AS (SELECT * FROM filtered ORDER BY created_at,id LIMIT $4 OFFSET $5),
+    projected AS (
+      SELECT page.*, COALESCE((
+        SELECT json_agg(json_build_object('id', o.id, 'name', o.name, 'code', o.code, 'role', m.role, 'enabled', m.enabled) ORDER BY o.code)
+        FROM public.organization_members m JOIN public.organizations o ON o.id=m.organization_id WHERE m.user_id=page.id
+      ), '[]'::json) AS organizations FROM page
+    )
     SELECT (SELECT count(*)::integer FROM filtered) AS total,
-      COALESCE((SELECT json_agg(page ORDER BY created_at,id) FROM page),'[]'::json) AS items`,
-    [input.search ?? null, input.role ?? null, input.enabled ?? null, input.limit, input.offset]);
+      COALESCE((SELECT json_agg(projected ORDER BY created_at,id) FROM projected),'[]'::json) AS items`,
+    [input.search ?? null, input.role ?? null, input.enabled ?? null, input.limit, input.offset, input.organization_id ?? null]);
     return rows[0]!;
   },
 };

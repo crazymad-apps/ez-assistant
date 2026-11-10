@@ -16,7 +16,7 @@ import type { AuthenticatedRequest } from '../security.js';
 import { HostDevicesService } from './service.js';
 
 @Controller('api')
-@Access('admin')
+@Access('organization')
 @ApiTags('host-devices')
 @ApiDefaultResponse({ type: CenterErrorResponse, description: '登记身份、用户权限或编辑冲突' })
 export class HostDevicesController {
@@ -26,7 +26,7 @@ export class HostDevicesController {
   ) {}
   @Post('host-devices')
   @HttpCode(200)
-  @Access('authenticated', 'device_applied')
+  @Access('member', 'device_applied')
   @ApiOperation({ operationId: 'applyHostDevice', summary: '设备主动申请，重复登记标识返回当前结果' })
   @ApiBody({ type: ApplyHostDevice })
   @ApiOkResponse({ type: HostRegistrationResult })
@@ -36,6 +36,7 @@ export class HostDevicesController {
       r.id,
       () => this.devices.apply(r.token, body, r.id),
       r.identity?.user.id,
+      r.identity?.scope.organization_id,
     );
   }
   // public 仅跳过用户 Token Guard；Service 必须验证独立设备凭据，绝非匿名设备管理。
@@ -76,7 +77,7 @@ export class HostDevicesController {
   }
 
   @Patch('admin/host-devices/:id')
-  @Access('admin', 'device_managed')
+  @Access('organization', 'device_managed')
   @ApiOperation({ operationId: 'manageHostDevice', summary: '比较所见原值，原子审批、授权、启停或注销' })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiBody({ type: ManageHostDevice })
@@ -87,6 +88,7 @@ export class HostDevicesController {
       r.id,
       () => this.devices.manage(r.token, id, body, r.id),
       r.identity?.user.id,
+      r.identity?.scope.organization_id,
     );
   }
 }

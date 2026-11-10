@@ -371,6 +371,9 @@ pub struct ToolExecutionMetadata {
     /// 宿主提供的模型服务来源标识；只携带不透明标识，不包含地址或凭据。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_provider: Option<String>,
+    /// 上层宿主可记录来源分区；只供观察投影，不能作为路由或权限凭据。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_source: Option<String>,
     /// 服务来源内的原始模型 ID，不套用宿主旧配置 key 的命名约束。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,

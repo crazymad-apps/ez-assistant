@@ -6,7 +6,7 @@ export class UserEntity {
   @PrimaryGeneratedColumn('identity', { type: 'integer', generatedIdentity: 'ALWAYS' }) id!: number;
   @Column({ type: 'varchar', length: 64 }) username!: string;
   @Column({ type: 'varchar', length: 64 }) display_name!: string;
-  @Column('text') role!: 'admin' | 'user';
+  @Column('text') role!: 'system_admin' | 'user';
   @Column({ type: 'boolean', default: false }) is_super_admin!: boolean;
   @Column({ type: 'boolean', default: true }) enabled!: boolean;
   @Column({ type: 'text', select: false }) password_hash!: string;

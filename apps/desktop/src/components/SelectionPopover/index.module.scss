@@ -96,7 +96,6 @@ div.trigger[data-variant="field"] {
   padding: 0;
   border: 1px solid var(--ez-border-strong);
   border-radius: 11px;
-  // 选项背景铺满面板，由外层统一裁出圆角；列表仍由 option_scroll 负责滚动。
   overflow: hidden;
   background: var(--ez-surface);
   box-shadow: var(--ez-shadow-popover);
@@ -117,7 +116,7 @@ div.trigger[data-variant="field"] {
 
 .title {
   display: block;
-  padding: 6px 8px 8px;
+  padding: 10px 16px 2px;
   color: var(--ez-text-secondary);
   font-size: var(--ez-font-small);
 }
@@ -125,6 +124,7 @@ div.trigger[data-variant="field"] {
 .option_scroll {
   display: grid;
   max-height: min(320px, calc(100vh - 100px));
+  padding: 6px;
   overflow-y: auto;
 }
 
@@ -133,14 +133,14 @@ div.trigger[data-variant="field"] {
   width: auto;
   // 选项行可能包含说明，固定高度契约只用于触发器。
   height: auto;
-  min-height: var(--ez-control-height-default);
+  min-height: var(--ez-menu-row-height);
   grid-template-columns: minmax(0, 1fr) 18px;
   justify-self: stretch;
   align-items: center;
   gap: 9px;
-  padding: 5px 9px;
+  padding: 5px 10px;
   border: 0;
-  border-radius: 0;
+  border-radius: var(--ez-radius-small);
   color: var(--ez-text-secondary);
   background: transparent;
   text-align: left;
@@ -158,7 +158,6 @@ div.trigger[data-variant="field"] {
 .option[data-has-icon="true"],
 .option[data-has-description="true"] {
   min-height: 46px;
-  padding-block: 7px;
 }
 
 .option[data-has-icon="true"] {
@@ -182,7 +181,7 @@ div.trigger[data-variant="field"] {
   min-width: 0;
   gap: 2px;
 
-  b { overflow: hidden; color: var(--ez-text); font-size: var(--ez-font-base); text-overflow: ellipsis; white-space: nowrap; }
+  b { overflow: hidden; color: var(--ez-text); font-size: var(--ez-font-base); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
   small { overflow: hidden; color: var(--ez-text-muted); font-size: var(--ez-font-small); text-overflow: ellipsis; white-space: nowrap; }
 }
 

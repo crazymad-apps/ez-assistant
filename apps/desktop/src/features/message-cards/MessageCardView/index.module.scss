@@ -1,0 +1,26 @@
+.card {
+  min-width: 0;
+  border: 1px solid var(--ez-border);
+  border-radius: var(--ez-radius-medium);
+  overflow: hidden;
+  background: var(--ez-surface);
+}
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  font-size: var(--ez-font-base);
+}
+.meta {
+  color: var(--ez-text-muted);
+  font-size: var(--ez-font-small);
+}
+.loading {
+  margin: 0;
+  padding: 0 12px;
+}
+.card iframe[title='应用界面'] {
+  min-height: 120px;
+}

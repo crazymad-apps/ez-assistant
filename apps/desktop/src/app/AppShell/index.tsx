@@ -1,3 +1,4 @@
+import { ConnectionNotice } from "../../components/ConnectionNotice";
 import { DesktopWindowControls } from "../../features/desktop-lifecycle/DesktopWindowControls";
 import { HostDirectoryDialog } from "../../features/workspaces/HostDirectoryDialog";
 import { observer } from "mobx-react-lite";
@@ -31,6 +32,7 @@ export const AppShell = observer(function AppShell() {
   const [desktop_platform, setDesktopPlatform] = useState<DesktopPlatform>("unsupported");
   const [search_dialog_open, setSearchDialogOpen] = useState(false);
   const application = store.projection.application;
+  const connection = store.local_connection.state === "connected" ? store.connection : store.local_connection;
   const session_id = store.navigation.selected_session_id;
   const session = application?.active_sessions.find((item) => item.session_id === session_id)
     ?? application?.archived_sessions.find((item) => item.session_id === session_id);
@@ -84,13 +86,20 @@ export const AppShell = observer(function AppShell() {
             <SessionHeader on_search={() => setSearchDialogOpen(true)} on_toggle_sidebar={() => store.toggleLeftSidebar()} session={session} sidebar_open={sidebar_expanded} />
             <ChildTaskSubheader />
           </div>
-          {store.connection.state !== "connected" && (application || store.remote_device) && (
-            <div className={styles.connection_notice} role="status">
-              <span>{store.connection.error_message ?? "Runtime 连接不可用，当前内容为上次快照。"}</span>
-              <button onClick={() => store.retryConnection()} type="button">重新连接</button>
-            </div>
-          )}
-          {store.remote_device && store.interaction_error && <p role="alert" className={styles.connection_notice}>{store.interaction_error}</p>}
+          <div className={styles.connection_notice}>
+            {connection.state !== "connected" && (application || store.remote_device) && (
+              <ConnectionNotice>
+                <span>{connection.error_message ?? "Runtime 连接不可用，当前内容为上次快照。"}</span>
+                <button onClick={() => connection === store.local_connection ? store.retryLocalConnection() : store.retryConnection()} type="button">重新连接</button>
+              </ConnectionNotice>
+            )}
+            {connection.state === "connected" && connection.center_available === false && (
+              <ConnectionNotice role="status">
+                <span>企业中心暂不可达，正在自动检查连接。本地会话仍可使用。</span>
+              </ConnectionNotice>
+            )}
+            {store.remote_device && store.interaction_error && <ConnectionNotice role="alert">{store.interaction_error}</ConnectionNotice>}
+          </div>
           <div className={styles.conversation_content}>
             <ConversationView key={navigation.target_device ?? "local"} />
           </div>

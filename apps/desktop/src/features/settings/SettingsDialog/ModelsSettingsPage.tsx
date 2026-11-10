@@ -1,7 +1,9 @@
 import { Button } from '../../../components/Button';
 import { observer } from 'mobx-react-lite';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ModelSelection, ProviderInstanceId } from '@ez-assistant/protocol';
+import type { ModelSelection, ProviderInstanceId, ProviderRequest } from '@ez-assistant/protocol';
+import { CollapsibleSection } from '../../../components/CollapsibleSection';
+import { Icon } from '../../../components/Icon';
 import { useRootStore } from '../../../stores/RootStoreContext';
 import { SessionActionDialog } from '../../sessions/SessionActionDialog';
 import { ModelFixedConfigPage } from './ModelFixedConfigPage';
@@ -16,9 +18,12 @@ import styles from './index.module.scss';
 type ModelPage =
   | { type: 'home' }
   | { type: 'create' }
-  | { type: 'provider' | 'edit'; provider_id: ProviderInstanceId }
-  | { type: 'model'; selection: ModelSelection }
-  | { type: 'add_model'; provider_id: ProviderInstanceId };
+  | ({ type: 'provider' | 'edit' | 'add_model' } & ProviderRequest)
+  | { type: 'model'; selection: ModelSelection };
+
+function providerPage(type: 'provider' | 'edit' | 'add_model', provider: ProviderRequest): ModelPage {
+  return { type, source: provider.source, provider_instance_id: provider.provider_instance_id };
+}
 
 export const ModelsSettingsPage = observer(function ModelsSettingsPage(
   props: Readonly<{
@@ -28,7 +33,7 @@ export const ModelsSettingsPage = observer(function ModelsSettingsPage(
   const root = useRootStore();
   const settings = root.settings;
   const management = settings.model_settings.management;
-  const read_only = management?.read_only ?? false;
+  const enterprise = Boolean(management ?? root.local_projection.application?.model_settings.management);
   const [page, setPage] = useState<ModelPage>({ type: 'home' });
   const [dirty, setDirty] = useState(false);
   const [pending_page, setPendingPage] = useState<ModelPage | null>(null);
@@ -60,52 +65,52 @@ export const ModelsSettingsPage = observer(function ModelsSettingsPage(
     // 提交会先移除 Provider 投影并卸载详情页；完成导航由仍持有 page 的父级负责。
     const deleted = await settings.deleteProvider(id);
     if (deleted && mounted.current)
-      setPage((current) => (current.type === 'provider' && current.provider_id === id ? { type: 'home' } : current));
+      setPage((current) => (current.type === 'provider' && current.source === 'local' && current.provider_instance_id === id
+        ? { type: 'home' } : current));
   }
-  const provider_id = page.type === 'model' ? page.selection.provider_instance_id : undefined;
+  const reference = page.type === 'model' ? page.selection : page.type === 'home' || page.type === 'create' ? null : page;
   const provider = settings.providers.find(
-    (item) =>
-      item.provider_instance_id ===
-      (page.type === 'provider' || page.type === 'edit' || page.type === 'add_model' ? page.provider_id : provider_id),
+    (item) => item.provider_instance_id === reference?.provider_instance_id && item.source === reference.source,
   );
+  const provider_key = provider ? `${provider.source}:${provider.provider_instance_id}` : undefined;
   let content;
-  if (page.type === 'create' || (page.type === 'edit' && provider)) {
+  if (page.type === 'create' || (page.type === 'edit' && provider?.source === 'local')) {
     content = (
       <ProviderConnectionForm
-        key={provider?.provider_instance_id ?? 'new'}
+        key={provider_key ?? 'new'}
         provider={provider ?? null}
         onDirtyChange={onDirtyChange}
-        onBack={() => (provider ? navigate({ type: 'provider', provider_id: provider.provider_instance_id }) : home())}
+        onBack={() => (provider ? navigate(providerPage('provider', provider)) : home())}
         onSaved={(saved) => {
           onDirtyChange(false);
-          setPage({ type: 'provider', provider_id: saved.provider_instance_id });
+          setPage(providerPage('provider', saved));
         }}
       />
     );
   } else if (page.type === 'provider' && provider) {
     content = (
       <ProviderSettingsPage
-        key={provider.provider_instance_id}
+        key={provider_key}
         provider={provider}
         onBack={home}
         onDelete={() => {
           void deleteProvider(provider.provider_instance_id);
         }}
-        onEdit={() => navigate({ type: 'edit', provider_id: provider.provider_instance_id })}
-        onAddModel={() => navigate({ type: 'add_model', provider_id: provider.provider_instance_id })}
+        onEdit={() => navigate(providerPage('edit', provider))}
+        onAddModel={() => navigate(providerPage('add_model', provider))}
         onModel={(selection) => navigate({ type: 'model', selection })}
       />
     );
-  } else if (page.type === 'add_model' && provider) {
+  } else if (page.type === 'add_model' && provider?.source === 'local') {
     content = (
       <ManualModelPage
         provider={provider}
         onDirtyChange={onDirtyChange}
         onDeleted={() => {
           onDirtyChange(false);
-          setPage({ type: 'provider', provider_id: provider.provider_instance_id });
+          setPage(providerPage('provider', provider));
         }}
-        onBack={() => navigate({ type: 'provider', provider_id: provider.provider_instance_id })}
+        onBack={() => navigate(providerPage('provider', provider))}
       />
     );
   } else if (page.type === 'model' && provider) {
@@ -116,61 +121,77 @@ export const ModelsSettingsPage = observer(function ModelsSettingsPage(
         selection={page.selection}
         onDeleted={() => {
           onDirtyChange(false);
-          setPage({ type: 'provider', provider_id: provider.provider_instance_id });
+          setPage(providerPage('provider', provider));
         }}
         onDirtyChange={onDirtyChange}
-        onBack={() => navigate({ type: 'provider', provider_id: provider.provider_instance_id })}
+        onBack={() => navigate(providerPage('provider', provider))}
       />
     );
   } else if (page.type !== 'home') {
     content = (
       <SettingsPageContainer title="服务商不可用" on_back={home}>
-        <p>服务商已删除，请返回重新选择。</p>
+        <p>当前配置中没有此服务商，请返回重新选择。</p>
       </SettingsPageContainer>
     );
   } else {
+    const organization = settings.providers.filter((item) => item.source === 'organization');
+    const personal = settings.providers.filter((item) => item.source !== 'organization');
+    function providerRows(providers: typeof settings.providers) {
+      return <div className={`${styles.model_rows} ${styles.model_provider_rows}`}>
+        {providers.map((item) => (
+          <button
+            type="button"
+            aria-label={`管理服务商 ${item.connection.display_name}${item.source === 'local' ? ` ${item.connection.endpoint}` : ''}`}
+            key={`${item.source}:${item.provider_instance_id}`}
+            onClick={() => navigate(providerPage('provider', item))}
+          >
+            <span>
+              <strong>{item.connection.display_name}</strong>
+              {item.source !== 'organization' && <small>{item.connection.endpoint}</small>}
+            </span>
+            <Icon name="chevron-right" size={16} />
+          </button>
+        ))}
+      </div>;
+    }
+    const personal_rows = personal.length > 0 ? providerRows(personal) : !settings.loading && !settings.error_message && (
+      <p className={styles.model_empty}>{enterprise ? '暂无个人服务商' : '暂无服务商'}</p>
+    );
     content = (
-      <SettingsPageContainer
-        title="模型与服务商"
-        actions={
-          read_only ? (
-            <Button disabled={Boolean(settings.pending_action)} onClick={() => void settings.refreshModelSource()}>
-              刷新配置
+      <SettingsPageContainer title="模型与服务商">
+        <div className={styles.models_home}>
+          <div className={styles.model_defaults}>
+            <ModelSelectionControl purpose="default" read_only={enterprise} />
+            <ModelSelectionControl purpose="vision" />
+          </div>
+          {enterprise && (
+            <CollapsibleSection title="企业模型" variant="outlined" defaultOpen actions={
+              <Button variant="text" aria-label="刷新配置"
+                title={management?.last_success_at_ms != null
+                  ? `最近获取：${new Date(management.last_success_at_ms).toLocaleString()}` : undefined}
+                disabled={Boolean(settings.pending_action)} onClick={() => void settings.refreshModelSource()}>
+                <Icon name="refresh" size={14} />刷新
+              </Button>
+            }>
+              {management && (management.last_refresh_error || management.unavailable_models.length > 0) && (
+                <div className={styles.model_group_messages}>
+                  {management.last_refresh_error && <p role="alert">刷新失败：{management.last_refresh_error}</p>}
+                  {management.unavailable_models.map(({ selection, reason }) => (
+                    <p key={JSON.stringify(selection)}>{selection.model_id}（不可用） · {reason}</p>
+                  ))}
+                </div>
+              )}
+              {providerRows(organization)}
+            </CollapsibleSection>
+          )}
+          <CollapsibleSection title={enterprise ? '个人模型' : '服务商'} variant="outlined" defaultOpen actions={
+            <Button variant="primary" disabled={Boolean(settings.pending_action)} onClick={() => navigate({ type: 'create' })}>
+              <Icon name="plus" size={14} />添加服务商
             </Button>
-          ) : (
-            <Button variant="primary" onClick={() => navigate({ type: 'create' })}>
-              添加服务商
-            </Button>
-          )
-        }
-      >
-        <ModelSelectionControl purpose="default" />
-        {(!read_only || settings.model_settings.vision_model) && <ModelSelectionControl purpose="vision" />}
-        {management?.unavailable_reason && <p role="status">{management.unavailable_reason}</p>}
-        {management?.last_success_at_ms != null && (
-          <p>最近获取：{new Date(management.last_success_at_ms).toLocaleString()}</p>
-        )}
-        {management?.last_refresh_error && <p role="alert">刷新失败：{management.last_refresh_error}</p>}
-        <div className={styles.model_rows}>
-          {settings.providers.map((item) => (
-            <button
-              type="button"
-              aria-label={`管理服务商 ${item.connection.display_name} ${item.connection.endpoint}`}
-              key={item.provider_instance_id}
-              onClick={() => navigate({ type: 'provider', provider_id: item.provider_instance_id })}
-            >
-              <span>
-                <strong>{item.connection.display_name}</strong>
-                <small>{item.connection.endpoint}</small>
-              </span>
-              <span aria-hidden="true">›</span>
-            </button>
-          ))}
+          }>{personal_rows}</CollapsibleSection>
+          {settings.loading && <p role="status">正在读取模型设置…</p>}
+          <SettingsMessages />
         </div>
-        {!read_only && !settings.loading && settings.providers.length === 0 && (
-          <p className={styles.empty_models}>添加服务商后即可获取在线模型。</p>
-        )}
-        <SettingsMessages />
       </SettingsPageContainer>
     );
   }

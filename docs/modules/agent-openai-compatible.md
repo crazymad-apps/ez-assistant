@@ -167,3 +167,14 @@ Responses summary/content 在规范 ReasoningPart 和每个 ReasoningDelta 中�
 ## v0.32.0 F05 OpenCode 具名方言
 
 Chat／Responses 的 `opencode()` 复用原有 Codec、Decoder 和 HTTP／SSE Service，模型能力与 reasoning 参数由宿主显式提供，不从模型名称猜测底层厂商。`OpenCodeRequestIdentity` 仅接收已校验、不可变的路由及 User-Agent；Service 仅在 OpenCode 方言发送相应头，缺失身份时在 Transport 前报配置错误。它不解释 Session／ChildTask／Run，不生成身份或保存映射。续接、压缩和计量默认关闭，正式 Host 同时拒绝未支持的配置；失败不切换协议或 endpoint。
+
+## v0.32.2 OpenAI 显式流式压缩
+
+仅具名 `openai()` 方言的显式 `compact` 使用 `/responses`、`stream:true`、`store:false`、
+末尾唯一 `compaction_trigger`，并携带 `x-codex-beta-features: remote_compaction_v2`。
+不按端点或模型名称猜测，不给其他兼容方言切换入口，也不改变普通生成或本地摘要。
+流完整结束且唯一成功终态含单个有效原生压缩项后，保留原输入的 user/developer/system
+消息并封装成既有 `responses.compacted_window`；旧窗口无需迁移。断流、取消、错误、
+不一致 item、终态后数据或超限均不发布候选，不调用工具或回退旧入口。
+
+压缩 SSE 的失败终态不伪造 HTTP 错误状态；按结构化错误 code/type 区分上下文溢出、限流和服务过载，并保留可解析的 Retry-After。未声明 HTTP 状态时保持 None，未知错误沿用 Provider 失败；不据此在 Adapter 内重试。

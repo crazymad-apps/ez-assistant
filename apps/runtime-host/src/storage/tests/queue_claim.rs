@@ -134,7 +134,13 @@ fn upgrade_detaches_only_unstarted_queue_controls_and_removes_successful_backup(
         .execute("UPDATE skill_activations SET run_id='old-queued-run'", [])
         .unwrap();
     engine.connection.execute("UPDATE inputs SET skill_activation_json=json_set(skill_activation_json,'$.run_id','old-queued-run') WHERE input_id=?1",[input.input_id.as_str()]).unwrap();
-    engine.connection.execute_batch("DELETE FROM schema_migrations WHERE migration_key='conversation_usage_snapshots_v1'; DROP TABLE conversation_usage_snapshots;").unwrap();
+    engine.connection.execute_batch("DELETE FROM schema_migrations WHERE migration_key='conversation_usage_snapshots_v1' OR version IN ('0.32.2','0.33.0');
+        DROP TABLE conversation_usage_snapshots;
+        DROP TABLE message_cards;
+        UPDATE database_compatibility SET min_compatible_host_version='0.32.1';
+        ALTER TABLE sessions DROP COLUMN model_source;
+        ALTER TABLE model_settings DROP COLUMN vision_model_source;
+        ALTER TABLE plugins DROP COLUMN source_organization_id;").unwrap();
     assert_eq!(
         engine
             .connection
@@ -213,7 +219,13 @@ fn queue_upgrade_preserves_an_already_claimed_start_receipt_for_normal_recovery(
         .connection
         .execute_batch("DROP TRIGGER pause_claimed_start")
         .unwrap();
-    engine.connection.execute_batch("DELETE FROM schema_migrations WHERE migration_key='conversation_usage_snapshots_v1'; DROP TABLE conversation_usage_snapshots;").unwrap();
+    engine.connection.execute_batch("DELETE FROM schema_migrations WHERE migration_key='conversation_usage_snapshots_v1' OR version IN ('0.32.2','0.33.0');
+        DROP TABLE conversation_usage_snapshots;
+        DROP TABLE message_cards;
+        UPDATE database_compatibility SET min_compatible_host_version='0.32.1';
+        ALTER TABLE sessions DROP COLUMN model_source;
+        ALTER TABLE model_settings DROP COLUMN vision_model_source;
+        ALTER TABLE plugins DROP COLUMN source_organization_id;").unwrap();
     assert_eq!(
         engine
             .connection

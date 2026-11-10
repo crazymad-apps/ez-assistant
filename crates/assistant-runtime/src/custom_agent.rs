@@ -10,6 +10,7 @@ use crate::RuntimeResult;
 #[derive(Clone)]
 pub struct CenterCustomAgentDirectory {
     pub center_id: String,
+    pub organization_id: Option<String>,
     pub agents: Vec<CustomAgentConfig>,
 }
 

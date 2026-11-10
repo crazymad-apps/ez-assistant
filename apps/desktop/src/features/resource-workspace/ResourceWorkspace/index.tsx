@@ -1,3 +1,4 @@
+import { ApplicationPicker } from "../../mcp-apps/ApplicationPicker";
 import { observer } from "mobx-react-lite";
 import { useEffect, useRef, useState, type KeyboardEvent, type WheelEvent, type RefObject } from "react";
 import {
@@ -40,6 +41,7 @@ export const ResourceWorkspace = observer(function ResourceWorkspace(props: Read
   const session_view = session_id ? root_store.reading_projection.session_views.get(session_id) : undefined;
   const draft = root_store.reading_drafts.get(draft_key as import("../../../stores/NewSessionDraftStore").NewSessionDraftKey | null);
   const draft_workspace = application?.workspaces.find((item) => item.workspace_id === draft?.workspace_id);
+  const [app_picker, setAppPicker] = useState(false);
   const [closing_terminal, setClosingTerminal] = useState<string | null>(null);
   const connected = root_store.reading_connection.state === "connected";
   const terminal_available = connected && Boolean(session_view || (!session_id && draft_workspace));
@@ -48,7 +50,7 @@ export const ResourceWorkspace = observer(function ResourceWorkspace(props: Read
   const openDesktop = () => { if (desktop_device && desktop_available) store.openDesktop(desktop_device.id, desktop_device.name, desktop_device.desktop_control); };
   const workspace_available = connected && Boolean(session_id || draft_workspace);
   const tab_refs = useRef(new Map<string, HTMLButtonElement>());
-  useEffect(() => { setClosingTerminal(null); }, [scope_key]);
+  useEffect(() => { setClosingTerminal(null); setAppPicker(false); }, [scope_key, store]);
 
   useEffect(() => {
     const tab = tab_refs.current.get(store.active_tab_key);
@@ -136,7 +138,9 @@ export const ResourceWorkspace = observer(function ResourceWorkspace(props: Read
         <div aria-label="资源标签" className={styles.tab_scroller} onWheel={handleTabWheel} role="tablist">
           {store.tabs.map((tab) => {
             const key = resourceTabKey(tab);
-            const title = tab.type === "browser" ? store.browsers.get(tab.browserId)?.title ?? resourceTabTitle(tab) : tab.type === "terminal" ? store.terminals.get(tab.terminalId)?.title ?? resourceTabTitle(tab) : resourceTabTitle(tab);
+            const app = tab.type === "app" ? store.apps.get(tab.appId) : undefined;
+            const title = tab.type === "app" ? app?.title ?? "应用" : tab.type === "browser" ? store.browsers.get(tab.browserId)?.title ?? resourceTabTitle(tab) : tab.type === "terminal" ? store.terminals.get(tab.terminalId)?.title ?? resourceTabTitle(tab) : resourceTabTitle(tab);
+            const app_icon = app?.icon_data_url;
             const active = store.active_tab_key === key;
             const shell = tab.type === "terminal" ? store.terminals.get(tab.terminalId)?.shell_kind : null;
             return (
@@ -170,7 +174,9 @@ export const ResourceWorkspace = observer(function ResourceWorkspace(props: Read
                   tabIndex={store.focused_tab_key === key ? 0 : -1}
                   type="button"
                 >
-                  <Icon name={tabIcon(tab)} size={15} />
+                  {app_icon
+                    ? <AppTabIcon key={app_icon} src={app_icon} />
+                    : <Icon name={tabIcon(tab)} size={15} />}
                   <span>{title}</span>
                   {shell && <small title={shellLabels[shell]}>{shellBadges[shell]}</small>}
                 </button>
@@ -196,6 +202,8 @@ export const ResourceWorkspace = observer(function ResourceWorkspace(props: Read
           on_terminal={openTerminal}
           desktop_available={desktop_available}
           on_desktop={openDesktop}
+          app_available={connected}
+          on_app={() => setAppPicker(true)}
           on_workspace={() => { if (scope_key && workspace_available) store.openWorkspace(scope_key); }}
           on_browser={() => store.openBrowser(undefined, owner)}
           on_error={(failure) => root_store.showInteractionError(String(failure))}
@@ -210,6 +218,7 @@ export const ResourceWorkspace = observer(function ResourceWorkspace(props: Read
               label="项目"
               on_select={() => scope_key && workspace_available && store.openWorkspace(scope_key)}
             />
+            <ResourceMenuItem disabled={!connected} icon="puzzle" label="应用" on_select={() => setAppPicker(true)} />
             <ResourceMenuItem disabled={!terminal_available} icon="terminal" label="终端" on_select={openTerminal} />
             <ResourceMenuItem disabled={!desktop_available} icon="desktop" label="远程桌面" on_select={openDesktop} />
           </DropdownMenuContent>
@@ -231,6 +240,7 @@ export const ResourceWorkspace = observer(function ResourceWorkspace(props: Read
           </section>;
         })}
       </div>}
+      {app_picker && <ApplicationPicker workspace={store} group={owner} on_close={() => setAppPicker(false)} />}
       {closing_terminal && <CloseTerminalDialog title={store.terminals.get(closing_terminal)?.title ?? "终端"}
         on_cancel={() => setClosingTerminal(null)} on_confirm={() => closeTerminal(closing_terminal)} />}
 
@@ -256,6 +266,13 @@ function ResourceMenuItem(props: Readonly<{
   );
 }
 
+function AppTabIcon({ src }: { src: string }) {
+  const [failed, setFailed] = useState(false);
+  return failed
+    ? <Icon name="puzzle" size={15} />
+    : <img className={styles.app_icon} src={src} alt="" width={15} height={15} onError={() => setFailed(true)} />;
+}
+
 function tabIcon(tab: ResourceTab): IconName {
   switch (tab.type) {
     case "context": return "sidebar-right";
@@ -264,6 +281,7 @@ function tabIcon(tab: ResourceTab): IconName {
     case "markdown": return "file";
     case "image": return "image";
     case "pdf": return "file";
+    case "app": return "puzzle";
     case "browser": return "globe";
     case "terminal": return "terminal";
     case "desktop": return "desktop";

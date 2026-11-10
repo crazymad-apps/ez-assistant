@@ -5,18 +5,20 @@ import { ModelPicker } from "../../src/features/settings/ModelPicker";
 import { RootStore } from "../../src/stores/RootStore";
 import { RootStoreProvider } from "../../src/stores/RootStoreContext";
 import { discoveredModel, modelProvider, modelSelection } from "../support/modelManagement";
-import type { ModelSelection } from "@ez-assistant/protocol";
+import type { DiscoveredModel, ModelSelection } from "@ez-assistant/protocol";
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 function Picker(props: Readonly<{
   disabled_reason?: string;
+  vision_only?: boolean;
   select: (selection: ModelSelection | null) => Promise<boolean>;
 }>) {
   const [open, setOpen] = useState(false);
   return <ModelPicker providers={[modelProvider]} selection={modelSelection} title="选择模型" label="fixture"
     disabled_reason={props.disabled_reason}
-    open={open} onOpenChange={setOpen} onSelect={props.select} trigger_class_name="" follow_default />;
+    open={open} onOpenChange={setOpen} onSelect={props.select} trigger_class_name=""
+    follow_default={!props.vision_only} vision_only={props.vision_only} />;
 }
 function show(select: (selection: ModelSelection | null) => Promise<boolean>) {
   const store = new RootStore();
@@ -92,5 +94,61 @@ describe("model picker interaction ownership", () => {
     expect(manage).toHaveFocus();
     fireEvent.keyDown(manage, { key: "Escape" });
     expect(screen.getByRole("button", { name: "选择模型" })).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("moves focus into a late vision catalog and skips models without image input", async () => {
+    const store = new RootStore();
+    let finish!: (models: DiscoveredModel[]) => void;
+    vi.spyOn(store.settings, "listProviderModels").mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    vi.spyOn(store.settings, "listAllFixedModels").mockResolvedValue([]);
+    const select = vi.fn().mockResolvedValue(true);
+    render(<RootStoreProvider store={store}><Picker select={select} vision_only /></RootStoreProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "选择模型" }));
+    const provider = screen.getByRole("menuitem", { name: /测试服务商/ });
+    await waitFor(() => expect(provider).toHaveFocus());
+    fireEvent.keyDown(provider, { key: "ArrowRight" });
+    const image = discoveredModel("image");
+    await act(async () => finish([
+      discoveredModel("text"),
+      { ...image, metadata: { ...image.metadata, image_input: "supported" } },
+      discoveredModel("text-only"),
+    ]));
+    const available = screen.getByRole("menuitemradio", { name: "image" });
+    await waitFor(() => expect(available).toHaveFocus());
+    expect(screen.getByRole("menuitemradio", { name: /^text-only/ })).toBeDisabled();
+    fireEvent.keyDown(available, { key: "ArrowDown" });
+    expect(available).toHaveFocus();
+    fireEvent.click(available);
+    expect(select).toHaveBeenCalledWith({ ...modelSelection, model_id: "image" });
+    store.dispose();
+  });
+
+  it("keeps repeated pointer clicks on the provider when its catalog arrives", async () => {
+    const store = new RootStore();
+    let finish!: (models: DiscoveredModel[]) => void;
+    vi.spyOn(store.settings, "listProviderModels").mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    vi.spyOn(store.settings, "listAllFixedModels").mockResolvedValue([]);
+    const select = vi.fn().mockResolvedValue(true);
+    render(<RootStoreProvider store={store}><Picker select={select} /></RootStoreProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "选择模型" }));
+    const provider = screen.getByRole("menuitem", { name: /测试服务商/ });
+    fireEvent.click(provider, { detail: 1 });
+    fireEvent.click(provider, { detail: 2 });
+    await act(async () => finish([discoveredModel("alternate")]));
+    const option = screen.getByRole("menuitemradio", { name: "alternate" });
+    fireEvent.click(provider, { detail: 1 });
+    await act(async () => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
+    expect(provider).toHaveFocus();
+    expect(option).toHaveAttribute("data-active", "false");
+    expect(option).toHaveAttribute("aria-checked", "false");
+    expect(select).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(provider, { key: "ArrowRight" });
+    await waitFor(() => expect(option).toHaveFocus());
+    fireEvent.click(provider, { detail: 1 });
+    expect(provider).toHaveFocus();
+    expect(option).toHaveAttribute("data-active", "false");
+    expect(select).not.toHaveBeenCalled();
+    store.dispose();
   });
 });

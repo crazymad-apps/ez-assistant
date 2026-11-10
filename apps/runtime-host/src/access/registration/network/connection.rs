@@ -17,6 +17,7 @@ use tokio_tungstenite::{
     tungstenite::{Error, Message, client::IntoClientRequest, protocol::WebSocketConfig},
 };
 
+const PROTOCOL_VERSION: u32 = 3;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(45);
 
@@ -26,6 +27,7 @@ struct Hello {
     kind: String,
     protocol_version: u32,
     center_id: String,
+    organization_id: String,
     registration_id: Option<String>,
 }
 
@@ -72,7 +74,8 @@ async fn run_inner(
         );
         network
             .credentials
-            .network_caller(&target.center_id)
+            .network_caller(&target.center_id, Some(&target.organization_id))
+            .map(|(_, token)| token)
             .ok_or(State::CredentialInvalid)?
     };
     request.headers_mut().insert(
@@ -96,15 +99,16 @@ async fn run_inner(
             };
             let hello: Hello = serde_json::from_str(&text).map_err(|_| State::Incompatible)?;
             if hello.kind != "hello"
-                || hello.protocol_version != 2
+                || hello.protocol_version != PROTOCOL_VERSION
                 || hello.center_id != target.center_id
+                || hello.organization_id != target.organization_id
                 || hello.registration_id.as_deref() != e.map(|e| e.id.as_str())
             {
                 return Err(State::Incompatible);
             }
             ws.send(Message::Text(
-                serde_json::json!({"type":"ready", "protocol_version":2,
-                "center_id":target.center_id, "registration_id":e.map(|e| &e.id)})
+                serde_json::json!({"type":"ready", "protocol_version":PROTOCOL_VERSION,
+                "center_id":target.center_id, "organization_id":target.organization_id, "registration_id":e.map(|e| &e.id)})
                 .to_string()
                 .into(),
             ))
@@ -147,6 +151,7 @@ where
         send.clone(),
         network.credentials.clone(),
         target.and_then(Target::enrollment).map(|e| e.id.clone()),
+        target.map(|target| target.organization_id.clone()),
     );
     let _guard = SessionGuard {
         network,
@@ -211,8 +216,9 @@ where
     }
 }
 fn changed(text: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(text)
-        .is_ok_and(|v| v["type"] == "registration_changed" && v["protocol_version"] == 2)
+    serde_json::from_str::<serde_json::Value>(text).is_ok_and(|v| {
+        v["type"] == "registration_changed" && v["protocol_version"] == PROTOCOL_VERSION
+    })
 }
 pub(super) fn endpoint(center: &str) -> Result<String, State> {
     let url = url::Url::parse(center).map_err(|_| State::Failed)?;

@@ -95,7 +95,7 @@ impl VolatileRuntimeStore {
             match update.plugin {
                 PluginRecordChange::Keep => {}
                 PluginRecordChange::Upsert(plugin) => {
-                    state.plugins.insert(plugin.name.clone(), plugin);
+                    state.plugins.insert(plugin.name.clone(), *plugin);
                 }
                 PluginRecordChange::Remove(name) => {
                     state.plugins.remove(&name);
@@ -170,7 +170,7 @@ mod tests {
                 .advance_plugin_operation(PluginOperationUpdate {
                     expected_phase: PluginOperationPhase::Preparing,
                     next: premature,
-                    plugin: PluginRecordChange::Upsert(plugin.clone()),
+                    plugin: PluginRecordChange::Upsert(Box::new(plugin.clone())),
                 })
                 .await
                 .unwrap_err()
@@ -196,7 +196,7 @@ mod tests {
             .advance_plugin_operation(PluginOperationUpdate {
                 expected_phase: PluginOperationPhase::Committing,
                 next: cleaning.clone(),
-                plugin: PluginRecordChange::Upsert(plugin.clone()),
+                plugin: PluginRecordChange::Upsert(Box::new(plugin.clone())),
             })
             .await
             .unwrap();

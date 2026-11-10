@@ -1,6 +1,6 @@
 //! 模型获取与发送共享当前登录身份；晚到结果只能提交到捕获的用户域和登录对象。
 
-use assistant_runtime::{ExternalModelPublication, RuntimeResult};
+use assistant_runtime::{ExternalModelPublication, ExternalModelSet, RuntimeResult};
 
 use super::*;
 
@@ -8,9 +8,9 @@ impl CenterLogin {
     pub(crate) async fn model_configuration(
         &self,
         key: &UserKey,
-    ) -> Result<ModelConfiguration, CenterError> {
+    ) -> Result<ExternalModelSet, CenterError> {
         self.client
-            .model_configuration(&self.token, &key.center_id)
+            .model_configuration(&self.token, &key.center_id, &key.organization_id)
             .await
     }
 
@@ -24,7 +24,8 @@ impl CenterLogin {
 }
 
 impl Credentials {
-    /// 每次发送时重新获取身份；域实例与当前访问状态同时核验，不复用任务启动时的 key。
+    /// 每次发送时重新获取身份与用户域生命周期，不复用任务启动时的 key。
+    /// 客户端访问连接中断不等于模型认证失败；请求由中心核验，网络错误沿模型有限重试处理。
     pub(crate) fn model_login(
         &self,
         key: &UserKey,
@@ -35,10 +36,49 @@ impl Credentials {
             .users
             .get(key)
             .ok_or(CenterError::InvalidCredentials)?;
-        if !Arc::ptr_eq(domain, &user.activity) || user.connections.is_cancelled() {
+        if !Arc::ptr_eq(domain, &user.activity)
+            || user.connections.is_cancelled()
+            || user.login.expires_at_ms <= crate::access::credentials::current_time_ms()?
+        {
             return Err(CenterError::InvalidCredentials);
         }
         Ok(user.login.clone())
+    }
+
+    /// 个人直连没有中心代理可代为鉴权，复用 F01 的同登录身份核验。
+    /// 仅网络不可用时沿用尚有效的本地域；旧登录的迟到拒绝不会撤销新登录。
+    pub(crate) async fn verify_personal_model_login(
+        &self,
+        key: &UserKey,
+        domain: &Arc<()>,
+    ) -> Result<(), CenterError> {
+        let login = self.model_login(key, domain)?;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), login.verify())
+            .await
+            .unwrap_or(Err(CenterError::Unavailable))
+            .and_then(|identity| {
+                if UserKey::from(&identity) == *key {
+                    Ok(())
+                } else {
+                    Err(CenterError::InvalidCredentials)
+                }
+            });
+        let current = self.model_login(key, domain)?;
+        if !Arc::ptr_eq(&login, &current) {
+            return Err(CenterError::StateChanged);
+        }
+        match result {
+            Ok(()) | Err(CenterError::Unavailable) => Ok(()),
+            Err(error) => {
+                if matches!(
+                    error,
+                    CenterError::InvalidCredentials | CenterError::IdentityMismatch
+                ) {
+                    self.reject_model_login(key, domain, &login);
+                }
+                Err(error)
+            }
+        }
     }
 
     /// 调用方已获取 Runtime 提交门；此处短持身份锁同步提交，释放后由调用方 finish 通知。
@@ -49,7 +89,7 @@ impl Credentials {
         domain: &Arc<()>,
         login: &Arc<CenterLogin>,
         publication: &mut ExternalModelPublication<'_>,
-        result: Result<ModelConfiguration, CenterError>,
+        result: Result<ExternalModelSet, CenterError>,
         fetched_at_ms: i64,
     ) -> RuntimeResult<bool> {
         let mut state = self.state.lock().expect("credential state poisoned");
@@ -61,12 +101,7 @@ impl Credentials {
             return Ok(false);
         }
         match result {
-            Ok(ModelConfiguration::Ready(configuration)) => {
-                publication.publish(Some(configuration), "", fetched_at_ms)?
-            }
-            Ok(ModelConfiguration::Unavailable(reason)) => {
-                publication.publish(None, reason, fetched_at_ms)?
-            }
+            Ok(configuration) => publication.publish(configuration, fetched_at_ms)?,
             Err(error) => {
                 publication.refresh_failed(&error.to_string())?;
                 if error == CenterError::InvalidCredentials {

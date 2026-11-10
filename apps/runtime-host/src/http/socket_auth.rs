@@ -64,8 +64,7 @@ pub(crate) async fn authenticate(
         auth.state
             .access
             .credentials
-            .verify_enterprise(&mut permit)
-            .await
+            .bind_enterprise_access(&mut permit)
             .map_err(|_| fail())?;
     }
     Ok(permit)

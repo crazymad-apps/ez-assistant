@@ -145,6 +145,7 @@ export const SessionList = observer(function SessionList(props: Readonly<{
 }>) {
   const store = useRootStore();
   const target = props.target_device === undefined ? store.network.browsing_device : props.target_device;
+  const execution = target ? store.network.contexts.get(target)?.live_execution : store.local_live_execution;
 
   return (
     <div className={styles.session_list} data-indent={props.indent ?? "nested"} id={props.id}>
@@ -175,7 +176,7 @@ export const SessionList = observer(function SessionList(props: Readonly<{
             title={store.isSessionPinned(session, target) ? "取消置顶" : "置顶"}
             type="button"
           ><Icon name={store.isSessionPinned(session, target) ? "pin" : "pin-outline"} size={14} /></button>}
-          {session.active_run_id ? (
+          {execution?.activeRunId(session.session_id, session.active_run_id) ? (
             <svg
               aria-label="正在运行"
               className={styles.loading_ring}

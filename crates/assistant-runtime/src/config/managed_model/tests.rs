@@ -27,6 +27,7 @@ fn provider(kind: ProviderType, preference: ProviderProtocolPreference) -> Store
 }
 fn selection() -> ModelSelection {
     ModelSelection {
+        source: assistant_protocol::ModelSelectionSource::Local,
         provider_instance_id: ProviderInstanceId::new("provider-1").unwrap(),
         model_id: "arbitrary/model-name".into(),
     }

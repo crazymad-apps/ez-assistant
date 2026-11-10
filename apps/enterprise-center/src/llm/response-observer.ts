@@ -153,6 +153,10 @@ export class ResponseObserver {
     if (typeof status === 'string' && ['completed', 'failed', 'incomplete', 'cancelled'].includes(status)) {
       if (typeof response.id !== 'string' || !Array.isArray(response.output))
         this.anomaly ??= 'invalid_response_structure';
+      if (this.row.kind === 'context_compaction' && status === 'completed' &&
+        (!Array.isArray(response.output) || response.output.length !== 1 || object(response.output[0])?.type !== 'compaction' ||
+          typeof object(response.output[0])?.encrypted_content !== 'string' || !object(response.output[0])?.encrypted_content))
+        this.anomaly ??= 'unexpected_compaction';
       if (response.error != null) this.anomaly ??= 'response_error';
       const digest = createHash('sha256')
         .update(JSON.stringify({ id: response.id, status, output: response.output }))
@@ -175,6 +179,12 @@ export class ResponseObserver {
         ? this.done && this.choices.size > 0 && [...this.choices.values()].every((value) => value !== null)
         : this.terminal === 'completed';
     return { state: normal ? 'normal' : 'unconfirmed', reason: normal ? null : 'missing_terminal' };
+  }
+
+  continuationId(): string | null {
+    this.frames.finish();
+    if (this.terminal !== 'completed' || this.anomaly || this.frames.reason) return null;
+    return this.responseId;
   }
 
   release(): void {

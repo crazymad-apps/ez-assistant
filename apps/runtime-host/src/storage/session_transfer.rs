@@ -106,6 +106,11 @@ impl StorageEngine {
             .iter()
             .map(|message| conversation::message_id(message).as_str().to_owned())
             .collect::<BTreeSet<_>>();
+        let card_children = inherited
+            .child_tasks
+            .iter()
+            .map(|child| child.child_task_id.as_str().to_owned())
+            .collect::<Vec<_>>();
         let mut activation_ids = BTreeSet::new();
         for activation in &fork.skill_activations {
             if !activation_ids.insert(activation.activation_id.clone())
@@ -429,8 +434,8 @@ impl StorageEngine {
                         session_id, title, model_id, reasoning_effort, system_prompt_json, skill_catalog_json, current_variant,
                         approval_mode, role, lifecycle, body_generation, message_count, created_at_ms,
                         updated_at_ms, archived_at_ms, is_pinned, title_origin,
-                        materialization_key, automatic_title_pending, model_provider_instance_id, agent_shell_kind, agent_shell_environment_json
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'active', 1, ?10, ?11, ?11, NULL, 0, ?12, ?13, ?14, ?15, ?16, ?17)",
+                        materialization_key, automatic_title_pending, model_provider_instance_id, agent_shell_kind, agent_shell_environment_json, model_source
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'active', 1, ?10, ?11, ?11, NULL, 0, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
                     params![
                         fork.session.session_id.as_str(),
                         fork.session.title,
@@ -458,12 +463,22 @@ impl StorageEngine {
                         fork.session.model_selection.as_ref().map(|selection| selection.provider_instance_id.as_str()),
                         fork.session.agent_shell_kind.map(super::mode::shell_kind_value),
 super::agent_shell::encode_environment(fork.session.agent_shell_environment.as_ref())?,
+                        super::model_management::selection_source(fork.session.model_selection.as_ref()),
                     ],
                 )
                 .map_err(|source| {
                     database_write_error("fork session could not be created", source)
                 })?;
             Self::insert_session_resources(&transaction, &fork.session)?;
+            if !self.allow_legacy_history {
+                super::card::copy_for_fork(
+                    &transaction,
+                    &fork.source_session_id,
+                    &fork.session.session_id,
+                    &message_ids,
+                    &card_children,
+                )?;
+            }
             transaction
                 .execute(
                     "INSERT INTO session_usage (session_id, backfilled, updated_at_ms)

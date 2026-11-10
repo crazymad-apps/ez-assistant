@@ -14,6 +14,43 @@ impl AssistantRuntime {
         Ok(catalog_snapshot(&provider))
     }
 
+    pub fn list_organization_provider_models(
+        &self,
+        id: ProviderInstanceId,
+    ) -> RuntimeResult<ProviderModelCatalogSnapshot> {
+        self.ensure_running()?;
+        let state = self.managed_models()?;
+        let mut models = Vec::new();
+        if let Some(external) = &state.external {
+            for (selection, model) in &external.models {
+                if selection.provider_instance_id == id
+                    && let Ok(model) = model
+                {
+                    models.push(DiscoveredModel {
+                        model_id: selection.model_id.clone(),
+                        display_name: None,
+                        metadata: model.parameters().clone(),
+                        configuration: Some(assistant_protocol::ModelConfigurationSummary {
+                            uses_template: false,
+                            requires_configuration: false,
+                        }),
+                    });
+                }
+            }
+        }
+        Ok(ProviderModelCatalogSnapshot {
+            provider_instance_id: id,
+            models,
+            refreshed_at_ms: state
+                .settings
+                .management
+                .as_ref()
+                .and_then(|status| status.last_success_at_ms),
+            connection_changed: false,
+            diagnostic: None,
+        })
+    }
+
     /// 唯一目录联网入口。联网期间不持配置写门；可靠落库后才替换 Provider Arc 并发布失效事件。
     pub async fn refresh_provider_models(
         &self,
@@ -90,6 +127,7 @@ fn catalog_snapshot(provider: &StoredProvider) -> ProviderModelCatalogSnapshot {
         let detail = crate::config::model_templates::configuration_detail(
             &provider.connection,
             ModelSelection {
+                source: assistant_protocol::ModelSelectionSource::Local,
                 provider_instance_id: provider.provider_instance_id.clone(),
                 model_id: model.model_id.clone(),
             },

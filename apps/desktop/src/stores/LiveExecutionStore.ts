@@ -243,6 +243,18 @@ export class LiveExecutionStore {
       ?? candidates.at(-1) ?? null;
   }
 
+  /** 活动入口统一从 Host 快照身份取值；同一 Run 的已知终态优先，不推断另一个 Run。 */
+  activeRunId(session_id: SessionId, run_id: string | null | undefined): string | null {
+    if (!run_id) return null;
+    const run = this.runs.get(runKey(session_id, run_id));
+    return run && !isNonterminalRun(run.status) ? null : run_id;
+  }
+
+  activeRunStatus(session_id: SessionId, run: RunSnapshot | null | undefined): RunStatus | undefined {
+    if (!run || !this.activeRunId(session_id, run.run_id)) return undefined;
+    return this.runs.get(runKey(session_id, run.run_id))?.status ?? run.status;
+  }
+
   runForChildTask(session_id: SessionId, child_task_id: ChildTaskId): LiveRunProjection | null {
     return this.child_runs.get(childKey(session_id, child_task_id)) ?? null;
   }
@@ -478,7 +490,8 @@ export class LiveExecutionStore {
         };
         break;
       case "model_stream_established":
-        next = { ...current, model_failure_kind: null, model_request: null };
+        // 与 Host 快照一致：建流只表示响应头已到，不能掩盖仍在等待的重试。
+        next = { ...current, model_failure_kind: null, model_request: { type: "requesting", attempt: event.attempt } };
         break;
       case "step_started":
         next = {
@@ -537,6 +550,9 @@ export class LiveExecutionStore {
         break;
       default:
         return;
+    }
+    if (event.type === "text_delta" || event.type === "reasoning_delta" || event.type === "tool_proposed") {
+      next = { ...next, model_request: null };
     }
     this.runs.set(key, next);
   }

@@ -66,6 +66,7 @@ const REQUIRED_FEATURES: &[RuntimeHostFeature] = &[
 pub(crate) struct RuntimeBootstrapCoordinator {
     runtime_home: PathBuf,
     runtime_executable: PathBuf,
+    development: bool,
     http: reqwest::Client,
     // 启动、普通重启和升级共用单一入口，避免同一桌面并发停止/启动同一 Host。
     lifecycle_gate: Arc<tokio::sync::Mutex<()>>,
@@ -177,6 +178,7 @@ impl RuntimeBootstrapCoordinator {
         Self {
             runtime_home,
             runtime_executable,
+            development: cfg!(debug_assertions),
             lifecycle_gate: Arc::default(),
             http: reqwest::Client::builder()
                 .no_proxy()
@@ -209,6 +211,7 @@ impl RuntimeBootstrapCoordinator {
             runtime_home: crate::runtime_source::canonical_home(&runtime_home)
                 .ok_or_else(invalid_discovery)?,
             runtime_executable,
+            development: false,
             http,
             lifecycle_gate: Arc::default(),
         })
@@ -246,7 +249,8 @@ impl RuntimeBootstrapCoordinator {
             Err(_) => {}
         }
 
-        self.launch_from(&self.runtime_executable).await?;
+        self.launch_from(&self.runtime_executable, self.development)
+            .await?;
         self.wait_for_start().await
     }
 
@@ -312,16 +316,24 @@ impl RuntimeBootstrapCoordinator {
         let source = tokio::fs::canonicalize(&self.runtime_executable)
             .await
             .map_err(|_| source_unavailable())?;
-        let hash_source = source.clone();
-        let digest =
-            tokio::task::spawn_blocking(move || crate::runtime_source::digest(&hash_source))
-                .await
-                .map_err(|_| source_unavailable())?
-                .map_err(|_| source_unavailable())?;
+        if !source.is_file() {
+            return Err(source_unavailable());
+        }
         let version = assistant_protocol::ClientCompatibility::current();
-        crate::runtime_source::verify(&source, &digest, &version)
-            .await
-            .map_err(|_| source_unavailable())?;
+        let digest = if self.development {
+            None
+        } else {
+            let hash_source = source.clone();
+            let digest =
+                tokio::task::spawn_blocking(move || crate::runtime_source::digest(&hash_source))
+                    .await
+                    .map_err(|_| source_unavailable())?
+                    .map_err(|_| source_unavailable())?;
+            crate::runtime_source::verify(&source, &digest, &version)
+                .await
+                .map_err(|_| source_unavailable())?;
+            Some(digest)
+        };
         let original = if let (Some(expected), Some((previous, discovery))) = (expected, target) {
             self.verify_saved_configuration(&previous, expected).await?;
             Some(discovery)
@@ -329,20 +341,24 @@ impl RuntimeBootstrapCoordinator {
             None
         };
         let (_operation, previous_instance) = self.stop_native(operation, original).await?;
-        crate::runtime_source::verify(&source, &digest, &version)
+        if let Some(digest) = &digest {
+            crate::runtime_source::verify(&source, digest, &version)
+                .await
+                .map_err(|_| {
+                    bootstrap_error(
+                        RuntimeBootstrapErrorCode::RuntimeStartFailed,
+                        "原 Host 已停止，但当前随包 Host 已变化或不可用；未启动其他来源。",
+                    )
+                })?;
+        }
+        self.launch_from(&source, self.development)
             .await
-            .map_err(|_| {
+            .map_err(|error| {
                 bootstrap_error(
                     RuntimeBootstrapErrorCode::RuntimeStartFailed,
-                    "原 Host 已停止，但当前随包 Host 已变化或不可用；未启动其他来源。",
+                    format!("原 Host 已停止，当前随包 Host 启动失败：{}", error.message),
                 )
             })?;
-        self.launch_from(&source).await.map_err(|error| {
-            bootstrap_error(
-                RuntimeBootstrapErrorCode::RuntimeStartFailed,
-                format!("原 Host 已停止，当前随包 Host 启动失败：{}", error.message),
-            )
-        })?;
         let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
         let mut delay = POLL_INTERVAL;
         loop {
@@ -351,7 +367,9 @@ impl RuntimeBootstrapCoordinator {
                     if previous_instance.as_ref() != Some(&current.instance_id) =>
                 {
                     if discovery.executable_path.as_ref() != Some(&source)
-                        || discovery.executable_sha256.as_ref() != Some(&digest)
+                        || digest.as_ref().is_some_and(|expected| {
+                            discovery.executable_sha256.as_ref() != Some(expected)
+                        })
                     {
                         return Err(instance_changed());
                     }
@@ -586,7 +604,7 @@ impl RuntimeBootstrapCoordinator {
         let capabilities = &bootstrap.capabilities;
         // Finder 覆盖后即使旧 Host 业务版本仍兼容，也先说明影响并等待显式换代。
         // 相同安装来源且内容已替换才提示，不将普通 Dock／Finder 重开变为自动停止。
-        if self.upgrade_source(&discovery, capabilities).await.is_ok() {
+        if !self.development && self.upgrade_source(&discovery, capabilities).await.is_ok() {
             return Err(bootstrap_error(
                 RuntimeBootstrapErrorCode::RuntimeUpgradeRequired,
                 "需要完成本机更新。更新将重启后台服务并中断正在运行的会话，随后自动备份和升级数据。",
@@ -697,11 +715,20 @@ impl RuntimeBootstrapCoordinator {
             })
     }
 
-    async fn launch_from(&self, executable: &Path) -> Result<(), RuntimeBootstrapError> {
+    async fn launch_from(
+        &self,
+        executable: &Path,
+        development: bool,
+    ) -> Result<(), RuntimeBootstrapError> {
         if !executable.is_file() {
             return Err(source_unavailable());
         }
         let mut command = tokio::process::Command::new(executable);
+        if development {
+            command.env("EZ_ASSISTANT_DEV_HOST", "1");
+        } else {
+            command.env_remove("EZ_ASSISTANT_DEV_HOST");
+        }
         // 短启动器无窗口；正式 Host 仍按自身 DETACHED_PROCESS 路径独立运行。
         #[cfg(windows)]
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
@@ -1133,7 +1160,10 @@ mod tests {
             RuntimeBootstrapCoordinator::new(directory.path().to_owned(), executable.clone())
                 .unwrap();
         // 测试可执行文件拒绝 Host 的 --runtime-home 参数，稳定产生非零退出码。
-        let error = coordinator.launch_from(&executable).await.unwrap_err();
+        let error = coordinator
+            .launch_from(&executable, false)
+            .await
+            .unwrap_err();
         assert!(matches!(
             error.code,
             RuntimeBootstrapErrorCode::RuntimeStartFailed

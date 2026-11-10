@@ -26,12 +26,12 @@ export class PluginService {
     return this.source.manager;
   }
 
-  private async rows(manager: EntityManager, name: string): Promise<{
+  private async rows(manager: EntityManager, organizationId: string, name: string): Promise<{
     plugin: PluginEntity; packages: PluginPackageEntity[];
   }> {
-    const plugin = await manager.getRepository(PluginEntity).findOneBy({ name });
+    const plugin = await manager.getRepository(PluginEntity).findOneBy({ organization_id: organizationId, name });
     if (!plugin) throw new PluginError(404, 'PLUGIN_NOT_FOUND');
-    const packages = await manager.getRepository(PluginPackageEntity).findBy({ plugin_name: name });
+    const packages = await manager.getRepository(PluginPackageEntity).findBy({ organization_id: organizationId, plugin_name: name });
     return { plugin, packages };
   }
 
@@ -43,13 +43,13 @@ export class PluginService {
     };
   }
 
-  private async detail(manager: EntityManager, name: string): Promise<PluginDetail> {
-    const { plugin, packages } = await this.rows(manager, name);
+  private async detail(manager: EntityManager, organizationId: string, name: string): Promise<PluginDetail> {
+    const { plugin, packages } = await this.rows(manager, organizationId, name);
     // 只取依赖 Agent 名称，不把其完整提示词带入插件管理响应。
     const dependents = await manager.query<{ name: string }[]>(`SELECT name FROM public.custom_agents
-      WHERE EXISTS (SELECT 1 FROM jsonb_array_elements(skills) AS ref(value) WHERE ref.value->>'plugin'=$1)
-         OR EXISTS (SELECT 1 FROM jsonb_array_elements(mcp) AS ref(value) WHERE ref.value->>'plugin'=$1)
-      ORDER BY name`, [name]);
+      WHERE organization_id=$2 AND (EXISTS (SELECT 1 FROM jsonb_array_elements(skills) AS ref(value) WHERE ref.value->>'plugin'=$1)
+         OR EXISTS (SELECT 1 FROM jsonb_array_elements(mcp) AS ref(value) WHERE ref.value->>'plugin'=$1))
+      ORDER BY name`, [name, organizationId]);
     // 详情补全已存清单的配置/外部软件要求；运行时目录仍只返回选包所需摘要。
     const versions = [...packages].sort((a, b) => compareVersions(b.version, a.version)).map(row => ({
       ...packageSummary(row), updated_at: row.updated_at.toISOString(),
@@ -61,11 +61,14 @@ export class PluginService {
   /** 管理目录包含未上架与已废弃项；运行时目录只暴露在架项。 */
   async list(token: string | undefined, runtime = false): Promise<PluginRecord[]> {
     const manager = this.manager;
-    if (runtime) await this.identities.requireUser(manager, token);
-    else await this.identities.requireAdmin(manager, token);
-    const plugins = await manager.getRepository(PluginEntity).find({ order: { name: 'ASC' } });
+    const authorize = runtime
+      ? this.identities.requireOrganizationMember.bind(this.identities)
+      : this.identities.requireOrganizationAdmin.bind(this.identities);
+    const { organizationId } = await authorize(manager, token);
+    const plugins = await manager.getRepository(PluginEntity).find({ where: { organization_id: organizationId }, order: { name: 'ASC' } });
     const selected = runtime ? plugins.filter(row => row.publication === 'listed') : plugins;
-    const packages = await manager.getRepository(PluginPackageEntity).find();
+    const packages = await manager.getRepository(PluginPackageEntity).findBy({ organization_id: organizationId });
+    await authorize(manager, token);
     return selected.map(row => this.record(row, packages.filter(item => item.plugin_name === row.name)));
   }
 
@@ -75,15 +78,16 @@ export class PluginService {
     validPluginName(name);
     if (runtime) {
       const manager = this.manager;
-      await this.identities.requireUser(manager, token);
-      const { plugin, packages } = await this.rows(manager, name);
+      const { organizationId } = await this.identities.requireOrganizationMember(manager, token);
+      const { plugin, packages } = await this.rows(manager, organizationId, name);
+      await this.identities.requireOrganizationMember(manager, token);
       return { body: this.record(plugin, plugin.publication === 'listed' ? packages : []) };
     }
     // 详情与 ETag 必须取自同一次串行读取，不能让并发说明修改拼出旧正文加新 ETag。
     return this.identities.write(async manager => {
-      await this.identities.requireAdmin(manager, token);
-      const { plugin } = await this.rows(manager, name);
-      return { body: await this.detail(manager, name), etag: pluginEtag(plugin) };
+      const { organizationId } = await this.identities.requireOrganizationAdmin(manager, token);
+      const { plugin } = await this.rows(manager, organizationId, name);
+      return { body: await this.detail(manager, organizationId, name), etag: pluginEtag(plugin) };
     });
   }
 
@@ -93,17 +97,17 @@ export class PluginService {
     validPluginName(name);
     const input = descriptionInput(value);
     return this.identities.write(async manager => {
-      const actor = await this.identities.requireAdmin(manager, token);
-      const { plugin } = await this.rows(manager, name);
+      const { organizationId, user: actor } = await this.identities.requireOrganizationAdmin(manager, token);
+      const { plugin } = await this.rows(manager, organizationId, name);
       requireEtag(ifMatch, pluginEtag(plugin));
       if (plugin.display_name !== input.display_name || plugin.description !== input.description) {
         plugin.display_name = input.display_name;
         plugin.description = input.description;
         plugin.updated_at = new Date();
         await manager.getRepository(PluginEntity).save(plugin);
-        await this.identities.audit(manager, 'plugin_updated', requestId, actor.id, undefined, null, { name });
+        await this.identities.audit(manager, 'plugin_updated', requestId, actor.id, undefined, null, { name }, organizationId);
       }
-      return { body: await this.detail(manager, name), etag: pluginEtag(plugin) };
+      return { body: await this.detail(manager, organizationId, name), etag: pluginEtag(plugin) };
     });
   }
 
@@ -113,8 +117,8 @@ export class PluginService {
     validPluginName(name);
     const listed = publicationInput(value);
     return this.identities.write(async manager => {
-      const actor = await this.identities.requireAdmin(manager, token);
-      const { plugin, packages } = await this.rows(manager, name);
+      const { organizationId, user: actor } = await this.identities.requireOrganizationAdmin(manager, token);
+      const { plugin, packages } = await this.rows(manager, organizationId, name);
       requireEtag(ifMatch, pluginEtag(plugin));
       const wasListed = plugin.publication === 'listed';
       const target = listed ? 'listed' : plugin.publication === 'listed' ? 'deprecated' : plugin.publication;
@@ -126,11 +130,11 @@ export class PluginService {
         plugin.updated_at = new Date();
         await manager.getRepository(PluginEntity).save(plugin);
         await this.identities.audit(manager, 'plugin_publication_changed', requestId, actor.id,
-          undefined, null, { name, publication: target });
+          undefined, null, { name, publication: target }, organizationId);
       }
-      return { body: await this.detail(manager, name), etag: pluginEtag(plugin),
-        cancel: wasListed && target === 'deprecated' };
-    }, result => { if (result.cancel) this.files.cancelDownloads(name); }).then(
+      return { body: await this.detail(manager, organizationId, name), etag: pluginEtag(plugin),
+        organizationId, cancel: wasListed && target === 'deprecated' };
+    }, result => { if (result.cancel) this.files.cancelDownloads(`${result.organizationId}:${name}`); }).then(
       ({ body, etag }) => ({ body, etag }));
   }
 
@@ -138,11 +142,12 @@ export class PluginService {
     validPluginName(name);
     const input = resolveInput(value);
     const manager = this.manager;
-    await this.identities.requireUser(manager, token);
-    const { plugin, packages } = await this.rows(manager, name);
+    const { organizationId } = await this.identities.requireOrganizationMember(manager, token);
+    const { plugin, packages } = await this.rows(manager, organizationId, name);
     this.requireListed(plugin);
     const selected = await choosePackage(packages, input, row =>
       this.files.check(row.sha256, row.archive_format, Number(row.size_bytes)));
+    await this.identities.requireOrganizationMember(manager, token);
     return { package: { name, ...packageSummary(selected) }, update_available: Boolean(input.installed_version &&
       compareVersions(selected.version, input.installed_version) > 0) };
   }
@@ -160,14 +165,20 @@ export class PluginService {
     let admitted: Readable | undefined;
     try {
       return await this.identities.write(async manager => {
-        await this.identities.requireUser(manager, token);
-        const { plugin } = await this.rows(manager, name);
+        const { organizationId, session } = await this.identities.requireOrganizationMember(manager, token);
+        const { plugin } = await this.rows(manager, organizationId, name);
         this.requireListed(plugin);
-        const row = await manager.getRepository(PluginPackageEntity).findOneBy({ plugin_name: name, version });
+        const row = await manager.getRepository(PluginPackageEntity).findOneBy({ organization_id: organizationId, plugin_name: name, version });
         if (!row) throw new IdentityError(404, 'PACKAGE_NOT_FOUND');
         requireEtag(ifMatch, `"${row.sha256}"`);
-        admitted = await this.files.openDownload(name, row.sha256, row.archive_format, Number(row.size_bytes));
-        return { stream: admitted, package: row };
+        admitted = await this.files.openDownload(`${organizationId}:${name}`, row.sha256, row.archive_format, Number(row.size_bytes));
+        const stream = admitted;
+        const unsubscribe = this.identities.onSessionRevoked(revoked => {
+          if (revoked === session) stream.destroy();
+        });
+        stream.once('close', unsubscribe);
+        await this.identities.requireOrganizationMember(manager, token);
+        return { stream, package: row };
       });
     } catch (error) {
       admitted?.destroy();
@@ -179,7 +190,8 @@ export class PluginService {
 
   /** 长传输和归档扫描在事务外；短提交段内重新鉴权，包记录与成功审计一同提交。 */
   async upload(body: Readable, format: PreparedPackage['format'], token: string | undefined,
-    requestId: string, actorId: number, clientSignal?: AbortSignal): Promise<PackageUploadResult> {
+    requestId: string, clientSignal?: AbortSignal): Promise<PackageUploadResult> {
+    const { user, organizationId } = await this.identities.requireOrganizationAdmin(this.manager, token);
     try {
       return await this.files.run(async signal => {
       const prepared = await this.files.receive(body, format, signal);
@@ -189,25 +201,25 @@ export class PluginService {
       try {
         return await this.identities.write(async manager => {
           if (signal.aborted) throw signal.reason;
-          const actor = await this.identities.requireAdmin(manager, token);
+          const { organizationId, user: actor } = await this.identities.requireOrganizationAdmin(manager, token);
           if (signal.aborted) throw signal.reason;
           const pluginRepo = manager.getRepository(PluginEntity);
           const packageRepo = manager.getRepository(PluginPackageEntity);
-          let plugin = await pluginRepo.findOneBy({ name: prepared.manifest.name });
+          let plugin = await pluginRepo.findOneBy({ organization_id: organizationId, name: prepared.manifest.name });
           if (!plugin) {
-            plugin = pluginRepo.create({ name: prepared.manifest.name,
+            plugin = pluginRepo.create({ organization_id: organizationId, name: prepared.manifest.name,
               display_name: prepared.manifest.display_name, description: prepared.manifest.description,
               publication: 'unpublished' });
             await pluginRepo.save(plugin);
           }
           // 身份 write 串行化提交段；并发上传只按进入此段后的实际提交顺序切换当前 SHA。
-          const existing = await packageRepo.findOneBy({ plugin_name: prepared.manifest.name,
+          const existing = await packageRepo.findOneBy({ organization_id: organizationId, plugin_name: prepared.manifest.name,
             version: prepared.manifest.version });
           const result = existing ? existing.sha256 === prepared.sha256 ? 'unchanged' : 'replaced' : 'created';
           // 同 SHA 不更新当前行；异 SHA 只替换当前引用，旧内容寻址文件继续保留。
           if (result !== 'unchanged') {
             await packageRepo.save(packageRepo.create({
-              plugin_name: prepared.manifest.name, version: prepared.manifest.version,
+              organization_id: organizationId, plugin_name: prepared.manifest.name, version: prepared.manifest.version,
               manifest: prepared.manifest, archive_format: prepared.format, sha256: prepared.sha256,
               size_bytes: String(prepared.size), created_at: existing?.created_at ?? new Date(),
               updated_at: new Date(),
@@ -218,7 +230,7 @@ export class PluginService {
             name: prepared.manifest.name, version: prepared.manifest.version,
             platforms: prepared.manifest.platforms, result, sha256: prepared.sha256,
             previous_sha256: result === 'replaced' ? existing!.sha256 : undefined,
-          });
+          }, organizationId);
           if (signal.aborted) throw signal.reason;
           return {
             name: prepared.manifest.name, version: prepared.manifest.version,
@@ -237,7 +249,7 @@ export class PluginService {
       if (error instanceof PluginError && error.code === 'PACKAGE_BUSY') body.destroy();
       if (error instanceof PluginError && error.status < 500 && this.source?.isInitialized)
         await this.identities.audit(this.source.manager, 'plugin_package_uploaded', requestId,
-          actorId, error.code, null);
+          user.id, error.code, null, {}, organizationId);
       throw error;
     }
   }
@@ -247,11 +259,12 @@ export class PluginService {
     if (!pluginName.test(name) || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version))
       throw new IdentityError(400, 'INVALID_REQUEST');
     if (!this.source?.isInitialized) throw new IdentityError(503, 'SERVICE_UNAVAILABLE');
-    await this.identities.requireAdmin(this.source.manager, token);
-    const row = await this.source.getRepository(PluginPackageEntity).findOneBy({ plugin_name: name, version });
+    const { organizationId } = await this.identities.requireOrganizationAdmin(this.source.manager, token);
+    const row = await this.source.getRepository(PluginPackageEntity).findOneBy({ organization_id: organizationId, plugin_name: name, version });
     if (!row) throw new IdentityError(404, 'PACKAGE_NOT_FOUND');
     if (!(await this.files.check(row.sha256, row.archive_format, Number(row.size_bytes))))
       throw new PluginError(503, 'PACKAGE_UNAVAILABLE');
+    await this.identities.requireOrganizationAdmin(this.source.manager, token);
     return { name, version, platforms: row.manifest.platforms, archive_format: row.archive_format,
       sha256: row.sha256, size_bytes: Number(row.size_bytes) };
   }

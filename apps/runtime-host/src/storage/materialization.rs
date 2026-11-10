@@ -660,9 +660,9 @@ fn insert_session(
                 session_id, title, model_id, reasoning_effort, system_prompt_json,
                 skill_catalog_json, current_variant, approval_mode, role, lifecycle,
                 body_generation, message_count, created_at_ms, updated_at_ms, archived_at_ms,
-                is_pinned, title_origin, materialization_key, automatic_title_pending, model_provider_instance_id, agent_shell_kind, agent_shell_environment_json
+                is_pinned, title_origin, materialization_key, automatic_title_pending, model_provider_instance_id, agent_shell_kind, agent_shell_environment_json, model_source
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'standard', 'active',
-                       1, 0, ?9, ?9, NULL, 0, ?10, ?11, ?12, ?13, ?14, ?15)",
+                       1, 0, ?9, ?9, NULL, 0, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 session.session_id.as_str(),
                 session.title,
@@ -682,6 +682,7 @@ fn insert_session(
                         session.model_selection.as_ref().map(|selection| selection.provider_instance_id.as_str()),
                 session.agent_shell_kind.map(super::mode::shell_kind_value),
 super::agent_shell::encode_environment(session.agent_shell_environment.as_ref())?,
+                        super::model_management::selection_source(session.model_selection.as_ref()),
             ],
         )
         .map_err(|source| database_write_error("session could not be materialized", source))?;

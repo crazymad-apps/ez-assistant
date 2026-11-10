@@ -111,6 +111,9 @@ pub enum ChildTaskEvent {
 #[ts(export_to = "assistant-protocol.ts")]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeEvent {
+    MessageCardsChanged {
+        owner: ConversationOwner,
+    },
     /// 已保存且可以查询的一组反馈问题。
     FeedbackPublished {
         request: crate::FeedbackRequestSnapshot,
@@ -534,6 +537,7 @@ mod tests {
             session_id: session_id(),
             title: "Session 1".to_owned(),
             model_selection: Some(crate::ModelSelection {
+                source: crate::ModelSelectionSource::Local,
                 provider_instance_id: crate::ProviderInstanceId::new("provider-1")
                     .expect("provider"),
                 model_id: "vendor/model-1".to_owned(),

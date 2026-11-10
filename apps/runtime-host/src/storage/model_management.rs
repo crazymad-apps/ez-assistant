@@ -2,8 +2,8 @@
 use super::{StorageEngine, StorageResult, conflict, internal_error, invalid_data};
 use assistant_protocol::{
     DiscoveredModel, ModelCatalogDiagnosticCode, ModelFixedConfig, ModelParameters, ModelSelection,
-    ModelSettings, ModelTokenLimit, ProviderConnection, ProviderInstanceId, ProviderSessionUsage,
-    ProviderUsage, SecretValue, SessionId,
+    ModelSelectionSource, ModelSettings, ModelTokenLimit, ProviderConnection, ProviderInstanceId,
+    ProviderSessionUsage, ProviderUsage, SecretValue, SessionId,
 };
 use assistant_runtime::{
     ProviderModelCatalogReplacement, StoredModelCatalog, StoredProvider,
@@ -153,11 +153,11 @@ impl StorageEngine {
         Ok(usage)
     }
     pub(super) fn load_model_settings(&self) -> StorageResult<ModelSettings> {
-        let raw = sql(self.connection.query_row("SELECT default_provider_instance_id, default_model_id, vision_provider_instance_id, vision_model_id FROM model_settings WHERE singleton_key=1", [], |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?))))?;
+        let raw = sql(self.connection.query_row("SELECT default_provider_instance_id, default_model_id, vision_provider_instance_id, vision_model_id, vision_model_source FROM model_settings WHERE singleton_key=1", [], |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, String>(4)?))))?;
         Ok(ModelSettings {
             management: None,
             default_model: selection(raw.0, raw.1)?,
-            vision_model: selection(raw.2, raw.3)?,
+            vision_model: selection_with_source(raw.2, raw.3, &raw.4)?,
         })
     }
     pub(super) fn save_model_settings(
@@ -172,7 +172,7 @@ impl StorageEngine {
                 [key],
             ))?;
         }
-        let rows = sql(transaction.execute("UPDATE model_settings SET default_provider_instance_id=?1, default_model_id=?2, vision_provider_instance_id=?3, vision_model_id=?4 WHERE singleton_key=1", params![settings.default_model.as_ref().map(|s|s.provider_instance_id.as_str()), settings.default_model.as_ref().map(|s|s.model_id.as_str()), settings.vision_model.as_ref().map(|s|s.provider_instance_id.as_str()), settings.vision_model.as_ref().map(|s|s.model_id.as_str())]))?;
+        let rows = sql(transaction.execute("UPDATE model_settings SET default_provider_instance_id=?1, default_model_id=?2, vision_provider_instance_id=?3, vision_model_id=?4, vision_model_source=?5 WHERE singleton_key=1", params![settings.default_model.as_ref().map(|s|s.provider_instance_id.as_str()), settings.default_model.as_ref().map(|s|s.model_id.as_str()), settings.vision_model.as_ref().map(|s|s.provider_instance_id.as_str()), settings.vision_model.as_ref().map(|s|s.model_id.as_str()), selection_source(settings.vision_model.as_ref())]))?;
         if rows != 1 {
             return Err(invalid_data("model settings singleton is missing"));
         }
@@ -216,7 +216,7 @@ impl StorageEngine {
     pub(super) fn put_model_fixed_config(
         &self,
         config: ModelFixedConfig,
-        server_history_key: Option<String>,
+        server_history_key: Option<assistant_runtime::FixedModelHistoryInvalidation>,
     ) -> StorageResult<()> {
         if self
             .get_model_fixed_config(config.selection.clone())?
@@ -243,7 +243,7 @@ impl StorageEngine {
     pub(super) fn reset_model_fixed_config(
         &self,
         selection: ModelSelection,
-        server_history_key: Option<String>,
+        server_history_key: Option<assistant_runtime::FixedModelHistoryInvalidation>,
     ) -> StorageResult<()> {
         let transaction = sql(self.connection.unchecked_transaction())?;
         sql(transaction.execute(
@@ -269,6 +269,7 @@ fn selection(
         (None, None) => Ok(None),
         (Some(provider), Some(model_id)) if !model_id.trim().is_empty() => {
             Ok(Some(ModelSelection {
+                source: assistant_protocol::ModelSelectionSource::Local,
                 provider_instance_id: identifier(provider)?,
                 model_id,
             }))
@@ -277,11 +278,35 @@ fn selection(
     }
 }
 
-/// Session 查询把两个实际列投影成临时 JSON 数组以复用同一读取校验；数据库不保存该 JSON。
+pub(super) fn selection_source(selection: Option<&ModelSelection>) -> &'static str {
+    match selection.map(|value| value.source).unwrap_or_default() {
+        ModelSelectionSource::Local => "local",
+        ModelSelectionSource::Organization => "organization",
+    }
+}
+
+fn selection_with_source(
+    provider: Option<String>,
+    model: Option<String>,
+    source: &str,
+) -> StorageResult<Option<ModelSelection>> {
+    let source = match source {
+        "local" => ModelSelectionSource::Local,
+        "organization" => ModelSelectionSource::Organization,
+        _ => return Err(invalid_data("stored model selection source is invalid")),
+    };
+    Ok(selection(provider, model)?.map(|selection| ModelSelection {
+        source,
+        ..selection
+    }))
+}
+
+/// Session 查询将三列投影为临时 JSON 数组，以复用读取校验。
 pub(super) fn read_selection_json(raw: &str) -> StorageResult<Option<ModelSelection>> {
-    let (provider, model): (Option<String>, Option<String>) = serde_json::from_str(raw)
-        .map_err(|error| internal_error("stored session model reference is invalid", error))?;
-    selection(provider, model)
+    let (provider, model, source): (Option<String>, Option<String>, String) =
+        serde_json::from_str(raw)
+            .map_err(|error| internal_error("stored session model reference is invalid", error))?;
+    selection_with_source(provider, model, &source)
 }
 fn enum_read<T: DeserializeOwned>(raw: String) -> StorageResult<T> {
     serde_json::from_value(Value::String(raw))
@@ -378,6 +403,7 @@ fn read_fixed(row: &Row<'_>) -> rusqlite::Result<StorageResult<ModelFixedConfig>
                     .map_err(|e| internal_error("stored model origin invalid", e))?,
             )?,
             selection: ModelSelection {
+                source: assistant_protocol::ModelSelectionSource::Local,
                 provider_instance_id: identifier(id)?,
                 model_id,
             },
@@ -392,12 +418,12 @@ fn read_provider_usage(
     id: &ProviderInstanceId,
 ) -> StorageResult<ProviderUsage> {
     let (default_model, vision_model, session_count, fixed_config_count) = sql(connection.query_row(
-        "SELECT COALESCE(default_provider_instance_id=?1,0), COALESCE(vision_provider_instance_id=?1,0),
-         (SELECT COUNT(*) FROM sessions WHERE model_provider_instance_id=?1),
+        "SELECT COALESCE(default_provider_instance_id=?1,0), COALESCE(vision_provider_instance_id=?1 AND vision_model_source='local',0),
+         (SELECT COUNT(*) FROM sessions WHERE model_provider_instance_id=?1 AND model_source='local'),
          (SELECT COUNT(*) FROM model_fixed_configs WHERE provider_instance_id=?1)
          FROM model_settings WHERE singleton_key=1", [id.as_str()], |row| Ok((row.get::<_,bool>(0)?, row.get::<_,bool>(1)?, row.get::<_,i64>(2)?, row.get::<_,i64>(3)?))
     ))?;
-    let mut statement = sql(connection.prepare("SELECT session_id, title FROM sessions WHERE model_provider_instance_id=?1 ORDER BY session_id LIMIT 20"))?;
+    let mut statement = sql(connection.prepare("SELECT session_id, title FROM sessions WHERE model_provider_instance_id=?1 AND model_source='local' ORDER BY session_id LIMIT 20"))?;
     let sessions = sql(statement.query_map([id.as_str()], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     }))?
@@ -425,10 +451,10 @@ fn read_provider_usage(
 fn invalidate_fixed_history(
     connection: &rusqlite::Connection,
     selection: &ModelSelection,
-    key: Option<String>,
+    history: Option<assistant_runtime::FixedModelHistoryInvalidation>,
 ) -> StorageResult<()> {
-    if let Some(key) = key {
-        sql(connection.execute("UPDATE sessions SET server_history_key=?1 WHERE (model_provider_instance_id=?2 AND model_id=?3) OR (model_id IS NULL AND EXISTS (SELECT 1 FROM model_settings WHERE singleton_key=1 AND default_provider_instance_id=?2 AND default_model_id=?3))", params![key, selection.provider_instance_id.as_str(), selection.model_id]))?;
+    if let Some(history) = history {
+        sql(connection.execute("UPDATE sessions SET server_history_key=?1 WHERE (model_source='local' AND model_provider_instance_id=?2 AND model_id=?3) OR (?4 AND model_id IS NULL AND EXISTS (SELECT 1 FROM model_settings WHERE singleton_key=1 AND default_provider_instance_id=?2 AND default_model_id=?3))", params![history.key, selection.provider_instance_id.as_str(), selection.model_id, history.includes_default_followers]))?;
     }
     Ok(())
 }

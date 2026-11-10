@@ -61,13 +61,24 @@ impl Drop for NetworkUser {
     }
 }
 impl Credentials {
-    pub(crate) fn network_caller(&self, center_id: &str) -> Option<SecretValue> {
+    pub(crate) fn network_caller(
+        &self,
+        center_id: &str,
+        organization_id: Option<&str>,
+    ) -> Option<(String, SecretValue)> {
         let state = self.state.lock().ok()?;
         state
             .users
             .iter()
-            .find(|(key, user)| key.center_id == center_id && !user.connections.is_cancelled())
-            .map(|(_, user)| user.login.token.clone())
+            .filter(|(key, user)| {
+                key.center_id == center_id
+                    && organization_id.is_none_or(|id| id == key.organization_id)
+                    && !user.connections.is_cancelled()
+                    && super::super::credentials::current_time_ms()
+                        .is_ok_and(|now| now < user.login.expires_at_ms)
+            })
+            .min_by_key(|(key, _)| (&key.organization_id, key.user_id))
+            .map(|(key, user)| (key.organization_id.clone(), user.login.token.clone()))
     }
     /// 中心已经准入该访问后调用。门闩覆盖安装与 ready 回执，网络等待不持 Credentials 锁。
     /// 现有登录只核验不替换；新登录在 commit 前取消时按对象身份回滚，不能清理后来的本机登录。
@@ -123,11 +134,14 @@ impl Credentials {
             };
             let login: super::client::Login =
                 serde_json::from_value(value).map_err(|_| AccessError::Unavailable)?;
-            if !super::client::valid_secret(&login.token, "ct_")
-                || !super::client::valid_secret(&login.llm_key, "cl_")
-            {
+            if !super::client::valid_jwt(&login.token) {
                 return Err(AccessError::Unavailable);
             }
+            let llm_key = login
+                .llm_key
+                .filter(|key| super::client::valid_secret(key, "cl_"))
+                .ok_or(AccessError::Unavailable)?;
+            let expires_at_ms = login.identity.expiration()?;
             let identity = login.identity.projection()?;
             if UserKey::from(&identity) != key {
                 return Err(CenterError::IdentityMismatch.into());
@@ -135,7 +149,9 @@ impl Credentials {
             let current = Arc::new(CenterLogin {
                 client: client.clone(),
                 token: login.token,
-                llm_key: login.llm_key,
+                llm_key,
+                expires_at_ms,
+                legacy_organization_id: login.identity.legacy_organization_id,
                 checking: Mutex::new(None),
             });
             let mut state = self.state.lock().expect("credential state poisoned");
@@ -149,6 +165,7 @@ impl Credentials {
                     identity,
                     connections: CancellationToken::new(),
                     activity: Arc::new(()),
+                    center_available: tokio::sync::watch::channel(true).0,
                 },
             );
             initialized.candidate = Some(current);

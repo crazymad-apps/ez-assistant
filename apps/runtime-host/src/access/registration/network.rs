@@ -27,6 +27,7 @@ struct Target {
     client: CenterClient,
     enrollment: Option<Enrollment>,
     center_id: String,
+    organization_id: String,
 }
 impl Target {
     fn enrollment(&self) -> Option<&Enrollment> {
@@ -35,6 +36,7 @@ impl Target {
     fn same(&self, other: &Self) -> bool {
         self.client.url == other.client.url
             && self.center_id == other.center_id
+            && self.organization_id == other.organization_id
             && match (self.enrollment(), other.enrollment()) {
                 (Some(a), Some(b)) => a.id == b.id && a.secret.expose() == b.secret.expose(),
                 (None, None) => true,
@@ -165,22 +167,25 @@ impl HostAccessService {
                 .and_then(|mut identity| identity.registrations.remove(configured))
                 .filter(|enrollment| enrollment.intent == Intent::Publish)
                 .zip(client.clone())
-                .map(|(enrollment, client)| Target {
-                    center_id: enrollment.center_id.clone(),
-                    client,
-                    enrollment: Some(enrollment),
+                .and_then(|(enrollment, client)| {
+                    Some(Target {
+                        center_id: enrollment.center_id.clone(),
+                        organization_id: enrollment.organization_id.clone()?,
+                        client,
+                        enrollment: Some(enrollment),
+                    })
                 })
                 .or_else(|| {
                     let center_id = host.enterprise.as_ref()?.center_id.clone()?;
-                    if !self.network.demand.load(Ordering::Relaxed)
-                        || self.credentials.network_caller(&center_id).is_none()
-                    {
+                    if !self.network.demand.load(Ordering::Relaxed) {
                         return None;
                     }
+                    let (organization_id, _) = self.credentials.network_caller(&center_id, None)?;
                     Some(Target {
                         client: client?,
                         enrollment: None,
                         center_id,
+                        organization_id,
                     })
                 })
         } else {
@@ -232,10 +237,19 @@ impl HostAccessService {
             .map_err(|_| AccessError::Unavailable)?
             .clone()
             .ok_or(AccessError::Unavailable)?;
+        let organization_id = e
+            .organization_id
+            .as_deref()
+            .or_else(|| {
+                host.legacy_organizations
+                    .get(configured)
+                    .map(String::as_str)
+            })
+            .ok_or(AccessError::Unavailable)?;
         let mut reply = client
             .registration(&e.center_id, &e.id, &e.secret, None)
             .await?;
-        check_reply(&reply, identity, e)?;
+        check_reply(&reply, identity, e, organization_id)?;
         if reply
             .device
             .as_ref()
@@ -254,19 +268,20 @@ impl HostAccessService {
                     }),
                 )
                 .await?;
-            check_reply(&reply, identity, e)?;
+            check_reply(&reply, identity, e, organization_id)?;
         }
-        if reply
-            .device
-            .as_ref()
-            .is_some_and(|d| d.status.is_terminal())
+        if let Some(device) = reply.device.as_ref()
+            && (device.status.is_terminal() || e.organization_id.is_none())
         {
-            store
+            let enrollment = store
                 .identity
                 .as_mut()
                 .and_then(|i| i.registrations.get_mut(configured))
-                .ok_or(AccessError::Unavailable)?
-                .intent = Intent::Closed;
+                .ok_or(AccessError::Unavailable)?;
+            enrollment.organization_id = Some(device.organization_id.clone());
+            if device.status.is_terminal() {
+                enrollment.intent = Intent::Closed;
+            }
             store.save().await?;
         }
         self.publish_network().await

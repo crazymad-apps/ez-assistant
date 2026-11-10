@@ -27,13 +27,13 @@ class Socket extends EventEmitter {
 function fixture(ready = true) {
   const socket = new Socket();
   const closed = vi.fn();
-  const connection = new DeviceConnection(socket as unknown as WebSocket, 'center', 'device', closed);
+  const connection = new DeviceConnection(socket as unknown as WebSocket, 'center', 'device', 'org', undefined, closed);
   connection.start();
   if (ready)
     socket.emit(
       'message',
       Buffer.from(
-        JSON.stringify({ type: 'ready', protocol_version: 2, center_id: 'center', registration_id: 'device' }),
+        JSON.stringify({ type: 'ready', protocol_version: 3, center_id: 'center', organization_id: 'org', registration_id: 'device' }),
       ),
       false,
     );
@@ -86,7 +86,7 @@ describe('设备控制连接期限和有界写入', () => {
     socket.emit(
       'message',
       Buffer.from(
-        JSON.stringify({ type: 'ready', protocol_version: 2, center_id: 'center', registration_id: 'device' }),
+        JSON.stringify({ type: 'ready', protocol_version: 3, center_id: 'center', organization_id: 'org', registration_id: 'device' }),
       ),
       false,
     );

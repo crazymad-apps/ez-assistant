@@ -48,6 +48,7 @@ impl SourceFailure {
     }
 }
 pub(super) struct Session {
+    pub(super) organization_id: Option<String>,
     /// 本次已协商连接的身份快照，不能随后续登记配置变化而替换。
     pub self_device_id: Option<String>,
     send: mpsc::Sender<Message>,
@@ -63,6 +64,7 @@ pub(super) struct Session {
 }
 #[derive(Deserialize)]
 pub(super) struct Offer {
+    pub organization_id: String,
     access_id: String,
     user_id: i32,
     source_connection_id: Option<String>,
@@ -82,11 +84,13 @@ impl Session {
         send: mpsc::Sender<Message>,
         credentials: Arc<Credentials>,
         self_device_id: Option<String>,
+        organization_id: Option<String>,
     ) -> (Arc<Self>, mpsc::Receiver<Work>) {
         let (jobs, receive) = mpsc::channel(64);
         (
             Arc::new(Self {
                 self_device_id,
+                organization_id,
                 send,
                 jobs,
                 ended: CancellationToken::new(),
@@ -453,8 +457,12 @@ impl Session {
             .get(&offer.access_id)
             .cloned()
             .ok_or(AccessError::Unauthorized)?;
+        if self.organization_id.as_deref() != Some(offer.organization_id.as_str()) {
+            return Err(AccessError::NetworkDenied);
+        }
         let key = UserKey {
             center_id,
+            organization_id: offer.organization_id.clone(),
             user_id: offer.user_id,
         };
         let initialized = self

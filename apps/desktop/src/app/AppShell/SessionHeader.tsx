@@ -248,7 +248,7 @@ export const SessionHeader = observer(function SessionHeader({ session, sidebar_
               <>
                 <DropdownMenuItem disabled={store.pending_session_action || (store.local_files.desktop && (store.pins.busy || !store.pins.value.imported))} onSelect={() => void store.setSessionPinned(session.session_id, !store.isSessionPinned(session, store.navigation.target_device))}>
                   <span>{store.isSessionPinned(session, store.navigation.target_device) ? "取消置顶" : "置顶"}</span>
-                  {store.isSessionPinned(session, store.navigation.target_device) && <Icon name="check" size={14} />}
+                  {store.isSessionPinned(session, store.navigation.target_device) && <Icon name="check-circle-fill" size={16} />}
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   disabled={blocks_archive || store.pending_session_action}

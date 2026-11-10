@@ -33,6 +33,8 @@ export type ConversationLoadState = Readonly<{
 const IDLE_LOAD: ConversationLoadState = { status: "idle", error: null };
 
 export class RuntimeProjectionStore {
+  message_cards_changed = 0;
+  card_sources_changed = 0;
   readonly conversation_loads = observable.map<string, ConversationLoadState>(undefined, { deep: false });
   application: ApplicationSnapshot | null = null;
   readonly session_views = observable.map<SessionId, SessionViewSnapshot>(undefined, {
@@ -58,6 +60,9 @@ export class RuntimeProjectionStore {
 
   constructor() {
     makeObservable(this, {
+      message_cards_changed: observable,
+      card_sources_changed: observable,
+      invalidateMessageCards: action,
       application: observableRef,
       observed_sequence: observable,
       is_stale: observable,
@@ -77,6 +82,12 @@ export class RuntimeProjectionStore {
       resetForInstance: action,
       setConversationLoadState: action,
     });
+  }
+
+  /** 仅表示查询失效；卡片与快照仍由 Runtime 查询恢复。 */
+  invalidateMessageCards(source_changed: boolean): void {
+    this.message_cards_changed += 1;
+    if (source_changed) this.card_sources_changed += 1;
   }
 
   conversationLoadState(session_id: SessionId, child_task_id: ChildTaskId | null = null): ConversationLoadState {

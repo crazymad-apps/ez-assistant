@@ -12,7 +12,7 @@ export function ProfileDialog(props: ProfileDialogProps) {
       <div className={styles.profile}>
         <UserIdentity user={props.user} />
         <div className={styles.tags}>
-          <Tag color="blue">{props.user.role === 'admin' ? '管理员' : '普通用户'}</Tag>
+          <Tag color="blue">{props.user.role === 'system_admin' ? '系统管理员' : '普通用户'}</Tag>
           {props.user.superAdmin && <Tag color="gold">超级管理员</Tag>}
         </div>
       </div>

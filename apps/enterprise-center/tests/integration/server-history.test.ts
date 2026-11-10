@@ -1,3 +1,4 @@
+import { singleModelPolicy, defaultHistoryModel } from '../support/model-policy.js';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { createServer } from 'node:http';
@@ -174,11 +175,11 @@ it('配置到代理与正式 Host 闭环：主体/策略/ABA 拒绝旧绑定，�
   const id: string = provider.provider_instance_id;
   const selected = { provider_instance_id: id, model_id: 'model-a' };
   for (const model_id of ['model-a', 'model-b']) await api('model-configuration', 'PUT', { ...selected, model_id, origin: 'manual', parameters });
-  await api('model-settings', 'PUT', { default_model: selected });
+  await api('model-settings', 'PUT', singleModelPolicy(await api('model-settings'), selected));
   const saveConnection = (patch: object, credential: object = { mode: 'unchanged' }) => api(`model-providers/${id}`, 'PUT', { connection: { ...connection, ...patch }, credential });
   let alice = await login('alice');
   const bob = await login('bob');
-  const config = (token = alice.token) => api('runtime/model-configuration', 'GET', undefined, 200, token);
+  const config = async (token = alice.token) => defaultHistoryModel(await api('runtime/model-configuration', 'GET', undefined, 200, token));
   let current = await config();
   const firstBinding: string = current.server_history_binding;
   expect(firstBinding).toMatch(/^[a-f0-9]{64}$/);
@@ -222,12 +223,12 @@ it('配置到代理与正式 Host 闭环：主体/策略/ABA 拒绝旧绑定，�
   await changed(async () => { await saveConnection({ server_history_enabled: false }); await proxy(raw, firstBinding, alice.llm_key, 409); await saveConnection({}); });
   await changed(async () => { await saveConnection({ endpoint: endpoint + '/other' }); await saveConnection({}); });
   await changed(async () => { await saveConnection({}, { mode: 'replace', value: 'new-artificial-key' }); await saveConnection({}, { mode: 'replace', value: 'upstream-artificial-key' }); });
-  await changed(async () => { await api('model-settings', 'PUT', { default_model: { ...selected, model_id: 'model-b' } }); await api('model-settings', 'PUT', { default_model: selected }); });
+  await changed(async () => { await api('model-settings', 'PUT', singleModelPolicy(await api('model-settings'), { ...selected, model_id: 'model-b' })); await api('model-settings', 'PUT', singleModelPolicy(await api('model-settings'), selected)); });
   await changed(async () => { await api('model-configuration', 'PUT', { ...selected, origin: 'manual', parameters: { ...parameters, max_output_tokens: { state: 'known', value: 512 } } }); await api('model-configuration', 'PUT', { ...selected, origin: 'manual', parameters }); });
   await changed(async () => { await api('model-configuration/reset', 'POST', selected, 204); await api('model-configuration', 'PUT', { ...selected, origin: 'manual', parameters }); });
 
   await api(`model-providers/${id}/refresh`, 'POST', {});
-  await api('model-settings', 'PUT', { default_model: { ...selected, model_id: 'gpt-6-astra' } });
+  await api('model-settings', 'PUT', singleModelPolicy(await api('model-settings'), { ...selected, model_id: 'gpt-6-astra' }));
   const templateBinding = (await config()).server_history_binding;
   await api('model-templates/reload', 'POST', {});
   expect((await config()).server_history_binding).toBe(templateBinding);
@@ -245,7 +246,7 @@ it('配置到代理与正式 Host 闭环：主体/策略/ABA 拒绝旧绑定，�
   await writeFile(templatesFile, originalTemplates);
   await api('model-templates/reload', 'POST', {});
   expect((await config()).server_history_binding).not.toBe(templateBinding);
-  await api('model-settings', 'PUT', { default_model: selected });
+  await api('model-settings', 'PUT', singleModelPolicy(await api('model-settings'), selected));
   const restartBinding = (await config()).server_history_binding;
   await app!.close();
   await openCenter();

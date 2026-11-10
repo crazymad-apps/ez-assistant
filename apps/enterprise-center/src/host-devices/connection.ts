@@ -1,7 +1,8 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { WebSocket } from 'ws';
+import type { LoginScope } from '../identity/service.js';
 
-const protocol = 2;
+const protocol = 3;
 const frameLimit = 16 * 1024;
 const bufferLimit = 256 * 1024;
 
@@ -30,6 +31,8 @@ export class DeviceConnection {
     private readonly ws: WebSocket,
     private readonly center: string,
     readonly id: string | null,
+    readonly organizationId: string,
+    readonly session: LoginScope | undefined,
     private readonly closed: () => void,
     private readonly control?: (value: unknown) => Promise<void>,
     private readonly binary?: (bytes: Buffer) => void,
@@ -81,6 +84,7 @@ export class DeviceConnection {
           message.type !== 'ready' ||
           message.protocol_version !== protocol ||
           message.center_id !== this.center ||
+          message.organization_id !== this.organizationId ||
           message.registration_id !== this.id
         )
           return this.stop();
@@ -95,7 +99,7 @@ export class DeviceConnection {
     });
     this.timer = setInterval(() => this.tick(), 250);
     this.write(
-      JSON.stringify({ type: 'hello', protocol_version: protocol, center_id: this.center, registration_id: this.id }),
+      JSON.stringify({ type: 'hello', protocol_version: protocol, center_id: this.center, organization_id: this.organizationId, registration_id: this.id }),
     );
   }
 

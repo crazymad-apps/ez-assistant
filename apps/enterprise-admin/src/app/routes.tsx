@@ -1,11 +1,12 @@
-import { Navigate } from 'react-router';
 import type { RouteObject } from 'react-router';
-import { Button, Result } from 'antd';
-import { useNavigate } from 'react-router';
+import { Result } from 'antd';
+import { OrganizationsRoute } from '../features/organizations/OrganizationsRoute';
+import { MembersRoute } from '../features/organizations/MembersRoute';
 import { AdminApp } from './AdminApp';
 import { PageLayout } from './PageLayout';
 import { LoginRoute, RequireIdentity } from './IdentityRoutes';
 import { ModelsRoute, ProviderRoute, ProviderEditor, ModelEditor } from '../features/models';
+import { PlatformSettingsRoute } from '../features/models/PlatformSettingsRoute';
 import { DevicesRoute } from '../features/devices/DevicesRoute';
 import { DeviceDetailRoute } from '../features/devices/DeviceDetailRoute';
 import { UsersRoute } from '../features/users/UsersRoute';
@@ -24,17 +25,6 @@ import { PluginDetailRoute } from '../features/plugins/PluginDetailRoute';
 
 export type RouteHeading = Readonly<{ title: string; menu: string }>;
 
-function MissingRoute() {
-  const navigate = useNavigate();
-  return (
-    <Result
-      status="404"
-      title="页面不存在"
-      extra={<Button onClick={() => navigate('/users', { replace: true })}>返回用户管理</Button>}
-    />
-  );
-}
-
 /** 页面只有路由这一份导航状态；弹窗草稿不进入 URL/history，身份守卫不替代服务端鉴权。 */
 export function adminRoutes(): RouteObject[] {
   return [
@@ -48,11 +38,26 @@ export function adminRoutes(): RouteObject[] {
             {
               element: <PageLayout />,
               children: [
-                { index: true, element: <Navigate to="/users" replace /> },
+                { index: true, element: <></> },
+                {
+                  path: '/organizations',
+                  element: <OrganizationsRoute />,
+                  handle: { title: '组织管理', menu: '/organizations' } satisfies RouteHeading,
+                },
+                {
+                  path: '/members',
+                  element: <MembersRoute />,
+                  handle: { title: '组织成员', menu: '/members' } satisfies RouteHeading,
+                },
                 {
                   path: '/users',
                   element: <UsersRoute />,
                   handle: { title: '用户管理', menu: '/users' } satisfies RouteHeading,
+                },
+                {
+                  path: '/platform-settings',
+                  element: <PlatformSettingsRoute />,
+                  handle: { title: '平台配置', menu: '/platform-settings' } satisfies RouteHeading,
                 },
                 {
                   path: '/devices',
@@ -137,7 +142,7 @@ export function adminRoutes(): RouteObject[] {
                 },
                 {
                   path: '*',
-                  element: <MissingRoute />,
+                  element: <Result status="404" title="页面不存在" />,
                   handle: { title: '页面不存在', menu: '' } satisfies RouteHeading,
                 },
               ],

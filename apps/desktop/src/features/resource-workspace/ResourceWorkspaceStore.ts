@@ -1,3 +1,5 @@
+import { AppController } from "./AppController";
+import { normalizeAppTarget, type AppTarget } from "../mcp-apps/appLinks";
 import { DesktopController } from "./DesktopController";
 import type { RuntimeClient } from "../../runtime-client/RuntimeClient";
 import { action, computed, makeObservable, observable, runInAction } from "mobx";
@@ -56,6 +58,7 @@ export type ResourceTab =
   | Readonly<{ type: "markdown"; resource: ResourceHandle }>
   | Readonly<{ type: "image"; resource: ResourceHandle }>
   | Readonly<{ type: "pdf"; resource: ResourceHandle }>
+  | Readonly<{ type: "app"; appId: string }>
   | Readonly<{ type: "browser"; browserId: string }>
   | Readonly<{ type: "terminal"; terminalId: string }>
   | Readonly<{ type: "desktop"; desktopId: string; name: string }>;
@@ -91,6 +94,8 @@ export class ResourceWorkspaceStore {
   readonly view_states = new Map<string, ResourceViewState>();
   shutting_down = false;
   readonly workspace_locations = observable.map<ResourceScopeKey, SessionResourceLocator>();
+  readonly apps = observable.map<string, AppController>({}, { deep: false });
+  #next_app_id = 1;
   readonly browsers = observable.map<string, BrowserController>({}, { deep: false });
   readonly terminals = observable.map<string, TerminalController>({}, { deep: false });
   readonly desktops = observable.map<string, DesktopController>({}, { deep: false });
@@ -111,6 +116,7 @@ export class ResourceWorkspaceStore {
       workspace_locations: observable,
       browser_error: observable,
       openBrowser: action,
+      openApp: action,
       openTerminal: action,
       openDesktop: action,
       active_tab: computed,
@@ -145,7 +151,8 @@ export class ResourceWorkspaceStore {
   set focused_tab_key(value: string) { this.active_group.focused_tab_key = value; }
 
   get mounted_pages(): CachedResourcePage[] {
-    const pages = [...this.cached_pages.values()];
+    // LRU 提升不能移动已挂载的 iframe；WebKit 移动 DOM 节点会重新加载页面。
+    const pages = [...this.cached_pages.values()].sort((left, right) => left.key.localeCompare(right.key));
     for (const group of this.groups.values()) {
       for (const tab of group.tabs) {
         if (tab.type === "terminal") pages.push({ key: this.pageKey(group, tab), group, tab });
@@ -209,6 +216,25 @@ export class ResourceWorkspaceStore {
     this.openTab({ type: "browser", browserId }, owner);
     if (owner !== this.active_group) controller.suspend();
     if (url) controller.navigate(url);
+  }
+
+  get client(): RuntimeClient | null { return this.getClient(); }
+
+  openApp(target: AppTarget, arguments_value: Record<string, unknown> = {}, instance_key?: string, owner = this.active_group): AppController {
+    const client = this.getClient();
+    if (!client || this.shutting_down || owner.closing || this.groups.get(owner.scope_key) !== owner) throw new Error("应用资源组已失效");
+    const normalized = normalizeAppTarget(target,[new URL(client.address).origin,location.origin]);
+    const identity = JSON.stringify(normalized);
+    const existing = owner.tabs.find(tab => tab.type === "app" && JSON.stringify(this.apps.get(tab.appId)?.target) === identity && this.apps.get(tab.appId)?.instance_key === instance_key);
+    if (existing?.type === "app") {
+      this.openTab(existing,owner);
+      return this.apps.get(existing.appId)!;
+    }
+    const appId = `app-${this.#next_app_id++}`;
+    const controller = new AppController(normalized,instance_key,arguments_value,this.getClient);
+    this.apps.set(appId,controller);
+    this.openTab({type:"app",appId},owner);
+    return controller;
   }
 
   openWorkspace(scopeKey: ResourceScopeKey, locator?: SessionResourceLocator): void {
@@ -399,6 +425,10 @@ export class ResourceWorkspaceStore {
         tabs: group.tabs.filter((tab) => tab.type !== "desktop").map((tab): SavedResourceTab => {
           let page: SavedResourceTab["page"];
           if ("resource" in tab) page = savedResourcePage(tab);
+          else if (tab.type === "app") {
+            const app = this.apps.get(tab.appId)!;
+            page = { type: "app", target: app.target, instance_key: app.instance_key };
+          }
           else if (tab.type === "browser") {
             const browser = this.browsers.get(tab.browserId)!;
             page = { type: "browser", url: browser.url, title: browser.title };
@@ -439,6 +469,7 @@ export class ResourceWorkspaceStore {
               case "context": this.openTab(CONTEXT_TAB, group); break;
               case "workspace": this.openWorkspace(group.scope_key); break;
               case "terminal": this.openTerminal(page.source, group, true); break;
+              case "app": this.openApp(page.target, {}, page.instance_key, group); break;
               case "browser": {
                 this.openBrowser(undefined, group);
                 const opened = group.tabs.at(-1)!;
@@ -583,6 +614,7 @@ export class ResourceWorkspaceStore {
     if (index < 0) return this.focused_tab_key;
     const fallback_key = resourceTabKey(group.tabs[Math.max(0, index - 1)] ?? CONTEXT_TAB);
     const tab = group.tabs[index];
+    if (tab?.type === "app") { this.apps.get(tab.appId)?.disconnect(); this.apps.delete(tab.appId); }
     if (tab?.type === "browser") {
       this.browsers.get(tab.browserId)?.dispose();
       this.browsers.delete(tab.browserId);
@@ -604,10 +636,12 @@ export class ResourceWorkspaceStore {
     return this.focused_tab_key;
   }
 
-  disconnectTerminals = (): void => { for (const desktop of this.desktops.values()) desktop.disconnect(); for (const terminal of this.terminals.values()) terminal.disconnect(); };
+  disconnectTerminals = (): void => { for (const app of this.apps.values()) app.disconnect(); for (const desktop of this.desktops.values()) desktop.disconnect(); for (const terminal of this.terminals.values()) terminal.disconnect(); };
 
   dispose(): void {
     this.disconnectTerminals();
+    for (const app of this.apps.values()) app.disconnect();
+    this.apps.clear();
     this.#generation += 1;
     for (const browser of this.browsers.values()) browser.dispose();
     this.browsers.clear();
@@ -638,6 +672,7 @@ export class ResourceWorkspaceStore {
     while (this.cached_pages.size >= PAGE_CACHE_LIMIT) {
       const oldest = this.cached_pages.values().next().value!;
       this.cached_pages.delete(oldest.key);
+      if (oldest.tab.type === "app") this.apps.get(oldest.tab.appId)?.disconnect();
       if (oldest.tab.type === "browser") this.browsers.get(oldest.tab.browserId)?.suspend();
     }
     this.cached_pages.set(key, { key, group, tab });
@@ -673,6 +708,7 @@ export function resourceTabKey(tab: ResourceTab): string {
     case "markdown":
     case "image":
     case "pdf": return `resource:${tab.resource.resource_key}`;
+    case "app": return `app:${tab.appId}`;
     case "browser": return `browser:${tab.browserId}`;
     case "terminal": return `terminal:${tab.terminalId}`;
     case "desktop": return `desktop:${tab.desktopId}`;
@@ -716,6 +752,7 @@ export function resourceTabTitle(tab: ResourceTab): string {
     case "markdown":
     case "image":
     case "pdf": return tab.resource.display_name;
+    case "app": return "应用";
     case "browser": return "浏览器";
     case "terminal": return "终端";
     case "desktop": return `${tab.name} · 桌面`;

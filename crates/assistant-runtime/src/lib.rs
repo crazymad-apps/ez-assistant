@@ -24,11 +24,16 @@ mod id;
 mod internal_boundary;
 mod journal;
 pub use execution_window::ExecutionWindow;
+mod cards;
 mod mcp;
 mod memory;
 mod observation;
 mod permission;
 mod plugin;
+pub use cards::validate_plugin_ui;
+pub use storage::{
+    MessageCardSnapshotWrite, NewMessageCard, StoredMessageCard, message_card_owner,
+};
 pub mod request_diagnostics;
 mod run;
 mod runtime;
@@ -49,7 +54,7 @@ pub use config::{
     ConfigCompilation, ConfigDocument, ConfigIssue, ConfigIssueCode, ConfigProjection,
     ConfigSourceFailure, ConfigSourceFailureKind, ConfigSourceFuture, ConfigSourceLoad,
     ConfigSourceReplace, ConfigSourceReplaceFuture, ConfigState, DelegationConfig,
-    ExternalModelConfiguration, ModelProtocol, ModelSource, ReasoningEffortKey,
+    ExternalModelConfiguration, ExternalModelSet, ModelProtocol, ModelSource, ReasoningEffortKey,
     ReasoningEffortWireValue, ResolvedConfig, ResolvedModelCapabilities, ResolvedModelConfig,
     ResolvedReasoningCapability, ResolvedReasoningEffort, RuntimeConfig, RuntimeConfigSource,
     RuntimeModelTransportConfig, compile_runtime_config,
@@ -89,7 +94,7 @@ pub use mcp::{
     McpConnectionFactory, McpConnectionFailureKind, McpConnectionFuture, McpConnectionOptions,
     McpImageMaterializationFailure, McpImageMaterializationFuture, McpImageMaterializer,
     McpRawCallResult, McpRawContent, McpSecret, McpServerConfig, McpServerTransportConfig,
-    McpToolDefinition, McpToolPage,
+    McpToolDefinition, McpToolPage, McpUiResourcePage,
 };
 pub use memory::{
     MemoryContextSnapshot, PersonaMutation, PersonaSnapshot, PinnedMemoryCreatedBy,
@@ -105,8 +110,8 @@ pub use permission::{
     PermissionStoreFuture, ShellPermissionMatcher, file_matcher_matches, resolve_permission_path,
 };
 pub use runtime::{
-    AssistantRuntime, ExternalModelPublication, ResolvedToolFileResource, StagedAttachmentUpload,
-    StagedSessionAttachment,
+    AssistantRuntime, ExternalModelPublication, ResolvedToolFileResource, ShutdownWork,
+    StagedAttachmentUpload, StagedSessionAttachment,
 };
 pub use skill::{
     BUILTIN_GUIDE_REFERENCES, BUILTIN_GUIDE_SKILL_NAME, MAX_CATALOG_SKILLS,
@@ -127,36 +132,36 @@ pub use storage::{
     ConversationRawWindowRequest, ConversationRewrite, ConversationSearchHit,
     ConversationSearchPage, ConversationSearchRequest, ConversationSearchScope,
     ConversationWindowRequest, CrossSessionInputBinding, CrossSessionInputEnvelope,
-    CustomAgentMutation, ForkedAttachmentReference, ForkedSessionCommand, GoalClear,
-    GoalHeldInputResume, GoalHeldInputResumeResult, GoalInputBinding, GoalStop, GoalStopResult,
-    InputMessageValidationError, InputOrigin, LoadedSession, MessageFeedbackChange, ModelChange,
-    NewAttachmentUpload, NewStoredChildTask, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
-    NewStoredSessionCommand, NewStoredSessionMaterialization, NewWorkspaceRegistration,
-    PendingChildToolExchange, PendingToolExchange, PluginOperationKind, PluginOperationPhase,
-    PluginOperationUpdate, PluginRecordChange, PluginSettingsChange, PluginSource,
-    ProviderModelCatalogReplacement, QueuePriorityChange, ReasoningEffortChange, RecoveredRuntime,
-    RewriteGoalEffect, RewriteResult, RuntimeStore, SessionCommandCommit, SessionDeletion,
-    SessionFork, SessionHistoryClear, SessionHistoryClearResult, SessionHistoryCompactionFinish,
-    SessionHistoryCompactionFinishKind, SessionHistoryCompactionPreparation,
-    SessionHistoryCompactionPreparationResult, SessionPinnedChange, SessionProxyChange,
-    SessionProxyState, SessionRole, SessionSummaryQuery, SessionTitleChange,
-    SessionTitleGenerationCommit, SessionTitleGenerationCommitResult, StoreError, StoreErrorKind,
-    StoreFuture, StoredAttachment, StoredAttachmentState, StoredChildTask, StoredChildTaskHistory,
-    StoredChildTaskSettlement, StoredConversationHistory, StoredConversationMessageLocation,
-    StoredConversationRawWindow, StoredConversationState, StoredConversationWindow,
-    StoredCustomAgent, StoredGoal, StoredGoalBudget, StoredGoalObjective, StoredGoalObjectivePart,
-    StoredGoalPauseReason, StoredGoalSettlementEffect, StoredGoalState, StoredHistoryAttachment,
-    StoredHistoryFacts, StoredHistoryFeedback, StoredInput, StoredInputHistory, StoredInputState,
-    StoredMcpSelection, StoredMessageFeedback, StoredMessageOrigin, StoredModelCatalog,
-    StoredPlugin, StoredPluginOperation, StoredProvider, StoredQueueItem, StoredRun,
-    StoredRunContinuation, StoredRunContinuationResult, StoredRunHistory, StoredRunSettlement,
-    StoredRunSettlementResult, StoredSession, StoredSessionCommand, StoredSessionCommandResult,
-    StoredSessionCommandState, StoredSessionFork, StoredSessionLifecycle,
-    StoredSessionMaterialization, StoredSessionUsage, StoredTerminalRunInputReconciliation,
-    StoredTodoItemStatus, StoredWorkPlan, StoredWorkPlanItem, StoredWorkspace,
-    StoredWorkspaceLifecycle, ToolExecutionStart, UserMessageCommit, VariantChange, WorkPlanClear,
-    WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval, WorkspaceRestoration,
-    WorkspaceUpdate, attachment_stable_view_path, custom_agent_revision,
+    CustomAgentMutation, FixedModelHistoryInvalidation, ForkedAttachmentReference,
+    ForkedSessionCommand, GoalClear, GoalHeldInputResume, GoalHeldInputResumeResult,
+    GoalInputBinding, GoalStop, GoalStopResult, InputMessageValidationError, InputOrigin,
+    LoadedSession, MessageFeedbackChange, ModelChange, NewAttachmentUpload, NewStoredChildTask,
+    NewStoredInput, NewStoredRunAttempt, NewStoredSession, NewStoredSessionCommand,
+    NewStoredSessionMaterialization, NewWorkspaceRegistration, PendingChildToolExchange,
+    PendingToolExchange, PluginOperationKind, PluginOperationPhase, PluginOperationUpdate,
+    PluginRecordChange, PluginSettingsChange, PluginSource, ProviderModelCatalogReplacement,
+    QueuePriorityChange, ReasoningEffortChange, RecoveredRuntime, RewriteGoalEffect, RewriteResult,
+    RuntimeStore, SessionCommandCommit, SessionDeletion, SessionFork, SessionHistoryClear,
+    SessionHistoryClearResult, SessionHistoryCompactionFinish, SessionHistoryCompactionFinishKind,
+    SessionHistoryCompactionPreparation, SessionHistoryCompactionPreparationResult,
+    SessionPinnedChange, SessionProxyChange, SessionProxyState, SessionRole, SessionSummaryQuery,
+    SessionTitleChange, SessionTitleGenerationCommit, SessionTitleGenerationCommitResult,
+    StoreError, StoreErrorKind, StoreFuture, StoredAttachment, StoredAttachmentState,
+    StoredChildTask, StoredChildTaskHistory, StoredChildTaskSettlement, StoredConversationHistory,
+    StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationState,
+    StoredConversationWindow, StoredCustomAgent, StoredGoal, StoredGoalBudget, StoredGoalObjective,
+    StoredGoalObjectivePart, StoredGoalPauseReason, StoredGoalSettlementEffect, StoredGoalState,
+    StoredHistoryAttachment, StoredHistoryFacts, StoredHistoryFeedback, StoredInput,
+    StoredInputHistory, StoredInputState, StoredMcpSelection, StoredMessageFeedback,
+    StoredMessageOrigin, StoredModelCatalog, StoredPlugin, StoredPluginOperation, StoredProvider,
+    StoredQueueItem, StoredRun, StoredRunContinuation, StoredRunContinuationResult,
+    StoredRunHistory, StoredRunSettlement, StoredRunSettlementResult, StoredSession,
+    StoredSessionCommand, StoredSessionCommandResult, StoredSessionCommandState, StoredSessionFork,
+    StoredSessionLifecycle, StoredSessionMaterialization, StoredSessionUsage,
+    StoredTerminalRunInputReconciliation, StoredTodoItemStatus, StoredWorkPlan, StoredWorkPlanItem,
+    StoredWorkspace, StoredWorkspaceLifecycle, ToolExecutionStart, UserMessageCommit,
+    VariantChange, WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval,
+    WorkspaceRestoration, WorkspaceUpdate, attachment_stable_view_path, custom_agent_revision,
     execution_context_from_product_history, merge_context_replacement_with_product_history,
     normalize_context_usage_adjustments, stored_model_catalog_is_valid, valid_custom_agent_config,
     valid_custom_agent_name, validate_input_message, validate_input_message_with_channel_source,

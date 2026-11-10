@@ -1,3 +1,4 @@
+import { singleModelPolicy } from '../support/model-policy.js';
 import { mkdtemp } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createServer } from 'node:http';
@@ -46,7 +47,8 @@ it('代理用量与正文策略独立，联合模型维度和调用明细一致'
     expect(identity[0]).toMatchObject({ host: '127.0.0.1', port: 55441, db: 'ez_center_f06_retry_acceptance', role: 'center_app' });
     expect(await source.getRepository(CallEntity).count()).toBe(0);
     expect((await source.query('SELECT COUNT(*)::integer AS n FROM public.providers'))[0].n).toBe(0);
-    const settings = await source.getRepository(RecordingEntity).findOneByOrFail({ singleton: true });
+    const [{ legacy_organization_id }] = await source.query('SELECT legacy_organization_id FROM public.center_identity');
+    const settings = await source.getRepository(RecordingEntity).findOneByOrFail({ organization_id: legacy_organization_id });
     expect(settings.mode).toBe('off');
     app = await createHttpApp({ source, origin: 'http://127.0.0.1:17330', snapshotRoot });
     await app.listen(0, '127.0.0.1');
@@ -56,7 +58,13 @@ it('代理用量与正文策略独立，联合模型维度和调用明细一致'
       body: JSON.stringify({ username: 'admin', password: '123456' }),
     });
     expect(login.status).toBe(200);
-    const credentials = await login.json() as { token: string; llm_key: string };
+    const unselected = await login.json() as { token: string };
+    const scoped = await fetch(`${endpoint}/api/auth/scope`, { method: 'POST',
+      headers: { authorization: `Bearer ${unselected.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ kind: 'organization', organization_id: legacy_organization_id, entry: 'admin' }),
+    });
+    expect(scoped.status).toBe(200);
+    const credentials = await scoped.json() as { token: string; llm_key: string };
     const api = async (method: string, path: string, body?: object) => {
       const response = await fetch(`${endpoint}/api/${path}`, {
         method, headers: { authorization: `Bearer ${credentials.token}`, ...(body ? { 'content-type': 'application/json' } : {}) },
@@ -102,13 +110,13 @@ it('代理用量与正文策略独立，联合模型维度和调用明细一致'
       }
       throw new Error('usage_settlement_timeout');
     };
-    await api('PUT', 'model-settings', { default_model: first });
+    await api('PUT', 'model-settings', singleModelPolicy(await api('GET', 'model-settings'), first));
     const withoutBody = await invoke(first.provider_instance_id);
     expect(withoutBody.usage_state).toBe('available');
     expect(withoutBody.total_tokens).toBe('15');
     expect(withoutBody.request_snapshot_state).toBe('disabled');
     await api('PUT', 'llm-recording-settings', { enabled: true, content_retention_days: 7, index_retention_days: 90 });
-    await api('PUT', 'model-settings', { default_model: second });
+    await api('PUT', 'model-settings', singleModelPolicy(await api('GET', 'model-settings'), second));
     const withBody = await invoke(second.provider_instance_id);
     expect(withBody.request_snapshot_state).toBe('complete');
     expect(withBody.response_snapshot_state).toBe('complete');
@@ -126,7 +134,7 @@ it('代理用量与正文策略独立，联合模型维度和调用明细一致'
     const details = await api('GET', `llm-calls/${withoutBody.id}`);
     expect(details).toMatchObject({ usage_state: 'available', total_tokens: '15', request: { state: 'disabled' } });
     expect(received.filter((body) => body.includes('"input":"hello"'))).toHaveLength(2);
-    await api('PUT', 'model-settings', { default_model: first });
+    await api('PUT', 'model-settings', singleModelPolicy(await api('GET', 'model-settings'), first));
     nextStatus = 503;
     const failedAttempt = await invoke(first.provider_instance_id, 503);
     const retryAttempt = await invoke(first.provider_instance_id);

@@ -2,6 +2,8 @@
 mod queue_claim;
 use assistant_runtime::{StoredWorkspaceLifecycle, WorkspaceRemoval};
 
+#[path = "tests/cards.rs"]
+mod cards;
 #[path = "tests/commands.rs"]
 mod commands;
 #[path = "tests/history_files.rs"]
@@ -220,6 +222,7 @@ fn workspace_id(value: &str) -> WorkspaceId {
 
 fn model_selection(model_id: &str) -> ModelSelection {
     ModelSelection {
+        source: assistant_protocol::ModelSelectionSource::Local,
         provider_instance_id: ProviderInstanceId::new("fixture-provider").expect("provider"),
         model_id: model_id.to_owned(),
     }
@@ -4809,6 +4812,7 @@ fn known_unversioned_storage_migrates_without_losing_existing_business_data() {
              DROP TABLE model_settings;
              DROP TABLE providers;
              DROP TABLE conversation_usage_snapshots;
+             DROP TABLE message_cards;
              DROP TABLE schema_migrations;
              DROP TABLE database_compatibility;
              DROP TABLE plugin_operations;
@@ -4824,6 +4828,7 @@ fn known_unversioned_storage_migrates_without_losing_existing_business_data() {
              ALTER TABLE pending_tool_starts DROP COLUMN delegated_child_json;
              ALTER TABLE sessions DROP COLUMN model_id;
              ALTER TABLE sessions DROP COLUMN model_provider_instance_id;
+             ALTER TABLE sessions DROP COLUMN model_source;
              ALTER TABLE sessions ADD COLUMN model_key TEXT NOT NULL DEFAULT 'discarded-old-model';
              COMMIT;",
         )

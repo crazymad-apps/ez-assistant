@@ -101,6 +101,7 @@ impl LoginSync<'_> {
             if plugin.origin
                 != (PluginPackageOrigin::Center {
                     center_id: self.key.center_id.clone(),
+                    organization_id: Some(self.key.organization_id.clone()),
                 })
             {
                 continue;
@@ -170,12 +171,7 @@ impl LoginSync<'_> {
         }
         let (center, token) = self.credentials.current_plugin_center(self.key).ok()?;
         let selection = match center
-            .resolve_plugin(
-                &token,
-                &self.key.center_id,
-                &plugin.name,
-                plugin.sha256.clone(),
-            )
+            .resolve_plugin(&token, self.key, &plugin.name, plugin.sha256.clone())
             .await
         {
             Ok(selection) => selection,

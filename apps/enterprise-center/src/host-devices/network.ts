@@ -3,7 +3,7 @@ import type { Duplex } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 import { WebSocketServer } from 'ws';
 import { IdentityError } from '../identity/errors.js';
-import type { HostDevicesService } from './service.js';
+import type { DeviceConnectionScope, HostDevicesService } from './service.js';
 import type { HostDeviceDetail } from '../contracts/host-devices.js';
 import { IdentityService } from '../identity/service.js';
 import { NetworkAccess } from './access.js';
@@ -20,6 +20,7 @@ export class HostNetwork {
   private readonly connections = new Map<string, DeviceConnection>();
   private readonly callers = new Set<DeviceConnection>();
   private readonly access: NetworkAccess;
+  private readonly unsubscribe: (() => void)[];
   private readonly pending = new Set<Duplex>();
   private closing = false;
   private authenticating = 0;
@@ -29,6 +30,14 @@ export class HostNetwork {
     identity: IdentityService,
   ) {
     this.access = new NetworkAccess(identity, devices, (id) => this.connections.get(id));
+    this.unsubscribe = [
+      identity.onSessionRevoked((scope) => {
+        for (const caller of this.callers) if (caller.session === scope) caller.stop();
+      }),
+      identity.onOrganizationRevoked((id) => {
+        for (const connection of this.connections.values()) if (connection.organizationId === id) connection.stop();
+      }),
+    ];
     devices.attachConnection(this);
   }
 
@@ -72,6 +81,7 @@ export class HostNetwork {
   onModuleDestroy() {
     this.closing = true;
     this.access.close();
+    for (const unsubscribe of this.unsubscribe.splice(0)) unsubscribe();
     for (const connection of this.callers) connection.stop();
     this.callers.clear();
     for (const socket of this.pending) socket.destroy();
@@ -88,7 +98,7 @@ export class HostNetwork {
       if ((!caller && typeof id !== 'string') || (caller && id !== undefined) || !bearer?.startsWith('Bearer '))
         return this.reject(socket, 401);
       if (caller && this.callers.size >= 256) return this.reject(socket, 503);
-      const accepted = (center: string) => {
+      const accepted = ({ center, organizationId, session }: DeviceConnectionScope) => {
         // 事务提交后同步接纳，与注销通知有确定顺序；迟到结果不得恢复已关闭的连接。
         if (socket.destroyed || this.closing) return;
         if (caller && this.callers.size >= 256) return this.reject(socket, 503);
@@ -99,6 +109,8 @@ export class HostNetwork {
               ws,
               center,
               typeof id === 'string' ? id : null,
+              organizationId,
+              session,
               () => {
                 this.access.disconnected(connection);
                 this.callers.delete(connection);

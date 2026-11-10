@@ -337,7 +337,7 @@ describe("ContextPanel", () => {
         providers: [], model_settings: { default_model: null, vision_model: null },
         active_sessions: application.active_sessions.map((session) => ({
           ...session,
-          model_selection: { provider_instance_id: "provider-1", model_id: "removed-model" },
+          model_selection: { source: 'local' as const, provider_instance_id: "provider-1", model_id: "removed-model" },
         })),
       },
     });
@@ -400,7 +400,7 @@ function contextStore(): RootStore {
       active_sessions: [{
         session_id: "session-1",
         workspace_id: "workspace-1",
-        model_selection: { provider_instance_id: "provider-1", model_id: "fixture" },
+        model_selection: { source: 'local' as const, provider_instance_id: "provider-1", model_id: "fixture" },
         current_variant: "build",
         approval_mode: "ask",
         message_count: 2,
@@ -414,7 +414,7 @@ function contextStore(): RootStore {
       session: {
         session_id: "session-1",
         workspace_id: "workspace-1",
-        model_selection: { provider_instance_id: "provider-1", model_id: "fixture" },
+        model_selection: { source: 'local' as const, provider_instance_id: "provider-1", model_id: "fixture" },
         current_variant: "build",
         approval_mode: "ask",
         message_count: 2,
@@ -428,7 +428,7 @@ function contextStore(): RootStore {
       },
       agent_shell_kind: "cmd",
       composer_capabilities: {
-        selected_model: { provider_instance_id: "provider-1", model_id: "fixture" },
+        selected_model: { source: 'local' as const, provider_instance_id: "provider-1", model_id: "fixture" },
         reasoning_effort_options: [],
         image_handling: "tool",
         goal_supported: true,

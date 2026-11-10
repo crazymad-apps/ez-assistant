@@ -407,6 +407,7 @@ impl McpConnection for WorkingMcpTestConnection {
                     }),
                     output_schema: None,
                     annotations: Some(json!({"destructiveHint": true})),
+                    meta: None,
                 },
                 McpToolDefinition {
                     name: "list_issues".to_owned(),
@@ -418,6 +419,7 @@ impl McpConnection for WorkingMcpTestConnection {
                     }),
                     output_schema: None,
                     annotations: Some(json!({"readOnlyHint": true})),
+                    meta: None,
                 },
             ],
             next_cursor: None,
@@ -443,6 +445,7 @@ impl McpConnection for WorkingMcpTestConnection {
             }],
             structured_content: None,
             is_error: false,
+            meta: None,
         })))
     }
 

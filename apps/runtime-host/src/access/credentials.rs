@@ -109,7 +109,7 @@ impl AccessPermit {
             .as_ref()
             .is_some_and(|(channel, _)| channel.is_cancelled())
         {
-            return Err(super::enterprise::CenterError::Unavailable.into());
+            return Err(super::enterprise::CenterError::InvalidCredentials.into());
         }
         Ok(())
     }
@@ -142,6 +142,7 @@ pub(super) struct CredentialState {
     password_hash: Option<String>,
     pub(super) sessions: HashMap<[u8; 32], LoginSession>,
     pub(super) users: HashMap<UserKey, UserState>,
+    pub(super) organization_selections: HashMap<[u8; 32], super::enterprise::OrganizationSelection>,
     pub(super) network_initializations: HashMap<UserKey, Arc<super::enterprise::Initialization>>,
     attempts: f64,
     refilled: Instant,
@@ -229,6 +230,7 @@ impl Credentials {
                 password_hash: None,
                 sessions: HashMap::new(),
                 users: HashMap::new(),
+                organization_selections: HashMap::new(),
                 network_initializations: HashMap::new(),
                 attempts: 5.0,
                 refilled: Instant::now(),
@@ -368,6 +370,33 @@ pub(super) fn issue(
     compatibility: ClientCompatibility,
     user_key: Option<UserKey>,
 ) -> Result<(SecretValue, LoginSession), AccessError> {
+    let expires_at_ms = user_key
+        .as_ref()
+        .map(|key| {
+            state
+                .users
+                .get(key)
+                .map(|user| user.login.expires_at_ms)
+                .ok_or(AccessError::Unauthorized)
+        })
+        .transpose()?;
+    issue_with_expiration(state, compatibility, user_key, expires_at_ms)
+}
+
+pub(super) fn current_time_ms() -> Result<u64, super::enterprise::CenterError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+        .ok_or(super::enterprise::CenterError::Unavailable)
+}
+
+pub(super) fn issue_with_expiration(
+    state: &mut CredentialState,
+    compatibility: ClientCompatibility,
+    user_key: Option<UserKey>,
+    center_expiration: Option<u64>,
+) -> Result<(SecretValue, LoginSession), AccessError> {
     if !compatibility.is_valid() {
         return Err(AccessError::Invalid("软件版本声明无效。"));
     }
@@ -378,16 +407,19 @@ pub(super) fn issue(
     let mut bytes = [0_u8; 32];
     getrandom::fill(&mut bytes).map_err(|_| AccessError::Unavailable)?;
     let token = URL_SAFE_NO_PAD.encode(bytes);
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| AccessError::Unavailable)?
-        .as_millis();
+    let now_ms = current_time_ms()?;
+    let host_expiration = now_ms + LOGIN_LIFETIME.as_millis() as u64;
+    let expires_at_ms =
+        center_expiration.map_or(host_expiration, |center| center.min(host_expiration));
+    if expires_at_ms <= now_ms {
+        return Err(AccessError::Unauthorized);
+    }
     let session = LoginSession {
         id: digest(&token),
         user_key,
         compatibility,
-        expires_at_ms: (now_ms + LOGIN_LIFETIME.as_millis()) as u64,
-        deadline: Instant::now() + LOGIN_LIFETIME,
+        expires_at_ms,
+        deadline: Instant::now() + Duration::from_millis(expires_at_ms - now_ms),
         cancelled: CancellationToken::new(),
         changes: state.changes.clone(),
     };
@@ -396,7 +428,7 @@ pub(super) fn issue(
     Ok((SecretValue::new(token), session))
 }
 
-fn digest(token: &str) -> [u8; 32] {
+pub(crate) fn digest(token: &str) -> [u8; 32] {
     Sha256::digest(token.as_bytes()).into()
 }
 

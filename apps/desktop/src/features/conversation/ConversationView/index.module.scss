@@ -9,7 +9,7 @@
   height: 100%;
   overflow-x: hidden;
   overflow-y: auto;
-  padding: 24px var(--conversation-horizontal-padding) 28px;
+  padding: 24px var(--ez-conversation-edge-spacing) 28px;
   scrollbar-gutter: stable;
   scrollbar-color: auto;
   scrollbar-width: auto;
@@ -598,7 +598,7 @@
 
 .scroll_bottom {
   position: absolute;
-  right: max(16px, var(--conversation-horizontal-padding));
+  right: var(--ez-conversation-edge-spacing);
   bottom: 16px;
   display: grid;
   width: var(--ez-control-height);

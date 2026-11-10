@@ -129,7 +129,7 @@ export function ContextPicker(props: Readonly<{
                 {option.detail && <span>{option.detail}</span>}
                 {option.hints?.map((hint) => <small key={hint}>{hint}</small>)}
               </span>
-              {option.value === props.selected?.value && <Icon name="check" size={16} />}
+              {option.value === props.selected?.value && <Icon name="check-circle-fill" size={16} />}
             </button>)}
             {results.length === 0 && <p className={styles.empty}>{props.empty_text ?? `没有匹配的${props.label}`}</p>}
           </div>

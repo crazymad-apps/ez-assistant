@@ -561,3 +561,208 @@ async fn native_mode_replays_agent_summary_as_system_message_without_handoff_com
     assert_eq!(input[1]["content"][0]["text"], "continue");
     assert!(body.get("previous_response_id").is_none());
 }
+
+fn v2_sse(output: Value) -> String {
+    format!(
+        "data: {}\n\ndata: {}\n\n",
+        json!({"type":"response.output_item.done","output_index":0,"item":output}),
+        json!({"type":"response.completed","response":{"id":"cmp_v2","status":"completed","output":[output],"usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}})
+    )
+}
+
+fn v2_service(transport: Arc<dyn Transport>) -> OpenAiResponsesService {
+    OpenAiResponsesService::with_transport(
+        "https://provider.invalid/v1",
+        BearerCredential::new("synthetic"),
+        "fixture-model",
+        128_000,
+        ResponsesProtocolAdapter::openai(),
+        transport,
+    )
+    .unwrap()
+    .with_server_compaction("scope", std::num::NonZeroU64::new(100_000).unwrap())
+    .unwrap()
+}
+
+#[tokio::test]
+async fn openai_v2_compaction_preserves_user_facts_and_replays_window() {
+    let native = json!({"type":"compaction","id":"cmp_item","encrypted_content":"opaque"});
+    let transport = Arc::new(RecordedTransport::new([
+        Ok(RecordedResponse::new(200, v2_sse(native.clone()))),
+        Ok(RecordedResponse::new(200, TEXT_SSE)),
+        Ok(RecordedResponse::new(200, v2_sse(native.clone()))),
+    ]));
+    let service = v2_service(transport.clone());
+    let compact = service
+        .compact(
+            request(vec![user("u", "task constraints")]),
+            ModelCallContext::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(compact.usage.as_ref().unwrap().input_tokens, 100);
+    let context = request(vec![
+        ConversationMessage::Assistant(compact),
+        user("next", "continue"),
+    ]);
+    response_turn(&service, context.clone()).await;
+    service
+        .compact(context, ModelCallContext::default())
+        .await
+        .unwrap();
+    let sent = transport.take_requests();
+    for index in [0, 2] {
+        assert!(sent[index].url.ends_with("/responses"));
+        assert!(sent[index].headers.contains(&(
+            "x-codex-beta-features".into(),
+            "remote_compaction_v2".into()
+        )));
+        let body: Value = serde_json::from_slice(&sent[index].body).unwrap();
+        assert_eq!(
+            body["input"].as_array().unwrap().last().unwrap(),
+            &json!({"type":"compaction_trigger"})
+        );
+        assert_eq!(body["store"], false);
+        assert_eq!(body["stream"], true);
+        assert!(body.get("previous_response_id").is_none());
+    }
+    let normal: Value = serde_json::from_slice(&sent[1].body).unwrap();
+    assert_eq!(normal["input"][0]["content"][0]["text"], "task constraints");
+    assert_eq!(normal["input"][1], native);
+    assert_eq!(normal["input"][2]["content"][0]["text"], "continue");
+}
+
+#[tokio::test]
+async fn openai_v2_compaction_rejects_incomplete_conflicting_and_noncompact_streams() {
+    let good = v2_sse(json!({"type":"compaction","encrypted_content":"opaque"}));
+    let cases = vec![
+        String::new(),
+        "data: [DONE]\n\n".into(),
+        v2_sse(json!({"type":"message","role":"assistant","content":[]})),
+        v2_sse(json!({"type":"compaction","encrypted_content":""})),
+        format!("{good}data: {{"),
+        format!("{good}{good}"),
+        format!("data: {{\"type\":\"response.cancelled\"}}\n\n{good}"),
+        format!("data: {{\"type\":\"response.output_item.done\",\"output_index\":0}}\n\n{good}"),
+        good.replace("\"cmp_v2\"", "\"\""),
+        "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"too large\"}}}\n\n".into(),
+    ];
+    for body in cases {
+        let transport = Arc::new(RecordedTransport::new([Ok(RecordedResponse::new(
+            200, body,
+        ))]));
+        assert!(
+            v2_service(transport)
+                .compact(request(vec![]), ModelCallContext::default())
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn openai_v2_compaction_cancels_while_waiting_for_response() {
+    let context = ModelCallContext::default();
+    let cancellation = context.cancellation.clone();
+    let service = v2_service(delayed_transport(150, 0, 300));
+    let (result, ()) = tokio::join!(service.compact(request(vec![]), context), async move {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        cancellation.cancel();
+    });
+    assert!(matches!(result, Err(ModelError::Cancelled)));
+}
+
+#[test]
+fn only_explicit_openai_dialect_uses_streaming_compaction() {
+    assert!(ResponsesProtocolAdapter::openai().streaming_compaction);
+    for adapter in [
+        ResponsesProtocolAdapter::openai_compatible(provider("openai")),
+        ResponsesProtocolAdapter::deepseek(),
+        ResponsesProtocolAdapter::qwen(),
+        ResponsesProtocolAdapter::kimi(),
+        ResponsesProtocolAdapter::opencode(),
+    ] {
+        assert!(!adapter.streaming_compaction);
+    }
+}
+
+#[tokio::test]
+async fn openai_v2_stream_failure_preserves_overload_without_fabricating_http_400() {
+    // 真实压缩曾在 HTTP 200 后返回此错误形状；不将服务过载误报为请求格式错误。
+    for (error, overloaded) in [
+        (
+            json!({"type":"service_unavailable_error", "code":"server_error",
+            "message":"provider overloaded", "headers":{"retry-after":"6"}}),
+            true,
+        ),
+        (
+            json!({"type":"invalid_request_error", "code":"invalid_input",
+            "message":"invalid input"}),
+            false,
+        ),
+    ] {
+        let body = format!(
+            "data: {}\n\n",
+            json!({"type":"response.failed",
+            "response":{"id":"cmp_failed", "status":"failed", "error":error}})
+        );
+        let transport = Arc::new(RecordedTransport::new([Ok(RecordedResponse::new(
+            200, body,
+        ))]));
+        let result = v2_service(transport)
+            .compact(request(vec![]), ModelCallContext::default())
+            .await;
+        if overloaded {
+            assert!(matches!(
+                result,
+                Err(ModelError::Unavailable {
+                    status: None,
+                    retry_after_ms: Some(6_000),
+                    ..
+                })
+            ));
+        } else {
+            assert!(matches!(
+                result,
+                Err(ModelError::Provider { status: None, .. })
+            ));
+        }
+    }
+}
+
+#[tokio::test]
+async fn openai_v2_compaction_never_publishes_failed_or_oversized_response() {
+    let native = json!({"type":"compaction","encrypted_content":"opaque"});
+    for response in [
+        RecordedResponse::chunked(
+            200,
+            vec![
+                BodyStep::Chunk(v2_sse(native.clone()).into_bytes()),
+                BodyStep::Fail("disconnect".into()),
+            ],
+        ),
+        RecordedResponse::new(200, "x".repeat(32 * 1024 * 1024 + 1)),
+        RecordedResponse::new(502, "{}"),
+    ] {
+        let transport = Arc::new(RecordedTransport::new([Ok(response)]));
+        assert!(
+            v2_service(transport.clone())
+                .compact(request(vec![]), ModelCallContext::default())
+                .await
+                .is_err()
+        );
+        assert_eq!(transport.take_requests().len(), 1);
+    }
+    let chunks = v2_sse(native)
+        .as_bytes()
+        .chunks(7)
+        .map(|c| BodyStep::Chunk(c.to_vec()))
+        .collect();
+    let transport = Arc::new(RecordedTransport::new([Ok(RecordedResponse::chunked(
+        200, chunks,
+    ))]));
+    v2_service(transport)
+        .compact(request(vec![]), ModelCallContext::default())
+        .await
+        .unwrap();
+}

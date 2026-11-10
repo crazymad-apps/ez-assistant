@@ -3,6 +3,7 @@ import type {
   ModelConfiguration,
   ModelConfigurationQuery,
   ModelSelection,
+  ModelPolicy,
   SaveModelConfiguration,
   SaveProviderWritable as SaveProvider,
 } from './openapi';
@@ -64,8 +65,8 @@ export const modelApi = {
 
   settings: async (token: string, signal?: AbortSignal) => (await sdk.getModelSettings(options(token, signal))).data,
 
-  setDefault: async (token: string, default_model: ModelSelection | null) =>
-    (await sdk.saveModelSettings({ ...options(token), body: { default_model } })).data,
+  savePolicy: async (token: string, policy: ModelPolicy) =>
+    (await sdk.saveModelSettings({ ...options(token), body: { policy } })).data,
 
   setPublicOrigin: async (token: string, public_origin: string | null) =>
     (await sdk.saveModelSettings({ ...options(token), body: { public_origin } })).data,

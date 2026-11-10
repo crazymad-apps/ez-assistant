@@ -2,6 +2,9 @@
 
 mod enterprise_sync;
 mod services;
+mod switch;
+use switch::OrganizationSwitch;
+pub(crate) use switch::SwitchOutcome;
 
 use crate::{
     access::{AccessError, AccessPermit, Credentials, enterprise::UserKey},
@@ -14,7 +17,10 @@ use assistant_protocol::RuntimeHostStartupError;
 use futures_util::FutureExt;
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::{
@@ -30,12 +36,14 @@ type Slot = Arc<DomainSlot>;
 struct DomainSlot {
     loaded: Arc<AsyncMutex<Option<Arc<LoadedDomain>>>>,
     startup: StartupStateHandle,
+    switching: AtomicBool,
 }
 impl DomainSlot {
     fn new(startup: StartupStateHandle) -> Self {
         Self {
             loaded: Arc::new(AsyncMutex::new(None)),
             startup,
+            switching: AtomicBool::new(false),
         }
     }
 }
@@ -71,6 +79,7 @@ struct OpenDomain {
 enum DomainRequest {
     Open(OpenDomain),
     WarmUp(AccessPermit),
+    Switch(Box<switch::SwitchJob>),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -89,6 +98,7 @@ pub(crate) struct UserDomains {
     open: mpsc::UnboundedSender<DomainRequest>,
     stopping: CancellationToken,
     stopped: watch::Receiver<Option<bool>>,
+    switches: Mutex<HashMap<String, Arc<OrganizationSwitch>>>,
 }
 
 impl UserDomains {
@@ -168,6 +178,9 @@ impl UserDomains {
                 guard = slot.loaded.clone().lock_owned() => guard,
             };
             permit.check()?;
+            if slot.switching.load(Ordering::Acquire) {
+                return Err(AccessError::Conflict.into());
+            }
             if let Some(loaded) = guard.as_ref() {
                 if !loaded.access.is_cancelled() {
                     return Ok(loaded.services.clone());
@@ -242,6 +255,7 @@ impl UserDomainService {
             open,
             stopping: CancellationToken::new(),
             stopped: completion,
+            switches: Mutex::new(HashMap::new()),
         });
         (
             Self {
@@ -302,6 +316,13 @@ impl UserDomainService {
                             if domains.ensure(&permit).await.is_err() {
                                 eprintln!("runtime-host: enterprise login warm-up unavailable");
                             }
+                            true
+                        });
+                    }
+                    DomainRequest::Switch(job) => {
+                        let domains = self.domains.clone();
+                        tasks.spawn(async move {
+                            domains.run_switch(*job).await;
                             true
                         });
                     }
@@ -406,7 +427,7 @@ async fn run_domain(
         None => Ok(credentials.personal_transport()),
     };
     let access = match access {
-        Ok(access) => access,
+        Ok(access) => access.child_token(),
         Err(error) => {
             let _ = reply.send(Err(error.into()));
             return true;
@@ -417,10 +438,13 @@ async fn run_domain(
         return true;
     }
     let home = match &key {
-        Some(key) => config
-            .runtime_home
-            .join("users")
-            .join(format!("{}_{}", key.center_id, key.user_id)),
+        Some(key) => match credentials.enterprise_home(key, &config.runtime_home.join("users")) {
+            Ok(path) => path,
+            Err(error) => {
+                let _ = reply.send(Err(error.into()));
+                return true;
+            }
+        },
         None => crate::host_layout::personal_home(&config.runtime_home),
     };
     let source = Arc::new(LocalConfigSource::new(home.join("config.toml")));
@@ -521,17 +545,24 @@ async fn run_domain(
         monitor(&services, &credentials, key.as_ref(), &access, &shutdown).await;
         // 先停 Runtime 准入和执行，再等待设备及语音服务退出。
         access.cancel();
-        services
-            .runtime
-            .request_shutdown()
-            .map_err(std::io::Error::other)
+        if slot.switching.load(Ordering::Acquire) {
+            Ok(())
+        } else {
+            services
+                .runtime
+                .request_shutdown()
+                .map_err(std::io::Error::other)
+        }
     }))
     .catch_unwind()
     .await;
     access.cancel();
-    let _ = services.runtime.request_shutdown();
     let mut guard = slot.loaded.lock().await;
-    let stopped = resources.shutdown().await;
+    let strict = slot.switching.load(Ordering::Acquire);
+    if !strict {
+        let _ = services.runtime.request_shutdown();
+    }
+    let stopped = resources.shutdown_for_switch(strict).await;
     let success = matches!(observed, Ok(Ok(()))) && stopped;
     if success {
         *guard = None;

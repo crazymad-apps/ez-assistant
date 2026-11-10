@@ -21,6 +21,7 @@ impl crate::CustomAgentDirectorySource for MutableAgentDirectory {
                 .ok_or(RuntimeError::ConfigurationUnavailable)?;
             Ok(crate::CenterCustomAgentDirectory {
                 center_id: "center-test".into(),
+                organization_id: None,
                 agents,
             })
         })
@@ -49,7 +50,10 @@ impl crate::CustomAgentDirectorySource for MutableAgentDirectory {
                 sha256: "a".repeat(64),
                 size_bytes: 7,
                 format: assistant_protocol::PluginArchiveFormat::TarGzip,
-                origin: assistant_protocol::PluginPackageOrigin::Center { center_id },
+                origin: assistant_protocol::PluginPackageOrigin::Center {
+                    center_id,
+                    organization_id: None,
+                },
                 expected_active_sha256: None,
             })
         })
@@ -161,6 +165,7 @@ async fn center_agent_catalog_refreshes_and_resolves_missing_plugin_requirements
         name: original.name.clone(),
         source: CustomAgentSource::Center {
             center_id: "center-test".into(),
+            organization_id: None,
         },
     };
     let prepared = runtime
@@ -251,6 +256,7 @@ async fn center_agent_missing_capability_can_send_and_retry_with_frozen_snapshot
         name: config.name,
         source: CustomAgentSource::Center {
             center_id: "center-test".into(),
+            organization_id: None,
         },
     });
     let prepared = runtime

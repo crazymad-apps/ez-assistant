@@ -9,8 +9,8 @@
   border: 1px solid transparent;
   border-radius: 999px;
   color: var(--ez-text-secondary);
+  background: var(--ez-surface-muted);
 
-  &[data-selected="true"] { background: var(--ez-surface-muted); }
   &:focus-within { @include fields.focus-border; }
 }
 
@@ -21,7 +21,7 @@
   min-height: 0;
   align-items: center;
   gap: 7px;
-  padding: 0 5px;
+  padding: 0 5px 0 10px;
   border: 0;
   border-radius: 999px;
   color: inherit;
@@ -34,8 +34,6 @@
   &:disabled { opacity: 0.48; }
   svg { flex: 0 0 auto; }
 }
-
-.root[data-selected="true"] .trigger { padding-left: 10px; }
 
 .trigger_name,
 .trigger_detail {
@@ -112,7 +110,7 @@
   display: flex;
   width: 100%;
   height: auto;
-  min-height: var(--ez-control-height-default);
+  min-height: var(--ez-menu-row-height);
   align-items: center;
   gap: 10px;
   padding: 0 9px;

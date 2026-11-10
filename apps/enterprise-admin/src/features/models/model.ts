@@ -1,4 +1,10 @@
-import type { CatalogSnapshot, ModelConfiguration, ModelParameters, ProviderConnection } from '../../request/openapi';
+import type {
+  CatalogSnapshot,
+  ModelConfiguration,
+  ModelParameters,
+  ModelSelection,
+  ProviderConnection,
+} from '../../request/openapi';
 import { serverHistorySupport as httpHistorySupport } from '../../../../../packages/assistant-protocol/src/server-history';
 
 /** Center 上游传输能力与个人 HTTP 配置分开，不能沿用其他服务商 HTTP store 的默认值。 */
@@ -29,8 +35,8 @@ export const providerLabels: Record<ProviderConnection['provider_type'], string>
 };
 export const reasons: Record<string, string> = {
   not_selected: '尚未选择默认模型',
-  provider_deleted: '默认服务商已删除',
-  model_absent: '默认模型不在目录且无固定配置',
+  provider_deleted: '服务商已删除',
+  model_absent: '模型不在目录且无固定配置',
   invalid_parameters: '模型参数不完整或无效',
 };
 export const supports = [
@@ -39,6 +45,9 @@ export const supports = [
   { value: 'unsupported', label: '不支持' },
 ];
 export const effortKeys = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+
+export const modelKey = (selection: ModelSelection | null) =>
+  selection ? JSON.stringify([selection.provider_instance_id, selection.model_id]) : '';
 
 export const modelPath = (id: string, model: string) =>
   `/models/providers/${id}/models/edit?${new URLSearchParams({ model_id: model })}`;

@@ -8,7 +8,7 @@ use crate::{
     config_source::LocalConfigSource,
     http::{HttpEndpointState, HttpState},
 };
-use assistant_protocol::{ClientCompatibility, SecretValue};
+use assistant_protocol::ClientCompatibility;
 use axum::{
     Json, Router,
     extract::State,
@@ -27,9 +27,11 @@ use std::{
 use tokio::{net::TcpListener, sync::Notify};
 use tokio_util::sync::CancellationToken;
 
+const ORGANIZATION_ID: &str = "01234567-89ab-4cde-8f01-23456789abce";
 const CENTER_ID: &str = "01234567-89ab-4cde-8f01-23456789abcd";
 #[derive(Default)]
 struct Mock {
+    pending_serial: AtomicUsize,
     serial: AtomicUsize,
     tokens: Mutex<HashMap<String, i32>>,
     seen: Mutex<Vec<String>>,
@@ -64,7 +66,11 @@ struct Held {
     release: Notify,
 }
 fn identity(id: i32, mismatch: bool) -> Value {
-    json!({"center_id": if mismatch { "11234567-89ab-4cde-8f01-23456789abcd" } else { CENTER_ID },
+    let expires_at = (time::OffsetDateTime::now_utc() + time::Duration::hours(1))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    json!({"legacy_organization_id": ORGANIZATION_ID, "scope": organization_scope(), "expires_at":expires_at,
+        "center_id": if mismatch { "11234567-89ab-4cde-8f01-23456789abcd" } else { CENTER_ID },
         "user":{"id":id,"username":format!("user{id}"),"display_name":format!("User {id}"),"role":"user","is_super_admin":false,"enabled":true}})
 }
 fn token(headers: &HeaderMap) -> String {
@@ -86,8 +92,32 @@ async fn mock_login(State(mock): State<Arc<Mock>>, Json(request): Json<Value>) -
             .into_response();
     }
     let id = if request["username"] == "bob" { 2 } else { 1 };
+    let serial = mock.pending_serial.fetch_add(1, Ordering::SeqCst);
+    let token = format!("pending.{serial:064x}.fixture");
+    mock.tokens.lock().unwrap().insert(token.clone(), id);
+    let mut result = identity(id, mock.mismatch.load(Ordering::SeqCst));
+    result["token"] = json!(token);
+    result["scope"] = json!({"kind":"unselected"});
+    Json(result).into_response()
+}
+
+fn organization_scope() -> Value {
+    json!({"kind":"organization","organization_id":ORGANIZATION_ID,"name":"Organization","enabled":true,"member_role":"member"})
+}
+
+async fn mock_select(
+    State(mock): State<Arc<Mock>>,
+    headers: HeaderMap,
+    Json(request): Json<Value>,
+) -> Response {
+    if request["organization_id"] != ORGANIZATION_ID {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(id) = mock.tokens.lock().unwrap().remove(&token(&headers)) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
     let serial = mock.serial.fetch_add(1, Ordering::SeqCst) + 1;
-    let token = format!("ct_{serial:064x}");
+    let token = format!("test.{serial:064x}.fixture");
     mock.tokens.lock().unwrap().insert(token.clone(), id);
     let mut result = identity(id, mock.mismatch.load(Ordering::SeqCst));
     result["token"] = json!(token);
@@ -219,12 +249,14 @@ impl Fixture {
         let center_router = Router::new()
             .route(
                 "/api/info",
-                get(|| async { Json(json!({"protocol_version":4,"min_protocol_version":4,"capabilities":["managed_models","llm_proxy"]})) }),
+                get(|| async { Json(json!({"protocol_version":6,"min_protocol_version":6,"capabilities":["managed_models","llm_proxy"]})) }),
             )
             .route("/api/runtime/model-configuration", get(runtime::models::configuration))
             .route("/api/llm/providers/{provider}/v1/chat/completions", post(runtime::models::proxy))
             .route("/api/llm/providers/{provider}/v1/responses", post(runtime::models::proxy))
             .route("/api/auth/login", post(mock_login))
+            .route("/api/auth/scopes", get(|| async { Json(json!([organization_scope()])) }))
+            .route("/api/auth/scope", post(mock_select))
             .route("/api/auth/me", get(mock_me))
             .route("/api/auth/logout", post(mock_logout))
             .route("/api/runtime/agents", get(|State(mock): State<Arc<Mock>>| async move {
@@ -349,9 +381,28 @@ impl Fixture {
         }
         request
     }
-    async fn login(&self, username: &str) -> String {
+    async fn begin_login(&self, username: &str) -> String {
         let response = self.request(reqwest::Method::POST, "/auth/login", None)
             .json(&json!({"method":"enterprise","username":username,"password":"password1","native":true})).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!response.headers().contains_key("set-cookie"));
+        let value = response.json::<Value>().await.unwrap();
+        assert!(value["token"].is_null());
+        value["organization_selection"]["selection_token"]
+            .as_str()
+            .unwrap()
+            .into()
+    }
+
+    async fn choose_organization(&self, selection_token: &str) -> reqwest::Response {
+        self.request(reqwest::Method::POST, "/auth/login", None)
+            .json(&json!({"method":"enterprise_select","selection_token":selection_token,"organization_id":ORGANIZATION_ID}))
+            .send().await.unwrap()
+    }
+
+    async fn login(&self, username: &str) -> String {
+        let selection = self.begin_login(username).await;
+        let response = self.choose_organization(&selection).await;
         assert_eq!(response.status(), StatusCode::OK);
         let value = response.json::<Value>().await.unwrap();
         assert_eq!(value["identity"]["center_id"], CENTER_ID);
@@ -399,9 +450,15 @@ async fn all_clients_use_latest_credentials_and_logout_only_ends_that_user() {
     let second = f.login("alice").await;
     assert_eq!(f.mock.logout_calls.load(Ordering::SeqCst), 0);
     assert_eq!(f.session(&first).await.status(), StatusCode::OK);
+    f.state
+        .access
+        .credentials
+        .verify_enterprise(&mut f.permit(&first))
+        .await
+        .unwrap();
     assert_eq!(
         f.mock.seen.lock().unwrap().last().unwrap(),
-        &format!("ct_{:064x}", 3)
+        &format!("test.{:064x}.fixture", 3)
     );
     let failed = f
         .request(reqwest::Method::POST, "/auth/login", None)
@@ -541,17 +598,51 @@ async fn unavailable_retains_tokens_but_explicit_invalidity_ends_user_and_logout
         .verify_enterprise(&mut permit)
         .await
         .unwrap();
+    let key = permit.user_key().unwrap().clone();
+    let (domain_lifetime, activity) = f.state.access.credentials.domain_access(&key).unwrap();
+    let login = f
+        .state
+        .access
+        .credentials
+        .model_login(&key, &activity)
+        .unwrap();
     f.mock.unavailable.store(true, Ordering::SeqCst);
-    assert_eq!(
-        f.session(&token).await.status(),
-        StatusCode::SERVICE_UNAVAILABLE
+    assert_eq!(f.session(&token).await.status(), StatusCode::OK);
+    assert!(matches!(
+        f.state
+            .access
+            .credentials
+            .verify_enterprise(&mut permit)
+            .await,
+        Err(AccessError::Center(CenterError::Unavailable))
+    ));
+    assert!(permit.check().is_ok());
+    assert!(
+        !domain_lifetime.is_cancelled(),
+        "network failure must not stop the Runtime"
     );
-    assert!(permit.check().is_err());
+    assert!(Arc::ptr_eq(
+        &login,
+        &f.state
+            .access
+            .credentials
+            .model_login(&key, &activity)
+            .unwrap()
+    ));
     assert!(f.state.access.credentials.authenticate(&token).is_some());
     f.mock.unavailable.store(false, Ordering::SeqCst);
     assert_eq!(f.session(&token).await.status(), StatusCode::OK);
     f.mock.tokens.lock().unwrap().clear();
+    assert!(matches!(
+        f.state
+            .access
+            .credentials
+            .verify_enterprise(&mut permit)
+            .await,
+        Err(AccessError::Center(CenterError::InvalidCredentials))
+    ));
     assert_eq!(f.session(&token).await.status(), StatusCode::UNAUTHORIZED);
+    assert!(domain_lifetime.is_cancelled());
     let new_token = f.login("alice").await;
     f.mock.unavailable.store(true, Ordering::SeqCst);
     // 中心离线且客户端没有版本声明时，仍要完成本机退出并送达结果。
@@ -621,24 +712,11 @@ async fn center_binding_mismatch_rejects_login_and_revokes_only_unpublished_cred
     let saved = std::fs::read_to_string(f.home.path().join("host.toml")).unwrap();
     assert!(saved.contains(CENTER_ID));
     f.mock.mismatch.store(true, Ordering::SeqCst);
-    let client = f.state.access.center().unwrap();
-    let result = f
-        .state
-        .access
-        .credentials
-        .enterprise_login(
-            &client,
-            &f.state.access,
-            "alice".into(),
-            SecretValue::new("password1".into()),
-            ClientCompatibility::current(),
-            &f.shutdown,
-        )
-        .await;
-    assert!(matches!(
-        result,
-        Err(AccessError::Center(CenterError::IdentityMismatch))
-    ));
+    let selection = f.begin_login("alice").await;
+    assert_eq!(
+        f.choose_organization(&selection).await.status(),
+        StatusCode::CONFLICT
+    );
     assert_eq!(f.mock.logout_calls.load(Ordering::SeqCst), 1);
     f.mock.mismatch.store(false, Ordering::SeqCst);
     assert_eq!(f.session(&token).await.status(), StatusCode::OK);
@@ -672,7 +750,7 @@ async fn stalled_identity_check_is_bounded_and_does_not_revoke_credentials() {
         Err(AccessError::Center(CenterError::Unavailable))
     ));
     tokio::time::resume();
-    assert!(old.check().is_err());
+    assert!(old.check().is_ok());
     assert!(f.state.access.credentials.authenticate(&token).is_some());
     held.release.notify_one();
     assert_eq!(f.session(&token).await.status(), StatusCode::OK);
@@ -730,19 +808,110 @@ async fn login_capacity_failure_keeps_current_credentials_and_cleans_new_center_
             .issue(&permit, ClientCompatibility::current())
             .unwrap();
     }
-    let response = f
-        .request(reqwest::Method::POST, "/auth/login", None)
-        .json(
-            &json!({"method":"enterprise","username":"alice","password":"password1","native":true}),
-        )
-        .send()
-        .await
-        .unwrap();
+    let selection = f.begin_login("alice").await;
+    let response = f.choose_organization(&selection).await;
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(f.mock.logout_calls.load(Ordering::SeqCst), 1);
+    f.state
+        .access
+        .credentials
+        .verify_enterprise(&mut f.permit(&token))
+        .await
+        .unwrap();
     assert_eq!(f.session(&token).await.status(), StatusCode::OK);
     assert_eq!(
         f.mock.seen.lock().unwrap().last().unwrap(),
-        &format!("ct_{:064x}", 1)
+        &format!("test.{:064x}.fixture", 1)
+    );
+}
+
+#[tokio::test]
+async fn supervisor_outage_preserves_access_and_revocation_ends_access_and_domain() {
+    let f = Fixture::new().await;
+    let token = f.login("alice").await;
+    let mut permit = f.permit(&token);
+    f.state
+        .access
+        .credentials
+        .verify_enterprise(&mut permit)
+        .await
+        .unwrap();
+    let (domain, _activity) = f
+        .state
+        .access
+        .credentials
+        .domain_access(permit.user_key().unwrap())
+        .unwrap();
+    f.mock.unavailable.store(true, Ordering::SeqCst);
+    let first = Arc::new(Held::default());
+    let next = Arc::new(Held::default());
+    *f.mock.hold.lock().unwrap() = Some(first.clone());
+    let credentials = f.state.access.credentials.clone();
+    let shutdown = CancellationToken::new();
+    let stop = shutdown.clone();
+    let checker = tokio::spawn(async move { credentials.recheck_connections(stop).await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), first.started.notified())
+        .await
+        .unwrap();
+    *f.mock.hold.lock().unwrap() = Some(next.clone());
+    first.release.notify_one();
+    // 下一轮开始证明上一轮失败结果已提交；推进逻辑时钟，不等待真实 30 秒。
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(31)).await;
+    tokio::time::resume();
+    tokio::time::timeout(std::time::Duration::from_secs(5), next.started.notified())
+        .await
+        .unwrap();
+    assert!(permit.check().is_ok());
+    assert!(!domain.is_cancelled());
+    assert!(f.state.access.credentials.authenticate(&token).is_some());
+    shutdown.cancel();
+    checker.await.unwrap();
+    next.release.notify_one();
+    f.mock.unavailable.store(false, Ordering::SeqCst);
+    f.mock.tokens.lock().unwrap().clear();
+    let credentials = f.state.access.credentials.clone();
+    let shutdown = CancellationToken::new();
+    let stop = shutdown.clone();
+    let checker = tokio::spawn(async move { credentials.recheck_connections(stop).await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), domain.cancelled())
+        .await
+        .unwrap();
+    assert!(f.state.access.credentials.authenticate(&token).is_none());
+    assert!(permit.check().is_err());
+    shutdown.cancel();
+    checker.await.unwrap();
+}
+
+#[tokio::test]
+async fn local_socket_auth_uses_host_identity_during_center_outage_and_observes_revocation() {
+    let f = Fixture::new().await;
+    let token = f.login("alice").await;
+    let source = f.permit(&token);
+    let context = source.login_context();
+    let auth = crate::http::socket_auth::SocketAuthentication {
+        state: f.state.clone(),
+        headers: HeaderMap::new(),
+        peer: "127.0.0.1:12345".parse().unwrap(),
+        permit: Some(source),
+        target: None,
+    };
+    f.mock.unavailable.store(true, Ordering::SeqCst);
+    let permit = crate::http::socket_auth::authenticate(&auth, None, context.as_deref())
+        .await
+        .unwrap();
+    assert!(permit.check().is_ok());
+    assert!(f.mock.seen.lock().unwrap().is_empty());
+    assert!(
+        crate::http::socket_auth::authenticate(&auth, None, Some("stale-account"))
+            .await
+            .is_err()
+    );
+    f.state.access.credentials.enterprise_logout(&permit).await;
+    assert!(permit.check().is_err());
+    assert!(
+        crate::http::socket_auth::authenticate(&auth, None, context.as_deref())
+            .await
+            .is_err()
     );
 }

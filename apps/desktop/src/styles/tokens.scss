@@ -6,6 +6,8 @@
   --ez-control-height-small: 24px;
   --ez-control-height-default: 32px;
   --ez-control-height-large: 40px;
+  // 菜单 header 与单行选项共用；多行选项以此作为最小高度。
+  --ez-menu-row-height: var(--ez-control-height-default);
   --ez-radius-small: 7px;
   --ez-radius-medium: 11px;
   --ez-radius-large: 15px;
@@ -27,5 +29,5 @@
   --ez-z-popover: 36;
   --ez-z-toast: 40;
   --conversation-content-max-width: 820px;
-  --conversation-horizontal-padding: clamp(12px, 3vw, 24px);
+  --ez-conversation-edge-spacing: 16px;
 }

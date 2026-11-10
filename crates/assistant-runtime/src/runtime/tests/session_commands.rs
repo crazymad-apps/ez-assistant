@@ -625,6 +625,7 @@ async fn mcp_connection_test_and_refresh_share_schema_duplicates_and_size_valida
         input_schema: serde_json::json!({"type":"object"}),
         output_schema: None,
         annotations: None,
+        meta: None,
     };
     let invalid = crate::McpToolDefinition {
         input_schema: serde_json::json!({"$schema":"https://invalid.test/schema"}),

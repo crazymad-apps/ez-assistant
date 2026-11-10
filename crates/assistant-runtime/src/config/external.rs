@@ -1,16 +1,17 @@
 //! 受信宿主提供的进程内模型配置；不含凭据，不读写本地模型存储。
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use agent_model::GenerationConfig;
 use assistant_protocol::{
-    ModelParameters, ModelSelection, ProviderConnection, ProviderInstanceId, SecretValue,
+    ModelParameters, ModelSelection, ModelSelectionSource, ProviderConnection, ProviderInstanceId,
+    SecretValue,
 };
 
 use super::managed_model::compile_managed_model;
 use crate::{RuntimeError, RuntimeResult, StoredProvider};
 
-/// 用户域装配时固定的模型权威来源，与产品模式和身份无关。
+/// 用户域装配时确定默认模型的权威来源。外部模式仍保存并使用本地显式配置。
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ModelSource {
     #[default]
@@ -32,6 +33,7 @@ impl ExternalModelConfiguration {
     /// # Errors
     /// 无效连接、模型标识或不完整执行参数返回配置错误。
     pub fn new(
+        provider_instance_id: ProviderInstanceId,
         connection: ProviderConnection,
         model_id: String,
         parameters: ModelParameters,
@@ -49,8 +51,8 @@ impl ExternalModelConfiguration {
             return Err(RuntimeError::ConfigurationUnavailable);
         }
         let selection = ModelSelection {
-            provider_instance_id: ProviderInstanceId::new("managed".to_owned())
-                .map_err(|_| RuntimeError::ConfigurationUnavailable)?,
+            source: ModelSelectionSource::Organization,
+            provider_instance_id,
             model_id,
         };
         super::validation::validate_selection(&selection)?;
@@ -115,7 +117,29 @@ impl ExternalModelConfiguration {
         self.provider.server_history_key.as_deref()
     }
 
-    pub(crate) fn selection(&self) -> &ModelSelection {
+    pub fn selection(&self) -> &ModelSelection {
         &self.selection
+    }
+}
+
+/// 同一身份下发的一次完整结果。逐项不可用保留引用，空集合表示中心尚未授权模型。
+/// 每项拥有自己的执行配置 Arc，晚到拒绝仅能使本次捕获的同一项失效。
+pub struct ExternalModelSet {
+    pub default_model: Option<ModelSelection>,
+    pub allow_member_selection: bool,
+    pub models: BTreeMap<ModelSelection, Result<Arc<ExternalModelConfiguration>, &'static str>>,
+}
+
+impl ExternalModelSet {
+    pub(crate) fn reason(&self) -> Option<String> {
+        match self
+            .default_model
+            .as_ref()
+            .and_then(|selection| self.models.get(selection))
+        {
+            Some(Ok(_)) => None,
+            Some(Err(reason)) => Some((*reason).to_owned()),
+            None => Some("管理员尚未配置组织默认模型。".to_owned()),
+        }
     }
 }

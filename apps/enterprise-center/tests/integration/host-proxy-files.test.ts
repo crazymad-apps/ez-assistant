@@ -1,3 +1,4 @@
+import { singleModelPolicy } from '../support/model-policy.js';
 import { readFile, mkdir, writeFile, readdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createServer } from 'node:http';
@@ -760,11 +761,13 @@ async function configureModel() {
     payload: {},
   });
   expect(refreshed.statusCode, refreshed.body).toBe(200);
+  const settings = await app!.inject({ method: 'GET', url: '/api/model-settings', headers: headers(admin) });
+  expect(settings.statusCode, settings.body).toBe(200);
   const selected = await app!.inject({
     method: 'PUT',
     url: '/api/model-settings',
     headers: headers(admin),
-    payload: { default_model: { provider_instance_id: providerId, model_id: 'gpt-6-astra' } },
+    payload: singleModelPolicy(settings.json(), { provider_instance_id: providerId, model_id: 'gpt-6-astra' }),
   });
   expect(selected.statusCode, selected.body).toBe(200);
 }

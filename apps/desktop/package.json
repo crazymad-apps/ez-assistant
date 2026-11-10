@@ -1,7 +1,7 @@
 {
   "name": "@ez-assistant/desktop",
   "private": true,
-  "version": "0.32.1",
+  "version": "0.33.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -20,6 +20,7 @@
     "test": "npm run check:protocol && vitest run",
     "test:packaging": "node --test tests/unit/sidecar-packaging.test.mjs tests/unit/macos-packaging.test.mjs",
     "test:e2e": "npm run build:host && playwright test",
+    "test:native:mcp-apps": "node scripts/verify-mcp-apps-native.mjs",
     "test:e2e:web": "npm run build:host && playwright test --config playwright.web.config.ts",
     "test:e2e:enterprise": "npm run build:host && playwright test --config playwright.enterprise.config.ts",
     "preview": "vite preview",
@@ -33,6 +34,9 @@
   },
   "dependencies": {
     "@ez-assistant/protocol": "file:../../packages/assistant-protocol",
+    "@modelcontextprotocol/client": "2.0.0",
+    "@modelcontextprotocol/core": "2.0.0",
+    "@modelcontextprotocol/ext-apps": "2.0.4",
     "@streamdown/code": "1.1.1",
     "@streamdown/math": "1.0.2",
     "@streamdown/mermaid": "1.0.2",
@@ -48,7 +52,8 @@
     "react-zoom-pan-pinch": "4.2.0",
     "streamdown": "2.5.0",
     "three": "0.134.0",
-    "vanta": "0.5.24"
+    "vanta": "0.5.24",
+    "zod": "4.2.0"
   },
   "devDependencies": {
     "@playwright/test": "1.62.1",

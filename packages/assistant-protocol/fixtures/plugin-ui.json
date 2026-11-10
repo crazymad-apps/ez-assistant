@@ -1,0 +1,295 @@
+{
+  "base": {
+    "format_version": 2,
+    "name": "ui-fixture",
+    "display_name": "UI fixture",
+    "description": "",
+    "version": "1.0.0",
+    "min_host_version": "0.33.0",
+    "platforms": [
+      {
+        "os": "macos",
+        "arch": "arm64"
+      }
+    ],
+    "skills": [],
+    "mcp": [],
+    "configuration": [],
+    "external_software": [],
+    "ui": {
+      "entries": [
+        {
+          "id": "counter",
+          "title": "Counter",
+          "kind": "card",
+          "resource": {
+            "type": "package",
+            "path": "resources/counter.html"
+          },
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "count": {
+                "type": "integer"
+              }
+            },
+            "additionalProperties": false
+          },
+          "capabilities": [
+            "save-snapshot"
+          ],
+          "snapshot_schema": "v1",
+          "readable_snapshot_schemas": [
+            "v1"
+          ]
+        }
+      ]
+    }
+  },
+  "cases": [
+    {
+      "name": "pure card package",
+      "accept": true,
+      "patches": []
+    },
+    {
+      "name": "old v1 cannot silently accept UI",
+      "accept": false,
+      "patches": [
+        {
+          "path": "/format_version",
+          "value": 1
+        }
+      ]
+    },
+    {
+      "name": "v2 requires compatible host",
+      "accept": false,
+      "patches": [
+        {
+          "path": "/min_host_version",
+          "value": "0.32.2"
+        }
+      ]
+    },
+    {
+      "name": "entries cannot be empty",
+      "accept": false,
+      "patches": [
+        {
+          "path": "/ui/entries",
+          "value": []
+        }
+      ]
+    },
+    {
+      "name": "resource path cannot escape",
+      "accept": false,
+      "patches": [
+        {
+          "path": "/ui/entries/0/resource/path",
+          "value": "resources/../outside.html"
+        }
+      ]
+    },
+    {
+      "name": "resource cannot be arbitrary URL",
+      "accept": false,
+      "patches": [
+        {
+          "path": "/ui/entries/0/resource",
+          "value": {
+            "type": "package",
+            "path": "https://example.invalid/app.html"
+          }
+        }
+      ]
+    },
+    {
+      "name": "unknown entry fields rejected",
+      "accept": false,
+      "patches": [
+        {
+          "path": "/ui/entries/0/unknown",
+          "value": true
+        }
+      ]
+    },
+    {
+      "name": "undeclared MCP server rejected",
+      "accept": false,
+      "patches": [
+        {
+          "path": "/ui/entries/0/resource",
+          "value": {
+            "type": "mcp",
+            "server": "missing",
+            "uri": "ui://card"
+          }
+        }
+      ]
+    },
+    {
+      "name": "invalid schema rejected",
+      "accept": false,
+      "patches": [
+        {
+          "path": "/ui/entries/0/input_schema",
+          "value": {
+            "type": "invalid-type"
+          }
+        }
+      ]
+    },
+    {
+      "name": "external schema references rejected",
+      "accept": false,
+      "patches": [
+        {
+          "path": "/ui/entries/0/input_schema",
+          "value": {
+            "$ref": "https://example.invalid/schema"
+          }
+        }
+      ]
+    },
+    {
+      "name": "CSP injection rejected",
+      "accept": false,
+      "patches": [
+        {
+          "path": "/ui/entries/0/csp",
+          "value": {
+            "connectDomains": [
+              "https://example.invalid; script-src *"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "CSP canonical origins accepted",
+      "accept": true,
+      "patches": [
+        {
+          "path": "/ui/entries/0/csp",
+          "value": {
+            "connectDomains": [
+              "https://api.example.invalid",
+              "wss://ws.example.invalid"
+            ],
+            "resourceDomains": [
+              "https://assets.example.invalid"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "duplicate capabilities rejected",
+      "accept": false,
+      "patches": [
+        {
+          "path": "/ui/entries/0/capabilities",
+          "value": [
+            "save-snapshot",
+            "save-snapshot"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "app cannot declare a card snapshot",
+      "accept": false,
+      "patches": [
+        {
+          "path": "/ui/entries/0/kind",
+          "value": "app"
+        }
+      ]
+    },
+    {
+      "name": "pure application accepted",
+      "accept": true,
+      "patches": [
+        {
+          "path": "/ui/entries/0/kind",
+          "value": "app"
+        },
+        {
+          "path": "/ui/entries/0/snapshot_schema",
+          "remove": true
+        },
+        {
+          "path": "/ui/entries/0/readable_snapshot_schemas",
+          "value": []
+        },
+        {
+          "path": "/ui/entries/0/capabilities",
+          "value": []
+        }
+      ]
+    },
+    {
+      "name": "duplicate entry identifiers rejected",
+      "accept": false,
+      "patches": [
+        {
+          "path": "/ui/entries",
+          "value": [
+            {
+              "id": "counter",
+              "title": "Counter",
+              "kind": "card",
+              "resource": {
+                "type": "package",
+                "path": "resources/counter.html"
+              },
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "count": {
+                    "type": "integer"
+                  }
+                },
+                "additionalProperties": false
+              },
+              "capabilities": [
+                "save-snapshot"
+              ],
+              "snapshot_schema": "v1",
+              "readable_snapshot_schemas": [
+                "v1"
+              ]
+            },
+            {
+              "id": "counter",
+              "title": "Counter",
+              "kind": "card",
+              "resource": {
+                "type": "package",
+                "path": "resources/counter.html"
+              },
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "count": {
+                    "type": "integer"
+                  }
+                },
+                "additionalProperties": false
+              },
+              "capabilities": [
+                "save-snapshot"
+              ],
+              "snapshot_schema": "v1",
+              "readable_snapshot_schemas": [
+                "v1"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

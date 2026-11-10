@@ -81,6 +81,9 @@ impl VolatileRuntimeStore {
                 .feedback
                 .retain(|_, request| request.session_id != clear.session_id);
             state.work_plans.remove(&clear.session_id);
+            state.message_cards.retain(|_, card| {
+                crate::message_card_owner(&card.summary.owner).0 != &clear.session_id
+            });
             state
                 .work_plan_completion_receipts
                 .retain(|(session_id, _), _| session_id != &clear.session_id);

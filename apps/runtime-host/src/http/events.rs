@@ -21,6 +21,10 @@ pub(super) async fn stream_events(
     Ok(Sse::new(project_events(
         services.runtime.subscribe_event_envelopes(),
         services.device_gateway.subscribe_events(),
+        state
+            .access
+            .credentials
+            .subscribe_center_availability(&permit),
         state.shutdown,
     ))
     .keep_alive(
@@ -35,17 +39,34 @@ pub(super) async fn stream_events(
 fn project_events(
     mut runtime_receiver: broadcast::Receiver<assistant_protocol::RuntimeEventEnvelope>,
     mut device_receiver: broadcast::Receiver<assistant_protocol::DeviceGatewayEvent>,
+    mut center: Option<tokio::sync::watch::Receiver<bool>>,
     shutdown: CancellationToken,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     let stream = async_stream::stream! {
         // 立即写出一个无业务语义的帧，避免 WebView 等待 keep-alive 首字节后才认为
         // SSE 已建立。客户端会忽略 comment，但仍能保证先订阅事件、再读取快照。
         yield Ok(Event::default().comment("connected"));
+        // Host 连接状态独立于 Runtime 事件水位；新订阅先收到当前值，无需额外查询。
+        if let Some(center) = &mut center {
+            let available = *center.borrow_and_update();
+            yield Ok(center_status_event(available));
+        }
         loop {
             let received = tokio::select! {
                 () = shutdown.cancelled() => break,
                 received = runtime_receiver.recv() => EventSource::Runtime(received.map(Box::new)),
                 received = device_receiver.recv() => EventSource::Device(received),
+                changed = async { match &mut center {
+                    Some(center) => center.changed().await,
+                    None => std::future::pending().await,
+                }} => {
+                    if changed.is_err() { break; }
+                    if let Some(center) = &mut center {
+                        let available = *center.borrow_and_update();
+                        yield Ok(center_status_event(available));
+                    }
+                    continue;
+                },
             };
             match received {
                 EventSource::Runtime(Ok(event)) => {
@@ -85,6 +106,13 @@ enum EventSource {
     Device(Result<assistant_protocol::DeviceGatewayEvent, broadcast::error::RecvError>),
 }
 
+// 传输层控制事件；不进入会话历史或 Runtime sequence，旧客户端可以忽略。
+fn center_status_event(available: bool) -> Event {
+    Event::default()
+        .event("center_status")
+        .data(serde_json::json!({ "available": available }).to_string())
+}
+
 fn stream_gap_data(dropped_events: u64) -> String {
     serde_json::json!({ "dropped_events": dropped_events }).to_string()
 }
@@ -102,7 +130,7 @@ mod tests {
         let (sender, receiver) = broadcast::channel(4);
         let (_device, devices) = broadcast::channel(4);
         let host = CancellationToken::new();
-        let events = project_events(receiver, devices, host.clone());
+        let events = project_events(receiver, devices, None, host.clone());
         tokio::pin!(events);
         assert!(events.next().await.is_some());
         sender
@@ -124,8 +152,13 @@ mod tests {
         let shutdown = CancellationToken::new();
         shutdown.cancel();
 
-        let response =
-            Sse::new(project_events(runtime_receiver, device_receiver, shutdown)).into_response();
+        let response = Sse::new(project_events(
+            runtime_receiver,
+            device_receiver,
+            None,
+            shutdown,
+        ))
+        .into_response();
         let body = to_bytes(response.into_body(), 1_024)
             .await
             .expect("SSE body");
@@ -144,6 +177,7 @@ mod tests {
         let response = Sse::new(project_events(
             runtime_receiver,
             device_receiver,
+            None,
             CancellationToken::new(),
         ))
         .into_response();
@@ -154,6 +188,34 @@ mod tests {
 
         assert!(body.contains("event: stream_gap\n"));
         assert!(body.contains("data: {\"dropped_events\":1}\n\n"));
+    }
+
+    #[tokio::test]
+    async fn center_status_sends_current_value_and_recovery_without_runtime_events() {
+        let (_runtime, events) = broadcast::channel(1);
+        let (_device, devices) = broadcast::channel(1);
+        let (center, status) = tokio::sync::watch::channel(false);
+        let stream = project_events(events, devices, Some(status), CancellationToken::new());
+        tokio::pin!(stream);
+        let _ = stream.next().await.unwrap().unwrap(); // connected
+        let initial = stream.next().await.unwrap().unwrap();
+        center.send_replace(true);
+        let recovered = stream.next().await.unwrap().unwrap();
+        let body = to_bytes(
+            Sse::new(futures_util::stream::iter([
+                Ok::<_, Infallible>(initial),
+                Ok(recovered),
+            ]))
+            .into_response()
+            .into_body(),
+            1024,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(body.to_vec()).unwrap(),
+            "event: center_status\ndata: {\"available\":false}\n\nevent: center_status\ndata: {\"available\":true}\n\n"
+        );
     }
 
     #[test]
@@ -169,7 +231,13 @@ mod tests {
             .send(assistant_protocol::DeviceGatewayEvent::Changed)
             .expect("device event");
         let response = Sse::new(
-            project_events(runtime_receiver, device_receiver, CancellationToken::new()).take(2),
+            project_events(
+                runtime_receiver,
+                device_receiver,
+                None,
+                CancellationToken::new(),
+            )
+            .take(2),
         )
         .into_response();
         let body = to_bytes(response.into_body(), 1_024)

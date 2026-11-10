@@ -75,6 +75,8 @@ async fn fixture() -> (FeedbackAccess, Arc<Mock>, tokio::task::JoinHandle<()>) {
     });
     let credentials = Arc::new(Credentials::new());
     let identity = HostUserIdentity {
+        organization_id: "00000000-0000-4000-8000-000000000010".into(),
+        organization_name: "Organization".into(),
         center_id: "01234567-89ab-4cde-8f01-23456789abcd".into(),
         user_id: 1,
         username: "alice".into(),
@@ -89,10 +91,13 @@ async fn fixture() -> (FeedbackAccess, Arc<Mock>, tokio::task::JoinHandle<()>) {
                 token: SecretValue::new("ct_fixture".into()),
                 llm_key: SecretValue::new("cl_fixture".into()),
                 checking: Mutex::new(None),
+                expires_at_ms: u64::MAX,
+                legacy_organization_id: "00000000-0000-4000-8000-000000000010".into(),
             }),
             identity,
             connections: CancellationToken::new(),
             activity: Arc::new(()),
+            center_available: tokio::sync::watch::channel(true).0,
         },
     );
     (FeedbackAccess::new(credentials, Some(key)), mock, task)
@@ -180,6 +185,8 @@ async fn replaced_credentials_and_cancelled_domain_discard_late_receipts() {
                     token: SecretValue::new("new-login".into()),
                     llm_key: SecretValue::new("new-llm".into()),
                     checking: Mutex::new(None),
+                    expires_at_ms: u64::MAX,
+                    legacy_organization_id: "00000000-0000-4000-8000-000000000010".into(),
                 });
             }
         }

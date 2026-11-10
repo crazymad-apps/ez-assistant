@@ -9,6 +9,7 @@ import { create as createTar } from 'tar';
 import { ZipFile } from 'yazl';
 import { scanArchive } from '../../dist/plugins/archive.js';
 import { PluginFiles } from '../../dist/plugins/files.js';
+import type { DataSource } from 'typeorm';
 import { PluginService } from '../../dist/plugins/service.js';
 import type { IdentityService } from '../../dist/identity/service.js';
 
@@ -240,10 +241,13 @@ it('提交结果未知时保留已发布 SHA 文件供读取核对，不自动�
   await zip(entries(), path);
   const files = new PluginFiles(join(root, 'ambiguous-commit-packages'));
   await files.initialize();
-  const identities = { write: async () => { throw new Error('simulated ambiguous commit'); } } as unknown as IdentityService;
-  const service = new PluginService(identities, undefined, files);
+  const identities = {
+    requireOrganizationAdmin: async () => ({ user: { id: 1 }, organizationId: 'test-org' }),
+    write: async () => { throw new Error('simulated ambiguous commit'); },
+  } as unknown as IdentityService;
+  const service = new PluginService(identities, { isInitialized: true } as DataSource, files);
   try {
-    await expect(service.upload(createReadStream(path), 'zip', 'token', 'request', 1))
+    await expect(service.upload(createReadStream(path), 'zip', 'token', 'request'))
       .rejects.toMatchObject({ code: 'PACKAGE_RESULT_UNKNOWN' });
     const published = await readdir(join(root, 'ambiguous-commit-packages', 'packages'));
     expect(published).toHaveLength(1);

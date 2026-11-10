@@ -452,7 +452,7 @@ function ResourceActionMenuItem(props: Readonly<{
     <DropdownMenuItem className={styles.resource_action_menu_item} onSelect={props.on_select}>
       <Icon name={props.icon} size={16} />
       <span>{props.label}</span>
-      {props.checked && <Icon name="check" size={14} />}
+      {props.checked && <Icon name="check-circle-fill" size={16} />}
     </DropdownMenuItem>
   );
 }
@@ -483,7 +483,7 @@ function OpaqueResourceBreadcrumb(props: Readonly<{
             <DropdownMenuItem disabled={item.disabled} key={item.key} onSelect={() => props.on_select(item)}>
               <ResourceMaterialIcon name={item.name} kind="file" className={styles.breadcrumb_file_icon} />
               <span>{item.name}</span>
-              {item.name === props.name && <Icon name="check" size={14} />}
+              {item.name === props.name && <Icon name="check-circle-fill" size={16} />}
             </DropdownMenuItem>
           ))}
         </DropdownMenuContent>
@@ -666,7 +666,7 @@ function LocalSiblingMenu(props: Readonly<{
               ? <ResourceMaterialIcon name={entry.display_name} kind="folder" root={false} className={styles.breadcrumb_file_icon} />
               : <ResourceMaterialIcon name={entry.display_name} kind="file" className={styles.breadcrumb_file_icon} />}
             <span>{entry.display_name}</span>
-            {(entry.current || entry.display_name === props.current_name) && <Icon name="check" size={14} />}
+            {(entry.current || entry.display_name === props.current_name) && <Icon name="check-circle-fill" size={16} />}
           </DropdownMenuItem>
         ))}
       </DropdownMenuContent>
@@ -737,7 +737,7 @@ function RootBreadcrumbSiblings(props: Readonly<{
           <DropdownMenuItem key={root.label} onSelect={() => props.on_focus_workspace(root.locator)}>
             <ResourceMaterialIcon name={root.label} kind="folder" root={true} className={styles.breadcrumb_file_icon} />
             <span>{root.label}</span>
-            {root.label === props.current_name && <Icon name="check" size={14} />}
+            {root.label === props.current_name && <Icon name="check-circle-fill" size={16} />}
           </DropdownMenuItem>
         ))}
       </DropdownMenuContent>
@@ -791,7 +791,7 @@ function BreadcrumbSiblings(props: Readonly<{
               ? <ResourceMaterialIcon name={entry.display_name} kind="folder" root={false} className={styles.breadcrumb_file_icon} />
               : <ResourceMaterialIcon name={entry.display_name} kind="file" className={styles.breadcrumb_file_icon} />}
             <span>{entry.display_name}</span>
-            {entry.display_name === props.current_name && <Icon name="check" size={14} />}
+            {entry.display_name === props.current_name && <Icon name="check-circle-fill" size={16} />}
           </DropdownMenuItem>
         ))}
       </DropdownMenuContent>

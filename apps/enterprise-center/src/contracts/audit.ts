@@ -25,7 +25,7 @@ export class AuditQuery extends PageQuery {
 }
 export class AuditUserFields {
   @ApiPropertyOptional({ type: String }) readonly display_name?: string;
-  @ApiPropertyOptional({ enum: ['user', 'admin'] }) readonly role?: 'user' | 'admin';
+  @ApiPropertyOptional({ enum: ['user', 'admin', 'system_admin'] }) readonly role?: 'user' | 'admin' | 'system_admin';
   @ApiPropertyOptional({ type: Boolean }) readonly enabled?: boolean;
 }
 export class AuditDetails {
@@ -44,6 +44,7 @@ export class AuditDetails {
   @ApiPropertyOptional({ type: String, pattern: '^[0-9a-f]{64}$' }) previous_sha256?: string;
   @ApiPropertyOptional({ type: Number, minimum: 0, maximum: 256 }) skill_count?: number;
   @ApiPropertyOptional({ type: Number, minimum: 0, maximum: 256 }) mcp_count?: number;
+  @ApiPropertyOptional({ type: String, format: 'uuid' }) device_id?: string;
   @ApiPropertyOptional({ type: String, format: 'uuid' }) call_id?: string;
   @ApiPropertyOptional({ enum: ['request', 'response', 'upstream_failure'] }) side?:
     'request' | 'response' | 'upstream_failure';
@@ -54,6 +55,7 @@ export class AuditDetails {
   @ApiPropertyOptional({ type: String, format: 'uuid' }) provider_instance_id?: string;
   @ApiPropertyOptional({ type: String }) model_id?: string;
   @ApiPropertyOptional({ type: Number, minimum: 0 }) model_count?: number;
+  @ApiPropertyOptional({ type: Boolean }) allow_member_selection?: boolean;
   @ApiPropertyOptional({ type: Number, minimum: 0 }) count?: number;
   @ApiPropertyOptional({ type: ModelSelection, nullable: true }) default_model?: ModelSelection | null;
   @ApiPropertyOptional({ type: String, nullable: true }) public_origin?: string | null;

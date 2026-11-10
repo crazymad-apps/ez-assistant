@@ -213,7 +213,7 @@ function openLocalMenuFromPointer(
   if (!local.menu) return;
   event.preventDefault();
   event.stopPropagation();
-  event.currentTarget.focus();
+  event.currentTarget.focus({ preventScroll: true });
   local.menu(reference, { x: event.clientX, y: event.clientY });
 }
 

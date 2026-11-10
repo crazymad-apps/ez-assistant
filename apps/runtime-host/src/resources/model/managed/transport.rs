@@ -9,6 +9,44 @@ use futures_util::StreamExt;
 
 use super::*;
 
+/// 个人连接沿原直连传输发送；只校验所属用户域仍有效，不读取或附加中心模型凭据。
+pub(super) struct PersonalModelTransport {
+    loader: Arc<CenterModelLoader>,
+    inner: ReqwestTransport,
+}
+
+impl PersonalModelTransport {
+    pub(super) fn new(
+        loader: Arc<CenterModelLoader>,
+        request: &ModelServiceFactoryRequest<'_>,
+    ) -> Result<Self, ModelServiceFactoryError> {
+        let inner = ReqwestTransport::with_timeouts(agent_openai_compatible::TransportTimeouts {
+            connect: request.connect_timeout,
+            request: request.request_timeout,
+        })
+        .map_err(|error| {
+            ModelServiceFactoryError::with_source("personal model transport is unavailable", error)
+        })?;
+        Ok(Self { loader, inner })
+    }
+}
+
+impl Transport for PersonalModelTransport {
+    fn execute<'a>(&'a self, request: TransportRequest) -> TransportFuture<'a> {
+        Box::pin(async move {
+            tokio::select! {
+                biased;
+                () = self.loader.cancellation.cancelled() => Err(reject(ModelError::Auth("用户服务已关闭。".to_owned()))),
+                result = async {
+                    self.loader.verify_personal_login().await
+                        .map_err(|error| reject(ModelError::Auth(error.to_string())))?;
+                    self.inner.execute(request).await
+                } => result,
+            }
+        })
+    }
+}
+
 pub(super) struct CenterModelTransport {
     loader: Arc<CenterModelLoader>,
     configuration: Arc<ExternalModelConfiguration>,

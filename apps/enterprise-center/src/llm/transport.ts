@@ -6,18 +6,19 @@ import type { Protocol } from '../contracts/models.js';
 
 import { ControlError } from './errors.js';
 
-export type ProxyRequestHeaders = Readonly<{ 'x-opencode-session'?: string; 'user-agent'?: string }>;
+export type ProxyRequestHeaders = Readonly<{ 'x-opencode-session'?: string; 'user-agent'?: string; 'x-codex-beta-features'?: string }>;
 
 /** 客户端生成的路由及身份只按受限白名单透传；检查原始头以拒绝重复单值。 */
 export function requestHeaders(raw: readonly string[]): ProxyRequestHeaders {
-  const result: { 'x-opencode-session'?: string; 'user-agent'?: string } = {};
+  const result: { 'x-opencode-session'?: string; 'user-agent'?: string; 'x-codex-beta-features'?: string } = {};
   for (let i = 0; i < raw.length; i += 2) {
     const name = raw[i]!.toLowerCase();
-    if (name !== 'x-opencode-session' && name !== 'user-agent') continue;
+    if (name !== 'x-opencode-session' && name !== 'user-agent' && name !== 'x-codex-beta-features') continue;
     const value = raw[i + 1];
     const limit = name === 'x-opencode-session' ? 128 : 256;
     if (result[name] !== undefined || !value?.trim() || value.length > limit || /[^\x20-\x7e]/.test(value))
       throw new ControlError('llm_request_invalid');
+    if (name === 'x-codex-beta-features' && value !== 'remote_compaction_v2') throw new ControlError('llm_request_invalid');
     result[name] = value;
   }
   return result;
@@ -104,6 +105,7 @@ export async function transfer(input: {
       'accept-encoding': 'identity',
       'content-length': input.body.length,
       ...(input.requestHeaders?.['x-opencode-session'] !== undefined ? { 'x-opencode-session': input.requestHeaders['x-opencode-session'] } : {}),
+      ...(input.requestHeaders?.['x-codex-beta-features'] !== undefined ? { 'x-codex-beta-features': input.requestHeaders['x-codex-beta-features'] } : {}),
       ...(input.requestHeaders?.['user-agent'] !== undefined ? { 'user-agent': input.requestHeaders['user-agent'] } : {}),
       ...(input.apiKey ? { authorization: `Bearer ${input.apiKey}` } : {}),
     },

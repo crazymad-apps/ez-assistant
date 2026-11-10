@@ -17,7 +17,7 @@ it('开始时冻结模式；明确正常才释放，文件失败独立，所有�
   const files = new SnapshotFiles();
   const records = new CallRecords(source, files);
   const settings = {
-    singleton: true,
+    organization_id: randomUUID(),
     mode: 'anomalies' as const,
     content_retention_days: 7,
     index_retention_days: 90,
@@ -37,6 +37,7 @@ it('开始时冻结模式；明确正常才释放，文件失败独立，所有�
   const publish = vi.spyOn(files, 'publish').mockRejectedValue(new Error('disk failure'));
   try {
     const first = await records.begin({
+      organization_id: settings.organization_id,
       user_id: 1,
       username: 'u',
       model_id: 'm',
@@ -138,14 +139,15 @@ it('正文两个读取槽，第三次立即繁忙；审计或身份复核失败�
     response_snapshot_reason: null,
   });
   vi.spyOn(source.manager.getRepository(CallEntity), 'findOneBy').mockResolvedValue(row);
-  vi.spyOn(identities, 'requireAdmin').mockResolvedValue({
-    id: 1,
+  vi.spyOn(identities, 'requireOrganizationAdmin').mockResolvedValue({
+    organizationId: randomUUID(),
+    user: { id: 1,
     username: 'u',
     display_name: 'u',
-    role: 'admin',
+    role: 'system_admin',
     enabled: true,
-    is_super_admin: false,
-  });
+    is_super_admin: false },
+  } as Awaited<ReturnType<IdentityService['requireOrganizationAdmin']>>);
   vi.spyOn(identities, 'write').mockImplementation((work) => work(source.manager));
   const audit = vi.spyOn(identities, 'audit').mockResolvedValue();
   let resume!: () => void;

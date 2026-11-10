@@ -1,3 +1,4 @@
+import { UiResources } from '../UiResources';
 import { observer } from 'mobx-react-lite';
 import { useEffect, useState } from 'react';
 import type { McpServerSnapshot } from '@ez-assistant/protocol';
@@ -185,6 +186,7 @@ export const ManagedServerEditor = observer(function ManagedServerEditor(
             {error}
           </p>
         )}
+        <UiResources server={server} />
         <SettingsMessages messages={settings} />
         {settings.configuration_conflict && (
           <div className={styles.warning}>

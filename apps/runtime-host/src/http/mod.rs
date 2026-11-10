@@ -22,6 +22,7 @@ mod routes;
 pub(crate) mod socket_auth;
 mod startup;
 pub(crate) mod terminals;
+mod ui_sandbox;
 mod web;
 pub(crate) use routes::router;
 pub(crate) use startup::ReadyServices;

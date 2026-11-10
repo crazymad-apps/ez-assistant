@@ -61,9 +61,14 @@ impl AssistantRuntime {
                 .find(|item| item.config.name == selection.name)
                 .map(project_personal)
                 .ok_or(RuntimeError::ConfigurationUnavailable),
-            CustomAgentSource::Center { center_id } => {
+            CustomAgentSource::Center {
+                center_id,
+                organization_id,
+            } => {
                 let directory = self.refresh_center_custom_agents().await?;
-                if &directory.center_id != center_id {
+                if &directory.center_id != center_id
+                    || &directory.organization_id != organization_id
+                {
                     return Err(RuntimeError::ConfigurationUnavailable);
                 }
                 directory
@@ -71,7 +76,7 @@ impl AssistantRuntime {
                     .iter()
                     .find(|item| item.name == selection.name)
                     .cloned()
-                    .map(|config| project_center(center_id, config))
+                    .map(|config| project_center(center_id, organization_id.as_deref(), config))
                     .ok_or(RuntimeError::ConfigurationUnavailable)
             }
         }
@@ -197,7 +202,11 @@ impl AssistantRuntime {
             });
         }
         let mut install_candidates = Vec::new();
-        if let CustomAgentSource::Center { center_id } = &agent.source {
+        if let CustomAgentSource::Center {
+            center_id,
+            organization_id,
+        } = &agent.source
+        {
             let source = self
                 .custom_agent_source
                 .as_ref()
@@ -230,6 +239,7 @@ impl AssistantRuntime {
                     || selection.origin
                         != (PluginPackageOrigin::Center {
                             center_id: center_id.clone(),
+                            organization_id: organization_id.clone(),
                         })
                 {
                     return Err(RuntimeError::ConfigurationUnavailable);
@@ -266,13 +276,9 @@ impl AssistantRuntime {
                     .as_ref()
                     .is_some_and(|source| source.can_use_cached(&directory.center_id))
             }) {
-                agents.extend(
-                    cached
-                        .agents
-                        .iter()
-                        .cloned()
-                        .map(|config| project_center(&cached.center_id, config)),
-                );
+                agents.extend(cached.agents.iter().cloned().map(|config| {
+                    project_center(&cached.center_id, cached.organization_id.as_deref(), config)
+                }));
             }
             refreshed.is_err()
         } else {
@@ -472,10 +478,14 @@ fn plugin_matches_source(
 ) -> bool {
     match source {
         CustomAgentSource::Personal => true,
-        CustomAgentSource::Center { center_id } => {
+        CustomAgentSource::Center {
+            center_id,
+            organization_id,
+        } => {
             plugin.origin
                 == (PluginPackageOrigin::Center {
                     center_id: center_id.clone(),
+                    organization_id: organization_id.clone(),
                 })
         }
     }
@@ -493,11 +503,13 @@ fn project_personal(agent: StoredCustomAgent) -> CustomAgentSnapshot {
 
 fn project_center(
     center_id: &str,
+    organization_id: Option<&str>,
     config: assistant_protocol::CustomAgentConfig,
 ) -> CustomAgentSnapshot {
     CustomAgentSnapshot {
         source: CustomAgentSource::Center {
             center_id: center_id.to_owned(),
+            organization_id: organization_id.map(str::to_owned),
         },
         revision: custom_agent_revision(&config),
         config,
@@ -595,6 +607,7 @@ mod tests {
             external_software: Vec::new(),
             skills: vec![name.into()],
             mcp: Vec::new(),
+            ui: None,
         };
         let facts = || DependencyFacts {
             ready: true,

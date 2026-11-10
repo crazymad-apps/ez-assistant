@@ -53,7 +53,7 @@ export function historyBinding(
 ): string | null {
   if (!(provider.connection.server_history_enabled || configuration.parameters.server_compaction_enabled) || !provider.server_history_key) return null;
   return createHmac('sha256', provider.server_history_key).update(configurationIdentity([
-    centerId, userId, provider.provider_instance_id,
+    centerId, provider.organization_id, userId, provider.provider_instance_id,
     historyConnectionIdentity(provider.connection, provider.api_key),
     configuration.model_id, configuration.parameters,
   ])).digest('hex');

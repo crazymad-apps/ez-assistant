@@ -97,7 +97,27 @@ pub(crate) fn upgrade(home: &Path) -> Result<()> {
     }
     let host = home.join(host_configuration::FILE);
     if files::exists(&host)? {
-        check_current(&host, true)?;
+        let config = check_current(&host, true)?;
+        if config.version == host_configuration::PREVIOUS_LAYOUT_VERSION {
+            let current = fs::read_to_string(&host)?;
+            let mut upgraded = current
+                .parse::<toml_edit::DocumentMut>()
+                .map_err(|_| Error::Configuration)?;
+            upgraded["version"] = toml_edit::value(host_configuration::LAYOUT_VERSION);
+            let upgraded = upgraded.to_string();
+            host_configuration::parse(&upgraded).map_err(|_| Error::Configuration)?;
+            // 目录不移动，保留原配置，先发布版本门禁再开放 Runtime。
+            let previous = home.join("backups/host-layout-0.27.0.toml");
+            if files::exists(&previous)? {
+                if files::inspect(&previous)? != files::bytes_entry(current.as_bytes()) {
+                    return Err(Error::Conflict);
+                }
+            } else {
+                prepare_private_directory(previous.parent().ok_or(Error::Conflict)?)?;
+                files::write(&previous, current.as_bytes())?;
+            }
+            files::write(&host, upgraded.as_bytes())?;
+        }
         return Ok(());
     }
     let backup_root = home.join("backups/host-layout");
@@ -253,8 +273,10 @@ fn finish_at_boundaries(
     boundary: &mut impl FnMut() -> Result<()>,
 ) -> Result<()> {
     let manifest: Manifest = serde_json::from_slice(&fs::read(backup.join("manifest.json"))?)?;
-    if manifest.version != host_configuration::LAYOUT_VERSION
-        || manifest.paths.source != home
+    if !matches!(
+        manifest.version.as_str(),
+        host_configuration::LAYOUT_VERSION | host_configuration::PREVIOUS_LAYOUT_VERSION
+    ) || manifest.paths.source != home
         || manifest.paths.target != personal_home(home)
         || manifest
             .paths

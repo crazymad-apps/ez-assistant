@@ -25,7 +25,7 @@ pub use domain::{
     DelegationConfig, McpRuntimeConfig, ModelProtocol, ResolvedConfig, ResolvedModelConfig,
     RuntimeModelTransportConfig,
 };
-pub use external::{ExternalModelConfiguration, ModelSource};
+pub use external::{ExternalModelConfiguration, ExternalModelSet, ModelSource};
 pub use source::{
     ConfigDocument, ConfigSourceFailure, ConfigSourceFailureKind, ConfigSourceFuture,
     ConfigSourceLoad, ConfigSourceReplace, ConfigSourceReplaceFuture, RuntimeConfigSource,

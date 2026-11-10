@@ -17,7 +17,7 @@ function create(options: ConstructorParameters<typeof RootStore>[0] = undefined)
   stores.push(store); return store;
 }
 it("restores per-target approval and model defaults only into newly created drafts", async () => {
-  const remembered = { provider_instance_id: "provider-1", model_id: "model-a" };
+  const remembered = { source: 'local' as const, provider_instance_id: "provider-1", model_id: "model-a" };
   bridge.load.mockResolvedValueOnce({
     ...defaults,
     default_approval_mode: "auto",
@@ -55,7 +55,7 @@ it("updates defaults only after a materialized Session mutation succeeds", async
   vi.spyOn(SessionManagementController.prototype, "setSessionModel")
     .mockResolvedValueOnce(true)
     .mockResolvedValueOnce(false);
-  const remembered = { provider_instance_id: "provider-1", model_id: "model-a" };
+  const remembered = { source: 'local' as const, provider_instance_id: "provider-1", model_id: "model-a" };
 
   expect(await store.setSessionApprovalMode("session-1", "auto")).toBe(true);
   expect(await store.setSessionModel("session-1", remembered)).toBe(true);
@@ -79,7 +79,7 @@ it("keeps the in-memory default and reports a visible error when preference savi
 });
 
 it("clears a remembered model when its provider disappears without rewriting meaningful drafts", async () => {
-  const remembered = { provider_instance_id: "provider-removed", model_id: "model-a" };
+  const remembered = { source: 'local' as const, provider_instance_id: "provider-removed", model_id: "model-a" };
   bridge.load.mockResolvedValueOnce({ ...defaults, last_model_selection: remembered });
   const store = create();
   await store.connect();
@@ -172,13 +172,13 @@ it("retains device expansion and draft defaults when an unused connection is rel
   const store = create(); await store.connect();
   const context = store.network.context(device);
   context.sidebar.toggleWorkspace("project-a");
-  context.drafts.applyDefaults("ask", { provider_instance_id: "remote-provider", model_id: "remote-model" });
+  context.drafts.applyDefaults("ask", { source: 'local' as const, provider_instance_id: "remote-provider", model_id: "remote-model" });
   store.navigation.selectSession(null, false, device);
   store.navigation.selectSession(null, false, null);
   expect(store.network.contexts.has(device)).toBe(false);
   const restored = store.network.context(device);
   expect(restored.sidebar.expanded_workspaces.has("project-a")).toBe(true);
-  expect(restored.drafts.default_model_selection).toEqual({ provider_instance_id: "remote-provider", model_id: "remote-model" });
+  expect(restored.drafts.default_model_selection).toEqual({ source: 'local' as const, provider_instance_id: "remote-provider", model_id: "remote-model" });
   expect(restored.drafts.default_approval_mode).toBe("ask");
   expect(store.local_new_session_drafts.default_model_selection).toBeNull();
 });

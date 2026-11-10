@@ -18,7 +18,8 @@ export function useDraftModelEfforts(
   const client = store.runtime_client;
   const provider_id = selection?.provider_instance_id;
   const model_id = selection?.model_id;
-  const model_key = JSON.stringify([client?.target_device, provider_id, model_id]);
+  const source = selection?.source ?? "local";
+  const model_key = JSON.stringify([client?.target_device, source, provider_id, model_id]);
   const [loaded, setLoaded] = useState<{ key: string; options: ReasoningEffortOptionSnapshot[] } | null>(null);
   const connection_state = store.connection.state;
 
@@ -27,7 +28,7 @@ export function useDraftModelEfforts(
     const controller = new AbortController();
     setLoaded(null);
     if (!client) return;
-    void client.command({ type: "get_model_configuration", payload: { provider_instance_id: provider_id, model_id, origin: "online" } }, { signal: controller.signal })
+    void client.command({ type: "get_model_configuration", payload: { source, provider_instance_id: provider_id, model_id, origin: "online" } }, { signal: controller.signal })
       .then(({ payload: { parameters } }) => {
         if (controller.signal.aborted) return;
         const options = effortOptions(parameters);
@@ -38,7 +39,7 @@ export function useDraftModelEfforts(
           store.showInteractionError(error instanceof Error ? error.message : '读取模型强度失败，请重新打开菜单重试。');
       });
     return () => controller.abort();
-  }, [store, client, open, provider_id, model_id, model_key, connection_state]);
+  }, [store, client, open, source, provider_id, model_id, model_key, connection_state]);
 
   return loaded?.key === model_key && connection_state === 'connected' ? loaded.options : [];
 }

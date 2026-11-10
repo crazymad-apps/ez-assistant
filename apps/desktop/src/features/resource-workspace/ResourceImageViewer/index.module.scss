@@ -20,6 +20,11 @@
   max-height: none;
 }
 
+.transparency_background {
+  // 底板只绘制在图片盒内，随原图变换；由原始 alpha 合成，不覆盖像素或写入下载内容。
+  background: repeating-conic-gradient(#fff 0% 25%, #eee 25% 50%) 0 0 / 16px 16px;
+}
+
 .error {
   margin: 0;
   padding: 24px;

@@ -1,17 +1,28 @@
 import { startupMessage } from "../../runtime-client/startupStatus";
 import { isTauri } from "@tauri-apps/api/core";
 import { action, computed, makeObservable, observable, observableRef, reaction, runInAction, type IReactionDisposer } from "mobx";
-import type { HostLoginResult, HostMode } from "@ez-assistant/protocol";
+import type { HostLoginResult, HostOrganization, HostOrganizationSelection, HostOrganizationSwitchRequest, HostOrganizationSwitchResult, HostMode } from "@ez-assistant/protocol";
 import { RootStore } from "../../stores/RootStore";
 import { RuntimeClient } from "../../runtime-client/RuntimeClient";
 import { bootstrapWebRuntime, discoverWebHost, loginWeb, takeWebLoginToken, WebLoginError } from "../../runtime-client/webLogin";
 import { bootstrapRuntime, upgradeRuntime, type RuntimeBootstrap } from "../../native-bridge/runtimeBootstrap";
-import { activateRuntimeBinding, beginRuntimeConnection, clearRuntimeBinding, connectRuntimeTarget, openRuntimeWeb, probeRuntimeTarget, restoreRuntimeConnection, prepareDesktopUpdate, manageLocalHost } from "../../native-bridge/runtimeConnection";
+import { activateRuntimeBinding, beginRuntimeConnection, clearRuntimeBinding, connectRuntimeTarget, openRuntimeWeb, probeRuntimeTarget, restoreRuntimeConnection, prepareDesktopUpdate, manageLocalHost, switchRuntimeOrganization } from "../../native-bridge/runtimeConnection";
 
 import { restartNativeRuntime } from "../../native-bridge/desktopLifecycle";
 import { centerAddressError, loginOptionsApplied, loginOptionsChanged, loginOptionsCommand, loginOptionsErrorCode, loginOptionsIntent, matchesLoginOptions, type LoginOptionsDraft, type LoginOptionsState } from "./loginOptions";
 
 import { DesktopUpdateStore } from "../desktop-update";
+
+type SwitchPreview = Extract<HostOrganizationSwitchResult, { state: "confirm" }>;
+type OrganizationSwitchState =
+  | { phase: "options"; organizations: HostOrganization[]; message?: string }
+  | { phase: "loading" | "checking" }
+  | { phase: "selection_error"; message: string }
+  | { phase: "confirm"; preview: SwitchPreview }
+  | { phase: "stopping" | "exchanging" | "verify" | "stop_failed" | "exchange_failed"; preview: SwitchPreview };
+
+const SWITCH_POLL_MS = 400;
+const PENDING_ORGANIZATION_SWITCH = "ez-assistant:organization-switch";
 
 /** 入口只管理身份和连接。身份改变时重建 Store，业务代码始终只看到本人的 Runtime。 */
 export class ApplicationConnectionStore {
@@ -20,6 +31,10 @@ export class ApplicationConnectionStore {
   phase: "loading" | "login" | "entry" | "workspace" = "loading";
   current: RootStore | null = null;
   session: HostLoginResult | null = null;
+  organization_selection: HostOrganizationSelection | null = null;
+  organization_switch: OrganizationSwitchState | null = null;
+  organization_switch_visible = false;
+  #organization_target: { binding: string; origin: string | null } | null = null;
   mode: HostMode = "personal";
   error: string | null = null;
   pending = false;
@@ -55,14 +70,15 @@ export class ApplicationConnectionStore {
   constructor(initial: RootStore, private readonly flush_application_preferences?: () => Promise<void>) {
     this.#initial = initial;
     makeObservable(this, {
-      phase: observable, current: observableRef, session: observableRef, mode: observable,
+      phase: observable, current: observableRef, session: observableRef, organization_selection: observableRef, mode: observable,
+      organization_switch: observableRef, organization_switch_visible: observable, closeOrganizationSwitch: action,
       error: observable, pending: observable, local_state: observable, local_error: observable,
       target: observable, connected_target: observable, address: observable, progress: observable,
       warning: observable, web_pending: observable, logout_confirmation: observable, password_open: observable,
       login_options: observableRef, login_options_notice: observable, credentials_epoch: observable, login_options_busy: computed,
       closeLoginOptions: action, editLoginOptions: action, confirmLoginOptions: action,
       host_update_required: observable, update_required: computed,
-      clearError: action, dispose: action, chooseTarget: action, requestLogout: action, cancelLogout: action, showPassword: action,
+      clearError: action, cancelOrganizationSelection: action, dispose: action, chooseTarget: action, requestLogout: action, cancelLogout: action, showPassword: action,
     });
     this.#phase_reaction = reaction(() => this.phase, (phase) => {
       if (phase !== "workspace") this.current?.settings.close();
@@ -275,7 +291,10 @@ export class ApplicationConnectionStore {
       if (this.update_required) return;
       try {
         const saved = await restoreRuntimeConnection();
-        if (saved && generation === this.#generation) { await this.#enter(saved, generation); return; }
+        if (saved && generation === this.#generation) {
+          if (!await this.#recoverOrganizationSwitch(saved)) await this.#enter(saved, generation);
+          return;
+        }
       } catch (error) { if (generation === this.#generation) this.#connectionError(error); }
       const remote = this.updates.snapshot.resume_remote;
       if (remote) runInAction(() => { this.target = "remote"; this.address = remote; });
@@ -288,6 +307,10 @@ export class ApplicationConnectionStore {
       const capabilities = await discoverWebHost();
       if (generation !== this.#generation) return;
       runInAction(() => { this.mode = capabilities.mode; });
+      if (!token && await this.#recoverOrganizationSwitch({
+        base_url: window.location.origin, instance_id: "", capabilities,
+        access_token: "", started_runtime: false, authentication: "web",
+      })) return;
       if (token) { await loginWeb({ method: "token", token }); this.#channel?.postMessage("changed"); }
       const bootstrap = await bootstrapWebRuntime();
       if (generation === this.#generation) await this.#enter(bootstrap, generation);
@@ -377,11 +400,20 @@ export class ApplicationConnectionStore {
       if (generation !== this.#generation) return;
       if (origin === null) {
         try { await this.startLocal(true); }
-        finally { await prepareDesktopUpdate(binding, null).catch(() => undefined); }
+        catch (error) {
+          await prepareDesktopUpdate(binding, null).catch(() => undefined);
+          throw error;
+        }
       }
       if (generation !== this.#generation) return;
       const result = await connectRuntimeTarget(binding, origin, password, remember, username);
       if (generation !== this.#generation) return;
+      if (result.organization_selection) {
+        this.#organization_target = { binding, origin };
+        runInAction(() => { this.organization_selection = result.organization_selection ?? null; });
+        return;
+      }
+      if (!result.bootstrap) throw new Error("Host 未返回登录状态。");
       runInAction(() => { this.warning = result.warning; });
       await this.#enter(result.bootstrap, generation);
     } catch (error) { if (generation === this.#generation) this.#connectionError(error); }
@@ -393,13 +425,55 @@ export class ApplicationConnectionStore {
     const generation = ++this.#generation;
     runInAction(() => { this.pending = true; this.error = null; });
     try {
-      await loginWeb(this.mode === "enterprise" ? { method: "enterprise", username, password, native: false } : { method: "password", password, native: false });
-      this.#channel?.postMessage("changed");
+      const reply = await loginWeb(this.mode === "enterprise" ? { method: "enterprise", username, password, native: false } : { method: "password", password, native: false });
       if (generation !== this.#generation) return;
+      if (reply?.organization_selection) {
+        runInAction(() => { this.organization_selection = reply.organization_selection ?? null; });
+        return;
+      }
+      this.#channel?.postMessage("changed");
       const bootstrap = await bootstrapWebRuntime();
       if (generation === this.#generation) await this.#enter(bootstrap, generation);
     } catch (error) { if (generation === this.#generation) this.#connectionError(error); }
     finally { if (generation === this.#generation) runInAction(() => { this.pending = false; }); }
+  }
+
+  cancelOrganizationSelection(): void {
+    this.organization_selection = null;
+    this.#organization_target = null;
+  }
+
+  async selectOrganization(organization_id: string): Promise<void> {
+    const selection = this.organization_selection;
+    if (this.pending || !selection?.organizations.some((org) => org.id === organization_id)) return;
+    const generation = this.#generation;
+    const target = this.#organization_target;
+    runInAction(() => { this.pending = true; this.error = null; this.progress = "正在进入组织…"; });
+    try {
+      let bootstrap: RuntimeBootstrap | null;
+      if (target) {
+        const result = await connectRuntimeTarget(target.binding, target.origin, "", false, "", {
+          selectionToken: selection.selection_token, organizationId: organization_id,
+        });
+        bootstrap = result.bootstrap;
+      } else {
+        await loginWeb({ method: "enterprise_select", organization_id, selection_token: selection.selection_token });
+        if (generation !== this.#generation) return;
+        this.#channel?.postMessage("changed");
+        bootstrap = await bootstrapWebRuntime();
+      }
+      if (generation !== this.#generation) return;
+      if (!bootstrap) throw new Error("Host 未返回登录状态。");
+      this.cancelOrganizationSelection();
+      await this.#enter(bootstrap, generation);
+    } catch (error) {
+      if (generation === this.#generation) {
+        this.cancelOrganizationSelection();
+        this.#connectionError(error);
+      }
+    } finally {
+      if (generation === this.#generation) runInAction(() => { this.pending = false; });
+    }
   }
 
   async acceptTokenLink(): Promise<void> {
@@ -420,7 +494,7 @@ export class ApplicationConnectionStore {
 
   /** 焦点恢复和同源通知都重新核验；不依据通知内容切换账号，也不重叠发出核验。 */
   async recheckSession(): Promise<void> {
-    if (this.desktop || this.pending || this.#checking) return;
+    if (this.desktop || this.pending || this.#checking || this.organization_switch && "preview" in this.organization_switch && this.organization_switch.phase !== "confirm") return;
     this.#checking = true;
     const generation = this.#generation;
     try {
@@ -432,9 +506,13 @@ export class ApplicationConnectionStore {
       await this.#enter(bootstrap, this.#generation);
     } catch (error) {
       if (generation !== this.#generation) return;
-      const required = this.update_required;
-      this.#clear();
-      runInAction(() => { this.phase = "login"; this.host_update_required = required; });
+      const code = typeof error === "object" && error !== null && "code" in error ? error.code : null;
+      if (code === "authentication_required" || code === "login_context_changed") {
+        const required = this.update_required;
+        this.#clear();
+        runInAction(() => { this.phase = "login"; this.host_update_required = required; });
+      }
+      // 核验请求失败不代表 Host 事件流断连；真实断连由连接所有者检测和恢复。
       this.#connectionError(error);
     } finally { this.#checking = false; }
   }
@@ -446,6 +524,187 @@ export class ApplicationConnectionStore {
     runInAction(() => { this.pending = true; this.error = null; });
     try { await this.#enter(bootstrap, generation); }
     finally { if (generation === this.#generation) runInAction(() => { this.pending = false; }); }
+  }
+
+  async #requestOrganizationSwitch(request: HostOrganizationSwitchRequest, source: RuntimeBootstrap) {
+    if (this.desktop) return switchRuntimeOrganization(request, source);
+    const client = new RuntimeClient(source);
+    try { return { result: await client.switchOrganization(request), bootstrap: null }; }
+    finally { client.dispose(); }
+  }
+
+  async openOrganizationSwitch(): Promise<void> {
+    const current = this.organization_switch;
+    if (current?.phase === "stop_failed" || current?.phase === "exchange_failed" || current?.phase === "verify") {
+      runInAction(() => { this.organization_switch_visible = true; });
+      return;
+    }
+    const source = this.#bootstrap;
+    if (!source || !this.session?.identity || this.pending || this.phase !== "workspace") return;
+    const loading = { phase: "loading" } as const;
+    runInAction(() => { this.organization_switch = loading; this.organization_switch_visible = false; });
+    try {
+      const { result } = await this.#requestOrganizationSwitch({ action: "options" }, source);
+      if (this.organization_switch !== loading || this.#bootstrap !== source) return;
+      if (result.state !== "options") throw new Error("无法读取可切换的组织。");
+      runInAction(() => { this.organization_switch = { phase: "options", organizations: result.organizations }; });
+    } catch (error) {
+      if (this.organization_switch === loading) runInAction(() => { this.organization_switch = { phase: "options", organizations: [], message: displayError(error) }; });
+    }
+  }
+
+  closeOrganizationSwitch(): void {
+    if (this.pending) return;
+    this.organization_switch_visible = false;
+    if (this.organization_switch?.phase !== "stop_failed" && this.organization_switch?.phase !== "exchange_failed") this.organization_switch = null;
+  }
+
+  leaveFailedOrganizationSwitch(): void {
+    if (this.pending || this.organization_switch?.phase !== "stop_failed") return;
+    this.#forgetOrganizationSwitch();
+    this.#authenticationRequired();
+    runInAction(() => { this.error = "当前组织收尾未完成，请重启 Runtime 后重新登录。"; });
+  }
+
+  async previewOrganizationSwitch(organization_id: string): Promise<void> {
+    const source = this.#bootstrap;
+    const options = this.organization_switch;
+    if (!source || this.pending || options?.phase !== "options" || !options.organizations.some((organization) => organization.id === organization_id)) return;
+    const checking = { phase: "checking" } as const;
+    runInAction(() => { this.organization_switch = checking; this.organization_switch_visible = true; });
+    try {
+      const { result } = await this.#requestOrganizationSwitch({ action: "preview", organization_id }, source);
+      if (!this.#ownsOrganizationSwitch(checking, source)) return;
+      if (result.state !== "confirm") throw new Error("无法核对当前组织的任务。");
+      runInAction(() => { this.organization_switch = { phase: "confirm", preview: result }; });
+    } catch (error) {
+      if (this.#ownsOrganizationSwitch(checking, source)) runInAction(() => {
+        this.organization_switch = { phase: "selection_error", message: displayError(error) };
+      });
+    }
+  }
+
+  #ownsOrganizationSwitch(state: OrganizationSwitchState, source: RuntimeBootstrap): boolean {
+    return this.organization_switch === state && this.#bootstrap === source;
+  }
+
+  async confirmOrganizationSwitch(): Promise<void> {
+    if (this.organization_switch?.phase === "confirm") await this.#followOrganizationSwitch(this.organization_switch.preview, true);
+  }
+
+  async checkOrganizationSwitch(): Promise<void> {
+    if (this.organization_switch && "preview" in this.organization_switch && this.organization_switch.phase !== "confirm") {
+      await this.#followOrganizationSwitch(this.organization_switch.preview, false);
+    }
+  }
+
+  async resumeOrganizationAfterSwitch(): Promise<void> {
+    const state = this.organization_switch, source = this.#bootstrap;
+    if (!source || state?.phase !== "exchange_failed" || this.pending) return;
+    runInAction(() => { this.pending = true; });
+    try {
+      const active_source = this.desktop || source.login_context ? source : await bootstrapWebRuntime();
+      if (this.#bootstrap !== source || active_source.instance_id !== source.instance_id) return;
+      const { result } = await this.#requestOrganizationSwitch({ action: "resume", operation_id: state.preview.operation_id }, active_source);
+      if (this.#bootstrap !== source || result.state !== "resumed") return;
+      this.#forgetOrganizationSwitch();
+      this.#clear();
+      await this.#enter(active_source, this.#generation);
+    } catch {
+      if (this.#bootstrap === source) runInAction(() => { this.organization_switch = { ...state, phase: "verify" }; });
+    } finally {
+      if (this.#bootstrap === source) runInAction(() => { this.pending = false; });
+    }
+  }
+
+  async #recoverOrganizationSwitch(source: RuntimeBootstrap): Promise<boolean> {
+    let saved: { base_url: string; instance_id: string; preview: SwitchPreview };
+    try {
+      const encoded = sessionStorage.getItem(PENDING_ORGANIZATION_SWITCH);
+      if (!encoded) return false;
+      saved = JSON.parse(encoded);
+      if (!saved.preview?.operation_id || !saved.preview.organization?.id || saved.base_url !== source.base_url
+        || (source.instance_id && source.instance_id !== saved.instance_id)) return false;
+    } catch { return false; }
+    this.#bootstrap = { ...source, instance_id: saved.instance_id };
+    if (this.desktop) activateRuntimeBinding(this.#bootstrap);
+    runInAction(() => { this.organization_switch_visible = true; });
+    await this.#followOrganizationSwitch(saved.preview, false, true);
+    return this.#bootstrap !== null || this.error !== null;
+  }
+
+  #forgetOrganizationSwitch(): void {
+    try { sessionStorage.removeItem(PENDING_ORGANIZATION_SWITCH); }
+    catch { /* 状态查询仍可在当前页面进行。 */ }
+  }
+
+  async #followOrganizationSwitch(preview: SwitchPreview, confirm: boolean, recovering = false): Promise<void> {
+    const source = this.#bootstrap;
+    const generation = this.#generation;
+    if (!source || this.pending) return;
+    const operation_id = preview.operation_id;
+    if (confirm) {
+      try { sessionStorage.setItem(PENDING_ORGANIZATION_SWITCH, JSON.stringify({ base_url: source.base_url, instance_id: source.instance_id, preview })); }
+      catch { /* 此窗口仍能查询进度。 */ }
+    }
+    runInAction(() => { this.pending = true; this.updates.operation_blocked = true; this.organization_switch = { phase: confirm ? "stopping" : "verify", preview }; });
+    try {
+      let reply = await this.#requestOrganizationSwitch({ action: confirm ? "confirm" : "status", operation_id }, source);
+      const deadline = Date.now() + 45_000;
+      while (generation === this.#generation && (reply.result.state === "stopping" || reply.result.state === "exchanging")) {
+        runInAction(() => { this.organization_switch = { phase: reply.result.state as "stopping" | "exchanging", preview }; });
+        if (Date.now() >= deadline) throw new Error("切换仍在进行。");
+        await new Promise<void>((resolve) => setTimeout(resolve, SWITCH_POLL_MS));
+        if (generation !== this.#generation) return;
+        reply = await this.#requestOrganizationSwitch({ action: "status", operation_id }, source);
+      }
+      if (generation !== this.#generation) return;
+      const { result, bootstrap } = reply;
+      switch (result.state) {
+        case "switched": {
+          const login = result.login;
+          if (login.instance_id !== source.instance_id || login.identity?.organization_id !== preview.organization.id || (this.desktop && !bootstrap)) throw new Error("组织切换结果与请求不一致。");
+          const target = { ...(bootstrap ?? source), session: login, login_context: login.login_context };
+          this.#forgetOrganizationSwitch();
+          this.#clear();
+          this.#channel?.postMessage("changed");
+          const target_generation = this.#generation;
+          await this.#enter(target, target_generation, `正在加载「${preview.organization.name}」工作区…`);
+          if (target_generation === this.#generation && this.phase !== "workspace" && this.error) {
+            runInAction(() => { this.error = `组织已切换，工作区加载失败。${this.error}`; });
+          }
+          return;
+        }
+        case "changed":
+          this.#forgetOrganizationSwitch();
+          if (recovering) this.#clear();
+          else {
+            runInAction(() => {
+              this.organization_switch = { phase: "selection_error", message: "任务或组织状态已变化，请重新选择组织。" };
+            });
+          }
+          return;
+        case "stop_failed":
+        case "exchange_failed":
+          runInAction(() => { this.organization_switch = { phase: result.state, preview }; });
+          return;
+        case "reauthenticate":
+          this.#forgetOrganizationSwitch();
+          this.#authenticationRequired();
+          runInAction(() => { this.error = "切换结果尚未确认，请重新登录并选择组织。"; });
+          return;
+        default: throw new Error("无法确认切换状态。");
+      }
+    } catch (error) {
+      if (generation !== this.#generation) return;
+      if (!confirm && typeof error === "object" && error !== null && "code" in error && error.code === "authentication_required") {
+        this.#forgetOrganizationSwitch();
+        this.#authenticationRequired();
+        runInAction(() => { this.error = "切换结果尚未确认，请重新登录并选择组织。"; });
+      } else runInAction(() => { this.organization_switch = { phase: "verify", preview }; });
+    } finally {
+      if (generation === this.#generation) runInAction(() => { this.pending = false; this.updates.operation_blocked = false; });
+    }
   }
 
   async changePassword(old_password: string, new_password: string): Promise<void> {
@@ -517,6 +776,7 @@ export class ApplicationConnectionStore {
     runInAction(() => {
       this.current = this.desktop ? new RootStore({ flush_application_preferences: this.flush_application_preferences, target_kind: this.target, restore_resources: false }) : null;
       this.session = null; this.pending = false; this.password_open = false; this.logout_confirmation = false;
+      this.organization_switch = null; this.organization_switch_visible = false;
       this.phase = this.desktop ? "entry" : "login"; this.error = null;
     });
   }
@@ -543,6 +803,7 @@ export class ApplicationConnectionStore {
   }
 
   #clear(keep_login_options = false): void {
+    this.cancelOrganizationSelection();
     if (!keep_login_options) runInAction(() => {
       this.#login_options_owner += 1;
       this.login_options = null;
@@ -554,7 +815,7 @@ export class ApplicationConnectionStore {
     this.current?.dispose(); this.#initial?.dispose(); this.#initial = null;
     this.#bootstrap = null;
     clearRuntimeBinding();
-    runInAction(() => { this.current = this.desktop ? new RootStore({ flush_application_preferences: this.flush_application_preferences, target_kind: this.target, restore_resources: false }) : null; this.session = null; this.pending = false; this.logout_confirmation = false; this.password_open = false; this.host_update_required = false; });
+    runInAction(() => { this.current = this.desktop ? new RootStore({ flush_application_preferences: this.flush_application_preferences, target_kind: this.target, restore_resources: false }) : null; this.session = null; this.pending = false; this.logout_confirmation = false; this.password_open = false; this.organization_switch = null; this.organization_switch_visible = false; this.host_update_required = false; });
   }
 
   #authenticationRequired(): void {
@@ -566,13 +827,13 @@ export class ApplicationConnectionStore {
     runInAction(() => { this.phase = this.desktop ? "entry" : "login"; this.error = "登录已失效，请重新登录。"; });
   }
 
-  async #enter(bootstrap: RuntimeBootstrap, generation: number): Promise<void> {
+  async #enter(bootstrap: RuntimeBootstrap, generation: number, progress = "正在初始化用户项目…"): Promise<void> {
     if (this.update_required || generation !== this.#generation) return;
     // 登录成功和初始化成功是两个阶段；初始化失败仍保留凭据供显式重试、改密和退出。
     this.#bootstrap = bootstrap;
     this.#auth_reaction?.();
     if (this.desktop) activateRuntimeBinding(bootstrap);
-    runInAction(() => { this.phase = this.desktop ? "entry" : "loading"; this.progress = "正在初始化用户项目…"; this.mode = bootstrap.capabilities.mode; });
+    runInAction(() => { this.phase = this.desktop ? "entry" : "loading"; this.progress = progress; this.mode = bootstrap.capabilities.mode; });
     const identity_client = new RuntimeClient(bootstrap);
     let session: HostLoginResult;
     try { session = bootstrap.session ?? await identity_client.session(); }
@@ -588,7 +849,7 @@ export class ApplicationConnectionStore {
     if (generation !== this.#generation || this.update_required) return;
     runInAction(() => { this.session = session; });
     const user = session.identity;
-    const namespace = user ? `${bootstrap.base_url}/users/${user.center_id}/${user.user_id}` : bootstrap.target_kind === "remote" ? bootstrap.base_url : undefined;
+    const namespace = user ? `${bootstrap.base_url}/users/${user.center_id}/${user.organization_id}/${user.user_id}` : bootstrap.target_kind === "remote" ? bootstrap.base_url : undefined;
     const store = this.#initial && !user ? this.#initial : new RootStore({ flush_application_preferences: this.flush_application_preferences, target_kind: bootstrap.target_kind, target_address: namespace, restore_resources: this.desktop });
     // 原生刷新恢复个人连接时可以复用尚未连接的初始 Store，不能先销毁再连接。
     if (this.current !== store) this.current?.dispose();
@@ -600,12 +861,17 @@ export class ApplicationConnectionStore {
     const ready = new Promise<void>((resolve) => { connected = resolve; });
     this.#auth_reaction = reaction(() => [store.local_connection.state, store.local_connection.last_error_code, store.local_connection.startup] as const, ([state, code, health]) => {
       if (generation !== this.#generation || (this.logout_confirmation && this.pending)) return;
+      if (this.organization_switch && "preview" in this.organization_switch && this.organization_switch.phase !== "confirm") return;
       if (health && health.status !== "ready") runInAction(() => { this.progress = startupMessage(health); });
       if (code === "center_protocol_incompatible") { this.#connectionError({ code }); }
       else if (code === "login_context_changed") { this.#clear(); runInAction(() => { this.phase = "loading"; }); void this.recheckSession(); }
       else if (code === "authentication_required") this.#authenticationRequired();
       else if (state !== "connected" && this.phase === "workspace") {
-        runInAction(() => { this.phase = this.desktop ? "entry" : "loading"; this.error = store.local_connection.error_message ?? "连接已中断，请重试。"; });
+        // 暂时断连仍显示原工作区及快照，由已有提示和重连流程恢复。
+        runInAction(() => {
+          if (state !== "disconnected" && state !== "reconnecting" && state !== "connecting") this.phase = this.desktop ? "entry" : "loading";
+          this.error = store.local_connection.error_message ?? "连接已中断，请重试。";
+        });
       } else if (state === "connected") { runInAction(() => { this.phase = "workspace"; this.error = null; }); connected(); }
     });
     runInAction(() => { this.current = store; });

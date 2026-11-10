@@ -554,12 +554,12 @@ impl StorageEngine {
         let changed = self
             .connection
             .execute(
-                "UPDATE sessions SET model_id = ?1, reasoning_effort = ?2, model_provider_instance_id = ?4, server_history_key = ?5, context_management_mode = ?6
+                "UPDATE sessions SET model_id = ?1, reasoning_effort = ?2, model_provider_instance_id = ?4, server_history_key = ?5, context_management_mode = ?6, model_source = ?7
                  WHERE session_id = ?3 AND lifecycle = 'active'
                    AND NOT EXISTS (SELECT 1 FROM inputs WHERE session_id = ?3 AND state = 'queued')
                    AND NOT EXISTS (SELECT 1 FROM runs WHERE session_id = ?3 AND status IN ('accepted', 'running', 'cancelling'))
                    AND NOT EXISTS (SELECT 1 FROM pending_tool_exchanges WHERE session_id = ?3)",
-                params![change.model_selection.as_ref().map(|selection| selection.model_id.as_str()), change.reasoning_effort.map(reasoning_effort_value), change.session_id.as_str(), change.model_selection.as_ref().map(|selection| selection.provider_instance_id.as_str()), change.server_history_key, change.context_management_mode.map(super::mode::context_management_mode_value)],
+                params![change.model_selection.as_ref().map(|selection| selection.model_id.as_str()), change.reasoning_effort.map(reasoning_effort_value), change.session_id.as_str(), change.model_selection.as_ref().map(|selection| selection.provider_instance_id.as_str()), change.server_history_key, change.context_management_mode.map(super::mode::context_management_mode_value), super::model_management::selection_source(change.model_selection.as_ref())],
             )
             .map_err(|source| {
                 database_write_error("session model could not be changed", source)
@@ -797,6 +797,14 @@ impl StorageEngine {
             .map(conversation::message_id)
             .map(agent_types::MessageId::as_str)
             .collect::<BTreeSet<_>>();
+        if !self.allow_legacy_history {
+            let messages = serde_json::to_string(&retained_message_ids)
+                .map_err(|e| internal_error("card retention could not be encoded", e))?;
+            let children = serde_json::to_string(&retained)
+                .map_err(|e| internal_error("child card retention could not be encoded", e))?;
+            transaction.execute("DELETE FROM message_cards WHERE session_id=?1 AND ((child_key='' AND anchor_message_id NOT IN(SELECT value FROM json_each(?2))) OR (child_key<>'' AND child_key NOT IN(SELECT value FROM json_each(?3))))",
+                params![rewrite.session_id.as_str(),messages,children]).map_err(|e|database_write_error("replaced cards could not be removed",e))?;
+        }
         let removed_activation_ids = {
             let mut statement = transaction
                 .prepare(

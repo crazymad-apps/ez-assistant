@@ -1,3 +1,4 @@
+import { singleModelPolicy, defaultRuntimeModel } from '../support/model-policy.js';
 import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createServer } from 'node:http';
@@ -70,8 +71,8 @@ it('正式接口保存和发现 OpenCode，保留企业身份并在后台发送�
     const selection = { provider_instance_id: id, model_id: 'gpt-6-astra' };
     const parameters = { ...emptyParameters(), context_window_tokens: { state: 'known', value: 8192 }, max_output_tokens: { state: 'known', value: 1024 }, streaming: 'supported' };
     await request('PUT', 'model-configuration', { ...selection, origin: 'online', parameters });
-    expect((await request('PUT', 'model-settings', { default_model: selection })).state).toBe('ready');
-    const managed = await request('GET', 'runtime/model-configuration');
+    expect((await request('PUT', 'model-settings', singleModelPolicy(await request('GET', 'model-settings'), selection))).availability[0].state).toBe('ready');
+    const managed = defaultRuntimeModel(await request('GET', 'runtime/model-configuration'));
     expect(managed.provider_type).toBe('opencode');
     expect(managed.protocol).toBe(preference === 'responses' ? 'open_ai_responses' : 'open_ai_chat_completions');
     expect(managed.endpoint).toBe(`http://127.0.0.1:${scenario.center_port}/api/llm/providers/${id}/v1`);

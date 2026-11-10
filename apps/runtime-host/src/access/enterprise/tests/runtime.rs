@@ -75,12 +75,14 @@ async fn center_package_download_installs_for_one_user_and_rejects_deprecated_se
     assert_eq!(
         selection.origin,
         PluginPackageOrigin::Center {
-            center_id: CENTER_ID.into()
+            center_id: CENTER_ID.into(),
+            organization_id: Some(ORGANIZATION_ID.into()),
         }
     );
     let mut wrong_center = selection.clone();
     wrong_center.origin = PluginPackageOrigin::Center {
         center_id: "11234567-89ab-4cde-8f01-23456789abcd".into(),
+        organization_id: Some(ORGANIZATION_ID.into()),
     };
     assert_ne!(
         f.command(
@@ -504,6 +506,7 @@ async fn start_work(runtime: &AssistantRuntime) -> SessionId {
         .await
         .unwrap();
     let selection = ModelSelection {
+        source: assistant_protocol::ModelSelectionSource::Local,
         provider_instance_id: provider.provider_instance_id,
         model_id: "fixture".into(),
     };
@@ -623,34 +626,151 @@ async fn token_expiry_retains_work_then_recycles_and_logout_cancels_only_its_own
 }
 
 #[tokio::test]
-async fn unavailable_center_stops_work_but_retains_login_for_explicit_recovery() {
+async fn unavailable_center_keeps_sse_and_runtime_until_explicit_revocation() {
     let model = HeldModel::new();
     let mut f = Fixture::with_domains(true, Some(Arc::new(Factory(model.clone())))).await;
     let alice = f.login("alice").await;
     let a = f.services(&alice).await;
     let session = start_work(&a.runtime).await;
     model.started().await;
+    let before = a
+        .runtime
+        .get_session_view(GetSessionViewRequest {
+            session_id: session.clone(),
+        })
+        .await
+        .unwrap();
+    let run_id = before
+        .snapshot
+        .value
+        .active_run
+        .as_ref()
+        .unwrap()
+        .run_id
+        .clone();
+    let mut events = f
+        .request(reqwest::Method::GET, "/events", Some(&alice))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let checked = f.mock.seen.lock().unwrap().len();
     f.mock.unavailable.store(true, Ordering::SeqCst);
-    assert_eq!(
-        f.session(&alice).await.status(),
-        StatusCode::SERVICE_UNAVAILABLE
-    );
-    stopped(&a.runtime).await;
+    assert_eq!(f.session(&alice).await.status(), StatusCode::OK);
+    assert_eq!(a.runtime.lifecycle().unwrap(), RuntimeLifecycle::Running);
+    assert!(a.runtime.has_background_work());
     assert!(f.state.access.credentials.authenticate(&alice).is_some());
+    // 新本地请求和新 SSE 均不联网核验，仍绑定原用户域。
+    assert_eq!(f.ready(&alice).await.status(), StatusCode::NO_CONTENT);
+    let fresh_events = f
+        .request(reqwest::Method::GET, "/events", Some(&alice))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(fresh_events.status(), StatusCode::OK);
+    assert_eq!(
+        f.command(
+            &alice,
+            RuntimeCommand::GetSessionView(GetSessionViewRequest {
+                session_id: session.clone()
+            })
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        f.mock.seen.lock().unwrap().len(),
+        checked,
+        "local reads must not contact center"
+    );
+    let mut permit = f.permit(&alice);
+    f.state
+        .access
+        .credentials
+        .bind_enterprise_access(&mut permit)
+        .unwrap();
+    let mut availability = f
+        .state
+        .access
+        .credentials
+        .subscribe_center_availability(&permit)
+        .unwrap();
+    // 真实周期任务首次立即检查；用状态通知等待，不依赖 sleep 猜测结果。
+    let stop = CancellationToken::new();
+    let credentials = f.state.access.credentials.clone();
+    let stopping = stop.clone();
+    let checker = tokio::spawn(async move { credentials.recheck_connections(stopping).await });
+    tokio::time::timeout(Duration::from_secs(5), availability.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!*availability.borrow_and_update());
+    stop.cancel();
+    checker.await.unwrap();
+    let after = a
+        .runtime
+        .get_session_view(GetSessionViewRequest {
+            session_id: session.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(after.snapshot.value.active_run.unwrap().run_id, run_id);
+    model.release.cancel();
+    let status = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut buffered = Vec::new();
+        loop {
+            let chunk = events
+                .chunk()
+                .await
+                .unwrap()
+                .expect("existing SSE remains open");
+            buffered.extend_from_slice(&chunk);
+            while let Some(end) = buffered.iter().position(|byte| *byte == b'\n') {
+                let line: Vec<_> = buffered.drain(..=end).collect();
+                let Some(data) = line.strip_prefix(b"data: ") else {
+                    continue;
+                };
+                let Ok(envelope) = serde_json::from_slice::<RuntimeEventEnvelope>(data) else {
+                    continue;
+                };
+                if let RuntimeEvent::RunFinished {
+                    run_id: finished,
+                    status,
+                    ..
+                } = envelope.event
+                    && finished == run_id
+                {
+                    return status;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(status, RunStatus::Completed);
+    assert_eq!(a.runtime.lifecycle().unwrap(), RuntimeLifecycle::Running);
     f.mock.unavailable.store(false, Ordering::SeqCst);
     assert_eq!(f.ready(&alice).await.status(), StatusCode::NO_CONTENT);
-    let reopened = f.services(&alice).await;
-    assert!(!Arc::ptr_eq(&a, &reopened));
-    assert!(
-        reopened
-            .runtime
-            .get_session_view(GetSessionViewRequest {
-                session_id: session
-            })
-            .await
-            .is_ok()
-    );
-    assert!(!reopened.runtime.has_background_work());
+    assert!(Arc::ptr_eq(&a, &f.services(&alice).await));
+    f.mock.tokens.lock().unwrap().clear();
+    let stop = CancellationToken::new();
+    let credentials = f.state.access.credentials.clone();
+    let stopping = stop.clone();
+    let checker = tokio::spawn(async move { credentials.recheck_connections(stopping).await });
+    tokio::time::timeout(Duration::from_secs(5), permit.ended())
+        .await
+        .unwrap();
+    stop.cancel();
+    checker.await.unwrap();
+    assert_eq!(f.session(&alice).await.status(), StatusCode::UNAUTHORIZED);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while events.chunk().await.unwrap().is_some() {}
+    })
+    .await
+    .unwrap();
+    stopped(&a.runtime).await;
     f.stop().await;
 }
 
@@ -762,7 +882,7 @@ async fn disconnected_initialization_waiter_does_not_own_the_initialization_task
 }
 
 #[tokio::test]
-async fn center_outage_interrupts_readiness_without_reporting_a_lost_login() {
+async fn center_outage_does_not_interrupt_local_initialization() {
     let mut f = Fixture::with_domains(true, None).await;
     let connection = hold_database(&f).await;
     let alice = f.login("alice").await;
@@ -771,17 +891,12 @@ async fn center_outage_interrupts_readiness_without_reporting_a_lost_login() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(!waiting.is_finished());
     f.mock.unavailable.store(true, Ordering::SeqCst);
-    assert_eq!(
-        f.session(&alice).await.status(),
-        StatusCode::SERVICE_UNAVAILABLE
-    );
-    assert_eq!(
-        waiting.await.unwrap().status(),
-        StatusCode::SERVICE_UNAVAILABLE
-    );
+    assert_eq!(f.session(&alice).await.status(), StatusCode::OK);
+    assert!(!waiting.is_finished());
     assert!(f.state.access.credentials.authenticate(&alice).is_some());
     connection.execute_batch("ROLLBACK").unwrap();
     drop(connection);
+    assert_eq!(waiting.await.unwrap().status(), StatusCode::NO_CONTENT);
     f.mock.unavailable.store(false, Ordering::SeqCst);
     assert_eq!(f.ready(&alice).await.status(), StatusCode::NO_CONTENT);
     f.stop().await;
@@ -813,5 +928,64 @@ async fn logout_during_initialization_does_not_resurrect_old_requests_or_block_n
     assert_eq!(logging_out.await.unwrap().status(), StatusCode::OK);
     assert_eq!(f.ready(&latest).await.status(), StatusCode::NO_CONTENT);
     assert!(f.state.access.credentials.authenticate(&latest).is_some());
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn center_outage_allows_local_run_interruption_without_online_check() {
+    let model = HeldModel::new();
+    let mut f = Fixture::with_domains(true, Some(Arc::new(Factory(model.clone())))).await;
+    let alice = f.login("alice").await;
+    let services = f.services(&alice).await;
+    let session_id = start_work(&services.runtime).await;
+    model.started().await;
+    let run_id = services
+        .runtime
+        .get_session_view(GetSessionViewRequest {
+            session_id: session_id.clone(),
+        })
+        .await
+        .unwrap()
+        .snapshot
+        .value
+        .active_run
+        .unwrap()
+        .run_id;
+    let checked = f.mock.seen.lock().unwrap().len();
+    f.mock.unavailable.store(true, Ordering::SeqCst);
+    let mut events = services.runtime.subscribe_event_envelopes();
+    assert_eq!(
+        f.command(
+            &alice,
+            RuntimeCommand::InterruptRun(assistant_protocol::InterruptRunRequest {
+                session_id,
+                run_id: run_id.clone()
+            })
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let status = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let RuntimeEvent::RunFinished {
+                run_id: finished,
+                status,
+                ..
+            } = events.recv().await.unwrap().event
+                && finished == run_id
+            {
+                break status;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(status, RunStatus::Cancelled);
+    assert_eq!(f.mock.seen.lock().unwrap().len(), checked);
+    assert_eq!(
+        services.runtime.lifecycle().unwrap(),
+        RuntimeLifecycle::Running
+    );
     f.stop().await;
 }

@@ -661,6 +661,55 @@ impl VolatileRuntimeStore {
                 state.goals.insert(stored.session_id.clone(), goal.clone());
             }
             state.histories.insert(stored.session_id.clone(), inherited);
+            let card_children = children
+                .iter()
+                .map(|(id, _, _)| id.clone())
+                .collect::<BTreeSet<_>>();
+            let mut copied = state
+                .message_cards
+                .values()
+                .filter(|card| {
+                    crate::message_card_owner(&card.summary.owner).0 == &fork.source_session_id
+                        && match &card.summary.owner {
+                            ConversationOwner::MainSession { .. } => {
+                                message_ids.contains(card.summary.anchor_message_id.as_str())
+                            }
+                            ConversationOwner::ChildTask { child_task_id, .. } => {
+                                card_children.contains(child_task_id)
+                            }
+                        }
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            copied.sort_by_key(|card| card.summary.position);
+            for mut card in copied {
+                card.summary.card_id = format!(
+                    "card-fork-{:x}",
+                    <sha2::Sha256 as sha2::Digest>::digest(format!(
+                        "{}\0{}",
+                        stored.session_id.as_str(),
+                        card.summary.card_id
+                    ))
+                );
+                card.summary.owner = match card.summary.owner {
+                    ConversationOwner::MainSession { .. } => ConversationOwner::MainSession {
+                        session_id: stored.session_id.clone(),
+                    },
+                    ConversationOwner::ChildTask { child_task_id, .. } => {
+                        ConversationOwner::ChildTask {
+                            session_id: stored.session_id.clone(),
+                            child_task_id,
+                        }
+                    }
+                };
+                state.next_card_position += 1;
+                card.summary.position = state.next_card_position;
+
+                card.summary.inherited = true;
+                state
+                    .message_cards
+                    .insert(card.summary.card_id.clone(), card);
+            }
             for (id, body, facts) in children {
                 let key = (stored.session_id.clone(), id);
                 state.child_conversations.insert(key.clone(), body);
@@ -768,6 +817,9 @@ impl VolatileRuntimeStore {
                 .feedback
                 .retain(|_, request| request.session_id != deletion.session_id);
             state.sessions.remove(&deletion.session_id);
+            state.message_cards.retain(|_, card| {
+                crate::message_card_owner(&card.summary.owner).0 != &deletion.session_id
+            });
             state.materialization_inputs.remove(&deletion.session_id);
             state.conversations.remove(&deletion.session_id);
             state.histories.remove(&deletion.session_id);

@@ -2986,6 +2986,13 @@ fn project_image_inspection_detail(
     let metadata = result.metadata.as_deref()?;
     Some(assistant_protocol::ImageInspectionDetailSnapshot {
         auxiliary_model: assistant_protocol::ModelSelection {
+            source: if metadata.model_source.as_deref() == Some("organization")
+                || metadata.model_provider.as_deref() == Some("managed")
+            {
+                assistant_protocol::ModelSelectionSource::Organization
+            } else {
+                assistant_protocol::ModelSelectionSource::Local
+            },
             provider_instance_id: assistant_protocol::ProviderInstanceId::new(
                 metadata.model_provider.clone()?,
             )
@@ -3457,6 +3464,7 @@ mod tool_image_projection_tests {
                 status: ToolResultStatus::Success,
                 content: ToolResultContent::text("image description"),
                 metadata: Some(Box::new(agent_types::ToolExecutionMetadata {
+                    model_source: None,
                     model_provider: Some(provider.into()),
                     model_id: Some("org/vision:latest".into()),
                     elapsed_ms: Some(12),

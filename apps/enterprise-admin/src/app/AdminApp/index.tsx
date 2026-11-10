@@ -17,7 +17,7 @@ export const AdminApp = observer(function AdminApp() {
       // Store 属于 bootstrap；StrictMode 的 effect 清理不应销毁已恢复的登录态。
     };
   }, [store]);
-  if (store.restoreState !== 'none')
+  if (store.restoreState !== 'none' && (!store.user || store.scope?.can_manage))
     return (
       <Result
         status="info"

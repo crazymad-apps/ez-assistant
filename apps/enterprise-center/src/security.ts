@@ -4,12 +4,13 @@ import { Reflector } from '@nestjs/core';
 import type { FastifyRequest } from 'fastify';
 import type { IdentityResponse } from './contracts/identity.js';
 import { IdentityError } from './identity/errors.js';
+import { isSystemAdmin } from './identity/service.js';
 import type { IdentityService } from './identity/service.js';
 
-type Policy = { mode: 'public' | 'optional' | 'authenticated' | 'admin'; action?: string };
+type Policy = { mode: 'public' | 'optional' | 'account' | 'system' | 'organization' | 'member' | 'scoped-admin'; action?: string };
 const accessPolicy = Symbol('access-policy');
 
-/** 未标记的 Nest 接口默认要求登录；optional 仅用于无效 Token 也能幂等退出。 */
+/** 未显式声明权限的入口拒绝访问；optional 用于无效 Token 也能幂等退出。 */
 export const Access = (mode: Policy['mode'], action?: string) =>
   SetMetadata(accessPolicy, { mode, action } satisfies Policy);
 
@@ -42,10 +43,19 @@ export class HttpSecurity implements CanActivate {
       const desktopUpload = (request.routeOptions?.config as { desktopReleaseUpload?: boolean } | undefined)?.desktopReleaseUpload === true;
       request.token = requestCredential(request, pluginUpload, desktopUpload);
       if (policy?.mode === 'public' || policy?.mode === 'optional') return true;
+      const mode = policy?.mode;
+      if (!mode)
+        throw new IdentityError(403, 'BUSINESS_UNAVAILABLE');
       request.identity = await this.identity.me(request.token);
-      const user = request.identity.user;
-      if (policy?.mode === 'admin' && !user.is_super_admin && user.role !== 'admin')
+      const { user, scope } = request.identity;
+      if (mode === 'system' && (scope.kind !== 'system' || !isSystemAdmin(user)))
         throw new IdentityError(403, 'ADMIN_REQUIRED');
+      if (mode === 'organization' && (scope.kind !== 'organization' || !scope.can_manage))
+        throw new IdentityError(403, 'SCOPE_DENIED');
+      if (mode === 'member' && (scope.kind !== 'organization' || !scope.member_role))
+        throw new IdentityError(403, 'SCOPE_DENIED');
+      if (mode === 'scoped-admin' && !scope.can_manage)
+        throw new IdentityError(403, 'SCOPE_DENIED');
       return true;
     };
 
@@ -53,7 +63,7 @@ export class HttpSecurity implements CanActivate {
     try {
       return await check();
     } catch (error) {
-      if (policy?.action) await this.identity.rejection(policy.action, request.id, error, request.identity?.user.id);
+      if (policy?.action) await this.identity.rejection(policy.action, request.id, error, request.identity?.user.id, request.identity?.scope.organization_id);
       throw error;
     }
   }

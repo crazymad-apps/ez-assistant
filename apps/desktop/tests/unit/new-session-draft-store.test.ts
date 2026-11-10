@@ -19,7 +19,7 @@ describe("NewSessionDraftStore", () => {
     expect(draft.approval_mode).toBe("auto");
     expect(draft.model_selection).toBeNull();
     expect(isDraftCustomized(draft)).toBe(false);
-    drafts.updateModel("unbound", { provider_instance_id: "provider-1", model_id: "vendor/model.v1" });
+    drafts.updateModel("unbound", { source: 'local' as const, provider_instance_id: "provider-1", model_id: "vendor/model.v1" });
     expect(isDraftCustomized(drafts.get("unbound")!)).toBe(true);
     drafts.updateModel("unbound", null);
     expect(isDraftCustomized(drafts.get("unbound")!)).toBe(false);
@@ -27,7 +27,7 @@ describe("NewSessionDraftStore", () => {
 
   it("copies current device defaults only into drafts created afterwards", () => {
     const drafts = new NewSessionDraftStore();
-    const remembered = { provider_instance_id: "provider-1", model_id: "model-a" };
+    const remembered = { source: 'local' as const, provider_instance_id: "provider-1", model_id: "model-a" };
     drafts.applyDefaults("auto", remembered);
     const first = drafts.open("unbound");
     expect(first).toMatchObject({ approval_mode: "auto", model_selection: remembered });
@@ -42,7 +42,7 @@ describe("NewSessionDraftStore", () => {
 
   it("clears an unavailable inherited model only from blank unmaterialized drafts", () => {
     const drafts = new NewSessionDraftStore();
-    const remembered = { provider_instance_id: "provider-1", model_id: "model-a" };
+    const remembered = { source: 'local' as const, provider_instance_id: "provider-1", model_id: "model-a" };
     drafts.applyDefaults("ask", remembered);
     drafts.open("unbound");
     drafts.open("workspace:workspace-2");
@@ -110,7 +110,7 @@ describe("NewSessionDraftStore", () => {
     drafts.open("unbound");
     const manifest = {
       idempotency_key: "attempt-1",
-      model_selection: { provider_instance_id: "provider-1", model_id: "model-a" },
+      model_selection: { source: 'local' as const, provider_instance_id: "provider-1", model_id: "model-a" },
       variant: "build" as const,
       approval_mode: "ask" as const,
       message: "首次发送",

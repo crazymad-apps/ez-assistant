@@ -1,0 +1,77 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>MCP UI fixture</title></head>
+<body><h1>标准 MCP 页面</h1><p id="state">等待初始化</p><button id="increment">增加</button><button id="save" disabled>保存</button><button id="navigate">导航</button><button id="open-app" disabled>打开应用</button><button id="draft" disabled>填写草稿</button><button id="call-app-tool" disabled>调用应用工具</button><button id="call-model-tool" disabled>调用模型工具</button><p id="tool-result"></p><div id="links"></div>
+<script>
+const parent_window = window.parent;
+const state = document.getElementById('state');
+let count = 0;
+let revision = 0;
+let save_id = 1000;
+let native_snapshot_probe = false;
+let native_link_probe = false;
+let native_peer_probe = false;
+let app_plugin = 'ui-fixture';
+let rpc_id = 2000;
+let tool_request_id;
+function requestApp(method,params) {parent_window.postMessage({jsonrpc:'2.0',id:++rpc_id,method,params},'*');}
+function callTool(name) {
+  requestApp('tools/call', {name, arguments:{}});
+  tool_request_id = rpc_id;
+  document.getElementById('tool-result').textContent = '等待工具结果';
+}
+document.getElementById('call-app-tool').onclick = () => callTool('app_only');
+document.getElementById('call-model-tool').onclick = () => callTool('model_only');
+document.getElementById('open-app').onclick = () => requestApp('ez-assistant/open-app',{target:{type:'plugin',name:app_plugin,entry_id:'counter-app'},arguments:{count}});
+document.getElementById('draft').onclick = () => requestApp('ez-assistant/set-composer-draft',{text:'来自应用的草稿'});
+
+document.getElementById('save').onclick = () => parent_window.postMessage({jsonrpc:'2.0',id:++save_id,method:'ez-assistant/save-snapshot',params:{expected_revision:revision,schema:'v1',snapshot:{count}}},'*');
+document.getElementById('increment').onclick = () => { state.textContent = '累计 ' + ++count; };
+document.getElementById('navigate').onclick = () => { location.href = 'about:blank'; };
+window.addEventListener('message', event => {
+  if (event.source !== parent_window || event.data?.jsonrpc !== '2.0') return;
+  const message = event.data;
+  if (message.id === 1 && message.result) {
+    document.body.dataset.hostCapabilities = JSON.stringify(message.result.hostCapabilities);
+    document.getElementById('open-app').disabled = !message.result.hostCapabilities.experimental?.['ez-assistant']?.openApp;
+    document.getElementById('draft').disabled = !message.result.hostCapabilities.experimental?.['ez-assistant']?.setComposerDraft;
+    document.getElementById('save').disabled = !message.result.hostCapabilities.experimental?.['ez-assistant']?.saveSnapshot;
+    document.getElementById('call-app-tool').disabled = !message.result.hostCapabilities.serverTools;
+    document.getElementById('call-model-tool').disabled = !message.result.hostCapabilities.serverTools;
+    parent_window.postMessage({jsonrpc:'2.0',method:'ui/notifications/initialized',params:{}}, '*');
+    state.textContent = '已初始化';
+    try { void parent.parent.document.body; document.body.dataset.parentReadable = 'true'; }
+    catch { document.body.dataset.parentReadable = 'false'; }
+    try { void document.cookie; document.body.dataset.cookieReadable = 'true'; }
+    catch { document.body.dataset.cookieReadable = 'false'; }
+    parent_window.postMessage({jsonrpc:'2.0',method:'notifications/message',params:{level:'info',data:{f03Proof:{parentReadable:document.body.dataset.parentReadable==='true',cookieExposed:(()=>{try{return document.cookie.length>0}catch{return false}})(),tauriAvailable:typeof window.__TAURI_INTERNALS__!=='undefined',mainFrameScript:window.__EZ_F03_MAIN_FRAME_PROBE__===true,allFrameScript:window.__EZ_F03_ALL_FRAME_PROBE__===true}}}},'*');
+    // 标准资源的默认 CSP 必须在请求发出前阻止联网。
+    if (location.protocol === 'about:') fetch('https://example.invalid/f03-forbidden').then(() => { document.body.dataset.network = 'allowed'; }).catch(() => { document.body.dataset.network = 'blocked'; });
+  }
+  if (message.id === tool_request_id && tool_request_id !== undefined) {
+    const result = document.getElementById('tool-result');
+    result.textContent = message.result?.content?.[0]?.text ?? message.error?.message ?? '无结果';
+    result.dataset.private = message.result?._meta?.private ?? '';
+  }
+  if (message.method === 'ui/notifications/tool-input') { native_snapshot_probe=message.params.arguments.native_snapshot_probe===true; native_link_probe=message.params.arguments.native_link_probe===true; native_peer_probe=message.params.arguments.native_peer_probe===true; app_plugin=message.params.arguments.app_plugin??'ui-fixture'; document.body.dataset.input = message.params.arguments.value; if(typeof message.params.arguments.count==='number') {count=message.params.arguments.count;state.textContent='累计 '+count;} }
+  if (message.method === 'ui/notifications/tool-result') { document.body.dataset.result = message.params.content[0]?.text ?? ''; document.body.dataset.privateResult = message.params._meta?.private; }
+  if (message.method === 'ez-assistant/notifications/card-state') { revision=message.params.revision; if(typeof message.params.snapshot?.value?.count==='number') count=message.params.snapshot.value.count;state.textContent='累计 '+count; if(native_snapshot_probe) {document.getElementById('increment').click();document.getElementById('save').click();} }
+  if (message.id>1000 && message.id<=2000 && message.result) { revision=message.result.revision;state.textContent=(message.result.saved?'已保存 ':'冲突 ')+count; if(native_snapshot_probe) parent_window.postMessage({jsonrpc:'2.0',method:'notifications/message',params:{level:'info',data:{f03SnapshotProof:{saved:message.result.saved,revision,count}}}},'*'); }
+  if (native_link_probe && message.id>1000 && message.id<=2000 && message.result?.revision===1) document.getElementById('open-app').click();
+  if (message.method === 'ez-assistant/notifications/link-opened') {
+    const handle=message.params.handle;const value=message.params.arguments.count??0;
+    const button=document.createElement('button');button.textContent='回传 '+value;
+    button.onclick=()=>requestApp('ez-assistant/post-message',{handle,payload:{count:10+value}});
+    button.dataset.handle=handle;document.getElementById('links').append(button);
+    document.body.dataset.lastLocate=String(value); if(native_peer_probe) button.click();
+  }
+  if (message.method === 'ez-assistant/notifications/link-closed') {document.querySelectorAll('[data-handle]').forEach(button=>{if(button.dataset.handle===message.params.handle)button.remove();});}
+  if (message.method === 'ez-assistant/notifications/link-message') {
+    count=message.params.payload.count;state.textContent='收到 '+count;
+    if(!document.getElementById('save').disabled) document.getElementById('save').click();
+    if(native_link_probe) parent_window.postMessage({jsonrpc:'2.0',method:'notifications/message',params:{level:'info',data:{f03LinkProof:{count,linked:typeof message.params.handle==='string'}}}},'*');
+  }
+  if (message.method === 'ui/notifications/host-context-changed') document.body.dataset.theme = message.params.theme;
+  if (message.method === 'ui/resource-teardown') parent_window.postMessage({jsonrpc:'2.0',id:message.id,result:{}},'*');
+});
+parent_window.postMessage({jsonrpc:'2.0',id:1,method:'ui/initialize',params:{appInfo:{name:'Generic UI fixture',version:'1'},appCapabilities:{},protocolVersion:'2026-01-26'}},'*');
+</script></body></html>

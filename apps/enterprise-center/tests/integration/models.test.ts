@@ -1,3 +1,4 @@
+import { singleModelPolicy, defaultRuntimeModel } from '../support/model-policy.js';
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { createServer } from 'node:http';
@@ -101,9 +102,9 @@ it('真实数据库与 HTTP 保持目录/固定/模板独立，拒绝迟到覆�
   const parameters: ModelParameters = detail.parameters;
   parameters.max_output_tokens = { state: 'known', value: 1024 };
   await request('PUT', 'model-configuration', { ...selection, origin: 'online', parameters });
-  expect((await request('PUT', 'model-settings', { default_model: selection })).state).toBe('ready');
-  const managed = await request('GET', 'runtime/model-configuration');
-  expect(managed.parameters.max_output_tokens.value).toBe(1024);
+  expect((await request('PUT', 'model-settings', singleModelPolicy(await request('GET', 'model-settings'), selection))).availability[0].state).toBe('ready');
+  const managed = defaultRuntimeModel(await request('GET', 'runtime/model-configuration'));
+  expect(managed.parameters?.max_output_tokens.value).toBe(1024);
   expect(managed.endpoint).toContain(`/providers/${id}/v1`);
   const stored = (await source.query('SELECT model_catalog FROM providers WHERE provider_instance_id=$1', [id]))[0]
     .model_catalog;
@@ -136,7 +137,7 @@ it('真实数据库与 HTTP 保持目录/固定/模板独立，拒绝迟到覆�
   await request('POST', `model-providers/${id}/refresh`, {});
   expect((await request('GET', `model-providers/${id}/catalog`)).models).toEqual([]);
   expect((await request('GET', `model-providers/${id}/fixed-configs`)).items).toHaveLength(1);
-  expect((await request('GET', 'model-settings')).state).toBe('ready');
+  expect((await request('GET', 'model-settings')).availability[0].state).toBe('ready');
   // 新 HTTP/模板 owner 只从数据库和静态文件恢复，不复用进程模型目录缓存。
   await app!.close();
   app = await createHttpApp({ source, origin: 'http://127.0.0.1:17320', templatesFile });
@@ -160,7 +161,7 @@ it('真实数据库与 HTTP 保持目录/固定/模板独立，拒绝迟到覆�
   };
 
   expect((await next(`model-providers/${id}/catalog`)).models).toEqual([]);
-  expect((await next('model-settings')).state).toBe('ready');
+  expect((await next('model-settings')).availability[0].state).toBe('ready');
   const status = await next('model-templates');
   expect(status.available).toBe(true);
   writeFileSync(templatesFile, '{invalid');
@@ -173,9 +174,9 @@ it('真实数据库与 HTTP 保持目录/固定/模板独立，拒绝迟到覆�
   ).parameters.max_output_tokens.value = 2048;
   writeFileSync(templatesFile, JSON.stringify(updated));
   await next('model-templates/reload', 'POST', {});
-  expect((await next('runtime/model-configuration')).parameters.max_output_tokens.value).toBe(1024);
+  expect(defaultRuntimeModel(await next('runtime/model-configuration')).parameters?.max_output_tokens.value).toBe(1024);
   await next('model-configuration/reset', 'POST', selection, 204);
-  expect((await next('model-settings')).reason).toBe('model_absent');
+  expect((await next('model-settings')).availability[0].reason).toBe('model_absent');
   const deletion = await app.inject({
     method: 'DELETE',
     url: `/api/model-providers/${id}`,
@@ -183,7 +184,7 @@ it('真实数据库与 HTTP 保持目录/固定/模板独立，拒绝迟到覆�
   });
   expect(deletion.statusCode).toBe(200);
   expect(deletion.json().default_model).toBe(true);
-  expect((await next('model-settings')).reason).toBe('provider_deleted');
+  expect((await next('model-settings')).availability[0].reason).toBe('provider_deleted');
   const final = (await source.query('SELECT provider_instance_id,model_id FROM model_settings'))[0];
   expect(final).toEqual(selection);
   expect((await source.query('SELECT count(*)::integer AS n FROM providers'))[0].n).toBe(0);

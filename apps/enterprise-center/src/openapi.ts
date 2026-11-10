@@ -6,9 +6,9 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 export function createOpenApiDocument(app: INestApplication) {
   const { version } = JSON.parse(readFileSync(new URL('./package-info.json', import.meta.url), 'utf8')) as { version: string };
   const config = new DocumentBuilder().setTitle('Enterprise Center API')
-    .setDescription('企业中心已实现的 HTTP 接口；软件版本不代表 Runtime 版本。')
+    .setDescription('企业中心 HTTP 接口。F01 M0 仅开放身份、组织与系统管理入口，尚未组织化的业务暂不可用。')
     .setVersion(version)
-    .addBearerAuth({ type: 'http', scheme: 'bearer', description: 'ct_ 内存 Token；不接受 cl_ LLM key 或 Cookie；中心重启需重新登录' }, 'tokenBearer')
+    .addBearerAuth({ type: 'http', scheme: 'bearer', bearerFormat: 'JWT', description: '有效期 7 天；中心重启需重新登录。凭据仅从 Bearer 请求头读取。' }, 'tokenBearer')
     .addSecurityRequirements('tokenBearer')
     .build();
   return SwaggerModule.createDocument(app, config);

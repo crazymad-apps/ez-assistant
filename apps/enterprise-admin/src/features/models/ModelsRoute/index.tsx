@@ -1,106 +1,45 @@
-import { useState } from 'react';
 import { useNavigate } from 'react-router';
 import { observer } from 'mobx-react-lite';
-import { Alert, App, Button, Card, Space, Table, Tag, Typography } from 'antd';
+import { Alert, Button, Card, Table } from 'antd';
 import adminStore from '../../../stores/AdminStore';
 import { modelApi } from '../../../request/models';
 import { useResourceQuery } from '../../../request/useResourceQuery';
-import { providerLabels, reasons } from '../model';
-import { DefaultModelDialog } from '../DefaultModelDialog';
-import { PublicOriginDialog } from '../PublicOriginDialog';
+import { providerLabels } from '../model';
+import { OrganizationModelSettings } from '../OrganizationModelSettings';
 import styles from './index.module.scss';
 
 const read = async (token: string, signal: AbortSignal) => {
-  const [providers, settings, templates] = await Promise.all([
+  const [providers, settings] = await Promise.all([
     modelApi.providers(token, signal),
     modelApi.settings(token, signal),
-    modelApi.templates(token, signal),
   ]);
-  return { providers, settings, templates };
+  return { providers, settings };
 };
 
 export const ModelsRoute = observer(function ModelsRoute() {
   const query = useResourceQuery(read),
-    navigate = useNavigate(),
-    { modal, message } = App.useApp();
-  const [selecting, setSelecting] = useState(false);
-  const [editingOrigin, setEditingOrigin] = useState(false);
+    navigate = useNavigate();
   const data = query.value;
-
-  async function reloadTemplates() {
-    const error = await adminStore.reloadModelTemplates();
-    query.reload();
-    if (error) void message.error(error);
-    else void message.success('模板已刷新');
-  }
 
   return (
     <section className={styles.page}>
       {query.error && (
         <Alert type="error" title={query.error} action={<Button onClick={query.reload}>重新读取</Button>} />
       )}
-      <Card title="公共配置" loading={!data && query.loading}>
-        <div className={styles.settings}>
-          <div className={styles.setting}>
-            <Typography.Text strong>企业默认模型</Typography.Text>
-            <Space wrap>
-              <Typography.Text>{data?.settings.default_model?.model_id ?? '尚未选择默认模型'}</Typography.Text>
-              <Tag color={data?.settings.state === 'ready' ? 'success' : 'warning'}>
-                {data?.settings.state === 'ready'
-                  ? '可用'
-                  : (reasons[data?.settings.reason ?? 'not_selected'] ?? '不可用')}
-              </Tag>
-              <Button disabled={adminStore.busy || !data} onClick={() => setSelecting(true)}>
-                选择默认模型
-              </Button>
-              <Button
-                disabled={adminStore.busy || !data?.settings.default_model}
-                onClick={() =>
-                  modal.confirm({
-                    title: '清除默认模型？',
-                    content: '新的企业模型请求将不可用，已接纳的流不因本次操作主动中断。',
-
-                    onOk: async () => {
-                      const error = await adminStore.setDefaultModel(null);
-                      if (error) {
-                        void message.error(error);
-                        throw new Error(error);
-                      }
-                      query.reload();
-                    },
-                  })
-                }
-              >
-                清除
-              </Button>
-            </Space>
-          </div>
-          <div className={styles.setting}>
-            <Typography.Text strong>客户端模型访问地址</Typography.Text>
-            <Space wrap>
-              <Typography.Text>{data?.settings.public_origin ?? '尚未配置'}</Typography.Text>
-              <Button disabled={adminStore.busy || !data} onClick={() => setEditingOrigin(true)}>
-                设置地址
-              </Button>
-            </Space>
-          </div>
-        </div>
-      </Card>
+      {data?.settings.policy ? (
+        <OrganizationModelSettings initial={data.settings} providers={data.providers} />
+      ) : (
+        <Card title="组织配置" loading={query.loading} />
+      )}
       <Card
         title="服务商"
         className={styles.providers}
         extra={
-          <Space wrap>
-            <Button disabled={adminStore.busy} onClick={reloadTemplates}>
-              刷新模板
-            </Button>
-            <Button type="primary" disabled={adminStore.busy} onClick={() => navigate('/models/providers/new')}>
-              添加服务商
-            </Button>
-          </Space>
+          <Button type="primary" disabled={adminStore.busy} onClick={() => navigate('/models/providers/new')}>
+            添加服务商
+          </Button>
         }
       >
-        {data && !data.templates.available && <Alert type="warning" title="模板暂不可用，请刷新模板后重试。" />}
         <Table
           rowKey="provider_instance_id"
           size="small"
@@ -132,27 +71,6 @@ export const ModelsRoute = observer(function ModelsRoute() {
           ]}
         />
       </Card>
-      {selecting && data && (
-        <DefaultModelDialog
-          providers={data.providers}
-          onClose={() => setSelecting(false)}
-          onSaved={() => {
-            setSelecting(false);
-            query.reload();
-          }}
-        />
-      )}
-      {editingOrigin && data && (
-        <PublicOriginDialog
-          origin={data.settings.public_origin}
-          onClose={() => setEditingOrigin(false)}
-          onSaved={() => {
-            setEditingOrigin(false);
-            query.reload();
-            void message.success('客户端模型访问地址已保存');
-          }}
-        />
-      )}
     </section>
   );
 });

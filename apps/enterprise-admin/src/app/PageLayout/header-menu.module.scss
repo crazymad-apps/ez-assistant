@@ -1,4 +1,4 @@
-.account_button {
+.menu_button {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -7,6 +7,14 @@
   border-radius: 999px;
   color: #fff;
 }
-.account_button:hover {
+.menu_button:hover {
+  color: #fff !important;
   background: rgba(255, 255, 255, 0.14) !important;
+}
+
+.menu_label {
+  max-width: 9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

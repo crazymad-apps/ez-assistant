@@ -456,6 +456,24 @@ impl VolatileRuntimeStore {
                 .cloned()
                 .collect::<BTreeSet<_>>();
             state.retain_rewritten_history(&rewrite.session_id, &removed, &retained_message_ids);
+            let retained_children = state
+                .histories
+                .get(&rewrite.session_id)
+                .into_iter()
+                .flat_map(|h| &h.child_tasks)
+                .map(|c| c.child_task_id.clone())
+                .collect::<BTreeSet<_>>();
+            state.message_cards.retain(|_, card| {
+                crate::message_card_owner(&card.summary.owner).0 != &rewrite.session_id
+                    || match &card.summary.owner {
+                        ConversationOwner::MainSession { .. } => retained_message_ids
+                            .iter()
+                            .any(|id| id.as_str() == card.summary.anchor_message_id.as_str()),
+                        ConversationOwner::ChildTask { child_task_id, .. } => {
+                            retained_children.contains(child_task_id)
+                        }
+                    }
+            });
             state
                 .inputs
                 .retain(|_, input| !removed.contains(&input.input_id));

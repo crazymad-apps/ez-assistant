@@ -767,6 +767,15 @@ async fn a_deny_reloaded_while_pending_overrides_the_older_allow_once_decision()
 
 #[tokio::test]
 async fn runtime_shutdown_cancels_and_removes_pending_approvals() {
+    assert_shutdown_cancels_pending_approvals(false).await;
+}
+
+#[tokio::test]
+async fn confirmed_shutdown_cancels_and_removes_pending_approvals() {
+    assert_shutdown_cancels_pending_approvals(true).await;
+}
+
+async fn assert_shutdown_cancels_pending_approvals(confirmed: bool) {
     let (runtime, tool) = approval_runtime([tool_step("assistant-tool")]);
     let session_id = runtime
         .create_session(CreateSessionRequest::default())
@@ -791,10 +800,25 @@ async fn runtime_shutdown_cancels_and_removes_pending_approvals() {
         .run;
     wait_for_pending_approval(&runtime, &session_id).await;
 
-    runtime
-        .shutdown(ShutdownRuntimeRequest::default())
-        .await
-        .expect("shutdown runtime");
+    if confirmed {
+        let work = runtime.preview_shutdown().await.expect("shutdown impact");
+        assert_eq!(work.counts(), (1, 1, 0));
+        assert!(
+            runtime
+                .begin_confirmed_shutdown(&work)
+                .await
+                .expect("confirm shutdown")
+        );
+        runtime
+            .finish_confirmed_shutdown()
+            .await
+            .expect("strict shutdown");
+    } else {
+        runtime
+            .shutdown(ShutdownRuntimeRequest::default())
+            .await
+            .expect("shutdown runtime");
+    }
     assert_eq!(
         runtime
             .get_run(GetRunRequest {

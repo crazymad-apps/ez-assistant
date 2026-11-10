@@ -15,6 +15,7 @@ impl RuntimeTarget {
     pub(crate) fn fixture(origin: &str, user: Option<i32>) -> Self {
         Self {
             identity: Arc::new(HostLoginResult {
+                organization_selection: None,
                 token: None,
                 expires_at_ms: u64::MAX,
                 instance_id: "native-probe".into(),
@@ -26,6 +27,8 @@ impl RuntimeTarget {
                 kind: HostIdentityKind::User,
                 login_context: None,
                 identity: user.map(|id| HostUserIdentity {
+                    organization_id: "00000000-0000-4000-8000-000000000010".into(),
+                    organization_name: "Organization".into(),
                     center_id: "native-probe".into(),
                     user_id: id,
                     username: format!("user{id}"),

@@ -99,6 +99,14 @@ impl AssistantRuntime {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
         let session = self.session_loader.prepare(&request.session_id).await?;
+        self.stop_goal_in_session(request, &session).await
+    }
+
+    pub(in crate::runtime) async fn stop_goal_in_session(
+        &self,
+        request: StopGoalRequest,
+        session: &SessionController,
+    ) -> RuntimeResult<StopGoalResult> {
         let _mutation = session.mutation().await;
         session.ensure_active()?;
         session.ensure_healthy()?;

@@ -69,7 +69,8 @@ pub(crate) struct RuntimeDiscovery {
     pub(crate) access_token: String,
     pub(crate) pid: u32,
     pub(crate) executable_path: PathBuf,
-    pub(crate) executable_sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) executable_sha256: Option<String>,
 }
 
 impl RuntimeInstanceGuard {
@@ -206,9 +207,15 @@ impl OwnedEndpoint {
     }
 }
 
-fn executable_identity() -> std::io::Result<(PathBuf, String)> {
+fn executable_identity() -> std::io::Result<(PathBuf, Option<String>)> {
     use sha2::{Digest, Sha256};
     let path = std::env::current_exe()?.canonicalize()?;
+    // 开发启动器直接管理重启，正式构建仍发布完整摘要供安装和 Client 校验。
+    if cfg!(debug_assertions)
+        && std::env::var_os("EZ_ASSISTANT_DEV_HOST").as_deref() == Some("1".as_ref())
+    {
+        return Ok((path, None));
+    }
     let mut file = File::open(&path)?;
     let before = file.metadata()?;
     let mut digest = Sha256::new();
@@ -229,7 +236,7 @@ fn executable_identity() -> std::io::Result<(PathBuf, String)> {
             "Host executable changed during discovery publication",
         ));
     }
-    Ok((path, format!("{:x}", digest.finalize())))
+    Ok((path, Some(format!("{:x}", digest.finalize()))))
 }
 
 fn endpoint_url(address: SocketAddr, scheme: HostAccessScheme) -> String {
@@ -454,7 +461,7 @@ mod tests {
             access_token: "replacement-token".to_owned(),
             pid: 99,
             executable_path: std::env::current_exe().unwrap(),
-            executable_sha256: "0".repeat(64),
+            executable_sha256: Some("0".repeat(64)),
         };
         fs::write(
             endpoint.discovery_path(),

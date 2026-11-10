@@ -15,12 +15,18 @@ impl Network {
         &self,
         permit: &AccessPermit,
     ) -> Result<Arc<Session>, AccessError> {
+        let key = permit.user_key().ok_or(AccessError::Unauthorized)?;
         self.demand.store(true, Ordering::Relaxed);
         self.refresh.notify_one();
         let mut connected = self.connected.subscribe();
         tokio::time::timeout(Duration::from_secs(12), async {
             loop {
-                if let Some(session) = connected.borrow_and_update().clone() && !session.ended.is_cancelled() { return Ok(session); }
+                if let Some(session) = connected.borrow_and_update().clone() && !session.ended.is_cancelled() {
+                    if session.organization_id.as_deref() != Some(key.organization_id.as_str()) {
+                        return Err(AccessError::NetworkDenied);
+                    }
+                    return Ok(session);
+                }
                 tokio::select! {
                     () = permit.ended() => return Err(AccessError::Unauthorized),
                     result = connected.changed() => { result.map_err(|_| AccessError::Unavailable)?; },

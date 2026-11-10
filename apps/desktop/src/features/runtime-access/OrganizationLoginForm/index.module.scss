@@ -1,0 +1,23 @@
+.field[data-variant="field"] {
+  padding-inline: 12px;
+  border-radius: 9px;
+}
+
+.actions {
+  display: grid;
+  gap: 8px;
+}
+
+.back[data-button-variant="text"] {
+  justify-self: end;
+  padding-inline: 0;
+  color: var(--ez-primary);
+  font-size: var(--ez-font-small);
+
+  &:hover:not(:disabled), &:focus-visible {
+    color: var(--ez-primary-hover);
+    text-decoration: underline;
+  }
+
+  &:focus-visible { outline: 2px solid var(--ez-focus); }
+}

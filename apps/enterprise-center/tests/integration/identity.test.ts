@@ -125,16 +125,16 @@ it('登录凭据仅在内存，数据库无会话表，me 不返回秘密，LLM 
   const f = await fixture(),
     result = await host(f);
   expect(result.token).toMatch(/^ct_[a-f0-9]{64}$/);
-  expect(result.llm_key).toMatch(/^cl_[a-f0-9]{64}$/);
+  expect(result.llm_key!).toMatch(/^cl_[a-f0-9]{64}$/);
   expect((await f.pool.query("SELECT to_regclass('public.login_sessions') AS relation")).rows[0].relation).toBeNull();
   const identity = await me(f, result.token);
   expect(identity.statusCode).toBe(200);
   expect(identity.json()).toEqual({ center_id: result.center_id, user: result.user });
   expect(identity.headers['cache-control']).toBe('no-store');
-  expect((await me(f, result.llm_key)).statusCode).toBe(401);
+  expect((await me(f, result.llm_key!)).statusCode).toBe(401);
   const stored = JSON.stringify(await snapshot(f.pool));
   expect(stored).not.toContain(result.token);
-  expect(stored).not.toContain(result.llm_key);
+  expect(stored).not.toContain(result.llm_key!);
   const contract = JSON.parse(readFileSync('tests/fixtures/identity/host-login.json', 'utf8'));
   expect({
     ...result,
@@ -208,14 +208,14 @@ it('多次登录秘密不同；退出只撤销当前 Token 和关联 key，重�
     a = await host(f),
     b = await host(f);
   expect(a.token).not.toBe(b.token);
-  expect(a.llm_key).not.toBe(b.llm_key);
+  expect(a.llm_key!).not.toBe(b.llm_key!);
   const repeated = await Promise.all([logout(f, a.token), logout(f, a.token)]);
   expect(repeated.map((response) => response.statusCode)).toEqual([204, 204]);
   expect((await logout(f, 'ct_' + '0'.repeat(64))).statusCode).toBe(204);
   expect((await me(f, a.token)).statusCode).toBe(401);
   expect((await me(f, b.token)).statusCode).toBe(200);
-  await expect(f.app.get(IdentityService).llmIdentity(a.llm_key)).rejects.toMatchObject({ code: 'TOKEN_INVALID' });
-  await expect(f.app.get(IdentityService).llmIdentity(b.llm_key)).resolves.toMatchObject({ user: b.user });
+  await expect(f.app.get(IdentityService).llmIdentity(a.llm_key!)).rejects.toMatchObject({ code: 'TOKEN_INVALID' });
+  await expect(f.app.get(IdentityService).llmIdentity(b.llm_key!)).resolves.toMatchObject({ user: b.user });
   expect(
     (await f.pool.query("SELECT count(*) FROM management_audit WHERE action='logout' AND success")).rows[0].count,
   ).toBe('1');
@@ -233,7 +233,7 @@ it('普通用户本人改密验证原密码，失败不撤销，成功保留全�
   expect((await password(f, a.token)).statusCode).toBe(204);
   for (const session of [a, b]) {
     expect((await me(f, session.token)).statusCode).toBe(200);
-    await expect(f.app.get(IdentityService).llmIdentity(session.llm_key)).resolves.toMatchObject({
+    await expect(f.app.get(IdentityService).llmIdentity(session.llm_key!)).resolves.toMatchObject({
       user: session.user,
     });
   }
@@ -385,7 +385,7 @@ it('重建 HTTP 与数据库连接池后，旧 Token 和 key 全部失效', asyn
   const again = { ...f, app: restarted, pool: restartedPool };
   expect((await me(again, a.token)).statusCode).toBe(401);
   expect((await me(again, b.token)).statusCode).toBe(401);
-  await expect(restarted.get(IdentityService).llmIdentity(b.llm_key)).rejects.toMatchObject({ code: 'TOKEN_INVALID' });
+  await expect(restarted.get(IdentityService).llmIdentity(b.llm_key!)).rejects.toMatchObject({ code: 'TOKEN_INVALID' });
   expect((await login(again)).statusCode).toBe(200);
 });
 
@@ -518,7 +518,7 @@ it('并发本人改密只提交一份密码快照，同时保留两个已登录 
   expect(await new Passwords().verify('123456', row.password_hash)).toBe(false);
   for (const session of [a, b]) {
     expect((await me(f, session.token)).statusCode).toBe(200);
-    await expect(f.app.get(IdentityService).llmIdentity(session.llm_key)).resolves.toMatchObject({
+    await expect(f.app.get(IdentityService).llmIdentity(session.llm_key!)).resolves.toMatchObject({
       user: session.user,
     });
   }

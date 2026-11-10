@@ -12,7 +12,7 @@ use axum::{
 include!(concat!(env!("OUT_DIR"), "/web_assets.rs"));
 
 // Safari 的 Blob PDF 会继承页面 CSP；允许同源父页面预览，同时继续禁止外站嵌入。
-const WEB_CSP: &str = "default-src 'self'; connect-src 'self'; img-src 'self' blob: data: http: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:; object-src 'none'; frame-src blob:; base-uri 'none'; form-action 'self'; frame-ancestors 'self'";
+const WEB_CSP: &str = "default-src 'self'; connect-src 'self'; img-src 'self' blob: data: http: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:; object-src 'none'; frame-src 'self' blob: http: https:; base-uri 'none'; form-action 'self'; frame-ancestors 'self'";
 
 pub(super) async fn serve(
     axum::extract::State(state): axum::extract::State<super::HttpState>,

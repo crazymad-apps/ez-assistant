@@ -1,4 +1,4 @@
-//! 显式 JSON 辅助操作；不进入生成重试、SSE 或工具执行生命周期。
+//! 显式计量与压缩辅助操作；不进入普通生成重试或工具执行生命周期。
 
 use std::time::Duration;
 
@@ -122,9 +122,12 @@ impl OpenAiResponsesService {
             body["instructions"] = Value::String(instructions);
         }
         // 压缩沿用宿主配置的 Transport 响应建立/正文空闲超时，不另设 120 秒总时限。
-        let response = self
-            .json_operation("responses/compact", body, &context)
-            .await?;
+        let response = if self.adapter.streaming_compaction {
+            self.compact_stream(body, &context).await?
+        } else {
+            self.json_operation("responses/compact", body, &context)
+                .await?
+        };
         validate_window(&response)?;
         let message_id = MessageId::new(required_string(&response, "id")?)
             .map_err(|_| protocol("compact response ID is invalid"))?;

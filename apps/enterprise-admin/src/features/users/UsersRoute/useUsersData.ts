@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import adminStore from '../../../stores/AdminStore';
 import { api } from '../../../request/api';
 import type { UserQuery } from '../../../request/api';
+import { useResourceQuery } from '../../../request/useResourceQuery';
 import { PagedList } from '../../../request/paged-list';
 import type { PagedSnapshot } from '../../../request/paged-list';
 import { userView } from '../../../model';
@@ -14,6 +15,7 @@ import type { UserView } from '../../../model';
  */
 export function useUsersData() {
   const token = adminStore.token;
+  const organizations = useResourceQuery(api.organizations);
   const [query, setQuery] = useState<UserQuery>({ limit: 20, offset: 0 });
   const [attempt, setAttempt] = useState(0);
   const [snapshot, setSnapshot] = useState<PagedSnapshot<UserView>>({
@@ -40,6 +42,8 @@ export function useUsersData() {
   }, [list, query, attempt]);
   return {
     users: snapshot.items,
+    organizations: organizations.value,
+    organizationLoad: organizations,
     preview: snapshot.state,
     total: snapshot.total,
     error: snapshot.error,

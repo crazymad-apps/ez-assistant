@@ -44,6 +44,7 @@ impl HostRegistrationState {
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct HostRegistrationDevice {
+    pub organization_id: String,
     pub id: String,
     pub installation_id: String,
     pub name: String,

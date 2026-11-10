@@ -68,7 +68,7 @@ export function isAllowDecision(decision: ApprovalDecision): boolean {
   return decision !== "deny";
 }
 
-function ApprovalInput({ input }: Readonly<{ input: ToolInputProjection }>) {
+export function ApprovalInput({ input }: Readonly<{ input: ToolInputProjection }>) {
   return <div>
     <ApprovalInputValue input={input.value} />
     {input.redacted && <p>已隐去敏感值。</p>}

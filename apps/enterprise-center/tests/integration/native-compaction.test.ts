@@ -1,3 +1,4 @@
+import { singleModelPolicy, defaultHistoryModel } from '../support/model-policy.js';
 import { createServer } from 'node:http';
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
@@ -14,7 +15,7 @@ it.skipIf(!process.env.CENTER_F01_SCENARIO)('真实数据库准入与 HTTP/WS �
   const root = resolve(process.env.CENTER_F01_SCENARIO!);
   if (!root.startsWith(resolve('../../.runtime-test/v030-f01-center-'))) throw new Error('隔离路径不符');
   const scenario = JSON.parse(await readFile(join(root, 'scenario.json'), 'utf8')) as {
-    root: string; postgres_host: string; postgres_port: number; database: string; role: string;
+    root: string; postgres_host: string; postgres_port: number; postgres_server_host?: string; postgres_server_port?: number; database: string; role: string;
   };
   if (scenario.root !== root || scenario.postgres_host !== '127.0.0.1' || scenario.database !== 'ez_center_f01' || scenario.role !== 'center_app') throw new Error('隔离目标不符');
   const url = `postgres://center_app@127.0.0.1:${scenario.postgres_port}/ez_center_f01`;
@@ -31,6 +32,12 @@ it.skipIf(!process.env.CENTER_F01_SCENARIO)('真实数据库准入与 HTTP/WS �
     for await (const part of request) parts.push(part);
     expect(request.headers['x-ez-center-history-binding']).toBeUndefined();
     const body = JSON.parse(Buffer.concat(parts).toString());
+    if (request.url === '/v1/responses') {
+      expect(request.headers['x-codex-beta-features']).toBe('remote_compaction_v2');
+      expect(body.input.at(-1)).toEqual({ type: 'compaction_trigger' });
+      response.writeHead(200, { 'content-type': 'text/event-stream' }).end(`data: ${JSON.stringify({ type: 'response.completed', response: { id: 'cmp_v2', status: 'completed', output: [native], usage } })}\n\n`);
+      return;
+    }
     response.writeHead(200, { 'content-type': 'application/json' });
     if (request.url?.endsWith('/input_tokens')) response.end('{"input_tokens":42}');
     else response.end(JSON.stringify({ id: `cmp_http_${http.length}`, object: 'response.compaction', created_at: 42, output: [...body.input.filter((item: { role?: string }) => item.role === 'user'), native], usage }));
@@ -50,7 +57,7 @@ it.skipIf(!process.env.CENTER_F01_SCENARIO)('真实数据库准入与 HTTP/WS �
   });
   try {
     const actual = (await pool.query('SELECT host(inet_server_addr()) AS host,inet_server_port() AS port,current_database() AS db,current_user AS role')).rows[0];
-    expect(actual).toEqual({ host: '127.0.0.1', port: scenario.postgres_port, db: 'ez_center_f01', role: 'center_app' });
+    expect(actual).toEqual({ host: scenario.postgres_server_host ?? '127.0.0.1', port: scenario.postgres_server_port ?? scenario.postgres_port, db: 'ez_center_f01', role: 'center_app' });
     expect((await pool.query("SELECT COUNT(*)::text AS n FROM pg_tables WHERE schemaname='public'")).rows[0].n).toBe('0');
     await upgradeDatabase(pool);
     await source.initialize();
@@ -81,14 +88,14 @@ it.skipIf(!process.env.CENTER_F01_SCENARIO)('真实数据库准入与 HTTP/WS �
     const parameters = { ...emptyParameters(), context_window_tokens: { state: 'known', value: 128000 }, max_output_tokens: { state: 'known', value: 1024 }, streaming: 'supported', tool_calls: 'supported', server_compaction_enabled: true, server_compaction_support: 'supported', input_token_count_support: 'supported' };
     await api('model-configuration', 'PUT', { ...selected, origin: 'manual', parameters });
     await api('model-configuration', 'PUT', { ...selected, origin: 'manual', parameters: { ...parameters, server_auto_compaction_enabled: true } }, 400);
-    await api('model-settings', 'PUT', { default_model: selected });
+    await api('model-settings', 'PUT', singleModelPolicy(await api('model-settings'), selected));
     for (const username of ['alice', 'bob']) await api('users', 'POST', { username, display_name: username, role: 'user', enabled: true, password: 'fixture-password1' }, 201);
     const alice = await login('alice', 'fixture-password1'), bob = await login('bob', 'fixture-password1');
-    const config = () => api('runtime/model-configuration', 'GET', undefined, 200, alice.token);
+    const config = async () => defaultHistoryModel(await api('runtime/model-configuration', 'GET', undefined, 200, alice.token));
     let binding = (await config()).server_history_binding;
     expect(binding).toMatch(/^[a-f0-9]{64}$/);
     const request = async (suffix: string, body: object, status = 200, bound: string | undefined = binding, key = alice.llm_key) => {
-      const response = await fetch(`${origin}/api/llm/providers/${provider.provider_instance_id}/v1/${suffix}`, { method: 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json', ...(bound === undefined ? {} : { 'x-ez-center-history-binding': bound }) }, body: JSON.stringify(body) });
+      const response = await fetch(`${origin}/api/llm/providers/${provider.provider_instance_id}/v1/${suffix}`, { method: 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json', 'x-codex-beta-features': 'remote_compaction_v2', ...(bound === undefined ? {} : { 'x-ez-center-history-binding': bound }) }, body: JSON.stringify(body) });
       const text = await response.text();
       expect(response.status, text).toBe(status);
       return { text, call: response.headers.get('x-ez-call-id') };
@@ -101,6 +108,11 @@ it.skipIf(!process.env.CENTER_F01_SCENARIO)('真实数据库准入与 HTTP/WS �
     await request('responses/compact', compactBody, 409, binding, bob.llm_key);
     await request('responses/compact', { ...compactBody, store: false }, 400);
     await request('responses', { model: 'fixture', stream: true, store: true, input: [user] }, 409);
+    const v2Body = { ...compactBody, stream: true, store: false, input: [user, { type: 'compaction_trigger' }] };
+    expect((await request('responses', v2Body)).text).toContain('compaction');
+    await request('responses', v2Body, 409, 'wrong');
+    await request('responses', v2Body, 409, binding, bob.llm_key);
+    await request('responses', { ...v2Body, store: true }, 400);
     await api(`model-providers/${provider.provider_instance_id}`, 'PUT', { connection: { ...connection, responses_transport: 'websocket' }, credential: { mode: 'unchanged' } });
     const old = binding;
     binding = (await config()).server_history_binding;
@@ -112,11 +124,12 @@ it.skipIf(!process.env.CENTER_F01_SCENARIO)('真实数据库准入与 HTTP/WS �
     const count = await request('responses/input_tokens', { model: 'fixture', input: JSON.parse(second.text).output });
     expect(JSON.parse(count.text)).toEqual({ input_tokens: 42 });
     await request('responses', { model: 'fixture', stream: true, store: false, input: JSON.parse(second.text).output });
-    expect(http).toEqual(['/v1/responses/compact', '/v1/responses/input_tokens']);
-    expect(wire.map(item => item.connection)).toEqual([1, 2, 3]);
+    expect((await request('responses', v2Body)).text).toContain('compaction');
+    expect(http).toEqual(['/v1/responses/compact', '/v1/responses', '/v1/responses/input_tokens']);
+    expect(wire.map(item => item.connection)).toEqual([1, 2, 3, 4]);
     expect(wire.every(item => !Object.hasOwn(item.body, 'previous_response_id') && item.body.store === false)).toBe(true);
     const rows = (await pool.query('SELECT kind,usage_state,input_tokens,total_tokens FROM llm_calls ORDER BY started_at,id')).rows;
-    expect(rows.filter(row => row.kind === 'context_compaction' && row.usage_state === 'available')).toHaveLength(3);
+    expect(rows.filter(row => row.kind === 'context_compaction' && row.usage_state === 'available')).toHaveLength(5);
     expect(rows.filter(row => row.kind === 'input_tokens')).toEqual([{ kind: 'input_tokens', usage_state: 'unavailable', input_tokens: null, total_tokens: null }]);
     const counted = await api('llm-usage');
     expect(counted.summary.calls).toBe(String(rows.filter(row => ['proxy', 'context_compaction'].includes(row.kind)).length));
@@ -130,7 +143,7 @@ it.skipIf(!process.env.CENTER_F01_SCENARIO)('真实数据库准入与 HTTP/WS �
     expect(counts.providers).toBe('1');
     expect(counts.model_fixed_configs).toBe('1');
     expect(counts.users).toBe('3');
-    expect(counts.pgmigrations).toBe('10');
+    expect(counts.pgmigrations).toBe('12');
   } finally {
     await app?.close();
     for (const socket of ws.clients) socket.terminate();

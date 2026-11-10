@@ -124,18 +124,33 @@ export class FixedConfigurationPage {
 export class ProviderUsage {
   @ApiProperty() fixed_config_count!: number;
   @ApiProperty() default_model!: boolean;
+  @ApiProperty({ type: [String] }) allowed_model_ids!: string[];
 }
+
+export class ModelPolicy {
+  @ApiProperty({ type: ModelSelection, nullable: true }) default_model!: ModelSelection | null;
+  @ApiProperty({ type: [ModelSelection] }) allowed_models!: ModelSelection[];
+  @ApiProperty() allow_member_selection!: boolean;
+  @ApiProperty({ type: String, format: 'uuid', nullable: true }) revision!: string | null;
+}
+
 export class SaveModelSettings {
-  @ApiPropertyOptional({ type: ModelSelection, nullable: true }) default_model?: ModelSelection | null;
-  @ApiPropertyOptional({ type: String, nullable: true, description: '客户端模型访问地址；null 恢复部署地址。与 default_model 分别提交。' })
+  @ApiPropertyOptional({ type: ModelPolicy }) policy?: ModelPolicy;
+  @ApiPropertyOptional({ type: String, nullable: true, description: '客户端模型访问地址；null 恢复部署地址。与组织策略分别提交。' })
   public_origin?: string | null;
 }
-export class ModelSettings {
-  @ApiProperty({ type: ModelSelection, nullable: true }) default_model!: ModelSelection | null;
-  @ApiProperty({ type: String, nullable: true }) public_origin!: string | null;
+
+export class ModelAvailability extends ModelSelection {
   @ApiProperty({ enum: ['ready', 'unavailable'] }) state!: 'ready' | 'unavailable';
   @ApiProperty({ type: String, nullable: true }) reason!: string | null;
-  @ApiProperty({ type: ModelConfiguration, nullable: true }) configuration!: ModelConfiguration | null;
+  @ApiProperty({ type: String, nullable: true }) display_name!: string | null;
+  @ApiProperty({ enum: ['online', 'manual'], nullable: true }) origin!: 'online' | 'manual' | null;
+}
+
+export class ModelSettings {
+  @ApiProperty({ type: ModelPolicy, nullable: true }) policy!: ModelPolicy | null;
+  @ApiProperty({ type: String, nullable: true }) public_origin!: string | null;
+  @ApiProperty({ type: [ModelAvailability] }) availability!: ModelAvailability[];
 }
 export class TemplateStatus {
   @ApiProperty() available!: boolean;
@@ -143,17 +158,29 @@ export class TemplateStatus {
   @ApiProperty({ type: Number, nullable: true }) loaded_at_ms!: number | null;
   @ApiProperty({ type: String, nullable: true }) error!: string | null;
 }
-export class RuntimeModelConfiguration {
+export class RuntimeModelItem {
+  @ApiProperty() model_id!: string;
   @ApiProperty({ enum: ['ready', 'unavailable'] }) state!: 'ready' | 'unavailable';
+  @ApiProperty({ type: String, nullable: true }) reason!: string | null;
+  @ApiProperty({ type: ModelParameters, nullable: true }) parameters!: ModelParameters | null;
+  @ApiProperty({ type: String, nullable: true }) server_history_binding!: string | null;
+}
+
+export class RuntimeModelProvider {
+  @ApiProperty({ format: 'uuid' }) provider_instance_id!: string;
+  @ApiProperty({ enum: providerTypes, nullable: true }) provider_type!: ProviderType | null;
+  @ApiProperty({ type: String, nullable: true }) provider_display_name!: string | null;
+  @ApiProperty() endpoint!: string;
+  @ApiProperty({ enum: protocols, nullable: true }) protocol!: Protocol | null;
+  @ApiProperty() server_history_enabled!: boolean;
+  @ApiProperty({ enum: supports }) server_history_support!: Support;
+  @ApiProperty({ type: [RuntimeModelItem] }) models!: RuntimeModelItem[];
+}
+
+export class RuntimeModelConfiguration {
   @ApiProperty({ format: 'uuid' }) center_id!: string;
-  @ApiPropertyOptional() reason?: string;
-  @ApiPropertyOptional() endpoint?: string;
-  @ApiPropertyOptional({ enum: providerTypes }) provider_type?: ProviderType;
-  @ApiPropertyOptional() provider_display_name?: string;
-  @ApiPropertyOptional({ enum: protocols }) protocol?: Protocol;
-  @ApiPropertyOptional() model_id?: string;
-  @ApiPropertyOptional({ type: ModelParameters }) parameters?: ModelParameters;
-  @ApiPropertyOptional() server_history_enabled?: boolean;
-  @ApiPropertyOptional({ enum: supports }) server_history_support?: Support;
-  @ApiPropertyOptional({ type: String, nullable: true }) server_history_binding?: string | null;
+  @ApiProperty({ format: 'uuid' }) organization_id!: string;
+  @ApiProperty() allow_member_selection!: boolean;
+  @ApiProperty({ type: ModelSelection, nullable: true }) default_model!: ModelSelection | null;
+  @ApiProperty({ type: [RuntimeModelProvider] }) providers!: RuntimeModelProvider[];
 }

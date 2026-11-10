@@ -145,6 +145,7 @@ fn project_agent_event(
             }))
         }
         AgentEvent::ToolProposed { step, call } => {
+            model_diagnostics.mark_tool_observed();
             let call_id = ProtocolToolCallId::new(call.id.as_str()).map_err(|_| {
                 RuntimeError::InternalStateUnavailable {
                     component: "runtime tool call id",

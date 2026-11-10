@@ -9,6 +9,7 @@ export const DesktopPins = observer(function DesktopPins() {
     {store.pins.error && <div role="alert">{store.pins.error}{!store.pins.value.imported && <button type="button" disabled={store.pins.busy} onClick={() => void store.retryPinImport()}>重试导入</button>}</div>}
     {store.pins.value.items.map((pin) => {
       const projection = pin.device ? store.network.contexts.get(pin.device)?.projection : store.local_projection;
+      const execution = pin.device ? store.network.contexts.get(pin.device)?.live_execution : store.local_live_execution;
       const current = projection?.application?.active_sessions.find((item) => item.session_id === pin.session_id);
       const title = current?.title ?? pin.title;
       const device = pin.device ? store.network.devices.find((item) => item.id === pin.device) : null;
@@ -20,7 +21,7 @@ export const DesktopPins = observer(function DesktopPins() {
           <span className={styles.session_title}>{title}</span>
         </button>
         <button className={styles.session_pin_action} type="button" aria-label={`取消置顶 ${title}`} disabled={store.pins.busy} onClick={() => void store.removePin(pin)}><Icon name="pin" size={14} /></button>
-        {current?.active_run_id && (
+        {execution?.activeRunId(pin.session_id, current?.active_run_id) && (
           <svg
             aria-label="正在运行"
             className={styles.loading_ring}
