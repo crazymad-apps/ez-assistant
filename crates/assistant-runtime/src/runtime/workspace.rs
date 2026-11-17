@@ -4,7 +4,7 @@ use assistant_protocol::{
     GetWorkspaceRequest, GetWorkspaceResult, ListWorkspacesRequest, ListWorkspacesResult,
     RegisterWorkspaceRequest, RegisterWorkspaceResult, RemoveWorkspaceRequest,
     RemoveWorkspaceResult, RestoreWorkspaceRequest, RestoreWorkspaceResult, UpdateWorkspaceRequest,
-    UpdateWorkspaceResult, WorkspaceId, WorkspaceLifecycle,
+    UpdateWorkspaceResult, WorkspaceId,
 };
 
 use super::AssistantRuntime;
@@ -149,32 +149,20 @@ impl AssistantRuntime {
         })
     }
 
-    /// 按 Workspace ID 的确定性顺序列出目标生命周期，缺省为活动 Workspace。
-    pub fn list_workspaces(
+    /// 持久侧栏顺序分页；Registry 不持有另一份排序状态。
+    pub async fn list_workspaces(
         &self,
         request: ListWorkspacesRequest,
     ) -> RuntimeResult<ListWorkspacesResult> {
-        let lifecycle = request.lifecycle.unwrap_or(WorkspaceLifecycle::Active);
-        let workspaces = self
-            .workspaces
-            .read()
-            .map_err(|_| RuntimeError::InternalStateUnavailable {
-                component: "workspace registry",
-            })?
-            .values()
-            .filter(|workspace| {
-                matches!(
-                    (workspace.lifecycle, lifecycle),
-                    (StoredWorkspaceLifecycle::Active, WorkspaceLifecycle::Active)
-                        | (
-                            StoredWorkspaceLifecycle::Removed,
-                            WorkspaceLifecycle::Removed
-                        )
-                )
-            })
-            .map(summary)
-            .collect();
-        Ok(ListWorkspacesResult { workspaces })
+        let page = self
+            .store
+            .query_workspaces(request)
+            .await
+            .map_err(|source| RuntimeError::from_store("query workspaces", source))?;
+        Ok(ListWorkspacesResult {
+            workspaces: page.workspaces.iter().map(summary).collect(),
+            has_more: page.has_more,
+        })
     }
 
     /// 假删 Workspace；不触碰用户目录、Agent 私有目录或既有 Session。

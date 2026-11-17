@@ -163,12 +163,7 @@ impl StorageEngine {
             ..
         } = &purpose
         {
-            self.ensure_new_input_identity(
-                &report.session_id,
-                &report.input_id,
-                None,
-                &report.message.id,
-            )?;
+            self.ensure_new_proxy_report(report)?;
         }
         let path = self.target_body_path(&target, generation)?;
         let owner = target.owner();
@@ -208,7 +203,9 @@ impl StorageEngine {
                     message_step,
                     &purpose,
                     created_at_ms,
-                    existing_history.as_ref(),
+                    existing_history
+                        .as_deref()
+                        .map(conversation::HistoryOffsets::facts),
                 )?,
             )?
         } else {
@@ -300,6 +297,7 @@ impl StorageEngine {
                 &path,
                 &staged.target.owner(),
                 staged.body_generation,
+                self.history_version(),
             )?
         {
             return Err(invalid_data("conversation history header is missing"));
@@ -323,6 +321,7 @@ impl StorageEngine {
             &path,
             &staged.target.owner(),
             staged.body_generation,
+            self.history_version(),
         )?;
         if !framed && !self.allow_legacy_history {
             return Err(invalid_data("conversation history header is missing"));
@@ -440,12 +439,7 @@ impl StorageEngine {
                 ..
             } = &append.staged.purpose
             {
-                self.ensure_new_input_identity(
-                    &report.session_id,
-                    &report.input_id,
-                    None,
-                    &report.message.id,
-                )?;
+                self.ensure_new_proxy_report(report)?;
             }
         }
         let transaction = self
@@ -540,6 +534,32 @@ impl StorageEngine {
                 staged.created_at_ms,
                 self.allow_legacy_history,
             )?;
+            if !self.retain_input_identities
+                && let ConversationStorageTarget::Session { session_id, run_id } = &staged.target
+                && matches!(
+                    &staged.purpose,
+                    AppendPurpose::UserMessage { .. }
+                        | AppendPurpose::RunSettlement { .. }
+                        | AppendPurpose::TerminalRunInputReconciliation { .. }
+                )
+            {
+                let published_key = batch
+                    .history
+                    .as_ref()
+                    .and_then(|history| history.inputs.first())
+                    .and_then(|input| input.idempotency_key.as_ref());
+                let changed = transaction.execute(
+                    "UPDATE inputs SET idempotency_key=NULL WHERE session_id=?1 AND state='committed'
+                     AND input_id=(SELECT input_id FROM runs WHERE run_id=?2 AND session_id=?1)
+                     AND idempotency_key IS ?3",
+                    params![session_id.as_str(), run_id.as_str(), published_key.map(assistant_protocol::IdempotencyKey::as_str)],
+                ).map_err(|source| internal_error("published Input key could not be released", source))?;
+                if changed != 1 {
+                    return Err(invalid_data(
+                        "published Input key differs from staged control",
+                    ));
+                }
+            }
             let deleted = match table {
                 AppendTable::Session => transaction.execute(
                     "DELETE FROM body_appends WHERE operation_id = ?1",
@@ -571,7 +591,12 @@ impl StorageEngine {
                 && matches!(&staged.purpose, AppendPurpose::RunSettlement { .. })
                 && let ConversationStorageTarget::Session { session_id, run_id } = &staged.target
             {
-                super::run_state::release_terminal_run_control(&transaction, session_id, run_id)?;
+                super::run_state::release_terminal_run_control(
+                    &transaction,
+                    session_id,
+                    run_id,
+                    self.retain_input_identities,
+                )?;
             }
             if framed
                 && !self.allow_legacy_history
@@ -686,12 +711,22 @@ impl StorageEngine {
         snapshot: ConversationSnapshot,
         changed_at_ms: i64,
     ) -> StorageResult<ReplacementPlan> {
+        self.begin_prepared_replacement(session_id, snapshot, changed_at_ms, |_, _, _| {})
+            .map(|(plan, _)| plan)
+    }
+
+    pub(super) fn begin_prepared_replacement(
+        &mut self,
+        session_id: SessionId,
+        mut snapshot: ConversationSnapshot,
+        changed_at_ms: i64,
+        prepare: impl FnOnce(&mut ConversationSnapshot, u64, &assistant_runtime::StoredHistoryFacts),
+    ) -> StorageResult<(ReplacementPlan, conversation::PreparedGeneration)> {
         // Round-trip through the same reader used after restart. This checks duplicate IDs, Tool
         // pairing and the exact bytes before a new generation can become authoritative.
         let owner = ConversationOwner::MainSession {
             session_id: session_id.clone(),
         };
-        let history = self.history_for_replacement(&owner, &snapshot)?;
         let previous_generation = self.session_generation(&session_id)?;
         let session_directory = self.session_directory(&session_id)?;
         let mut new_generation = previous_generation
@@ -702,11 +737,19 @@ impl StorageEngine {
                 .checked_add(1)
                 .ok_or_else(|| conflict("conversation generation is exhausted"))?;
         }
+        let history = self.history_for_replacement(&owner, &snapshot)?;
+        prepare(&mut snapshot, new_generation, &history);
         let new_path = body_path(&session_directory, new_generation);
-        conversation::write_generation(&new_path, &owner, new_generation, &snapshot, &history)?;
+        let prepared = conversation::prepare_generation(
+            &new_path,
+            &owner,
+            new_generation,
+            &snapshot,
+            &history,
+        )?;
         sync_directory(&session_directory)?;
 
-        Ok(ReplacementPlan {
+        let plan = ReplacementPlan {
             session_id,
             previous_generation,
             new_generation,
@@ -718,7 +761,8 @@ impl StorageEngine {
                 )
             })?,
             changed_at_ms,
-        })
+        };
+        Ok((plan, prepared))
     }
 
     pub(super) fn commit_replacement(&mut self, plan: &ReplacementPlan) -> StorageResult<()> {
@@ -840,7 +884,10 @@ impl StorageEngine {
 
         let mut unavailable = HashSet::new();
         for (operation_id, session_id) in pending {
-            if self.complete_staged_append(&operation_id).is_err() {
+            if let Err(error) = self.complete_staged_append(&operation_id) {
+                if self.retain_input_identities && !self.allow_legacy_history {
+                    return Err(error);
+                }
                 unavailable.insert(session_id);
             }
         }
@@ -883,10 +930,10 @@ impl StorageEngine {
         };
         let mut unavailable = HashSet::new();
         for (operation_id, session_id, child_task_id) in pending {
-            if self
-                .complete_target_append(&operation_id, AppendTable::ChildTask)
-                .is_err()
-            {
+            if let Err(error) = self.complete_target_append(&operation_id, AppendTable::ChildTask) {
+                if self.retain_input_identities && !self.allow_legacy_history {
+                    return Err(error);
+                }
                 unavailable.insert((session_id, child_task_id));
             }
         }

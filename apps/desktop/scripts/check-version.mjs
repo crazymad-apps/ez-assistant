@@ -31,18 +31,25 @@ for (const [name, value] of [["SOFTWARE_VERSION", version], ["MIN_COMPATIBLE_VER
     throw new Error(`${name} 已过期，请重新生成应用协议`);
   }
 }
-// Host 初始化要求迁移清单终点与软件版本一致；无 DDL 的版本也必须登记。
+// Host 初始化要求迁移清单终点与数据库目标一致；应用版本可以单独推进。
 // 在打包前检查真实清单，避免只验证版本字符串却交付无法初始化的 Host。
 const migrationRoot = "../../../apps/runtime-host/src/storage/migrations/";
 const migrationSource = await read(`${migrationRoot}mod.rs`);
+const databaseVersion = migrationSource.match(/^const DATABASE_SCHEMA_VERSION: &str = "([^"]+)";$/m)?.[1];
+const database = parse(databaseVersion);
+const databaseDifference = actual.map((value, index) => value - database[index]).find((value) => value !== 0) ?? 0;
+if (databaseDifference < 0) throw new Error("数据库目标不能高于当前软件版本");
 const manifestBody = migrationSource.match(/fn manifest\(\) -> \[Migration; \d+\] \{([\s\S]*?)\n\}/)?.[1];
 const productBody = migrationSource.match(/fn product_manifest\(\) -> Vec<Migration> \{([\s\S]*?)\n\}/)?.[1];
 const lastMigration = [...`${manifestBody ?? ""}\n${productBody ?? ""}`.matchAll(/(v\d+_\d+_\d+)::entry\(\)/g)].at(-1)?.[1];
-if (lastMigration !== `v${version.replaceAll(".", "_")}`) {
-  throw new Error("Host 数据库迁移清单终点与软件版本不一致，请补齐当前版本迁移入口");
+if (lastMigration !== `v${databaseVersion.replaceAll(".", "_")}`) {
+  throw new Error("Host 数据库迁移清单终点与数据库目标不一致");
 }
-const migrationEntry = await read(`${migrationRoot}${lastMigration}.rs`);
-if (migrationEntry.match(/version:\s*"([^"]+)"/)?.[1] !== version) {
-  throw new Error("Host 当前迁移入口登记的版本与软件版本不一致");
+const migrationEntry = await read(`${migrationRoot}${lastMigration}.rs`).catch((error) => {
+  if (error.code !== "ENOENT") throw error;
+  return read(`${migrationRoot}${lastMigration}/mod.rs`);
+});
+if (migrationEntry.match(/version:\s*"([^"]+)"/)?.[1] !== databaseVersion) {
+  throw new Error("Host 当前迁移入口登记的版本与数据库目标不一致");
 }
 console.log(`Desktop 发布版本一致：${version}，应用最低兼容版本 ${minimum}`);

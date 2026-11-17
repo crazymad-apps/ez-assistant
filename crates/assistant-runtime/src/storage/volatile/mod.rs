@@ -19,28 +19,29 @@ use super::{
     AcceptedInput, ApprovalModeChange, ArchiveChange, ChildTaskStart, ChildToolExecutionStart,
     CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
     ContextReplacementResult, ContextReplacementTarget, ConversationMessageLocationRequest,
-    ConversationRawWindowRequest, ConversationRewrite, ConversationSearchHit,
-    ConversationSearchPage, ConversationSearchRequest, ConversationSearchScope,
-    ConversationWindowRequest, CrossSessionInputBinding, CustomAgentMutation, GoalClear,
-    GoalHeldInputResume, GoalHeldInputResumeResult, GoalStop, GoalStopResult, InputOrigin,
-    MessageFeedbackChange, ModelChange, NewAttachmentUpload, NewStoredChildTask, NewStoredInput,
-    NewStoredRunAttempt, NewStoredSession, NewStoredSessionCommand,
-    NewStoredSessionMaterialization, NewWorkspaceRegistration, PendingChildToolExchange,
-    PendingToolExchange, PluginOperationPhase, PluginOperationUpdate, PluginRecordChange,
-    PluginSettingsChange, QueuePriorityChange, ReasoningEffortChange, RecoveredRuntime,
-    RewriteResult, RuntimeStore, SessionCommandCommit, SessionDeletion, SessionFork,
-    SessionHistoryClear, SessionHistoryClearResult, SessionHistoryCompactionFinish,
-    SessionHistoryCompactionFinishKind, SessionHistoryCompactionPreparation,
-    SessionHistoryCompactionPreparationResult, SessionPinnedChange, SessionProxyChange,
-    SessionProxyState, SessionRole, SessionTitleChange, SessionTitleGenerationCommit,
-    SessionTitleGenerationCommitResult, StoreError, StoreErrorKind, StoreFuture, StoredAttachment,
-    StoredAttachmentState, StoredChildTask, StoredChildTaskSettlement,
-    StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationState,
-    StoredConversationWindow, StoredCustomAgent, StoredGoal, StoredGoalPauseReason,
-    StoredGoalSettlementEffect, StoredGoalState, StoredInput, StoredInputState,
-    StoredMessageFeedback, StoredPlugin, StoredPluginOperation, StoredRun, StoredRunContinuation,
-    StoredRunContinuationResult, StoredRunSettlement, StoredRunSettlementResult, StoredSession,
-    StoredSessionCommand, StoredSessionCommandState, StoredSessionFork, StoredSessionLifecycle,
+    ConversationNavigationRequest, ConversationRawWindowRequest, ConversationRewrite,
+    ConversationSearchHit, ConversationSearchPage, ConversationSearchRequest,
+    ConversationSearchScope, ConversationTurnBoundaries, ConversationWindowRequest,
+    CrossSessionInputBinding, CustomAgentMutation, GoalClear, GoalHeldInputResume,
+    GoalHeldInputResumeResult, GoalStop, GoalStopResult, InputOrigin, MessageFeedbackChange,
+    ModelChange, NewAttachmentUpload, NewStoredChildTask, NewStoredInput, NewStoredRunAttempt,
+    NewStoredSession, NewStoredSessionCommand, NewStoredSessionMaterialization,
+    NewWorkspaceRegistration, PendingChildToolExchange, PendingToolExchange, PluginOperationPhase,
+    PluginOperationUpdate, PluginRecordChange, PluginSettingsChange, QueuePriorityChange,
+    ReasoningEffortChange, RecoveredRuntime, RewriteResult, RuntimeStore, SessionCommandCommit,
+    SessionDeletion, SessionFork, SessionHistoryClear, SessionHistoryClearResult,
+    SessionHistoryCompactionFinish, SessionHistoryCompactionFinishKind,
+    SessionHistoryCompactionPreparation, SessionHistoryCompactionPreparationResult,
+    SessionPinnedChange, SessionProxyChange, SessionProxyState, SessionRole, SessionTitleChange,
+    SessionTitleGenerationCommit, SessionTitleGenerationCommitResult, StoreError, StoreErrorKind,
+    StoreFuture, StoredAttachment, StoredAttachmentState, StoredChildTask,
+    StoredChildTaskSettlement, StoredConversationMessageLocation, StoredConversationNavigation,
+    StoredConversationRawWindow, StoredConversationState, StoredConversationWindow,
+    StoredCustomAgent, StoredGoal, StoredGoalPauseReason, StoredGoalSettlementEffect,
+    StoredGoalState, StoredInput, StoredInputState, StoredMessageFeedback, StoredPlugin,
+    StoredPluginOperation, StoredRun, StoredRunContinuation, StoredRunContinuationResult,
+    StoredRunSettlement, StoredRunSettlementResult, StoredSession, StoredSessionCommand,
+    StoredSessionCommandState, StoredSessionFork, StoredSessionLifecycle,
     StoredSessionMaterialization, StoredSessionUsage, StoredTerminalRunInputReconciliation,
     StoredTodoItemStatus, StoredWorkPlan, StoredWorkspace, StoredWorkspaceLifecycle,
     ToolExecutionStart, UserMessageCommit, VariantChange, WorkPlanClear, WorkPlanMutation,
@@ -75,6 +76,7 @@ mod run;
 mod session;
 mod session_history;
 mod session_metadata;
+mod sidebar;
 mod work_plan;
 mod workspace;
 
@@ -109,26 +111,16 @@ struct VolatileCompactionReceipt {
     outcome: Option<CompactSessionOutcome>,
 }
 
-/// 原始接纳身份对应 Host inputs 的最小保留列；不包含正文、来源、时间或执行历史。
-/// order 是首次接纳的稳定行序，和临时队列优先级分开；控制释放后仍用于幂等及文件核对。
+/// 暂存输入的原始接纳顺序，和可调整的队列优先级分开；发布时由历史接管。
 struct InputIdentity {
     session_id: SessionId,
-    idempotency_key: Option<IdempotencyKey>,
     queue_order: u64,
 }
 
 impl InputIdentity {
-    fn from_command(command: &StoredSessionCommand) -> Self {
-        Self {
-            session_id: command.session_id.clone(),
-            idempotency_key: command.idempotency_key.clone(),
-            queue_order: command.queue_order,
-        }
-    }
     fn from_input(input: &StoredInput) -> Self {
         Self {
             session_id: input.session_id.clone(),
-            idempotency_key: input.idempotency_key.clone(),
             queue_order: input.queue_order,
         }
     }
@@ -136,6 +128,7 @@ impl InputIdentity {
 
 #[derive(Default)]
 struct State {
+    sidebar: sidebar::SidebarOrders,
     message_cards: BTreeMap<String, crate::StoredMessageCard>,
     next_card_position: u64,
     feedback: BTreeMap<String, assistant_protocol::FeedbackRequestSnapshot>,
@@ -163,7 +156,6 @@ struct State {
     inputs: BTreeMap<InputId, StoredInput>,
     input_identities: BTreeMap<InputId, InputIdentity>,
     session_commands: BTreeMap<InputId, StoredSessionCommand>,
-    command_identities: BTreeMap<InputId, InputIdentity>,
     mcp_input_selections: BTreeMap<String, StoredMcpSelection>,
     runs: BTreeMap<RunId, StoredRun>,
     child_tasks: BTreeMap<ChildTaskId, StoredChildTask>,
@@ -408,10 +400,8 @@ fn validate_volatile_proxy_report(
         &report.message.id,
     )?;
     if report.idempotency_key.as_ref().is_some_and(|key| {
-        state.input_identities.values().any(|identity| {
-            identity.session_id == report.session_id
-                && identity.idempotency_key.as_ref() == Some(key)
-        })
+        state.message_request(&report.session_id, key).is_some()
+            || state.command_request(&report.session_id, key).is_some()
     }) {
         return Err(conflict("proxy report acceptance key already exists"));
     }
@@ -735,22 +725,27 @@ fn ensure_idle(state: &State, session_id: &SessionId) -> Result<(), StoreError> 
 }
 
 fn conversation_window(
-    snapshot: ConversationSnapshot,
+    snapshot: &ConversationSnapshot,
     request: &ConversationWindowRequest,
-) -> StoredConversationWindow {
-    let display_indices = snapshot
-        .messages
-        .iter()
-        .enumerate()
-        .filter_map(|(index, message)| {
-            (message.is_transcript_visible()
-                || matches!(message, ConversationMessage::ContextSummary(_)))
-            .then_some(index)
-        })
-        .collect::<Vec<_>>();
+    history: super::StoredHistoryFacts,
+) -> Result<StoredConversationWindow, StoreError> {
+    let run_ids = history.message_run_ids();
+    let mut turns = ConversationTurnBoundaries::default();
+    let mut display_indices = Vec::new();
+    for (index, message) in snapshot.messages.iter().enumerate() {
+        if message.is_transcript_visible()
+            || matches!(message, ConversationMessage::ContextSummary(_))
+        {
+            if let ConversationMessage::Assistant(assistant) = message
+                && let Some(run_id) = run_ids.get(&assistant.id)
+            {
+                turns.record_assistant(display_indices.len(), run_id);
+            }
+            display_indices.push(index);
+        }
+    }
     let total = display_indices.len();
-    let end = request.end.unwrap_or(total).min(total);
-    let start = end.saturating_sub(request.limit);
+    let std::ops::Range { start, end } = turns.window(total, request.end, request.turn_limit)?;
     let raw_start = display_indices
         .get(start)
         .copied()
@@ -759,14 +754,14 @@ fn conversation_window(
         .get(end)
         .copied()
         .unwrap_or(snapshot.messages.len());
-    StoredConversationWindow {
+    Ok(StoredConversationWindow {
         generation: request.generation,
         start,
         end,
         total,
         conversation: ConversationSnapshot::new(snapshot.messages[raw_start..raw_end].to_vec()),
-        history: None,
-    }
+        history: Some(history),
+    })
 }
 
 fn volatile_scope_matches(scope: &ConversationSearchScope, session: &StoredSession) -> bool {
@@ -920,6 +915,24 @@ fn validate_volatile_input_activation(
         || skill_parts.len() != 1
     {
         return Err(conflict("input skill activation is inconsistent"));
+    }
+    Ok(())
+}
+
+fn validate_volatile_mcp_selection(
+    state: &State,
+    input: &NewStoredInput,
+) -> Result<(), StoreError> {
+    if let Some(selection) = input.mcp_selection.as_ref()
+        && (input.origin != InputOrigin::User
+            || state.contains_mcp_selection(&input.session_id, &selection.selection_id)
+            || selection.session_id != input.session_id
+            || selection.input_id.as_ref() != Some(&input.input_id)
+            || selection.message_id != input.message.id
+            || selection.display_name.trim().is_empty()
+            || selection.display_name.len() > 128)
+    {
+        return Err(conflict("MCP input selection is inconsistent"));
     }
     Ok(())
 }
@@ -1181,7 +1194,7 @@ impl State {
             .ok_or_else(|| conflict("accepted first Run history is missing"))?;
         Ok(AcceptedInput::Historical {
             session_id: input.session_id,
-            input: fact,
+            input: Box::new(fact),
             run,
         })
     }

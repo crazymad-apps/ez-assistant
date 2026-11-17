@@ -104,9 +104,15 @@ pub trait FileSystemTool: Send + Sync {
 
 - 模型输入中的相对路径基于显式 `session_workdir` 做纯词法归一化；能力请求、授权
   facts 和结果统一使用 UTF-8 `AbsolutePath`，不执行 canonicalize 或符号链接解析。
-- read 的 offset/limit、search 的 max_results/output/record limit、edit 的
+- read 的 offset_chars/limit_chars、search 的 max_results/output/record limit、edit 的
   replace_all，以及 Shell 的 workdir/timeout/output limit/process mode 都在 resolve 后
   成为显式有效值；Schema 同步公开模型可选参数的实际默认值。
+- `read_file` 按 Unicode scalar value 分页：`offset_chars` 从 0 开始，`limit_chars`
+  包含换行且受实例最大值约束，超限在 resolve 阶段拒绝，不能因单行过长返回无界正文。
+  `content` 保留原换行且不插入行号，`start_line`／`start_column` 是 1 起始的位置提示；
+  续读显式传回 `next_offset_chars`，为 null 时到达文件尾。调用无状态，每次反映当前文件。
+  旧行号参数 `offset`／`limit` 明确拒绝，不静默解释为字符；已有历史的 JSON 参数及结果
+  保持原样，不迁移或重新执行。真实 Adapter 与 fake 共用纯字符分页实现。
 - `grep`/`rg` 语义归入 `search`，契约不感知搜索后端，`rg` 仅可作为实现侧内部细节。
 - `FileEntry.kind` 描述目标类型，`is_symlink` 独立标记目录项自身是否为符号链接。
 - `FileToolError` 提供 `NotFound` / `InvalidInput` / `Io` / `UnsupportedEncoding` /

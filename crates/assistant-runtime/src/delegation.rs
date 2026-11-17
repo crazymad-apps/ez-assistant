@@ -55,6 +55,7 @@ struct ActiveChildTask {
     session_id: SessionId,
     parent_run_id: RunId,
     cancellation: Arc<cancellation::ChildTaskCancellation>,
+    step: Option<u32>,
 }
 
 impl ChildTaskRegistry {
@@ -192,9 +193,44 @@ impl ChildTaskRegistry {
                 session_id: task.session_id.clone(),
                 parent_run_id: task.parent_run_id.clone(),
                 cancellation,
+                step: None,
             },
         );
         Ok(())
+    }
+
+    pub(crate) fn observe_step(
+        &self,
+        child_task_id: &ChildTaskId,
+        step: u32,
+    ) -> crate::RuntimeResult<()> {
+        let mut active =
+            self.active
+                .lock()
+                .map_err(|_| crate::RuntimeError::InternalStateUnavailable {
+                    component: "active child task registry",
+                })?;
+        if let Some(task) = active.get_mut(child_task_id) {
+            task.step = Some(task.step.unwrap_or(0).max(step));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn active_step(
+        &self,
+        session_id: &SessionId,
+        child_task_id: &ChildTaskId,
+    ) -> crate::RuntimeResult<Option<u32>> {
+        let active =
+            self.active
+                .lock()
+                .map_err(|_| crate::RuntimeError::InternalStateUnavailable {
+                    component: "active child task registry",
+                })?;
+        Ok(active
+            .get(child_task_id)
+            .filter(|task| &task.session_id == session_id)
+            .and_then(|task| task.step))
     }
 
     pub(crate) fn deactivate(

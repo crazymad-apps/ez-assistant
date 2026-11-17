@@ -1,4 +1,4 @@
-import type { SessionSummary } from "@ez-assistant/protocol";
+import type { SessionSummary, WorkspaceSummary } from "@ez-assistant/protocol";
 import { observer } from "mobx-react-lite";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "../../../components/Button";
@@ -24,18 +24,14 @@ export const SessionSearchDialog = observer(function SessionSearchDialog({ open,
   const [search_next, setSearchNext] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const application = store.sidebar_projection.application;
+  const [active_workspaces, setActiveWorkspaces] = useState<WorkspaceSummary[]>([]);
   const target_device = store.network.browsing_device;
   const trimmed_query = query.trim();
-  const sessions = trimmed_query
-    ? matches
-    : scope === "active" ? application?.active_sessions ?? [] : application?.archived_sessions ?? [];
-  const active_workspaces = application?.workspaces.filter((workspace) => workspace.lifecycle === "active") ?? [];
-  const active_workspace_ids = new Set(active_workspaces.map((workspace) => workspace.workspace_id));
-  const visible_sessions = sessions.filter((session) => session.role !== "controller"
+  const sessions = matches;
+  const active_workspace_ids = new Set(active_workspaces.map(workspace => workspace.workspace_id));
+  const visible_sessions = sessions.filter(session => session.role !== "controller"
     && (!session.workspace_id || active_workspace_ids.has(session.workspace_id)));
-  const next_offset = trimmed_query ? search_next : scope === "active"
-    ? application?.active_sessions_next_offset ?? null : application?.archived_sessions_next_offset ?? null;
+  const next_offset = search_next;
 
   useEffect(() => {
     if (!open) return;
@@ -53,12 +49,13 @@ export const SessionSearchDialog = observer(function SessionSearchDialog({ open,
     setSearchNext(null);
     setError(null);
     setLoading(false);
-    if (!open || !trimmed_query) return;
+    if (!open) return;
 
     const timer = window.setTimeout(() => {
       setLoading(true);
-      void store.listSessionPage(scope, 0, trimmed_query).then((page) => {
+      void Promise.all([store.listSessionPage(scope, 0, trimmed_query), store.listWorkspaceOptions()]).then(([page, workspaces]) => {
         if (request_generation.current !== generation) return;
+        setActiveWorkspaces(workspaces);
         setMatches(page.sessions);
         setSearchNext(page.has_more ? 100 : null);
       }).catch((failure: unknown) => {
@@ -69,7 +66,7 @@ export const SessionSearchDialog = observer(function SessionSearchDialog({ open,
         if (request_generation.current === generation) setLoading(false);
       });
     }, 180);
-    return () => window.clearTimeout(timer);
+    return () => { window.clearTimeout(timer); request_generation.current += 1; };
   }, [open, scope, store, trimmed_query, target_device]);
 
   async function loadMore() {
@@ -78,14 +75,10 @@ export const SessionSearchDialog = observer(function SessionSearchDialog({ open,
     setLoading(true);
     setError(null);
     try {
-      if (trimmed_query) {
-        const page = await store.listSessionPage(scope, next_offset, trimmed_query);
-        if (request_generation.current !== generation) return;
-        setMatches((current) => [...new Map([...current, ...page.sessions].map((session) => [session.session_id, session])).values()]);
-        setSearchNext(page.has_more ? next_offset + 100 : null);
-      } else {
-        await store.loadMoreSessions(scope);
-      }
+      const page = await store.listSessionPage(scope, next_offset, trimmed_query);
+      if (request_generation.current !== generation) return;
+      setMatches((current) => [...new Map([...current, ...page.sessions].map(session => [session.session_id, session])).values()]);
+      setSearchNext(page.has_more ? next_offset + page.sessions.length : null);
     } catch (failure: unknown) {
       if (request_generation.current === generation) {
         setError(failure instanceof Error ? failure.message : "加载失败");

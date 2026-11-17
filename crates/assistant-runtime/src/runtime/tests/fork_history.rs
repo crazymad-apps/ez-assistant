@@ -33,6 +33,7 @@ impl ModelService for SecondStepGate {
 
 fn input(session_id: &SessionId) -> SubmitInputRequest {
     SubmitInputRequest {
+        delivery: Default::default(),
         session_id: session_id.clone(),
         message: "fork history fixture".to_owned(),
         mode: assistant_protocol::SubmitInputMode::Normal,
@@ -376,13 +377,26 @@ async fn fork_keeps_earlier_empty_retries_but_excludes_empty_retries_after_the_c
         .unwrap()
         .user_message_id;
     let rewritten = runtime
-        .reenter_from_user_message(assistant_protocol::ReenterFromUserMessageRequest {
-            session_id: source.clone(),
-            message_id: assistant_protocol::MessageId::new(other_user.as_str()).unwrap(),
-            message: "replace later input".to_owned(),
-            attachment_ids: Vec::new(),
-            idempotency_key: None,
-            variant: assistant_protocol::AgentVariant::Build,
+        .reenter_from_user_message({
+            let (expected_generation, expected_message_count) =
+                edit_basis(&runtime, &source.clone()).await;
+            assistant_protocol::ReenterFromUserMessageRequest {
+                session_id: source.clone(),
+                message_id: assistant_protocol::MessageId::new(other_user.as_str()).unwrap(),
+                message: "replace later input".to_owned(),
+                attachment_ids: Vec::new(),
+                idempotency_key: assistant_protocol::IdempotencyKey::new(
+                    crate::id::generate("edit-test").unwrap(),
+                )
+                .unwrap(),
+                variant: assistant_protocol::AgentVariant::Build,
+
+                expected_generation,
+                expected_message_count,
+                quotes: Vec::new(),
+                skill_edit: assistant_protocol::UserMessageSkillEdit::Retain,
+                mcp_edit: assistant_protocol::UserMessageMcpEdit::Retain,
+            }
         })
         .await
         .unwrap();

@@ -5,8 +5,8 @@ mod fork;
 use agent_types::MessageId;
 use assistant_protocol::{
     AgentVariant, ApprovalMode, AttachmentId, ChildTaskId, ChildTaskStatus,
-    FeedbackRequestSnapshot, InputId, MessageFeedback, ReasoningEffortKey, RunId, RunStatus,
-    RuntimeErrorInfo, ToolCallId,
+    FeedbackRequestSnapshot, IdempotencyKey, InputId, MessageFeedback, ReasoningEffortKey, RunId,
+    RunStatus, RuntimeErrorInfo, SessionId, ToolCallId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -49,11 +49,16 @@ pub struct StoredRunHistory {
     pub finished_after_message_id: Option<MessageId>,
 }
 
-/// 已可靠进入历史的输入阅读事实；没有排队正文、幂等请求键或可执行状态。
+/// 已可靠进入历史的输入及本地接纳身份，不含待消费载荷或执行状态。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoredInputHistory {
     pub input_id: InputId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<IdempotencyKey>,
+    /// 原目标已被裁尾，靠可靠事实区分重发和普通输入。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewritten_from: Option<MessageId>,
     pub user_message_id: MessageId,
     pub queue_order: u64,
     pub agent_variant: AgentVariant,
@@ -71,6 +76,8 @@ impl StoredInputHistory {
     pub fn from_input(input: &StoredInput) -> Self {
         Self {
             input_id: input.input_id.clone(),
+            idempotency_key: input.idempotency_key.clone(),
+            rewritten_from: None,
             user_message_id: input.user_message_id.clone(),
             queue_order: input.queue_order,
             agent_variant: input.agent_variant,
@@ -82,6 +89,30 @@ impl StoredInputHistory {
             accepted_at_ms: input.accepted_at_ms,
             inherited: false,
         }
+    }
+
+    /// 构造本地输入的只读接纳投影；重试方仍须单独校验并创建未完成控制。
+    pub fn committed_projection(&self, session_id: SessionId) -> Option<StoredInput> {
+        if self.inherited {
+            return None;
+        }
+        Some(StoredInput {
+            input_id: self.input_id.clone(),
+            session_id,
+            idempotency_key: self.idempotency_key.clone(),
+            queue_order: self.queue_order,
+            agent_variant: self.agent_variant,
+            origin: self.origin,
+            goal_binding: self.goal_binding.clone(),
+            cross_session: self.cross_session.clone(),
+            channel_source: self.channel_source.clone(),
+            agent_shell_target: self.agent_shell_target,
+            skill_activation: None,
+            user_message_id: self.user_message_id.clone(),
+            state: super::StoredInputState::Committed,
+            queued_message: None,
+            accepted_at_ms: self.accepted_at_ms,
+        })
     }
 }
 
@@ -200,6 +231,14 @@ impl StoredHistoryFacts {
             && self.feedback.is_empty()
             && self.questions.is_empty()
             && self.attachments.is_empty()
+    }
+
+    /// 提取分页所需的可靠归属。调用方用可见 Assistant 过滤这些身份。
+    pub fn message_run_ids(&self) -> std::collections::HashMap<&MessageId, &RunId> {
+        self.message_origins
+            .iter()
+            .filter_map(|origin| Some((&origin.message_id, origin.run_id.as_ref()?)))
+            .collect()
     }
 
     /// 按可靠提交顺序收敛同一事实的后续变化；保留最后一次完整值，不保留事件日志。

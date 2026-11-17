@@ -52,7 +52,7 @@ fn original_materialization_identity_is_reserved_after_history_clear_and_restart
                 |row| row.get::<_, i64>(0)
             )
             .unwrap(),
-        1
+        0
     );
     engine
         .clear_session_history(assistant_runtime::SessionHistoryClear {
@@ -276,6 +276,7 @@ fn inherited_file_identities_still_protect_the_owner_after_source_deletion_witho
         .facts;
     for input in &mut facts.inputs {
         input.inherited = true;
+        input.idempotency_key = None;
     }
     for run in &mut facts.runs {
         run.inherited = true;
@@ -286,6 +287,7 @@ fn inherited_file_identities_still_protect_the_owner_after_source_deletion_witho
     let target = session_id("inherited-owner");
     for command in &mut facts.commands {
         command.session_id = target.clone();
+        command.idempotency_key = None;
     }
     engine
         .create_session(new_session(target.as_str(), &engine.sessions_directory))
@@ -370,6 +372,8 @@ fn rewrite_cannot_reuse_an_identity_even_when_that_history_would_be_truncated() 
                 approval_mode: assistant_protocol::ApprovalMode::Ask,
                 session_id: original.session_id.clone(),
                 target_user_message_id: original.message.id.clone(),
+                expected_generation: 1,
+                expected_message_count: old.messages.len() as u64,
                 conversation: ConversationSnapshot::new(vec![ConversationMessage::User(
                     input.message.clone(),
                 )]),
@@ -519,7 +523,7 @@ fn proxy_report_rechecks_target_file_identity_before_finalization_and_recovery()
                 |row| row.get::<_, i64>(0)
             )
             .unwrap(),
-        1
+        0
     );
     drop(engine);
     let mut reopened = open_engine(&home);
@@ -544,7 +548,7 @@ fn proxy_report_rechecks_target_file_identity_before_finalization_and_recovery()
                 |row| row.get::<_, i64>(0)
             )
             .unwrap(),
-        1
+        0
     );
     assert_eq!(
         reopened
@@ -556,5 +560,217 @@ fn proxy_report_rechecks_target_file_identity_before_finalization_and_recovery()
             .runs
             .len(),
         2
+    );
+}
+
+#[test]
+fn v1_request_keys_transfer_only_at_publish_and_survive_restart_and_retry() {
+    let home = home();
+    let mut engine = open_engine(&home);
+    let finished = completed(&mut engine, "v1-input-upgrade", SessionRole::Standard);
+    let session = &finished.session_id;
+    let command = super::commands::request(session, "v1-upgrade-command");
+    engine.accept_session_command(command.clone()).unwrap();
+    engine
+        .commit_session_command(super::commands::commit(&command))
+        .unwrap();
+    let mut active = super::input_selections::selected_input(session, "v1-active", false);
+    active.idempotency_key = Some(IdempotencyKey::new("v1-active-key").unwrap());
+    start(&mut engine, &active);
+    let mut queued = super::input_selections::selected_input(session, "v1-queued", false);
+    queued.idempotency_key = Some(IdempotencyKey::new("v1-queued-key").unwrap());
+    engine.accept_input(queued.clone()).unwrap();
+
+    let owner = ConversationOwner::MainSession {
+        session_id: session.clone(),
+    };
+    let authoritative = engine.load_conversation_history(owner.clone()).unwrap();
+    let body = engine.load_conversation(session).unwrap();
+    let mut previous = authoritative.facts.clone();
+    let generation = authoritative.generation;
+    let path = body_path(&engine.session_directory(session).unwrap(), generation);
+    let waiting: String = engine
+        .connection
+        .query_row(
+            "SELECT queued_message_json FROM inputs WHERE input_id=?1",
+            [queued.input_id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    for input in &mut previous.inputs {
+        let key = input.idempotency_key.take().unwrap();
+        if input.input_id == active.input_id {
+            assert_eq!(
+                engine
+                    .connection
+                    .execute(
+                        "UPDATE inputs SET idempotency_key=?1 WHERE input_id=?2",
+                        params![key.as_str(), input.input_id.as_str()],
+                    )
+                    .unwrap(),
+                1
+            );
+        } else {
+            assert_eq!(input.input_id, finished.input_id);
+            engine
+                .connection
+                .execute(
+                    "INSERT INTO inputs(queue_order,input_id,session_id,idempotency_key,state,agent_variant,origin)
+                 VALUES(?1,?2,?3,?4,'committed',NULL,NULL)",
+                    params![
+                        i64::try_from(input.queue_order).unwrap(),
+                        input.input_id.as_str(),
+                        session.as_str(),
+                        key.as_str()
+                    ],
+                )
+                .unwrap();
+        }
+    }
+    engine
+        .connection
+        .execute(
+            "INSERT INTO inputs(input_id,session_id,idempotency_key,state,input_kind,agent_variant,origin)
+         VALUES(?1,?2,?3,'committed','command',NULL,NULL)",
+            params![
+                command.input_id.as_str(),
+                session.as_str(),
+                command.idempotency_key.as_ref().unwrap().as_str()
+            ],
+        )
+        .unwrap();
+    engine
+        .connection
+        .execute_batch(
+            "DROP INDEX workspaces_sort_order;
+         DROP INDEX session_resources_workspace_order;
+         DROP INDEX sessions_pin_order;
+         DROP INDEX sessions_created_order;
+         ALTER TABLE workspaces DROP COLUMN sort_order;
+         ALTER TABLE session_resources DROP COLUMN sort_order;
+         ALTER TABLE sessions DROP COLUMN pin_order;
+         CREATE INDEX session_resources_workspace ON session_resources(workspace_id,session_id);
+         DELETE FROM schema_migrations WHERE version='0.33.1';
+         UPDATE database_compatibility SET min_compatible_host_version='0.33.0';
+         CREATE TRIGGER fail_v2_publish BEFORE INSERT ON schema_migrations
+         WHEN NEW.version='0.33.1' BEGIN SELECT RAISE(ABORT,'injected v2 publish failure'); END;",
+        )
+        .unwrap();
+    fs::remove_file(&path).unwrap();
+    conversation::write_generation_version(
+        &path,
+        &owner,
+        generation,
+        conversation::PREVIOUS_HISTORY_VERSION,
+        &body,
+        &previous,
+    )
+    .unwrap();
+    let v1_bytes = fs::read(&path).unwrap();
+    drop(engine);
+
+    assert!(StorageEngine::open(home.path()).is_err());
+    let sqlite_path = home.path().join("data/runtime.sqlite3");
+    let rollback = Connection::open(&sqlite_path).unwrap();
+    let previous_rows = |connection: &Connection| {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM inputs WHERE idempotency_key IS NOT NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(previous_rows(&rollback), 4);
+    assert_eq!(fs::read(&path).unwrap(), v1_bytes);
+    let saved = fs::read_dir(home.path().join("backups/database"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let backup = Connection::open_with_flags(
+        saved.join("runtime.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    assert_eq!(previous_rows(&backup), 4);
+    assert_eq!(
+        fs::read(saved.join(path.strip_prefix(home.path()).unwrap())).unwrap(),
+        v1_bytes
+    );
+    rollback
+        .execute_batch("DROP TRIGGER fail_v2_publish")
+        .unwrap();
+    drop(rollback);
+    drop(backup);
+
+    let mut engine = open_engine(&home);
+    assert_eq!(engine.load_conversation(session).unwrap(), body);
+    let upgraded = engine.load_conversation_history(owner).unwrap();
+    assert!(upgraded.generation > generation);
+    assert_eq!(upgraded.facts, authoritative.facts);
+    assert!(!path.exists());
+    assert!(
+        saved.is_dir(),
+        "a later success keeps the previous failure backup"
+    );
+    assert_eq!(previous_rows(&engine.connection), 1);
+    assert_eq!(
+        engine
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM inputs WHERE state='committed' AND idempotency_key IS NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1,
+    );
+    assert_eq!(
+        engine
+            .connection
+            .query_row(
+                "SELECT queued_message_json FROM inputs WHERE input_id=?1",
+                [queued.input_id.as_str()],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        waiting
+    );
+    assert!(engine.accept_session_command(command).unwrap().is_duplicate);
+    assert_eq!(
+        engine.accept_input(active.clone()).unwrap().run_id(),
+        Some(&fixture_run_id(&active))
+    );
+    assert!(engine.accept_input(queued).unwrap().run_id().is_none());
+    assert!(matches!(
+        engine.accept_input(finished.clone()).unwrap(),
+        assistant_runtime::AcceptedInput::Historical { .. }
+    ));
+
+    finish_fixture_run(
+        &mut engine,
+        session.as_str(),
+        fixture_run_id(&active).as_str(),
+        RunStatus::Completed,
+        None,
+        3500,
+    );
+    drop(engine);
+    let mut engine = open_engine(&home);
+    let retry = engine
+        .create_run_attempt(assistant_runtime::NewStoredRunAttempt {
+            run_id: run_id("v1-upgraded-retry"),
+            session_id: session.clone(),
+            source_run_id: fixture_run_id(&finished),
+            approval_mode: assistant_protocol::ApprovalMode::Ask,
+            created_at_ms: 4000,
+        })
+        .unwrap();
+    assert_eq!(retry.attempt, 2);
+    assert_eq!(
+        engine.accept_input(finished.clone()).unwrap().run_id(),
+        Some(&fixture_run_id(&finished))
     );
 }

@@ -31,11 +31,11 @@ export const AppShell = observer(function AppShell() {
   const store = useRootStore();
   const [desktop_platform, setDesktopPlatform] = useState<DesktopPlatform>("unsupported");
   const [search_dialog_open, setSearchDialogOpen] = useState(false);
+  const [conversation_navigation_slot, setConversationNavigationSlot] = useState<HTMLDivElement | null>(null);
   const application = store.projection.application;
   const connection = store.local_connection.state === "connected" ? store.connection : store.local_connection;
   const session_id = store.navigation.selected_session_id;
-  const session = application?.active_sessions.find((item) => item.session_id === session_id)
-    ?? application?.archived_sessions.find((item) => item.session_id === session_id);
+  const session = store.projection.sessionSummary(session_id);
   const navigation = store.navigation;
   const workspace_editor_presence = usePresence(store.workspace_editor !== null, 120);
   const retained_workspace_editor_ref = useRef(store.workspace_editor);
@@ -101,8 +101,9 @@ export const AppShell = observer(function AppShell() {
             {store.remote_device && store.interaction_error && <ConnectionNotice role="alert">{store.interaction_error}</ConnectionNotice>}
           </div>
           <div className={styles.conversation_content}>
-            <ConversationView key={navigation.target_device ?? "local"} />
+            <ConversationView key={navigation.target_device ?? "local"} navigation_slot={conversation_navigation_slot} />
           </div>
+          <div className={styles.conversation_navigation_slot} ref={setConversationNavigationSlot} />
           <div className={styles.composer_slot}>
             {<ComposerDock key={navigation.target_device ?? "local"} read_only={store.navigation.selected_child_task_id !== null} />}
           </div>

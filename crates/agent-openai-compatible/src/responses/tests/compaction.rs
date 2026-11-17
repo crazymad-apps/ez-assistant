@@ -172,7 +172,8 @@ async fn compact_preserves_complete_window_and_starts_then_resumes_a_new_chain()
         )),
         Ok(RecordedResponse::new(200, TEXT_SSE)),
     ]));
-    let service = native_service(transport.clone(), "session:stable-configuration");
+    let service = native_service(transport.clone(), "session:stable-configuration")
+        .with_prompt_cache_key("stable-owner");
     let original = request(vec![user("task", "original tool history")]);
     let compact = service
         .compact(original.clone(), ModelCallContext::default())
@@ -217,6 +218,9 @@ async fn compact_preserves_complete_window_and_starts_then_resumes_a_new_chain()
     let requests = sent(&transport);
     assert_eq!(requests.len(), 5);
     assert_eq!(requests[0].as_object().unwrap().len(), 2);
+    assert_eq!(requests[1]["prompt_cache_key"], "stable-owner");
+    assert_eq!(requests[2]["prompt_cache_key"], "stable-owner");
+    assert!(requests[3].get("prompt_cache_key").is_none());
     assert_eq!(
         requests[1]["input"],
         compact_window("compact-one")["output"]
@@ -266,7 +270,9 @@ async fn input_count_is_independent_and_never_creates_a_response_chain() {
         200,
         json!({"input_tokens":456}).to_string(),
     ))]));
-    let service = native_service(transport.clone(), "scope").with_input_token_count(true);
+    let service = native_service(transport.clone(), "scope")
+        .with_input_token_count(true)
+        .with_prompt_cache_key("stable-owner");
     let mut context = ModelCallContext::default();
     assert_eq!(
         service
@@ -281,6 +287,7 @@ async fn input_count_is_independent_and_never_creates_a_response_chain() {
     assert!(body.get("previous_response_id").is_none());
     assert!(body.get("store").is_none());
     assert!(body.get("stream").is_none());
+    assert!(body.get("prompt_cache_key").is_none());
     let disabled = Arc::new(RecordedTransport::new([]));
     assert_eq!(
         native_service(disabled.clone(), "scope")

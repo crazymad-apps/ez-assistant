@@ -11,7 +11,7 @@ use std::{
 };
 
 // 当前发布链及具名迁移；新库、升级与重启保持同一完整账本。
-const CURRENT_MIGRATION_COUNT: i64 = 19;
+const CURRENT_MIGRATION_COUNT: i64 = 21;
 
 struct Host(Child);
 impl Drop for Host {
@@ -339,7 +339,7 @@ fn released_v0251_host_refuses_upgraded_database_without_changing_data_files() {
                 |r| r.get::<_, String>(0)
             )
             .unwrap(),
-        "0.33.0"
+        "0.33.1"
     );
     let backup_dir = fs::read_dir(home.path().join("backups/host-layout"))
         .unwrap()
@@ -562,9 +562,9 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
         .unwrap()
         .json()
         .unwrap();
-    assert_eq!(health["database_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(health["database_version"], "0.33.1");
     // 数据库最低 Host 与应用协议 minimum 独立；F02 文件历史切换要求新的存储下限。
-    assert_eq!(health["min_compatible_host_version"], "0.33.0");
+    assert_eq!(health["min_compatible_host_version"], "0.33.1");
     let configuration =
         fs::read_to_string(home.path().join("users/_personal/config.toml")).unwrap();
     assert!(!configuration.contains("default_model"));
@@ -603,7 +603,7 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    assert_eq!(ledger.0, env!("CARGO_PKG_VERSION"));
+    assert_eq!(ledger.0, "0.33.1");
     let count = |table: &str| {
         database
             .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
@@ -690,6 +690,9 @@ fn legacy_invalid_model_reference_is_discarded_and_successful_backup_is_removed(
     ))
     .unwrap();
     old.execute_batch("INSERT INTO sessions(session_id,title,model_key,system_prompt_json,skill_catalog_json,lifecycle,body_generation,message_count,created_at_ms,updated_at_ms) VALUES ('legacy','history preserved','invalid model !','[]','{}','archived',1,0,1,2)").unwrap();
+    let directory = home.path().join("users/_personal/data/sessions/legacy");
+    // 旧产品创建会话时同时写资源归属，排序升级依赖这一既有事实。
+    old.execute("INSERT INTO session_resources(session_id,workspace_id,working_directory,additional_workspace_directories_json,attachment_directory,private_directory,created_at_ms) VALUES('legacy',NULL,?1,'[]',?2,?1,1)", rusqlite::params![directory.join("private").to_string_lossy(), directory.join("attachments").to_string_lossy()]).unwrap();
     assert_eq!(
         old.query_row("SELECT COUNT(*) FROM sessions", [], |row| row
             .get::<_, i64>(0))
@@ -698,7 +701,6 @@ fn legacy_invalid_model_reference_is_discarded_and_successful_backup_is_removed(
     );
     drop(old);
     // 正常旧产品为空会话也创建文件；SQL 人工夹具须包含这份配套原件。
-    let directory = home.path().join("users/_personal/data/sessions/legacy");
     fs::create_dir_all(&directory).unwrap();
     fs::write(directory.join("conversation.1.jsonl"), b"").unwrap();
     let mut host = start(home.path());
@@ -708,11 +710,12 @@ fn legacy_invalid_model_reference_is_discarded_and_successful_backup_is_removed(
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
-    assert_eq!(upgraded.query_row("SELECT COUNT(*) FROM sessions WHERE session_id='legacy' AND title='history preserved' AND lifecycle='archived' AND body_generation=2 AND message_count=0 AND model_provider_instance_id IS NULL AND model_id IS NULL", [], |row| row.get::<_,i64>(0)).unwrap(), 1);
-    let framed = fs::read_to_string(directory.join("conversation.2.jsonl")).unwrap();
+    assert_eq!(upgraded.query_row("SELECT COUNT(*) FROM sessions WHERE session_id='legacy' AND title='history preserved' AND lifecycle='archived' AND body_generation=3 AND message_count=0 AND model_provider_instance_id IS NULL AND model_id IS NULL", [], |row| row.get::<_,i64>(0)).unwrap(), 1);
+    let framed = fs::read_to_string(directory.join("conversation.3.jsonl")).unwrap();
     let header: Value = serde_json::from_str(framed.lines().next().unwrap()).unwrap();
     assert_eq!(header["format"], "ez_assistant_history");
-    assert_eq!(header["generation"], 2);
+    assert_eq!(header["generation"], 3);
+    assert_eq!(header["version"], 2);
     assert_eq!(
         fs::read_dir(home.path().join("users/_personal/backups/database"))
             .unwrap()
@@ -831,4 +834,73 @@ fn provider_usage_counts_unloaded_archived_sessions_and_deletion_preserves_refer
         "usage-two"
     );
     assert!(backup_path.is_file());
+}
+
+/// 需要经核实、不含 F04 排序迁移的真实 0.33.1 Host。只使用新建隔离 Home。
+#[test]
+#[ignore = "requires EZ_ASSISTANT_PRE_F04_V0331_HOST"]
+fn real_pre_f04_v0331_host_rejects_same_version_sort_ledger_before_writes() {
+    let binary =
+        std::env::var_os("EZ_ASSISTANT_PRE_F04_V0331_HOST").expect("verified early Host path");
+    let binary = Path::new(&binary);
+    assert!(binary.is_absolute() && binary.is_file());
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.runtime-test");
+    fs::create_dir_all(&base).unwrap();
+    let home = tempfile::Builder::new()
+        .prefix("f04-real-old-host-")
+        .tempdir_in(base)
+        .unwrap();
+    let personal = home.path().join("users/_personal");
+    fs::create_dir_all(&personal).unwrap();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    fs::write(
+        home.path().join("host.toml"),
+        format!("version='0.27.0'\nmode='personal'\n[host_access]\nport={port}\n"),
+    )
+    .unwrap();
+    fs::write(
+        personal.join("config.toml"),
+        "schema_version=1\ndefault_model=''\n",
+    )
+    .unwrap();
+    let mut old = spawn_binary(home.path(), binary);
+    let discovery = wait_health(home.path(), &mut old, "ready");
+    stop(&discovery, &mut old);
+    let database = personal.join("data/runtime.sqlite3");
+    let read = || {
+        rusqlite::Connection::open_with_flags(&database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap()
+    };
+    assert_eq!(
+        read()
+            .query_row(
+                "SELECT count(*) FROM schema_migrations WHERE version='0.33.1'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+    let mut current = start(home.path());
+    let discovery = wait_health(home.path(), &mut current, "ready");
+    stop(&discovery, &mut current);
+    assert_eq!(read().query_row("SELECT count(*) FROM schema_migrations WHERE version='0.33.1' AND migration_key='sidebar_order_v1'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+    let before = files(&personal);
+    let mut old = spawn_binary(home.path(), binary);
+    let discovery = wait_health(home.path(), &mut old, "unavailable");
+    let health: Value = http()
+        .get(format!("{}/health", discovery["address"].as_str().unwrap()))
+        .bearer_auth(discovery["access_token"].as_str().unwrap())
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(health["error"], "migration_failed");
+    gated(&discovery);
+    stop(&discovery, &mut old);
+    assert_eq!(files(&personal), before);
 }

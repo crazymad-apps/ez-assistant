@@ -35,10 +35,12 @@ impl FileSystemTool for ProbeFs {
             self.reads.lock().expect("lock reads").push(request.clone());
             Ok(ReadFileResult {
                 path: request.path,
-                offset: request.offset,
-                limit: request.limit,
-                content: "1\thello".to_owned(),
-                next_offset: None,
+                offset_chars: request.offset_chars,
+                limit_chars: request.limit_chars,
+                content: "hello".to_owned(),
+                start_line: 1,
+                start_column: 1,
+                next_offset_chars: None,
                 truncated: false,
             })
         })
@@ -132,7 +134,7 @@ fn resolver() -> SessionPathResolver {
 }
 
 fn read_config() -> ReadFileToolConfig {
-    ReadFileToolConfig::new(nonzero(1), nonzero(200), nonzero(2000)).expect("valid read config")
+    ReadFileToolConfig::new(0, nonzero(10_000), nonzero(20_000)).expect("valid read config")
 }
 
 fn search_config() -> SearchFilesToolConfig {
@@ -155,12 +157,12 @@ fn read_schema_resolved_facts_fingerprint_and_execution_share_effective_input() 
     let snapshot = registry.snapshot();
     let definition = &snapshot.definitions()[0];
     assert_eq!(
-        definition.input_schema["properties"]["offset"]["default"],
-        serde_json::json!(1)
+        definition.input_schema["properties"]["offset_chars"]["default"],
+        serde_json::json!(0)
     );
     assert_eq!(
-        definition.input_schema["properties"]["limit"]["default"],
-        serde_json::json!(200)
+        definition.input_schema["properties"]["limit_chars"]["default"],
+        serde_json::json!(10_000)
     );
     assert!(definition.description.contains("Calls are stateless"));
     assert!(
@@ -171,13 +173,13 @@ fn read_schema_resolved_facts_fingerprint_and_execution_share_effective_input() 
     assert!(
         definition
             .description
-            .contains("previous result's next_offset")
+            .contains("previous result's next_offset_chars")
     );
     assert!(
-        definition.input_schema["properties"]["offset"]["description"]
+        definition.input_schema["properties"]["offset_chars"]["description"]
             .as_str()
             .expect("offset description")
-            .contains("next_offset")
+            .contains("next_offset_chars")
     );
     let mut batch = Dispatcher::resolve_batch(
         &snapshot,
@@ -194,8 +196,8 @@ fn read_schema_resolved_facts_fingerprint_and_execution_share_effective_input() 
         invocation.resolved_arguments(),
         &serde_json::json!({
             "path": expected_path.to_str().expect("utf8"),
-            "offset": 1,
-            "limit": 200,
+            "offset_chars": 0,
+            "limit_chars": 10_000,
         })
     );
     let facts = invocation
@@ -217,6 +219,42 @@ fn read_schema_resolved_facts_fingerprint_and_execution_share_effective_input() 
         fs.reads.lock().expect("lock reads")[0].path.as_path(),
         expected_path
     );
+}
+
+#[test]
+fn read_rejects_oversized_and_legacy_line_arguments_before_execution() {
+    let fs = Arc::new(ProbeFs::default());
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(FsReadTool::new(fs.clone(), resolver(), read_config()))
+        .unwrap();
+    let snapshot = registry.snapshot();
+    for arguments in [
+        serde_json::json!({"path": "file.txt", "limit_chars": 20_001}),
+        serde_json::json!({"path": "file.txt", "limit_chars": 0}),
+        serde_json::json!({"path": "file.txt", "offset_chars": -1}),
+        serde_json::json!({"path": "file.txt", "offset": 1}),
+        serde_json::json!({"path": "file.txt", "limit": 100}),
+    ] {
+        let batch = Dispatcher::resolve_batch(&snapshot, &[tool_call("read_file", arguments)]);
+        assert!(matches!(
+            batch.get(0),
+            Some(ResolvedBatchItemRef::Invalid { .. })
+        ));
+    }
+    let batch = Dispatcher::resolve_batch(
+        &snapshot,
+        &[tool_call(
+            "read_file",
+            serde_json::json!({"path": "file.txt", "offset_chars": 20_000, "limit_chars": 20_000}),
+        )],
+    );
+    let Some(ResolvedBatchItemRef::Valid(call)) = batch.get(0) else {
+        panic!("maximum page resolves")
+    };
+    assert_eq!(call.resolved_arguments()["offset_chars"], 20_000);
+    assert_eq!(call.resolved_arguments()["limit_chars"], 20_000);
+    assert!(fs.reads.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -296,7 +334,7 @@ fn empty_paths_queries_and_invalid_edit_are_rejected_without_execution() {
 
 #[test]
 fn invalid_instance_configs_fail_before_tool_construction() {
-    assert!(ReadFileToolConfig::new(nonzero(1), nonzero(20), nonzero(10)).is_err());
+    assert!(ReadFileToolConfig::new(0, nonzero(20), nonzero(10)).is_err());
     assert!(
         SearchFilesToolConfig::new(
             nonzero(20),
@@ -317,8 +355,8 @@ fn cancellation_is_forwarded_to_file_capability() {
     let resolution = tool
         .resolve(ReadFileInput {
             path: "README.md".to_owned(),
-            offset: None,
-            limit: None,
+            offset_chars: None,
+            limit_chars: None,
         })
         .expect("resolve read");
     let error = block_on(tool.execute(

@@ -452,6 +452,34 @@ impl RuntimeStore for FaultInjectingStore {
     fn load_runtime_globals(&self) -> StoreFuture<'_, RecoveredRuntime> {
         self.inner.load_runtime_globals()
     }
+    fn move_sidebar_item(
+        &self,
+        request: assistant_protocol::MoveSidebarItemRequest,
+    ) -> StoreFuture<'_, ()> {
+        self.inner.move_sidebar_item(request)
+    }
+
+    fn reset_sidebar_order(
+        &self,
+        request: assistant_protocol::ResetSidebarOrderRequest,
+    ) -> StoreFuture<'_, ()> {
+        self.inner.reset_sidebar_order(request)
+    }
+
+    fn query_workspaces(
+        &self,
+        request: assistant_protocol::ListWorkspacesRequest,
+    ) -> StoreFuture<'_, crate::WorkspacePage> {
+        self.inner.query_workspaces(request)
+    }
+
+    fn query_sidebar(
+        &self,
+        request: assistant_protocol::GetApplicationSnapshotRequest,
+    ) -> StoreFuture<'_, crate::SidebarSnapshot> {
+        self.inner.query_sidebar(request)
+    }
+
     fn query_session_summaries(
         &self,
         query: crate::SessionSummaryQuery,
@@ -830,8 +858,37 @@ impl RuntimeStore for FaultInjectingStore {
         })
     }
 
-    fn claim_input(&self, run: StoredRun) -> StoreFuture<'_, ()> {
-        self.inner.claim_input(run)
+    fn claim_input(
+        &self,
+        run: StoredRun,
+        goal_resume: Option<crate::GoalHeldInputResume>,
+    ) -> StoreFuture<'_, ()> {
+        self.inner.claim_input(run, goal_resume)
+    }
+
+    fn new_conversation_identity_available(
+        &self,
+        session: &SessionId,
+        identity: crate::NewConversationIdentity,
+    ) -> StoreFuture<'_, bool> {
+        self.inner
+            .new_conversation_identity_available(session, identity)
+    }
+
+    fn load_run_conversation(
+        &self,
+        session: &SessionId,
+        run: &assistant_protocol::RunId,
+    ) -> StoreFuture<'_, crate::StoredConversationRawWindow> {
+        self.inner.load_run_conversation(session, run)
+    }
+
+    fn find_request_acceptance(
+        &self,
+        session: &SessionId,
+        key: &assistant_protocol::IdempotencyKey,
+    ) -> StoreFuture<'_, Option<crate::StoredRequestAcceptance>> {
+        self.inner.find_request_acceptance(session, key)
     }
 
     fn accept_input(&self, input: NewStoredInput) -> StoreFuture<'_, AcceptedInput> {
@@ -977,6 +1034,13 @@ impl RuntimeStore for FaultInjectingStore {
             }
             Ok(window)
         })
+    }
+
+    fn read_conversation_navigation(
+        &self,
+        request: crate::ConversationNavigationRequest,
+    ) -> StoreFuture<'_, crate::StoredConversationNavigation> {
+        self.inner.read_conversation_navigation(request)
     }
 
     fn load_conversation_raw_window(

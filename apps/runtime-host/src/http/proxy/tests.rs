@@ -38,6 +38,21 @@ fn command_gate_rejects_global_management_and_allows_scoped_permissions() {
         "runtime",
         json!({"type":"prepare_custom_agent","payload":{"selection":{"name":"test","source":{"type":"personal"}}}})
     )));
+    for command in [
+        json!({"type":"move_sidebar_item","payload":{"scope":"workspaces","workspace_id":"a","reference_id":"b","placement":"before"}}),
+        json!({"type":"reset_sidebar_order","payload":{"scope":"sessions","group":{"type":"unbound"}}}),
+    ] {
+        assert!(allowed::allowed(&request("runtime", command)));
+    }
+    let owner = json!({"type":"child_task","session_id":"s","child_task_id":"c"});
+    assert!(allowed::allowed(&request(
+        "runtime",
+        json!({"type":"list_conversation_navigation","payload":{"owner":owner,"cursor":null}})
+    )));
+    assert!(allowed::allowed(&request(
+        "runtime",
+        json!({"type":"get_conversation_message_preview","payload":{"owner":owner,"generation":1,"message_id":"m"}})
+    )));
     assert!(!allowed::allowed(&request(
         "runtime",
         json!({"type":"shutdown_runtime","payload":{}})

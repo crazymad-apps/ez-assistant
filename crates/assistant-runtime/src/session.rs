@@ -8,8 +8,8 @@ use std::{
 use agent_model::SystemPromptSnapshot;
 use agent_types::ConversationSnapshot;
 use assistant_protocol::{
-    AgentVariant, ApprovalMode, IdempotencyKey, InputId, ModelSelection, ReasoningEffortKey, RunId,
-    RunSnapshot, SessionCompactionSnapshot, SessionId, SessionLifecycle, SessionSummary,
+    AgentVariant, ApprovalMode, InputId, ModelSelection, ReasoningEffortKey, RunId, RunSnapshot,
+    SessionCompactionSnapshot, SessionId, SessionLifecycle, SessionSummary,
     SessionTitleGenerationSnapshot, SessionTitleOrigin,
 };
 use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
@@ -38,6 +38,8 @@ pub(crate) struct SessionController {
     system_prompt: SystemPromptSnapshot,
     environment: SessionExecutionEnvironment,
     mutation_gate: AsyncMutex<()>,
+    /// 只在介入请求间串行。队列执行与结算不取得此锁。
+    pub(crate) intervention_gate: AsyncMutex<()>,
     state: Mutex<SessionState>,
 }
 
@@ -149,7 +151,7 @@ pub(crate) struct InputRecord {
 }
 
 impl SessionState {
-    /// 按 Goal 状态选择唯一可自动领取的输入；Goal 存在时不会回退消费用户队列。
+    /// 运行中的 Goal 独占自动推进，暂停后普通队列按既有门禁领取。
     pub(crate) fn next_runnable_input(&self) -> Option<InputId> {
         if self
             .feedback
@@ -159,13 +161,6 @@ impl SessionState {
             return None;
         }
         match self.goal.as_ref() {
-            None => {
-                if self.queue_paused_by_user || self.resume_required {
-                    None
-                } else {
-                    self.queue_item_ids.front().cloned()
-                }
-            }
             Some(goal) if matches!(goal.state, GoalState::Running) => self
                 .goal_inputs
                 .front()
@@ -178,7 +173,8 @@ impl SessionState {
                         })
                 })
                 .cloned(),
-            Some(_) => None,
+            _ if self.queue_paused_by_user || self.resume_required => None,
+            _ => self.queue_item_ids.front().cloned(),
         }
     }
 
@@ -226,6 +222,7 @@ impl SessionController {
             system_prompt: stored.system_prompt,
             environment: stored.environment,
             mutation_gate: AsyncMutex::new(()),
+            intervention_gate: AsyncMutex::new(()),
             state: Mutex::new(SessionState {
                 context_measurements: BTreeMap::new(),
                 feedback: BTreeMap::new(),
@@ -396,6 +393,7 @@ impl SessionController {
             system_prompt: stored.system_prompt,
             environment: stored.environment,
             mutation_gate: AsyncMutex::new(()),
+            intervention_gate: AsyncMutex::new(()),
             state: Mutex::new(SessionState {
                 context_measurements: BTreeMap::new(),
                 feedback: BTreeMap::new(),
@@ -570,18 +568,6 @@ impl SessionController {
             });
         }
         Ok(())
-    }
-
-    pub(crate) fn find_idempotent(
-        &self,
-        key: &IdempotencyKey,
-    ) -> RuntimeResult<Option<(InputId, Option<RunId>)>> {
-        let state = self.lock_state()?;
-        Ok(state
-            .inputs
-            .values()
-            .find(|input| input.stored.idempotency_key.as_ref() == Some(key))
-            .map(|input| (input.stored.input_id.clone(), input.first_run_id.clone())))
     }
 
     /// 内部状态故障后只允许查询和进程级恢复，不再接受新的 Session 变更。
@@ -830,7 +816,9 @@ impl SessionController {
     }
 }
 
-fn context_for_mode(
+/// 从已恢复的可靠窗口选择当前机制的上下文；冷恢复和编辑后重建使用同一规则。
+/// 仅派生内存快照，不改变机制绑定或持久历史；尚未绑定时保留原生状态，待实际领取再选择。
+pub(crate) fn context_for_mode(
     history: &ConversationSnapshot,
     mode: Option<agent_model::ContextManagementMode>,
 ) -> ConversationSnapshot {

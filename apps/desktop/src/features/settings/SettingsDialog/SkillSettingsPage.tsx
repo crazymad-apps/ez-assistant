@@ -1,6 +1,6 @@
 import { useAppearance } from "../../../stores/AppearanceContext";
 import { observer } from "mobx-react-lite";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type {
   SkillDiagnosticSnapshot,
   SkillDetailSnapshot,
@@ -8,6 +8,7 @@ import type {
   SkillSourceSnapshot,
   SkillSummarySnapshot,
   WorkspaceId,
+  WorkspaceSummary,
 } from "@ez-assistant/protocol";
 import { Icon } from "../../../components/Icon";
 import { MarkdownContent } from "../../../components/MarkdownContent";
@@ -22,9 +23,16 @@ import shared from "./index.module.scss";
 export const SkillSettingsPage = observer(function SkillSettingsPage() {
   const store = useRootStore();
   const settings = store.settings;
-  const workspaces = store.local_projection.application?.workspaces.filter((item) => item.lifecycle === "active") ?? [];
+  const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [tab, setTab] = useState<"skills" | "diagnostics">("skills");
   const [scope_open, setScopeOpen] = useState(false);
+  useEffect(() => {
+    if (!scope_open) return;
+    let current = true;
+    void store.listWorkspaceOptions(null).then(rows => { if (current) setWorkspaces(rows); })
+      .catch(() => { if (current) settings.showError("项目加载失败，请重试。"); });
+    return () => { current = false; };
+  }, [scope_open, store, settings]);
   const [selected_name, setSelectedName] = useState<string | null>(null);
   const snapshot = settings.skill_management;
   const selected = useMemo(

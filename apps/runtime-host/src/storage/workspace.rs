@@ -191,27 +191,40 @@ impl StorageEngine {
         let additional_json = serde_json::to_string(&additional_directories).map_err(|source| {
             internal_error("workspace directories could not be encoded", source)
         })?;
-        let inserted = self.connection.execute(
-            "INSERT INTO workspaces (
+        let inserted = (|| -> StorageResult<()> {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|e| database_write_error("workspace creation could not begin", e))?;
+            let order = super::sidebar_order::Scope::Workspaces
+                .next(&transaction, super::sidebar_order::Placement::Before)?;
+            transaction
+                .execute(
+                    "INSERT INTO workspaces (
                 workspace_id, label, user_directory, additional_directories_json,
-                agent_directory, lifecycle, created_at_ms, updated_at_ms, removed_at_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?6, NULL)",
-            params![
-                workspace.workspace_id.as_str(),
-                workspace.label,
-                canonical,
-                additional_json,
-                agent_directory_text,
-                registration.changed_at_ms,
-            ],
-        );
+                agent_directory, lifecycle, created_at_ms, updated_at_ms, removed_at_ms, sort_order
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?6, NULL, ?7)",
+                    params![
+                        workspace.workspace_id.as_str(),
+                        workspace.label,
+                        canonical,
+                        additional_json,
+                        agent_directory_text,
+                        registration.changed_at_ms,
+                        order,
+                    ],
+                )
+                .map_err(|e| {
+                    database_write_error("workspace could not be created in runtime storage", e)
+                })?;
+            transaction
+                .commit()
+                .map_err(|e| database_write_error("workspace creation could not be committed", e))
+        })();
         if let Err(source) = inserted {
             let _ = fs::remove_dir(&agent_directory);
             let _ = fs::remove_dir(&workspace_directory);
-            return Err(database_write_error(
-                "workspace could not be created in runtime storage",
-                source,
-            ));
+            return Err(source);
         }
         sync_directory(&self.workspaces_directory)?;
         Ok(workspace)
@@ -346,6 +359,46 @@ impl StorageEngine {
         workspace.updated_at_ms = restoration.changed_at_ms;
         workspace.removed_at_ms = None;
         Ok(workspace)
+    }
+
+    pub(super) fn query_workspaces(
+        &self,
+        request: assistant_protocol::ListWorkspacesRequest,
+    ) -> StorageResult<assistant_runtime::WorkspacePage> {
+        let lifecycle = match request
+            .lifecycle
+            .unwrap_or(assistant_protocol::WorkspaceLifecycle::Active)
+        {
+            assistant_protocol::WorkspaceLifecycle::Active => "active",
+            assistant_protocol::WorkspaceLifecycle::Removed => "removed",
+        };
+        let limit = request.limit.map(|n| n.clamp(1, u32::MAX - 1));
+        let mut statement = self.connection.prepare(
+            "SELECT workspace_id,label,user_directory,additional_directories_json,agent_directory,lifecycle,created_at_ms,updated_at_ms,removed_at_ms FROM workspaces WHERE lifecycle=?1 ORDER BY sort_order DESC,workspace_id LIMIT ?2 OFFSET ?3"
+        ).map_err(|e| internal_error("workspace page could not be queried", e))?;
+        let mut workspaces = statement
+            .query_map(
+                params![
+                    lifecycle,
+                    limit.map(|n| i64::from(n) + 1).unwrap_or(-1),
+                    request.offset
+                ],
+                read_workspace_row,
+            )
+            .map_err(|e| internal_error("workspace page could not be read", e))?
+            .map(|r| {
+                r.map_err(|e| internal_error("workspace row is invalid", e))
+                    .and_then(parse_workspace_row)
+            })
+            .collect::<StorageResult<Vec<_>>>()?;
+        let has_more = limit.is_some_and(|n| workspaces.len() > n as usize);
+        if let Some(limit) = limit {
+            workspaces.truncate(limit as usize);
+        }
+        Ok(assistant_runtime::WorkspacePage {
+            workspaces,
+            has_more,
+        })
     }
 
     fn load_workspaces(&self, include_removed: bool) -> StorageResult<Vec<StoredWorkspace>> {

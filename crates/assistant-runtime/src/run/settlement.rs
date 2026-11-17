@@ -305,7 +305,7 @@ pub(crate) async fn continue_run_if_required(
         } else {
             None
         };
-        state.resume_required = stored.resume_required;
+        state.resume_required |= stored.resume_required;
         state.updated_at_ms = committed_at_ms;
         if speech_reminder && let Some(cycle) = state.output_cycle.as_mut() {
             cycle.speech_reminder_issued = true;
@@ -374,13 +374,17 @@ async fn settle_run_inner(
         execution_steps,
     } = context;
     let finished_at_ms = system_time_ms()?;
-    let final_step = outcome.as_ref().and_then(|outcome| match outcome {
-        ExecutionOutcome::Completed { step, .. } => Some(*step),
-        _ => None,
-    });
     // mutation gate 串行化同 Session 的结算、输入接受和历史变更；状态锁只保护下面各段内存临界区。
     let mutation = session.mutation().await;
-    let (candidate, messages, settlement, cancel_requested, goal_effect, proxy_report_draft) = {
+    let (
+        candidate,
+        messages,
+        message_step,
+        settlement,
+        cancel_requested,
+        goal_effect,
+        proxy_report_draft,
+    ) = {
         let mut state = session.lock_state()?;
         if !is_active_run(&state, run_id) {
             state.is_faulted = true;
@@ -407,51 +411,63 @@ async fn settle_run_inner(
             });
         };
         let (journal_snapshot, has_pending) = (journal.snapshot(), journal.has_pending());
-        // 在 Journal 副本上追加最终 Assistant Message，Store 成功前不触碰权威内存 Journal。
         let mut candidate = journal.clone();
-        let mut settlement = if let Some(error) = forced_error {
-            RunSettlement {
-                status: RunStatus::Failed,
-                reasoning: None,
-                text: None,
-                error: Some(error),
-            }
+        let (mut settlement, output) = if let Some(error) = forced_error {
+            (
+                RunSettlement {
+                    status: RunStatus::Failed,
+                    reasoning: None,
+                    text: None,
+                    error: Some(error),
+                },
+                None,
+            )
         } else {
             match outcome {
-                Some(ExecutionOutcome::Completed { message, .. }) => {
-                    match candidate
-                        .append_completed(ConversationMessage::Assistant(message.clone()))
-                    {
-                        Ok(()) => completed_settlement(&message),
-                        Err(_) => {
-                            state.is_faulted = true;
-                            internal_failure("final assistant message could not be committed")
-                        }
-                    }
+                Some(ExecutionOutcome::Completed { step, message, .. }) => {
+                    (completed_settlement(&message), Some((step, message)))
                 }
-                Some(ExecutionOutcome::Failed { error, .. }) => {
-                    failed_settlement(&error, model_diagnostics)
-                }
-                Some(ExecutionOutcome::Cancelled { .. }) => {
-                    RunSettlement::terminal(RunStatus::Cancelled)
-                }
+                Some(ExecutionOutcome::Failed { error, partial, .. }) => (
+                    failed_settlement(&error, model_diagnostics),
+                    partial.map(|response| (response.step, response.message)),
+                ),
+                Some(ExecutionOutcome::Cancelled { partial, .. }) => (
+                    RunSettlement::terminal(RunStatus::Cancelled),
+                    partial.map(|response| (response.step, response.message)),
+                ),
                 Some(ExecutionOutcome::CompactionRequired { .. }) => {
-                    RunSettlement::terminal(RunStatus::CompactionRequired)
+                    (RunSettlement::terminal(RunStatus::CompactionRequired), None)
                 }
                 Some(ExecutionOutcome::ContinuationRequired {
                     reason: agent_core::ContinuationReason::ReturnToHost,
                     ..
-                }) => RunSettlement::terminal(RunStatus::Completed),
-                Some(ExecutionOutcome::ContinuationRequired { .. }) => {
-                    internal_failure("agent continuation escaped the run execution loop")
-                }
-                None => internal_failure("agent completion task terminated unexpectedly"),
+                }) => (RunSettlement::terminal(RunStatus::Completed), None),
+                Some(ExecutionOutcome::ContinuationRequired { .. }) => (
+                    internal_failure("agent continuation escaped the run execution loop"),
+                    None,
+                ),
+                None => (
+                    internal_failure("agent completion task terminated unexpectedly"),
+                    None,
+                ),
             }
         };
+        let mut message_step = None;
         // 未完成 Tool Exchange 代表副作用结果未知，不能把 Core 表面终态提交为正常完成。
         if has_pending {
             state.is_faulted = true;
             settlement = internal_failure("run ended with an incomplete tool exchange");
+        } else if let Some((step, message)) = output {
+            // 已完成的工具交换由 Recorder 持有；这里只提交尚未写入的终态消息。
+            if candidate
+                .append_completed(ConversationMessage::Assistant(message))
+                .is_ok()
+            {
+                message_step = Some(step);
+            } else {
+                state.is_faulted = true;
+                settlement = internal_failure("final assistant message could not be committed");
+            }
         }
         let candidate = candidate.snapshot();
         // Store 只接收尚未持久化的尾部增量；persisted_message_count 是内存 Journal 的可靠提交边界。
@@ -528,6 +544,7 @@ async fn settle_run_inner(
         (
             candidate,
             messages,
+            message_step,
             settlement,
             cancel_requested,
             goal_effect,
@@ -555,7 +572,7 @@ async fn settle_run_inner(
             error: settlement.error.clone(),
             queued_user_message: None,
             messages: messages.clone(),
-            message_step: final_step,
+            message_step,
             goal_effect,
             proxy_report,
             finished_at_ms,
@@ -609,7 +626,7 @@ async fn settle_run_inner(
             .runs
             .get_mut(run_id)
             .expect("run existence checked before persistence");
-        if let Some(step) = final_step {
+        if let Some(step) = message_step {
             record.extend_message_ids_at_step(message_ids, step);
         } else {
             record.extend_message_ids(message_ids);
@@ -641,7 +658,7 @@ async fn settle_run_inner(
         } else {
             None
         };
-        state.resume_required = resume_required;
+        state.resume_required |= resume_required;
         state.updated_at_ms = finished_at_ms;
         state.active_run = None;
         let channel_output = if snapshot.status == RunStatus::Completed {
@@ -674,9 +691,9 @@ async fn settle_run_inner(
             None
         };
         RunSettlementResult {
+            final_message_step: message_step.filter(|_| snapshot.status == RunStatus::Completed),
             run: snapshot,
             goal,
-            final_message_step: final_step,
             channel_output,
         }
     };

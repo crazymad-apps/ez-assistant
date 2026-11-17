@@ -61,18 +61,23 @@ impl StorageEngine {
             let paths = self.prepare_session_directories(&session_id)?;
             let private = path_text(&paths.private_directory)?;
             let attachment = path_text(&paths.attachment_directory)?;
-            self.connection
-                .execute(
-                    "INSERT OR IGNORE INTO session_resources (
-                        session_id, workspace_id, working_directory,
-                        additional_workspace_directories_json, attachment_directory,
-                        private_directory, created_at_ms
-                     ) VALUES (?1, NULL, ?2, '[]', ?3, ?2, ?4)",
-                    params![session_id.as_str(), private, attachment, created_at_ms],
-                )
-                .map_err(|source| {
-                    super::database_write_error("session resources could not be repaired", source)
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|e| {
+                    super::database_write_error("session resource repair could not begin", e)
                 })?;
+            let order = super::sidebar_order::Scope::Sessions(None)
+                .next(&transaction, super::sidebar_order::Placement::Before)?;
+            transaction.execute(
+                "INSERT OR IGNORE INTO session_resources (session_id, workspace_id, working_directory,
+                    additional_workspace_directories_json, attachment_directory, private_directory, created_at_ms, sort_order)
+                 VALUES (?1, NULL, ?2, '[]', ?3, ?2, ?4, ?5)",
+                params![session_id.as_str(), private, attachment, created_at_ms, order],
+            ).map_err(|e| super::database_write_error("session resources could not be repaired", e))?;
+            transaction.commit().map_err(|e| {
+                super::database_write_error("session resource repair could not be committed", e)
+            })?;
         }
         self.rebase_moved_session_resources(scope)?;
         self.recover_session_resource_directories(scope)
@@ -274,13 +279,21 @@ impl StorageEngine {
                     super::database_write_error("session custom agent could not be saved", source)
                 })?;
         }
+        let order = super::sidebar_order::Scope::Sessions(
+            session
+                .environment
+                .workspace_id
+                .as_ref()
+                .map(WorkspaceId::as_str),
+        )
+        .next(transaction, super::sidebar_order::Placement::Before)?;
         transaction
             .execute(
                 "INSERT INTO session_resources (
                     session_id, workspace_id, working_directory,
                     additional_workspace_directories_json, attachment_directory,
-                    private_directory, created_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    private_directory, created_at_ms, sort_order
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     session.session_id.as_str(),
                     session
@@ -299,6 +312,7 @@ impl StorageEngine {
                     session.environment.session_attachment_directory,
                     session.environment.session_private_directory,
                     session.created_at_ms,
+                    order,
                 ],
             )
             .map_err(|source| {

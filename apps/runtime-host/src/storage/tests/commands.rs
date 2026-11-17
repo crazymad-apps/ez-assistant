@@ -80,7 +80,17 @@ fn command_commit_releases_payload_but_preserves_identity_and_another_queued_com
         .execute_batch("DROP TRIGGER fail_command_switch")
         .unwrap();
     let completed = engine.commit_session_command(result.clone()).unwrap();
-    assert_eq!(engine.connection.query_row("SELECT COUNT(*) FROM inputs WHERE input_id='command-original' AND state='committed' AND command_json IS NULL AND command_result_json IS NULL AND user_message_id IS NULL AND accepted_at_ms IS NULL AND agent_variant IS NULL AND origin IS NULL AND priority_order IS NULL", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+    assert_eq!(
+        engine
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM inputs WHERE input_id='command-original'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
     let changes = engine.connection.total_changes();
     assert_eq!(
         engine.commit_session_command(result.clone()).unwrap(),
@@ -108,7 +118,7 @@ fn command_commit_releases_payload_but_preserves_identity_and_another_queued_com
             .query_row("SELECT COUNT(*) FROM inputs", [], |row| row
                 .get::<_, i64>(0))
             .unwrap(),
-        2
+        1
     );
     engine
         .connection

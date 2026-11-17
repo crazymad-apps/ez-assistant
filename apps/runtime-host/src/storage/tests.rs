@@ -1,5 +1,9 @@
 #[path = "tests/queue_claim.rs"]
 mod queue_claim;
+#[path = "tests/sidebar_order.rs"]
+mod sidebar_order;
+#[path = "tests/sidebar_query.rs"]
+mod sidebar_query;
 use assistant_runtime::{StoredWorkspaceLifecycle, WorkspaceRemoval};
 
 #[path = "tests/cards.rs"]
@@ -2492,6 +2496,17 @@ fn start_tool(engine: &mut StorageEngine, session: &str, run: &str, receipt: &st
         .expect("record tool started");
 }
 
+fn downgrade_fixture_header(path: &Path) {
+    let bytes = fs::read(path).unwrap();
+    let boundary = bytes.iter().position(|byte| *byte == b'\n').unwrap();
+    let mut header: serde_json::Value = serde_json::from_slice(&bytes[..boundary]).unwrap();
+    assert_eq!(header["version"], conversation::HISTORY_VERSION);
+    header["version"] = conversation::PREVIOUS_HISTORY_VERSION.into();
+    let mut downgraded = serde_json::to_vec(&header).unwrap();
+    downgraded.extend_from_slice(&bytes[boundary..]);
+    fs::write(path, downgraded).unwrap();
+}
+
 fn open_engine(root: &TempDir) -> StorageEngine {
     StorageEngine::open(root.path()).expect("open storage engine")
 }
@@ -2651,7 +2666,7 @@ fn mcp_command_is_durable_without_run_and_commit_is_idempotent() {
             .len(),
         1
     );
-    for (table, expected) in [("inputs", 1), ("runs", 0), ("body_appends", 0)] {
+    for (table, expected) in [("inputs", 0), ("runs", 0), ("body_appends", 0)] {
         let count: i64 = engine
             .connection
             .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
@@ -4058,6 +4073,10 @@ fn first_goal_input_goal_and_run_are_atomic_and_idempotent() {
 
 #[test]
 fn goal_run_continuation_updates_budget_without_creating_input_or_run() {
+    exercise_goal_run_continuation_and_resume(false);
+}
+
+fn exercise_goal_run_continuation_and_resume(resume_on_claim: bool) {
     let root = tempfile::tempdir().expect("tempdir");
     let mut engine = open_engine(&root);
     let sessions_directory = engine.sessions_directory.clone();
@@ -4295,39 +4314,80 @@ fn goal_run_continuation_updates_budget_without_creating_input_or_run() {
         })
         .expect("settle stopped Goal Run");
 
-    let mut resumed_goal = stopped_goal;
+    let mut resumed_goal = stopped_goal.clone();
     resumed_goal.state = StoredGoalState::Running;
     resumed_goal.pause_reason = None;
     resumed_goal.generation = 3;
     resumed_goal.turn = 3;
     resumed_goal.updated_at_ms = 5_000;
-    let mut resume_message = held_message;
+    let mut resume_message = held_message.clone();
     resume_message.parts.push(UserPart::Injected(TextPart {
         id: PartId::new("goal-resume-context").expect("part id"),
         text: "GOAL_RESUME_INJECTION_V1".to_owned(),
     }));
-    let resumed = engine
-        .resume_goal_with_held_input(assistant_runtime::GoalHeldInputResume {
-            session_id: session.clone(),
-            input_id: held.input_id().clone(),
-            expected_goal_id: resumed_goal.goal_id.clone(),
-            expected_generation: 2,
-            resumed_goal: resumed_goal.clone(),
-            message: resume_message,
-        })
-        .expect("resume Goal with held input");
-    assert!(resumed.run.is_none());
     let resumed_run_id = RunId::new("run-goal-resume").unwrap();
-    claim_stored_fixture(&mut engine, &resumed.input, resumed_run_id.clone());
+    let resume = assistant_runtime::GoalHeldInputResume {
+        session_id: session.clone(),
+        input_id: held.input_id().clone(),
+        expected_goal_id: resumed_goal.goal_id.clone(),
+        expected_generation: 2,
+        resumed_goal: resumed_goal.clone(),
+        message: resume_message.clone(),
+    };
+    let input_id = resume.input_id.clone();
+    if resume_on_claim {
+        let run = stored_claim_fixture(accepted_input(&held), resumed_run_id.clone());
+        engine
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER reject_goal_claim BEFORE INSERT ON runs
+             BEGIN SELECT RAISE(ABORT, 'fixture rejected claim'); END;",
+            )
+            .unwrap();
+        assert!(
+            engine
+                .claim_input(run.clone(), Some(resume.clone()))
+                .is_err()
+        );
+        assert_eq!(engine.load_all_goals().unwrap(), vec![stopped_goal]);
+        let inputs = engine.load_inputs().unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert!(inputs[0].goal_binding.is_none());
+        assert_eq!(inputs[0].queued_message.as_ref(), Some(&held_message));
+        assert!(engine.load_runs().unwrap().is_empty());
+        engine
+            .connection
+            .execute_batch("DROP TRIGGER reject_goal_claim")
+            .unwrap();
+        engine
+            .claim_input(run.clone(), Some(resume.clone()))
+            .unwrap();
+        assert!(engine.claim_input(run, Some(resume.clone())).is_err());
+        drop(engine);
+        engine = open_engine(&root);
+        assert_eq!(engine.load_all_goals().unwrap(), vec![resumed_goal.clone()]);
+        let inputs = engine.load_inputs().unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].goal_binding, Some(resume.binding()));
+        assert_eq!(inputs[0].queued_message.as_ref(), Some(&resume_message));
+        let runs = engine.load_runs().unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].run_id, resumed_run_id);
+        assert_eq!(runs[0].status, RunStatus::Accepted);
+    } else {
+        let resumed = engine.resume_goal_with_held_input(resume).unwrap();
+        assert!(resumed.run.is_none());
+        claim_stored_fixture(&mut engine, &resumed.input, resumed_run_id.clone());
+    }
     engine
         .commit_user_message(UserMessageCommit {
             context_management_mode: agent_model::ContextManagementMode::LocalSummary,
             shell: None,
             operation_id: "start-goal-resume".to_owned(),
-            input_id: resumed.input.input_id,
+            input_id,
             run_id: resumed_run_id.clone(),
             session_id: session.clone(),
-            message: resumed.input.queued_message,
+            message: Some(resume_message),
             reasoning_effort: None,
             created_at_ms: 5_100,
         })
@@ -4366,7 +4426,16 @@ fn goal_run_continuation_updates_budget_without_creating_input_or_run() {
             .expect("goals after completion")
             .is_empty()
     );
-    assert_eq!(engine.load_inputs().expect("historical inputs").len(), 2);
+    assert!(engine.load_inputs().unwrap().is_empty());
+    assert_eq!(
+        engine
+            .load_session_state(&session)
+            .unwrap()
+            .state
+            .inputs
+            .len(),
+        2
+    );
 }
 
 #[test]
@@ -4721,7 +4790,56 @@ fn known_unversioned_storage_migrates_without_losing_existing_business_data() {
     }
     drop(saved);
     // 从可靠文件还原这个旧格式夹具所需的 Input 元数据；产品路径不执行反向写回。
+    let historical_input = engine
+        .load_session_state(&source_id)
+        .unwrap()
+        .state
+        .inputs
+        .into_iter()
+        .next()
+        .unwrap();
+    engine
+        .connection
+        .execute(
+            "INSERT INTO inputs(queue_order,input_id,session_id,idempotency_key,user_message_id,
+            state,accepted_at_ms,agent_variant,origin,channel_source_json)
+         VALUES(?1,?2,?3,?4,?5,'committed',?6,?7,?8,?9)",
+            params![
+                i64::try_from(historical_input.queue_order).unwrap(),
+                historical_input.input_id.as_str(),
+                source_id.as_str(),
+                historical_input
+                    .idempotency_key
+                    .as_ref()
+                    .map(IdempotencyKey::as_str),
+                historical_input.user_message_id.as_str(),
+                historical_input.accepted_at_ms,
+                super::mode::agent_variant_value(historical_input.agent_variant),
+                super::input_state::input_origin_value(historical_input.origin),
+                historical_input
+                    .channel_source
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
     let legacy_inputs = engine.load_inputs().unwrap();
+    for id in [&source_id, &forked_id, &child_session_id] {
+        let directory = engine.session_directory(id).unwrap();
+        downgrade_fixture_header(&body_path(
+            &directory,
+            engine.session_generation(id).unwrap(),
+        ));
+    }
+    let child_generation = engine
+        .child_generation(&child_session_id, &child_id)
+        .unwrap();
+    let child_path = engine
+        .child_body(&child_session_id, &child_id, child_generation)
+        .unwrap();
+    downgrade_fixture_header(&child_path);
     let source_schema = include_str!("migrations/v0_25_1/schema.sql");
     let input_schema = source_schema
         .split("CREATE TABLE IF NOT EXISTS inputs (")
@@ -4813,7 +4931,15 @@ fn known_unversioned_storage_migrates_without_losing_existing_business_data() {
              DROP TABLE providers;
              DROP TABLE conversation_usage_snapshots;
              DROP TABLE message_cards;
-             DROP TABLE schema_migrations;
+DROP INDEX workspaces_sort_order;
+         DROP INDEX session_resources_workspace_order;
+         DROP INDEX sessions_pin_order;
+         DROP INDEX sessions_created_order;
+         ALTER TABLE workspaces DROP COLUMN sort_order;
+         ALTER TABLE session_resources DROP COLUMN sort_order;
+         ALTER TABLE sessions DROP COLUMN pin_order;
+         CREATE INDEX session_resources_workspace ON session_resources(workspace_id,session_id);
+         DROP TABLE schema_migrations;
              DROP TABLE database_compatibility;
              DROP TABLE plugin_operations;
              DROP TABLE plugins;
@@ -5922,8 +6048,8 @@ fn conversation_window_uses_display_boundaries_and_rebuilds_after_append() {
         .load_conversation_window(ConversationWindowRequest {
             owner: owner.clone(),
             generation: 1,
-            end: None,
-            limit: 2,
+            end: assistant_runtime::ConversationWindowEnd::Latest,
+            turn_limit: 1,
         })
         .expect("latest window");
     assert_eq!((latest.start, latest.end, latest.total), (4, 6, 6));
@@ -5937,8 +6063,8 @@ fn conversation_window_uses_display_boundaries_and_rebuilds_after_append() {
         .load_conversation_window(ConversationWindowRequest {
             owner: owner.clone(),
             generation: 1,
-            end: Some(latest.start),
-            limit: 2,
+            end: assistant_runtime::ConversationWindowEnd::Before(latest.start),
+            turn_limit: 1,
         })
         .expect("older window");
     assert_eq!((older.start, older.end, older.total), (2, 4, 6));
@@ -5952,8 +6078,8 @@ fn conversation_window_uses_display_boundaries_and_rebuilds_after_append() {
         .load_conversation_window(ConversationWindowRequest {
             owner: owner.clone(),
             generation: 1,
-            end: None,
-            limit: 2,
+            end: assistant_runtime::ConversationWindowEnd::Latest,
+            turn_limit: 1,
         })
         .expect("window after append");
     assert_eq!((appended.start, appended.end, appended.total), (6, 8, 8));
@@ -5986,8 +6112,8 @@ fn conversation_window_uses_display_boundaries_and_rebuilds_after_append() {
         .load_conversation_window(ConversationWindowRequest {
             owner: owner.clone(),
             generation: 1,
-            end: None,
-            limit: 2,
+            end: assistant_runtime::ConversationWindowEnd::Latest,
+            turn_limit: 1,
         })
         .expect("window after hidden runtime message");
     assert_eq!(
@@ -7660,7 +7786,7 @@ async fn verify_shell_fork_reopen(include_failed_attempt: bool) {
                     session_id: source_id.clone(),
                 },
                 cursor: None,
-                limit: 30,
+                turn_limit: Some(30),
             })
             .await
             .unwrap()
@@ -7961,8 +8087,8 @@ fn active_run_context_replacement_switches_generation_without_rewriting_run_rela
                 session_id: session_id("s-compact-run"),
             },
             generation: 2,
-            end: None,
-            limit: 20,
+            end: assistant_runtime::ConversationWindowEnd::Latest,
+            turn_limit: 20,
         })
         .expect("product window after replacement");
     assert_eq!(product_window.total, 5);
@@ -8058,24 +8184,13 @@ fn active_run_context_replacement_switches_generation_without_rewriting_run_rela
                 session_id: session_id("s-compact-run"),
             },
             generation: 3,
-            end: None,
-            limit: 3,
+            end: assistant_runtime::ConversationWindowEnd::Latest,
+            turn_limit: 3,
         })
         .expect("latest product page after restart");
     assert_eq!(latest_page.total, 8);
-    assert_eq!(latest_page.start, 5);
-    let previous_page = reopened
-        .load_conversation_window(ConversationWindowRequest {
-            owner: ConversationOwner::MainSession {
-                session_id: session_id("s-compact-run"),
-            },
-            generation: 3,
-            end: Some(latest_page.start),
-            limit: 5,
-        })
-        .expect("previous product page after restart");
-    assert_eq!(previous_page.start, 0);
-    assert_eq!(previous_page.end, 5);
+    assert_eq!(latest_page.start, 0);
+    assert_eq!(latest_page.conversation, final_history);
 }
 
 #[test]
@@ -8506,7 +8621,14 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
                 cancel_requested: false,
                 error: None,
                 queued_user_message: None,
-                messages: vec![assistant_message(assistant, assistant)],
+                messages: vec![assistant_message(
+                    assistant,
+                    if run == "run-one" {
+                        "**assistant-one**"
+                    } else {
+                        assistant
+                    },
+                )],
                 goal_effect: None,
                 proxy_report: None,
                 finished_at_ms: at + 8,
@@ -8553,7 +8675,32 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
         0
     );
 
-    let replacement_user = raw_user_message("user-replacement", "replacement");
+    let mut replacement_user = raw_user_message("user-replacement", "replacement");
+    for source in ["user-one", "user-two", "assistant-one"] {
+        replacement_user
+            .parts
+            .push(UserPart::QuotedText(agent_types::QuotedTextPart {
+                quote_id: PartId::new(format!("rewrite-quote-{source}")).unwrap(),
+                exact: source.to_owned(),
+                prefix: String::new(),
+                suffix: String::new(),
+                source_owner: agent_types::QuotedTextSourceOwner::MainSession {
+                    session_id: session.as_str().to_owned(),
+                },
+                source_generation: 1,
+                source_message_id: MessageId::new(source).unwrap(),
+                text_start_utf16: 0,
+                text_end_utf16: u32::try_from(source.encode_utf16().count()).unwrap(),
+                source_role: if source == "assistant-one" {
+                    agent_types::QuotedTextSourceRole::Assistant
+                } else {
+                    agent_types::QuotedTextSourceRole::User
+                },
+                source_label: "user".to_owned(),
+                source_created_at_ms: None,
+                source_available: true,
+            }));
+    }
     let mut replacement_messages: Vec<_> = engine
         .load_conversation(&session)
         .unwrap()
@@ -8568,6 +8715,8 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
         approval_mode: assistant_protocol::ApprovalMode::Ask,
         session_id: session.clone(),
         target_user_message_id: MessageId::new("user-two").expect("message id"),
+        expected_generation: 1,
+        expected_message_count: engine.load_conversation(&session).unwrap().messages.len() as u64,
         conversation: ConversationSnapshot::new(replacement_messages.clone()),
         input: NewStoredInput {
             feedback_answer: None,
@@ -8591,6 +8740,15 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
         goal_effect: None,
         changed_at_ms: 2_000,
     };
+    let stale = ConversationRewrite {
+        expected_message_count: rewrite.expected_message_count - 1,
+        ..rewrite.clone()
+    };
+    assert_eq!(
+        engine.rewrite_from_user(stale).unwrap_err().kind(),
+        StoreErrorKind::Conflict
+    );
+    assert_eq!(fs::read(&source).unwrap(), source_bytes);
     engine.connection.execute_batch("CREATE TABLE rewrite_fault(session_id TEXT REFERENCES sessions(session_id) DEFERRABLE INITIALLY DEFERRED); CREATE TRIGGER reject_rewrite AFTER INSERT ON runs WHEN NEW.run_id='run-replacement' BEGIN INSERT INTO rewrite_fault VALUES('missing-fixture-session'); END;").unwrap();
     let error = engine.rewrite_from_user(rewrite.clone()).unwrap_err();
     assert_eq!(
@@ -8615,20 +8773,57 @@ fn history_rewrite_switches_generation_and_removes_tail_relations_atomically() {
             .query_row("SELECT COUNT(*) FROM inputs", [], |row| row
                 .get::<_, i64>(0))
             .unwrap(),
-        2
+        0
     );
     engine
         .connection
         .execute_batch("DROP TRIGGER reject_rewrite; DROP TABLE rewrite_fault")
         .unwrap();
+    // 孤儿准备件占据下一代。引文必须使用实际发布代次。
+    let orphan = body_path(&engine.session_directory(&session).unwrap(), 2);
+    fs::write(&orphan, &source_bytes).unwrap();
     let result = engine.rewrite_from_user(rewrite).expect("rewrite history");
+    let quotes: Vec<_> = result
+        .user_message
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            UserPart::QuotedText(quote) => Some(quote),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(quotes.len(), 3);
+    assert!(quotes[0].source_available);
+    assert_eq!(quotes[0].source_generation, 3);
+    assert!(!quotes[1].source_available);
+    assert_eq!(quotes[1].exact, "user-two");
+    assert!(quotes[2].source_available);
+    assert_eq!(quotes[2].source_generation, 3);
+    *replacement_messages.last_mut().unwrap() =
+        ConversationMessage::User(result.user_message.clone());
 
     assert_eq!(
         result.input.state,
         assistant_runtime::StoredInputState::Committed
     );
     assert_eq!(result.run.status, RunStatus::Accepted);
-    assert_eq!(engine.session_generation(&session).expect("generation"), 2);
+    assert_eq!(engine.session_generation(&session).expect("generation"), 3);
+    let owner = ConversationOwner::MainSession {
+        session_id: session.clone(),
+    };
+    let published_path = body_path(&engine.session_directory(&session).unwrap(), 3);
+    let indexed = engine.load_conversation_history(owner.clone()).unwrap();
+    let cold = conversation::ConversationIndexCache::default()
+        .read_history(&published_path, &owner, 3)
+        .unwrap();
+    assert_eq!(indexed.facts, cold.facts);
+    assert!(
+        indexed
+            .facts
+            .runs
+            .iter()
+            .any(|run| run.run_id == result.run.run_id)
+    );
     assert_eq!(
         engine.load_conversation(&session).expect("conversation"),
         ConversationSnapshot::new(replacement_messages.clone())
@@ -10779,8 +10974,10 @@ fn clear_switch_transaction_failure_keeps_old_history_and_removes_new_file() {
     assert!(!body_path(&engine.session_directory(&session_id).unwrap(), 2).exists());
     assert!(
         engine
-            .load_inputs()
+            .load_session_state(&session_id)
             .expect("old input remains")
+            .state
+            .inputs
             .iter()
             .any(|input| input.session_id == session_id)
     );
@@ -11205,6 +11402,8 @@ fn session_summary_refresh_reads_one_large_prefix_without_loading_bodies() {
     );
     fs::write(&body, b"invalid historical body\n").unwrap();
     let query = |offset, limit| assistant_runtime::SessionSummaryQuery {
+        group: None,
+        pinned_only: false,
         filter: assistant_protocol::SessionListFilter::Active,
         session_id: None,
         role: None,
@@ -11267,6 +11466,8 @@ fn lazy_startup_and_summary_pages_ignore_unrelated_corrupt_details() {
     for offset in [0, 7, 14, 21] {
         let page = reopened
             .query_session_summaries(assistant_runtime::SessionSummaryQuery {
+                group: None,
+                pinned_only: false,
                 filter: assistant_protocol::SessionListFilter::All,
                 session_id: None,
                 role: None,
@@ -11414,8 +11615,8 @@ fn native_compaction_appends_in_place_and_recovers_ready_state_without_duplicate
                 session_id: session_id("s-native-state"),
             },
             generation: committed.result_generation,
-            end: None,
-            limit: 10,
+            end: assistant_runtime::ConversationWindowEnd::Latest,
+            turn_limit: 10,
         })
         .unwrap();
     assert_eq!(
@@ -11534,24 +11735,27 @@ impl StorageEngine {
         if accepted.is_duplicate() {
             return Ok(accepted);
         }
-        self.claim_input(assistant_runtime::StoredRun {
-            shell: None,
-            run_id,
-            session_id: input.session_id.clone(),
-            input_id: input.input_id.clone(),
-            attempt: 1,
-            status: RunStatus::Accepted,
-            agent_variant: input.agent_variant,
-            approval_mode,
-            reasoning_effort: None,
-            cancel_requested: false,
-            error: None,
-            message_ids: Vec::new(),
-            message_steps: Default::default(),
-            created_at_ms: input.accepted_at_ms,
-            started_at_ms: None,
-            finished_at_ms: None,
-        })?;
+        self.claim_input(
+            assistant_runtime::StoredRun {
+                shell: None,
+                run_id,
+                session_id: input.session_id.clone(),
+                input_id: input.input_id.clone(),
+                attempt: 1,
+                status: RunStatus::Accepted,
+                agent_variant: input.agent_variant,
+                approval_mode,
+                reasoning_effort: None,
+                cancel_requested: false,
+                error: None,
+                message_ids: Vec::new(),
+                message_steps: Default::default(),
+                created_at_ms: input.accepted_at_ms,
+                started_at_ms: None,
+                finished_at_ms: None,
+            },
+            None,
+        )?;
         let input = self
             .load_input_for_id(&input.session_id, &input.input_id)?
             .expect("accepted fixture input");
@@ -11570,24 +11774,27 @@ fn fixture_run_id(input: &NewStoredInput) -> RunId {
 
 fn claim_fixture(engine: &mut StorageEngine, input: &NewStoredInput) {
     engine
-        .claim_input(assistant_runtime::StoredRun {
-            shell: None,
-            run_id: fixture_run_id(input),
-            session_id: input.session_id.clone(),
-            input_id: input.input_id.clone(),
-            attempt: 1,
-            status: RunStatus::Accepted,
-            agent_variant: input.agent_variant,
-            approval_mode: assistant_protocol::ApprovalMode::Ask,
-            reasoning_effort: None,
-            cancel_requested: false,
-            error: None,
-            message_ids: Vec::new(),
-            message_steps: Default::default(),
-            created_at_ms: input.accepted_at_ms,
-            started_at_ms: None,
-            finished_at_ms: None,
-        })
+        .claim_input(
+            assistant_runtime::StoredRun {
+                shell: None,
+                run_id: fixture_run_id(input),
+                session_id: input.session_id.clone(),
+                input_id: input.input_id.clone(),
+                attempt: 1,
+                status: RunStatus::Accepted,
+                agent_variant: input.agent_variant,
+                approval_mode: assistant_protocol::ApprovalMode::Ask,
+                reasoning_effort: None,
+                cancel_requested: false,
+                error: None,
+                message_ids: Vec::new(),
+                message_steps: Default::default(),
+                created_at_ms: input.accepted_at_ms,
+                started_at_ms: None,
+                finished_at_ms: None,
+            },
+            None,
+        )
         .unwrap();
 }
 
@@ -11603,23 +11810,30 @@ fn claim_stored_fixture(
     run_id: RunId,
 ) {
     engine
-        .claim_input(assistant_runtime::StoredRun {
-            shell: None,
-            run_id,
-            session_id: input.session_id.clone(),
-            input_id: input.input_id.clone(),
-            attempt: 1,
-            status: RunStatus::Accepted,
-            agent_variant: input.agent_variant,
-            approval_mode: assistant_protocol::ApprovalMode::Ask,
-            reasoning_effort: None,
-            cancel_requested: false,
-            error: None,
-            message_ids: Vec::new(),
-            message_steps: Default::default(),
-            created_at_ms: input.accepted_at_ms,
-            started_at_ms: None,
-            finished_at_ms: None,
-        })
+        .claim_input(stored_claim_fixture(input, run_id), None)
         .unwrap();
+}
+
+fn stored_claim_fixture(
+    input: &assistant_runtime::StoredInput,
+    run_id: RunId,
+) -> assistant_runtime::StoredRun {
+    assistant_runtime::StoredRun {
+        shell: None,
+        run_id,
+        session_id: input.session_id.clone(),
+        input_id: input.input_id.clone(),
+        attempt: 1,
+        status: RunStatus::Accepted,
+        agent_variant: input.agent_variant,
+        approval_mode: assistant_protocol::ApprovalMode::Ask,
+        reasoning_effort: None,
+        cancel_requested: false,
+        error: None,
+        message_ids: Vec::new(),
+        message_steps: Default::default(),
+        created_at_ms: input.accepted_at_ms,
+        started_at_ms: None,
+        finished_at_ms: None,
+    }
 }

@@ -98,6 +98,7 @@ async fn fork_child_history_is_owner_scoped_readonly_and_survives_source_deletio
     set_auto_approval(&runtime, &source).await;
     let submitted = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             session_id: source.clone(),
             message: "delegate once".to_owned(),
             mode: assistant_protocol::SubmitInputMode::Normal,
@@ -584,6 +585,7 @@ async fn isolated_child_result(interrupt_child: bool) {
     let mut events = runtime.subscribe_events();
     let started = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -693,8 +695,8 @@ async fn isolated_child_result(interrupt_child: bool) {
                 child_task_id: child.child_task_id.clone(),
             },
             generation: child.body_generation,
-            end: None,
-            limit: 30,
+            end: crate::ConversationWindowEnd::Latest,
+            turn_limit: 30,
         })
         .await
         .unwrap();
@@ -1082,6 +1084,7 @@ async fn child_compaction_projection_case(case: &str) {
     }
     let started = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -1286,6 +1289,7 @@ async fn child_model_failure_is_persisted_before_the_parent_receives_an_error_re
     set_auto_approval(&runtime, &session.session.session_id).await;
     let started = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -1366,6 +1370,7 @@ async fn plan_and_build_parent_agents_expose_the_same_delegate_definition() {
     ] {
         let started = runtime
             .submit_started_input(SubmitInputRequest {
+                delivery: Default::default(),
                 mode: assistant_protocol::SubmitInputMode::Normal,
                 variant,
                 session_id: session_id.clone(),
@@ -1429,6 +1434,7 @@ async fn sibling_delegations_overlap_but_respect_the_frozen_concurrency_limit() 
     set_auto_approval(&runtime, &session.session.session_id).await;
     let started = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -1480,6 +1486,7 @@ async fn task_limit_rejects_excess_calls_without_creating_extra_child_records() 
     set_auto_approval(&runtime, &session.session.session_id).await;
     let started = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -1542,6 +1549,7 @@ async fn child_timeout_is_failed_and_parent_can_still_summarize() {
     set_auto_approval(&runtime, &session.session.session_id).await;
     let started = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -1595,6 +1603,7 @@ async fn child_timeout_disabled_allows_task_to_finish() {
     set_auto_approval(&runtime, &session.session.session_id).await;
     let started = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -1642,6 +1651,7 @@ async fn cancelling_one_child_does_not_cancel_its_sibling_or_parent() {
     set_auto_approval(&runtime, &session.session.session_id).await;
     let started = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -1731,6 +1741,7 @@ async fn cancelling_parent_cascades_to_children_and_skips_parent_summary() {
     set_auto_approval(&runtime, &session.session.session_id).await;
     let started = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -1815,6 +1826,7 @@ async fn child_tool_approval_carries_child_identity_and_resolves_independently()
         .expect("session");
     let started = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -1932,6 +1944,7 @@ async fn child_tool_reads_the_parent_sessions_new_approval_mode() {
         .session_id;
     let run = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session_id.clone(),
@@ -1995,6 +2008,7 @@ async fn denying_delegate_approval_does_not_create_a_child_task() {
         .expect("session");
     let started = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -2068,6 +2082,7 @@ async fn child_waiting_for_approval_does_not_block_its_sibling() {
         .expect("session");
     let started = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -2239,6 +2254,7 @@ async fn cancelling_child_removes_its_pending_approval_without_running_the_tool(
         .expect("session");
     let started = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),

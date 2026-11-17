@@ -1,3 +1,4 @@
+import { sidebarFixture } from "../support/sidebarFixture";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ApprovalSnapshot, ApplicationSnapshot, SessionSummary } from "@ez-assistant/protocol";
@@ -123,8 +124,8 @@ describe("AppShell session header", () => {
   it("uses only the switch label to identify a proxied session", () => {
     const store = new RootStore();
     const snapshot = applicationSnapshot();
-    snapshot.active_sessions[0] = {
-      ...snapshot.active_sessions[0],
+    snapshot.session_groups[0].sessions[0] = {
+      ...snapshot.session_groups[0].sessions[0],
       proxy: {
         controller_session_id: "controller-session",
         changed_at_ms: 2,
@@ -145,8 +146,8 @@ describe("AppShell session header", () => {
   it("does not duplicate output hosting state in the session header", () => {
     const store = new RootStore();
     const snapshot = applicationSnapshot();
-    snapshot.active_sessions[0] = {
-      ...snapshot.active_sessions[0]!,
+    snapshot.session_groups[0].sessions[0] = {
+      ...snapshot.session_groups[0].sessions[0]!,
       role: "controller",
       pc_output_hosting: { device_id: "device-1", device_name: "客厅终端" },
     };
@@ -333,7 +334,7 @@ describe("AppShell session header", () => {
   it("previews the exact runtime impact before permanently deleting a session", async () => {
     const store = storeWithSessions();
     const prepared = {
-      session: applicationSnapshot().active_sessions[0]!,
+      session: applicationSnapshot().session_groups[0].sessions[0]!,
       impact: {
         message_count: 12,
         run_count: 3,
@@ -419,8 +420,11 @@ function storeWithSessions(): RootStore {
 function applicationSnapshot(): ApplicationSnapshot {
   return {
     runtime_lifecycle: "running",
-    active_sessions_next_offset: null,
-    archived_sessions_next_offset: null,
+    ...sidebarFixture({ active_next: null, archived_next: null, active: [
+      sessionSummary("session-1", "First session", 2),
+      sessionSummary("session-2", "Second session", 1),
+    ], archived: [] }),
+
     configuration: {
       config_path: null,
       revision: "fixture-revision",
@@ -430,15 +434,12 @@ function applicationSnapshot(): ApplicationSnapshot {
     },
     providers: [], model_settings: { default_model: null, vision_model: null },
     workspaces: [],
-    active_sessions: [
-      sessionSummary("session-1", "First session", 2),
-      sessionSummary("session-2", "Second session", 1),
-    ],
-    archived_sessions: [],
+
+
     controller_availability: { status: "unavailable" },
     additional_controller_count: 0,
     capabilities: {
-      conversation_paging: true, mcp_tools: true, mcp_management: true, session_commands: true,
+      conversation_paging: true, mcp_tools: true, mcp_management: true, session_commands: true, user_message_edit: false,
       tool_detail: true,
       queue_control: true,
       approval_queue: true,

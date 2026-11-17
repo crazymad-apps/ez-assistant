@@ -18,6 +18,7 @@ pub enum RuntimeErrorCode {
     SessionArchived,
     /// Session 尚未达到归档、模型切换或历史重新输入要求的完全空闲状态。
     SessionNotIdle,
+    UserMessageNotEditable,
     /// Session 已有自动或手动上下文压缩正在执行。
     SessionCompactionInProgress,
     /// 指定的手动压缩已经结束或不存在。
@@ -199,6 +200,10 @@ mod tests {
             (RuntimeErrorCode::SessionBusy, "session_busy"),
             (RuntimeErrorCode::SessionArchived, "session_archived"),
             (RuntimeErrorCode::SessionNotIdle, "session_not_idle"),
+            (
+                RuntimeErrorCode::UserMessageNotEditable,
+                "user_message_not_editable",
+            ),
             (
                 RuntimeErrorCode::SessionCompactionInProgress,
                 "session_compaction_in_progress",

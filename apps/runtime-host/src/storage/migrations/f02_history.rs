@@ -44,7 +44,7 @@ pub(super) fn committed(connection: &Connection) -> Result<bool> {
     Ok(connection.query_row("SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version='0.32.1' AND migration_key=?1)", [KEY], |row| row.get(0))?)
 }
 
-struct PreparedOwner {
+pub(super) struct PreparedOwner {
     owner: ConversationOwner,
     source_generation: u64,
     target_generation: u64,
@@ -53,6 +53,7 @@ struct PreparedOwner {
     source_file: Entry,
     target_path: PathBuf,
     target_file: Entry,
+    update_catalogue: bool,
 }
 
 /// 仅含复核证据和未发布文件的切换清单；不保留整库或所有会话正文。
@@ -265,7 +266,12 @@ fn prepare_owner(
     if !matches!(source_file, Entry::File { .. }) {
         return Err(MigrationError::InvalidPath);
     }
-    let (keys, source_history) = conversation::scan_document(&source_path, &owner, generation)?;
+    let (keys, source_history) = conversation::scan_version(
+        &source_path,
+        &owner,
+        generation,
+        conversation::PREVIOUS_HISTORY_VERSION,
+    )?;
     if u64::try_from(keys.messages.len()).ok() != Some(message_count) {
         return Err(MigrationError::Integrity);
     }
@@ -282,6 +288,9 @@ fn prepare_owner(
         .retain(|origin| !known_origins.contains(&origin.message_id));
     history.extend(legacy);
     history.normalize();
+    for input in &mut history.inputs {
+        input.idempotency_key = None;
+    }
     let session_id = match &owner {
         ConversationOwner::MainSession { session_id }
         | ConversationOwner::ChildTask { session_id, .. } => session_id,
@@ -292,15 +301,35 @@ fn prepare_owner(
             child.body_generation = *target;
         }
     }
-    let target = owner_path(home, &owner, target_generation)?;
-    conversation::write_upgraded_generation(
-        &source_path,
-        &target,
-        &owner,
-        generation,
+    prepare_generation(
+        home,
+        owner,
+        (generation, source_file),
         target_generation,
         message_count,
         &history,
+        conversation::PREVIOUS_HISTORY_VERSION,
+    )
+}
+
+pub(super) fn prepare_generation(
+    home: &Path,
+    owner: ConversationOwner,
+    (generation, source_file): (u64, Entry),
+    target_generation: u64,
+    message_count: u64,
+    history: &assistant_runtime::StoredHistoryFacts,
+    version: u32,
+) -> Result<PreparedOwner> {
+    let source_path = owner_path(home, &owner, generation)?;
+    let target = owner_path(home, &owner, target_generation)?;
+    conversation::write_upgraded_generation(
+        (&source_path, generation),
+        (&target, target_generation),
+        &owner,
+        version,
+        message_count,
+        history,
     )?;
     crate::storage::sync_directory(target.parent().ok_or(MigrationError::InvalidPath)?)?;
     if files::inspect(&source_path).map_err(file_error)? != source_file {
@@ -315,10 +344,70 @@ fn prepare_owner(
         source_file,
         target_file: files::inspect(&target).map_err(file_error)?,
         target_path: target,
+        update_catalogue: true,
     })
 }
 
 impl Prepared {
+    pub(super) fn for_input_upgrade(
+        source: backup::DatabaseEvidence,
+        owners: Vec<PreparedOwner>,
+    ) -> Self {
+        Self {
+            source,
+            owners,
+            materialization_inputs: Vec::new(),
+        }
+    }
+
+    pub(super) fn remove_upgraded_sources(&self) {
+        for owner in &self.owners {
+            if matches!(files::inspect(&owner.source_path), Ok(file) if file == owner.source_file) {
+                if let Err(error) = std::fs::remove_file(&owner.source_path) {
+                    eprintln!(
+                        "event=history_upgrade_cleanup_failed kind={:?}",
+                        error.kind()
+                    );
+                } else if let Some(parent) = owner.source_path.parent() {
+                    let _ = crate::storage::sync_directory(parent);
+                }
+            }
+        }
+    }
+
+    /// 重开数据库后核对目录指针及已在发布前完整回读的文件。
+    pub(super) fn verify_published(&self, connection: &Connection) -> Result<()> {
+        for owner in &self.owners {
+            let target =
+                i64::try_from(owner.target_generation).map_err(|_| MigrationError::Integrity)?;
+            let count =
+                i64::try_from(owner.message_count).map_err(|_| MigrationError::Integrity)?;
+            let published: bool = match &owner.owner {
+                ConversationOwner::MainSession { session_id } => connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sessions WHERE session_id=?1 AND body_generation=?2 AND message_count=?3)",
+                    params![session_id.as_str(), target, count], |row| row.get(0),
+                )?,
+                ConversationOwner::ChildTask { session_id, child_task_id } if owner.update_catalogue => connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM child_tasks WHERE session_id=?1 AND child_task_id=?2 AND body_generation=?3 AND message_count=?4)",
+                    params![session_id.as_str(), child_task_id.as_str(), target, count], |row| row.get(0),
+                )?,
+                ConversationOwner::ChildTask { .. } => true,
+            };
+            if !published
+                || files::inspect(&owner.target_path).map_err(file_error)? != owner.target_file
+                || !conversation::has_history_header(
+                    &owner.target_path,
+                    &owner.owner,
+                    owner.target_generation,
+                    conversation::HISTORY_VERSION,
+                )?
+            {
+                return Err(MigrationError::Integrity);
+            }
+        }
+        Ok(())
+    }
+
     /// schema 增加最小身份列后，在同一切换事务绑定已核实的原接纳；不保存历史结果。
     pub(super) fn bind_materialization_inputs(&self, connection: &Connection) -> Result<()> {
         for (session, input) in &self.materialization_inputs {
@@ -359,10 +448,11 @@ impl Prepared {
                     "UPDATE sessions SET body_generation=?1 WHERE session_id=?2 AND body_generation=?3 AND message_count=?4",
                     params![target_generation, session_id.as_str(), source_generation, message_count],
                 )?,
-                ConversationOwner::ChildTask { session_id, child_task_id } => connection.execute(
+                ConversationOwner::ChildTask { session_id, child_task_id } if owner.update_catalogue => connection.execute(
                     "UPDATE child_tasks SET body_generation=?1 WHERE child_task_id=?2 AND session_id=?3 AND body_generation=?4 AND message_count=?5",
                     params![target_generation, child_task_id.as_str(), session_id.as_str(), source_generation, message_count],
                 )?,
+                ConversationOwner::ChildTask { .. } => 1,
             };
             if changed != 1 {
                 return Err(MigrationError::DatabaseChanged);
@@ -370,9 +460,44 @@ impl Prepared {
         }
         Ok(())
     }
+
+    pub(super) fn rekey_recall_generations(&self, connection: &Connection) -> Result<()> {
+        for owner in &self.owners {
+            let (session, kind, owner_id) = match &owner.owner {
+                ConversationOwner::MainSession { session_id } => {
+                    (session_id, "session", session_id.as_str())
+                }
+                ConversationOwner::ChildTask {
+                    session_id,
+                    child_task_id,
+                } => (session_id, "child_task", child_task_id.as_str()),
+            };
+            let source =
+                i64::try_from(owner.source_generation).map_err(|_| MigrationError::Integrity)?;
+            let target =
+                i64::try_from(owner.target_generation).map_err(|_| MigrationError::Integrity)?;
+            connection.execute(
+                "UPDATE conversation_recall_heads SET body_generation=?1, state='dirty'
+                 WHERE session_id=?2 AND owner_kind=?3 AND owner_id=?4 AND body_generation=?5",
+                params![target, session.as_str(), kind, owner_id, source],
+            )?;
+        }
+        Ok(())
+    }
 }
 
-fn owner_path(home: &Path, owner: &ConversationOwner, generation: u64) -> Result<PathBuf> {
+impl PreparedOwner {
+    pub(super) fn with_child_control(mut self, has_control: bool) -> Self {
+        self.update_catalogue = has_control;
+        self
+    }
+}
+
+pub(super) fn owner_path(
+    home: &Path,
+    owner: &ConversationOwner,
+    generation: u64,
+) -> Result<PathBuf> {
     let session = match owner {
         ConversationOwner::MainSession { session_id }
         | ConversationOwner::ChildTask { session_id, .. } => session_id,
@@ -388,7 +513,7 @@ fn owner_path(home: &Path, owner: &ConversationOwner, generation: u64) -> Result
     })
 }
 
-fn next_generation(home: &Path, owner: &ConversationOwner, source: u64) -> Result<u64> {
+pub(super) fn next_generation(home: &Path, owner: &ConversationOwner, source: u64) -> Result<u64> {
     let mut generation = source.checked_add(1).ok_or(MigrationError::Integrity)?;
     while files::exists(&owner_path(home, owner, generation)?).map_err(file_error)? {
         generation = generation.checked_add(1).ok_or(MigrationError::Integrity)?;
@@ -396,7 +521,7 @@ fn next_generation(home: &Path, owner: &ConversationOwner, source: u64) -> Resul
     Ok(generation)
 }
 
-fn check_managed_ancestors(home: &Path, file: &Path) -> Result<()> {
+pub(super) fn check_managed_ancestors(home: &Path, file: &Path) -> Result<()> {
     let relative = file
         .strip_prefix(home)
         .map_err(|_| MigrationError::InvalidPath)?;
@@ -414,7 +539,7 @@ fn check_managed_ancestors(home: &Path, file: &Path) -> Result<()> {
     Ok(())
 }
 
-fn file_error(source: crate::host_layout::Error) -> MigrationError {
+pub(super) fn file_error(source: crate::host_layout::Error) -> MigrationError {
     MigrationError::Store(crate::storage::internal_error(
         "history upgrade file verification failed",
         source,

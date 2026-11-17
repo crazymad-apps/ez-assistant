@@ -34,6 +34,7 @@ fn refresh_request(session_id: &SessionId, key: &str) -> SubmitSessionCommandReq
 
 fn input_request(session_id: &SessionId, text: &str) -> SubmitInputRequest {
     SubmitInputRequest {
+        delivery: Default::default(),
         session_id: session_id.clone(),
         message: text.to_owned(),
         variant: AgentVariant::Build,

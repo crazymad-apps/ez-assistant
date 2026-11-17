@@ -1,5 +1,5 @@
 //! 启动前的版本链、备份与逐版本事务。调用者先持有 RuntimeInstanceGuard，业务 worker 尚未开放。
-//! 初始版本与软件版本对齐；不存在旧版本账本时从 v0.25.1 开始执行。
+//! 数据库目标独立于应用版本；不存在旧版本账本时从 v0.25.1 开始执行。
 
 mod admission;
 mod backup;
@@ -28,6 +28,7 @@ mod v0_32_0;
 mod v0_32_1;
 mod v0_32_2;
 mod v0_33_0;
+mod v0_33_1;
 
 #[cfg(test)]
 use std::fs;
@@ -46,6 +47,7 @@ use thiserror::Error;
 use super::{BUSY_TIMEOUT, DATA_DIRECTORY, DATABASE_FILE};
 
 const BASELINE: &str = "0.25.1";
+const DATABASE_SCHEMA_VERSION: &str = "0.33.1";
 const LEDGER: &str = "CREATE TABLE IF NOT EXISTS schema_migrations (
     version TEXT PRIMARY KEY NOT NULL,
     applied_at_ms INTEGER NOT NULL CHECK(typeof(applied_at_ms) = 'integer' AND applied_at_ms >= 0)
@@ -80,6 +82,8 @@ pub(crate) enum MigrationError {
     InvalidPath,
     #[error("database integrity verification failed")]
     Integrity,
+    #[error("history migration source is inconsistent: {0}")]
+    HistorySource(&'static str),
     #[error("database migration I/O failed")]
     Io(#[from] std::io::Error),
     #[error("database migration SQL failed")]
@@ -151,20 +155,18 @@ fn product_manifest() -> Vec<Migration> {
     entries.push(v0_33_0::entry());
     entries.push(v0_33_0::model_sources_entry());
     entries.push(v0_33_0::message_cards_entry());
+    entries.push(v0_33_1::entry());
+    entries.push(v0_33_1::sidebar_order::entry());
     entries
 }
 
-/// 唯一生产 manifest；软件发版必须同时声明该版本入口，包括没有 DDL 的版本。
+/// 唯一生产 manifest。仅数据库事实变化时推进目标版本；应用协议升级不写入账本。
 pub(super) fn align(
     home: &Path,
     progress: impl FnMut(super::DatabaseStartupProgress),
 ) -> Result<()> {
-    let report = migrate_with_progress(
-        home,
-        env!("CARGO_PKG_VERSION"),
-        &product_manifest(),
-        progress,
-    )?;
+    let report =
+        migrate_with_progress(home, DATABASE_SCHEMA_VERSION, &product_manifest(), progress)?;
     // 只有整轮迁移及目标校验成功才释放本轮恢复副本；失败经上方 ? 返回并保留现场。
     // 清理不扫描旧备份，也不能将清理失败误报为已提交数据库的迁移失败。
     if let Some(directory) = report.backup
@@ -199,7 +201,7 @@ pub(crate) fn startup_error(
 }
 
 /// 版本与 manifest 均由 Host 编译产物指定，不能接受客户端提供的目标或 SQL。
-/// 测试显式传入目标；正式调用点只使用编译软件版本。
+/// 测试显式传入目标；正式调用点使用编译期数据库目标。
 /// 每次打开只处理未完成前缀，失败保留前序已提交版本与独立备份，不自动还原或继续写入。
 #[cfg(test)]
 fn migrate(home: &Path, target: &str, manifest: &[Migration]) -> Result<MigrationReport> {
@@ -326,21 +328,27 @@ fn migrate_layout_with_progress(
             total: (manifest.len() - completed) as u64,
         });
         progress(current.clone());
-        let prepared = if migration.key == f02_history::KEY {
-            let (returned, prepared) =
-                f02_history::prepare_with_progress(connection, home, |done, total| {
-                    current.stage = HistoryMigration;
-                    current.progress = Some(assistant_protocol::RuntimeHostStartupProgress {
-                        completed: done,
-                        total,
-                    });
-                    progress(current.clone());
-                })
-                .map_err(|source| MigrationError::VersionFailed {
-                    version: migration.version.into(),
-                    backup: report.backup.clone(),
-                    source: Box::new(source),
-                })?;
+        let prepared = if migration.key == f02_history::KEY
+            || (migration.version == "0.33.1" && migration.key == v0_33_1::KEY)
+        {
+            let history_progress = |done, total| {
+                current.stage = HistoryMigration;
+                current.progress = Some(assistant_protocol::RuntimeHostStartupProgress {
+                    completed: done,
+                    total,
+                });
+                progress(current.clone());
+            };
+            let (returned, prepared) = if migration.key == f02_history::KEY {
+                f02_history::prepare_with_progress(connection, home, history_progress)
+            } else {
+                v0_33_1::prepare_with_progress(connection, home, history_progress)
+            }
+            .map_err(|source| MigrationError::VersionFailed {
+                version: migration.version.into(),
+                backup: report.backup.clone(),
+                source: Box::new(source),
+            })?;
             connection = returned;
             Some(prepared)
         } else {
@@ -366,6 +374,32 @@ fn migrate_layout_with_progress(
             backup: report.backup.clone(),
             source: Box::new(source),
         })?;
+        if (migration.version == "0.33.1" && migration.key == v0_33_1::KEY)
+            && let Some(prepared) = &prepared
+        {
+            let verify = || -> Result<()> {
+                let mut reader = Connection::open_with_flags(
+                    &sqlite_path,
+                    OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+                )?;
+                let snapshot = reader.transaction()?;
+                let minimum = compatibility::read(&snapshot)?;
+                if inspect_state(&snapshot, &versions, manifest, minimum.as_ref(), false)?
+                    != index + 1
+                {
+                    return Err(MigrationError::InvalidLedger);
+                }
+                prepared.verify_published(&snapshot)?;
+                snapshot.commit()?;
+                Ok(())
+            };
+            verify().map_err(|source| MigrationError::VersionFailed {
+                version: migration.version.into(),
+                backup: report.backup.clone(),
+                source: Box::new(source),
+            })?;
+            prepared.remove_upgraded_sources();
+        }
         report.applied.push(migration.version.into());
         current.progress = Some(assistant_protocol::RuntimeHostStartupProgress {
             completed: (index - completed + 1) as u64,
@@ -548,6 +582,9 @@ fn apply_version(
     relocation: Option<&crate::host_layout::paths::Relocation>,
     history: Option<&f02_history::Prepared>,
 ) -> Result<()> {
+    if (migration.version == "0.33.1" && migration.key == v0_33_1::KEY) && history.is_none() {
+        return Err(MigrationError::Integrity);
+    }
     if migration.rebuilds_referenced_tables {
         connection.pragma_update(None, "foreign_keys", false)?;
         let enabled: bool =
@@ -576,6 +613,9 @@ fn apply_version(
         let outcome = (|| {
             if let Some(history) = history {
                 history.switch(&transaction)?;
+                if migration.version == "0.33.1" && migration.key == v0_33_1::KEY {
+                    history.rekey_recall_generations(&transaction)?;
+                }
             }
             (migration.apply)(&transaction)?;
             if let Some(history) = history {

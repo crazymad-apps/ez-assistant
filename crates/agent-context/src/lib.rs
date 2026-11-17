@@ -35,7 +35,9 @@ pub fn project_effective_context(
     snapshot: &agent_types::ConversationSnapshot,
     policy: &agent_model::ContextPolicy,
 ) -> Result<agent_types::ConversationSnapshot, agent_model::ModelError> {
-    match policy {
+    use agent_types::{AssistantPart, ConversationMessage};
+
+    let mut projected = match policy {
         agent_model::ContextPolicy::LocalSummary => {
             if snapshot.messages.iter().any(|message| matches!(message,
                 agent_types::ConversationMessage::Assistant(assistant) if assistant.parts.iter().any(|part| matches!(part,
@@ -47,12 +49,26 @@ pub fn project_effective_context(
             snapshot.validate_tool_exchange_pairs().map_err(|_| {
                 agent_model::ModelError::Protocol("invalid effective context".into())
             })?;
-            Ok(snapshot.clone())
+            snapshot.clone()
         }
         agent_model::ContextPolicy::ServerCompaction { .. } => {
             snapshot.project_provider_context().map_err(|_| {
                 agent_model::ModelError::Protocol("invalid native effective context".into())
-            })
+            })?
         }
-    }
+    };
+    // 历史保留完整可见输出；两个协议的发送与计量共用此快照，只回传终止前的正文。
+    projected.messages.retain_mut(|message| {
+        if let ConversationMessage::Assistant(assistant) = message
+            && assistant.finish_reason.is_partial()
+        {
+            assistant.parts.retain(
+                |part| matches!(part, AssistantPart::Text(text) if !text.text.trim().is_empty()),
+            );
+            !assistant.parts.is_empty()
+        } else {
+            true
+        }
+    });
+    Ok(projected)
 }

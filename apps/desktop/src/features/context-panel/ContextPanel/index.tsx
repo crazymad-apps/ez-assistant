@@ -56,9 +56,8 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
   const store = useRootStore();
   const application = store.projection.application;
   const session_id = store.navigation.selected_session_id;
-  const session = application?.active_sessions.find((item) => item.session_id === session_id)
-    ?? application?.archived_sessions.find((item) => item.session_id === session_id);
-  const workspace = application?.workspaces.find((item) => item.workspace_id === session?.workspace_id);
+  const session = store.projection.sessionSummary(session_id);
+  const workspace = store.projection.workspaceSummary(session?.workspace_id);
   const session_view = session_id ? store.projection.session_views.get(session_id) : undefined;
   // 窗口占用由 Runtime 根据当前有效上下文计算，不能用旧 step 或累计用量取最大值。
   const context_usage = session_view?.usage.context ?? null;
@@ -68,9 +67,7 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
   const session_workspace = session_view?.workspace;
   const draft_key = store.navigation.selected_draft_key;
   const new_session_draft = store.new_session_drafts.get(draft_key);
-  const draft_workspace = application?.workspaces.find(
-    (item) => item.workspace_id === new_session_draft?.workspace_id,
-  );
+  const draft_workspace = store.projection.workspaceSummary(new_session_draft?.workspace_id);
   const attachments = session_view?.attachments ?? [];
   const [preview_attachment, setPreviewAttachment] = useState<AttachmentSummary | null>(null);
   const [attachment_menu, setAttachmentMenu] = useState<Readonly<{
@@ -80,7 +77,7 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
   const [system_context, setSystemContext] = useState<SystemContextSnapshot | null>(null);
   const [system_context_error, setSystemContextError] = useState<string | null>(null);
   const [system_context_loading, setSystemContextLoading] = useState(false);
-  const [locating_run_id, setLocatingRunId] = useState<string | null>(null);
+  const [locating_run, setLocatingRun] = useState<{ run_id: string } | null>(null);
   const [section_state, setSectionState] = useState<Record<string, Partial<Record<ContextSectionKey, boolean>>>>({});
   const [artifact_refresh, setArtifactRefresh] = useState(0);
   const [all_workspace_directories_visible, setAllWorkspaceDirectoriesVisible] = useState(false);
@@ -148,13 +145,15 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
   }, [session_id]);
 
   const locateRun = async (run_id: string) => {
-    if (!session_id || locating_run_id) {
-      return;
-    }
-    setLocatingRunId(run_id);
+    if (!session_id || locating_run?.run_id === run_id) return;
+    const request = { run_id };
+    setLocatingRun(request);
     store.navigation.closeChildTask();
-    await store.locateConversationRun(session_id, run_id);
-    setLocatingRunId(null);
+    try {
+      await store.locateConversationRun(session_id, run_id);
+    } finally {
+      setLocatingRun(current => current === request ? null : current);
+    }
   };
 
   const openSystemContext = async () => {
@@ -452,7 +451,7 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
             <div className={styles.run_rows}>
               {[...session_view.runs].reverse().map((run) => (
                 <button
-                  disabled={locating_run_id !== null}
+                  disabled={locating_run?.run_id === run.run_id}
                   key={run.run_id}
                   onClick={() => void locateRun(run.run_id)}
                   type="button"
@@ -462,7 +461,7 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
                     <strong>运行 #{run.attempt} · {formatVariant(run.variant)}</strong>
                     <small>{formatRunTime(run.finished_at_ms ?? run.created_at_ms)} · {run.tools?.length ?? 0} 个工具</small>
                   </span>
-                  <em>{locating_run_id === run.run_id ? "定位中…" : runStatusLabel(run.status)}</em>
+                  <em>{locating_run?.run_id === run.run_id ? "定位中…" : runStatusLabel(run.status)}</em>
                 </button>
               ))}
             </div>

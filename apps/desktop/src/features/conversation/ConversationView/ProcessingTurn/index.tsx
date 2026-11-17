@@ -9,6 +9,7 @@ import type {
 import { Collapse } from '../../../../components/Collapse';
 import { Icon } from '../../../../components/Icon';
 import type { LiveRunProjection, LiveToolSnapshot } from '../../../../stores/LiveExecutionStore';
+import { MessageActions } from '../MessageActions';
 import { AssistantSegmentView, LiveSegmentView } from '../ToolSegments';
 import { ReasoningBox } from '../ReasoningBox';
 import { ProcessToolGroup } from '../ProcessToolGroup';
@@ -82,7 +83,6 @@ export function ProcessingTurn(
   else if (!inherited && props.awaiting_feedback) label = '等待回复';
   else if (run) label = liveRunStatusLabel(run);
   else if (status) label = runStatusLabel(status);
-  if (inherited) label = `继承 · ${label}`;
   let error: string | null = null;
   if (!inherited && status === 'failed')
     error = runFailureMessage(run?.model_failure_kind ?? null, run?.error_code ?? null, run?.error_message ?? null);
@@ -185,22 +185,12 @@ export function ProcessingTurn(
         {props.cards}
       </div>
       {!active && last && (
-        <div className={shared.message_actions}>
-          <button
-            aria-label="复制助手正文"
-            onClick={() =>
-              void navigator.clipboard?.writeText(
-                props.messages
-                  .flatMap((message) => message.segments)
-                  .filter((segment) => segment.type === 'text')
-                  .map((segment) => segment.text)
-                  .join('\n\n'),
-              )
-            }
-            type="button"
-          >
-            <Icon name="copy" size={15} />
-          </button>
+        <MessageActions
+          copy_label="复制助手正文"
+          text={props.messages.flatMap(message => message.segments)
+            .filter(segment => segment.type === 'text').map(segment => segment.text).join('\n\n')}
+          time={partial ? undefined : formatDateTime(clock.finished_at_ms)}
+        >
           {props.show_fork && (
             <button
               aria-label="从此消息分叉"
@@ -211,8 +201,7 @@ export function ProcessingTurn(
               <Icon name="fork" size={15} />
             </button>
           )}
-          {!partial && <time>{formatDateTime(clock.finished_at_ms)}</time>}
-        </div>
+        </MessageActions>
       )}
     </article>
   );

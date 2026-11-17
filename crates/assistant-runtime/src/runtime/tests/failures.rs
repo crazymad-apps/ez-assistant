@@ -35,6 +35,306 @@ impl ModelService for GatedCompletionModel {
 }
 
 #[tokio::test]
+async fn failed_stream_output_is_committed_once_and_only_text_enters_the_next_request() {
+    let mut partial = assistant_text("failed-partial", "partial answer");
+    partial.parts.insert(
+        0,
+        AssistantPart::Reasoning(agent_types::ReasoningPart {
+            id: agent_types::PartId::new("partial-reasoning").unwrap(),
+            source: agent_types::ReasoningSource::Summary,
+            text: "partial reasoning".into(),
+        }),
+    );
+    let mut events = message_events(&partial);
+    *events.last_mut().unwrap() = ModelEvent::TurnFailed {
+        error: ModelError::Protocol("fixture interruption".into()),
+    };
+    partial.finish_reason = agent_types::FinishReason::Failed;
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(false),
+        8_192,
+        [
+            ModelScript::Events(events),
+            ModelScript::Events(message_events(&assistant_text(
+                "next-answer",
+                "next answer",
+            ))),
+        ],
+    ));
+    let runtime = runtime(model.clone());
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    let mut request = SubmitInputRequest {
+        delivery: Default::default(),
+        session_id: session_id.clone(),
+        message: "first question".into(),
+        mode: assistant_protocol::SubmitInputMode::Normal,
+        variant: assistant_protocol::AgentVariant::Build,
+        attachment_ids: vec![],
+        quotes: vec![],
+        skill_name: None,
+        mcp_server_key: None,
+        idempotency_key: None,
+    };
+    let first = runtime.submit_started_input(request.clone()).await.unwrap();
+    let run_id = first.run.run_id;
+    assert_eq!(
+        wait_for_terminal(&runtime, &session_id, &run_id)
+            .await
+            .status,
+        assistant_protocol::RunStatus::Failed
+    );
+    let history = runtime.conversation_snapshot(&session_id).await.unwrap();
+    assert_eq!(
+        &history.messages[1..],
+        &[ConversationMessage::Assistant(partial.clone())]
+    );
+    let view = runtime
+        .get_session_view(GetSessionViewRequest {
+            session_id: session_id.clone(),
+        })
+        .await
+        .unwrap()
+        .snapshot
+        .value;
+    assert!(
+        matches!(&view.conversation.items[1], assistant_protocol::ConversationItem::Assistant(message)
+        if message.run_id.as_ref() == Some(&run_id) && message.step == Some(1)
+            && message.status == Some(assistant_protocol::RunStatus::Failed))
+    );
+    request.message = "next question".into();
+    let next = runtime.submit_started_input(request).await.unwrap();
+    assert_eq!(
+        wait_for_terminal(&runtime, &session_id, &next.run.run_id)
+            .await
+            .status,
+        assistant_protocol::RunStatus::Completed
+    );
+    partial.parts.remove(0);
+    let requests = model.take_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[1].conversation.messages[1],
+        ConversationMessage::Assistant(partial)
+    );
+}
+
+#[tokio::test]
+async fn failed_partial_output_settlement_does_not_publish_a_terminal_run() {
+    let store = Arc::new(FaultInjectingStore::fail_settlement());
+    let mut script = message_events(&assistant_text("not-committed", "uncommitted output"));
+    *script.last_mut().unwrap() = ModelEvent::TurnFailed {
+        error: ModelError::Protocol("fixture interruption".into()),
+    };
+    let runtime = runtime_with_store(
+        Arc::new(ScriptedModelService::new(
+            model_capabilities(false),
+            8_192,
+            [ModelScript::Events(script)],
+        )),
+        store.clone(),
+        RuntimeConfig::new(NonZeroUsize::new(32).unwrap()),
+    )
+    .await;
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    let mut events = runtime.subscribe_events();
+    let accepted = runtime
+        .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
+            session_id: session_id.clone(),
+            message: "fixture input".into(),
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            variant: assistant_protocol::AgentVariant::Build,
+            attachment_ids: vec![],
+            quotes: vec![],
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+        })
+        .await
+        .unwrap();
+    let session = runtime.session_for_test(&session_id).await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !session.lock_state().unwrap().is_faulted {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    while let Ok(event) = events.try_recv() {
+        assert!(
+            !matches!(event, RuntimeEvent::RunFinished { run_id, .. } if run_id == accepted.run.run_id)
+        );
+    }
+    let persisted = store.load_session_state(&session_id).await.unwrap();
+    assert_eq!(
+        persisted
+            .state
+            .runs
+            .iter()
+            .find(|run| run.run_id == accepted.run.run_id)
+            .unwrap()
+            .status,
+        assistant_protocol::RunStatus::Running
+    );
+    let history = store.load_conversation(&session_id).await.unwrap();
+    assert!(matches!(
+        history.messages.as_slice(),
+        [ConversationMessage::User(_)]
+    ));
+}
+
+#[tokio::test]
+async fn intervention_waiter_returns_queued_input_on_old_run_settlement_fault() {
+    use assistant_protocol::{
+        IdempotencyKey, InputDelivery, InterventionNotExecuted, SubmitInputMode,
+    };
+
+    let entered = Arc::new(Notify::new());
+    let store = Arc::new(FaultInjectingStore::fail_settlement());
+    let runtime = runtime_with_store(
+        Arc::new(CancellationAwareModel {
+            capabilities: model_capabilities(false),
+            entered: entered.clone(),
+        }),
+        store.clone(),
+        RuntimeConfig::new(NonZeroUsize::new(32).unwrap()),
+    )
+    .await;
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    let mut request = SubmitInputRequest {
+        delivery: InputDelivery::Queued,
+        mode: SubmitInputMode::Normal,
+        session_id: session_id.clone(),
+        message: "old execution".into(),
+        variant: AgentVariant::Build,
+        attachment_ids: vec![],
+        quotes: vec![],
+        skill_name: None,
+        mcp_server_key: None,
+        idempotency_key: None,
+    };
+    runtime.submit_started_input(request.clone()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .unwrap();
+    request.delivery = InputDelivery::Intervention;
+    request.message = "retained guidance".into();
+    request.idempotency_key = Some(IdempotencyKey::new("fault-guidance").unwrap());
+    let result = tokio::time::timeout(Duration::from_secs(3), runtime.submit_input(request))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        result.not_executed,
+        Some(InterventionNotExecuted::SessionFaulted)
+    );
+    assert!(result.run.is_none());
+    assert!(result.user_message.is_none());
+    let stored = store.load_session_state(&session_id).await.unwrap();
+    assert!(
+        stored
+            .state
+            .inputs
+            .iter()
+            .any(|input| input.input_id == result.input_id
+                && input.state == crate::StoredInputState::Queued)
+    );
+    assert!(
+        !stored
+            .state
+            .runs
+            .iter()
+            .any(|run| run.input_id == result.input_id)
+    );
+}
+
+#[tokio::test]
+async fn complete_response_racing_cancellation_is_committed_only_once() {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let completed = assistant_text_with_usage("raced-completion", "complete answer", 100);
+    let runtime = runtime(Arc::new(GatedCompletionModel {
+        capabilities: model_capabilities(false),
+        events: message_events(&completed),
+        entered: entered.clone(),
+        release: release.clone(),
+        calls: AtomicUsize::new(0),
+    }));
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    let run = runtime
+        .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
+            session_id: session_id.clone(),
+            message: "complete while stopping".into(),
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            variant: assistant_protocol::AgentVariant::Build,
+            attachment_ids: vec![],
+            quotes: vec![],
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+        })
+        .await
+        .unwrap()
+        .run;
+    tokio::time::timeout(Duration::from_secs(1), entered.notified())
+        .await
+        .unwrap();
+    let request = CancelRunRequest {
+        session_id: session_id.clone(),
+        run_id: run.run_id.clone(),
+    };
+    // 让取消先排在结算 gate 上，同时让 Core 先读到模型的完整终态。
+    let session = runtime.session_for_test(&session_id).await;
+    let mutation = session.mutation().await;
+    let mut events = runtime.subscribe_events();
+    let cancellation = runtime.cancel_run(request.clone());
+    tokio::pin!(cancellation);
+    assert!(futures_util::poll!(&mut cancellation).is_pending());
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if matches!(events.recv().await.unwrap(), RuntimeEvent::UsageUpdated { run_id, .. } if run_id == run.run_id) {
+                break;
+            }
+        }
+    }).await.unwrap();
+    drop(mutation);
+    assert_eq!(
+        cancellation.await.unwrap().run.status,
+        assistant_protocol::RunStatus::Cancelling
+    );
+    let settled = wait_for_terminal(&runtime, &session_id, &run.run_id).await;
+    assert_eq!(settled.status, assistant_protocol::RunStatus::Completed);
+    assert_eq!(runtime.cancel_run(request).await.unwrap().run, settled);
+    let history = runtime.conversation_snapshot(&session_id).await.unwrap();
+    assert_eq!(
+        &history.messages[1..],
+        &[ConversationMessage::Assistant(completed)]
+    );
+}
+
+#[tokio::test]
 async fn failed_run_history_is_compacted_before_overflow_failure_settles() {
     let model = Arc::new(ScriptedModelService::new(
         model_capabilities(false),
@@ -61,6 +361,7 @@ async fn failed_run_history_is_compacted_before_overflow_failure_settles() {
 
     let failed = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -79,6 +380,7 @@ async fn failed_run_history_is_compacted_before_overflow_failure_settles() {
 
     let compact = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -145,6 +447,7 @@ async fn threshold_compaction_replaces_history_and_continues_the_same_run() {
 
     let first_run = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -167,6 +470,7 @@ async fn threshold_compaction_replaces_history_and_continues_the_same_run() {
     let mut events = runtime.subscribe_events();
     let continued = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -297,6 +601,7 @@ async fn one_user_long_run_can_compact_three_times_without_replaying_tools_or_re
     set_auto_approval(&runtime, &session_id).await;
     let accepted = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session_id.clone(),
@@ -568,6 +873,7 @@ async fn oversized_protected_tool_tail_stops_without_summarizing_the_same_input_
 
     let accepted = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session_id.clone(),
@@ -671,6 +977,7 @@ async fn provider_overflow_continuation_advances_the_same_run_step() {
 
     let first_run = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -693,6 +1000,7 @@ async fn provider_overflow_continuation_advances_the_same_run_step() {
     let mut events = runtime.subscribe_events();
     let continued = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -770,6 +1078,7 @@ async fn retry_exhaustion_persists_safe_attempt_diagnostics() {
         .expect("session");
     let started = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -880,6 +1189,7 @@ async fn in_stream_failure_reports_establishment_and_partial_output_without_retr
         .expect("session");
     let started = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -920,6 +1230,7 @@ async fn core_engine_panic_becomes_internal_failure_and_session_is_not_left_busy
         .expect("session");
     let started = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -975,6 +1286,7 @@ async fn prestart_settlement_failure_faults_the_session_without_partial_commit()
         .replace_document_for_test("invalid runtime configuration");
     let accepted = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             session_id: session.session_id.clone(),
             message: "must remain recoverable".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -1053,6 +1365,7 @@ async fn runtime_task_panic_settles_current_run_and_faults_session_without_wakin
         .expect("session");
     let first = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -1070,6 +1383,7 @@ async fn runtime_task_panic_settles_current_run_and_faults_session_without_wakin
         .expect("first model entered");
     runtime
         .submit_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -1100,6 +1414,7 @@ async fn runtime_task_panic_settles_current_run_and_faults_session_without_wakin
     assert!(matches!(
         runtime
             .submit_started_input(SubmitInputRequest {
+                delivery: Default::default(),
                 mode: assistant_protocol::SubmitInputMode::Normal,
                 variant: assistant_protocol::AgentVariant::Build,
                 session_id: session.session.session_id,
@@ -1125,6 +1440,7 @@ async fn blank_message_and_unknown_run_do_not_mutate_conversation() {
     assert!(matches!(
         runtime
             .submit_started_input(SubmitInputRequest {
+                delivery: Default::default(),
                 mode: assistant_protocol::SubmitInputMode::Normal,
                 variant: assistant_protocol::AgentVariant::Build,
                 session_id: session.session.session_id.clone(),
@@ -1181,6 +1497,7 @@ async fn duplicate_provider_message_id_settles_as_failure_without_replaying_tool
     set_auto_approval(&runtime, &session_id).await;
     let accepted = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session_id.clone(),
@@ -1237,6 +1554,7 @@ async fn uncommitted_continuation_candidate_is_absent_after_recorder_failure_and
         .session_id;
     let submitted = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session_id.clone(),
@@ -1318,6 +1636,7 @@ async fn parent_compaction_projection_failure_keeps_committed_history_without_te
     }));
     let started = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             session_id: session_id.clone(),
             message: "continue".into(),
             variant: assistant_protocol::AgentVariant::Build,

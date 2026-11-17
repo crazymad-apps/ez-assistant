@@ -25,6 +25,7 @@ async fn skill_state_preparation_failure_atomically_commits_the_failed_input() {
         .queue_paused_by_user = true;
     let accepted = runtime
         .submit_claimed_input(SubmitInputRequest {
+            delivery: Default::default(),
             session_id: session.session_id.clone(),
             message: "skill state must not lose this input".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -90,6 +91,7 @@ async fn session_view_repairs_only_its_terminal_queued_input_once() {
         .queue_paused_by_user = true;
     let source = first
         .submit_claimed_input(SubmitInputRequest {
+            delivery: Default::default(),
             session_id: session.session_id.clone(),
             message: "recover only this input".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -104,6 +106,7 @@ async fn session_view_repairs_only_its_terminal_queued_input_once() {
         .expect("source input");
     let unrelated = first
         .submit_input(SubmitInputRequest {
+            delivery: Default::default(),
             session_id: session.session_id.clone(),
             message: "stay queued".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -198,6 +201,7 @@ async fn unavailable_session_skips_settlement_and_cannot_resume_after_restart() 
     session.lock_state().expect("state").queue_paused_by_user = true;
     let accepted = first
         .submit_claimed_input(SubmitInputRequest {
+            delivery: Default::default(),
             session_id: broken.clone(),
             message: "persisted before restart".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -357,8 +361,8 @@ async fn startup_and_summary_pages_do_not_hydrate_history_and_first_load_is_sing
         .unwrap()
         .snapshot
         .value;
-    assert_eq!(snapshot.active_sessions.len(), 100);
-    assert_eq!(snapshot.active_sessions_next_offset, Some(100));
+    assert_eq!(snapshot.session_groups[0].sessions.len(), 10);
+    assert_eq!(snapshot.session_groups[0].next_offset, Some(10));
     let tail = restarted
         .list_sessions(assistant_protocol::ListSessionsRequest {
             offset: 100,
@@ -410,6 +414,7 @@ async fn confirmed_shutdown_rechecks_added_work_and_preserves_the_queue_on_reope
     session.lock_state().expect("state").queue_paused_by_user = true;
     runtime
         .submit_input(SubmitInputRequest {
+            delivery: Default::default(),
             session_id: session_id.clone(),
             message: "keep for explicit resume".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,

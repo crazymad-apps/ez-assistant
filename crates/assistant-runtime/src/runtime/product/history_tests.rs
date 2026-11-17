@@ -67,6 +67,8 @@ fn window(partial: bool) -> StoredConversationWindow {
 
 fn input_fact() -> crate::StoredInputHistory {
     crate::StoredInputHistory {
+        idempotency_key: None,
+        rewritten_from: None,
         input_id: assistant_protocol::InputId::new("source-input").unwrap(),
         user_message_id: agent_types::MessageId::new("source-user").unwrap(),
         queue_order: 7,

@@ -99,7 +99,9 @@ impl AssistantRuntime {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
         let session = self.session_loader.prepare(&request.session_id).await?;
-        self.stop_goal_in_session(request, &session).await
+        let result = self.stop_goal_in_session(request, &session).await?;
+        self.wake_queue(session)?;
+        Ok(result)
     }
 
     pub(in crate::runtime) async fn stop_goal_in_session(
@@ -108,6 +110,16 @@ impl AssistantRuntime {
         session: &SessionController,
     ) -> RuntimeResult<StopGoalResult> {
         let _mutation = session.mutation().await;
+        self.stop_goal_locked(request, session).await
+    }
+
+    /// 调用方持有 Session mutation gate。先可靠提交暂停和取消意图，再触发令牌。
+    /// 介入与显式停止共用相同 Goal 世代校验和投影。
+    pub(in crate::runtime) async fn stop_goal_locked(
+        &self,
+        request: StopGoalRequest,
+        session: &SessionController,
+    ) -> RuntimeResult<StopGoalResult> {
         session.ensure_active()?;
         session.ensure_healthy()?;
         let stopped_at_ms = super::super::now_ms()?;
@@ -175,7 +187,6 @@ impl AssistantRuntime {
                     .map(|active| active.cancellation.clone())
             });
             state.goal = Some(authoritative);
-            state.resume_required = !state.queue_item_ids.is_empty();
             (cancellation, run_snapshot)
         };
         if result.cancelling_run_id.is_some() && cancellation.is_none() {
@@ -255,13 +266,13 @@ impl AssistantRuntime {
         let mut state = session.lock_state()?;
         state.goal = None;
         state.goal_inputs.clear();
-        state.resume_required = !state.queue_item_ids.is_empty();
         drop(state);
         self.publish(assistant_protocol::RuntimeEvent::GoalChanged {
             session_id: request.session_id,
             goal_id: goal.id,
             generation: goal.generation,
         });
+        self.wake_queue(session.clone())?;
         Ok(ClearGoalResult { goal: None })
     }
 
@@ -449,12 +460,7 @@ impl AssistantRuntime {
         )
         .await?;
         let accepted_at_ms = super::super::now_ms()?;
-        let resumed =
-            goal.resume(accepted_at_ms)
-                .map_err(|_| RuntimeError::InternalStateUnavailable {
-                    component: "Goal resume transition",
-                })?;
-        inject_resume_context(&mut message, &resumed)?;
+        let resumed = prepare_goal_resume(&goal, &mut message, accepted_at_ms)?;
         let result = self
             .store
             .resume_goal_with_held_input(GoalHeldInputResume {
@@ -487,7 +493,6 @@ impl AssistantRuntime {
             state.queue_item_ids.remove(position);
             state.goal_inputs.push_back(input_id.clone());
             state.queue_revision = state.queue_revision.saturating_add(1);
-            state.resume_required = !state.queue_item_ids.is_empty();
             state.goal = Some(authoritative);
             state
                 .inputs
@@ -597,12 +602,7 @@ impl GoalSubmission {
             Self::None => Ok(None),
             Self::Start => prepare_goal_start(message, accepted_at_ms, None).map(Some),
             Self::Resume(goal) => {
-                let control = (*goal).resume(accepted_at_ms).map_err(|_| {
-                    RuntimeError::InternalStateUnavailable {
-                        component: "Goal resume transition",
-                    }
-                })?;
-                inject_resume_context(message, &control)?;
+                let control = prepare_goal_resume(&goal, message, accepted_at_ms)?;
                 let binding = GoalInputBinding {
                     goal_id: control.id.clone(),
                     generation: control.generation,
@@ -639,6 +639,21 @@ pub(in crate::runtime) async fn ensure_goal_model_supported(
         });
     }
     Ok(())
+}
+
+/// 为已确定会执行的用户输入准备恢复后的同一 Goal 及隐藏上下文。
+pub(in crate::runtime) fn prepare_goal_resume(
+    goal: &GoalControl,
+    message: &mut UserMessage,
+    resumed_at_ms: i64,
+) -> RuntimeResult<GoalControl> {
+    let resumed =
+        goal.resume(resumed_at_ms)
+            .map_err(|_| RuntimeError::InternalStateUnavailable {
+                component: "Goal resume transition",
+            })?;
+    inject_resume_context(message, &resumed)?;
+    Ok(resumed)
 }
 
 /// 构造首次 Goal Input 及控制器事实；调用方负责将其与 Input/Run 原子提交。

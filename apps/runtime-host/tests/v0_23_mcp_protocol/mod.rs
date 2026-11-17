@@ -243,7 +243,7 @@ fn roundtrip(protocol: &str, transport: &str, selected: bool, decision: &str) {
     )
     .expect("read isolated database");
     let counts: (i64, i64, i64) = connection.query_row("SELECT (SELECT COUNT(*) FROM inputs), (SELECT COUNT(*) FROM runs), (SELECT COUNT(*) FROM pending_tool_exchanges)", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).expect("exact completed counts");
-    assert_eq!(counts, (1, 0, 0));
+    assert_eq!(counts, (0, 0, 0));
     assert_eq!(
         connection
             .query_row("SELECT COUNT(*) FROM mcp_input_selections", [], |row| row

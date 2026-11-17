@@ -101,7 +101,7 @@ test('右栏拖拽区从分割线右侧开始，让出中栏滚动条', async ({
 });
 
 test('无需创建会话即可打开 MCP 应用；草稿替换须确认且不会自动发送', async ({ page }) => {
-  const before = await command('get_application_snapshot', {});
+  const before = await command('list_sessions', { limit: 10000 });
   await login(page);
   await page.getByRole('button', { name: '新建资源标签', exact: true }).click();
   await page.getByRole('menuitem', { name: '应用', exact: true }).click();
@@ -138,9 +138,9 @@ test('无需创建会话即可打开 MCP 应用；草稿替换须确认且不会
   await app.getByRole('button', { name: '填写草稿', exact: true }).click();
   await confirmation.getByRole('button', { name: '替换草稿', exact: true }).click();
   await expect(draft).toHaveValue('来自应用的草稿');
-  const after = await command('get_application_snapshot', {});
-  expect(after.snapshot.value.active_sessions.map((s: { session_id: string }) => s.session_id)).toEqual(
-    before.snapshot.value.active_sessions.map((s: { session_id: string }) => s.session_id),
+  const after = await command('list_sessions', { limit: 10000 });
+  expect(after.sessions.map((s: { session_id: string }) => s.session_id)).toEqual(
+    before.sessions.map((s: { session_id: string }) => s.session_id),
   );
 });
 

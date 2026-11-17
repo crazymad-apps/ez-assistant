@@ -12,6 +12,83 @@ fn home() -> TempDir {
 }
 
 #[test]
+fn terminal_partial_output_and_step_survive_store_reopen_once() {
+    let home = home();
+    let mut engine = open_engine(&home);
+    let session = session_id("f03-partial-output");
+    let run = run_id("f03-partial-run");
+    seed_session_and_run(&mut engine, session.as_str(), run.as_str());
+    engine
+        .append_messages(AppendRequest {
+            operation_id: "f03-user".into(),
+            session_id: session.clone(),
+            run_id: run.clone(),
+            messages: vec![user_message("f03-user-message", "stop after output")],
+            message_step: None,
+            created_at_ms: 1_100,
+        })
+        .unwrap();
+    let ConversationMessage::Assistant(mut message) =
+        assistant_message("f03-partial-message", "partial answer")
+    else {
+        unreachable!()
+    };
+    message.finish_reason = agent_types::FinishReason::Cancelled;
+    message.parts.insert(
+        0,
+        agent_types::AssistantPart::Reasoning(agent_types::ReasoningPart {
+            id: agent_types::PartId::new("f03-reasoning").unwrap(),
+            source: agent_types::ReasoningSource::Summary,
+            text: "partial reasoning".into(),
+        }),
+    );
+    let settlement = StoredRunSettlement {
+        operation_id: "f03-partial-settlement".into(),
+        session_id: session.clone(),
+        run_id: run.clone(),
+        status: RunStatus::Cancelled,
+        cancel_requested: true,
+        error: None,
+        queued_user_message: None,
+        messages: vec![ConversationMessage::Assistant(message.clone())],
+        message_step: Some(2),
+        goal_effect: None,
+        proxy_report: None,
+        finished_at_ms: 1_200,
+    };
+    engine.settle_run(settlement.clone()).unwrap();
+    drop(engine);
+
+    let mut engine = open_engine(&home);
+    assert!(engine.settle_run(settlement).is_err());
+    let conversation = engine.load_conversation(&session).unwrap();
+    assert_eq!(
+        &conversation.messages[1..],
+        &[ConversationMessage::Assistant(message.clone())]
+    );
+    let history = engine
+        .load_conversation_history(ConversationOwner::MainSession {
+            session_id: session,
+        })
+        .unwrap();
+    assert_eq!(history.facts.runs.len(), 1);
+    assert_eq!(history.facts.runs[0].status, Some(RunStatus::Cancelled));
+    assert_eq!(
+        history.facts.runs[0].last_message_id.as_ref(),
+        Some(&message.id)
+    );
+    assert!(
+        history
+            .facts
+            .message_origins
+            .iter()
+            .any(|origin| origin.message_id == message.id
+                && origin.run_id.as_ref() == Some(&run)
+                && origin.step == Some(2))
+    );
+}
+
+#[test]
 fn fork_uses_reliable_end_positions_for_empty_retries_even_when_clocks_reverse() {
     let home = home();
     let mut engine = open_engine(&home);
@@ -444,12 +521,16 @@ fn materialization_identity_never_moves_to_later_inputs_after_clear_or_rewrite()
         later.message = raw_user_message("later-materialized-user", "later input");
         // 即使时钟与原接纳相同，也不能用时间或当前排序推断原身份。
         if rewrite {
+            let expected_message_count =
+                engine.load_conversation(&session).unwrap().messages.len() as u64;
             engine
                 .rewrite_from_user(ConversationRewrite {
                     run_id: fixture_run_id(&later.clone()),
                     approval_mode: assistant_protocol::ApprovalMode::Ask,
                     session_id: session.clone(),
                     target_user_message_id: original.input.message.id.clone(),
+                    expected_generation: 1,
+                    expected_message_count,
                     conversation: ConversationSnapshot::new(vec![ConversationMessage::User(
                         later.message.clone(),
                     )]),
@@ -661,6 +742,13 @@ async fn accepted_and_materialized_retries_read_terminal_files_without_decoding_
     engine.accept_input(queued.clone()).unwrap();
     // 可靠终态已无 SQL 控制；只在此夹具注入旧终态，验证在线读取不使用其失真载荷。
     for input in [&original.input, &accepted_input] {
+        engine
+            .connection
+            .execute(
+                "INSERT INTO inputs(input_id,session_id,state,agent_variant,origin) VALUES(?1,?2,'committed',NULL,NULL)",
+                params![input.input_id.as_str(), session.as_str()],
+            )
+            .unwrap();
         engine.connection.execute("INSERT INTO runs(run_id,session_id,input_id,attempt,status,cancel_requested,created_at_ms,started_at_ms,shell_snapshot_json) VALUES(?1,?2,?3,1,'completed',0,999,999999,'{}')",
             params![fixture_run_id(input).as_str(), session.as_str(), input.input_id.as_str()]).unwrap();
     }
@@ -694,6 +782,16 @@ async fn accepted_and_materialized_retries_read_terminal_files_without_decoding_
                     .execute(
                         "DELETE FROM runs WHERE session_id=?1 AND status='completed'",
                         [session.as_str()]
+                    )
+                    .unwrap(),
+                2
+            );
+            assert_eq!(
+                engine
+                    .connection
+                    .execute(
+                        "DELETE FROM inputs WHERE session_id=?1 AND state='committed'",
+                        [session.as_str()],
                     )
                     .unwrap(),
                 2
@@ -2307,8 +2405,8 @@ fn normal_store_rejects_legacy_bytes_without_recreating_sql_history() {
             .load_conversation_window(ConversationWindowRequest {
                 owner: owner.clone(),
                 generation: 1,
-                end: None,
-                limit: 20,
+                end: assistant_runtime::ConversationWindowEnd::Latest,
+                turn_limit: 20,
             })
             .is_err()
     );

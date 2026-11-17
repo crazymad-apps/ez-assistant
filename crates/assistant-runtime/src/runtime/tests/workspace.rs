@@ -59,6 +59,7 @@ async fn workspace_registry_is_idempotent_soft_deleted_and_frozen_into_sessions(
     assert!(
         runtime
             .list_workspaces(ListWorkspacesRequest::default())
+            .await
             .expect("list workspaces")
             .workspaces
             .is_empty()
@@ -91,7 +92,12 @@ async fn workspace_registry_is_idempotent_soft_deleted_and_frozen_into_sessions(
         .snapshot
         .value;
     assert!(application.workspaces.is_empty());
-    assert!(application.active_sessions.is_empty());
+    assert!(
+        application
+            .session_groups
+            .iter()
+            .all(|group| group.sessions.is_empty())
+    );
 
     let error = runtime
         .create_session(CreateSessionRequest {
@@ -107,7 +113,9 @@ async fn workspace_registry_is_idempotent_soft_deleted_and_frozen_into_sessions(
         runtime
             .list_workspaces(ListWorkspacesRequest {
                 lifecycle: Some(WorkspaceLifecycle::Removed),
+                ..Default::default()
             })
+            .await
             .expect("list removed workspaces")
             .workspaces,
         vec![removed]
@@ -138,7 +146,7 @@ async fn workspace_registry_is_idempotent_soft_deleted_and_frozen_into_sessions(
         .snapshot
         .value;
     assert_eq!(restored_application.workspaces, vec![restored]);
-    assert_eq!(restored_application.active_sessions, vec![bound]);
+    assert_eq!(restored_application.session_groups[0].sessions, vec![bound]);
 }
 
 #[tokio::test]
@@ -170,12 +178,22 @@ async fn restore_rebuilds_runtime_projection_after_store_committed_first() {
         .expect("commit restore directly in store");
     assert_eq!(committed.lifecycle, StoredWorkspaceLifecycle::Active);
     assert_eq!(committed.updated_at_ms, 2_000);
+    // 公共列表已经读取持久层；身份 Registry 仍需重复恢复命令修复。
     assert_eq!(
         runtime
-            .list_workspaces(ListWorkspacesRequest {
-                lifecycle: Some(WorkspaceLifecycle::Removed),
+            .get_workspace(GetWorkspaceRequest {
+                workspace_id: workspace.workspace_id.clone()
             })
-            .expect("registry remains stale before recovery")
+            .unwrap()
+            .workspace
+            .lifecycle,
+        WorkspaceLifecycle::Removed
+    );
+    assert_eq!(
+        runtime
+            .list_workspaces(ListWorkspacesRequest::default())
+            .await
+            .unwrap()
             .workspaces
             .len(),
         1
@@ -194,6 +212,7 @@ async fn restore_rebuilds_runtime_projection_after_store_committed_first() {
     assert_eq!(
         runtime
             .list_workspaces(ListWorkspacesRequest::default())
+            .await
             .expect("active projection after recovery")
             .workspaces,
         vec![recovered]
@@ -486,6 +505,7 @@ async fn workspace_form_rejects_invalid_labels_and_directory_sets_before_storage
     assert!(
         runtime
             .list_workspaces(ListWorkspacesRequest::default())
+            .await
             .expect("list workspaces")
             .workspaces
             .is_empty()
@@ -712,6 +732,7 @@ async fn every_run_compiles_tools_from_its_sessions_frozen_workspace() {
     ] {
         let accepted = runtime
             .submit_started_input(SubmitInputRequest {
+                delivery: Default::default(),
                 mode: assistant_protocol::SubmitInputMode::Normal,
                 variant: assistant_protocol::AgentVariant::Build,
                 session_id: session_id.clone(),
@@ -769,6 +790,7 @@ async fn missing_bound_workdir_is_reported_as_workspace_unavailable_before_start
         .session;
     let accepted = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session_id.clone(),

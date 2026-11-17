@@ -2,6 +2,7 @@
 
 mod codec;
 mod history_index;
+pub(super) use history_index::{HistoryOffsets, RequestKeyOwner};
 mod index_append;
 mod stream;
 #[cfg(test)]
@@ -16,11 +17,18 @@ use std::{
 };
 
 use agent_types::{ConversationMessage, ConversationSnapshot, MessageId};
-use assistant_runtime::StoredHistoryFacts;
+use assistant_runtime::{
+    ConversationNavigationIndex, ConversationNavigationRead, ConversationNavigationRequest,
+    ConversationTurnBoundaries, ConversationWindowEnd, NavigationHistory, NavigationMessageKind,
+    StoredConversationNavigation, StoredHistoryFacts, conversation_preview_text,
+};
 
 use super::{StorageResult, internal_error, invalid_data};
 use codec::{Encoding, HistoryHeader, RecordReader};
-pub(super) use stream::{scan_document, write_upgraded_generation};
+pub(super) use codec::{HISTORY_VERSION, PREVIOUS_HISTORY_VERSION};
+#[cfg(test)]
+use stream::scan_document;
+pub(super) use stream::{scan_version, write_upgraded_generation};
 
 const INDEX_CACHE_CAPACITY: usize = 32;
 
@@ -35,6 +43,7 @@ pub(super) struct ConversationDocument {
 struct MessagePosition {
     offset: u64,
     index: usize,
+    visible_assistant: bool,
 }
 
 struct CachedConversationIndex {
@@ -44,11 +53,16 @@ struct CachedConversationIndex {
     offsets: ConversationOffsets,
 }
 
+/// 已同步并完整回读的新代次；事务提交前由准备者独占，不能通过位置缓存读到。
+pub(super) struct PreparedGeneration(CachedConversationIndex);
+
 #[derive(Clone)]
 struct ConversationOffsets {
     message: Arc<[MessagePosition]>,
     // 可见消息映射到物理消息序号；元数据帧从不增加任何消息序号。
     display: Arc<[usize]>,
+    turns: Arc<ConversationTurnBoundaries>,
+    navigation: Arc<ConversationNavigationIndex>,
     encoding: Encoding,
     header: Option<HistoryHeader>,
     history: Arc<history_index::HistoryOffsets>,
@@ -60,17 +74,22 @@ struct ConversationOffsets {
 /// Store Worker 私有的可重建 LRU；缓存位置和最新元数据，不缓存 Conversation 正文。
 pub(super) struct ConversationIndexCache {
     entries: VecDeque<CachedConversationIndex>,
+    version: u32,
 }
 
 impl Default for ConversationIndexCache {
     fn default() -> Self {
-        Self {
-            entries: VecDeque::with_capacity(INDEX_CACHE_CAPACITY),
-        }
+        Self::with_version(HISTORY_VERSION)
     }
 }
 
 impl ConversationIndexCache {
+    pub(super) fn with_version(version: u32) -> Self {
+        Self {
+            entries: VecDeque::with_capacity(INDEX_CACHE_CAPACITY),
+            version,
+        }
+    }
     /// 完整正文读取同时构建同一文件的位置索引，冷加载的后续历史／分页查询直接复用。
     /// 只将位置和校验 ID 留在 LRU；正文所有权移交调用方，不在 Store 缓存第二份正文。
     pub(super) fn read_owned(
@@ -89,6 +108,7 @@ impl ConversationIndexCache {
         let mut messages = Vec::new();
         let offsets = build_offsets(
             path,
+            self.version,
             Some(&mut |message| {
                 messages.push(message);
                 Ok(())
@@ -130,7 +150,11 @@ impl ConversationIndexCache {
             .modified()
             .map_err(|e| internal_error("conversation timestamp unavailable", e))?;
         let mut window = assistant_runtime::ExecutionWindow::default();
-        let offsets = build_offsets(path, Some(&mut |message| window.push(message)))?;
+        let offsets = build_offsets(
+            path,
+            self.version,
+            Some(&mut |message| window.push(message)),
+        )?;
         if offsets
             .header
             .as_ref()
@@ -218,6 +242,45 @@ impl ConversationIndexCache {
         Ok(offsets.history.children(child_task_id))
     }
 
+    pub(super) fn read_run_conversation(
+        &mut self,
+        path: &Path,
+        owner: &assistant_protocol::ConversationOwner,
+        generation: u64,
+        run_id: &assistant_protocol::RunId,
+    ) -> StorageResult<assistant_runtime::StoredConversationRawWindow> {
+        self.validate_owner(path, owner, generation)?;
+        let offsets = self.offsets(path)?;
+        let origins = offsets.history.origins_for_run(run_id);
+        let range = origins.iter().try_fold(None, |range, origin| {
+            let position = *offsets
+                .locations
+                .get(&origin.message_id)
+                .ok_or_else(|| invalid_data("historical Run message is missing"))?;
+            Ok::<_, assistant_runtime::StoreError>(Some(match range {
+                Some((first, last)) => (usize::min(first, position), usize::max(last, position)),
+                None => (position, position),
+            }))
+        })?;
+        let (start, end) = range.map_or((0, 0), |(first, last)| (first, last + 1));
+        let conversation = if start < end {
+            read_positions(path, &offsets.message[start..end], offsets.encoding)?
+        } else {
+            ConversationSnapshot::new(Vec::new())
+        };
+        Ok(assistant_runtime::StoredConversationRawWindow {
+            generation,
+            start,
+            end,
+            total: offsets.message.len(),
+            conversation,
+            history: Some(StoredHistoryFacts {
+                message_origins: origins,
+                ..Default::default()
+            }),
+        })
+    }
+
     pub(super) fn read_run_origins(
         &mut self,
         path: &Path,
@@ -273,8 +336,7 @@ impl ConversationIndexCache {
         generation: u64,
         input_id: &assistant_protocol::InputId,
     ) -> StorageResult<Option<assistant_runtime::StoredInputHistory>> {
-        self.validate_owner(path, owner, generation)?;
-        Ok(self.offsets(path)?.history.input(input_id))
+        Ok(self.history_index(path, owner, generation)?.input(input_id))
     }
     pub(super) fn read_history_window(
         &mut self,
@@ -296,6 +358,24 @@ impl ConversationIndexCache {
         owner: &assistant_protocol::ConversationOwner,
         generation: u64,
     ) -> StorageResult<()> {
+        self.history_index(path, owner, generation).map(|_| ())
+    }
+
+    pub(super) fn history_index(
+        &mut self,
+        path: &Path,
+        owner: &assistant_protocol::ConversationOwner,
+        generation: u64,
+    ) -> StorageResult<Arc<history_index::HistoryOffsets>> {
+        Ok(self.owned_offsets(path, owner, generation)?.history)
+    }
+
+    fn owned_offsets(
+        &mut self,
+        path: &Path,
+        owner: &assistant_protocol::ConversationOwner,
+        generation: u64,
+    ) -> StorageResult<ConversationOffsets> {
         let offsets = self.offsets(path)?;
         let header = offsets
             .header
@@ -306,7 +386,28 @@ impl ConversationIndexCache {
                 "conversation history owner or generation does not match",
             ));
         }
-        Ok(())
+        Ok(offsets)
+    }
+
+    /// 裁尾只需要已核验的来源身份和历史事实，命中同代索引时无需重读正文。
+    pub(super) fn replacement_source(
+        &mut self,
+        path: &Path,
+        owner: &assistant_protocol::ConversationOwner,
+        generation: u64,
+    ) -> StorageResult<(Arc<HashMap<MessageId, usize>>, StoredHistoryFacts)> {
+        let offsets = self.owned_offsets(path, owner, generation)?;
+        Ok((offsets.locations, offsets.history.snapshot()))
+    }
+
+    /// 只有发布代次的事务已经提交，准备阶段生成的派生索引才进入 LRU。
+    pub(super) fn record_committed_generation(&mut self, prepared: PreparedGeneration) {
+        let PreparedGeneration(entry) = prepared;
+        self.entries.retain(|current| current.path != entry.path);
+        if self.entries.len() == INDEX_CACHE_CAPACITY {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(entry);
     }
 
     pub(super) fn remove_under(&mut self, directory: &Path) {
@@ -318,8 +419,8 @@ impl ConversationIndexCache {
         &mut self,
         path: &Path,
         generation: u64,
-        requested_end: Option<usize>,
-        limit: usize,
+        end: ConversationWindowEnd,
+        turn_limit: usize,
     ) -> StorageResult<assistant_runtime::StoredConversationWindow> {
         let offsets = self.offsets(path)?;
         if offsets
@@ -332,8 +433,7 @@ impl ConversationIndexCache {
             ));
         }
         let total = offsets.display.len();
-        let end = requested_end.unwrap_or(total).min(total);
-        let start = end.saturating_sub(limit);
+        let std::ops::Range { start, end } = offsets.turns.window(total, end, turn_limit)?;
         let raw_start = offsets
             .display
             .get(start)
@@ -358,6 +458,59 @@ impl ConversationIndexCache {
             conversation,
             history,
         })
+    }
+
+    pub(super) fn read_navigation(
+        &mut self,
+        path: &Path,
+        request: ConversationNavigationRequest,
+    ) -> StorageResult<StoredConversationNavigation> {
+        self.validate_owner(path, &request.owner, request.generation)?;
+        let offsets = self.offsets(path)?;
+        let run = |id: &assistant_protocol::RunId| offsets.history.run(id);
+        match request.read {
+            ConversationNavigationRead::Page { boundary, limit } => {
+                offsets
+                    .navigation
+                    .page(boundary, limit, &request.context, run)
+            }
+            ConversationNavigationRead::Preview { message_id: id } => {
+                let Some(&raw) = offsets.locations.get(&id) else {
+                    return Ok(StoredConversationNavigation::Preview(None));
+                };
+                let allowed = offsets
+                    .display
+                    .binary_search(&raw)
+                    .ok()
+                    .is_some_and(|ordinal| {
+                        offsets
+                            .navigation
+                            .permits_preview(ordinal, &id, &request.context, run)
+                    });
+                if !allowed {
+                    return Ok(StoredConversationNavigation::Preview(None));
+                }
+                let position = offsets.message[raw];
+                let file = File::open(path).map_err(|source| {
+                    internal_error("conversation file could not be opened", source)
+                })?;
+                let frame = read_indexed_frame(
+                    &mut BufReader::new(file),
+                    &mut Vec::new(),
+                    position.offset,
+                    offsets.encoding,
+                )?;
+                let value = frame
+                    .get(position.index)
+                    .filter(|value| message_id(value) == &id)
+                    .ok_or_else(|| {
+                        invalid_data("conversation index does not match its preview frame")
+                    })?;
+                Ok(StoredConversationNavigation::Preview(Some(
+                    conversation_preview_text(value),
+                )))
+            }
+        }
     }
 
     pub(super) fn read_raw_window(
@@ -427,7 +580,7 @@ impl ConversationIndexCache {
             return Ok(offsets);
         }
         self.entries.retain(|entry| entry.path != path);
-        let offsets = build_offsets(path, None)?;
+        let offsets = build_offsets(path, self.version, None)?;
         if self.entries.len() == INDEX_CACHE_CAPACITY {
             self.entries.pop_front();
         }
@@ -443,13 +596,15 @@ impl ConversationIndexCache {
 
 fn build_offsets(
     path: &Path,
+    version: u32,
     mut collected: Option<&mut dyn FnMut(ConversationMessage) -> StorageResult<()>>,
 ) -> StorageResult<ConversationOffsets> {
     let file = File::open(path)
         .map_err(|source| internal_error("conversation file could not be opened", source))?;
-    let mut reader = RecordReader::new(BufReader::new(file));
+    let mut reader = RecordReader::with_version(BufReader::new(file), version);
     let mut message = Vec::new();
     let mut display = Vec::new();
+    let mut navigation_rows = Vec::new();
     let mut ids = HashMap::new();
     let mut referenced_ids = HashSet::new();
     let mut referenced_runs = HashSet::new();
@@ -473,14 +628,16 @@ fn build_offsets(
             {
                 return Err(invalid_data("conversation contains a duplicate message id"));
             }
-            if value.is_transcript_visible()
-                || matches!(value, ConversationMessage::ContextSummary(_))
-            {
+            let kind = NavigationMessageKind::classify(value);
+            let visible_assistant = matches!(kind, Some(NavigationMessageKind::Assistant { .. }));
+            if let Some(kind) = kind {
+                navigation_rows.push((message_id(value).clone(), kind));
                 display.push(message.len());
             }
             message.push(MessagePosition {
                 offset: batch.offset,
                 index,
+                visible_assistant,
             });
         }
         if let Some(collected) = &mut collected {
@@ -497,15 +654,34 @@ fn build_offsets(
             "conversation history references a missing message",
         ));
     }
+    history.finish()?;
     if referenced_runs.iter().any(|run| !history.contains_run(run)) {
         return Err(invalid_data(
             "conversation message origin references a missing historical Run",
         ));
     }
-    history.finish();
+    let facts = NavigationHistory::new(history.facts());
+    let is_child = reader.header.as_ref().is_some_and(|header| {
+        matches!(
+            header.owner,
+            assistant_protocol::ConversationOwner::ChildTask { .. }
+        )
+    });
+    let mut turns = ConversationTurnBoundaries::default();
+    let mut navigation = ConversationNavigationIndex::default();
+    for (ordinal, (id, kind)) in navigation_rows.into_iter().enumerate() {
+        if matches!(kind, NavigationMessageKind::Assistant { .. })
+            && let Some(run_id) = facts.origin(&id).and_then(|origin| origin.run_id.as_ref())
+        {
+            turns.record_assistant(ordinal, run_id);
+        }
+        navigation.push(ordinal, &id, kind, &facts, is_child);
+    }
     Ok(ConversationOffsets {
         message: message.into(),
         display: display.into(),
+        turns: Arc::new(turns),
+        navigation: Arc::new(navigation),
         encoding: reader.encoding(),
         header: reader.header,
         history: Arc::new(history),
@@ -529,16 +705,7 @@ fn read_positions(
     let mut messages = Vec::with_capacity(positions.len());
     for position in positions {
         if offset != Some(position.offset) {
-            reader
-                .seek(SeekFrom::Start(position.offset))
-                .map_err(|source| {
-                    internal_error("conversation file could not be positioned", source)
-                })?;
-            line.clear();
-            reader.read_until(b'\n', &mut line).map_err(|source| {
-                internal_error("conversation record could not be read", source)
-            })?;
-            frame_messages = codec::decode_indexed_record(&line, encoding)?;
+            frame_messages = read_indexed_frame(&mut reader, &mut line, position.offset, encoding)?;
             offset = Some(position.offset);
         }
         let message = frame_messages
@@ -547,6 +714,29 @@ fn read_positions(
         messages.push(message.clone());
     }
     validate_snapshot(messages)
+}
+
+#[cfg(test)]
+thread_local! {
+    static INDEXED_FRAME_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn read_indexed_frame(
+    reader: &mut BufReader<File>,
+    line: &mut Vec<u8>,
+    offset: u64,
+    encoding: Encoding,
+) -> StorageResult<Vec<ConversationMessage>> {
+    #[cfg(test)]
+    INDEXED_FRAME_READS.with(|reads| reads.set(reads.get() + 1));
+    reader
+        .seek(SeekFrom::Start(offset))
+        .map_err(|source| internal_error("conversation file could not be positioned", source))?;
+    line.clear();
+    reader
+        .read_until(b'\n', line)
+        .map_err(|source| internal_error("conversation record could not be read", source))?;
+    codec::decode_indexed_record(line, encoding)
 }
 
 pub(super) fn encode_messages(messages: &[ConversationMessage]) -> StorageResult<Vec<u8>> {
@@ -577,9 +767,18 @@ pub(super) fn read_document(
     owner: &assistant_protocol::ConversationOwner,
     generation: u64,
 ) -> StorageResult<ConversationDocument> {
+    read_document_version(path, owner, generation, HISTORY_VERSION)
+}
+
+pub(super) fn read_document_version(
+    path: &Path,
+    owner: &assistant_protocol::ConversationOwner,
+    generation: u64,
+    version: u32,
+) -> StorageResult<ConversationDocument> {
     let file = File::open(path)
         .map_err(|source| internal_error("conversation file could not be opened", source))?;
-    let (conversation, facts, header) = decode_history(BufReader::new(file))?;
+    let (conversation, facts, header) = decode_history_version(BufReader::new(file), version)?;
     if header
         .as_ref()
         .is_some_and(|header| &header.owner != owner || header.generation != generation)
@@ -602,32 +801,119 @@ pub(super) fn write_generation(
     conversation: &ConversationSnapshot,
     history: &StoredHistoryFacts,
 ) -> StorageResult<()> {
+    write_generation_version(
+        path,
+        owner,
+        generation,
+        HISTORY_VERSION,
+        conversation,
+        history,
+    )
+}
+
+pub(super) fn write_generation_version(
+    path: &Path,
+    owner: &assistant_protocol::ConversationOwner,
+    generation: u64,
+    version: u32,
+    conversation: &ConversationSnapshot,
+    history: &StoredHistoryFacts,
+) -> StorageResult<()> {
+    write_snapshot(path, owner, generation, version, conversation, history)?;
+    stream::verify_version(
+        path,
+        owner,
+        generation,
+        version,
+        conversation.messages.iter().cloned().map(Ok),
+        history,
+    )?;
+    Ok(())
+}
+
+/// 将发布前的逐条比对和位置索引构建合并到同一次磁盘回读，保留完整的结构和事实校验。
+pub(super) fn prepare_generation(
+    path: &Path,
+    owner: &assistant_protocol::ConversationOwner,
+    generation: u64,
+    conversation: &ConversationSnapshot,
+    history: &StoredHistoryFacts,
+) -> StorageResult<PreparedGeneration> {
+    write_snapshot(
+        path,
+        owner,
+        generation,
+        HISTORY_VERSION,
+        conversation,
+        history,
+    )?;
+    let metadata = path
+        .metadata()
+        .map_err(|source| internal_error("prepared history could not be inspected", source))?;
+    let modified = metadata
+        .modified()
+        .map_err(|source| internal_error("prepared history timestamp could not be read", source))?;
+    let mut messages = conversation.messages.iter();
+    let offsets = build_offsets(
+        path,
+        HISTORY_VERSION,
+        Some(&mut |actual| {
+            if messages.next() != Some(&actual) {
+                return Err(invalid_data(
+                    "replacement history message verification failed",
+                ));
+            }
+            Ok(())
+        }),
+    )?;
+    if messages.next().is_some() {
+        return Err(invalid_data("replacement history is missing messages"));
+    }
+    if offsets
+        .header
+        .as_ref()
+        .is_none_or(|header| &header.owner != owner || header.generation != generation)
+    {
+        return Err(invalid_data(
+            "conversation history owner or generation does not match",
+        ));
+    }
+    let mut expected = history.clone();
+    expected.normalize();
+    if offsets.history.facts() != &expected {
+        return Err(invalid_data("replacement history verification failed"));
+    }
+    let prepared = PreparedGeneration(CachedConversationIndex {
+        path: path.to_path_buf(),
+        file_length: metadata.len(),
+        modified,
+        offsets,
+    });
+    prepared.check_prefix()?;
+    Ok(prepared)
+}
+
+fn write_snapshot(
+    path: &Path,
+    owner: &assistant_protocol::ConversationOwner,
+    generation: u64,
+    version: u32,
+    conversation: &ConversationSnapshot,
+    history: &StoredHistoryFacts,
+) -> StorageResult<()> {
     conversation
         .validate_tool_exchange_pairs()
         .map_err(|source| {
             invalid_data_with_source("replacement history splits a tool exchange", source)
         })?;
-    let mut file = super::create_new_private_file(path)?;
-    codec::write_generation(
-        &mut file,
-        owner,
-        generation,
-        conversation.messages.iter().cloned().map(Ok),
-        history,
-    )?;
-    file.flush()
-        .map_err(|source| internal_error("replacement history could not be flushed", source))?;
-    file.sync_all().map_err(|source| {
-        internal_error("replacement history could not be synchronized", source)
-    })?;
-    stream::verify_generation(
+    stream::write_generation_file(
         path,
         owner,
         generation,
+        version,
         conversation.messages.iter().cloned().map(Ok),
         history,
-    )?;
-    Ok(())
+    )
 }
 
 pub(super) fn create_empty(
@@ -678,6 +964,7 @@ pub(super) fn has_history_header(
     path: &Path,
     owner: &assistant_protocol::ConversationOwner,
     generation: u64,
+    version: u32,
 ) -> StorageResult<bool> {
     let file = File::open(path)
         .map_err(|source| internal_error("conversation file could not be opened", source))?;
@@ -685,7 +972,7 @@ pub(super) fn has_history_header(
     BufReader::new(file)
         .read_until(b'\n', &mut line)
         .map_err(|source| internal_error("conversation header could not be read", source))?;
-    let mut reader = RecordReader::new(std::io::Cursor::new(line));
+    let mut reader = RecordReader::with_version(std::io::Cursor::new(line), version);
     reader.next()?;
     if let Some(header) = reader.header {
         if &header.owner != owner || header.generation != generation {
@@ -711,7 +998,18 @@ fn decode_history(
     StoredHistoryFacts,
     Option<HistoryHeader>,
 )> {
-    let mut reader = RecordReader::new(reader);
+    decode_history_version(reader, HISTORY_VERSION)
+}
+
+fn decode_history_version(
+    reader: impl BufRead,
+    version: u32,
+) -> StorageResult<(
+    ConversationSnapshot,
+    StoredHistoryFacts,
+    Option<HistoryHeader>,
+)> {
+    let mut reader = RecordReader::with_version(reader, version);
     let mut messages = Vec::new();
     let mut facts = StoredHistoryFacts::default();
     while let Some(batch) = reader.next()? {

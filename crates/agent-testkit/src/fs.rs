@@ -13,7 +13,7 @@ use agent_tools::{
     FileToolContext, FileToolError, FsFuture, ListDirectoryRequest, ListDirectoryResult,
     PathResolutionError, ReadFileRequest, ReadFileResult, SearchFilesRequest, SearchFilesResult,
     SearchKind, SearchMatch, SearchTruncationReason, SessionPathResolver, WriteFileRequest,
-    WriteFileResult, exact_replace, paginate_with_line_numbers,
+    WriteFileResult, exact_replace, paginate_file_text,
 };
 
 /// 内存文件树 Fake；保存和返回的路径始终是绝对逻辑路径。
@@ -86,16 +86,7 @@ impl FileSystemTool for FakeFileSystemTool {
             let Some(content) = files.get(&request.path) else {
                 return Err(FileToolError::NotFound { path: request.path });
             };
-            let (content, next_offset, truncated) =
-                paginate_with_line_numbers(content, request.offset, request.limit);
-            Ok(ReadFileResult {
-                path: request.path,
-                offset: request.offset,
-                limit: request.limit,
-                content,
-                next_offset,
-                truncated,
-            })
+            Ok(paginate_file_text(content, request))
         })
     }
 
@@ -393,14 +384,14 @@ mod tests {
         let result = block_on(fake().read(
             ReadFileRequest {
                 path: path("src/main.rs"),
-                offset: nonzero(1),
-                limit: nonzero(1),
+                offset_chars: 0,
+                limit_chars: nonzero(13),
             },
             FileToolContext::default(),
         ))
         .expect("read succeeds");
-        assert_eq!(result.content, "1\tfn main() {}");
-        assert_eq!(result.next_offset, NonZeroU32::new(2));
+        assert_eq!(result.content, "fn main() {}\n");
+        assert_eq!(result.next_offset_chars, Some(13));
         assert!(result.truncated);
     }
 
@@ -479,8 +470,8 @@ mod tests {
         let error = block_on(fake.read(
             ReadFileRequest {
                 path: path("src/lib.rs"),
-                offset: nonzero(1),
-                limit: nonzero(1),
+                offset_chars: 0,
+                limit_chars: nonzero(1),
             },
             FileToolContext::default(),
         ))
@@ -506,8 +497,8 @@ mod tests {
             block_on(fake.read(
                 ReadFileRequest {
                     path: path("src"),
-                    offset: nonzero(1),
-                    limit: nonzero(1),
+                    offset_chars: 0,
+                    limit_chars: nonzero(1),
                 },
                 FileToolContext::default(),
             )),

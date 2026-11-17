@@ -261,7 +261,8 @@ fn consumed_selections_recover_from_files_while_another_input_remains_queued() {
         assert_eq!(waiting_row(&engine), original_waiting);
         // 只在此一次性夹具注入过期 SQL：正常读取不能消费其无效载荷，下一次准入必须拒绝。
         engine.connection.execute_batch(
-            "INSERT INTO runs(run_id,session_id,input_id,attempt,status,cancel_requested,created_at_ms,started_at_ms)
+            "INSERT INTO inputs(input_id,session_id,state,agent_variant,origin) VALUES('input-consumed','selection-owner','committed',NULL,NULL);
+             INSERT INTO runs(run_id,session_id,input_id,attempt,status,cancel_requested,created_at_ms,started_at_ms)
              VALUES('run-consumed','selection-owner','input-consumed',1,'completed',0,2000,2200);
              INSERT INTO skill_activations(activation_id,session_id,owner_kind,owner_id,run_id,input_id,message_id,name,catalog_revision,definition_digest,trigger,created_at_ms)
              VALUES('stale-activation','selection-owner','session','selection-owner','run-consumed','input-consumed','user-consumed','review','','','user',0);

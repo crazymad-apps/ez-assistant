@@ -1,6 +1,43 @@
+use std::collections::HashMap;
+
 use super::*;
 
 impl State {
+    fn conversation_at_generation(
+        &self,
+        owner: &ConversationOwner,
+        generation: u64,
+    ) -> Result<&ConversationSnapshot, StoreError> {
+        match owner {
+            ConversationOwner::MainSession { session_id } => {
+                let session = self
+                    .sessions
+                    .get(session_id)
+                    .ok_or_else(|| conflict("session does not exist in runtime storage"))?;
+                if session.body_generation != generation {
+                    return Err(conflict("conversation generation changed"));
+                }
+                self.conversations
+                    .get(session_id)
+                    .ok_or_else(|| conflict("session conversation does not exist"))
+            }
+            ConversationOwner::ChildTask {
+                session_id,
+                child_task_id,
+            } => {
+                let task = self
+                    .child_history(session_id, child_task_id)
+                    .ok_or_else(|| conflict("child task does not exist in session"))?;
+                if task.body_generation != generation {
+                    return Err(conflict("conversation generation changed"));
+                }
+                self.child_conversations
+                    .get(&(session_id.clone(), child_task_id.clone()))
+                    .ok_or_else(|| conflict("child conversation does not exist"))
+            }
+        }
+    }
+
     pub(super) fn conversation_history(
         &self,
         owner: ConversationOwner,
@@ -88,41 +125,58 @@ impl VolatileRuntimeStore {
     ) -> StoreFuture<'_, StoredConversationWindow> {
         Box::pin(async move {
             let state = self.lock()?;
-            let snapshot = match &request.owner {
-                ConversationOwner::MainSession { session_id } => {
-                    let session = state
-                        .sessions
-                        .get(session_id)
-                        .ok_or_else(|| conflict("session does not exist in runtime storage"))?;
-                    if session.body_generation != request.generation {
-                        return Err(conflict("conversation generation changed"));
-                    }
-                    state
-                        .conversations
-                        .get(session_id)
-                        .cloned()
-                        .ok_or_else(|| conflict("session conversation does not exist"))?
+            let snapshot = state.conversation_at_generation(&request.owner, request.generation)?;
+            let history = state.conversation_history(request.owner.clone())?.facts;
+            conversation_window(snapshot, &request, history)
+        })
+    }
+
+    pub(super) fn read_conversation_navigation(
+        &self,
+        request: ConversationNavigationRequest,
+    ) -> StoreFuture<'_, StoredConversationNavigation> {
+        use crate::{
+            ConversationNavigationIndex, ConversationNavigationRead, NavigationHistory,
+            NavigationMessageKind, conversation_preview_text,
+        };
+
+        Box::pin(async move {
+            let state = self.lock()?;
+            let snapshot = state.conversation_at_generation(&request.owner, request.generation)?;
+            let history = state.conversation_history(request.owner.clone())?.facts;
+            let facts = NavigationHistory::new(&history);
+            let is_child = matches!(request.owner, ConversationOwner::ChildTask { .. });
+            let mut index = ConversationNavigationIndex::default();
+            let mut ordinal = 0;
+            let mut target = None;
+            for message in &snapshot.messages {
+                let Some(kind) = NavigationMessageKind::classify(message) else {
+                    continue;
+                };
+                let id = message_id(message);
+                if matches!(&request.read, ConversationNavigationRead::Preview { message_id } if message_id == id)
+                {
+                    target = Some((ordinal, message));
                 }
-                ConversationOwner::ChildTask {
-                    session_id,
-                    child_task_id,
-                } => {
-                    let task = state
-                        .child_history(session_id, child_task_id)
-                        .ok_or_else(|| conflict("child task does not exist in session"))?;
-                    if task.body_generation != request.generation {
-                        return Err(conflict("conversation generation changed"));
-                    }
-                    state
-                        .child_conversations
-                        .get(&(session_id.clone(), child_task_id.clone()))
-                        .cloned()
-                        .ok_or_else(|| conflict("child conversation does not exist"))?
+                index.push(ordinal, id, kind, &facts, is_child);
+                ordinal += 1;
+            }
+            let runs: HashMap<_, _> = history.runs.iter().map(|run| (&run.run_id, run)).collect();
+            let run = |id: &RunId| runs.get(id).copied();
+            match request.read {
+                ConversationNavigationRead::Page { boundary, limit } => {
+                    index.page(boundary, limit, &request.context, run)
                 }
-            };
-            let mut window = conversation_window(snapshot, &request);
-            window.history = Some(state.conversation_history(request.owner)?.facts);
-            Ok(window)
+                ConversationNavigationRead::Preview { message_id } => {
+                    Ok(StoredConversationNavigation::Preview(
+                        target
+                            .filter(|(ordinal, _)| {
+                                index.permits_preview(*ordinal, &message_id, &request.context, run)
+                            })
+                            .map(|(_, message)| conversation_preview_text(message)),
+                    ))
+                }
+            }
         })
     }
 
@@ -355,7 +409,7 @@ impl VolatileRuntimeStore {
 
     pub(super) fn rewrite_from_user(
         &self,
-        rewrite: ConversationRewrite,
+        mut rewrite: ConversationRewrite,
     ) -> StoreFuture<'_, RewriteResult> {
         Box::pin(async move {
             rewrite
@@ -370,6 +424,52 @@ impl VolatileRuntimeStore {
                 })?;
             let mut state = self.lock()?;
             ensure_idle(&state, &rewrite.session_id)?;
+            if state.feedback.values().any(|request| {
+                request.session_id == rewrite.session_id
+                    && request.status == assistant_protocol::FeedbackStatus::Pending
+            }) {
+                return Err(conflict("session has pending feedback"));
+            }
+            let session = state
+                .sessions
+                .get(&rewrite.session_id)
+                .ok_or_else(|| conflict("session does not exist"))?;
+            let current = state
+                .conversations
+                .get(&rewrite.session_id)
+                .ok_or_else(|| conflict("rewrite conversation does not exist"))?;
+            if session.body_generation != rewrite.expected_generation
+                || session.message_count != rewrite.expected_message_count
+                || u64::try_from(current.messages.len()).ok()
+                    != Some(rewrite.expected_message_count)
+            {
+                return Err(conflict(
+                    "history rewrite source generation or message count changed",
+                ));
+            }
+            let body_generation = session
+                .body_generation
+                .checked_add(1)
+                .ok_or_else(|| conflict("conversation generation is exhausted"))?;
+            let count = u64::try_from(rewrite.conversation.messages.len())
+                .map_err(|_| conflict("rewrite message count exceeds range"))?;
+            if !current
+                .messages
+                .get(rewrite.conversation.messages.len().saturating_sub(1))
+                .is_some_and(|message| message_id(message) == &rewrite.target_user_message_id)
+                || rewrite.input.origin != InputOrigin::User
+                || rewrite.input.cross_session.is_some()
+            {
+                return Err(conflict("replacement target or input origin is invalid"));
+            }
+            if let Some(key) = &rewrite.input.idempotency_key
+                && (state.message_request(&rewrite.session_id, key).is_some()
+                    || state.command_request(&rewrite.session_id, key).is_some())
+            {
+                return Err(conflict(
+                    "replacement Input request key is already accepted",
+                ));
+            }
             state.ensure_new_input_identity(
                 &rewrite.session_id,
                 &rewrite.input.input_id,
@@ -383,7 +483,7 @@ impl VolatileRuntimeStore {
             {
                 return Err(conflict("session is archived or missing"));
             }
-            let target_order = state
+            state
                 .histories
                 .get(&rewrite.session_id)
                 .into_iter()
@@ -391,7 +491,6 @@ impl VolatileRuntimeStore {
                 .find(|input| {
                     !input.inherited && input.user_message_id == rewrite.target_user_message_id
                 })
-                .map(|input| input.queue_order)
                 .ok_or_else(|| conflict("target user message does not belong to an input"))?;
             let new_message = rewrite.input.message.clone();
             if rewrite.input.session_id != rewrite.session_id
@@ -413,14 +512,26 @@ impl VolatileRuntimeStore {
                     || goal.goal_id != current.goal_id
                     || goal.session_id != current.session_id
                     || goal.objective != current.objective
-                    || goal.state != StoredGoalState::Paused
-                    || goal.pause_reason != Some(StoredGoalPauseReason::RecoveryRequired)
+                    || !rewrite
+                        .conversation
+                        .messages
+                        .iter()
+                        .any(|message| message_id(message) == &goal.objective.source_message_id)
+                    || current.state != StoredGoalState::Paused
+                    || goal.state != StoredGoalState::Running
+                    || goal.pause_reason.is_some()
+                    || rewrite.input.goal_binding.as_ref().is_none_or(|binding| {
+                        binding.goal_id != goal.goal_id
+                            || binding.generation != goal.generation
+                            || binding.turn != goal.turn
+                            || binding.reply_route.is_some()
+                    })
                     || goal.generation
                         != current
                             .generation
                             .checked_add(1)
                             .ok_or_else(|| conflict("Goal generation is exhausted"))?
-                    || goal.turn != current.turn
+                    || current.turn.checked_add(1) != Some(goal.turn)
                     || goal.budget != current.budget
                     || goal.consecutive_failures != current.consecutive_failures
                     || goal.created_at_ms != current.created_at_ms
@@ -429,31 +540,38 @@ impl VolatileRuntimeStore {
                 {
                     return Err(conflict("history rewrite Goal projection is invalid"));
                 }
+            } else if state.goals.contains_key(&rewrite.session_id)
+                || rewrite.input.goal_binding.is_some()
+            {
+                return Err(conflict("rewrite Goal changed before commit"));
             }
+            validate_input_message_with_channel_source(
+                rewrite.input.origin,
+                rewrite.input.goal_binding.as_ref(),
+                rewrite.input.cross_session.as_ref(),
+                rewrite.input.channel_source.as_ref(),
+                &new_message,
+            )
+            .map_err(|_| conflict("replacement input origin is invalid"))?;
+            validate_volatile_input_activation(&state, &rewrite.input)?;
+            validate_volatile_mcp_selection(&state, &rewrite.input)?;
 
-            let mut removed = state
-                .inputs
-                .values()
-                .filter(|input| {
-                    input.session_id == rewrite.session_id && input.queue_order >= target_order
-                })
-                .map(|input| input.input_id.clone())
-                .collect::<std::collections::BTreeSet<_>>();
-            removed.extend(
-                state
-                    .histories
-                    .get(&rewrite.session_id)
-                    .into_iter()
-                    .flat_map(|history| &history.inputs)
-                    .filter(|input| !input.inherited && input.queue_order >= target_order)
-                    .map(|input| input.input_id.clone()),
-            );
             let retained_message_ids = rewrite
                 .conversation
                 .messages
                 .iter()
                 .map(message_id)
                 .cloned()
+                .collect::<BTreeSet<_>>();
+            let removed = state
+                .histories
+                .get(&rewrite.session_id)
+                .into_iter()
+                .flat_map(|history| &history.inputs)
+                .filter(|input| {
+                    !input.inherited && !retained_message_ids.contains(&input.user_message_id)
+                })
+                .map(|input| input.input_id.clone())
                 .collect::<BTreeSet<_>>();
             state.retain_rewritten_history(&rewrite.session_id, &removed, &retained_message_ids);
             let retained_children = state
@@ -463,6 +581,18 @@ impl VolatileRuntimeStore {
                 .flat_map(|h| &h.child_tasks)
                 .map(|c| c.child_task_id.clone())
                 .collect::<BTreeSet<_>>();
+            ConversationRewrite::rebase_quotes(
+                &rewrite.session_id,
+                &mut rewrite.conversation,
+                body_generation,
+                rewrite.expected_generation,
+                &retained_children,
+            );
+            let Some(ConversationMessage::User(new_message)) = rewrite.conversation.messages.last()
+            else {
+                unreachable!("validated replacement user");
+            };
+            let new_message = new_message.clone();
             state.message_cards.retain(|_, card| {
                 crate::message_card_owner(&card.summary.owner).0 != &rewrite.session_id
                     || match &card.summary.owner {
@@ -503,17 +633,6 @@ impl VolatileRuntimeStore {
                 command.session_id != rewrite.session_id
                     || retained_message_ids.contains(&command.user_message_id)
             });
-            let retained_commands = state
-                .histories
-                .get(&rewrite.session_id)
-                .into_iter()
-                .flat_map(|history| history.commands.iter())
-                .filter(|command| retained_message_ids.contains(&command.user_message_id))
-                .map(|command| command.input_id.clone())
-                .collect::<BTreeSet<_>>();
-            state.command_identities.retain(|id, identity| {
-                identity.session_id != rewrite.session_id || retained_commands.contains(id)
-            });
             if let Some(effect) = rewrite.goal_effect.as_ref() {
                 state
                     .goals
@@ -549,7 +668,7 @@ impl VolatileRuntimeStore {
                 reasoning_effort: None,
                 cancel_requested: false,
                 error: None,
-                message_ids: vec![new_message.id],
+                message_ids: vec![new_message.id.clone()],
                 message_steps: std::collections::HashMap::new(),
                 created_at_ms: rewrite.input.accepted_at_ms,
                 started_at_ms: None,
@@ -558,29 +677,44 @@ impl VolatileRuntimeStore {
             state
                 .conversations
                 .insert(rewrite.session_id.clone(), rewrite.conversation.clone());
-            let count = u64::try_from(rewrite.conversation.messages.len()).map_err(|source| {
-                StoreError::with_source(
-                    StoreErrorKind::Internal,
-                    "conversation message count exceeds storage range",
-                    source,
-                )
-            })?;
             let session = state
                 .sessions
                 .get_mut(&rewrite.session_id)
                 .expect("checked session");
-            session.body_generation += 1;
-            let body_generation = session.body_generation;
+            session.body_generation = body_generation;
             session.message_count = count;
-            session.current_variant = rewrite.input.agent_variant;
             state.inputs.insert(input.input_id.clone(), input.clone());
             state
                 .input_identities
                 .insert(input.input_id.clone(), InputIdentity::from_input(&input));
             state.runs.insert(run.run_id.clone(), run.clone());
+            if let Some(activation) = state
+                .inputs
+                .get_mut(&input.input_id)
+                .and_then(|input| input.skill_activation.as_mut())
+            {
+                activation.run_id = Some(run.run_id.clone());
+            }
+            if let Some(selection) = rewrite.input.mcp_selection {
+                state
+                    .mcp_input_selections
+                    .insert(selection.selection_id.clone(), selection);
+            }
             state.record_run_history(&run.run_id)?;
+            let fact = state
+                .histories
+                .get_mut(&rewrite.session_id)
+                .and_then(|history| {
+                    history
+                        .inputs
+                        .iter_mut()
+                        .find(|fact| fact.input_id == input.input_id)
+                })
+                .expect("rewrite input was frozen by record_run_history");
+            fact.rewritten_from = Some(rewrite.target_user_message_id);
             Ok(RewriteResult {
                 input,
+                user_message: new_message,
                 run,
                 body_generation,
             })

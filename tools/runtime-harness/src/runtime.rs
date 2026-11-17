@@ -261,7 +261,7 @@ impl HarnessRun {
                 self.events.terminal = Some(TerminalKind::Failed);
                 self.events.dropped_events = *dropped_events;
             }
-            AgentEvent::ExecutionCancelled { dropped_events } => {
+            AgentEvent::ExecutionCancelled { dropped_events, .. } => {
                 self.events.terminal = Some(TerminalKind::Cancelled);
                 self.events.dropped_events = *dropped_events;
             }
@@ -761,6 +761,7 @@ mod tests {
                 kind: BudgetKind::Steps,
                 limit: 1,
             },
+            partial: None,
             consumption: Default::default(),
         }
     }
@@ -842,6 +843,7 @@ mod tests {
             .finish_run(
                 &first.run_id,
                 ExecutionOutcome::Cancelled {
+                    partial: None,
                     consumption: Default::default(),
                 },
             )
@@ -862,6 +864,7 @@ mod tests {
                 .finish_run(
                     &prepared.run_id,
                     ExecutionOutcome::Cancelled {
+                        partial: None,
                         consumption: Default::default(),
                     },
                 )
@@ -937,6 +940,7 @@ mod tests {
             .finish_run(
                 &cancelled.run_id,
                 ExecutionOutcome::Cancelled {
+                    partial: None,
                     consumption: Default::default(),
                 },
             )
@@ -964,13 +968,17 @@ mod tests {
         runtime
             .observe_event(
                 &prepared.run_id,
-                &AgentEvent::ExecutionCancelled { dropped_events: 3 },
+                &AgentEvent::ExecutionCancelled {
+                    dropped_events: 3,
+                    partial: None,
+                },
             )
             .expect("observe terminal");
         runtime
             .finish_run(
                 &prepared.run_id,
                 ExecutionOutcome::Cancelled {
+                    partial: None,
                     consumption: Default::default(),
                 },
             )

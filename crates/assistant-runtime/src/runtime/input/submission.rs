@@ -5,7 +5,8 @@
 //! 发布观察事件并唤醒执行队列；Channel 不会因此形成第二套会话或消息存储。
 
 use assistant_protocol::{
-    IdempotencyKey, SessionTitleOrigin, SubmitInputMode, SubmitInputRequest, SubmitInputResult,
+    IdempotencyKey, InputDelivery, SessionTitleOrigin, SubmitInputMode, SubmitInputRequest,
+    SubmitInputResult,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::{Digest, Sha256};
@@ -48,7 +49,8 @@ impl AssistantRuntime {
                     reason: "device source is not authorized",
                 });
             }
-            if input.mode != SubmitInputMode::Normal
+            if input.delivery == InputDelivery::Intervention
+                || input.mode != SubmitInputMode::Normal
                 || !input.attachment_ids.is_empty()
                 || !input.quotes.is_empty()
                 || input.skill_name.is_some()
@@ -59,6 +61,9 @@ impl AssistantRuntime {
                 });
             }
             input.idempotency_key = Some(device_input_idempotency_key(source)?);
+        }
+        if input.delivery == InputDelivery::Intervention {
+            return self.submit_intervention(input, request.source).await;
         }
         self.accept_session_input(input, request.source, None, None)
             .await
@@ -78,6 +83,33 @@ impl AssistantRuntime {
         .await
     }
 
+    async fn duplicate_input_result(
+        &self,
+        session: &crate::session::SessionController,
+        accepted: &crate::AcceptedInput,
+        agent_shell_target: Option<assistant_protocol::ShellKind>,
+    ) -> RuntimeResult<(SubmitInputResult, bool)> {
+        let original = match accepted {
+            crate::AcceptedInput::Control { input, .. } => input.agent_shell_target,
+            crate::AcceptedInput::Historical { input, .. } => input.agent_shell_target,
+        };
+        if original != agent_shell_target {
+            return Err(RuntimeError::InvalidRequest {
+                reason: "input idempotency key was reused with a different shell target",
+            });
+        }
+        Ok((
+            SubmitInputResult {
+                user_message: None,
+                generation: None,
+                not_executed: None,
+                input_id: accepted.input_id().clone(),
+                run: self.project_accepted_run(session, accepted).await?,
+            },
+            true,
+        ))
+    }
+
     /// 完成一次 Session Input 的可靠接受与内存投影。
     ///
     /// 调用期间持有 Runtime 操作/模型绑定读 gate 和目标 Session mutation gate，保证配置绑定与
@@ -86,7 +118,7 @@ impl AssistantRuntime {
     /// 调用返回错误，后续可从 Store 权威事实恢复。
     pub(in crate::runtime) async fn accept_session_input(
         &self,
-        mut request: SubmitInputRequest,
+        request: SubmitInputRequest,
         channel_source: InputChannelSource,
         agent_shell_target: Option<assistant_protocol::ShellKind>,
         feedback_reply: Option<assistant_protocol::AnswerFeedbackRequest>,
@@ -94,16 +126,29 @@ impl AssistantRuntime {
         let _operation = self.operation_gate.read().await;
         let _binding = self.model_binding_gate.read().await;
         self.ensure_running()?;
-        if request.message.trim().is_empty()
-            && request.attachment_ids.is_empty()
-            && request.quotes.is_empty()
-        {
-            return Err(RuntimeError::InvalidRequest {
-                reason: "input must contain text, attachments, or quotes",
-            });
-        }
+        validate_input_body(&request)?;
         let session = self.session_loader.prepare(&request.session_id).await?;
         let _mutation = session.mutation().await;
+        self.accept_input_locked(
+            &session,
+            request,
+            channel_source,
+            agent_shell_target,
+            feedback_reply,
+        )
+        .await
+    }
+
+    /// 接纳及投影共用路径。调用方持有操作、模型绑定与 Session mutation gate。
+    /// 介入会在释放 mutation 前继续调整同一 Input 的持久顺序；重复接纳只读取原结果。
+    pub(super) async fn accept_input_locked(
+        &self,
+        session: &std::sync::Arc<crate::session::SessionController>,
+        mut request: SubmitInputRequest,
+        channel_source: InputChannelSource,
+        agent_shell_target: Option<assistant_protocol::ShellKind>,
+        feedback_reply: Option<assistant_protocol::AnswerFeedbackRequest>,
+    ) -> RuntimeResult<(SubmitInputResult, bool)> {
         session.ensure_active()?;
         let feedback_answer = if let Some(reply) = feedback_reply.as_ref() {
             let mut feedback = session
@@ -129,11 +174,12 @@ impl AssistantRuntime {
             feedback.answers = Some(reply.answers.clone());
             Some(feedback)
         } else {
-            if session
-                .lock_state()?
-                .feedback
-                .values()
-                .any(|r| r.status == assistant_protocol::FeedbackStatus::Pending)
+            if request.delivery != InputDelivery::Intervention
+                && session
+                    .lock_state()?
+                    .feedback
+                    .values()
+                    .any(|r| r.status == assistant_protocol::FeedbackStatus::Pending)
             {
                 return Err(crate::feedback::invalid(
                     "请回复当前问题，或取消等待后发送新指令",
@@ -142,32 +188,12 @@ impl AssistantRuntime {
             None
         };
 
-        if let Some(key) = request.idempotency_key.as_ref()
-            && session
-                .lock_state()?
-                .commands
-                .values()
-                .any(|command| command.idempotency_key.as_ref() == Some(key))
+        if let Some(key) = &request.idempotency_key
+            && let Some(accepted) = self.find_message_acceptance(session, key).await?
         {
-            return Err(RuntimeError::InvalidRequest {
-                reason: "input idempotency key belongs to a session control command",
-            });
-        }
-        // 先命中 Session 内已恢复的幂等事实，使合法重试不受当前配置、附件或 Skill 变化影响。
-        if let Some(key) = request.idempotency_key.as_ref()
-            && let Some((input_id, run)) = self.find_idempotent_run(&session, key).await?
-        {
-            if session
-                .lock_state()?
-                .inputs
-                .get(&input_id)
-                .is_none_or(|input| input.stored.agent_shell_target != agent_shell_target)
-            {
-                return Err(RuntimeError::InvalidRequest {
-                    reason: "input idempotency key was reused with a different shell target",
-                });
-            }
-            return Ok((SubmitInputResult { input_id, run }, true));
+            return self
+                .duplicate_input_result(session, &accepted, agent_shell_target)
+                .await;
         }
         session.ensure_not_compacting()?;
         session.ensure_healthy()?;
@@ -210,12 +236,10 @@ impl AssistantRuntime {
         let goal_submission = self.goal_submission(session.as_ref(), request.mode).await?;
         let generated_title = automatic_session_title(&request.message);
         let files = self.resolve_file_references(&request.session_id, &request.attachment_ids)?;
-        let history = crate::runtime::load_identity_history(self.store.as_ref(), &session).await?;
         let mut message = create_user_message(request.message, files, request.variant)?;
-        {
-            let state = session.lock_state()?;
-            crate::run::ensure_message_id_available(&mut message.id, &state, &history)?;
-        }
+        let input_id =
+            crate::runtime::allocate_new_input(self.store.as_ref(), session, &mut message.id)
+                .await?;
         insert_quotes(&mut message, &quotes)?;
         // 结构化 channel_source 才是授权和回复路由事实；此 InternalContext 只提示模型本轮交互形态。
         if let Some(text) = channel_input_context(&channel_source) {
@@ -228,17 +252,18 @@ impl AssistantRuntime {
                 },
             )?;
         }
-        let (input_id, should_generate_title) = {
+        let should_generate_title = {
             let state = session.lock_state()?;
-            (
-                crate::run::allocate_input_id(&state, &history)?,
-                state.title_origin == SessionTitleOrigin::Generated
-                    && state.inputs.is_empty()
-                    && state.message_count == 0,
-            )
+            state.title_origin == SessionTitleOrigin::Generated
+                && state.inputs.is_empty()
+                && state.message_count == 0
         };
         let accepted_at_ms = super::super::now_ms()?;
         let mut prepared_goal = goal_submission.prepare(&mut message, accepted_at_ms)?;
+        // 介入使用普通队列的优先操作。已绑定 Goal 的新输入由原 Goal 队列接纳。
+        if request.delivery == InputDelivery::Intervention && prepared_goal.is_some() {
+            return Err(RuntimeError::QueueConflict);
+        }
         if let Some(goal) = prepared_goal.as_mut()
             && let Some((server_key, _)) = selected_mcp.as_ref()
         {
@@ -261,7 +286,7 @@ impl AssistantRuntime {
                 })
             })
             .transpose()?;
-        let skill_catalog = self.current_skill_catalog(&session).await?;
+        let skill_catalog = self.current_skill_catalog(session).await?;
         let skill_activation = selected_skill
             .as_ref()
             .map(|name| {
@@ -351,27 +376,9 @@ impl AssistantRuntime {
             });
         }
         if accepted.is_duplicate() {
-            // Store 级幂等是跨进程重启的最终防线；重复请求不得再次附加消息或修改队列投影。
-            let run = if let Some(run_id) = accepted.run_id() {
-                Some(
-                    self.product_run_snapshots(&session)
-                        .await?
-                        .into_iter()
-                        .find(|run| &run.run_id == run_id && &run.input_id == accepted.input_id())
-                        .ok_or(RuntimeError::InternalStateUnavailable {
-                            component: "idempotent run projection",
-                        })?,
-                )
-            } else {
-                None
-            };
-            return Ok((
-                SubmitInputResult {
-                    input_id: accepted.input_id().clone(),
-                    run,
-                },
-                true,
-            ));
+            return self
+                .duplicate_input_result(session, &accepted, agent_shell_target)
+                .await;
         }
         if let Some(feedback) = feedback_answer {
             let mut state = session.lock_state()?;
@@ -465,12 +472,27 @@ impl AssistantRuntime {
         self.wake_queue(session.clone())?;
         Ok((
             SubmitInputResult {
+                user_message: None,
+                generation: None,
+                not_executed: None,
                 input_id: projection.input_id,
                 run: None,
             },
             false,
         ))
     }
+}
+
+pub(super) fn validate_input_body(request: &SubmitInputRequest) -> RuntimeResult<()> {
+    if request.message.trim().is_empty()
+        && request.attachment_ids.is_empty()
+        && request.quotes.is_empty()
+    {
+        return Err(RuntimeError::InvalidRequest {
+            reason: "input must contain text, attachments, or quotes",
+        });
+    }
+    Ok(())
 }
 
 /// 将设备侧输入身份收敛到 Runtime 既有幂等键空间。

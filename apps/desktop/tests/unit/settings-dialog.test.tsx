@@ -1,3 +1,4 @@
+import { sidebarFixture } from "../support/sidebarFixture";
 import { AppearanceProvider } from '../../src/stores/AppearanceContext';
 import { AppearanceStore } from '../../src/stores/AppearanceStore';
 import { applyDocumentTheme } from '../../src/styles/themePresets';
@@ -1125,8 +1126,8 @@ function mcpSettingsStore(): RootStore {
 function applicationWithSession(session: SessionSummary): ApplicationSnapshot {
   return {
     runtime_lifecycle: 'running',
-    active_sessions_next_offset: null,
-    archived_sessions_next_offset: null,
+    ...sidebarFixture({ active_next: null, archived_next: null, active: [session], archived: [] }),
+
     configuration: {
       config_path: null,
       revision: 'revision-1',
@@ -1137,15 +1138,15 @@ function applicationWithSession(session: SessionSummary): ApplicationSnapshot {
     providers: [],
     model_settings: { default_model: null, vision_model: null },
     workspaces: [],
-    active_sessions: [session],
-    archived_sessions: [],
+
+
     controller_availability: { status: 'unavailable' },
     additional_controller_count: 0,
     capabilities: {
       conversation_paging: true,
       mcp_tools: true,
       mcp_management: true,
-      session_commands: true,
+      session_commands: true, user_message_edit: false,
       tool_detail: true,
       queue_control: true,
       approval_queue: true,

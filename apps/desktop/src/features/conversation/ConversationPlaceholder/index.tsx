@@ -8,11 +8,8 @@ export const ConversationPlaceholder = observer(function ConversationPlaceholder
   const store = useRootStore();
   const application = store.projection.application;
   const session_id = store.navigation.selected_session_id;
-  const session = application?.active_sessions.find((item) => item.session_id === session_id)
-    ?? application?.archived_sessions.find((item) => item.session_id === session_id);
-  const workspace = application?.workspaces.find(
-    (item) => item.workspace_id === session?.workspace_id,
-  );
+  const session = store.projection.sessionSummary(session_id);
+  const workspace = store.projection.workspaceSummary(session?.workspace_id);
   const first_active_workspace = application?.workspaces.find(
     (item) => item.lifecycle === "active",
   );

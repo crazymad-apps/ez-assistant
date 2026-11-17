@@ -2,7 +2,11 @@ use super::*;
 
 impl VolatileRuntimeStore {
     /// 持有 Store 唯一锁核对并领取暂存输入；此处才创建 Run，不写会话历史。
-    pub(super) fn claim_input(&self, run: StoredRun) -> StoreFuture<'_, ()> {
+    pub(super) fn claim_input(
+        &self,
+        run: StoredRun,
+        goal_resume: Option<GoalHeldInputResume>,
+    ) -> StoreFuture<'_, ()> {
         Box::pin(async move {
             let mut state = self.lock()?;
             let input = state
@@ -35,6 +39,12 @@ impl VolatileRuntimeStore {
             {
                 return Err(conflict("Input already claimed or invalid Run"));
             }
+            if let Some(resume) = &goal_resume {
+                if resume.session_id != run.session_id || resume.input_id != run.input_id {
+                    return Err(conflict("Goal resume belongs to a different Run claim"));
+                }
+                state.bind_held_input_to_resumed_goal(resume)?;
+            }
             if let Some(activation) = state
                 .inputs
                 .get_mut(&run.input_id)
@@ -57,25 +67,14 @@ impl VolatileRuntimeStore {
     pub(super) fn accept_input(&self, input: NewStoredInput) -> StoreFuture<'_, AcceptedInput> {
         Box::pin(async move {
             let mut state = self.lock()?;
-            if input.idempotency_key.as_ref().is_some_and(|key| {
-                state.command_identities.values().any(|command| {
-                    command.session_id == input.session_id
-                        && command.idempotency_key.as_ref() == Some(key)
-                })
-            }) {
-                return Err(conflict(
-                    "message idempotency key belongs to a session command",
-                ));
-            }
-            if let Some(key) = input.idempotency_key.as_ref()
-                && let Some((id, identity)) =
-                    state.input_identities.iter().find(|(_, candidate)| {
-                        candidate.session_id == input.session_id
-                            && candidate.idempotency_key.as_ref() == Some(key)
-                    })
-            {
-                let existing = state.input_projection(&identity.session_id, id)?;
-                return state.existing_input_acceptance(existing);
+            if let Some(key) = &input.idempotency_key {
+                if state.command_request(&input.session_id, key).is_some() {
+                    return Err(conflict("message request key belongs to a session command"));
+                }
+                if let Some(id) = state.message_request(&input.session_id, key) {
+                    let existing = state.input_projection(&input.session_id, id)?;
+                    return state.existing_input_acceptance(existing);
+                }
             }
             state.ensure_new_input_identity(
                 &input.session_id,
@@ -120,17 +119,7 @@ impl VolatileRuntimeStore {
                 }
             }
             validate_volatile_input_activation(&state, &input)?;
-            if let Some(selection) = input.mcp_selection.as_ref()
-                && (input.origin != InputOrigin::User
-                    || state.contains_mcp_selection(&input.session_id, &selection.selection_id)
-                    || selection.session_id != input.session_id
-                    || selection.input_id.as_ref() != Some(&input.input_id)
-                    || selection.message_id != input.message.id
-                    || selection.display_name.trim().is_empty()
-                    || selection.display_name.len() > 128)
-            {
-                return Err(conflict("MCP input selection is inconsistent"));
-            }
+            validate_volatile_mcp_selection(&state, &input)?;
             if input.new_goal.is_some() && input.resumed_goal.is_some() {
                 return Err(conflict("input cannot start and resume a Goal together"));
             }
@@ -382,21 +371,13 @@ impl VolatileRuntimeStore {
         Box::pin(async move {
             let mut state = self.lock()?;
             if let Some(key) = command.idempotency_key.as_ref() {
-                if state.input_identities.values().any(|input| {
-                    input.session_id == command.session_id
-                        && input.idempotency_key.as_ref() == Some(key)
-                }) {
+                if state.message_request(&command.session_id, key).is_some() {
                     return Err(conflict(
-                        "session command idempotency key belongs to a message input",
+                        "session command request key belongs to a message input",
                     ));
                 }
-                if let Some((id, identity)) =
-                    state.command_identities.iter().find(|(_, candidate)| {
-                        candidate.session_id == command.session_id
-                            && candidate.idempotency_key.as_ref() == Some(key)
-                    })
-                {
-                    let existing = state.command_projection(&identity.session_id, id)?;
+                if let Some(id) = state.command_request(&command.session_id, key) {
+                    let existing = state.command_projection(&command.session_id, id)?;
                     if existing.command != command.command {
                         return Err(conflict(
                             "session command idempotency key was reused with different content",
@@ -451,10 +432,6 @@ impl VolatileRuntimeStore {
                 state: StoredSessionCommandState::Queued,
                 accepted_at_ms: command.accepted_at_ms,
             };
-            state.command_identities.insert(
-                stored.input_id.clone(),
-                InputIdentity::from_command(&stored),
-            );
             state
                 .session_commands
                 .insert(stored.input_id.clone(), stored.clone());
@@ -610,7 +587,8 @@ impl VolatileRuntimeStore {
                 return Err(conflict("only the latest run can be retried"));
             }
             state.ensure_new_run_identity(&attempt.session_id, &attempt.run_id)?;
-            let input = state.input_projection(&attempt.session_id, &input_id)?;
+            let mut input = state.input_projection(&attempt.session_id, &input_id)?;
+            input.idempotency_key = None;
             let run = StoredRun {
                 shell: None,
                 run_id: attempt.run_id,

@@ -53,7 +53,7 @@ describe('通知可靠内容', () => {
     expect(await resolveNotificationContent(client, notification)).toMatchObject({ title: '来源会话', body: '旧轮回复：已完成 检查' });
     expect(requests).toEqual([
       { type: 'get_session', payload: { session_id: 'source' } },
-      { type: 'get_conversation_page_around_run', payload: { session_id: 'source', run_id: 'old-run', limit: 1 } },
+      { type: 'get_conversation_page_around_run', payload: { session_id: 'source', run_id: 'old-run', turn_limit: 1 } },
     ]);
   });
 

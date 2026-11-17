@@ -173,8 +173,13 @@ async fn config_reload_ensures_one_controller_and_role_restricts_lifecycle_opera
         .expect("application snapshot")
         .snapshot
         .value;
-    assert_eq!(application.active_sessions.len(), 1);
-    let controller = &application.active_sessions[0];
+    assert!(
+        application
+            .session_groups
+            .iter()
+            .all(|group| group.sessions.is_empty())
+    );
+    let controller = runtime.controller_summary().await.unwrap();
     assert_eq!(controller.title, "主控会话");
     assert_eq!(
         controller.role,
@@ -236,11 +241,7 @@ async fn config_reload_ensures_one_controller_and_role_restricts_lifecycle_opera
         .expect("multi-controller snapshot")
         .snapshot
         .value;
-    let mut controllers = application
-        .active_sessions
-        .iter()
-        .filter(|session| session.role == assistant_protocol::SessionRoleSnapshot::Controller)
-        .collect::<Vec<_>>();
+    let mut controllers = runtime.controller_summaries().await.unwrap();
     controllers.sort_by(|left, right| {
         left.created_at_ms
             .cmp(&right.created_at_ms)
@@ -276,10 +277,15 @@ async fn missing_configuration_allows_controller_setup_without_a_model() {
         .expect("application snapshot")
         .snapshot
         .value;
-    assert_eq!(application.active_sessions.len(), 1);
+    assert!(
+        application
+            .session_groups
+            .iter()
+            .all(|group| group.sessions.is_empty())
+    );
     assert!(application.providers.is_empty());
     assert!(application.model_settings.default_model.is_none());
-    let controller = &application.active_sessions[0];
+    let controller = runtime.controller_summary().await.unwrap();
     assert!(controller.model_selection.is_none());
     assert_eq!(
         application.controller_availability,
@@ -662,6 +668,7 @@ async fn user_skill_activation_is_frozen_with_queue_and_conversation_projections
 
     let submitted = runtime
         .submit_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "review this change".to_owned(),
@@ -915,6 +922,7 @@ async fn model_load_skill_commits_hidden_activation_and_continues_at_the_next_ru
         .session_id;
     let submitted = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "review with a skill".to_owned(),
@@ -1018,6 +1026,7 @@ async fn goal_and_skill_keep_objective_clean_and_internal_boundaries_ordered() {
     controller.lock_state().expect("state").resume_required = true;
     let submitted = runtime
         .submit_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::StartGoal,
             session_id,
             message: "ship release".to_owned(),
@@ -1120,6 +1129,7 @@ async fn model_factory_failure_atomically_commits_the_user_message_and_input() {
         .expect("session");
     let submitted = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),

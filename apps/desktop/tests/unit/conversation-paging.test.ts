@@ -25,7 +25,7 @@ function fixture() {
   store.projection.applySessionSnapshot(snapshot(page(["m3", "m4"])));
   return { store, client, getter };
 }
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe("conversation page request ownership", () => {
   it("abandons anchor recovery silently when the reader navigates away", async () => {
@@ -45,8 +45,10 @@ describe("conversation page request ownership", () => {
     const command = vi.spyOn(client, "command").mockReturnValue(pending.promise);
     const loading = store.loadPreviousConversationPage("s");
     store.projection.applySessionSnapshot(snapshot(page(["m4", "m5"]), 20));
-    expect(await store.loadPreviousConversationPage("s")).toBe(false); expect(command).toHaveBeenCalledOnce();
-    pending.resolve(response(page(["m1", "m2"]))); expect(await loading).toBe(true);
+    const joined = store.loadPreviousConversationPage("s");
+    expect(command).toHaveBeenCalledOnce();
+    pending.resolve(response(page(["m1", "m2"])));
+    expect(await Promise.all([loading, joined])).toEqual([true, true]);
     expect(store.projection.conversation_histories.get("s")?.items.map(item => item.message_id)).toEqual(["m1", "m2", "m3", "m4", "m5"]);
     expect(store.projection.observed_sequence).toBe(0);
   });
@@ -71,11 +73,63 @@ describe("conversation page request ownership", () => {
     expect(store.projection.conversation_histories.get("s")?.items[0].message_id).toBe("rewritten");
   });
   it("preserves history after failure and only retries on another explicit request", async () => {
-    const { store, client } = fixture(); const command = vi.spyOn(client, "command").mockRejectedValueOnce(new RuntimeClientError("snapshot_busy", "busy"));
-    expect(await store.loadPreviousConversationPage("s")).toBe(false);
+    vi.useFakeTimers();
+    const { store, client } = fixture(); const command = vi.spyOn(client, "command").mockRejectedValue(new RuntimeClientError("snapshot_busy", "busy"));
+    const loading = store.loadPreviousConversationPage("s");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(await loading).toBe(false);
     expect(store.projection.conversation_histories.get("s")).toMatchObject({ is_loading_previous: false, load_error: "历史正在更新，请重试。" });
-    expect(command).toHaveBeenCalledOnce();
+    expect(command).toHaveBeenCalledTimes(3);
     command.mockResolvedValueOnce(response(page(["m1", "m2"])));
     expect(await store.loadPreviousConversationPage("s")).toBe(true);
+  });
+
+  it("shares one budget across pages and retries from the last successful cursor", async () => {
+    vi.useFakeTimers();
+    const { store, client } = fixture();
+    store.navigation.selectSession("s");
+    const anchor = { type: "get_conversation_page_around_run" as const, payload: {
+      anchor_message_id: "m1", snapshot: { observed_sequence: 2, value: page(["m1"]) },
+    } };
+    const command = vi.spyOn(client, "command")
+      .mockResolvedValueOnce(anchor)
+      .mockImplementationOnce(async () => {
+        await new Promise(resolve => setTimeout(resolve, 14_000));
+        return response({ ...page(["m2"]), previous_cursor: "older" });
+      })
+      .mockReturnValueOnce(new Promise(() => undefined));
+    const locating = store.locateConversationRun("s", "r");
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(await locating).toBe(false);
+    expect(store.projection.conversation_histories.get("s")?.items.map(item => item.message_id)).toEqual(["m2", "m3", "m4"]);
+    expect(store.projection.conversation_histories.get("s")?.load_error).toContain("超时");
+    command.mockResolvedValueOnce(anchor).mockResolvedValueOnce(response(page(["m1"])));
+    expect(await store.locateConversationRun("s", "r")).toBe(true);
+    expect(command.mock.calls.at(-1)?.[0]).toMatchObject({ type: "list_conversation_page", payload: { cursor: "older" } });
+    expect(store.projection.conversation_histories.get("s")?.items.map(item => item.message_id)).toEqual(["m1", "m2", "m3", "m4"]);
+  });
+
+  it("stops at a repeated cursor and discards the non-progressing response", async () => {
+    const { store, client } = fixture();
+    vi.spyOn(client, "command").mockResolvedValueOnce(response(page(["m2"])));
+    expect(await store.loadPreviousConversationPage("s")).toBe(false);
+    expect(store.projection.conversation_histories.get("s")?.items.map(item => item.message_id)).toEqual(["m3", "m4"]);
+    expect(store.projection.conversation_histories.get("s")?.load_error).toContain("未能向前推进");
+  });
+
+  it("only anchors the newest location intent", async () => {
+    const { store, client } = fixture();
+    store.navigation.selectSession("s");
+    const anchor = (message_id: string) => ({ type: "get_conversation_page_around_run" as const, payload: {
+      anchor_message_id: message_id, snapshot: { observed_sequence: 2, value: page([message_id]) },
+    } });
+    const old = deferred<ReturnType<typeof anchor>>();
+    vi.spyOn(client, "command").mockReturnValueOnce(old.promise).mockResolvedValueOnce(anchor("m4"));
+    const request = vi.spyOn(store.navigation, "requestConversationAnchor");
+    const first = store.locateConversationRun("s", "old");
+    expect(await store.locateConversationRun("s", "new")).toBe(true);
+    old.resolve(anchor("m3"));
+    expect(await first).toBe(false);
+    expect(request).toHaveBeenCalledExactlyOnceWith("m4");
   });
 });

@@ -195,6 +195,7 @@ function controllerFixture(restored: boolean) {
   const runtime = {
     client: { command, target_device: null },
     loadApplication: load_application,
+    applyWorkspaceSummary: vi.fn(),
     loadSession: load_session,
     selectInitialSession: select_initial_session,
   } as unknown as RuntimeLifecycleCoordinator;

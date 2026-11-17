@@ -42,6 +42,19 @@ impl StorageEngine {
                 session_id: id.clone(),
             })?
             .facts;
+        let controls: std::collections::HashSet<_> = state
+            .inputs
+            .iter()
+            .filter(|input| &input.session_id == id)
+            .map(|input| input.input_id.clone())
+            .collect();
+        state.inputs.extend(
+            facts
+                .inputs
+                .iter()
+                .filter(|input| !controls.contains(&input.input_id))
+                .filter_map(|input| input.committed_projection(id.clone())),
+        );
         for activation in &facts.skill_activations {
             if let Some(input_id) = &activation.input_id
                 && let Some(input) = state
@@ -192,6 +205,8 @@ impl StorageEngine {
         let mut identities = Vec::new();
         for reference in ids {
             let rows = self.query_session_summaries(SessionSummaryQuery {
+                group: None,
+                pinned_only: false,
                 filter: assistant_protocol::SessionListFilter::All,
                 session_id: Some(reference),
                 role: None,
@@ -241,8 +256,36 @@ impl StorageEngine {
             assistant_protocol::SessionRoleSnapshot::Standard => "standard",
             assistant_protocol::SessionRoleSnapshot::Controller => "controller",
         });
-        let mut statement = self.connection.prepare(
-            "SELECT s.session_id, s.title, json_array(s.model_provider_instance_id, s.model_id, s.model_source), s.reasoning_effort,
+        // 分组从资源索引出发，先按完整顺序过滤再 LIMIT；全局搜索不受置顶或活动时间影响。
+        let (source, scope, order, workspace) = if let Some(group) = &query.group {
+            let workspace = match group {
+                assistant_protocol::SessionGroup::Workspace { workspace_id } => {
+                    Some(workspace_id.as_str())
+                }
+                assistant_protocol::SessionGroup::Unbound => None,
+            };
+            (
+                "session_resources r CROSS JOIN sessions s ON s.session_id=r.session_id",
+                "r.workspace_id IS ?7 AND s.role='standard' AND (r.workspace_id IS NULL OR EXISTS(SELECT 1 FROM workspaces w WHERE w.workspace_id=r.workspace_id AND w.lifecycle='active'))",
+                "r.sort_order DESC, r.session_id",
+                workspace,
+            )
+        } else if query.pinned_only {
+            (
+                "sessions s JOIN session_resources r ON r.session_id=s.session_id",
+                "?7 IS NULL AND s.is_pinned=1 AND s.lifecycle='active' AND s.role='standard' AND (r.workspace_id IS NULL OR EXISTS(SELECT 1 FROM workspaces w WHERE w.workspace_id=r.workspace_id AND w.lifecycle='active'))",
+                "s.pin_order DESC, s.session_id",
+                None,
+            )
+        } else {
+            (
+                "sessions s LEFT JOIN session_resources r ON r.session_id=s.session_id",
+                "?7 IS NULL",
+                "s.created_at_ms DESC, s.session_id",
+                None,
+            )
+        };
+        let sql = format!("SELECT s.session_id, s.title, json_array(s.model_provider_instance_id, s.model_id, s.model_source), s.reasoning_effort,
                     s.lifecycle, s.role, s.proxy_controller_session_id, s.proxy_changed_at_ms,
                     s.pc_output_device_id, d.display_name, s.current_variant, s.approval_mode,
                     r.workspace_id, s.message_count, s.created_at_ms, s.updated_at_ms,
@@ -251,12 +294,16 @@ impl StorageEngine {
                      AND i.state = 'queued' AND i.input_kind = 'message' AND i.origin = 'user' AND i.goal_id IS NULL),
                     EXISTS(SELECT 1 FROM inputs i WHERE i.session_id = s.session_id AND i.state = 'queued' AND i.goal_id IS NULL),
                     s.custom_agent_json
-             FROM sessions s LEFT JOIN devices d ON d.device_id = s.pc_output_device_id
-             LEFT JOIN session_resources r ON r.session_id = s.session_id
+             FROM {source}
+             LEFT JOIN devices d ON d.device_id = s.pc_output_device_id
              WHERE (?1 IS NULL OR s.lifecycle = ?1) AND (?2 IS NULL OR s.session_id = ?2)
                AND (?3 IS NULL OR s.role = ?3) AND (?6 IS NULL OR instr(lower(s.title), lower(?6)) > 0)
-             ORDER BY s.is_pinned DESC, s.updated_at_ms DESC, s.session_id ASC LIMIT ?4 OFFSET ?5"
-        ).map_err(|e| internal_error("session summaries could not be queried", e))?;
+             AND {scope}
+             ORDER BY {order} LIMIT ?4 OFFSET ?5");
+        let mut statement = self
+            .connection
+            .prepare(&sql)
+            .map_err(|e| internal_error("session summaries could not be queried", e))?;
         let mut rows = statement
             .query(params![
                 lifecycle,
@@ -264,7 +311,8 @@ impl StorageEngine {
                 role,
                 query.limit.max(1),
                 query.offset,
-                query.query.as_deref()
+                query.query.as_deref(),
+                workspace
             ])
             .map_err(|e| internal_error("session summaries could not be read", e))?;
         let mut summaries = Vec::new();

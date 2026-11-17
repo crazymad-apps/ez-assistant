@@ -109,6 +109,7 @@ pub(super) fn runtime_status(code: RuntimeErrorCode) -> StatusCode {
         RuntimeErrorCode::ApprovalNotFound => StatusCode::NOT_FOUND,
         RuntimeErrorCode::SessionBusy
         | RuntimeErrorCode::SessionArchived
+        | RuntimeErrorCode::UserMessageNotEditable
         | RuntimeErrorCode::SessionNotIdle
         | RuntimeErrorCode::SessionRoleRestricted
         | RuntimeErrorCode::RunNotRetryable

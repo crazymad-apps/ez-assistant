@@ -60,14 +60,21 @@ fn terminal_delete_failure_rolls_back_control_and_receipt_then_restart_finishes_
  {
     for trigger in [
         "CREATE TRIGGER fail_terminal_release BEFORE DELETE ON runs BEGIN SELECT RAISE(ABORT,'injected Run release failure'); END;",
-        "CREATE TRIGGER fail_terminal_release BEFORE UPDATE OF user_message_id ON inputs WHEN NEW.user_message_id IS NULL AND OLD.user_message_id IS NOT NULL BEGIN SELECT RAISE(ABORT,'injected Input release failure'); END;",
+        "CREATE TRIGGER fail_terminal_release BEFORE DELETE ON inputs BEGIN SELECT RAISE(ABORT,'injected Input release failure'); END;",
     ] {
         terminal_release_failure(trigger);
     }
 }
 
-fn minimal_input_count(engine: &StorageEngine) -> i64 {
-    engine.connection.query_row("SELECT COUNT(*) FROM inputs WHERE input_id='input-terminal' AND state='committed' AND priority_order IS NULL AND user_message_id IS NULL AND accepted_at_ms IS NULL AND agent_variant IS NULL AND origin IS NULL AND goal_id IS NULL AND goal_generation IS NULL AND goal_turn IS NULL AND goal_reply_route_json IS NULL AND cross_session_json IS NULL AND channel_source_json IS NULL AND agent_shell_target IS NULL AND skill_activation_json IS NULL AND queued_message_json IS NULL", [], |row|row.get(0)).unwrap()
+fn input_control_count(engine: &StorageEngine) -> i64 {
+    engine
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM inputs WHERE input_id='input-terminal'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
 }
 
 fn terminal_release_failure(trigger: &str) {
@@ -115,7 +122,7 @@ fn terminal_release_failure(trigger: &str) {
         0
     );
     assert_eq!(recovered.run_history.len(), 1);
-    assert_eq!(minimal_input_count(&engine), 1);
+    assert_eq!(input_control_count(&engine), 0);
     let restored_input = engine
         .load_input_for_id(&input.session_id, &input.input_id)
         .unwrap()
@@ -139,8 +146,8 @@ fn terminal_release_failure(trigger: &str) {
     engine.connection.execute_batch("CREATE TRIGGER fail_retry_admission BEFORE INSERT ON runs BEGIN SELECT RAISE(ABORT,'injected retry admission failure'); END;").unwrap();
     assert!(engine.create_run_attempt(attempt.clone()).is_err());
     assert_eq!(
-        minimal_input_count(&engine),
-        1,
+        input_control_count(&engine),
+        0,
         "failed Run admission must roll back restored Input fields"
     );
     assert_eq!(engine.staged_append_count().unwrap(), 0);
@@ -151,8 +158,8 @@ fn terminal_release_failure(trigger: &str) {
     let retry = engine.create_run_attempt(attempt).unwrap();
     assert_eq!(retry.attempt, 2);
     assert_eq!(
-        minimal_input_count(&engine),
-        0,
+        input_control_count(&engine),
+        1,
         "actual retry admission restores temporary execution fields"
     );
     assert_eq!(
@@ -193,8 +200,8 @@ fn terminal_release_failure(trigger: &str) {
     assert!(recovered.runs.is_empty());
     assert_eq!(recovered.run_history.len(), 2);
     assert_eq!(
-        minimal_input_count(&engine),
-        1,
+        input_control_count(&engine),
+        0,
         "retry completion releases temporary fields again"
     );
     assert_eq!(
@@ -287,8 +294,8 @@ fn finished_input_uses_file_metadata_and_rejects_reintroduced_sql_history_on_nex
     let mut engine = open_engine(&home);
     let input = started(&mut engine);
     engine.settle_run(finish(&input)).unwrap();
-    assert_eq!(minimal_input_count(&engine), 1);
-    engine.connection.execute("UPDATE inputs SET user_message_id='poison-user',accepted_at_ms=999999,agent_variant='plan',origin='user',channel_source_json='{' WHERE input_id='input-terminal'",[]).unwrap();
+    assert_eq!(input_control_count(&engine), 0);
+
     let changes = engine.connection.total_changes();
     let restored = engine
         .load_input_for_id(&input.session_id, &input.input_id)
@@ -307,6 +314,13 @@ fn finished_input_uses_file_metadata_and_rejects_reintroduced_sql_history_on_nex
         changes,
         "history reading never restores SQL controls"
     );
+    engine
+        .connection
+        .execute(
+            "INSERT INTO inputs(input_id,session_id,state,agent_variant,origin) VALUES('input-terminal',?1,'committed',NULL,NULL)",
+            [restored.session_id.as_str()],
+        )
+        .unwrap();
     drop(engine);
     assert!(StorageEngine::open(home.path()).is_err());
 }

@@ -172,7 +172,7 @@ impl VolatileRuntimeStore {
                         .cloned()
                         .collect(),
                     inputs: state.input_projections(Some(&session_id))?,
-                    session_commands: state.command_projections(Some(&session_id))?,
+                    session_commands: state.command_projections(Some(&session_id)),
                     mcp_input_selections: state.mcp_selection_projections(Some(&session_id)),
                     runs: state
                         .runs
@@ -210,73 +210,97 @@ impl VolatileRuntimeStore {
         })
     }
 
+    pub(super) fn query_workspaces(
+        &self,
+        request: assistant_protocol::ListWorkspacesRequest,
+    ) -> StoreFuture<'_, crate::WorkspacePage> {
+        Box::pin(async move { Ok(workspace_page(&*self.lock()?, request)) })
+    }
+
+    pub(super) fn query_sidebar(
+        &self,
+        request: assistant_protocol::GetApplicationSnapshotRequest,
+    ) -> StoreFuture<'_, crate::SidebarSnapshot> {
+        Box::pin(async move {
+            use assistant_protocol::{
+                SessionGroup, SessionGroupRequest, SessionGroupSnapshot, SessionListFilter,
+            };
+            let state = self.lock()?;
+            let workspaces = workspace_page(
+                &state,
+                assistant_protocol::ListWorkspacesRequest {
+                    limit: Some(request.workspaces_limit.unwrap_or(crate::SIDEBAR_PAGE_SIZE)),
+                    ..Default::default()
+                },
+            );
+            let requests = request.session_groups.unwrap_or_else(|| {
+                workspaces
+                    .workspaces
+                    .iter()
+                    .map(|w| SessionGroupRequest {
+                        group: SessionGroup::Workspace {
+                            workspace_id: w.workspace_id.clone(),
+                        },
+                        filter: SessionListFilter::Active,
+                        limit: None,
+                    })
+                    .chain(std::iter::once(SessionGroupRequest {
+                        group: SessionGroup::Unbound,
+                        filter: SessionListFilter::Active,
+                        limit: None,
+                    }))
+                    .collect()
+            });
+            let mut session_groups = Vec::new();
+            for request in requests {
+                if request.filter == SessionListFilter::All {
+                    return Err(conflict("sidebar group requires one lifecycle"));
+                }
+                let limit = request
+                    .limit
+                    .unwrap_or(crate::SIDEBAR_PAGE_SIZE)
+                    .clamp(1, u32::MAX - 1);
+                let mut sessions = session_rows(
+                    &state,
+                    crate::SessionSummaryQuery {
+                        group: Some(request.group.clone()),
+                        filter: request.filter,
+                        limit: limit + 1,
+                        ..Default::default()
+                    },
+                )?;
+                let next_offset = (sessions.len() > limit as usize).then_some(limit);
+                sessions.truncate(limit as usize);
+                session_groups.push(SessionGroupSnapshot {
+                    group: request.group,
+                    filter: request.filter,
+                    sessions,
+                    next_offset,
+                });
+            }
+            let pinned_sessions = session_rows(
+                &state,
+                crate::SessionSummaryQuery {
+                    pinned_only: true,
+                    limit: 2048,
+                    ..Default::default()
+                },
+            )?;
+            Ok(crate::SidebarSnapshot {
+                workspaces,
+                session_groups,
+                pinned_sessions,
+            })
+        })
+    }
+
     pub(super) fn query_session_summaries(
         &self,
         query: crate::SessionSummaryQuery,
     ) -> StoreFuture<'_, Vec<assistant_protocol::SessionSummary>> {
         Box::pin(async move {
             let state = self.lock()?;
-            let mut rows = Vec::new();
-            for stored in state.sessions.values() {
-                if query
-                    .session_id
-                    .as_ref()
-                    .is_some_and(|id| id != &stored.session_id)
-                {
-                    continue;
-                }
-                let mut row = crate::session::SessionController::new(stored.clone())
-                    .summary()
-                    .map_err(|_| conflict("session summary unavailable"))?;
-                if query
-                    .query
-                    .as_ref()
-                    .is_some_and(|q| !row.title.to_lowercase().contains(&q.to_lowercase()))
-                {
-                    continue;
-                }
-                if query.role.is_some_and(|role| role != row.role) {
-                    continue;
-                }
-                if !match query.filter {
-                    assistant_protocol::SessionListFilter::All => true,
-                    assistant_protocol::SessionListFilter::Active => {
-                        row.lifecycle == assistant_protocol::SessionLifecycle::Active
-                    }
-                    assistant_protocol::SessionListFilter::Archived => {
-                        row.lifecycle == assistant_protocol::SessionLifecycle::Archived
-                    }
-                } {
-                    continue;
-                }
-                row.queued_input_count = state
-                    .inputs
-                    .values()
-                    .filter(|i| {
-                        i.session_id == row.session_id
-                            && i.state == StoredInputState::Queued
-                            && i.origin == InputOrigin::User
-                            && i.goal_binding.is_none()
-                    })
-                    .count() as u64;
-                row.resume_required = row.queued_input_count > 0
-                    || state.session_commands.values().any(|c| {
-                        c.session_id == row.session_id
-                            && c.state == super::StoredSessionCommandState::Queued
-                    });
-                rows.push(row);
-            }
-            rows.sort_by(|a, b| {
-                b.is_pinned
-                    .cmp(&a.is_pinned)
-                    .then_with(|| b.updated_at_ms.cmp(&a.updated_at_ms))
-                    .then_with(|| a.session_id.cmp(&b.session_id))
-            });
-            Ok(rows
-                .into_iter()
-                .skip(query.offset as usize)
-                .take(query.limit.max(1) as usize)
-                .collect())
+            session_rows(&state, query)
         })
     }
 
@@ -338,7 +362,7 @@ impl VolatileRuntimeStore {
                 child_history: state.recovered_child_history(None),
                 sessions: state.sessions.values().cloned().collect(),
                 inputs: state.input_projections(None)?,
-                session_commands: state.command_projections(None)?,
+                session_commands: state.command_projections(None),
                 mcp_input_selections: state.mcp_selection_projections(None),
                 runs: state
                     .runs
@@ -643,5 +667,155 @@ impl VolatileRuntimeStore {
                 collection_revision: state.pinned_collection_revision,
             })
         })
+    }
+}
+
+fn session_rows(
+    state: &State,
+    query: crate::SessionSummaryQuery,
+) -> Result<Vec<assistant_protocol::SessionSummary>, StoreError> {
+    let mut rows = Vec::new();
+    for stored in state.sessions.values() {
+        if query
+            .session_id
+            .as_ref()
+            .is_some_and(|id| id != &stored.session_id)
+        {
+            continue;
+        }
+        let mut row = crate::session::SessionController::new(stored.clone())
+            .summary()
+            .map_err(|_| conflict("session summary unavailable"))?;
+        if query
+            .query
+            .as_ref()
+            .is_some_and(|q| !row.title.to_lowercase().contains(&q.to_lowercase()))
+        {
+            continue;
+        }
+        if let Some(group) = &query.group {
+            let workspace = match group {
+                assistant_protocol::SessionGroup::Workspace { workspace_id } => Some(workspace_id),
+                assistant_protocol::SessionGroup::Unbound => None,
+            };
+            if row.workspace_id.as_ref() != workspace
+                || row.role != assistant_protocol::SessionRoleSnapshot::Standard
+            {
+                continue;
+            }
+        }
+        if (query.group.is_some() || query.pinned_only)
+            && row.workspace_id.as_ref().is_some_and(|id| {
+                state
+                    .workspaces
+                    .get(id)
+                    .is_none_or(|w| w.lifecycle != StoredWorkspaceLifecycle::Active)
+            })
+        {
+            continue;
+        }
+        if query.pinned_only
+            && (!row.is_pinned
+                || row.role != assistant_protocol::SessionRoleSnapshot::Standard
+                || row.lifecycle != assistant_protocol::SessionLifecycle::Active)
+        {
+            continue;
+        }
+        if query.role.is_some_and(|role| role != row.role) {
+            continue;
+        }
+        if !match query.filter {
+            assistant_protocol::SessionListFilter::All => true,
+            assistant_protocol::SessionListFilter::Active => {
+                row.lifecycle == assistant_protocol::SessionLifecycle::Active
+            }
+            assistant_protocol::SessionListFilter::Archived => {
+                row.lifecycle == assistant_protocol::SessionLifecycle::Archived
+            }
+        } {
+            continue;
+        }
+        row.queued_input_count = state
+            .inputs
+            .values()
+            .filter(|i| {
+                i.session_id == row.session_id
+                    && i.state == StoredInputState::Queued
+                    && i.origin == InputOrigin::User
+                    && i.goal_binding.is_none()
+            })
+            .count() as u64;
+        row.resume_required = row.queued_input_count > 0
+            || state.session_commands.values().any(|c| {
+                c.session_id == row.session_id
+                    && c.state == super::StoredSessionCommandState::Queued
+            });
+        rows.push(row);
+    }
+    rows.sort_by(|a, b| {
+        b.created_at_ms
+            .cmp(&a.created_at_ms)
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
+    let order = if query.pinned_only {
+        Some(state.sidebar.pins.as_slice())
+    } else {
+        query.group.as_ref().and_then(|g| {
+            let key = match g {
+                assistant_protocol::SessionGroup::Workspace { workspace_id } => {
+                    Some(workspace_id.clone())
+                }
+                assistant_protocol::SessionGroup::Unbound => None,
+            };
+            state.sidebar.sessions.get(&key).map(Vec::as_slice)
+        })
+    };
+    if let Some(order) = order {
+        let positions: BTreeMap<_, _> = order.iter().enumerate().map(|(i, id)| (id, i)).collect();
+        rows.sort_by_key(|row| positions.get(&row.session_id).map(|i| i + 1).unwrap_or(0));
+    }
+    Ok(rows
+        .into_iter()
+        .skip(query.offset as usize)
+        .take(query.limit.max(1) as usize)
+        .collect())
+}
+
+fn workspace_page(
+    state: &State,
+    request: assistant_protocol::ListWorkspacesRequest,
+) -> crate::WorkspacePage {
+    let removed = request.lifecycle == Some(assistant_protocol::WorkspaceLifecycle::Removed);
+    let mut workspaces: Vec<_> = state
+        .workspaces
+        .values()
+        .filter(|w| (w.lifecycle == StoredWorkspaceLifecycle::Removed) == removed)
+        .cloned()
+        .collect();
+    workspaces.sort_by(|a, b| {
+        b.created_at_ms
+            .cmp(&a.created_at_ms)
+            .then_with(|| a.workspace_id.cmp(&b.workspace_id))
+    });
+    let positions: BTreeMap<_, _> = state
+        .sidebar
+        .workspaces
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (id, i))
+        .collect();
+    workspaces.sort_by_key(|row| positions.get(&row.workspace_id).map(|i| i + 1).unwrap_or(0));
+    let mut workspaces: Vec<_> = workspaces
+        .into_iter()
+        .skip(request.offset as usize)
+        .collect();
+    let limit = request.limit.map(|n| n.clamp(1, u32::MAX - 1));
+    let has_more = limit.is_some_and(|n| workspaces.len() > n as usize);
+    if let Some(n) = limit {
+        workspaces.truncate(n as usize);
+    }
+    crate::WorkspacePage {
+        workspaces,
+        has_more,
     }
 }

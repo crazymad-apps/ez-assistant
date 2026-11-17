@@ -6,10 +6,10 @@ import styles from "./index.module.scss";
 
 type ComposerSecondaryDrawerProps = Readonly<{
   actions?: ReactNode;
-  children: ReactNode;
+  children?: ReactNode;
   label: string;
-  on_open_change: (open: boolean) => void;
-  open: boolean;
+  on_open_change?: (open: boolean) => void;
+  open?: boolean;
   state?: string;
   summary: ReactNode;
 }>;
@@ -20,27 +20,29 @@ type ComposerSecondaryDrawerProps = Readonly<{
  */
 export function ComposerSecondaryDrawer(props: ComposerSecondaryDrawerProps) {
   const content_id = useId();
+  const toggle = props.on_open_change;
   return (
     <section
       aria-label={props.label}
       className={styles.secondary_drawer}
       data-open={props.open}
       data-state={props.state}
+      data-title-only={toggle ? undefined : true}
     >
       <header className={styles.secondary_drawer_header}>
-        <button
+        {toggle ? <button
           aria-controls={content_id}
           aria-expanded={props.open}
           className={styles.secondary_drawer_trigger}
-          onClick={() => props.on_open_change(!props.open)}
+          onClick={() => toggle(!props.open)}
           type="button"
         >
           {props.summary}
           <Icon name="chevron-down" size={14} />
-        </button>
+        </button> : <div className={styles.secondary_drawer_title}>{props.summary}</div>}
         {props.actions && <div className={styles.secondary_drawer_actions}>{props.actions}</div>}
       </header>
-      <Collapse id={content_id} open={props.open}>{props.children}</Collapse>
+      {toggle && <Collapse id={content_id} open={Boolean(props.open)}>{props.children}</Collapse>}
     </section>
   );
 }

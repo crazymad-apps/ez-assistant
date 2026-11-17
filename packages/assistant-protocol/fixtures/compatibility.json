@@ -213,9 +213,9 @@
     "error": "invalid_declaration"
   },
   {
-    "name": "invalid-version-'０.25.2'",
+    "name": "invalid-version-'\uff10.25.2'",
     "client": {
-      "version": "０.25.2",
+      "version": "\uff10.25.2",
       "min_compatible_version": "0.25.2"
     },
     "host": {
@@ -283,5 +283,41 @@
       "min_compatible_version": "0.0.0"
     },
     "error": null
+  },
+  {
+    "name": "v0.33.1-complete-turn-pagination-pair",
+    "client": {
+      "version": "0.33.1",
+      "min_compatible_version": "0.33.1"
+    },
+    "host": {
+      "version": "0.33.1",
+      "min_compatible_version": "0.33.1"
+    },
+    "error": null
+  },
+  {
+    "name": "v0.33.0-client-rejected-by-v0.33.1-host",
+    "client": {
+      "version": "0.33.0",
+      "min_compatible_version": "0.33.0"
+    },
+    "host": {
+      "version": "0.33.1",
+      "min_compatible_version": "0.33.1"
+    },
+    "error": "client_too_old"
+  },
+  {
+    "name": "v0.33.1-client-rejects-v0.33.0-host",
+    "client": {
+      "version": "0.33.1",
+      "min_compatible_version": "0.33.1"
+    },
+    "host": {
+      "version": "0.33.0",
+      "min_compatible_version": "0.33.0"
+    },
+    "error": "host_too_old"
   }
 ]

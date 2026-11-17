@@ -5,14 +5,12 @@ import type {
   ApprovalDecision,
   CustomAgentSelection,
   CustomAgentSnapshot,
-  GoalStateSnapshot,
   McpSelectionTagSnapshot,
   PreparedCustomAgentSnapshot,
   QuotedTextSnapshot,
   SessionId,
   SessionViewSnapshot,
   SkillSummarySnapshot,
-  SubmitInputMode,
 } from '@ez-assistant/protocol';
 import { Button } from '../../../components/Button';
 import { Icon } from '../../../components/Icon';
@@ -20,8 +18,11 @@ import { PresenceBoundary } from '../../../components/Presence';
 import { useInputMethodGuard } from '../../../components/InputMethodGuard';
 import { Tooltip } from '../../../components/Tooltip';
 import { Dialog } from '../../../components/Dialog';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '../../../components/DropdownMenu';
+import { ComposerSecondaryDrawer } from './ComposerSecondaryDrawer';
 import { draftKeyForWorkspace, type NewSessionDraft, type NewSessionDraftKey } from '../../../stores/NewSessionDraftStore';
 import { useRootStore } from '../../../stores/RootStoreContext';
+import type { HistoryEditDraft, HistoryEditStore } from '../../../stores/HistoryEditStore';
 import { FeedbackPanel } from '../../feedback/FeedbackPanel';
 import { modelSelectionIssue, modelSelectionLabel } from '../../settings';
 import { ApprovalWorkspace, isAllowDecision } from './ApprovalWorkspace';
@@ -72,20 +73,55 @@ const SessionComposerDock = observer(function SessionComposerDock({
   const session_id = store.navigation.selected_session_id;
   const session_view = session_id ? store.projection.session_views.get(session_id) : undefined;
   const session = session_view?.session;
-  const active_run_id = session ? store.live_execution.activeRunId(session.session_id, session.active_run_id) : null;
+  const receipt_run = session_id ? store.projection.input_receipts.get(session_id)?.at(-1)?.run : undefined;
+  const active_run_id = session ? store.live_execution.activeRunId(session.session_id, receipt_run?.run_id ?? session.active_run_id) : null;
   const feedback = session_id ? store.feedback.waiting(session_id) : undefined;
-  const [draft, setDraft] = useState('');
-  const [goal_armed, setGoalArmed] = useState(false);
-  const [selected_skill, setSelectedSkill] = useState<SkillSummarySnapshot | null>(null);
+  const editor = store.history_edit;
+  const ordinary_key = editor.ordinaryKey;
+  const ordinary = editor.ordinary(ordinary_key);
+  const edit = read_only ? undefined : editor.draft;
+  const edit_key = edit?.key;
+  const edit_locked = Boolean(edit && edit.phase !== 'editing');
+  const edit_stale = Boolean(edit && editor.stale);
+  const edit_busy = Boolean(edit && editor.sessionBusy);
+  const accepted = editor.accepted;
+  const draft = edit?.text ?? ordinary.text;
+  const variant = edit?.variant ?? session?.current_variant;
+  const goal_armed = !edit && ordinary.goal_armed;
+  const selected_skill = !edit ? ordinary.skill : historySkillTag(edit);
+  const selected_mcp = edit ? edit.mcp : ordinary.mcp;
+  const expanded_drawer = ordinary.drawer;
+
+  function setDraft(text: string) {
+    if (edit_key) editor.update(ordinary_key, edit_key, { text });
+    else editor.updateOrdinary(ordinary_key, { text });
+  }
+
+  function setGoalArmed(value: boolean) {
+    editor.updateOrdinary(ordinary_key, { goal_armed: value });
+  }
+
+  function setSelectedSkill(skill: SkillSummarySnapshot | null) {
+    if (edit_key) editor.update(ordinary_key, edit_key, { skill_edit: skill ? { type: 'select', name: skill.name } : { type: 'clear' } });
+    else editor.updateOrdinary(ordinary_key, { skill });
+  }
+
+  function setSelectedMcp(mcp: McpSelectionTagSnapshot | null) {
+    if (edit_key) editor.update(ordinary_key, edit_key, { mcp, mcp_edit: mcp ? { type: 'select', server_key: mcp.server_key } : { type: 'clear' } });
+    else editor.updateOrdinary(ordinary_key, { mcp });
+  }
+
+  function setExpandedDrawer(drawer: typeof expanded_drawer) {
+    editor.updateOrdinary(ordinary_key, { drawer });
+  }
+
   const [skill_picker_open, setSkillPickerOpen] = useState(false);
-  const [selected_mcp, setSelectedMcp] = useState<McpSelectionTagSnapshot | null>(null);
   const [mcp_picker_open, setMcpPickerOpen] = useState(false);
   const [active_overlay, setActiveOverlay] = useState<'todo' | 'execution' | 'model' | null>(null);
   const [initial_settings_category, setInitialSettingsCategory] = useState<
     'variant' | 'approval' | 'model' | 'effort' | null
   >(null);
   const [slash_active_index, setSlashActiveIndex] = useState(0);
-  const [expanded_drawer, setExpandedDrawer] = useState<'goal' | 'queue' | null>('queue');
   const [approval_minimized, setApprovalMinimized] = useState(false);
   const [approval_decision, setApprovalDecision] = useState<ApprovalDecision | null>(null);
   const [show_help, setShowHelp] = useState(false);
@@ -94,19 +130,24 @@ const SessionComposerDock = observer(function SessionComposerDock({
   const input_method = useInputMethodGuard();
   const previous_approval_count = useRef(0);
   const previous_approval_session_id = useRef<string | null>(null);
-  const input_owner = useRef({ session_id, variant: session?.current_variant });
-  // 上传与提交可能跨越导航；旧输入不能清除新页面刚选中的标签。
-  if (input_owner.current.session_id !== session_id || input_owner.current.variant !== session?.current_variant) {
-    input_owner.current = { session_id, variant: session?.current_variant };
+  const input_owner = useRef({ key: ordinary_key, edit_key, variant });
+  // 上传与提交回调只可更新原草稿，切换视图不能清掉新草稿。
+  if (input_owner.current.key !== ordinary_key || input_owner.current.edit_key !== edit_key || input_owner.current.variant !== variant) {
+    input_owner.current = { key: ordinary_key, edit_key, variant };
   }
   const attachment_flow = useComposerAttachments({
-    disabled: store.composer_pending || store.pending_compaction_session_id === session_id,
+    attachments: edit?.attachments ?? ordinary.attachments,
+    disabled: edit_locked || store.composer_pending || store.pending_compaction_session_id === session_id,
+    on_attachments_change: (attachments) => {
+      if (edit_key) editor.updateAttachments(ordinary_key, edit_key, attachments);
+      else editor.updateOrdinary(ordinary_key, { attachments });
+    },
     on_error: (message) => store.showInteractionError(message),
-    owner_key: session_id,
+    owner_key: edit_key ?? ordinary_key,
   });
-  const quotes = store.composer_quotes.get(session_id);
+  const quotes = edit?.quotes ?? store.composer_quotes.get(session_id);
 
-  const slash_query = draft.startsWith('/') && !draft.includes('\n') ? draft.toLocaleLowerCase() : null;
+  const slash_query = !edit && draft.startsWith('/') && !draft.includes('\n') ? draft.toLocaleLowerCase() : null;
   const slash_items: readonly SlashCommandItem[] =
     slash_query === null
       ? []
@@ -129,18 +170,60 @@ const SessionComposerDock = observer(function SessionComposerDock({
   }, [slash_query]);
 
   useEffect(() => {
-    setGoalArmed(false);
-    setSelectedSkill(null);
     setSkillPickerOpen(false);
-    setExpandedDrawer('queue');
-    setActiveOverlay(null);
-    setShowHelp(false);
-  }, [session_id]);
-
-  useEffect(() => {
-    setSelectedMcp(null);
     setMcpPickerOpen(false);
-  }, [session_id, session?.current_variant]);
+    setActiveOverlay(current => current === 'todo' ? current : null);
+    setShowHelp(false);
+  }, [ordinary_key, edit_key]);
+
+  const ordinary_variant = useRef({ key: ordinary_key, variant: session?.current_variant });
+  useEffect(() => {
+    const previous = ordinary_variant.current;
+    if (previous.key === ordinary_key && previous.variant !== session?.current_variant) {
+      editor.updateOrdinary(ordinary_key, { mcp: null });
+    }
+    ordinary_variant.current = { key: ordinary_key, variant: session?.current_variant };
+    setMcpPickerOpen(false);
+  }, [editor, ordinary_key, session?.current_variant]);
+
+  const client = store.runtime_client;
+  const connected = store.connection.state === 'connected' && !store.projection.is_stale;
+  const supports_intervention = Boolean(application?.capabilities.input_intervention);
+  const intervention = store.intervention;
+  const draft_intervening = intervention?.target.type === 'draft';
+  useEffect(() => {
+    if (!read_only && session_id && connected && intervention?.phase === 'uncertain') {
+      void store.confirmIntervention(session_id, true);
+    }
+  }, [session_id, connected, intervention, client, read_only, store]);
+  const edit_mcp_key = edit?.mcp?.server_key;
+  const mcp_scope = edit_key && edit_mcp_key && variant
+    ? JSON.stringify([edit_key, edit_mcp_key, variant, store.projection.card_sources_changed])
+    : null;
+  const [mcp_check, setMcpCheck] = useState<{ scope: string; issue: string | null } | null>(null);
+  const mcp_check_pending = Boolean(mcp_scope && mcp_check?.scope !== mcp_scope);
+  const mcp_issue = mcp_scope && mcp_check?.scope === mcp_scope ? mcp_check.issue : null;
+  useEffect(() => {
+    if (!mcp_scope || !edit_mcp_key || !session_id || !variant || !connected) return;
+    let current = true;
+    void store.listMcpServerOptions({ context: { type: 'session', payload: { session_id } }, variant })
+      .then(servers => {
+        if (!current) return;
+        const available = servers.some(server => server.server_key === edit_mcp_key);
+        setMcpCheck({ scope: mcp_scope, issue: available ? null : '原 MCP 服务当前不可用，请移除或替换。' });
+      })
+      .catch(() => {
+        if (current) setMcpCheck({ scope: mcp_scope, issue: '无法核对 MCP 服务，请重新选择或移除。' });
+      });
+    return () => { current = false; };
+  }, [client, connected, edit_mcp_key, mcp_scope, session_id, store, variant]);
+  useEffect(() => {
+    if (connected && edit?.phase === 'uncertain') void editor.retry(true);
+  }, [client, connected, edit?.phase, editor]);
+  const accepted_result = accepted?.result;
+  useEffect(() => {
+    if (connected && accepted_result && !read_only) void editor.refresh(true);
+  }, [accepted_result, connected, editor, ordinary_key, read_only]);
 
   useEffect(() => {
     const count = session_view?.approvals.items.length ?? 0;
@@ -184,6 +267,18 @@ const SessionComposerDock = observer(function SessionComposerDock({
     resizeTextarea(textarea_ref.current);
   }, [draft, feedback?.request_id]);
 
+  const focus_revision = editor.focus_revision;
+  const applied_focus = useRef({ revision: focus_revision, edit_key: undefined as string | undefined });
+  useEffect(() => {
+    const textarea = textarea_ref.current;
+    if (!textarea || read_only || feedback || (approval && !approval_minimized)) return;
+    if (applied_focus.current.revision !== focus_revision || (edit_key && applied_focus.current.edit_key !== edit_key)) {
+      textarea.focus({ preventScroll: true });
+      textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+    }
+    applied_focus.current = { revision: focus_revision, edit_key };
+  }, [focus_revision, edit_key, read_only, feedback, approval, approval_minimized]);
+
   if (!session || !session_view) {
     return null;
   }
@@ -200,6 +295,11 @@ const SessionComposerDock = observer(function SessionComposerDock({
   const queue_presentation = queuePresentation(session_view.queue, active_run_id);
   const manual_compaction = session.active_compaction?.trigger.type === 'manual' ? session.active_compaction : null;
   const compaction_command_pending = store.pending_compaction_session_id === session.session_id;
+  const unavailable_attachment = Boolean(edit?.attachments.some(item => item.attachment_id && item.state === 'failed'));
+  const edit_can_send = Boolean(edit && connected && application?.capabilities.user_message_edit
+    && !edit_locked && !edit_stale && !edit_busy && !editor.busyTarget && !unavailable_attachment && !mcp_check_pending && !mcp_issue
+    && !attachment_flow.pending && !model_required
+    && (draft.trim() || attachment_flow.attachments.length || quotes.length));
   // 窗口占用由 Runtime 根据当前有效上下文计算，不能用旧 step 或累计用量取最大值。
   const context_usage = session_view?.usage.context ?? null;
 
@@ -227,13 +327,19 @@ const SessionComposerDock = observer(function SessionComposerDock({
     await store.compactSession(session!.session_id, session_view!.conversation_generation);
   }
 
-  async function submitDraft(value = draft) {
-    if (session_id && store.feedback.waiting(session_id)) {
+  async function submitDraft(value = draft, intervene = false) {
+    if (edit) {
+      if (edit_can_send) await editor.submit(() => attachment_flow.uploadAll(session!.session_id));
+      return;
+    }
+    if (!intervene && session_id && store.feedback.waiting(session_id)) {
       store.showInteractionError('请先回复问题，或取消等待后发送新指令。');
       return;
     }
     const owner = input_owner.current;
     const control = parseSessionCommand(value);
+    if (store.intervention || (intervene && (!supports_intervention || !connected || is_archived
+      || goal_armed || slash_query !== null || control.type !== 'not_command' || manual_compaction || compaction_command_pending))) return;
     if (control.type === 'invalid') {
       store.showInteractionError(control.message);
       return;
@@ -271,11 +377,22 @@ const SessionComposerDock = observer(function SessionComposerDock({
       }
     }
     const attachment_ids = await attachment_flow.uploadAll(session!.session_id);
-    if (!attachment_ids || owner !== input_owner.current) {
+    if (!attachment_ids || owner !== input_owner.current || editor.ordinaryKey !== ordinary_key) {
       return;
     }
-    const mode = resolveSubmitMode(goal_armed, session_view!.goal?.state);
-    const submitted = await store.submitInput(
+    const mode = goal_armed ? 'start_goal' : 'normal';
+    const uploaded = editor.ordinary(ordinary_key).attachments;
+    const quote_store = store.composer_quotes;
+    const clearInterventionDraft = () => {
+      const current = editor.ordinary(ordinary_key);
+      // 回执核实可能发生在切回会话后，只清理原草稿中已提交的内容。
+      if (current.text === value && current.attachments === uploaded
+        && current.skill === selected_skill && current.mcp === selected_mcp && !current.goal_armed) {
+        editor.updateOrdinary(ordinary_key, { text: '', attachments: [], skill: null, mcp: null });
+        for (const quote of quotes) quote_store.remove(session!.session_id, quote.quote_id);
+      }
+    };
+    const args = [
       session!.session_id,
       value,
       session!.current_variant,
@@ -284,7 +401,12 @@ const SessionComposerDock = observer(function SessionComposerDock({
       selected_skill?.name ?? null,
       quotes,
       selected_mcp?.server_key ?? null,
-    );
+    ] as const;
+    if (intervene) {
+      await store.submitInput(...args, 'intervention', clearInterventionDraft);
+      return;
+    }
+    const submitted = await store.submitInput(...args);
     if (submitted && owner === input_owner.current) {
       setDraft('');
       setGoalArmed(false);
@@ -370,6 +492,13 @@ const SessionComposerDock = observer(function SessionComposerDock({
     if (input_method.shouldIgnoreKeyDown(event)) {
       return;
     }
+    if (edit) {
+      if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        if (!event.ctrlKey && !event.metaKey) void submitDraft();
+      }
+      return;
+    }
     if (slash_items.length > 0 && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
       event.preventDefault();
       const direction = event.key === 'ArrowDown' ? 1 : -1;
@@ -387,6 +516,10 @@ const SessionComposerDock = observer(function SessionComposerDock({
     }
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
+      if (event.ctrlKey || event.metaKey) {
+        if (isInterventionShortcut(event)) void submitDraft(draft, true);
+        return;
+      }
       const selected_command = slash_query === null ? undefined : slash_items[slash_active_index];
       if (selected_command) {
         handleSlashCommand(selected_command);
@@ -415,19 +548,19 @@ const SessionComposerDock = observer(function SessionComposerDock({
 
   function handleDraftChange(value: string) {
     setDraft(value);
-    if (value.startsWith('/') && !value.includes('\n')) {
+    if (!edit && value.startsWith('/') && !value.includes('\n')) {
       setActiveOverlay(null);
       setShowHelp(false);
     }
   }
 
   const goal = session_view.goal;
-  const compaction_cancels_from_primary = Boolean(manual_compaction?.cancellable);
+  const compaction_cancels_from_primary = !edit && Boolean(manual_compaction?.cancellable);
   const has_composer_content = Boolean(draft.trim() || attachment_flow.attachments.length || quotes.length);
   const goal_stops_from_primary =
-    !compaction_cancels_from_primary && !has_composer_content && goal?.state === 'running';
+    !edit && !compaction_cancels_from_primary && !has_composer_content && goal?.state === 'running';
   const run_interrupts_from_primary =
-    !has_composer_content && !goal_stops_from_primary && Boolean(active_run_id);
+    !edit && !has_composer_content && !goal_stops_from_primary && Boolean(active_run_id);
   const primary_action_available =
     compaction_cancels_from_primary || has_composer_content || goal_stops_from_primary || run_interrupts_from_primary;
   const primary_action = resolvePrimaryAction(
@@ -436,6 +569,15 @@ const SessionComposerDock = observer(function SessionComposerDock({
     run_interrupts_from_primary,
   );
   const primary_label = primaryActionLabel(primary_action);
+  const normal_send_label = has_composer_content && !compaction_cancels_from_primary ? '发送消息' : primary_label;
+  const show_send_shortcut = supports_intervention && !goal_armed && !is_control_command && slash_query === null
+    && primary_action === 'send';
+  let placeholder = '输入消息…  / 使用指令';
+  if (edit) placeholder = '编辑历史消息…';
+  else if (model_required) placeholder = '选择模型后开始对话，或输入 / 使用控制指令';
+  else if (manual_compaction || compaction_command_pending) placeholder = '正在压缩上下文…';
+  else if (feedback) placeholder = `输入新指令，${interventionShortcutLabel()} 介入…`;
+  else if (goal?.state === 'paused') placeholder = '输入新指导并恢复目标…';
   const execution_initial_category =
     active_overlay === 'execution' &&
     (initial_settings_category === 'variant' || initial_settings_category === 'approval')
@@ -453,8 +595,7 @@ const SessionComposerDock = observer(function SessionComposerDock({
     });
   }
 
-  // 与审批一样占用输入区；普通草稿及附件留在当前 Composer 状态中。
-  if (!read_only && feedback) {
+  if (!read_only && feedback && !supports_intervention) {
     return <div className={styles.dock}>
       <FeedbackPanel key={feedback.request_id} request={feedback} store={store.feedback} />
     </div>;
@@ -463,11 +604,12 @@ const SessionComposerDock = observer(function SessionComposerDock({
   return (
     <div className={styles.dock}>
       <div className={styles.composer_top}>
+        {!read_only && feedback && <FeedbackPanel key={feedback.request_id} request={feedback} store={store.feedback} />}
         {!read_only && session_id && store.feedback.errors.has(session_id) && <ComposerNotice tone="error"
           action={{ label: '重试', onClick: () => void store.feedback.refresh(session_id) }}>
           无法读取问答状态：{store.feedback.errors.get(session_id)}
         </ComposerNotice>}
-        {!read_only && session_view.work_plan && session_view.work_plan.items.length > 0 && (
+        {!edit && !read_only && session_view.work_plan && session_view.work_plan.items.length > 0 && (
           <TodoSummary
             on_open_change={(open) => updateActiveOverlay('todo', open)}
             open={active_overlay === 'todo'}
@@ -504,13 +646,13 @@ const SessionComposerDock = observer(function SessionComposerDock({
             {store.session_notice.message}
           </ComposerNotice>
         )}
-        {!read_only && session_view.title_generation?.trigger === 'manual' && (
+        {!edit && !read_only && session_view.title_generation?.trigger === 'manual' && (
           <div className={styles.compaction_status} role="status">
             <span className={styles.loading_ring} />
             <strong>正在生成标题</strong>
           </div>
         )}
-        {!read_only && goal && (
+        {!edit && !read_only && goal && (
           <GoalStatusRow
             goal={goal}
             on_clear={() => store.clearGoal(session.session_id, goal.goal_id, goal.generation)}
@@ -529,9 +671,11 @@ const SessionComposerDock = observer(function SessionComposerDock({
             <Icon name="chevron-down" size={14} />
           </button>
         )}
-        {!read_only && queue_presentation.visible && (
+        {!edit && !read_only && queue_presentation.visible && (
           <QueueDrawer
             goal={goal}
+            intervention_available={supports_intervention && !is_archived}
+            intervention_blocked={Boolean(session.active_compaction) || compaction_command_pending}
             open={expanded_drawer === 'queue'}
             on_open_change={(open) => setExpandedDrawer(open ? 'queue' : null)}
             queue={session_view.queue}
@@ -539,11 +683,36 @@ const SessionComposerDock = observer(function SessionComposerDock({
             session_id={session.session_id}
           />
         )}
-        {!read_only && session.active_compaction && (
+        {!read_only && intervention && <ComposerNotice tone="neutral"
+          action={intervention.phase === 'uncertain' && connected ? {
+            label: '核实', onClick: () => void store.confirmIntervention(session.session_id),
+          } : undefined}>
+          {intervention.phase === 'submitting' && connected ? '正在介入…' : '正在确认…'}
+        </ComposerNotice>}
+        {!edit && !read_only && session.active_compaction && (
           <div className={styles.compaction_status} role="status">
             <span className={styles.loading_ring} />
             <strong>{compactionStatusLabel(session.active_compaction.trigger)}</strong>
           </div>
+        )}
+        {!read_only && accepted && <ComposerNotice tone={accepted.busy ? 'neutral' : 'error'}
+          action={!accepted.busy ? { label: '重新读取', onClick: () => void editor.refresh() } : undefined}>
+          {accepted.busy ? '修改已发送，正在刷新历史…' : '修改已发送，消息刷新失败。'}
+        </ComposerNotice>}
+        {edit && (edit.phase === 'submitting' || edit.phase === 'uncertain' || edit.error || edit_stale || edit_busy) && (
+          <HistoryEditNotice editor={editor} connected={connected} />
+        )}
+        {edit && !edit_locked && !edit_busy && mcp_issue && <ComposerNotice tone="warning">{mcp_issue}</ComposerNotice>}
+        {edit && (!approval || approval_minimized) && (
+          <ComposerSecondaryDrawer
+            label="正在编辑历史消息"
+            summary={<strong>正在编辑历史消息</strong>}
+            actions={<>
+              <Button variant="text" size="small" disabled={edit.locating || !connected}
+                onClick={() => void editor.locateOriginal()}>{edit.locating ? '正在定位…' : '返回原位置'}</Button>
+              <Button variant="text" size="small" disabled={edit_locked} onClick={() => editor.cancel()}>取消</Button>
+            </>}
+          />
         )}
       </div>
       {approval && !approval_minimized ? (
@@ -561,7 +730,7 @@ const SessionComposerDock = observer(function SessionComposerDock({
           queue_revision={session_view.queue.revision}
           remaining={session_view.approvals.items.length - 1}
         />
-      ) : read_only ? null : is_archived ? (
+      ) : read_only ? null : is_archived && !edit ? (
         <div className={styles.archived_notice}>
           <span>此会话已归档，只能查看历史内容。</span>
           <button
@@ -574,7 +743,7 @@ const SessionComposerDock = observer(function SessionComposerDock({
         </div>
       ) : (
         <section className={styles.composer}>
-          {session.proxy && (
+          {!edit && session.proxy && (
             <div className={styles.proxy_takeover_hint}>当前由主控代理；发送消息后将由你接管并退出代理。</div>
           )}
           <SlashCommandMenu
@@ -587,7 +756,7 @@ const SessionComposerDock = observer(function SessionComposerDock({
           <SlashCommandHelp on_close={() => setShowHelp(false)} open={show_help} />
           {skill_picker_open && (
             <SkillPicker
-              key={session.session_id}
+              key={edit_key ?? session.session_id}
               workspace_id={session.workspace_id}
               on_close={() => {
                 setSkillPickerOpen(false);
@@ -602,7 +771,7 @@ const SessionComposerDock = observer(function SessionComposerDock({
           )}
           {mcp_picker_open && (
             <McpServerPicker
-              key={`${session.session_id}:${session.current_variant}`}
+              key={`${edit_key ?? session.session_id}:${variant}`}
               on_close={() => {
                 setMcpPickerOpen(false);
                 requestAnimationFrame(() => textarea_ref.current?.focus());
@@ -614,16 +783,20 @@ const SessionComposerDock = observer(function SessionComposerDock({
               }}
               request={{
                 context: { type: 'session', payload: { session_id: session.session_id } },
-                variant: session.current_variant,
+                variant: variant ?? session.current_variant,
               }}
             />
           )}
           <ComposerAttachmentContext
             attachments={attachment_flow.attachments}
             on_quote_locate={(quote) => store.locateTextQuoteSource(session.session_id, quote)}
-            on_quote_remove={(quote) => store.composer_quotes.remove(session.session_id, quote.quote_id)}
+            on_quote_remove={(quote) => {
+              if (edit_key) editor.update(ordinary_key, edit_key, { quotes: quotes.filter(item => item.quote_id !== quote.quote_id) });
+              else store.composer_quotes.remove(session.session_id, quote.quote_id);
+            }}
             on_remove={attachment_flow.remove}
-            owner_key={session.session_id}
+            remove_disabled={edit_locked || draft_intervening}
+            owner_key={edit_key ?? ordinary_key}
             paste_pending={attachment_flow.paste_pending}
             quotes={quotes}
             session_id={session.session_id}
@@ -643,6 +816,7 @@ const SessionComposerDock = observer(function SessionComposerDock({
                   {selected_skill.name}
                   <button
                     aria-label={`移除技能 ${selected_skill.name}`}
+                    disabled={edit_locked || draft_intervening}
                     onClick={() => setSelectedSkill(null)}
                     type="button"
                   >
@@ -651,10 +825,11 @@ const SessionComposerDock = observer(function SessionComposerDock({
                 </span>
               )}
               {selected_mcp && (
-                <span title={selected_mcp.server_key}>
+                <span data-unavailable={mcp_issue ? true : undefined} title={mcp_issue ?? selected_mcp.server_key}>
                   MCP · {selected_mcp.display_name}
                   <button
                     aria-label={`移除 MCP ${selected_mcp.display_name}`}
+                    disabled={edit_locked || draft_intervening}
                     onClick={() => setSelectedMcp(null)}
                     type="button"
                   >
@@ -664,42 +839,42 @@ const SessionComposerDock = observer(function SessionComposerDock({
               )}
             </div>
           )}
-          <AppComposerDraftReceiver text={draft} has_other_content={has_composer_content} on_fill={setDraft} />
+          {!edit && !draft_intervening && <AppComposerDraftReceiver text={draft} has_other_content={has_composer_content} on_fill={setDraft} />}
           <textarea
-            aria-label="输入消息"
+            aria-label={edit ? '编辑消息' : '输入消息'}
+            readOnly={edit_locked || draft_intervening}
             disabled={
-              store.connection.state !== 'connected' ||
+              !edit && (store.connection.state !== 'connected' ||
               store.composer_pending ||
               attachment_flow.pending ||
               Boolean(manual_compaction) ||
-              compaction_command_pending
+              compaction_command_pending)
             }
             onChange={(event) => handleDraftChange(event.target.value)}
             onCompositionEnd={input_method.onCompositionEnd}
             onCompositionStart={input_method.onCompositionStart}
             onKeyDown={handleTextareaKeyDown}
             onKeyUp={input_method.onKeyUp}
-            onPaste={(event) => handleComposerPaste(event, draft, setDraft, attachment_flow.pasteImages)}
-            placeholder={
-              model_required
-                ? '选择模型后开始对话，或输入 / 使用控制指令'
-                : manual_compaction || compaction_command_pending
-                  ? '正在压缩上下文…'
-                  : goal?.state === 'paused'
-                    ? '输入新指导并恢复目标…'
-                    : '输入消息…  / 使用指令'
-            }
+            onPaste={(event) => {
+              if (!edit_locked && !draft_intervening) handleComposerPaste(event, draft, setDraft, attachment_flow.pasteImages);
+            }}
+            placeholder={placeholder}
             ref={textarea_ref}
             rows={2}
             value={draft}
           />
           <footer className={styles.composer_actions}>
-            <Tooltip content="添加附件">
+            {edit ? <EditContextMenu disabled={edit_locked || attachment_flow.pending || !connected}
+              on_attachment={() => void attachment_flow.choose()}
+              on_skill={() => { setMcpPickerOpen(false); setSkillPickerOpen(true); }}
+              on_mcp={() => { setSkillPickerOpen(false); setMcpPickerOpen(true); }}
+            /> : <Tooltip content="添加附件">
               <Button
                 aria-label="添加附件"
                 className={styles.attachment_button}
                 disabled={
                   store.composer_pending ||
+                  draft_intervening ||
                   attachment_flow.pending ||
                   Boolean(manual_compaction) ||
                   compaction_command_pending
@@ -710,10 +885,10 @@ const SessionComposerDock = observer(function SessionComposerDock({
               >
                 <Icon name="plus" size={17} />
               </Button>
-            </Tooltip>
+            </Tooltip>}
             <ExecutionSettingsPopover
               approval_mode={session.approval_mode}
-              disabled={store.composer_pending || Boolean(manual_compaction) || compaction_command_pending}
+              disabled={edit_locked || store.composer_pending || Boolean(manual_compaction) || compaction_command_pending}
               initial_category={execution_initial_category}
               on_approval_change={(mode) => store.setSessionApprovalMode(session.session_id, mode)}
               on_open_change={(open) => {
@@ -721,16 +896,20 @@ const SessionComposerDock = observer(function SessionComposerDock({
                 if (open) setInitialSettingsCategory(null);
                 updateActiveOverlay('execution', open);
               }}
-              on_variant_change={(variant) => store.setSessionVariant(session.session_id, variant)}
+              on_variant_change={async (next_variant) => {
+                if (!edit_key) return store.setSessionVariant(session.session_id, next_variant);
+                editor.update(ordinary_key, edit_key, { variant: next_variant });
+                return true;
+              }}
               open={active_overlay === 'execution'}
               trigger_class_name={styles.execution_selector}
-              variant={session.current_variant}
+              variant={variant ?? session.current_variant}
             />
-            {session.role === 'controller' && <OutputHostingMenu session={session} />}
+            {!edit && session.role === 'controller' && <OutputHostingMenu session={session} />}
             <span className={styles.action_spacer} />
             <ContextUsageRing context={context_usage} />
             <ModelSettingsPopover
-              disabled={store.composer_pending || Boolean(manual_compaction) || compaction_command_pending}
+              disabled={edit_locked || store.composer_pending || Boolean(manual_compaction) || compaction_command_pending}
               effort={session.reasoning_effort ?? null}
               effort_options={session_view.composer_capabilities.reasoning_effort_options}
               initial_category={model_initial_category}
@@ -752,11 +931,12 @@ const SessionComposerDock = observer(function SessionComposerDock({
               trigger_class_name={styles.model_selector}
             />
             <button
-              aria-label={has_composer_content && !compaction_cancels_from_primary ? '发送消息' : primary_label}
+              aria-label={edit ? '发送修改' : normal_send_label}
+              title={edit ? '发送修改' : show_send_shortcut ? sendShortcutLabel(Boolean(feedback)) : undefined}
               className={styles.send_button}
               data-action={primary_action}
               disabled={
-                Boolean(feedback) ||
+                edit ? !edit_can_send : (has_composer_content && (Boolean(feedback) || Boolean(intervention))) ||
                 (store.composer_pending && !compaction_cancels_from_primary) ||
                 attachment_flow.pending ||
                 !primary_action_available ||
@@ -764,7 +944,9 @@ const SessionComposerDock = observer(function SessionComposerDock({
                 (has_composer_content && model_required && !is_control_command && !compaction_cancels_from_primary)
               }
               onClick={() => {
-                if (compaction_cancels_from_primary && manual_compaction) {
+                if (edit) {
+                  void submitDraft();
+                } else if (compaction_cancels_from_primary && manual_compaction) {
                   void store.cancelSessionCompaction(session.session_id, manual_compaction.compaction_id);
                 } else if (has_composer_content) {
                   void submitDraft();
@@ -791,6 +973,53 @@ const SessionComposerDock = observer(function SessionComposerDock({
     </div>
   );
 });
+
+function historySkillTag(edit: HistoryEditDraft): { name: string } | null {
+  if (edit.skill_edit.type === 'select') return { name: edit.skill_edit.name };
+  if (edit.skill_edit.type === 'clear') return null;
+  return edit.basis.message.skill ?? null;
+}
+
+const HistoryEditNotice = observer(function HistoryEditNotice({ editor, connected }: Readonly<{
+  editor: HistoryEditStore;
+  connected: boolean;
+}>) {
+  const edit = editor.draft;
+  if (!edit) return null;
+  if (edit.phase === 'submitting') return <ComposerNotice tone="neutral">正在发送修改…</ComposerNotice>;
+  if (edit.phase === 'uncertain') return (
+    <ComposerNotice tone="warning" action={connected ? {
+      label: '重试原发送', onClick: () => void editor.retry(),
+    } : undefined}>发送结果尚未确认。</ComposerNotice>
+  );
+  if (editor.sessionBusy) return <ComposerNotice tone="warning">会话当前无法编辑历史消息。</ComposerNotice>;
+  if (editor.stale) return (
+    <ComposerNotice tone="warning" action={connected && !editor.busyTarget ? {
+      label: '重新核对', onClick: () => void editor.recheck(),
+    } : undefined}>{edit.error ?? '历史已更新，请重新核对后发送。'}</ComposerNotice>
+  );
+  return edit.error ? <ComposerNotice tone="error">{edit.error}</ComposerNotice> : null;
+});
+
+function EditContextMenu(props: Readonly<{
+  disabled: boolean;
+  on_attachment: () => void;
+  on_skill: () => void;
+  on_mcp: () => void;
+}>) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger aria-label="添加输入内容" className={styles.attachment_button} disabled={props.disabled} iconOnly variant="text">
+        <Icon name="plus" size={17} />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent aria-label="添加输入内容" align="start" className={styles.hosting_menu}>
+        <DropdownMenuItem onSelect={props.on_attachment}>添加附件</DropdownMenuItem>
+        <DropdownMenuItem onSelect={props.on_skill}>选择 Skill</DropdownMenuItem>
+        <DropdownMenuItem onSelect={props.on_mcp}>选择 MCP</DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
 
 const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
   draft_key,
@@ -1053,6 +1282,16 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
     }
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
+      if (event.ctrlKey || event.metaKey) {
+        if (isInterventionShortcut(event) && application?.capabilities.input_intervention
+          && !store.projection.is_stale && slash_query === null && !current_draft.goal_armed
+          && parseSessionCommand(current_draft.text).type === 'not_command'
+          && can_send && !unresolved && !store.composer_pending && !attachment_flow.pending && !agent_preparing) {
+          // 首次输入已经走物化命令，新会话没有需要打断的 Run。
+          void submitNewDraft();
+        }
+        return;
+      }
       const selected_command = slash_query === null ? undefined : slash_items[slash_active_index];
       if (selected_command) {
         handleSlashCommand(selected_command);
@@ -1431,6 +1670,8 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
             aria-label={unresolved ? "重试确认首次发送" : "发送消息"}
             className={styles.send_button}
             data-action="send"
+            title={application?.capabilities.input_intervention && !unresolved && !draft.goal_armed
+              && slash_query === null ? sendShortcutLabel() : undefined}
             disabled={!can_send || (!unresolved && (model_required || capability_blocked)) || store.composer_pending || attachment_flow.pending || agent_preparing}
             onClick={() => void submitNewDraft()}
             type="button"
@@ -1442,6 +1683,23 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
     </div>
   );
 });
+
+function isMacPlatform(): boolean {
+  return navigator.platform.toLocaleLowerCase().includes('mac');
+}
+
+function isInterventionShortcut(event: React.KeyboardEvent<HTMLTextAreaElement>): boolean {
+  return !event.altKey && !event.repeat && (event.ctrlKey || (event.metaKey && isMacPlatform()));
+}
+
+function interventionShortcutLabel(): string {
+  return isMacPlatform() ? 'Command + Enter' : 'Ctrl + Enter';
+}
+
+function sendShortcutLabel(feedback = false): string {
+  const intervention = `介入（${interventionShortcutLabel()}）`;
+  return feedback ? intervention : `发送（Enter）· ${intervention}`;
+}
 
 function agentOptionValue(selection: CustomAgentSelection): string {
   return JSON.stringify([selection.source.type,
@@ -1523,6 +1781,7 @@ function ComposerAttachmentContext(
   props: Readonly<{
     attachments: readonly ComposerAttachment[];
     on_remove: (attachment: ComposerAttachment) => void;
+    remove_disabled?: boolean;
     paste_pending: boolean;
     session_id: SessionId | null;
     owner_key: string;
@@ -1580,6 +1839,7 @@ function ComposerAttachmentContext(
                   </button>
                   <button
                     aria-label={`移除引用 ${item.quote.exact}`}
+                    disabled={props.remove_disabled}
                     className={styles.attachment_remove}
                     onClick={() => {
                       if (quote_detail?.quote_id === item.quote.quote_id) setQuoteDetail(null);
@@ -1741,12 +2001,6 @@ function draftSlashDisabledReason(command_name: string): string | null {
   )
     return '发送第一条消息后可用';
   return null;
-}
-
-function resolveSubmitMode(goal_armed: boolean, goal_state: GoalStateSnapshot | undefined): SubmitInputMode {
-  if (goal_armed) return 'start_goal';
-  if (goal_state === 'paused') return 'resume_goal';
-  return 'normal';
 }
 
 function nextEnabledSlashIndex(items: readonly SlashCommandItem[], current: number, direction: 1 | -1): number {

@@ -2,6 +2,7 @@ import type { ReactNode, SVGProps } from "react";
 
 export type IconName =
   | "archive"
+  | "sort"
   | "arrow-down"
   | "bell"
   | "bot"
@@ -13,6 +14,7 @@ export type IconName =
   | "chevron-left"
   | "chevron-right"
   | "copy"
+  | "corner-down-right"
   | "collapse-all"
   | "device"
   | "desktop"
@@ -71,6 +73,7 @@ const pin_shape = "M334.182 616.09l73.728 73.728c-72.601 61.44-178.636 156.928-2
 const paths: Record<IconName, ReactNode> = {
   palette: <><path d="M12 3a9 9 0 1 0 0 18h1a2 2 0 0 0 1.4-3.4 1.5 1.5 0 0 1 1.1-2.6H18a3 3 0 0 0 3-3 9 9 0 0 0-9-9Z" /><circle cx="7" cy="11" r="1" /><circle cx="10" cy="7" r="1" /><circle cx="15" cy="7" r="1" /><circle cx="18" cy="11" r="1" /></>,
   archive: <><rect x="4" y="5" width="16" height="15" rx="2" /><path d="M3 5h18V3H3zM9 10h6" /></>,
+  sort: <><path d="M8 20V4M4 8l4-4 4 4M16 4v16m-4-4 4 4 4-4" /></>,
   "arrow-down": <><path d="M12 4v15M6 13l6 6 6-6" /></>,
   bell: <><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" /></>,
   bot: <><rect x="4" y="6.5" width="16" height="14" rx="4" /><path d="M12 3v3.5M2 11.5v4M22 11.5v4M9 12v3M15 12v3" /></>,
@@ -82,6 +85,7 @@ const paths: Record<IconName, ReactNode> = {
   "chevron-left": <path d="m15 18-6-6 6-6" />,
   "chevron-right": <path d="m9 18 6-6-6-6" />,
   copy: <><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3" /></>,
+  "corner-down-right": <path d="M7 7v7h10m-3-3 3 3-3 3" />,
   "collapse-all": <><path d="m7 4 5 5 5-5" /><path d="m7 20 5-5 5 5" /></>,
   device: (
     <g fill="currentColor" stroke="none" transform="scale(0.0234375)">

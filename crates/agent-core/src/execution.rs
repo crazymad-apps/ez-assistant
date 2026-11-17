@@ -90,8 +90,8 @@ impl std::fmt::Debug for CompactionHandoff {
 /// 一次执行的最终结果；与五个终态事件镜像。
 ///
 /// `ExecutionCompleted{message}` ↔ [`ExecutionOutcome::Completed`]、
-/// `ExecutionFailed{error}` ↔ [`ExecutionOutcome::Failed`]、
-/// `ExecutionCancelled` ↔ [`ExecutionOutcome::Cancelled`]、
+/// `ExecutionFailed{error,partial}` ↔ [`ExecutionOutcome::Failed`]、
+/// `ExecutionCancelled{partial}` ↔ [`ExecutionOutcome::Cancelled`]、
 /// `ExecutionCompactionRequired{reason,step,consumption}` ↔
 /// [`ExecutionOutcome::CompactionRequired`]、
 /// `ExecutionContinuationRequired{reason,consumption}` ↔
@@ -113,11 +113,17 @@ pub enum ExecutionOutcome {
     Failed {
         /// 已脱敏的失败原因。
         error: ExecutionError,
+        /// 当前模型 Step 终止前收到的可见输出。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        partial: Option<Box<PartialModelResponse>>,
         /// 本段 execution 已可靠消费的硬预算。
         consumption: ExecutionConsumption,
     },
     /// 已取消；收敛前保留工具已返回的结果，仅为没有结果的调用补记 interrupted。
     Cancelled {
+        /// 当前模型 Step 终止前收到的可见输出。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        partial: Option<Box<PartialModelResponse>>,
         /// 本段 execution 已可靠消费的硬预算。
         consumption: ExecutionConsumption,
     },
@@ -141,6 +147,15 @@ pub enum ExecutionOutcome {
         /// 本段 execution 已可靠消费的硬预算。
         consumption: ExecutionConsumption,
     },
+}
+
+/// 当前模型 Step 未完整结束时交给宿主的规范消息，只包含已收到的正文与 reasoning。
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PartialModelResponse {
+    /// 消息所属的 Run 全局 step。
+    pub step: u32,
+    /// 保留模型声明的消息与片段身份，由宿主随终态一起提交。
+    pub message: AssistantMessage,
 }
 
 /// 一段 [`AgentExecution`] 已经实际消费的硬预算事实。
@@ -255,10 +270,12 @@ impl AgentExecution {
                     let error = ExecutionError::Internal;
                     failure_events.send(crate::AgentEvent::ExecutionFailed {
                         error: error.clone(),
+                        partial: None,
                         dropped_events: failure_events.dropped_events(),
                     });
                     ExecutionOutcome::Failed {
                         error,
+                        partial: None,
                         consumption: ExecutionConsumption::default(),
                     }
                 }
@@ -269,6 +286,7 @@ impl AgentExecution {
         let completion = Box::pin(async move {
             completion_rx.await.unwrap_or(ExecutionOutcome::Failed {
                 error: ExecutionError::Internal,
+                partial: None,
                 consumption: ExecutionConsumption::default(),
             })
         });
@@ -380,6 +398,7 @@ mod tests {
 
     enum StubBehavior {
         Complete(AssistantMessage),
+        Events(Vec<ModelEvent>),
         FailEstablishment(ModelError),
         Panic,
     }
@@ -409,6 +428,7 @@ mod tests {
                     },
                 ]),
                 StubBehavior::FailEstablishment(error) => Err(error.clone()),
+                StubBehavior::Events(events) => Ok(events.clone()),
                 StubBehavior::Panic => panic!("private provider panic payload"),
             };
             Box::pin(async move {
@@ -709,6 +729,7 @@ mod tests {
         let outcomes = vec![
             completed(text_message("done")),
             ExecutionOutcome::Failed {
+                partial: None,
                 error: ExecutionError::BudgetExceeded {
                     kind: BudgetKind::Steps,
                     limit: 4,
@@ -716,6 +737,7 @@ mod tests {
                 consumption: ExecutionConsumption::default(),
             },
             ExecutionOutcome::Failed {
+                partial: None,
                 error: ExecutionError::GuardrailTriggered {
                     kind: crate::GuardrailKind::RepeatedInvocation,
                     threshold: NonZeroU32::new(3).expect("non-zero threshold"),
@@ -723,6 +745,7 @@ mod tests {
                 consumption: ExecutionConsumption::default(),
             },
             ExecutionOutcome::Cancelled {
+                partial: None,
                 consumption: ExecutionConsumption::default(),
             },
             ExecutionOutcome::CompactionRequired {
@@ -761,6 +784,7 @@ mod tests {
         );
         // 稳定 tag：蛇形命名。
         let json = serde_json::to_value(ExecutionOutcome::Cancelled {
+            partial: None,
             consumption: ExecutionConsumption::default(),
         })
         .expect("serialize to value");
@@ -915,6 +939,7 @@ mod tests {
         assert_eq!(
             outcome,
             ExecutionOutcome::Failed {
+                partial: None,
                 error: ExecutionError::Model(ModelError::Auth("bad key".to_owned())),
                 consumption: used_steps(1),
             }
@@ -927,6 +952,7 @@ mod tests {
                 AgentEvent::StepStarted { step: 1 },
                 AgentEvent::ExecutionFailed {
                     error: ExecutionError::Model(ModelError::Auth("bad key".to_owned())),
+                    partial: None,
                     dropped_events: 0,
                 },
             ]
@@ -945,6 +971,7 @@ mod tests {
         assert_eq!(
             execution.completion.await,
             ExecutionOutcome::Failed {
+                partial: None,
                 error: ExecutionError::Internal,
                 consumption: ExecutionConsumption::default(),
             }
@@ -956,10 +983,123 @@ mod tests {
                 AgentEvent::StepStarted { step: 1 },
                 AgentEvent::ExecutionFailed {
                     error: ExecutionError::Internal,
+                    partial: None,
                     dropped_events: 0,
                 },
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn terminal_output_keeps_only_the_current_attempt_even_when_deltas_are_dropped() {
+        use agent_types::{AssistantPart, ReasoningPart, ReasoningSource, ToolCallId, ToolName};
+
+        for (error, reason) in [
+            (ModelError::Cancelled, FinishReason::Cancelled),
+            (
+                ModelError::Protocol("interrupted".into()),
+                FinishReason::Failed,
+            ),
+        ] {
+            let mut message = text_message("expected");
+            let AssistantPart::Text(text) = &message.parts[0] else {
+                panic!("text fixture")
+            };
+            let text_id = text.id.clone();
+            let reasoning_id = PartId::new("summary").unwrap();
+            let call_id = ToolCallId::new("unfinished").unwrap();
+            let mut events = vec![
+                ModelEvent::TurnStarted {
+                    message_id: MessageId::new("discarded").unwrap(),
+                    model: message.model.clone(),
+                },
+                ModelEvent::TextStarted {
+                    id: text_id.clone(),
+                },
+                ModelEvent::TextDelta {
+                    id: text_id.clone(),
+                    delta: "discarded".into(),
+                },
+                ModelEvent::TurnRestarted,
+                ModelEvent::TurnStarted {
+                    message_id: message.id.clone(),
+                    model: message.model.clone(),
+                },
+                ModelEvent::ReasoningStarted {
+                    id: reasoning_id.clone(),
+                },
+                ModelEvent::TextStarted {
+                    id: text_id.clone(),
+                },
+                ModelEvent::ToolCallStarted {
+                    id: call_id.clone(),
+                    name: ToolName::new("example").unwrap(),
+                },
+                ModelEvent::ToolCallDelta {
+                    id: call_id,
+                    arguments_delta: "{".into(),
+                },
+            ];
+            events.extend((0..300).map(|_| ModelEvent::TextDelta {
+                id: text_id.clone(),
+                delta: "x".into(),
+            }));
+            events.push(ModelEvent::ReasoningDelta {
+                id: reasoning_id.clone(),
+                delta: "summary so far".into(),
+                source: ReasoningSource::Summary,
+            });
+            events.push(ModelEvent::TurnFailed { error });
+            let (context, recorder) = context(CancellationToken::new());
+            let execution = AgentExecution::start_at_step(
+                spec(StubModel {
+                    capabilities: capabilities(),
+                    behavior: StubBehavior::Events(events),
+                }),
+                input(),
+                context,
+                NonZeroU32::new(7).unwrap(),
+            );
+            let outcome = execution.completion.await;
+            message.finish_reason = reason;
+            message.usage = None;
+            message.parts = vec![
+                AssistantPart::Reasoning(ReasoningPart {
+                    id: reasoning_id,
+                    text: "summary so far".into(),
+                    source: ReasoningSource::Summary,
+                }),
+                AssistantPart::Text(TextPart {
+                    id: text_id,
+                    text: "x".repeat(300),
+                }),
+            ];
+            let expected = PartialModelResponse { step: 7, message };
+            let partial = match outcome {
+                ExecutionOutcome::Cancelled { partial, .. }
+                | ExecutionOutcome::Failed { partial, .. } => partial,
+                other => panic!("unexpected outcome: {other:?}"),
+            };
+            assert_eq!(partial.as_deref(), Some(&expected));
+            let events = collect_events(execution.events).await;
+            match events.last().unwrap() {
+                AgentEvent::ExecutionCancelled {
+                    partial: observed,
+                    dropped_events,
+                }
+                | AgentEvent::ExecutionFailed {
+                    partial: observed,
+                    dropped_events,
+                    ..
+                } => {
+                    assert_eq!(observed, &partial);
+                    assert!(*dropped_events > 0);
+                }
+                other => panic!("unexpected event: {other:?}"),
+            }
+            assert!(recorder.pending.lock().unwrap().is_none());
+            assert!(recorder.deltas.lock().unwrap().is_empty());
+        }
     }
 
     #[tokio::test]
@@ -998,6 +1138,7 @@ mod tests {
         assert_eq!(
             outcome,
             ExecutionOutcome::Cancelled {
+                partial: None,
                 consumption: used_steps(1),
             }
         );
@@ -1007,7 +1148,10 @@ mod tests {
             vec![
                 AgentEvent::ExecutionStarted,
                 AgentEvent::StepStarted { step: 1 },
-                AgentEvent::ExecutionCancelled { dropped_events: 0 },
+                AgentEvent::ExecutionCancelled {
+                    dropped_events: 0,
+                    partial: None
+                },
             ]
         );
     }

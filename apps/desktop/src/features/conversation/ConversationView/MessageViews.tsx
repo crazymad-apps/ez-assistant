@@ -14,6 +14,7 @@ import type {
   UserMessageSnapshot,
 } from "@ez-assistant/protocol";
 import { Icon } from "../../../components/Icon";
+import { Tooltip } from "../../../components/Tooltip";
 import { PresenceBoundary } from "../../../components/Presence";
 import {
   formatTime,
@@ -21,17 +22,21 @@ import {
 } from "./conversationRows";
 import { DeviceMessageSourceDialog } from "./DeviceMessageSourceDialog";
 import { QuoteDetailDialog } from "../QuoteDetailDialog";
+import { MessageActions } from "./MessageActions";
 import styles from "./index.module.scss";
 import type { ResourceMenuLocation } from "../../resource-workspace/ResourceContextMenu";
 
 export function UserMessage(props: Readonly<{
   message: UserMessageSnapshot;
+  navigation_highlight?: boolean;
   attachments: readonly AttachmentSummary[];
   on_attachment_click: (attachment: AttachmentSummary) => void;
   on_attachment_menu?: (attachment: AttachmentSummary, location: ResourceMenuLocation) => void;
   source_session?: SessionSummary;
   on_source_open: (session: SessionSummary) => void;
   on_quote_locate?: (quote: QuotedTextSnapshot) => Promise<boolean>;
+  editing?: boolean;
+  edit?: Readonly<{ disabled_reason?: string; loading: boolean; on_select: () => void }>;
 }>) {
   const images = props.attachments.filter((attachment) => attachment.media_type?.startsWith("image/"));
   const files = props.attachments.filter((attachment) => !attachment.media_type?.startsWith("image/"));
@@ -44,6 +49,8 @@ export function UserMessage(props: Readonly<{
     <article
       className={`${styles.user_message}${is_external ? ` ${styles.external_message}` : ""}`}
       data-message-id={props.message.message_id}
+      data-navigation-highlight={props.navigation_highlight || undefined}
+      data-history-edit-target={props.editing || undefined}
       data-source={source.type}
     >
       {source.type === "controller_delivery" && (
@@ -129,8 +136,21 @@ export function UserMessage(props: Readonly<{
           {props.message.mcp_selection && <span title={props.message.mcp_selection.server_key}>MCP · {props.message.mcp_selection.display_name}</span>}
         </div>
       )}
-      {props.message.inherited && <span className={styles.user_skill}>继承</span>}
-      <time>{formatTime(props.message.created_at_ms)}</time>
+      <MessageActions copy_label="复制用户消息" text={props.message.text} time={formatTime(props.message.created_at_ms)}>
+        {props.edit && (
+          <Tooltip content={props.edit.disabled_reason ?? (props.edit.loading ? "正在读取原消息…" : "编辑用户消息")}>
+            <button
+              aria-busy={props.edit.loading || undefined}
+              aria-disabled={Boolean(props.edit.disabled_reason || props.edit.loading) || undefined}
+              aria-label="编辑用户消息"
+              onClick={props.edit.disabled_reason || props.edit.loading ? undefined : props.edit.on_select}
+              type="button"
+            >
+              <Icon name="edit" size={15} />
+            </button>
+          </Tooltip>
+        )}
+      </MessageActions>
       <PresenceBoundary present={source.type === "device" && device_source_open}>
       {source.type === "device" && device_source_open ? (
         <DeviceMessageSourceDialog on_close={() => setDeviceSourceOpen(false)} source={source} />

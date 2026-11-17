@@ -1,3 +1,12 @@
+mod navigation;
+
+pub(crate) use navigation::user_text_parts;
+pub use navigation::{
+    ConversationNavigationIndex, ConversationNavigationRead, ConversationNavigationRequest,
+    NavigationBoundary, NavigationHistory, NavigationMessageKind, NavigationReplyContext,
+    StoredConversationNavigation, conversation_preview_text,
+};
+
 use agent_types::{ContextUsageAdjustment, ConversationMessage, ConversationSnapshot, MessageId};
 use assistant_protocol::{
     ChildTaskId, ConversationOwner, GoalId, IdempotencyKey, RunId, SessionId, WorkspaceId,
@@ -20,10 +29,89 @@ pub struct ConversationRewrite {
     pub approval_mode: assistant_protocol::ApprovalMode,
     pub session_id: SessionId,
     pub target_user_message_id: MessageId,
+    pub expected_generation: u64,
+    pub expected_message_count: u64,
     pub conversation: ConversationSnapshot,
     pub input: NewStoredInput,
     pub goal_effect: Option<RewriteGoalEffect>,
     pub changed_at_ms: i64,
+}
+
+impl ConversationRewrite {
+    /// 新代次由 Store 分配。只重定位新输入的同 owner 引文，保留冻结原文与其他历史。
+    pub fn rebase_quotes(
+        session_id: &SessionId,
+        snapshot: &mut ConversationSnapshot,
+        generation: u64,
+        previous_generation: u64,
+        retained_children: &std::collections::BTreeSet<ChildTaskId>,
+    ) {
+        use agent_types::{AssistantPart, QuotedTextSourceOwner, UserPart};
+        let Some((last, prefix)) = snapshot.messages.split_last_mut() else {
+            return;
+        };
+        let ConversationMessage::User(user) = last else {
+            return;
+        };
+        for quote in user.parts.iter_mut().filter_map(|part| match part {
+            UserPart::QuotedText(quote) => Some(quote),
+            _ => None,
+        }) {
+            match &quote.source_owner {
+                QuotedTextSourceOwner::MainSession { session_id: source }
+                    if source == session_id.as_str() => {}
+                QuotedTextSourceOwner::ChildTask {
+                    session_id: source,
+                    child_task_id,
+                } if source == session_id.as_str() => {
+                    quote.source_available &= ChildTaskId::new(child_task_id)
+                        .is_ok_and(|id| retained_children.contains(&id));
+                    continue;
+                }
+                _ => continue,
+            }
+            let source = prefix
+                .iter()
+                .find(|message| message_id_for_replacement(message) == &quote.source_message_id);
+            let text = match (source, quote.source_role) {
+                (
+                    Some(ConversationMessage::User(source)),
+                    agent_types::QuotedTextSourceRole::User,
+                ) if source.transcript_visibility == agent_types::TranscriptVisibility::Visible => {
+                    Some(user_text_parts(source).collect::<Vec<_>>().join("\n"))
+                }
+                (
+                    Some(ConversationMessage::Assistant(source)),
+                    agent_types::QuotedTextSourceRole::Assistant,
+                ) if source.purpose.is_model_response() => Some(
+                    source
+                        .parts
+                        .iter()
+                        .filter_map(|part| match part {
+                            AssistantPart::Text(text) => Some(text.text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                _ => None,
+            };
+            quote.source_available = text.is_some_and(|text| {
+                // 前缀中的源消息保持原样。来自旧代次的可用定位保留渲染后的 UTF-16 范围，
+                // 客户端仍会核对 exact；直接拿 Markdown 源码比较会错误丢弃加粗等格式中的定位。
+                if quote.source_available && quote.source_generation == previous_generation {
+                    return true;
+                }
+                let units: Vec<_> = text.encode_utf16().collect();
+                units
+                    .get(quote.text_start_utf16 as usize..quote.text_end_utf16 as usize)
+                    .is_some_and(|range| range.iter().copied().eq(quote.exact.encode_utf16()))
+            });
+            if quote.source_available {
+                quote.source_generation = generation;
+            }
+        }
+    }
 }
 
 /// 自动压缩要原子替换的正文所有者；Run 与 child 都必须仍处于活动执行期。
@@ -362,17 +450,84 @@ fn message_id_for_replacement(message: &ConversationMessage) -> &MessageId {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RewriteResult {
     pub input: StoredInput,
+    pub user_message: agent_types::UserMessage,
     pub run: StoredRun,
     pub body_generation: u64,
 }
 
-/// Runtime 向 Store 请求的一段规范 Conversation 窗口；`end` 使用可显示消息序号。
+/// Runtime 向 Store 请求的一段完整 Run 批次窗口。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConversationWindowRequest {
     pub owner: ConversationOwner,
     pub generation: u64,
-    pub end: Option<usize>,
-    pub limit: usize,
+    pub end: ConversationWindowEnd,
+    pub turn_limit: usize,
+}
+
+/// 位置使用展示序号。分页游标必须落在批次边界，定位则可以指向批次内部。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConversationWindowEnd {
+    Latest,
+    Before(usize),
+    Around(usize),
+}
+
+/// 与前端相同，只合并相邻的同 Run 助手消息。输入、摘要和旧无身份行随下一批，
+/// 未跟随 Run 的尾部留在最新页。仅保存展示位置与最后一个可计数的助手身份。
+#[derive(Clone, Default)]
+pub struct ConversationTurnBoundaries {
+    starts: Vec<usize>,
+    last: Option<(usize, RunId)>,
+}
+
+impl ConversationTurnBoundaries {
+    pub fn record_assistant(&mut self, ordinal: usize, run_id: &RunId) {
+        match &mut self.last {
+            Some((previous, run)) if *previous + 1 == ordinal && run == run_id => {
+                *previous = ordinal;
+                return;
+            }
+            Some((previous, _)) => self.starts.push(*previous + 1),
+            None => self.starts.push(0),
+        }
+        self.last = Some((ordinal, run_id.clone()));
+    }
+
+    pub fn window(
+        &self,
+        total: usize,
+        end: ConversationWindowEnd,
+        turn_limit: usize,
+    ) -> Result<std::ops::Range<usize>, super::StoreError> {
+        use super::{StoreError, StoreErrorKind};
+
+        let invalid = || {
+            StoreError::new(
+                StoreErrorKind::InvalidInput,
+                "conversation window position is not valid",
+            )
+        };
+        let (end, turns) = match end {
+            ConversationWindowEnd::Latest => (total, self.starts.len()),
+            ConversationWindowEnd::Before(end) if end > 0 && end < total => {
+                (end, self.starts.binary_search(&end).map_err(|_| invalid())?)
+            }
+            ConversationWindowEnd::Around(ordinal) if ordinal < total => {
+                let turns = self.starts.partition_point(|start| *start <= ordinal);
+                (self.starts.get(turns).copied().unwrap_or(total), turns)
+            }
+            _ => return Err(invalid()),
+        };
+        if turn_limit == 0 {
+            return Err(invalid());
+        }
+        let start = self
+            .starts
+            .get(turns.saturating_sub(turn_limit))
+            .copied()
+            .unwrap_or(0);
+        Ok(start..end)
+    }
 }
 
 /// Store 基于可重建索引返回的规范消息窗口；offset 不进入产品协议。

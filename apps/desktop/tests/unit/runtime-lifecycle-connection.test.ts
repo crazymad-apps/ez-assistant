@@ -1,10 +1,11 @@
+import { sidebarFixture } from "../support/sidebarFixture";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RuntimeLifecycleCoordinator } from "../../src/stores/RuntimeLifecycleCoordinator";
 import { ConnectionStore } from "../../src/stores/ConnectionStore";
 import { NavigationStore } from "../../src/stores/NavigationStore";
 import { RuntimeProjectionStore } from "../../src/stores/RuntimeProjectionStore";
 import { LiveExecutionStore } from "../../src/stores/LiveExecutionStore";
-import type { ApplicationSnapshot, RunSnapshot, SessionSummary } from "@ez-assistant/protocol";
+import type { ApplicationSnapshot, ConversationPage, RunSnapshot, SessionSummary, SessionViewSnapshot } from "@ez-assistant/protocol";
 import type { RuntimeBootstrap } from "../../src/native-bridge/runtimeBootstrap";
 import { RuntimeClientError } from "../../src/runtime-client/RuntimeClient";
 
@@ -27,9 +28,9 @@ vi.mock("../../src/runtime-client/RuntimeClient", () => ({
 }));
 const application: ApplicationSnapshot = {
   runtime_lifecycle: "running",
-  active_sessions_next_offset: null,
-  archived_sessions_next_offset: null, configuration: { config_path: null, revision: "fixture", state: "ready", schema_version: 1, issues: [] }, providers: [], model_settings: { default_model: null, vision_model: null }, workspaces: [], active_sessions: [], archived_sessions: [], controller_availability: { status: "unavailable" }, additional_controller_count: 0,
-  capabilities: { conversation_paging: true, mcp_tools: true, mcp_management: true, session_commands: true, tool_detail: true, queue_control: true, approval_queue: true, child_task_view: true, conversation_search: true },
+  ...sidebarFixture({ active_next: null, archived_next: null, active: [], archived: [] }),
+   configuration: { config_path: null, revision: "fixture", state: "ready", schema_version: 1, issues: [] }, providers: [], model_settings: { default_model: null, vision_model: null }, workspaces: [],   controller_availability: { status: "unavailable" }, additional_controller_count: 0,
+  capabilities: { conversation_paging: true, mcp_tools: true, mcp_management: true, session_commands: true, user_message_edit: false, tool_detail: true, queue_control: true, approval_queue: true, child_task_view: true, conversation_search: true },
 };
 const bootstrap = (origin: string): RuntimeBootstrap => ({ base_url: origin, instance_id: origin, binding_id: origin, target_kind: "remote", access_token: "fixture", capabilities: { mode: "personal", min_compatible_version: "0.25.2", runtime_version: "0.25.2", max_command_bytes: 1048576, max_attachment_bytes: null, sse: true, streaming_upload: true, features: ["web_login", "startup_diagnostics"] }, started_runtime: false });
 const result = (revision: string) => ({ type: "get_application_snapshot", payload: { snapshot: { observed_sequence: 0, value: { ...structuredClone(application), configuration: { ...application.configuration, revision } } } } });
@@ -64,33 +65,60 @@ const summary = (session_id: string): SessionSummary => ({
   active_child_count: 0, active_run_status: null,
 });
 
+function seedGroupPage(projection: RuntimeProjectionStore, filter: "active" | "archived", sessions: SessionSummary[], next_offset: number | null) {
+  projection.appendSessionGroup({ group: { type: "unbound" }, filter, sessions, next_offset }, 0, projection.list_revision);
+}
+
 describe("bounded owner snapshot reads", () => {
+  it("omits collapsed groups while retaining their loaded prefix for reopening", async () => {
+    const { coordinator, projection, navigation } = create();
+    await coordinator.connect(bootstrap("http://a"));
+    seedGroupPage(projection, "active", Array.from({ length: 40 }, (_, i) => summary(`s-${i}`)), 40);
+    navigation.setSectionOpen("unbound", false);
+    transport.command.mockClear();
+    transport.command.mockImplementation(async (address, command) => {
+      expect(command.payload.session_groups).toEqual([]);
+      const response = result(address);
+      response.payload.snapshot.value.session_groups = [];
+      return response;
+    });
+    await coordinator.loadApplication();
+    expect(projection.application?.session_groups).toEqual([]);
+    navigation.setSectionOpen("unbound", true);
+    transport.command.mockImplementation(async (address, command) => {
+      expect(command.payload.session_groups).toEqual([{ group: { type: "unbound" }, filter: "active", limit: 40 }]);
+      return result(address);
+    });
+    await coordinator.loadApplication();
+    expect(transport.command).toHaveBeenCalledTimes(2);
+  });
+
   it("refreshes the loaded list prefixes in one snapshot with authoritative ordering and offsets", async () => {
     const { coordinator, projection } = create();
     await coordinator.connect(bootstrap("http://a"));
     const loaded = Array.from({ length: 500 }, (_, index) => summary(`old-${index}`));
-    projection.appendSessionPage("active", loaded, 500);
-    projection.appendSessionPage("archived", Array.from({ length: 235 }, (_, index) => ({ ...summary(`archived-${index}`), lifecycle: "archived" as const })), null);
+    seedGroupPage(projection, "active", loaded, 500);
+    seedGroupPage(projection, "archived", Array.from({ length: 235 }, (_, index) => ({ ...summary(`archived-${index}`), lifecycle: "archived" as const })), null);
     transport.command.mockClear();
     transport.command.mockImplementation(async (address, command) => {
-      expect(command).toEqual({ type: "get_application_snapshot", payload: { active_sessions_limit: 500, archived_sessions_limit: 235 } });
+      expect(command).toEqual({ type: "get_application_snapshot", payload: { workspaces_limit: 10, session_groups: [{ group: { type: "unbound" }, filter: "active", limit: 500 }] } });
       const response = result(address);
-      response.payload.snapshot.value.active_sessions = [summary("new-pinned"), ...loaded.slice(0, 499)];
-      response.payload.snapshot.value.active_sessions_next_offset = 500;
+      response.payload.snapshot.value.session_groups[0].sessions = [summary("new-pinned"), ...loaded.slice(0, 499)];
+      response.payload.snapshot.value.session_groups[0].next_offset = 500;
       return response;
     });
     await coordinator.loadApplication();
     expect(transport.command).toHaveBeenCalledOnce();
-    expect(projection.application?.active_sessions.map((session) => session.session_id)).toEqual(["new-pinned", ...loaded.slice(0, 499).map((session) => session.session_id)]);
-    expect(projection.application?.active_sessions_next_offset).toBe(500);
-    expect(projection.application?.archived_sessions).toEqual([]);
-    expect(projection.application?.archived_sessions_next_offset).toBeNull();
+    expect(projection.application?.session_groups[0].sessions.map((session) => session.session_id)).toEqual(["new-pinned", ...loaded.slice(0, 499).map((session) => session.session_id)]);
+    expect(projection.application?.session_groups[0].next_offset).toBe(500);
+    expect(projection.application?.session_groups[1].sessions).toEqual([]);
+    expect(projection.application?.session_groups[1].next_offset).toBeNull();
   });
 
   it("retries the same enlarged snapshot at most three times without fetching individual pages", async () => {
     const { coordinator, projection, report_error } = create();
     await coordinator.connect(bootstrap("http://a"));
-    projection.appendSessionPage("active", [summary("previous")], 500);
+    seedGroupPage(projection, "active", [summary("previous")], 500);
     const previous = projection.application;
     vi.useFakeTimers();
     transport.command.mockClear();
@@ -100,13 +128,13 @@ describe("bounded owner snapshot reads", () => {
     await loading;
     expect(transport.command).toHaveBeenCalledTimes(3);
     for (const [, command] of transport.command.mock.calls) {
-      expect(command).toEqual({ type: "get_application_snapshot", payload: { active_sessions_limit: 500, archived_sessions_limit: 100 } });
+      expect(command).toEqual({ type: "get_application_snapshot", payload: { workspaces_limit: 10, session_groups: [{ group: { type: "unbound" }, filter: "active", limit: 500 }] } });
     }
     expect(report_error).toHaveBeenCalledWith("会话暂时繁忙，请重试");
     expect(projection.application).toBe(previous);
   });
 
-  it("does not refetch the application when an older selection stays busy", async () => {
+  it("keeps an off-page selection without fetching or injecting its summary", async () => {
     const { coordinator, projection, navigation, connection, report_error } = create();
     await coordinator.connect(bootstrap("http://a"));
     const previous = projection.application;
@@ -121,25 +149,25 @@ describe("bounded owner snapshot reads", () => {
     await vi.advanceTimersByTimeAsync(1_000);
     await loading;
     expect(transport.command.mock.calls.filter(([, command]) => command.type === "get_application_snapshot")).toHaveLength(1);
-    expect(transport.command.mock.calls.filter(([, command]) => command.type === "get_session")).toHaveLength(3);
-    expect(report_error).toHaveBeenCalledWith("会话暂时繁忙，请重试");
-    expect(projection.application).toBe(previous);
+    expect(transport.command.mock.calls.filter(([, command]) => command.type === "get_session")).toHaveLength(0);
+    expect(report_error).not.toHaveBeenCalled();
+    expect(projection.application).not.toBe(previous);
     expect(navigation.selected_session_id).toBe("older");
     expect(connection.state).toBe("connected");
   });
 
-  it("shares one total deadline across the enlarged application and an older selected summary", async () => {
+  it("enforces the application deadline while keeping an off-page selection", async () => {
     const { coordinator, projection, navigation, report_error } = create();
     await coordinator.connect(bootstrap("http://a"));
-    projection.appendSessionPage("active", [summary("previous")], 500);
+    seedGroupPage(projection, "active", [summary("previous")], 500);
     navigation.selectSession("older", false);
     const previous = projection.application;
     vi.useFakeTimers();
     transport.command.mockClear();
     transport.command.mockImplementation((address, command) => {
       if (command.type === "get_application_snapshot") {
-        expect(command.payload.active_sessions_limit).toBe(500);
-        return new Promise((resolve) => window.setTimeout(() => resolve(result(address)), 14_900));
+        expect(command.payload.session_groups[0].limit).toBe(500);
+        return new Promise((resolve) => window.setTimeout(() => resolve(result(address)), 16_000));
       }
       expect(command.type).toBe("get_session");
       return new Promise(() => {});
@@ -150,7 +178,7 @@ describe("bounded owner snapshot reads", () => {
     await vi.advanceTimersByTimeAsync(1);
     await loading;
     expect(report_error).toHaveBeenCalledWith("读取会话超时，请重试");
-    expect(transport.command).toHaveBeenCalledTimes(2);
+    expect(transport.command).toHaveBeenCalledTimes(1);
     const signals = transport.command.mock.calls.map(([, , options]) => options.signal as AbortSignal);
     expect(signals.every((signal) => signal === signals[0] && signal.aborted)).toBe(true);
     expect(projection.application).toBe(previous);
@@ -159,12 +187,12 @@ describe("bounded owner snapshot reads", () => {
   it("preserves loaded counts on same-instance reconnect and resets them for a different instance", async () => {
     const { coordinator, projection } = create();
     await coordinator.connect(bootstrap("http://a"));
-    projection.appendSessionPage("active", [summary("previous")], 500);
+    seedGroupPage(projection, "active", [summary("previous")], 500);
     transport.command.mockClear();
     await coordinator.connect(bootstrap("http://a"));
     expect(transport.command).toHaveBeenCalledOnce();
-    expect(transport.command.mock.calls[0]![1]).toEqual({ type: "get_application_snapshot", payload: { active_sessions_limit: 500, archived_sessions_limit: 100 } });
-    projection.appendSessionPage("active", [summary("previous")], 500);
+    expect(transport.command.mock.calls[0]![1]).toEqual({ type: "get_application_snapshot", payload: { workspaces_limit: 10, session_groups: [{ group: { type: "unbound" }, filter: "active", limit: 500 }] } });
+    seedGroupPage(projection, "active", [summary("previous")], 500);
     transport.command.mockClear();
     await coordinator.connect(bootstrap("http://b"));
     expect(transport.command).toHaveBeenCalledOnce();
@@ -174,7 +202,7 @@ describe("bounded owner snapshot reads", () => {
   it("preserves a gap rebase requested during an expanded application refresh and resumes the global stream", async () => {
     const { coordinator, projection } = create();
     await coordinator.connect(bootstrap("http://a"));
-    projection.appendSessionPage("active", [summary("previous")], 500);
+    seedGroupPage(projection, "active", [summary("previous")], 500);
     transport.command.mockClear();
     let finish!: (value: ReturnType<typeof result>) => void;
     const fresh = result("fresh"); fresh.payload.snapshot.observed_sequence = 2;
@@ -191,7 +219,7 @@ describe("bounded owner snapshot reads", () => {
     expect(projection.observed_sequence).toBe(3);
     expect(transport.command).toHaveBeenCalledTimes(2);
     for (const [, command] of transport.command.mock.calls) {
-      expect(command).toEqual({ type: "get_application_snapshot", payload: { active_sessions_limit: 500, archived_sessions_limit: 100 } });
+      expect(command).toEqual({ type: "get_application_snapshot", payload: { workspaces_limit: 10, session_groups: [{ group: { type: "unbound" }, filter: "active", limit: 500 }] } });
     }
   });
 
@@ -211,6 +239,30 @@ describe("bounded owner snapshot reads", () => {
     expect(text("s")).toBe("base");
     expect(text("other")).toBe("other");
     expect(projection.observed_sequence).toBe(3);
+  });
+
+  it("bridges a disjoint same-generation latest page to the retained reading history", async () => {
+    const { coordinator, navigation, projection } = create();
+    await coordinator.connect(bootstrap("http://a"));
+    navigation.selectSession("s", false);
+    const view = sessionResult("s").payload.snapshot.value as unknown as SessionViewSnapshot;
+    const conversation = (ids: string[], cursor: string | null): ConversationPage => ({
+      ...view.conversation, previous_cursor: cursor, has_more: cursor !== null,
+      items: ids.map(message_id => ({
+        type: "user", message_id, text: message_id, inherited: false, input_id: null, attachment_ids: [],
+        quotes: [], source: { type: "user" }, created_at_ms: null,
+      })),
+    });
+    projection.applySessionSnapshot({ observed_sequence: 1, value: { ...view, conversation: conversation(["m1", "m2"], null) } });
+    transport.command.mockClear()
+      .mockResolvedValueOnce({ payload: { snapshot: { observed_sequence: 5, value: { ...view, conversation: conversation(["m5", "m6"], "newer") } } } })
+      .mockResolvedValueOnce({ payload: { snapshot: { observed_sequence: 6, value: conversation(["m3", "m4"], "older") } } })
+      .mockResolvedValueOnce({ payload: { snapshot: { observed_sequence: 7, value: conversation(["m1", "m2"], null) } } });
+    await coordinator.loadSession("s");
+    expect(transport.command.mock.calls.slice(1).map(([, command]) => command.payload.cursor)).toEqual(["newer", "older"]);
+    expect(projection.conversation_histories.get("s")?.items.map(item => item.message_id)).toEqual(["m1", "m2", "m3", "m4", "m5", "m6"]);
+    expect(projection.observed_sequence).toBe(0);
+    expect(projection.sessionSnapshotSequence("s")).toBe(5);
   });
 
   it("resynchronizes an overflowing initial stream without installing the truncated baseline", async () => {
@@ -518,13 +570,15 @@ describe("selected Runtime lifecycle", () => {
     transport.command.mockImplementation(async (address: string, command: { type: string }) => {
       if (command.type === "get_session") return { payload: { session: older } };
       const response = result(address);
-      response.payload.snapshot.value.active_sessions_next_offset = 100;
+      response.payload.snapshot.value.session_groups[0].next_offset = 100;
       return response;
     });
     // 避开本用例不关心的正文装配，仅验证连接后的摘要与选择恢复。
     vi.spyOn(coordinator, "loadSession").mockResolvedValue();
     coordinator.retryConnection();
-    await vi.waitFor(() => expect(projection.application?.active_sessions).toContainEqual(older));
+    await vi.waitFor(() => expect(coordinator.loadSession).toHaveBeenCalledWith("older"));
+    expect(projection.application?.session_groups[0].sessions).not.toContainEqual(older);
+    expect(transport.command.mock.calls.some(([, command]) => command.type === "get_session")).toBe(false);
     expect(navigation.selected_session_id).toBe("older");
     expect(transport.command.mock.calls.some(([, command]) => command.type === "list_sessions")).toBe(false);
   });
@@ -713,7 +767,7 @@ it.each([0, 150])("replaces old running state after a same-Host user Runtime res
     if (command.type === "get_application_snapshot") {
       const response = result(address);
       response.payload.snapshot.observed_sequence = 100;
-      response.payload.snapshot.value.active_sessions = [{ ...summary("s"), active_run_id: "r" }];
+      response.payload.snapshot.value.session_groups[0].sessions = [{ ...summary("s"), active_run_id: "r" }];
       return response;
     }
     return sessionResult("s", "before outage", activeRun(), 100);
@@ -724,7 +778,7 @@ it.each([0, 150])("replaces old running state after a same-Host user Runtime res
     if (command.type === "get_application_snapshot") {
       const response = result(address);
       response.payload.snapshot.observed_sequence = sequence;
-      response.payload.snapshot.value.active_sessions = [summary("s")];
+      response.payload.snapshot.value.session_groups[0].sessions = [summary("s")];
       return response;
     }
     return sessionResult("s", "after recovery", null, sequence);
@@ -747,7 +801,7 @@ it("keeps center availability independent from local queries and model retries",
   transport.command.mockImplementation(async (address, command) => {
     if (command.type === "get_application_snapshot") {
       const response = result(address);
-      response.payload.snapshot.value.active_sessions = [{ ...summary("s"), active_run_id: "r" }];
+      response.payload.snapshot.value.session_groups[0].sessions = [{ ...summary("s"), active_run_id: "r" }];
       return response;
     }
     return sessionResult("s", "network test", activeRun());

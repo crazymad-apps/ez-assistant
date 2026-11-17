@@ -170,7 +170,7 @@ fn formal_plan_reads_topics_and_preserves_results_across_override_disable_and_re
     let db = Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
     for (table, count) in [
         ("sessions", 2),
-        ("inputs", 3),
+        ("inputs", 0),
         ("runs", 0),
         ("skill_activations", 0),
         ("model_request_records", 9),

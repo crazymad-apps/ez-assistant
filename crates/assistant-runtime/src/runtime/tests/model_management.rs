@@ -674,6 +674,7 @@ async fn online_execution_fixture() -> (
 
 fn input_request(session_id: &assistant_protocol::SessionId, message: &str) -> SubmitInputRequest {
     SubmitInputRequest {
+        delivery: Default::default(),
         mode: assistant_protocol::SubmitInputMode::Normal,
         variant: assistant_protocol::AgentVariant::Build,
         session_id: session_id.clone(),

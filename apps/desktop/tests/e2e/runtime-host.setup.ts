@@ -198,7 +198,24 @@ async function startFakeProvider(): Promise<FakeProvider> {
       if (!Array.isArray(message.content)) return "";
       return message.content.map((part: { text?: string }) => part.text ?? "").join("\n");
     }).findLast((text) => text.startsWith("F05_RESOURCES\n"));
-    if ((marker === 'F03_CARD' || marker === 'F03_MCP_CARD' || marker === 'F03_APPS_CARD') && !has_tool_result) {
+    if (marker === "GOAL_QUEUE_START" || marker === "GOAL_QUEUE_GUIDANCE") {
+      const history = JSON.stringify(body.messages);
+      const guidance = history.includes("GOAL_QUEUE_GUIDANCE");
+      const has_resume_context = history.includes("GOAL_RESUME_INJECTION_V1");
+      if (guidance && !has_resume_context) {
+        frames = textFrames(response_id, "Goal resume context missing");
+      } else if (has_tool_result) {
+        frames = textFrames(response_id, guidance ? "Goal guidance applied" : "Goal paused for guidance");
+      } else {
+        const args = guidance
+          ? { status: "complete", summary: "Guidance applied" }
+          : { status: "blocked", summary: "Waiting for fixture guidance" };
+        frames = [
+          { id: response_id, model: "offline-model", choices: [{ index: 0, delta: { role: "assistant", tool_calls: [{ index: 0, id: `goal-${response_id}`, type: "function", function: { name: "update_goal", arguments: JSON.stringify(args) } }] }, finish_reason: null }] },
+          { id: response_id, model: "offline-model", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] },
+        ];
+      }
+    } else if ((marker === 'F03_CARD' || marker === 'F03_MCP_CARD' || marker === 'F03_APPS_CARD') && !has_tool_result) {
       const name=marker!=='F03_MCP_CARD'?'publish_card':'call_mcp_tool';
       const args=marker==='F03_APPS_CARD'?{plugin:'ui-link-fixture',entry:'counter',arguments:{count:JSON.stringify(body.messages?.findLast(message=>message.role==='user')?.content).includes('TWO')?2:1,app_plugin:'ui-link-fixture'}}:marker==='F03_CARD'?{plugin:'ui-fixture',entry:'counter',arguments:{count:1}}:{server:'ui_fixture',tool:'show_card',arguments:{value:'card input'}};
       const inputs = marker === 'F03_CARD'
@@ -281,7 +298,7 @@ type ProviderMessage = Readonly<{ role?: string; content?: unknown }>;
 type ProviderRequest = Readonly<{ messages?: readonly ProviderMessage[] }>;
 
 function latestMarker(body: string): string {
-  const markers = ["FIRST_CASE", "BLOCK_FOR_QUEUE", "QUEUED_CASE", "TOOL_CASE", "DELEGATE_CASE", "MCP_CASE", "PRIVATE_CASE", "C05_STREAM", "F02_STREAM", 'F03_CARD', 'F03_MCP_CARD', 'F03_APPS_CARD'];
+  const markers = ["FIRST_CASE", "BLOCK_FOR_QUEUE", "QUEUED_CASE", "TOOL_CASE", "DELEGATE_CASE", "MCP_CASE", "PRIVATE_CASE", "C05_STREAM", "F02_STREAM", "GOAL_QUEUE_START", "GOAL_QUEUE_GUIDANCE", 'F03_CARD', 'F03_MCP_CARD', 'F03_APPS_CARD'];
   return markers
     .flatMap((marker) => {
       const position = body.lastIndexOf(marker);

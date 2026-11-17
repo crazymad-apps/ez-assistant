@@ -495,7 +495,6 @@ impl VolatileRuntimeStore {
                     || !command_message_ids.insert(command.user_message_id.clone())
                     || state.inputs.contains_key(&command.input_id)
                     || state.input_identities.contains_key(&command.input_id)
-                    || state.command_identities.contains_key(&command.input_id)
                     || state.session_commands.contains_key(&command.input_id)
                     || command.session_id != fork.session.session_id
                     || command.idempotency_key.is_some()
@@ -839,9 +838,6 @@ impl VolatileRuntimeStore {
             state
                 .session_commands
                 .retain(|_, command| command.session_id != deletion.session_id);
-            state
-                .command_identities
-                .retain(|_, identity| identity.session_id != deletion.session_id);
             state.runs.retain(|id, _| !run_ids.contains(id));
             state
                 .child_tasks

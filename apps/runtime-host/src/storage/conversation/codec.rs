@@ -6,18 +6,22 @@ use agent_types::ConversationMessage;
 use assistant_protocol::ConversationOwner;
 use assistant_runtime::StoredHistoryFacts;
 use serde::{Deserialize, Serialize};
+use serde_json::value::{RawValue, to_raw_value};
 
 use super::super::{StorageResult, internal_error, invalid_data, invalid_data_with_source};
 
 pub(super) const HISTORY_FORMAT: &str = "ez_assistant_history";
-pub(super) const HISTORY_VERSION: u32 = 1;
+pub(in crate::storage) const HISTORY_VERSION: u32 = 2;
+pub(in crate::storage) const PREVIOUS_HISTORY_VERSION: u32 = 1;
 const GENERATION_BATCH_SIZE: usize = 64;
+const GENERATION_MESSAGE_FRAME_BYTES: usize = 512 * 1024;
 
-/// 新 generation 的消息与检查点按有界批次写入；工具配对闭包不因批次上限被拆开。
+/// 按编码后的字节切分正文，限制索引读取的解码范围；超限单条消息或完整工具交换独占一帧。
 pub(super) fn write_generation(
     writer: &mut impl Write,
     owner: &ConversationOwner,
     generation: u64,
+    version: u32,
     messages: impl IntoIterator<Item = StorageResult<ConversationMessage>>,
     history: &StoredHistoryFacts,
 ) -> StorageResult<()> {
@@ -25,7 +29,7 @@ pub(super) fn write_generation(
         writer,
         &HistoryRecord::Header(HistoryHeader {
             format: HISTORY_FORMAT.to_owned(),
-            version: HISTORY_VERSION,
+            version,
             owner: owner.clone(),
             generation,
         }),
@@ -34,35 +38,46 @@ pub(super) fn write_generation(
     let operation_id = format!("generation:{generation}");
     let mut validation = agent_types::ToolExchangeValidator::default();
     let mut batch = Vec::with_capacity(GENERATION_BATCH_SIZE);
+    let mut exchange = Vec::new();
+    let empty_frame_bytes = serde_json::to_vec(&GenerationMessageFrame::new(&operation_id, &[]))
+        .map_err(|source| internal_error("conversation history could not be encoded", source))?
+        .len()
+        + 1;
+    let mut frame_bytes = empty_frame_bytes;
+    let mut exchange_bytes = 0;
     for message in messages {
         let message = message?;
         validation.push(&message).map_err(|source| {
             invalid_data_with_source("replacement history tool exchange is invalid", source)
         })?;
-        batch.push(message);
-        if validation.is_complete() && batch.len() >= GENERATION_BATCH_SIZE {
-            write_record(
-                writer,
-                &HistoryRecord::Commit(HistoryFrame {
-                    operation_id: operation_id.clone(),
-                    messages: std::mem::take(&mut batch),
-                    history: StoredHistoryFacts::default(),
-                }),
-            )?;
+        let encoded = to_raw_value(&message).map_err(|source| {
+            internal_error("conversation message could not be encoded", source)
+        })?;
+        // 每项多计一个分隔逗号，确保连同外层对象及换行也在预算内。
+        exchange_bytes += encoded.get().len() + 1;
+        exchange.push(encoded);
+        if !validation.is_complete() {
+            continue;
+        }
+        if !batch.is_empty() && frame_bytes + exchange_bytes > GENERATION_MESSAGE_FRAME_BYTES {
+            write_record(writer, &GenerationMessageFrame::new(&operation_id, &batch))?;
+            batch.clear();
+            frame_bytes = empty_frame_bytes;
+        }
+        frame_bytes += exchange_bytes;
+        exchange_bytes = 0;
+        batch.append(&mut exchange);
+        if batch.len() >= GENERATION_BATCH_SIZE || frame_bytes >= GENERATION_MESSAGE_FRAME_BYTES {
+            write_record(writer, &GenerationMessageFrame::new(&operation_id, &batch))?;
+            batch.clear();
+            frame_bytes = empty_frame_bytes;
         }
     }
     validation.finish().map_err(|source| {
         invalid_data_with_source("replacement history splits a tool exchange", source)
     })?;
     if !batch.is_empty() {
-        write_record(
-            writer,
-            &HistoryRecord::Commit(HistoryFrame {
-                operation_id: operation_id.clone(),
-                messages: batch,
-                history: StoredHistoryFacts::default(),
-            }),
-        )?;
+        write_record(writer, &GenerationMessageFrame::new(&operation_id, &batch))?;
     }
     macro_rules! facts {
         ($field:ident) => {
@@ -110,12 +125,31 @@ pub(super) fn encode_append(
     Ok(bytes)
 }
 
-fn write_record(writer: &mut impl Write, record: &HistoryRecord) -> StorageResult<()> {
+fn write_record(writer: &mut impl Write, record: &impl Serialize) -> StorageResult<()> {
     serde_json::to_writer(&mut *writer, record)
         .map_err(|source| internal_error("conversation history could not be encoded", source))?;
     writer.write_all(b"\n").map_err(|source| {
         internal_error("conversation history record could not be written", source)
     })
+}
+
+/// 与规范 Commit 同一格式，正文已编码用于计算帧大小，避免第二次 JSON 转义。
+#[derive(Serialize)]
+struct GenerationMessageFrame<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    operation_id: &'a str,
+    messages: &'a [Box<RawValue>],
+}
+
+impl<'a> GenerationMessageFrame<'a> {
+    fn new(operation_id: &'a str, messages: &'a [Box<RawValue>]) -> Self {
+        Self {
+            kind: "commit",
+            operation_id,
+            messages,
+        }
+    }
 }
 
 /// 头只绑定格式与物理 owner；不是每次提交都会变化的业务 revision。
@@ -154,6 +188,7 @@ pub(super) enum Encoding {
 pub(super) struct RecordReader<R> {
     reader: R,
     encoding: Option<Encoding>,
+    version: u32,
     pub(super) header: Option<HistoryHeader>,
     line: Vec<u8>,
     offset: u64,
@@ -166,8 +201,14 @@ pub(super) struct Batch {
 }
 
 impl<R: BufRead> RecordReader<R> {
+    #[cfg(test)]
     pub(super) fn new(reader: R) -> Self {
+        Self::with_version(reader, HISTORY_VERSION)
+    }
+
+    pub(super) fn with_version(reader: R, version: u32) -> Self {
         Self {
+            version,
             reader,
             encoding: None,
             header: None,
@@ -219,7 +260,7 @@ impl<R: BufRead> RecordReader<R> {
                 HistoryRecord::Header(header) => {
                     if self.encoding.is_some()
                         || header.format != HISTORY_FORMAT
-                        || header.version != HISTORY_VERSION
+                        || header.version != self.version
                         || header.generation == 0
                     {
                         return Err(invalid_data("conversation history header is invalid"));

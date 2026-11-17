@@ -29,7 +29,7 @@ describe("ConversationView scroll anchoring", () => {
     const item = { ...base, task, can_cancel: false };
     const open = vi.fn();
     render(<ChildTaskTree items={[item]} on_open={open} />);
-    expect(screen.getByText(/继承.*正文不可用/)).toBeVisible();
+    expect(screen.getByText("已完成 · 正文不可用")).toBeVisible();
     const button = screen.getByRole("button", { name: "查看子任务：检查恢复一致性" });
     expect(button).toBeDisabled();
     fireEvent.click(button);
@@ -76,7 +76,6 @@ describe("ConversationView scroll anchoring", () => {
         mcp_selection: { server_key: "github", display_name: "提交时的名字" } }}
       on_attachment_click={vi.fn()} on_source_open={vi.fn()}
     />);
-    expect(screen.getByText("继承")).toBeVisible();
     expect(screen.getByText("MCP · 提交时的名字")).toHaveAttribute("title", "github");
     expect(screen.getByText("正常正文")).toBeVisible();
   });

@@ -24,6 +24,7 @@ pub(super) fn release_terminal_run_control(
     transaction: &rusqlite::Transaction<'_>,
     session_id: &assistant_protocol::SessionId,
     run_id: &assistant_protocol::RunId,
+    retain_input_identity: bool,
 ) -> StorageResult<()> {
     let input_id: Option<String> = transaction
         .query_row(
@@ -51,17 +52,23 @@ pub(super) fn release_terminal_run_control(
     if shared_control {
         return Ok(());
     }
-    let changed = transaction
-        .execute(
-            "UPDATE inputs SET priority_order=NULL,user_message_id=NULL,accepted_at_ms=NULL,
+    let statement = if retain_input_identity {
+        "UPDATE inputs SET priority_order=NULL,user_message_id=NULL,accepted_at_ms=NULL,
             agent_variant=NULL,origin=NULL,goal_id=NULL,goal_generation=NULL,goal_turn=NULL,
             goal_reply_route_json=NULL,skill_activation_json=NULL,cross_session_json=NULL,
             channel_source_json=NULL,agent_shell_target=NULL
          WHERE input_id=?1 AND session_id=?2 AND input_kind='message' AND state='committed'
             AND queued_message_json IS NULL
-            AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.input_id=inputs.input_id)",
-            params![input_id, session_id.as_str()],
-        )
+            AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.input_id=inputs.input_id)"
+    } else {
+        "DELETE FROM inputs WHERE input_id=?1 AND session_id=?2 AND input_kind='message'
+            AND state='committed' AND queued_message_json IS NULL AND idempotency_key IS NULL
+            AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.input_id=inputs.input_id)
+            AND NOT EXISTS(SELECT 1 FROM skill_activations a WHERE a.input_id=inputs.input_id)
+            AND NOT EXISTS(SELECT 1 FROM mcp_input_selections m WHERE m.input_id=inputs.input_id)"
+    };
+    let changed = transaction
+        .execute(statement, params![input_id, session_id.as_str()])
         .map_err(|source| internal_error("finished Input fields could not be released", source))?;
     if changed != 1 {
         return Err(conflict("finished Input still has unfinished control"));
@@ -72,7 +79,11 @@ pub(super) fn release_terminal_run_control(
 impl StorageEngine {
     /// 目标 Session mutation 内完成队列领取；此提交前输入可撤销，提交后才存在 Run。
     /// 独立事务只保存未完成控制；后续正文/开始提交沿已有 staged append 恢复，不提前写历史。
-    pub(super) fn claim_input(&mut self, run: StoredRun) -> StorageResult<()> {
+    pub(super) fn claim_input(
+        &mut self,
+        run: StoredRun,
+        goal_resume: Option<assistant_runtime::GoalHeldInputResume>,
+    ) -> StorageResult<()> {
         if run.status != RunStatus::Accepted
             || run.attempt != 1
             || run.started_at_ms.is_some()
@@ -90,16 +101,8 @@ impl StorageEngine {
         {
             return Err(conflict("claim Input is not queued"));
         }
-        let history =
-            self.load_conversation_history(assistant_protocol::ConversationOwner::MainSession {
-                session_id: run.session_id.clone(),
-            })?;
-        if history
-            .facts
-            .runs
-            .iter()
-            .any(|fact| fact.run_id == run.run_id || fact.input_id.as_ref() == Some(&run.input_id))
-        {
+        let history = self.local_input_history(&run.session_id)?;
+        if history.has_run_identity(&run.run_id) || history.has_run_for_input(&run.input_id) {
             return Err(conflict("claim Input already has Run history"));
         }
         let transaction = self
@@ -114,6 +117,12 @@ impl StorageEngine {
         ).map_err(|source| internal_error("input claim admission could not be checked",source))?;
         if !admitted {
             return Err(conflict("Input already claimed or Session busy"));
+        }
+        if let Some(resume) = &goal_resume {
+            if resume.session_id != run.session_id || resume.input_id != run.input_id {
+                return Err(conflict("Goal resume belongs to a different Run claim"));
+            }
+            super::input_state::bind_held_input_to_resumed_goal(&transaction, resume)?;
         }
         transaction.execute("INSERT INTO runs(run_id,session_id,input_id,attempt,status,cancel_requested,approval_mode,created_at_ms,started_at_ms) VALUES(?1,?2,?3,1,'accepted',0,?4,?5,NULL)",
             params![run.run_id.as_str(),run.session_id.as_str(),run.input_id.as_str(),approval_mode_value(run.approval_mode),run.created_at_ms]
@@ -205,12 +214,22 @@ impl StorageEngine {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|source| internal_error("retry admission could not begin", source))?;
-        let admitted: bool = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM inputs JOIN sessions USING(session_id)
-                WHERE input_id=?1 AND inputs.session_id=?2 AND state='committed' AND lifecycle='active' AND body_generation=?3)
-             AND NOT EXISTS(SELECT 1 FROM runs WHERE input_id=?1 AND session_id=?2 AND status IN ('accepted','running','cancelling'))",
-            params![input_id.as_str(), attempt.session_id.as_str(), super::to_i64(history.generation, "history generation exceeds SQLite range")?], |row| row.get(0)
-        ).map_err(|source| internal_error("retry admission could not be checked", source))?;
+        let admitted: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sessions
+                WHERE session_id=?2 AND lifecycle='active' AND body_generation=?3)
+             AND NOT EXISTS(SELECT 1 FROM inputs WHERE input_id=?1)",
+                params![
+                    input_id.as_str(),
+                    attempt.session_id.as_str(),
+                    super::to_i64(
+                        history.generation,
+                        "history generation exceeds SQLite range"
+                    )?
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|source| internal_error("retry admission could not be checked", source))?;
         if !admitted {
             return Err(conflict(
                 "retry Input is not committed or already has unfinished work",
@@ -220,11 +239,10 @@ impl StorageEngine {
         // 与 accepted Run 同事务，终结后再次释放，不将历史装配成可自行恢复的执行。
         let restored = transaction
             .execute(
-                "UPDATE inputs SET user_message_id=?1,accepted_at_ms=?2,agent_variant=?3,origin=?4,
-                cross_session_json=?5,channel_source_json=?6,agent_shell_target=?7,
-                priority_order=NULL,goal_id=NULL,goal_generation=NULL,goal_turn=NULL,
-                goal_reply_route_json=NULL,skill_activation_json=NULL
-             WHERE input_id=?8 AND session_id=?9 AND state='committed' AND input_kind='message'",
+                "INSERT INTO inputs (user_message_id,accepted_at_ms,agent_variant,origin,
+                    cross_session_json,channel_source_json,agent_shell_target,input_id,session_id,
+                    queue_order,state,input_kind)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'committed','message')",
                 params![
                     input.user_message_id.as_str(),
                     input.accepted_at_ms,
@@ -250,7 +268,8 @@ impl StorageEngine {
                         ))?,
                     input.agent_shell_target.map(super::mode::shell_kind_value),
                     input_id.as_str(),
-                    attempt.session_id.as_str()
+                    attempt.session_id.as_str(),
+                    super::to_i64(input.queue_order, "Input order exceeds SQLite range")?,
                 ],
             )
             .map_err(|source| {

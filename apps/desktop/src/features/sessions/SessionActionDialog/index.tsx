@@ -7,6 +7,7 @@ type SessionActionDialogProps = Readonly<{
   title: string;
   children: ReactNode;
   confirm_label: string;
+  cancel_label?: string;
   is_danger?: boolean;
   confirm_disabled?: boolean;
   is_pending: boolean;
@@ -19,6 +20,7 @@ export function SessionActionDialog({
   title,
   children,
   confirm_label,
+  cancel_label = "取消",
   is_danger = false,
   confirm_disabled = false,
   is_pending,
@@ -44,7 +46,7 @@ export function SessionActionDialog({
         </header>
         <div className={styles.body}>{children}</div>
         <footer className={styles.footer}>
-          <button disabled={is_pending} onClick={on_cancel} ref={cancel_ref} type="button">取消</button>
+          <button disabled={is_pending} onClick={on_cancel} ref={cancel_ref} type="button">{cancel_label}</button>
           <button
             className={is_danger ? styles.danger : styles.primary}
             disabled={is_pending || confirm_disabled}

@@ -3,27 +3,30 @@
 use std::{env, error::Error, fs, path::PathBuf, process};
 
 use assistant_protocol::{
-    DesktopDisplay, DesktopInput, DesktopInputFrame, DesktopViewOpenRequest, UserTerminalControl,
-    UserTerminalNotice,
-};
-use assistant_protocol::{
+    ConversationMessagePreview, ConversationNavigationItem, ConversationNavigationPage,
     DesktopUpdateContext, DeviceGatewayCommand, DeviceGatewayCommandResult, DeviceGatewayEvent,
     GetApplicationSnapshotRequest, GetApplicationSnapshotResult, GetChildTaskViewRequest,
-    GetChildTaskViewResult, GetConversationPageAroundRunRequest,
+    GetChildTaskViewResult, GetConversationMessagePreviewRequest,
+    GetConversationMessagePreviewResult, GetConversationPageAroundRunRequest,
     GetConversationPageAroundRunResult, GetSessionViewRequest, GetSessionViewResult,
     GetToolDetailRequest, GetToolDetailResult, GoalId, HostAccessCommand, HostAccessStatus,
     HostFileRequest, HostLoginRequest, HostLoginResult, HostLogoutResult, HostOrganization,
     HostOrganizationSelection, HostOrganizationSwitchRequest, HostOrganizationSwitchResult,
-    HostPasswordRequest, InterruptRunRequest, InterruptRunResult, ListConversationPageRequest,
-    ListConversationPageResult, ListHostFilesRequest, ListHostFilesResult,
-    ListSessionResourceFilesRequest, ListSessionResourceFilesResult, PermissionMcpMatcher,
-    PreviewSessionResourceFileRequest, PreviewSessionResourceFileResult,
+    HostPasswordRequest, InterruptRunRequest, InterruptRunResult,
+    ListConversationNavigationRequest, ListConversationNavigationResult,
+    ListConversationPageRequest, ListConversationPageResult, ListHostFilesRequest,
+    ListHostFilesResult, ListSessionResourceFilesRequest, ListSessionResourceFilesResult,
+    PermissionMcpMatcher, PreviewSessionResourceFileRequest, PreviewSessionResourceFileResult,
     PrioritizeQueuedInputRequest, PrioritizeQueuedInputResult, QueuedSessionItemSnapshot,
     QuotedTextSnapshot, RejectApprovalAndStopRunRequest, RejectApprovalAndStopRunResult,
     ResumeQueuedInputRequest, ResumeQueuedInputResult, RuntimeCommand, RuntimeCommandResult,
     RuntimeEventEnvelope, RuntimeHostCapabilities, RuntimeHostHealth,
     SessionMaterializationManifest, SessionMaterializationResult, SessionTitleGenerationSnapshot,
     SubmitInputMode, TodoItemId, UploadAttachmentResult,
+};
+use assistant_protocol::{
+    DesktopDisplay, DesktopInput, DesktopInputFrame, DesktopViewOpenRequest, UserTerminalControl,
+    UserTerminalNotice,
 };
 use ts_rs::{Config, TS};
 
@@ -102,6 +105,13 @@ fn export_all(output_directory: PathBuf) -> Result<PathBuf, Box<dyn Error>> {
         assistant_protocol::SessionResourceFileInfo,
         GetChildTaskViewRequest,
         GetChildTaskViewResult,
+        ConversationMessagePreview,
+        ConversationNavigationItem,
+        ConversationNavigationPage,
+        GetConversationMessagePreviewRequest,
+        GetConversationMessagePreviewResult,
+        ListConversationNavigationRequest,
+        ListConversationNavigationResult,
         ListConversationPageRequest,
         ListConversationPageResult,
         GetConversationPageAroundRunRequest,

@@ -854,11 +854,19 @@ pub(super) struct RunAuthorizationInput {
     pub(super) cancellation: tokio_util::sync::CancellationToken,
     pub(super) events: ObservationCoordinator,
     pub(super) goal_binding: Option<GoalRunBinding>,
+    pub(super) resume_paused_goal: bool,
+    /// 历史替换预编译时只使用将保留的激活与本次显式选择。
+    pub(super) rewrite_input: Option<RewriteCompilationInput>,
     pub(super) input_origin: crate::InputOrigin,
     pub(super) cross_session: Option<crate::CrossSessionInputEnvelope>,
 }
 
 /// 队列驱动与历史重入共同传入的 Run 装配资源；收敛参数数量并明确哪些能力来自 Runtime。
+pub(super) struct RewriteCompilationInput {
+    pub(super) activations: Vec<crate::StoredSkillActivation>,
+    pub(super) mcp_selection: Option<crate::StoredMcpSelection>,
+}
+
 pub(super) struct RunCompilationResources<'a> {
     pub(super) plugin: Arc<crate::plugin::PluginManager>,
     pub(super) attachments: Arc<
@@ -1185,8 +1193,12 @@ pub(super) async fn compile_run_agent(
     let active_skill_names = {
         let state = session.lock_state()?;
         let mut latest_names = std::collections::BTreeSet::new();
-        state
-            .skill_activations
+        authorization
+            .rewrite_input
+            .as_ref()
+            .map_or(state.skill_activations.as_slice(), |rewrite| {
+                rewrite.activations.as_slice()
+            })
             .iter()
             .rev()
             .filter(|activation| {
@@ -1211,6 +1223,11 @@ pub(super) async fn compile_run_agent(
             .collect::<Vec<_>>()
     };
     let skill_activation_latch = Arc::new(SkillActivationLatch::new(active_skill_names));
+    if authorization.resume_paused_goal && !compiled.capabilities.tool_calls {
+        return Err(RuntimeError::GoalUnsupportedByModel {
+            session_id: session.id().clone(),
+        });
+    }
     let goal_signal_latch = if let Some(binding) = authorization.goal_binding.as_ref() {
         let state = session.lock_state()?;
         let goal = state
@@ -1219,10 +1236,15 @@ pub(super) async fn compile_run_agent(
             .ok_or(RuntimeError::InternalStateUnavailable {
                 component: "goal run binding",
             })?;
+        let generation_matches = if authorization.resume_paused_goal {
+            matches!(goal.state, GoalState::Paused(_))
+                && goal.generation.checked_add(1) == Some(binding.generation)
+        } else {
+            goal.state == GoalState::Running && goal.generation == binding.generation
+        };
         if goal.id != binding.goal_id
-            || goal.generation != binding.generation
+            || !generation_matches
             || binding.run_id != authorization.run_id
-            || !matches!(goal.state, GoalState::Running)
         {
             return Err(RuntimeError::InternalStateUnavailable {
                 component: "goal run binding",
@@ -1237,13 +1259,14 @@ pub(super) async fn compile_run_agent(
     let permission_scopes = session.permission_scopes();
     let (input_selection, goal_selection) = {
         let state = session.lock_state()?;
-        let input_selection = Some(&authorization.input_id).and_then(|input_id| {
-            state
+        let input_selection = match authorization.rewrite_input.as_ref() {
+            Some(rewrite) => rewrite.mcp_selection.clone(),
+            None => state
                 .mcp_selections
                 .iter()
-                .find(|selection| selection.input_id.as_ref() == Some(input_id))
-                .cloned()
-        });
+                .find(|selection| selection.input_id.as_ref() == Some(&authorization.input_id))
+                .cloned(),
+        };
         let goal_selection = authorization.goal_binding.as_ref().and_then(|_| {
             state.goal.as_ref().and_then(|goal| {
                 goal.mcp_server_key.as_ref().map(|server_key| {

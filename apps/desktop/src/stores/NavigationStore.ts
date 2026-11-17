@@ -40,8 +40,11 @@ export class NavigationStore {
   right_sidebar_width = RIGHT_SIDEBAR_DEFAULT_WIDTH;
   viewport_width = 1280;
   conversation_anchor_message_id: MessageId | null = null;
+  conversation_anchor_follows_output = false;
   readonly conversation_history = observable.array<ConversationLocation>([], { deep: false });
   conversation_history_index = -1;
+  workspace_section_open = true;
+  unbound_section_open = true;
   workspace_expansion_initialized = false;
   readonly expanded_workspaces = observable.set<WorkspaceId>();
 
@@ -64,10 +67,14 @@ export class NavigationStore {
       left_sidebar_current_max_width: computed,
       right_sidebar_current_max_width: computed,
       conversation_anchor_message_id: observable,
+      conversation_anchor_follows_output: observable,
       conversation_history_index: observable,
       can_go_back: computed,
       can_go_forward: computed,
       current_conversation_location: computed,
+      workspace_section_open: observable,
+      unbound_section_open: observable,
+      setSectionOpen: action,
       workspace_expansion_initialized: observable,
       expanded_workspaces: observable,
       selectSession: action,
@@ -308,6 +315,11 @@ export class NavigationStore {
     this.list_mode = mode;
   }
 
+  setSectionOpen(section: "workspaces" | "unbound", open: boolean): void {
+    if (section === "workspaces") this.workspace_section_open = open;
+    else this.unbound_section_open = open;
+  }
+
   toggleWorkspace(workspace_id: WorkspaceId): void {
     this.workspace_expansion_initialized = true;
     if (this.expanded_workspaces.has(workspace_id)) {
@@ -360,8 +372,9 @@ export class NavigationStore {
     this.viewport_width = Math.max(0, Math.round(width));
   }
 
-  requestConversationAnchor(message_id: MessageId): void {
+  requestConversationAnchor(message_id: MessageId, follow_output = false): void {
     this.conversation_anchor_message_id = message_id;
+    this.conversation_anchor_follows_output = follow_output;
   }
 
   consumeConversationAnchor(message_id: MessageId): void {
@@ -404,6 +417,7 @@ export class NavigationStore {
     this.selected_draft_key = null;
     this.selected_child_task_id = location.child_task_id;
     this.conversation_anchor_message_id = location.anchor_message_id;
+    this.conversation_anchor_follows_output = false;
   }
 
   #effectiveSidebarLayout(): Readonly<{

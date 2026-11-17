@@ -32,6 +32,43 @@ fn body(transport: &RecordedTransport) -> Value {
 }
 
 #[tokio::test]
+async fn cache_identity_survives_service_rebuild_and_changed_identity_replays_full_history() {
+    let first = Arc::new(RecordedTransport::new([Ok(RecordedResponse::new(
+        200, TEXT_SSE,
+    ))]));
+    let initial = request(vec![user("u1", "hello")]);
+    let message = turn(
+        &service(first, Some("owner:connection")).with_prompt_cache_key("stable-owner"),
+        initial.clone(),
+    )
+    .await;
+    let input = request(vec![
+        initial.conversation.messages[0].clone(),
+        ConversationMessage::Assistant(message.clone()),
+        user("u2", "next"),
+    ]);
+    for key in ["stable-owner", "other-owner"] {
+        let transport = Arc::new(RecordedTransport::new([Ok(RecordedResponse::new(
+            200, TEXT_SSE,
+        ))]));
+        turn(
+            &service(transport.clone(), Some("owner:connection")).with_prompt_cache_key(key),
+            input.clone(),
+        )
+        .await;
+        let sent = body(&transport);
+        assert_eq!(sent["prompt_cache_key"], key);
+        if key == "stable-owner" {
+            assert_eq!(sent["previous_response_id"], message.id.as_str());
+            assert_eq!(sent["input"].as_array().unwrap().len(), 1);
+        } else {
+            assert!(sent.get("previous_response_id").is_none());
+            assert_eq!(sent["input"].as_array().unwrap().len(), 3);
+        }
+    }
+}
+
+#[tokio::test]
 async fn complete_text_roundtrip_restores_chain_in_a_new_service_and_resends_current_parameters() {
     let first = Arc::new(RecordedTransport::new([Ok(RecordedResponse::new(
         200, TEXT_SSE,

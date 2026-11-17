@@ -50,6 +50,7 @@ async fn recover(fixture: ChildFixture) {
     let controller = first.session_for_test(&session_id).await;
     controller.lock_state().unwrap().queue_paused_by_user = true;
     let request = |message: &str| SubmitInputRequest {
+        delivery: Default::default(),
         mode: assistant_protocol::SubmitInputMode::Normal,
         variant: assistant_protocol::AgentVariant::Build,
         session_id: session_id.clone(),

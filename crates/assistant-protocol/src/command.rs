@@ -7,15 +7,17 @@ use crate::{
     AgentVariant, ApprovalDecision, ApprovalId, ApprovalMode, ApprovalSnapshot, AttachmentId,
     AttachmentSummary, ChildTaskId, ChildTaskSnapshot, ConfigurationStatus,
     DeleteConfirmationToken, GetApplicationSnapshotRequest, GetApplicationSnapshotResult,
-    GetChildTaskViewRequest, GetChildTaskViewResult, GetConversationPageAroundMessageRequest,
+    GetChildTaskViewRequest, GetChildTaskViewResult, GetConversationMessagePreviewRequest,
+    GetConversationMessagePreviewResult, GetConversationPageAroundMessageRequest,
     GetConversationPageAroundMessageResult, GetConversationPageAroundRunRequest,
     GetConversationPageAroundRunResult, GetConversationRecallWindowRequest,
     GetConversationRecallWindowResult, GetSessionViewRequest, GetSessionViewResult,
     GetToolDetailRequest, GetToolDetailResult, GoalId, GoalSnapshot, IdempotencyKey, InputId,
-    InterruptRunRequest, InterruptRunResult, ListConversationPageRequest,
-    ListConversationPageResult, MemoryAttributeValue, MemoryCapabilities, MessageFeedback,
-    MessageId, PermissionDiagnostic, PermissionDocumentDraft, PermissionDocumentRevision,
-    PermissionDocumentScope, PermissionDocumentSnapshot, PermissionFileSummary, PersonaSnapshot,
+    InterruptRunRequest, InterruptRunResult, ListConversationNavigationRequest,
+    ListConversationNavigationResult, ListConversationPageRequest, ListConversationPageResult,
+    MemoryAttributeValue, MemoryCapabilities, MessageFeedback, MessageId, PermissionDiagnostic,
+    PermissionDocumentDraft, PermissionDocumentRevision, PermissionDocumentScope,
+    PermissionDocumentSnapshot, PermissionFileSummary, PersonaSnapshot,
     PinnedMemoryCollectionSnapshot, PinnedMemorySnapshot, PrioritizeQueuedInputRequest,
     PrioritizeQueuedInputResult, ReasoningEffortKey, RejectApprovalAndStopRunRequest,
     RejectApprovalAndStopRunResult, ResumeQueuedInputRequest, ResumeQueuedInputResult, RunId,
@@ -310,12 +312,20 @@ pub struct ListWorkspacesRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional = nullable)]
     pub lifecycle: Option<crate::WorkspaceLifecycle>,
+    #[serde(default)]
+    #[ts(as = "Option<u32>", optional)]
+    pub offset: u32,
+    /// 缺省读取全部项目；侧栏显式传入页大小。
+    #[serde(default)]
+    #[ts(optional)]
+    pub limit: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ListWorkspacesResult {
     pub workspaces: Vec<WorkspaceSummary>,
+    pub has_more: bool,
 }
 
 /// 从新 Session 的正常可选列表中假删一个 Workspace。
@@ -536,6 +546,9 @@ pub struct CancelSessionCompactionResult {
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ListSessionsRequest {
     #[serde(default)]
+    #[ts(optional)]
+    pub group: Option<crate::SessionGroup>,
+    #[serde(default)]
     pub filter: SessionListFilter,
     #[serde(default)]
     pub offset: u32,
@@ -605,6 +618,22 @@ impl SubmitInputMode {
     }
 }
 
+/// 可靠接受后的投递方式，与输入载荷独立。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "assistant-protocol.ts")]
+pub enum InputDelivery {
+    #[default]
+    Queued,
+    Intervention,
+}
+
+impl InputDelivery {
+    fn is_queued(&self) -> bool {
+        *self == Self::Queued
+    }
+}
+
 /// 可靠提交一条用户输入；同 Session 内可按 key 幂等重试。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
@@ -618,6 +647,9 @@ pub struct SubmitInputRequest {
     /// 一次性提交意图；旧客户端缺省为普通输入。
     #[serde(default, skip_serializing_if = "SubmitInputMode::is_normal")]
     pub mode: SubmitInputMode,
+    #[serde(default, skip_serializing_if = "InputDelivery::is_queued")]
+    #[ts(as = "Option<InputDelivery>", optional)]
+    pub delivery: InputDelivery,
     /// 按用户选择顺序引用的 Session Attachment。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachment_ids: Vec<AttachmentId>,
@@ -698,6 +730,37 @@ pub struct SubmitInputResult {
     pub input_id: InputId,
     /// 新入队时为空；只有已经实际领取的幂等结果才携带 Run。
     pub run: Option<RunSnapshot>,
+    /// 介入结果复用已提交历史的用户消息投影。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub user_message: Option<Box<crate::UserMessageSnapshot>>,
+    /// 与已提交用户消息同一次读取的正文代次。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub generation: Option<u64>,
+    /// 仅描述接纳后仍未领取的输入。已结算的 Run 自带失败状态与错误。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub not_executed: Option<InterventionNotExecuted>,
+}
+
+/// 已接纳的介入输入仍由既有队列管理。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "assistant-protocol.ts")]
+pub enum InterventionNotExecuted {
+    Queued,
+    QueuePaused,
+    SessionFaulted,
+    CouldNotInterrupt,
+}
+
+/// 提升并接续已经接纳的用户输入，复用其 InputId。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct InterveneQueuedInputRequest {
+    pub session_id: SessionId,
+    pub input_id: InputId,
 }
 
 /// 以 revision CAS 清除 Session WorkPlan；Goal 和 Conversation 保持不变。
@@ -1027,6 +1090,65 @@ pub struct SetSessionApprovalModeResult {
     pub session: SessionSummary,
 }
 
+/// 查询当前会话里一条可靠用户消息的完整可编辑输入。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct GetUserMessageEditRequest {
+    pub session_id: SessionId,
+    pub message_id: crate::MessageId,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum UserMessageEditBlockedReason {
+    SessionNotIdle,
+    SessionArchived,
+    MessageNotFound,
+    NotLocalUserInput,
+    InputUnavailable,
+    GoalObjectiveBoundary,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum UserMessageEditPreparation {
+    Ready {
+        message: Box<crate::UserMessageSnapshot>,
+        variant: AgentVariant,
+        generation: u64,
+        message_count: u64,
+    },
+    Blocked {
+        reason: UserMessageEditBlockedReason,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct GetUserMessageEditResult {
+    pub snapshot: crate::ObservedSnapshot<UserMessageEditPreparation>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum UserMessageSkillEdit {
+    Retain,
+    Clear,
+    Select { name: String },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum UserMessageMcpEdit {
+    Retain,
+    Clear,
+    Select { server_key: crate::McpServerKey },
+}
+
 /// 从历史 User Message 位置提交一条全新输入并销毁原目标及尾段。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
@@ -1036,11 +1158,13 @@ pub struct ReenterFromUserMessageRequest {
     pub message: String,
     /// 本次重新输入实际使用的 Agent 变体。
     pub variant: AgentVariant,
-    /// 替换消息按用户选择顺序引用的 Session Attachment。
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachment_ids: Vec<AttachmentId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub idempotency_key: Option<IdempotencyKey>,
+    pub quotes: Vec<crate::QuotedTextSnapshot>,
+    pub skill_edit: UserMessageSkillEdit,
+    pub mcp_edit: UserMessageMcpEdit,
+    pub expected_generation: u64,
+    pub expected_message_count: u64,
+    pub idempotency_key: IdempotencyKey,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -1048,6 +1172,11 @@ pub struct ReenterFromUserMessageRequest {
 pub struct ReenterFromUserMessageResult {
     pub input_id: InputId,
     pub run: RunSnapshot,
+    pub user_message_id: crate::MessageId,
+    pub generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub execution_error: Option<crate::RuntimeErrorInfo>,
 }
 
 /// 请求取消指定 Session 中的活动 Run。
@@ -1232,6 +1361,8 @@ pub enum RuntimeCommand {
     GetChildTaskView(GetChildTaskViewRequest),
     /// 分页查询主或子 Conversation 的可靠历史。
     ListConversationPage(ListConversationPageRequest),
+    ListConversationNavigation(ListConversationNavigationRequest),
+    GetConversationMessagePreview(GetConversationMessagePreviewRequest),
     /// 查询包含目标 Run 的主 Conversation 页。
     GetConversationPageAroundRun(GetConversationPageAroundRunRequest),
     /// 按消息 ID 查询可继续分页的 Conversation 页。
@@ -1244,6 +1375,7 @@ pub enum RuntimeCommand {
     GetToolDetail(GetToolDetailRequest),
     /// 把一条排队输入提升为下一条执行项。
     PrioritizeQueuedInput(PrioritizeQueuedInputRequest),
+    InterveneQueuedInput(InterveneQueuedInputRequest),
     /// 中断当前 Run 并暂停剩余队列。
     InterruptRun(InterruptRunRequest),
     /// 从暂停队列中指定恢复一条输入。
@@ -1371,6 +1503,8 @@ pub enum RuntimeCommand {
     /// 使用最新稳定 Conversation 手动触发标题旁路生成。
     GenerateSessionTitle(GenerateSessionTitleRequest),
     /// 设置 Session 固定状态。
+    MoveSidebarItem(crate::MoveSidebarItemRequest),
+    ResetSidebarOrder(crate::ResetSidebarOrderRequest),
     SetSessionPinned(SetSessionPinnedRequest),
     /// 设置 Session 主控代理状态。
     SetSessionProxy(SetSessionProxyRequest),
@@ -1386,6 +1520,7 @@ pub enum RuntimeCommand {
     /// 切换 Session 当前审批模式。
     SetSessionApprovalMode(SetSessionApprovalModeRequest),
     /// 从历史 User Message 重新输入。
+    GetUserMessageEdit(GetUserMessageEditRequest),
     ReenterFromUserMessage(ReenterFromUserMessageRequest),
     /// 取消 Run。
     CancelRun(CancelRunRequest),
@@ -1445,12 +1580,15 @@ pub enum RuntimeCommandResult {
     GetSessionView(Box<GetSessionViewResult>),
     GetChildTaskView(Box<GetChildTaskViewResult>),
     ListConversationPage(ListConversationPageResult),
+    ListConversationNavigation(ListConversationNavigationResult),
+    GetConversationMessagePreview(GetConversationMessagePreviewResult),
     GetConversationPageAroundRun(GetConversationPageAroundRunResult),
     GetConversationPageAroundMessage(GetConversationPageAroundMessageResult),
     SearchConversationHistory(SearchConversationHistoryResult),
     GetConversationRecallWindow(GetConversationRecallWindowResult),
     GetToolDetail(Box<GetToolDetailResult>),
     PrioritizeQueuedInput(PrioritizeQueuedInputResult),
+    InterveneQueuedInput(SubmitInputResult),
     InterruptRun(InterruptRunResult),
     ResumeQueuedInput(ResumeQueuedInputResult),
     RejectApprovalAndStopRun(RejectApprovalAndStopRunResult),
@@ -1552,6 +1690,8 @@ pub enum RuntimeCommandResult {
     RenameSession(RenameSessionResult),
     GenerateSessionTitle(GenerateSessionTitleResult),
     /// Session 固定状态已设置。
+    MoveSidebarItem(crate::SidebarOrderResult),
+    ResetSidebarOrder(crate::SidebarOrderResult),
     SetSessionPinned(SetSessionPinnedResult),
     /// Session 主控代理状态已设置。
     SetSessionProxy(SetSessionProxyResult),
@@ -1567,6 +1707,7 @@ pub enum RuntimeCommandResult {
     /// Session 当前审批模式已切换。
     SetSessionApprovalMode(SetSessionApprovalModeResult),
     /// 历史重新输入已接受。
+    GetUserMessageEdit(GetUserMessageEditResult),
     ReenterFromUserMessage(ReenterFromUserMessageResult),
     /// 取消请求已接受。
     CancelRun(CancelRunResult),
@@ -1741,6 +1882,7 @@ mod tests {
     #[test]
     fn command_uses_explicit_type_and_payload_tags() {
         let command = RuntimeCommand::SubmitInput(SubmitInputRequest {
+            delivery: Default::default(),
             mode: SubmitInputMode::Normal,
             session_id: SessionId::new("session-1").expect("session id"),
             message: "hello".to_owned(),
@@ -1790,6 +1932,7 @@ mod tests {
         assert_eq!(minimal.mode, SubmitInputMode::Normal);
 
         let request = SubmitInputRequest {
+            delivery: Default::default(),
             mode: SubmitInputMode::Normal,
             session_id: SessionId::new("session-1").expect("session id"),
             message: "compare".to_owned(),
@@ -1808,6 +1951,7 @@ mod tests {
             json!(["attachment-2", "attachment-1"])
         );
         let start_goal = SubmitInputRequest {
+            delivery: Default::default(),
             mode: SubmitInputMode::StartGoal,
             session_id: SessionId::new("session-1").expect("session id"),
             message: "ship".to_owned(),
@@ -1968,6 +2112,7 @@ mod tests {
             (
                 RuntimeCommand::ListWorkspaces(ListWorkspacesRequest {
                     lifecycle: Some(crate::WorkspaceLifecycle::Removed),
+                    ..Default::default()
                 }),
                 "list_workspaces",
             ),
@@ -2065,6 +2210,7 @@ mod tests {
             ),
             (
                 RuntimeCommand::SubmitInput(SubmitInputRequest {
+                    delivery: Default::default(),
                     mode: SubmitInputMode::Normal,
                     session_id: session_id.clone(),
                     message: "hello".to_owned(),
@@ -2203,9 +2349,12 @@ mod tests {
                     message: "replacement".to_owned(),
                     variant: AgentVariant::Plan,
                     attachment_ids: Vec::new(),
-                    idempotency_key: Some(
-                        IdempotencyKey::new("replace-1").expect("idempotency key"),
-                    ),
+                    idempotency_key: IdempotencyKey::new("replace-1").expect("idempotency key"),
+                    expected_generation: 1,
+                    expected_message_count: 2,
+                    quotes: Vec::new(),
+                    skill_edit: UserMessageSkillEdit::Retain,
+                    mcp_edit: UserMessageMcpEdit::Retain,
                 }),
                 "reenter_from_user_message",
             ),
@@ -2304,6 +2453,7 @@ mod tests {
             (
                 RuntimeCommandResult::ListWorkspaces(ListWorkspacesResult {
                     workspaces: vec![workspace_summary()],
+                    has_more: false,
                 }),
                 "list_workspaces",
             ),
@@ -2425,6 +2575,9 @@ mod tests {
             ),
             (
                 RuntimeCommandResult::SubmitInput(SubmitInputResult {
+                    user_message: None,
+                    generation: None,
+                    not_executed: None,
                     input_id: InputId::new("input-1").expect("input id"),
                     run: Some(run_snapshot()),
                 }),
@@ -2534,6 +2687,9 @@ mod tests {
                 RuntimeCommandResult::ReenterFromUserMessage(ReenterFromUserMessageResult {
                     input_id: InputId::new("input-1").expect("input id"),
                     run: run_snapshot(),
+                    user_message_id: crate::MessageId::new("message-1").expect("message id"),
+                    generation: 2,
+                    execution_error: None,
                 }),
                 "reenter_from_user_message",
             ),

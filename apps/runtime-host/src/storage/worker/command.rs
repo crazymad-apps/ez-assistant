@@ -1,14 +1,14 @@
 //! 异步存储客户端与阻塞存储线程之间的类型化命令。
 
-use assistant_protocol::{ChildTaskId, InputId, SessionId};
+use assistant_protocol::{ChildTaskId, InputId, RunId, SessionId};
 use assistant_runtime::{
     AcceptedInput, AcceptedStoredSessionCommand, ApprovalModeChange, ArchiveChange, ChildTaskStart,
     ChildToolExecutionStart, CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
-    ContextReplacementResult, ConversationMessageLocationRequest, ConversationRawWindowRequest,
-    ConversationRewrite, ConversationSearchPage, ConversationSearchRequest,
-    ConversationWindowRequest, DeviceNameChange, DeviceRevocation, DeviceRevocationResult,
-    GoalClear, GoalHeldInputResume, GoalHeldInputResumeResult, GoalStop, GoalStopResult,
-    MemoryContextSnapshot, MessageFeedbackChange, ModelChange, NewAttachmentUpload,
+    ContextReplacementResult, ConversationMessageLocationRequest, ConversationNavigationRequest,
+    ConversationRawWindowRequest, ConversationRewrite, ConversationSearchPage,
+    ConversationSearchRequest, ConversationWindowRequest, DeviceNameChange, DeviceRevocation,
+    DeviceRevocationResult, GoalClear, GoalHeldInputResume, GoalHeldInputResumeResult, GoalStop,
+    GoalStopResult, MemoryContextSnapshot, MessageFeedbackChange, ModelChange, NewAttachmentUpload,
     NewPairedDevice, NewStoredChildTask, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
     NewStoredSessionCommand, NewStoredSessionMaterialization, NewWorkspaceRegistration,
     PairedDevice, PcOutputHostingChange, PendingChildToolExchange, PendingToolExchange,
@@ -20,13 +20,14 @@ use assistant_runtime::{
     SessionPinnedChange, SessionProxyChange, SessionTitleChange, SessionTitleGenerationCommit,
     SessionTitleGenerationCommitResult, SkillNameState, SkillNameStateChange, StoreError,
     StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
-    StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationWindow,
-    StoredMessageFeedback, StoredPinnedMemory, StoredRun, StoredRunContinuation,
-    StoredRunContinuationResult, StoredRunSettlement, StoredRunSettlementResult, StoredSession,
-    StoredSessionCommand, StoredSessionFork, StoredSessionMaterialization, StoredSessionUsage,
-    StoredTerminalRunInputReconciliation, StoredWorkPlan, StoredWorkspace, ToolExecutionStart,
-    UserMessageCommit, VariantChange, WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult,
-    WorkspaceRemoval, WorkspaceRestoration, WorkspaceUpdate,
+    StoredConversationMessageLocation, StoredConversationNavigation, StoredConversationRawWindow,
+    StoredConversationWindow, StoredMessageFeedback, StoredPinnedMemory, StoredRun,
+    StoredRunContinuation, StoredRunContinuationResult, StoredRunSettlement,
+    StoredRunSettlementResult, StoredSession, StoredSessionCommand, StoredSessionFork,
+    StoredSessionMaterialization, StoredSessionUsage, StoredTerminalRunInputReconciliation,
+    StoredWorkPlan, StoredWorkspace, ToolExecutionStart, UserMessageCommit, VariantChange,
+    WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval,
+    WorkspaceRestoration, WorkspaceUpdate,
 };
 use tokio::sync::oneshot;
 
@@ -179,6 +180,22 @@ pub(super) enum Command {
     LoadSessionState {
         session_id: SessionId,
         reply: oneshot::Sender<Result<assistant_runtime::LoadedSession, StoreError>>,
+    },
+    MoveSidebarItem {
+        request: assistant_protocol::MoveSidebarItemRequest,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    ResetSidebarOrder {
+        request: assistant_protocol::ResetSidebarOrderRequest,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    QueryWorkspaces {
+        request: assistant_protocol::ListWorkspacesRequest,
+        reply: oneshot::Sender<Result<assistant_runtime::WorkspacePage, StoreError>>,
+    },
+    QuerySidebar {
+        request: assistant_protocol::GetApplicationSnapshotRequest,
+        reply: oneshot::Sender<Result<assistant_runtime::SidebarSnapshot, StoreError>>,
     },
     QuerySessionSummaries {
         query: assistant_runtime::SessionSummaryQuery,
@@ -338,7 +355,24 @@ pub(super) enum Command {
     },
     ClaimInput {
         run: StoredRun,
+        goal_resume: Option<Box<GoalHeldInputResume>>,
         reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    CheckConversationIdentity {
+        session_id: SessionId,
+        identity: assistant_runtime::NewConversationIdentity,
+        reply: oneshot::Sender<Result<bool, StoreError>>,
+    },
+    LoadRunConversation {
+        session_id: SessionId,
+        run_id: RunId,
+        reply: oneshot::Sender<Result<assistant_runtime::StoredConversationRawWindow, StoreError>>,
+    },
+    FindRequestAcceptance {
+        session_id: SessionId,
+        key: assistant_protocol::IdempotencyKey,
+        reply:
+            oneshot::Sender<Result<Option<assistant_runtime::StoredRequestAcceptance>, StoreError>>,
     },
     AcceptInput {
         input: Box<NewStoredInput>,
@@ -424,6 +458,10 @@ pub(super) enum Command {
     LoadConversationWindow {
         request: ConversationWindowRequest,
         reply: oneshot::Sender<Result<StoredConversationWindow, StoreError>>,
+    },
+    ReadConversationNavigation {
+        request: ConversationNavigationRequest,
+        reply: oneshot::Sender<Result<StoredConversationNavigation, StoreError>>,
     },
     LoadConversationRawWindow {
         request: ConversationRawWindowRequest,

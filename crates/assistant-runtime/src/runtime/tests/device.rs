@@ -133,6 +133,7 @@ fn device_session_input(
 ) -> SubmitSessionInputRequest {
     SubmitSessionInputRequest {
         input: assistant_protocol::SubmitInputRequest {
+            delivery: Default::default(),
             session_id,
             message: message.to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -826,7 +827,7 @@ async fn device_input_is_idempotent_and_keeps_its_frozen_output_preference() {
                 session_id: controller.session.session_id,
             },
             cursor: None,
-            limit: 20,
+            turn_limit: Some(20),
         })
         .await
         .expect("conversation after revoke")
@@ -1032,6 +1033,7 @@ async fn channel_dispatch_failure_does_not_rewrite_the_completed_conversation() 
 
     let submitted = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             session_id: controller.session.session_id.clone(),
             message: "desktop input".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,

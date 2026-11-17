@@ -45,14 +45,16 @@ fn hidden_runtime_users_do_not_change_display_windows_or_volatile_recall() {
     };
 
     let window = conversation_window(
-        snapshot.clone(),
+        &snapshot,
         &ConversationWindowRequest {
             owner: owner.clone(),
             generation: 1,
-            end: None,
-            limit: 1,
+            end: crate::ConversationWindowEnd::Latest,
+            turn_limit: 1,
         },
-    );
+        Default::default(),
+    )
+    .unwrap();
     assert_eq!((window.start, window.end, window.total), (0, 1, 1));
     assert_eq!(window.conversation.messages.len(), 2);
     assert!(!window.conversation.messages[1].is_transcript_visible());

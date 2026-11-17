@@ -587,6 +587,18 @@ async fn dispatch_runtime(
             ),
             false,
         ),
+        RuntimeCommand::ListConversationNavigation(request) => (
+            RuntimeCommandResult::ListConversationNavigation(
+                runtime.list_conversation_navigation(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::GetConversationMessagePreview(request) => (
+            RuntimeCommandResult::GetConversationMessagePreview(
+                runtime.get_conversation_message_preview(request).await?,
+            ),
+            false,
+        ),
         RuntimeCommand::GetConversationPageAroundRun(request) => (
             RuntimeCommandResult::GetConversationPageAroundRun(
                 runtime.get_conversation_page_around_run(request).await?,
@@ -620,6 +632,12 @@ async fn dispatch_runtime(
         RuntimeCommand::PrioritizeQueuedInput(request) => (
             RuntimeCommandResult::PrioritizeQueuedInput(
                 runtime.prioritize_queued_input(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::InterveneQueuedInput(request) => (
+            RuntimeCommandResult::InterveneQueuedInput(
+                runtime.intervene_queued_input(request).await?,
             ),
             false,
         ),
@@ -816,7 +834,7 @@ async fn dispatch_runtime(
             false,
         ),
         RuntimeCommand::ListWorkspaces(request) => (
-            RuntimeCommandResult::ListWorkspaces(runtime.list_workspaces(request)?),
+            RuntimeCommandResult::ListWorkspaces(runtime.list_workspaces(request).await?),
             false,
         ),
         RuntimeCommand::RemoveWorkspace(request) => {
@@ -988,6 +1006,14 @@ async fn dispatch_runtime(
             ),
             false,
         ),
+        RuntimeCommand::MoveSidebarItem(request) => (
+            RuntimeCommandResult::MoveSidebarItem(runtime.move_sidebar_item(request).await?),
+            false,
+        ),
+        RuntimeCommand::ResetSidebarOrder(request) => (
+            RuntimeCommandResult::ResetSidebarOrder(runtime.reset_sidebar_order(request).await?),
+            false,
+        ),
         RuntimeCommand::SetSessionPinned(request) => (
             RuntimeCommandResult::SetSessionPinned(runtime.set_session_pinned(request).await?),
             false,
@@ -1026,6 +1052,10 @@ async fn dispatch_runtime(
             RuntimeCommandResult::SetSessionApprovalMode(
                 runtime.set_session_approval_mode(request).await?,
             ),
+            false,
+        ),
+        RuntimeCommand::GetUserMessageEdit(request) => (
+            RuntimeCommandResult::GetUserMessageEdit(runtime.get_user_message_edit(request).await?),
             false,
         ),
         RuntimeCommand::ReenterFromUserMessage(request) => (

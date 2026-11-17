@@ -7,6 +7,8 @@ use agent_types::{
 use assistant_protocol::{RunStatus, ShutdownRuntimeRequest};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+mod rebuild;
+
 struct NativeFactory {
     script: Arc<ScriptedModelService>,
     compactions: Arc<AtomicUsize>,
@@ -340,6 +342,178 @@ async fn native_to_local_keeps_cutoff_through_manual_or_automatic_summary_and_re
             .await
             .unwrap();
     }
+}
+
+#[tokio::test]
+async fn native_reentry_preserves_checkpoint_for_automatic_compaction() {
+    verify_native_reentry_compaction(true).await;
+}
+
+#[tokio::test]
+async fn native_reentry_preserves_checkpoint_for_manual_compaction_after_failure() {
+    verify_native_reentry_compaction(false).await;
+}
+
+async fn verify_native_reentry_compaction(automatic: bool) {
+    let mut scripts = vec![
+        ModelScript::Events(message_events(&assistant_text_with_usage(
+            "before-compaction",
+            "first answer",
+            120,
+        ))),
+        ModelScript::Events(message_events(&assistant_text_with_usage(
+            "retained-answer",
+            "answer after checkpoint",
+            120,
+        ))),
+        ModelScript::Events(message_events(&assistant_text_with_usage(
+            "replaced-answer",
+            "original answer",
+            120,
+        ))),
+    ];
+    if !automatic {
+        // 普通模型失败后立即手动压缩，不能靠重启重建 Journal 才恢复。
+        scripts.push(ModelScript::FailEstablishment(ModelError::Protocol(
+            "synthetic response failure".into(),
+        )));
+    }
+    scripts.push(ModelScript::Events(message_events(
+        &assistant_text_with_usage("resumed-answer", "continued with compacted context", 120),
+    )));
+    let factory = Arc::new(NativeFactory {
+        script: Arc::new(ScriptedModelService::new(
+            model_capabilities(false),
+            8192,
+            scripts,
+        )),
+        compactions: Arc::new(AtomicUsize::new(0)),
+        requests: Arc::new(Mutex::new(Vec::new())),
+    });
+    let runtime = runtime_with_factories(
+        factory.clone(),
+        Arc::new(StaticSystemPromptFactory),
+        ToolSetSnapshot::default(),
+        64,
+    );
+    let mut provider = model_fixture::provider("synthetic");
+    provider.connection.provider_type = assistant_protocol::ProviderType::Openai;
+    provider.connection.protocol_preference =
+        assistant_protocol::ProviderProtocolPreference::Responses;
+    provider.server_history_key = Some("native-reentry-provider".into());
+    runtime.store.put_provider(provider).await.unwrap();
+    let mut parameters = model_fixture::parameters();
+    parameters.server_compaction_enabled = true;
+    parameters.server_compaction_support = assistant_protocol::ModelFeatureSupport::Supported;
+    model_fixture::save_fixed(&runtime, "fixture", parameters).await;
+    runtime.restore_model_settings().await.unwrap();
+    let id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    submit_completed_turn(&runtime, &id, "original task").await;
+    let (generation, _) = edit_basis(&runtime, &id).await;
+    runtime
+        .compact_session(assistant_protocol::CompactSessionRequest {
+            session_id: id.clone(),
+            operation_id: assistant_protocol::IdempotencyKey::new("before-reentry").unwrap(),
+            expected_generation: generation,
+        })
+        .await
+        .unwrap();
+    submit_completed_turn(&runtime, &id, "retained input").await;
+    submit_completed_turn(&runtime, &id, "original input").await;
+    let history = runtime.store.load_conversation(&id).await.unwrap();
+    let target = history
+        .messages
+        .iter()
+        .rev()
+        .find_map(|message| match message {
+            ConversationMessage::User(user)
+                if user.origin == agent_types::UserMessageOrigin::User =>
+            {
+                Some(assistant_protocol::MessageId::new(user.id.as_str()).unwrap())
+            }
+            _ => None,
+        })
+        .unwrap();
+    factory.requests.lock().unwrap().clear();
+    let (expected_generation, expected_message_count) = edit_basis(&runtime, &id).await;
+    let edited = runtime
+        .reenter_from_user_message(assistant_protocol::ReenterFromUserMessageRequest {
+            session_id: id.clone(),
+            message_id: target,
+            // 超过窗口，复现新轮建流前就需要自动压缩的实际失败路径。
+            message: if automatic {
+                "large edited input ".repeat(3000)
+            } else {
+                "edited input".into()
+            },
+            attachment_ids: Vec::new(),
+            variant: assistant_protocol::AgentVariant::Build,
+            idempotency_key: assistant_protocol::IdempotencyKey::new("native-reentry").unwrap(),
+            expected_generation,
+            expected_message_count,
+            quotes: Vec::new(),
+            skill_edit: assistant_protocol::UserMessageSkillEdit::Retain,
+            mcp_edit: assistant_protocol::UserMessageMcpEdit::Retain,
+        })
+        .await
+        .unwrap();
+    let result = wait_for_terminal(&runtime, &id, &edited.run.run_id).await;
+    if automatic {
+        assert_eq!(result.status, RunStatus::Completed, "{:?}", result.error);
+    } else {
+        assert_eq!(result.status, RunStatus::Failed);
+        let (generation, _) = edit_basis(&runtime, &id).await;
+        let compacted = runtime
+            .compact_session(assistant_protocol::CompactSessionRequest {
+                session_id: id.clone(),
+                operation_id: assistant_protocol::IdempotencyKey::new("after-reentry").unwrap(),
+                expected_generation: generation,
+            })
+            .await
+            .expect("manual compaction must use the same reliable context after reentry");
+        assert!(matches!(
+            compacted.outcome,
+            assistant_protocol::CompactSessionOutcome::Compacted { .. }
+        ));
+        submit_completed_turn(&runtime, &id, "continue after manual compaction").await;
+    }
+    assert_eq!(factory.compactions.load(Ordering::SeqCst), 2);
+    {
+        let requests = factory.requests.lock().unwrap();
+        assert_eq!(requests.len(), if automatic { 2 } else { 3 });
+        for request in &requests[..requests.len() - 1] {
+            assert!(matches!(request.conversation.messages.first(),
+                Some(ConversationMessage::Assistant(message)) if message.id.as_str() == "native-0"));
+        }
+        assert!(
+            matches!(requests.last().unwrap().conversation.messages.first(),
+            Some(ConversationMessage::Assistant(message)) if message.id.as_str() == "native-1")
+        );
+    }
+    let after = runtime.store.load_conversation(&id).await.unwrap();
+    assert_eq!(after.messages.first(), history.messages.first());
+    assert!(!after.messages.iter().any(|message| matches!(message,
+        ConversationMessage::Assistant(message) if message.id.as_str() == "replaced-answer")));
+    let session = runtime.session(&id).await.unwrap();
+    assert_eq!(
+        session
+            .lock_state()
+            .unwrap()
+            .journal
+            .as_ref()
+            .unwrap()
+            .snapshot(),
+        after.project_provider_context().unwrap()
+    );
+    runtime
+        .shutdown(ShutdownRuntimeRequest::default())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

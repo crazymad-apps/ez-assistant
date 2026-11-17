@@ -145,11 +145,7 @@ impl RunRecord {
             approval_mode: self.approval_mode,
             reasoning_effort: self.reasoning_effort,
             cancel_requested: self.cancel_requested,
-            active_step: if self.status.is_terminal() {
-                None
-            } else {
-                self.active_step
-            },
+            active_step: self.active_step(),
             model_request: self.model_diagnostics.as_ref().and_then(|diagnostics| {
                 (self.status == RunStatus::Running)
                     .then(|| diagnostics.request_snapshot())
@@ -249,6 +245,14 @@ impl RunRecord {
     pub(crate) fn attempt(&self) -> u32 {
         self.attempt
     }
+    pub(crate) fn active_step(&self) -> Option<u32> {
+        if self.status.is_terminal() {
+            None
+        } else {
+            self.active_step
+        }
+    }
+
     pub(crate) fn status(&self) -> RunStatus {
         self.status
     }

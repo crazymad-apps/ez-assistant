@@ -4,6 +4,8 @@ mod discovery;
 mod managed;
 #[cfg(test)]
 mod opencode_tests;
+#[cfg(test)]
+mod prompt_cache_tests;
 pub(crate) use managed::CenterModelLoader;
 pub(crate) use managed::CenterModelServiceFactory;
 
@@ -165,6 +167,14 @@ impl HostModelServiceFactory {
                 .map_err(model_service_error)?
                 .with_max_input_tokens(request.max_input_tokens)
                 .map_err(model_service_error)?;
+                // 由 Runtime 保持主会话／子任务身份稳定；企业代理地址不改变 Provider 语义。
+                let service = if request.provider.as_str() == "openai"
+                    && let Some(key) = request.conversation_routing_id
+                {
+                    service.with_prompt_cache_key(key)
+                } else {
+                    service
+                };
                 let service = match opencode_identity {
                     Some(identity) => service.with_opencode_identity(identity),
                     None => service,

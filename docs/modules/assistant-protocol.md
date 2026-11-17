@@ -585,3 +585,22 @@ RuntimeHostHealth 增加可选 progress（completed／total），既有启动阶
 `ReadUiApp` 可在实际挂载时接收会话或草稿作用域并返回短期工具句柄。MCP 卡片复用挂载实例 ID。受信客户端使用 `UiTool` 接纳、读取、决定、取消或释放调用。app 审批携带真实应用标题、作用域和脱敏参数，工具结果与页面参数使用脱敏 Debug。协议不持久保存调用句柄。
 
 `UiTool` 启动可携带受信客户端从当前沙箱确认的单次 `user_gesture`，字段缺省时沿用普通页面请求的授权流程。
+
+## v0.33.1 F01 会话历史与缩略查询
+
+- `list_conversation_page` 和两类 around 查询的 `turn_limit` 按完整 Run 合批计数，默认 10，允许 1～50。Session／child 视图内嵌页采用同一口径。正文只有向前游标，客户端按原值回传。
+- `list_conversation_navigation` 按 owner 和代次返回有界的双向页，每项仅有用户消息 ID 和可空的助手消息 ID。`get_conversation_message_preview` 按同一 owner、代次及单个 ID 读取最多 160 个 Unicode 标量，并给出截断标记。
+- 应用协议准入使用 0.33.1。存储结构和最低 Host 版本另行管理。
+
+## v0.33.1 F02 历史用户输入编辑
+
+- `GetUserMessageEdit` 返回带观察水位的完整用户输入或类型化阻塞原因。客户端提交最终正文、附件、引用、变体及显式 Skill／MCP 意图，同时携带查询返回的历史代次、完整消息数和请求键。
+- 重入回执返回新输入、首次 Run、新用户消息 ID 和可靠代次，已接纳后的执行恢复问题经 `execution_error` 表达。编辑能力在 M3 接通 Desktop 和 Host Web 界面后开启。
+
+## v0.33.1 F04 分组侧栏协议
+
+- `ApplicationSnapshot` 用 `workspaces_next_offset`、`session_groups`、`pinned_sessions` 替换原全局活动／归档页及偏移。请求缺省为前 10 个项目与各组前 10 条活动会话；显式空分组不读会话页，显式分组可按生命周期读取指定前缀。
+- `ListWorkspaces` 增加 offset／limit／has_more，limit 缺省保持全量项目选项；`ListSessions` 可指定项目或独立会话分组，不指定时按创建时间降序、ID 升序全局读取。整数排序值不进入 DTO，TS 由 Rust 正式导出。
+- 本版早期测试构建与最终分组快照不支持混用，最低配套仍为 0.33.1；本段替代旧快照前缀字段的当前用法。
+
+- M2 增加 `MoveSidebarItem`（有类型的范围、实体与参照 ID、前后位置）和 `ResetSidebarOrder`（不含置顶）；成功只返回空确认，`SidebarOrderChanged` 无载荷。失效参照沿用 `conflict`，不暴露排序整数或增加幂等键。

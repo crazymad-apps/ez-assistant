@@ -77,6 +77,7 @@ async fn start_goal_is_idempotent_freezes_objective_and_clears_after_completion(
     let key = IdempotencyKey::new("start-goal-1").expect("key");
     let first = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: SubmitInputMode::StartGoal,
             session_id: session_id.clone(),
             message: "ship the complete release".to_owned(),
@@ -91,6 +92,7 @@ async fn start_goal_is_idempotent_freezes_objective_and_clears_after_completion(
         .expect("start Goal");
     let duplicate = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: SubmitInputMode::StartGoal,
             session_id: session_id.clone(),
             message: "this duplicate payload must be ignored".to_owned(),
@@ -250,6 +252,7 @@ async fn start_goal_rejects_a_model_without_tool_calls() {
     assert!(matches!(
         runtime
             .submit_started_input(SubmitInputRequest {
+                delivery: Default::default(),
                 mode: SubmitInputMode::StartGoal,
                 session_id,
                 message: "unsupported Goal".to_owned(),
@@ -263,6 +266,73 @@ async fn start_goal_rejects_a_model_without_tool_calls() {
             .await,
         Err(RuntimeError::GoalUnsupportedByModel { .. })
     ));
+}
+
+#[tokio::test]
+async fn intervention_resumes_same_running_goal_and_keeps_ordinary_tail_held() {
+    use assistant_protocol::{IdempotencyKey, InputDelivery};
+
+    let entered = Arc::new(Notify::new());
+    let runtime = runtime_with_tools(
+        Arc::new(CancellationAwareModel {
+            capabilities: model_capabilities(true),
+            entered: entered.clone(),
+        }),
+        ToolSetSnapshot::default(),
+    );
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    let mut request = SubmitInputRequest {
+        delivery: InputDelivery::Queued,
+        mode: SubmitInputMode::StartGoal,
+        session_id: session_id.clone(),
+        message: "original goal".into(),
+        variant: AgentVariant::Build,
+        attachment_ids: vec![],
+        quotes: vec![],
+        skill_name: None,
+        mcp_server_key: None,
+        idempotency_key: None,
+    };
+    let old = runtime.submit_started_input(request.clone()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .unwrap();
+    let (goal_id, generation) = goal_identity(&runtime, &session_id);
+    request.mode = SubmitInputMode::Normal;
+    request.message = "ordinary tail".into();
+    let tail = runtime.submit_input(request.clone()).await.unwrap();
+    request.delivery = InputDelivery::Intervention;
+    request.message = "adjust the next step".into();
+    request.idempotency_key = Some(IdempotencyKey::new("goal-guidance").unwrap());
+    let result = tokio::time::timeout(Duration::from_secs(3), runtime.submit_input(request))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.user_message.unwrap().text, "adjust the next step");
+    assert_eq!(
+        wait_for_terminal(&runtime, &session_id, &old.run.run_id)
+            .await
+            .status,
+        assistant_protocol::RunStatus::Cancelled
+    );
+    let view = runtime
+        .get_session_view(GetSessionViewRequest { session_id })
+        .await
+        .unwrap()
+        .snapshot
+        .value;
+    let goal = view.goal.unwrap();
+    assert_eq!(goal.goal_id, goal_id);
+    assert_eq!(goal.generation, generation + 2);
+    assert!(
+        matches!(&view.queue.items[..], [assistant_protocol::QueuedSessionItemSnapshot::Message(item)] if item.input_id == tail.input_id && item.held_by_goal)
+    );
+    assert_eq!(view.active_run.unwrap().run_id, result.run.unwrap().run_id);
 }
 
 #[tokio::test]
@@ -281,6 +351,7 @@ async fn stop_goal_fences_late_run_settlement_then_clear_removes_only_the_contro
         .session_id;
     let started = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: SubmitInputMode::StartGoal,
             session_id: session_id.clone(),
             message: "keep running until stopped".to_owned(),
@@ -296,6 +367,43 @@ async fn stop_goal_fences_late_run_settlement_then_clear_removes_only_the_contro
     tokio::time::timeout(Duration::from_secs(1), entered.notified())
         .await
         .expect("Goal Run entered model");
+
+    let queued = runtime
+        .submit_input(SubmitInputRequest {
+            delivery: Default::default(),
+            mode: SubmitInputMode::Normal,
+            session_id: session_id.clone(),
+            message: "Queue this while the Goal is running".to_owned(),
+            variant: assistant_protocol::AgentVariant::Build,
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+        })
+        .await
+        .expect("queue ordinary input");
+    assert!(queued.run.is_none());
+    let view = runtime
+        .get_session_view(assistant_protocol::GetSessionViewRequest {
+            session_id: session_id.clone(),
+        })
+        .await
+        .expect("session view")
+        .snapshot
+        .value;
+    assert!(matches!(
+        &view.queue.items[..],
+        [assistant_protocol::QueuedSessionItemSnapshot::Message(item)]
+            if item.input_id == queued.input_id && item.held_by_goal
+    ));
+    runtime
+        .cancel_queued_input(assistant_protocol::CancelQueuedInputRequest {
+            session_id: session_id.clone(),
+            input_id: queued.input_id,
+        })
+        .await
+        .expect("cancel the held input");
 
     assert!(matches!(
         runtime
@@ -423,7 +531,14 @@ async fn blocked_goal_resumes_with_visible_user_guidance_and_a_new_generation() 
             ))),
         ],
     ));
-    let runtime = runtime_with_tools(model.clone(), ToolSetSnapshot::default());
+    let factory = Arc::new(FailOnceModelFactory::new(model.clone()));
+    factory.should_fail.store(false, Ordering::SeqCst);
+    let runtime = runtime_with_factories(
+        factory.clone(),
+        Arc::new(StaticSystemPromptFactory),
+        ToolSetSnapshot::default(),
+        32,
+    );
     let session_id = runtime
         .create_session(CreateSessionRequest::default())
         .await
@@ -432,6 +547,7 @@ async fn blocked_goal_resumes_with_visible_user_guidance_and_a_new_generation() 
         .session_id;
     let first = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: SubmitInputMode::StartGoal,
             session_id: session_id.clone(),
             message: "ship release".to_owned(),
@@ -445,6 +561,7 @@ async fn blocked_goal_resumes_with_visible_user_guidance_and_a_new_generation() 
         .await
         .expect("start Goal");
     wait_for_terminal(&runtime, &session_id, &first.run.run_id).await;
+    let paused_identity = goal_identity(&runtime, &session_id);
     {
         let controller = runtime.session(&session_id).await.expect("session");
         let state = controller.lock_state().expect("state");
@@ -455,21 +572,57 @@ async fn blocked_goal_resumes_with_visible_user_guidance_and_a_new_generation() 
         ));
         assert_eq!(goal.generation, 2);
     }
-    let resumed = runtime
+    let guidance = SubmitInputRequest {
+        delivery: Default::default(),
+        mode: SubmitInputMode::Normal,
+        session_id: session_id.clone(),
+        message: "Use the stable release channel".to_owned(),
+        variant: assistant_protocol::AgentVariant::Build,
+        attachment_ids: Vec::new(),
+        quotes: Vec::new(),
+        skill_name: None,
+        mcp_server_key: None,
+        idempotency_key: None,
+    };
+    factory.should_fail.store(true, Ordering::SeqCst);
+    let failed = runtime
         .submit_started_input(SubmitInputRequest {
-            mode: SubmitInputMode::ResumeGoal,
-            session_id: session_id.clone(),
-            message: "Use the stable release channel".to_owned(),
-            variant: assistant_protocol::AgentVariant::Build,
-            attachment_ids: Vec::new(),
-            quotes: Vec::new(),
-            skill_name: None,
-            mcp_server_key: None,
-            idempotency_key: None,
+            delivery: Default::default(),
+            message: "This input fails during preparation".to_owned(),
+            ..guidance.clone()
         })
         .await
-        .expect("resume Goal");
-    wait_for_terminal(&runtime, &session_id, &resumed.run.run_id).await;
+        .expect("accept input");
+    assert_eq!(
+        wait_for_terminal(&runtime, &session_id, &failed.run.run_id)
+            .await
+            .status,
+        assistant_protocol::RunStatus::Failed
+    );
+    assert_eq!(goal_identity(&runtime, &session_id), paused_identity);
+    {
+        let controller = runtime.session(&session_id).await.expect("session");
+        controller.lock_state().expect("state").queue_paused_by_user = true;
+    }
+    let submitted = runtime
+        .submit_input(guidance)
+        .await
+        .expect("queue guidance");
+    assert!(submitted.run.is_none());
+    assert_eq!(goal_identity(&runtime, &session_id), paused_identity);
+    runtime
+        .resume_session(assistant_protocol::ResumeSessionRequest {
+            session_id: session_id.clone(),
+        })
+        .await
+        .expect("resume the queue");
+    let resumed = runtime
+        .wait_for_input_claim(&session_id, &submitted.input_id)
+        .await
+        .expect("claim guidance");
+    let finished = wait_for_terminal(&runtime, &session_id, &resumed.run_id).await;
+    assert_eq!(finished.status, assistant_protocol::RunStatus::Completed);
+    assert!(finished.started_at_ms.expect("started") >= finished.created_at_ms.expect("claimed"));
     {
         let controller = runtime.session(&session_id).await.expect("session");
         let state = controller.lock_state().expect("state");
@@ -490,20 +643,33 @@ async fn blocked_goal_resumes_with_visible_user_guidance_and_a_new_generation() 
         .lock_state()
         .expect("state")
         .inputs
-        .get(&resumed.input_id)
+        .get(&submitted.input_id)
         .expect("resume input")
         .stored
         .user_message_id
         .clone();
     let rewritten = runtime
-        .reenter_from_user_message(ReenterFromUserMessageRequest {
-            variant: assistant_protocol::AgentVariant::Build,
-            session_id: session_id.clone(),
-            message_id: assistant_protocol::MessageId::new(resume_message_id.as_str())
-                .expect("message id"),
-            message: "replace guidance after objective".to_owned(),
-            attachment_ids: Vec::new(),
-            idempotency_key: None,
+        .reenter_from_user_message({
+            let (expected_generation, expected_message_count) =
+                edit_basis(&runtime, &session_id.clone()).await;
+            ReenterFromUserMessageRequest {
+                variant: assistant_protocol::AgentVariant::Build,
+                session_id: session_id.clone(),
+                message_id: assistant_protocol::MessageId::new(resume_message_id.as_str())
+                    .expect("message id"),
+                message: "replace guidance after objective".to_owned(),
+                attachment_ids: Vec::new(),
+                idempotency_key: assistant_protocol::IdempotencyKey::new(
+                    crate::id::generate("edit-test").unwrap(),
+                )
+                .unwrap(),
+
+                expected_generation,
+                expected_message_count,
+                quotes: Vec::new(),
+                skill_edit: assistant_protocol::UserMessageSkillEdit::Retain,
+                mcp_edit: assistant_protocol::UserMessageMcpEdit::Retain,
+            }
         })
         .await
         .expect("rewrite after Goal objective");
@@ -558,6 +724,7 @@ async fn fork_copies_goal_only_when_the_objective_message_is_in_the_prefix() {
         .session;
     let baseline = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: SubmitInputMode::Normal,
             session_id: source.session_id.clone(),
             message: "baseline turn".to_owned(),
@@ -573,6 +740,7 @@ async fn fork_copies_goal_only_when_the_objective_message_is_in_the_prefix() {
     wait_for_terminal(&runtime, &source.session_id, &baseline.run.run_id).await;
     let goal_run = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: SubmitInputMode::StartGoal,
             session_id: source.session_id.clone(),
             message: "forkable Goal".to_owned(),
@@ -670,8 +838,29 @@ async fn goal_pauses_after_three_consecutive_run_failures_without_retrying_an_at
         .expect("create session")
         .session
         .session_id;
+    let controller = runtime.session(&session_id).await.expect("session");
+    controller.lock_state().expect("state").queue_paused_by_user = true;
+    let queued = runtime
+        .submit_input(SubmitInputRequest {
+            delivery: Default::default(),
+            mode: SubmitInputMode::Normal,
+            session_id: session_id.clone(),
+            message: "Wait for the Goal".to_owned(),
+            variant: assistant_protocol::AgentVariant::Build,
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+        })
+        .await
+        .expect("queue ordinary input");
+    assert!(queued.run.is_none());
+    // 让 Goal 首轮优先领取；随后只由失败恢复门禁阻止普通输入。
+    controller.lock_state().expect("state").queue_paused_by_user = false;
     runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: SubmitInputMode::StartGoal,
             session_id: session_id.clone(),
             message: "retry across Goal Runs".to_owned(),
@@ -708,17 +897,15 @@ async fn goal_pauses_after_three_consecutive_run_failures_without_retrying_an_at
     })
     .await
     .expect("failure budget pauses Goal");
-    let controller = runtime.session(&session_id).await.expect("session");
     let state = controller.lock_state().expect("state");
     let goal = state.goal.as_ref().expect("Goal");
     assert_eq!(goal.budget.used_runs, 3);
     assert_eq!(goal.consecutive_failures, 3);
     assert_eq!(goal.generation, 2);
-    assert_eq!(
-        state.inputs.len(),
-        1,
-        "automatic Goal progress keeps the original Input"
-    );
+    assert!(state.resume_required);
+    assert!(state.next_runnable_input().is_none());
+    assert_eq!(state.queue_item_ids.front(), Some(&queued.input_id));
+    assert_eq!(state.inputs.len(), 2, "one Goal Input and one queued input");
     assert_eq!(
         state.runs.len(),
         1,
@@ -777,6 +964,7 @@ async fn paused_goal_can_resume_with_a_hidden_runtime_continuation() {
         .session_id;
     let first = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: SubmitInputMode::StartGoal,
             session_id: session_id.clone(),
             message: "resume without guidance".to_owned(),
@@ -868,6 +1056,15 @@ async fn held_user_input_can_be_bound_to_goal_resume_without_duplication() {
                 "waiting",
             ))),
             ModelScript::Events(message_events(&signal(
+                "blocked",
+                "held-resume-blocked-again",
+                "held-resume-blocked-again-call",
+            ))),
+            ModelScript::Events(message_events(&assistant_text(
+                "held-resume-blocked-again-final",
+                "waiting again",
+            ))),
+            ModelScript::Events(message_events(&signal(
                 "complete",
                 "held-resume-complete",
                 "held-resume-complete-call",
@@ -887,6 +1084,7 @@ async fn held_user_input_can_be_bound_to_goal_resume_without_duplication() {
         .session_id;
     let first = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: SubmitInputMode::StartGoal,
             session_id: session_id.clone(),
             message: "wait for held guidance".to_owned(),
@@ -900,8 +1098,16 @@ async fn held_user_input_can_be_bound_to_goal_resume_without_duplication() {
         .await
         .expect("start Goal");
     wait_for_terminal(&runtime, &session_id, &first.run.run_id).await;
+    runtime
+        .session(&session_id)
+        .await
+        .unwrap()
+        .lock_state()
+        .unwrap()
+        .queue_paused_by_user = true;
     let held = runtime
         .submit_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "Use this exact held guidance".to_owned(),
@@ -959,9 +1165,60 @@ async fn held_user_input_can_be_bound_to_goal_resume_without_duplication() {
                     if text.text.starts_with("GOAL_RESUME_INJECTION_V1"))))
     }));
     let controller = runtime.session(&session_id).await.expect("session");
+    let (target, expected_generation, expected_message_count, goal_id, generation) = {
+        let state = controller.lock_state().expect("state");
+        assert_eq!(state.inputs.len(), 2, "held Input is reused, not copied");
+        assert!(state.queue_item_ids.is_empty());
+        let goal = state.goal.as_ref().expect("paused Goal");
+        assert!(matches!(goal.state, GoalState::Paused(_)));
+        (
+            state.inputs[&resumed_input].stored.user_message_id.clone(),
+            state.body_generation,
+            state.message_count,
+            goal.id.clone(),
+            goal.generation,
+        )
+    };
+    let request = ReenterFromUserMessageRequest {
+        session_id: session_id.clone(),
+        message_id: assistant_protocol::MessageId::new(target.as_str()).unwrap(),
+        message: "Use the corrected guidance".to_owned(),
+        variant: assistant_protocol::AgentVariant::Build,
+        attachment_ids: Vec::new(),
+        quotes: Vec::new(),
+        expected_generation,
+        expected_message_count,
+        idempotency_key: IdempotencyKey::new("edit-paused-goal").unwrap(),
+        skill_edit: assistant_protocol::UserMessageSkillEdit::Retain,
+        mcp_edit: assistant_protocol::UserMessageMcpEdit::Retain,
+    };
+    let edited = runtime
+        .reenter_from_user_message(request.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime
+            .reenter_from_user_message(request)
+            .await
+            .unwrap()
+            .run
+            .run_id,
+        edited.run.run_id
+    );
+    assert_eq!(
+        wait_for_terminal(&runtime, &session_id, &edited.run.run_id)
+            .await
+            .status,
+        assistant_protocol::RunStatus::Completed
+    );
     let state = controller.lock_state().expect("state");
-    assert_eq!(state.inputs.len(), 2, "held Input is reused, not copied");
-    assert!(state.queue_item_ids.is_empty());
+    let binding = state.inputs[&edited.input_id]
+        .stored
+        .goal_binding
+        .as_ref()
+        .unwrap();
+    assert_eq!(binding.goal_id, goal_id);
+    assert_eq!(binding.generation, generation + 1);
     assert!(state.goal.is_none());
 }
 
@@ -1002,6 +1259,7 @@ async fn reported_usage_does_not_pause_goal_before_the_run_limit() {
         .session_id;
     let run = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: SubmitInputMode::StartGoal,
             session_id: session_id.clone(),
             message: "bounded Goal".to_owned(),

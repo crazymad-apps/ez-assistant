@@ -20,9 +20,9 @@ test("repeated forks remain readable after source deletion and accept new input"
   const accepted = await command("submit_input", {
     session_id: source.session_id, message: "FIRST_CASE", mode: "normal", variant: "build", attachment_ids: [], quotes: [],
   });
-  await expect.poll(async () => (await command("get_run", {
-    session_id: source.session_id, run_id: accepted.run.run_id,
-  })).run.status).toBe("completed");
+  await expect.poll(async () => (await command("get_session_view", {
+    session_id: source.session_id,
+  })).snapshot.value.runs.find(run => run.input_id === accepted.input_id)?.status).toBe("completed");
   const original = (await command("get_session_view", { session_id: source.session_id })).snapshot.value;
   const issued = await fetch(`${host.base_url}/auth/login`, { method: "POST", headers, body: JSON.stringify({ method: "desktop" }) });
   expect(issued.ok).toBe(true);
@@ -39,8 +39,8 @@ test("repeated forks remain readable after source deletion and accept new input"
     await page.getByRole("dialog", { name: "从这条回复创建分支？" }).getByRole("button", { name: "创建分支" }).click();
     title = `${title}（分支）`;
     await expect(page.getByLabel("会话标题栏").getByRole("button", { name: title, exact: true })).toBeVisible();
-    await expect(page.getByRole("status").filter({ hasText: "继承 · 已完成" }).first()).toBeVisible();
-    const copy = (await command("get_application_snapshot")).snapshot.value.active_sessions.find((session) => session.title === title)!;
+    await expect(page.getByRole("status").filter({ hasText: "已完成" }).first()).toBeVisible();
+    const copy = (await command("list_sessions", { query: title })).sessions.find((session) => session.title === title)!;
     expect(copy).toBeDefined();
     copies.push(copy);
     const view = (await command("get_session_view", { session_id: copy.session_id })).snapshot.value;
@@ -56,7 +56,7 @@ test("repeated forks remain readable after source deletion and accept new input"
   await page.reload();
   await navigation.getByRole("button", { name: title, exact: true }).click();
   await expect(page.getByText("离线回复：FIRST_CASE", { exact: true })).toBeVisible();
-  await expect(page.getByRole("status").filter({ hasText: "继承 · 已完成" }).first()).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: "已完成" }).first()).toBeVisible();
   const composer = page.getByRole("textbox", { name: "输入消息" });
   await composer.fill("QUEUED_CASE");
   await composer.press("Enter");

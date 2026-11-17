@@ -69,17 +69,7 @@ impl InheritedShellSwitchResult {
     pub(crate) fn from_message(
         message: &agent_types::UserMessage,
     ) -> crate::RuntimeResult<Option<Self>> {
-        message
-            .parts
-            .iter()
-            .find_map(|part| match part {
-                agent_types::UserPart::InternalContext(part)
-                    if part.kind == "inherited_shell_switch_result" =>
-                {
-                    Some(&part.text)
-                }
-                _ => None,
-            })
+        Self::encoded_result(message)
             .map(|text| {
                 serde_json::from_str(text).map_err(|_| {
                     crate::RuntimeError::InternalStateUnavailable {
@@ -88,6 +78,17 @@ impl InheritedShellSwitchResult {
                 })
             })
             .transpose()
+    }
+
+    pub(crate) fn encoded_result(message: &agent_types::UserMessage) -> Option<&str> {
+        message.parts.iter().find_map(|part| match part {
+            agent_types::UserPart::InternalContext(part)
+                if part.kind == "inherited_shell_switch_result" =>
+            {
+                Some(part.text.as_str())
+            }
+            _ => None,
+        })
     }
 
     pub(crate) fn append_to(

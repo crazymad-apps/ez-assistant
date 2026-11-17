@@ -72,6 +72,7 @@ impl OpenAiResponsesService {
             "stream",
             "store",
             "previous_response_id",
+            "prompt_cache_key",
             "max_output_tokens",
             "temperature",
             "top_p",

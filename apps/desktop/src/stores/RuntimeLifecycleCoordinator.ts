@@ -3,6 +3,7 @@ import { reaction, runInAction } from "mobx";
 import type {
   ChildTaskId,
   ConversationOwner,
+  ConversationPage,
   GetApplicationSnapshotRequest,
   GetApplicationSnapshotResult,
   GetChildTaskViewResult,
@@ -13,6 +14,7 @@ import type {
   RuntimeEventEnvelope,
   RuntimeErrorInfo,
   SessionId,
+  SubmitInputResult,
 } from "@ez-assistant/protocol";
 import {
   bootstrapRuntime,
@@ -23,7 +25,10 @@ import { RuntimeClient, RuntimeClientError } from "../runtime-client/RuntimeClie
 import type { ConnectionStore } from "./ConnectionStore";
 import type { LiveExecutionStore } from "./LiveExecutionStore";
 import type { NavigationStore } from "./NavigationStore";
-import type { RuntimeProjectionStore } from "./RuntimeProjectionStore";
+import { sameConversationOwner } from "./ConversationNavigationStore";
+import type { ConversationHistoryProjection, RuntimeProjectionStore } from "./RuntimeProjectionStore";
+import { SIDEBAR_PAGE_SIZE, sessionGroupKey } from "./RuntimeProjectionStore";
+import { childKey } from "./liveExecutionProjection";
 import { workspaceForDraftKey } from "./NewSessionDraftStore";
 
 const MAX_AUTOMATIC_RECONNECTS = 3;
@@ -32,8 +37,10 @@ const SNAPSHOT_RETRY_DELAYS = [250, 750] as const;
 const MAX_SNAPSHOT_EVENTS = 2048;
 const MAX_SNAPSHOT_EVENT_BYTES = 2 * 1024 * 1024;
 
-type SnapshotQueryType = "get_application_snapshot" | "get_session_view" | "get_child_task_view" | "get_session";
-type SnapshotQuery = <TType extends SnapshotQueryType>(
+type ReadQueryType = "get_workspace" | "get_application_snapshot" | "get_session_view" | "get_child_task_view" | "get_session"
+  | "list_conversation_page" | "get_conversation_page_around_message" | "get_conversation_page_around_run"
+  | "list_conversation_navigation" | "get_conversation_message_preview";
+export type RuntimeReadQuery = <TType extends ReadQueryType>(
   command: Extract<RuntimeCommand, { readonly type: TType }>,
 ) => Promise<Extract<RuntimeCommandResult, { readonly type: TType }>>;
 
@@ -83,11 +90,17 @@ export class RuntimeLifecycleCoordinator {
   #disposed = false;
   #lifecycle_generation = 0;
   #snapshot_reads = new Map<string, SnapshotRead>();
+  #list_mode_disposer: (() => void) | null = null;
   #selection_disposer: (() => void) | null = null;
   #rebase_application_pending = false;
 
   constructor(private readonly dependencies: RuntimeLifecycleDependencies) {
     this.#observeSelection();
+  }
+
+  /** 单个项目命令回执用于页外草稿，不改变侧栏页。 */
+  applyWorkspaceSummary(workspace: import("@ez-assistant/protocol").WorkspaceSummary): void {
+    this.dependencies.projection.cacheWorkspaces([workspace]);
   }
 
   get client(): RuntimeClient | null {
@@ -149,6 +162,9 @@ export class RuntimeLifecycleCoordinator {
   }
 
   #observeSelection(): void {
+    this.#list_mode_disposer ??= reaction(() => this.dependencies.navigation.list_mode, () => {
+      if (this.dependencies.connection.state === "connected") void this.loadApplication();
+    });
     this.#selection_disposer ??= reaction(
       () => [this.dependencies.navigation.target_device, this.dependencies.navigation.selected_session_id, this.dependencies.navigation.selected_child_task_id],
       () => {
@@ -185,7 +201,7 @@ export class RuntimeLifecycleCoordinator {
   #readSnapshot<T>(
     client: RuntimeClient,
     owner: SnapshotOwner | null,
-    operation: (query: SnapshotQuery) => Promise<T>,
+    operation: (query: RuntimeReadQuery) => Promise<T>,
     apply: (value: T, events: readonly RuntimeEventEnvelope[]) => void,
   ): Promise<T> {
     const key = this.#snapshotKey(owner);
@@ -199,26 +215,7 @@ export class RuntimeLifecycleCoordinator {
     if (owner) this.dependencies.projection.setConversationLoadState(owner.session_id, owner.child_task_id, { status: "loading", error: null });
     const timeout = window.setTimeout(() => read.controller.abort(new RuntimeClientError("snapshot_timeout", "读取会话超时，请重试")), SNAPSHOT_BUDGET_MS);
     let succeeded = false;
-    const requests = new Map<string, number>();
-    const query: SnapshotQuery = async <TType extends SnapshotQueryType>(
-      command: Extract<RuntimeCommand, { readonly type: TType }>,
-    ): Promise<Extract<RuntimeCommandResult, { readonly type: TType }>> => {
-      const request_key = JSON.stringify(command);
-      for (let retry = 0; ; retry++) {
-        read.controller.signal.throwIfAborted();
-        const count = requests.get(request_key) ?? 0;
-        if (count > SNAPSHOT_RETRY_DELAYS.length) throw new RuntimeClientError("snapshot_stale", "会话更新较多，请重试");
-        requests.set(request_key, count + 1);
-        try {
-          return await waitForSnapshot(client.command<TType>(command, { signal: read.controller.signal }), read.controller.signal);
-        } catch (error) {
-          if (read.controller.signal.aborted) throw read.controller.signal.reason;
-          if (!(error instanceof RuntimeClientError) || error.code !== "snapshot_busy") throw error;
-          if (count >= SNAPSHOT_RETRY_DELAYS.length) throw new RuntimeClientError("snapshot_busy", "会话暂时繁忙，请重试");
-          await snapshotDelay(SNAPSHOT_RETRY_DELAYS[retry]!, read.controller.signal);
-        }
-      }
-    };
+    const query = boundedReadQuery(client, read.controller.signal);
     read.promise = (async () => {
       try {
         for (let attempt = 0; ; attempt++) {
@@ -267,6 +264,30 @@ export class RuntimeLifecycleCoordinator {
     return read.promise as Promise<T>;
   }
 
+  /** 局部读取共用预算，保持全局事件水位和会话快照各自的安装边界。 */
+  async readConversation<T>(
+    operation: (query: RuntimeReadQuery, signal: AbortSignal) => Promise<T>,
+    cancellation?: AbortSignal,
+  ): Promise<T> {
+    const client = this.client;
+    if (!client) throw new RuntimeClientError("runtime_unavailable", "Runtime 当前不可用。");
+    const controller = new AbortController();
+    const signal = cancellation ? AbortSignal.any([controller.signal, cancellation]) : controller.signal;
+    const { navigation } = this.dependencies;
+    const stop = reaction(
+      () => [navigation.target_device, navigation.selected_session_id, navigation.selected_child_task_id, navigation.selected_draft_key, navigation.conversation_history_index],
+      () => controller.abort(new DOMException("Conversation selection changed", "AbortError")),
+    );
+    const timeout = window.setTimeout(() => controller.abort(new RuntimeClientError("snapshot_timeout", "读取历史超时，请重试。")), SNAPSHOT_BUDGET_MS);
+    try {
+      signal.throwIfAborted();
+      return await operation(boundedReadQuery(client, signal), signal);
+    } finally {
+      stop();
+      window.clearTimeout(timeout);
+    }
+  }
+
   async selectInitialSession(): Promise<void> {
     if (!this.#ownsSelection()) return;
     if (this.dependencies.target_device) {
@@ -281,12 +302,19 @@ export class RuntimeLifecycleCoordinator {
     }
     const draft_key = navigation.selected_draft_key;
     const draft_workspace_id = draft_key ? workspaceForDraftKey(draft_key) : null;
-    const draft_is_available = draft_key === "unbound" || Boolean(
-      draft_workspace_id
-      && application.workspaces.some((workspace) => (
-        workspace.workspace_id === draft_workspace_id && workspace.lifecycle === "active"
-      )),
-    );
+    let draft_workspace = projection.workspaceSummary(draft_workspace_id);
+    if (draft_workspace_id && !draft_workspace && this.#client) {
+      const client = this.#client;
+      try {
+        const result = await client.command({ type: "get_workspace", payload: { workspace_id: draft_workspace_id } });
+        if (client !== this.#client || navigation.selected_draft_key !== draft_key) return;
+        projection.cacheWorkspaces([result.payload.workspace]);
+        draft_workspace = result.payload.workspace;
+      } catch {
+        // 页外项目查询失败保留草稿；首次发送仍由 Host 校验项目可用性。
+      }
+    }
+    const draft_is_available = draft_key === "unbound" || Boolean(draft_workspace_id && draft_workspace?.lifecycle !== "removed");
     if (draft_key && draft_is_available) {
       if (!navigation.workspace_expansion_initialized) {
         for (const workspace of application.workspaces) {
@@ -296,8 +324,11 @@ export class RuntimeLifecycleCoordinator {
       return;
     }
     const current_id = navigation.selected_session_id;
-    const current_exists = application.active_sessions.some((session) => session.session_id === current_id);
-    const session_id = current_exists ? current_id : (application.active_sessions[0]?.session_id ?? null);
+    // 已选择的会话可以在未加载页，重连不以侧栏是否包含它来改选。
+    const first = application.workspaces.flatMap(workspace =>
+      this.dependencies.projection.sessionGroup(workspace.workspace_id, "active")?.sessions ?? [])[0]
+      ?? this.dependencies.projection.sessionGroup(null, "active")?.sessions[0];
+    const session_id = current_id ?? first?.session_id ?? null;
     navigation.selectSession(session_id, false);
     if (!navigation.workspace_expansion_initialized) {
       for (const workspace of application.workspaces) {
@@ -314,7 +345,8 @@ export class RuntimeLifecycleCoordinator {
     if (!client) return;
     this.#rebase_application_pending ||= rebase_event_sequence;
     try {
-      await this.#readSnapshot(client, null, (query) => this.#getApplication(client, query), (result, events) => {
+      await this.#readSnapshot(client, null, (query) => this.#getApplication(query), (result, events) => {
+        if (result.workspace) this.applyWorkspaceSummary(result.workspace);
         if (this.#rebase_application_pending) {
           const future = applicationEventsAfter(result.snapshot.observed_sequence, events);
           this.dependencies.projection.applyApplicationSnapshot(result.snapshot);
@@ -342,8 +374,18 @@ export class RuntimeLifecycleCoordinator {
     if (!client || !this.#ownsSnapshot(owner)) return;
     try {
       await this.#readSnapshot(client, owner,
-        (query) => query({ type: "get_session_view", payload: { session_id } }),
+        async (query) => {
+          const result = await query({ type: "get_session_view", payload: { session_id } });
+          const snapshot = result.payload.snapshot;
+          const conversation = await bridgeLatestPage(query, snapshot.value.conversation,
+            this.dependencies.projection.conversation_histories.get(session_id));
+          const workspace_id = snapshot.value.session.workspace_id;
+          const workspace = workspace_id && !this.dependencies.projection.application?.workspaces.some(item => item.workspace_id === workspace_id)
+            ? (await query({ type: "get_workspace", payload: { workspace_id } }).catch(() => null))?.payload.workspace : undefined;
+          return { ...result, workspace, payload: { snapshot: { ...snapshot, value: { ...snapshot.value, conversation } } } };
+        },
         (result, events) => {
+          if (result.workspace) this.dependencies.projection.cacheWorkspaces([result.workspace]);
           const snapshot = result.payload.snapshot.value;
           if (snapshot.session.session_id !== session_id || snapshot.conversation.owner.type !== "main_session"
             || snapshot.conversation.owner.session_id !== session_id) {
@@ -359,14 +401,32 @@ export class RuntimeLifecycleCoordinator {
     }
   }
 
+  /** 回执仅为当前正文所有者提供已保存消息，不推进 SSE 水位或替换会话快照。 */
+  applyInputReceipt(session_id: SessionId, result: SubmitInputResult): void {
+    if (!this.#ownsSnapshot({ session_id, child_task_id: null }) || this.dependencies.navigation.selected_child_task_id) return;
+    if (!this.dependencies.projection.applyInputReceipt(session_id, result)) return;
+    if (result.run && this.dependencies.projection.input_receipts.get(session_id)?.some(receipt => receipt.run.run_id === result.run?.run_id)) {
+      this.dependencies.live_execution.seedInputRun(result.run);
+    }
+    if (result.user_message) this.dependencies.navigation.requestConversationAnchor(result.user_message.message_id, true);
+  }
+
   async loadChildTask(session_id: SessionId, child_task_id: ChildTaskId): Promise<void> {
     const client = this.#client;
     const owner = { session_id, child_task_id };
     if (!client || !this.#ownsSnapshot(owner)) return;
+    const parent_generation = this.dependencies.projection.conversationGeneration(session_id);
     try {
       await this.#readSnapshot(client, owner,
-        (query) => query({ type: "get_child_task_view", payload: owner }),
+        async (query) => {
+          const result = await query({ type: "get_child_task_view", payload: owner });
+          const snapshot = result.payload.snapshot;
+          const conversation = await bridgeLatestPage(query, snapshot.value.conversation,
+            this.dependencies.projection.child_conversation_histories.get(childKey(session_id, child_task_id)));
+          return { ...result, payload: { snapshot: { ...snapshot, value: { ...snapshot.value, conversation } } } };
+        },
         (result, events) => {
+          if (parent_generation !== this.dependencies.projection.conversationGeneration(session_id)) return;
           const snapshot = result.payload.snapshot.value;
           if (snapshot.task.task.session_id !== session_id || snapshot.task.task.child_task_id !== child_task_id
             || snapshot.conversation.owner.type !== "child_task" || snapshot.conversation.owner.session_id !== session_id
@@ -383,6 +443,8 @@ export class RuntimeLifecycleCoordinator {
 
   dispose(): void {
     this.#cancelSnapshotReads();
+    this.#list_mode_disposer?.();
+    this.#list_mode_disposer = null;
     this.#selection_disposer?.();
     this.#selection_disposer = null;
     this.#disposed = true;
@@ -489,7 +551,7 @@ export class RuntimeLifecycleCoordinator {
         buffered_events.length = 0;
         buffered_bytes = 0;
         buffer_overflow = false;
-        const result = await this.#getApplication(client, query);
+        const result = await this.#getApplication(query);
         if (buffer_overflow) throw new RuntimeClientError("snapshot_stale", "事件同步积压，请重试");
         applicationEventsAfter(result.snapshot.observed_sequence, buffered_events);
         return result;
@@ -504,6 +566,7 @@ export class RuntimeLifecycleCoordinator {
         this.dependencies.projection.resetForInstance();
         this.dependencies.live_execution.clear();
         this.dependencies.projection.applyApplicationSnapshot(application.snapshot);
+        if (application.workspace) this.applyWorkspaceSummary(application.workspace);
       });
       snapshot_loaded = true;
       for (const event of applicationEventsAfter(application.snapshot.observed_sequence, buffered_events)) this.#applyEvent(event);
@@ -564,30 +627,30 @@ export class RuntimeLifecycleCoordinator {
   }
 
 
-  async #getApplication(client: RuntimeClient, query: SnapshotQuery): Promise<GetApplicationSnapshotResult> {
+  async #getApplication(query: RuntimeReadQuery): Promise<GetApplicationSnapshotResult & { workspace?: import("@ez-assistant/protocol").WorkspaceSummary }> {
     // 普通刷新、gap 和同实例重连都一次读取已加载前缀，排序与事件水位来自同一快照。
     const previous = this.dependencies.projection.application;
+    const navigation = this.dependencies.navigation;
+    const filter = navigation.list_mode;
+    const groups = [
+      ...(navigation.workspace_section_open ? previous?.workspaces.filter(workspace =>
+        navigation.expanded_workspaces.has(workspace.workspace_id)).map(workspace => workspace.workspace_id) ?? [] : []),
+      ...(navigation.unbound_section_open ? [null] : []),
+    ];
     const request: GetApplicationSnapshotRequest = previous ? {
-      active_sessions_limit: Math.max(100, previous.active_sessions_next_offset ?? previous.active_sessions.length),
-      archived_sessions_limit: Math.max(100, previous.archived_sessions_next_offset ?? previous.archived_sessions.length),
+      workspaces_limit: Math.max(SIDEBAR_PAGE_SIZE, previous.workspaces_next_offset ?? previous.workspaces.length),
+      session_groups: groups.map(workspace_id => ({
+        group: workspace_id === null ? { type: "unbound" } : { type: "workspace", workspace_id },
+        filter,
+        limit: this.dependencies.projection.group_limits.get(sessionGroupKey(workspace_id, filter)) ?? SIDEBAR_PAGE_SIZE,
+      })),
     } : {};
     const result = await query({ type: "get_application_snapshot", payload: request });
-    if (this.#disposed || this.#client !== client) return result.payload;
-    const selected_id = this.#ownsSelection() ? this.dependencies.navigation.selected_session_id : null;
-    const application = result.payload.snapshot.value;
-    if (selected_id && !application.active_sessions.some((session) => session.session_id === selected_id)) {
-      try {
-        const selected = await query({ type: "get_session", payload: { session_id: selected_id } });
-        if (this.#disposed || this.#client !== client) return result.payload;
-        const session = selected.payload.session;
-        if (session.lifecycle === "active" && (!session.workspace_id || application.workspaces.some(
-          (workspace) => workspace.workspace_id === session.workspace_id && workspace.lifecycle === "active",
-        ))) application.active_sessions.push(session);
-      } catch (error: unknown) {
-        if (!(error instanceof RuntimeClientError && error.code === "session_not_found")) throw error;
-      }
-    }
-    return result.payload;
+    const draft_key = navigation.selected_draft_key;
+    const workspace_id = draft_key ? workspaceForDraftKey(draft_key) : null;
+    const workspace = workspace_id && !result.payload.snapshot.value.workspaces.some(item => item.workspace_id === workspace_id)
+      ? (await query({ type: "get_workspace", payload: { workspace_id } }).catch(() => null))?.payload.workspace : undefined;
+    return { ...result.payload, workspace };
   }
 
   #applySessionResult(result: GetSessionViewResult, events: readonly RuntimeEventEnvelope[] = []): void {
@@ -595,6 +658,9 @@ export class RuntimeLifecycleCoordinator {
     assertSnapshotGeneration(result.snapshot.value.conversation.owner, result.snapshot.value.conversation.generation, future);
     if (this.dependencies.projection.applySessionSnapshot(result.snapshot)) {
       this.dependencies.live_execution.rebaseSession(result.snapshot.value, result.snapshot.observed_at_ms, result.snapshot.observed_sequence, future);
+      for (const receipt of this.dependencies.projection.input_receipts.get(result.snapshot.value.session.session_id) ?? []) {
+        this.dependencies.live_execution.seedInputRun(receipt.run);
+      }
     }
   }
 
@@ -651,6 +717,10 @@ export class RuntimeLifecycleCoordinator {
     if (!this.#eventIsInOwnerSnapshot(envelope)) this.dependencies.live_execution.buffer(envelope);
     this.dependencies.on_event?.(envelope);
     const event = envelope.event;
+    if (event.type === "workspace_changed") this.dependencies.projection.invalidateWorkspace(event.workspace_id);
+    if ((event.type === "conversation_committed" || event.type === "step_committed") && event.owner.type === "main_session") {
+      this.dependencies.projection.noteConversationGeneration(event.owner.session_id, event.generation);
+    }
     if (event.type === 'message_cards_changed') this.dependencies.projection.invalidateMessageCards(false);
     if (event.type === 'plugin_catalog_changed' || event.type === 'mcp_registry_changed' || event.type === 'config_changed') this.dependencies.projection.invalidateMessageCards(true);
     if (event.type === "session_title_generation_finished") {
@@ -674,6 +744,7 @@ export class RuntimeLifecycleCoordinator {
       event.type === "config_changed"
       || event.type === "mcp_registry_changed"
       || event.type === "skill_settings_changed"
+      || event.type === "sidebar_order_changed"
       || event.type === "workspace_changed"
       || event.type === "session_created"
       || event.type === "session_changed"
@@ -688,8 +759,7 @@ export class RuntimeLifecycleCoordinator {
     ) {
       const session_id = sessionIdForRefresh(event);
       const selected = this.dependencies.navigation.selected_session_id;
-      const workspace_id = selected ? this.dependencies.projection.session_views.get(selected)?.session.workspace_id
-        ?? this.dependencies.projection.application?.active_sessions.find((session) => session.session_id === selected)?.workspace_id : null;
+      const workspace_id = selected ? this.dependencies.projection.sessionSummary(selected)?.workspace_id : null;
       const shared = event.type === "config_changed" || event.type === "mcp_registry_changed"
         || event.type === "skill_settings_changed" || (event.type === "workspace_changed" && event.workspace_id === workspace_id);
       this.#scheduleRefresh(true, shared || session_id === this.dependencies.navigation.selected_session_id);
@@ -793,6 +863,61 @@ export class RuntimeLifecycleCoordinator {
       this.#reconnect_timer = null;
     }
   }
+}
+
+function boundedReadQuery(client: RuntimeClient, signal: AbortSignal): RuntimeReadQuery {
+  const requests = new Map<string, number>();
+  return async <TType extends ReadQueryType>(
+    command: Extract<RuntimeCommand, { readonly type: TType }>,
+  ): Promise<Extract<RuntimeCommandResult, { readonly type: TType }>> => {
+    const key = JSON.stringify(command);
+    for (;;) {
+      signal.throwIfAborted();
+      const count = requests.get(key) ?? 0;
+      if (count > SNAPSHOT_RETRY_DELAYS.length) throw new RuntimeClientError("snapshot_stale", "会话更新较多，请重试");
+      requests.set(key, count + 1);
+      try {
+        const result = await waitForSnapshot(client.command<TType>(command, { signal }), signal);
+        signal.throwIfAborted();
+        return result;
+      } catch (error) {
+        signal.throwIfAborted();
+        if (!(error instanceof RuntimeClientError) || error.code !== "snapshot_busy") throw error;
+        const delay = SNAPSHOT_RETRY_DELAYS[count];
+        if (delay === undefined) throw new RuntimeClientError("snapshot_busy", "会话暂时繁忙，请重试");
+        await snapshotDelay(delay, signal);
+      }
+    }
+  };
+}
+
+/** 断线期间新增超过一页时，只沿可靠前页补到旧尾，确认接缝后再安装快照。 */
+async function bridgeLatestPage(query: RuntimeReadQuery, latest: ConversationPage, current?: ConversationHistoryProjection): Promise<ConversationPage> {
+  if (!current?.items.length || current.generation !== latest.generation || !sameConversationOwner(current.owner, latest.owner)) return latest;
+  const tail = current.items.at(-1)?.message_id;
+  if (latest.items.some(item => item.message_id === tail)) return latest;
+  const known = new Set(current.items.map(item => item.message_id));
+  const pages = [latest];
+  const visited = new Set<string>();
+  let page = latest;
+  while (!page.items.some(item => known.has(item.message_id))) {
+    const cursor = page.previous_cursor;
+    if (!page.has_more || !cursor) return latest;
+    if (visited.has(cursor)) throw new RuntimeClientError("protocol_mismatch", "历史分页未能向前推进。");
+    visited.add(cursor);
+    const result = await query({ type: "list_conversation_page", payload: { owner: latest.owner, cursor } });
+    page = result.payload.snapshot.value;
+    if (page.generation !== latest.generation || !sameConversationOwner(page.owner, latest.owner)) {
+      throw new RuntimeClientError("snapshot_stale", "历史已更新，请重试。");
+    }
+    if (!page.items.length || page.previous_cursor === cursor || page.has_more !== (page.previous_cursor !== null)) {
+      throw new RuntimeClientError("protocol_mismatch", "历史分页未能向前推进。");
+    }
+    pages.push(page);
+  }
+  return pages.length === 1 ? latest : {
+    ...page, items: pages.reverse().flatMap(part => part.items),
+  };
 }
 
 function waitForSnapshot<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {

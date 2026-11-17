@@ -23,7 +23,9 @@ use rusqlite::Transaction;
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
 use super::{
-    StorageEngine, StorageResult, conflict, database_write_error,
+    StorageEngine, StorageResult, conflict,
+    conversation::{HistoryOffsets, RequestKeyOwner},
+    database_write_error,
     goal::{apply_goal_resume, insert_new_goal},
     internal_error, invalid_data, invalid_data_with_source,
     mode::{agent_variant_value, parse_agent_variant},
@@ -74,24 +76,123 @@ impl StorageEngine {
         Ok(())
     }
 
-    /// 幂等键只定位本 Session 的原接纳身份，不为一次重试解码其他队列载荷。
-    fn load_input_for_key(
+    pub(super) fn ensure_new_proxy_report(&mut self, report: &NewStoredInput) -> StorageResult<()> {
+        if let Some(key) = &report.idempotency_key
+            && self.request_key_owner(&report.session_id, key)?.is_some()
+        {
+            return Err(conflict("proxy report key is already accepted"));
+        }
+        self.ensure_new_input_identity(
+            &report.session_id,
+            &report.input_id,
+            None,
+            &report.message.id,
+        )
+    }
+
+    pub(super) fn new_conversation_identity_available(
+        &mut self,
+        session: &SessionId,
+        identity: assistant_runtime::NewConversationIdentity,
+    ) -> StorageResult<bool> {
+        match identity {
+            assistant_runtime::NewConversationIdentity::Input {
+                input_id,
+                message_id,
+            } => match self.ensure_new_input_identity(session, &input_id, None, &message_id) {
+                Ok(()) => Ok(true),
+                Err(error) if error.kind() == assistant_runtime::StoreErrorKind::Conflict => {
+                    Ok(false)
+                }
+                Err(error) => Err(error),
+            },
+            assistant_runtime::NewConversationIdentity::Run(run) => {
+                Ok(!self.local_input_history(session)?.has_run_identity(&run))
+            }
+        }
+    }
+
+    /// 查已发布文件与尚未发布的暂存键。只有迁移源允许 SQL 仍保存已交接的键。
+    pub(super) fn request_key_owner(
         &mut self,
         session: &SessionId,
         key: &IdempotencyKey,
-    ) -> StorageResult<Option<StoredInput>> {
-        let id: Option<String> = self.connection.query_row(
-            "SELECT input_id FROM inputs WHERE session_id=?1 AND idempotency_key=?2 AND input_kind='message'",
-            params![session.as_str(), key.as_str()], |row| row.get(0),
-        ).optional().map_err(|source| internal_error("accepted Input identity could not be read", source))?;
-        id.map(|id| {
-            let id = InputId::new(id).map_err(|source| {
-                invalid_data_with_source("accepted Input ID is invalid", source)
-            })?;
-            self.load_input_for_id(session, &id)?
-                .ok_or_else(|| invalid_data("accepted Input is missing"))
-        })
-        .transpose()
+    ) -> StorageResult<Option<RequestKeyOwner>> {
+        let control: Option<(String, String)> = self
+            .connection
+            .query_row(
+                "SELECT input_kind,input_id FROM inputs WHERE session_id=?1 AND idempotency_key=?2",
+                params![session.as_str(), key.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|source| internal_error("input request key could not be read", source))?;
+        let control = control
+            .map(|(kind, raw)| {
+                let id = InputId::new(raw).map_err(|source| {
+                    invalid_data_with_source("accepted Input ID is invalid", source)
+                })?;
+                match kind.as_str() {
+                    "message" => Ok(RequestKeyOwner::Message(id)),
+                    "command" => Ok(RequestKeyOwner::Command(id)),
+                    _ => Err(invalid_data("stored input kind is invalid")),
+                }
+            })
+            .transpose()?;
+        if self.allow_legacy_history {
+            return Ok(control);
+        }
+        let historical = self.local_input_history(session)?.request_key(key);
+        if let (Some(control), Some(historical)) = (&control, &historical)
+            && (control != historical || !self.retain_input_identities)
+        {
+            return Err(invalid_data(
+                "request key belongs to both history and control",
+            ));
+        }
+        Ok(historical.or(control))
+    }
+
+    pub(super) fn find_request_acceptance(
+        &mut self,
+        session: &SessionId,
+        key: &IdempotencyKey,
+    ) -> StorageResult<Option<assistant_runtime::StoredRequestAcceptance>> {
+        use assistant_runtime::StoredRequestAcceptance;
+        let Some(owner) = self.request_key_owner(session, key)? else {
+            return Ok(None);
+        };
+        Ok(Some(match owner {
+            RequestKeyOwner::Message(id) => {
+                let input = self
+                    .load_input_for_id(session, &id)?
+                    .ok_or_else(|| invalid_data("accepted Input is missing"))?;
+                StoredRequestAcceptance::Message(Box::new(self.existing_input_acceptance(input)?))
+            }
+            RequestKeyOwner::Command(id) => {
+                let command = self
+                    .load_session_command(session, &id)?
+                    .ok_or_else(|| invalid_data("accepted command is missing"))?;
+                StoredRequestAcceptance::Command(Box::new(command))
+            }
+        }))
+    }
+
+    pub(super) fn local_input_history(
+        &mut self,
+        session: &SessionId,
+    ) -> StorageResult<std::sync::Arc<HistoryOffsets>> {
+        let owner = assistant_protocol::ConversationOwner::MainSession {
+            session_id: session.clone(),
+        };
+        self.ensure_no_pending_history(&owner)?;
+        if self.unavailable_sessions.contains(session.as_str()) {
+            return Err(invalid_data("Input history is unavailable"));
+        }
+        let generation = self.session_generation(session)?;
+        let path = super::body_path(&self.session_directory(session)?, generation);
+        self.conversation_indexes
+            .history_index(&path, &owner, generation)
     }
 
     /// 固定首次 attempt；SQL 只读取未完成控制，终态只能从当前 owner 的可靠文件取得。
@@ -123,34 +224,18 @@ impl StorageEngine {
                 is_duplicate: true,
             });
         }
-        let history = self
-            .load_conversation_history(assistant_protocol::ConversationOwner::MainSession {
-                session_id: input.session_id.clone(),
-            })?
-            .facts;
+        let history = self.local_input_history(&input.session_id)?;
         let fact = history
-            .inputs
-            .into_iter()
-            .find(|fact| {
-                fact.input_id == input.input_id
-                    && !fact.inherited
-                    && fact.user_message_id == input.user_message_id
-            })
+            .input(&input.input_id)
+            .filter(|fact| !fact.inherited && fact.user_message_id == input.user_message_id)
             .ok_or_else(|| invalid_data("accepted Input history is missing"))?;
         let run = history
-            .runs
-            .into_iter()
-            .find(|run| {
-                run.input_id.as_ref() == Some(&input.input_id)
-                    && run.attempt == 1
-                    && !run.inherited
-                    && !run.partial
-                    && run.status.is_some_and(|status| status.is_terminal())
-            })
+            .first_run(&input.input_id)
+            .filter(|run| !run.partial && run.status.is_some_and(|status| status.is_terminal()))
             .ok_or_else(|| invalid_data("accepted first Run history is missing"))?;
         Ok(AcceptedInput::Historical {
             session_id: input.session_id,
-            input: fact,
+            input: Box::new(fact),
             run,
         })
     }
@@ -162,62 +247,11 @@ impl StorageEngine {
         &mut self,
         resume: GoalHeldInputResume,
     ) -> StorageResult<GoalHeldInputResumeResult> {
-        let binding = GoalInputBinding {
-            goal_id: resume.resumed_goal.goal_id.clone(),
-            generation: resume.resumed_goal.generation,
-            turn: resume.resumed_goal.turn,
-            reply_route: None,
-        };
-        // 只接受目标一致、generation 恰好递增一代的恢复，防止过期调用跨代绑定 Input。
-        if resume.expected_goal_id != resume.resumed_goal.goal_id
-            || resume.resumed_goal.generation
-                != resume
-                    .expected_generation
-                    .checked_add(1)
-                    .ok_or_else(|| invalid_data("Goal generation is exhausted"))?
-            || resume.message.id.as_str().is_empty()
-        {
-            return Err(invalid_data("held Input Goal resume is invalid"));
-        }
-        validate_input_message(InputOrigin::User, Some(&binding), None, &resume.message)
-            .map_err(|_| invalid_data("held Goal resume message is invalid"))?;
-        let message_json = serde_json::to_string(&resume.message).map_err(|source| {
-            internal_error("held Goal resume message could not be encoded", source)
-        })?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|source| internal_error("held Input Goal resume could not begin", source))?;
-        apply_goal_resume(&transaction, &resume.resumed_goal)?;
-        // WHERE 条件同时确认这是未绑定 Goal 的排队用户输入，避免覆盖已被调度器消费的状态。
-        let changed = transaction
-            .execute(
-                "UPDATE inputs
-                 SET goal_id = ?1, goal_generation = ?2, goal_turn = ?3,
-                     queued_message_json = ?4
-                 WHERE input_id = ?5 AND session_id = ?6 AND state = 'queued'
-                   AND origin = 'user' AND goal_id IS NULL AND goal_generation IS NULL
-                   AND goal_turn IS NULL AND user_message_id = ?7
-                   AND NOT EXISTS (SELECT 1 FROM runs WHERE runs.input_id = inputs.input_id)",
-                params![
-                    binding.goal_id.as_str(),
-                    i64::try_from(binding.generation).map_err(|source| internal_error(
-                        "Goal generation exceeds storage range",
-                        source
-                    ))?,
-                    i64::from(binding.turn),
-                    message_json,
-                    resume.input_id.as_str(),
-                    resume.session_id.as_str(),
-                    resume.message.id.as_str(),
-                ],
-            )
-            .map_err(|source| {
-                database_write_error("held Input could not be bound to Goal", source)
-            })?;
-        if changed != 1 {
-            return Err(conflict("Input is not held user guidance"));
-        }
+        bind_held_input_to_resumed_goal(&transaction, &resume)?;
         transaction.commit().map_err(|source| {
             database_write_error("held Input Goal resume could not commit", source)
         })?;
@@ -288,8 +322,14 @@ impl StorageEngine {
     pub(super) fn accept_input(&mut self, input: NewStoredInput) -> StorageResult<AcceptedInput> {
         // 幂等命中必须发生在任何插入之前，并固定返回首个 Run，保持调用方重试结果稳定。
         if let Some(key) = input.idempotency_key.as_ref()
-            && let Some(existing) = self.load_input_for_key(&input.session_id, key)?
+            && let Some(owner) = self.request_key_owner(&input.session_id, key)?
         {
+            let RequestKeyOwner::Message(id) = owner else {
+                return Err(conflict("message request key belongs to a session command"));
+            };
+            let existing = self
+                .load_input_for_id(&input.session_id, &id)?
+                .ok_or_else(|| invalid_data("accepted Input is missing"))?;
             return self.existing_input_acceptance(existing);
         }
         self.ensure_new_input_identity(
@@ -398,37 +438,26 @@ impl StorageEngine {
         &mut self,
         command: NewStoredSessionCommand,
     ) -> StorageResult<AcceptedStoredSessionCommand> {
-        if let Some(key) = command.idempotency_key.as_ref() {
-            let identity: Option<(String, String)> = self.connection.query_row(
-                "SELECT input_kind,input_id FROM inputs WHERE session_id=?1 AND idempotency_key=?2",
-                params![command.session_id.as_str(), key.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            ).optional().map_err(|source| internal_error("input idempotency identity could not be read", source))?;
-            if let Some((kind, raw)) = identity {
-                if kind == "message" {
-                    return Err(conflict(
-                        "session command idempotency key belongs to a message input",
-                    ));
-                }
-                if kind != "command" {
-                    return Err(invalid_data("stored input kind is invalid"));
-                }
-                let id = InputId::new(raw).map_err(|source| {
-                    invalid_data_with_source("command Input ID is invalid", source)
-                })?;
-                let existing = self
-                    .load_session_command(&command.session_id, &id)?
-                    .ok_or_else(|| invalid_data("accepted command identity is missing"))?;
-                if existing.command != command.command {
-                    return Err(conflict(
-                        "session command idempotency key was reused with different content",
-                    ));
-                }
-                return Ok(AcceptedStoredSessionCommand {
-                    command: existing,
-                    is_duplicate: true,
-                });
+        if let Some(key) = command.idempotency_key.as_ref()
+            && let Some(owner) = self.request_key_owner(&command.session_id, key)?
+        {
+            let RequestKeyOwner::Command(id) = owner else {
+                return Err(conflict(
+                    "session command request key belongs to a message input",
+                ));
+            };
+            let existing = self
+                .load_session_command(&command.session_id, &id)?
+                .ok_or_else(|| invalid_data("accepted command is missing"))?;
+            if existing.command != command.command {
+                return Err(conflict(
+                    "session command idempotency key was reused with different content",
+                ));
             }
+            return Ok(AcceptedStoredSessionCommand {
+                command: existing,
+                is_duplicate: true,
+            });
         }
 
         self.ensure_new_input_identity(
@@ -536,45 +565,25 @@ impl StorageEngine {
         session_id: &SessionId,
         input_id: &InputId,
     ) -> StorageResult<Option<StoredSessionCommand>> {
-        let identity: Option<(String, Option<String>)> = self.connection.query_row(
-            "SELECT state,idempotency_key FROM inputs WHERE session_id=?1 AND input_id=?2 AND input_kind='command'",
-            params![session_id.as_str(), input_id.as_str()], |row| Ok((row.get(0)?, row.get(1)?)),
-        ).optional().map_err(|source| internal_error("command identity could not be read", source))?;
-        let Some((state, key)) = identity else {
-            return Ok(None);
-        };
-        if self.allow_legacy_history || state == "queued" {
-            return Ok(self
-                .query_session_commands(Some(session_id), Some(input_id))?
-                .into_iter()
-                .next());
-        }
-        if state != "committed" {
-            return Err(invalid_data("command identity has invalid state"));
-        }
-        let facts = self
-            .load_conversation_history(assistant_protocol::ConversationOwner::MainSession {
-                session_id: session_id.clone(),
-            })?
-            .facts;
-        let command = facts
-            .commands
+        let control = self
+            .query_session_commands(Some(session_id), Some(input_id))?
             .into_iter()
-            .find(|command| &command.input_id == input_id)
-            .ok_or_else(|| invalid_data("committed command file history is missing"))?;
-        if command.state != StoredSessionCommandState::Committed
-            || &command.session_id != session_id
-            || command.idempotency_key.as_ref().map(IdempotencyKey::as_str) != key.as_deref()
-            || !command
-                .result
-                .as_ref()
-                .is_some_and(|result| result.matches_command(&command.command))
-        {
-            return Err(invalid_data(
-                "command file history differs from accepted identity",
-            ));
+            .next();
+        if control.is_some() || self.allow_legacy_history {
+            return Ok(control);
         }
-        Ok(Some(command))
+        let command = self.local_input_history(session_id)?.command(input_id);
+        if let Some(command) = &command
+            && (command.state != StoredSessionCommandState::Committed
+                || &command.session_id != session_id
+                || !command
+                    .result
+                    .as_ref()
+                    .is_some_and(|result| result.matches_command(&command.command)))
+        {
+            return Err(invalid_data("invalid committed command in file history"));
+        }
+        Ok(command)
     }
 
     // 全量恢复与精确幂等查询共享行解码/Run 归属校验，但在线请求只读取目标唯一键。
@@ -726,9 +735,31 @@ impl StorageEngine {
         session_id: &assistant_protocol::SessionId,
         input_id: &InputId,
     ) -> StorageResult<Option<StoredInput>> {
-        Ok(self
+        let control = self
             .load_inputs_filtered(Some(session_id), Some(input_id))?
-            .pop())
+            .into_iter()
+            .next();
+        if control
+            .as_ref()
+            .is_some_and(|input| input.state == StoredInputState::Queued)
+            || self.allow_legacy_history
+        {
+            return Ok(control);
+        }
+        let fact = self.local_input_history(session_id)?.input(input_id);
+        if let Some(fact) = fact {
+            let mut input = fact
+                .committed_projection(session_id.clone())
+                .ok_or_else(|| conflict("inherited Input does not have local control"))?;
+            if self.retain_input_identities && input.idempotency_key.is_none() {
+                input.idempotency_key = control.and_then(|input| input.idempotency_key);
+            }
+            return Ok(Some(input));
+        }
+        if control.is_some() {
+            return Err(invalid_data("committed Input history is missing"));
+        }
+        Ok(None)
     }
 
     fn load_inputs_filtered(
@@ -802,6 +833,9 @@ impl StorageEngine {
                 has_control,
             ) = row;
             if !self.allow_legacy_history && state == "committed" && !has_control {
+                if !self.retain_input_identities {
+                    continue;
+                }
                 if input_id.is_empty() {
                     return Err(invalid_data("stored Input identity is empty"));
                 }
@@ -1097,7 +1131,60 @@ impl StorageEngine {
     }
 }
 
-fn validate_new_input_mcp_selection(input: &NewStoredInput) -> StorageResult<()> {
+pub(super) fn bind_held_input_to_resumed_goal(
+    transaction: &Transaction<'_>,
+    resume: &GoalHeldInputResume,
+) -> StorageResult<()> {
+    let binding = resume.binding();
+    // 只接受目标一致、generation 恰好递增一代的恢复，防止过期调用跨代绑定 Input。
+    if resume.session_id != resume.resumed_goal.session_id
+        || resume.expected_goal_id != resume.resumed_goal.goal_id
+        || resume.resumed_goal.generation
+            != resume
+                .expected_generation
+                .checked_add(1)
+                .ok_or_else(|| invalid_data("Goal generation is exhausted"))?
+        || resume.message.id.as_str().is_empty()
+    {
+        return Err(invalid_data("held Input Goal resume is invalid"));
+    }
+    validate_input_message(InputOrigin::User, Some(&binding), None, &resume.message)
+        .map_err(|_| invalid_data("held Goal resume message is invalid"))?;
+    let message_json = serde_json::to_string(&resume.message).map_err(|source| {
+        internal_error("held Goal resume message could not be encoded", source)
+    })?;
+    apply_goal_resume(transaction, &resume.resumed_goal)?;
+    // WHERE 条件同时确认这是未绑定 Goal 的排队用户输入，避免覆盖已被调度器消费的状态。
+    let changed = transaction
+        .execute(
+            "UPDATE inputs
+                 SET goal_id = ?1, goal_generation = ?2, goal_turn = ?3,
+                     queued_message_json = ?4
+                 WHERE input_id = ?5 AND session_id = ?6 AND state = 'queued'
+                   AND origin = 'user' AND goal_id IS NULL AND goal_generation IS NULL
+                   AND goal_turn IS NULL AND user_message_id = ?7
+                   AND NOT EXISTS (SELECT 1 FROM runs WHERE runs.input_id = inputs.input_id)",
+            params![
+                binding.goal_id.as_str(),
+                i64::try_from(binding.generation).map_err(|source| internal_error(
+                    "Goal generation exceeds storage range",
+                    source
+                ))?,
+                i64::from(binding.turn),
+                message_json,
+                resume.input_id.as_str(),
+                resume.session_id.as_str(),
+                resume.message.id.as_str(),
+            ],
+        )
+        .map_err(|source| database_write_error("held Input could not be bound to Goal", source))?;
+    if changed != 1 {
+        return Err(conflict("Input is not held user guidance"));
+    }
+    Ok(())
+}
+
+pub(super) fn validate_new_input_mcp_selection(input: &NewStoredInput) -> StorageResult<()> {
     let Some(selection) = input.mcp_selection.as_ref() else {
         return Ok(());
     };

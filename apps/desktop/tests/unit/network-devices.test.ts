@@ -1,3 +1,4 @@
+import { sidebarFixture } from "../support/sidebarFixture";
 import { afterEach, expect, it, vi } from "vitest";
 import { observable, runInAction } from "mobx";
 import { MIN_COMPATIBLE_VERSION, SOFTWARE_VERSION, type ApplicationSnapshot } from "@ez-assistant/protocol";
@@ -9,11 +10,11 @@ import { RootStore } from "../../src/stores/RootStore";
 const A = "11111111-1111-4111-8111-111111111111", B = "22222222-2222-4222-8222-222222222222";
 const disposables: { dispose(): void }[] = [];
 const application: ApplicationSnapshot = {
-  runtime_lifecycle: "running", active_sessions_next_offset: null, archived_sessions_next_offset: null,
+  runtime_lifecycle: "running", ...sidebarFixture({ active_next: null, archived_next: null, active: [], archived: [] }),
   configuration: { config_path: null, revision: "fixture", state: "ready", schema_version: 1, issues: [] },
-  providers: [], model_settings: { default_model: null, vision_model: null }, workspaces: [], active_sessions: [], archived_sessions: [],
+  providers: [], model_settings: { default_model: null, vision_model: null }, workspaces: [],
   controller_availability: { status: "unavailable" }, additional_controller_count: 0,
-  capabilities: { conversation_paging: true, mcp_tools: true, mcp_management: true, session_commands: true, tool_detail: true,
+  capabilities: { conversation_paging: true, mcp_tools: true, mcp_management: true, session_commands: true, user_message_edit: false, tool_detail: true,
     queue_control: true, approval_queue: true, child_task_view: true, conversation_search: true },
 };
 function client() {
@@ -116,6 +117,13 @@ it("requires proxy v2 before any remote request and retains immutable request ta
   expect(last[0]).toBe("http://127.0.0.1:7240/commands");
   expect(new Headers(last[1]?.headers).get("x-ez-target-device")).toBe(A);
   expect(new Headers(last[1]?.headers).get("authorization")).toBe("Bearer fixture");
+  const owner = { type: "child_task" as const, session_id: "s", child_task_id: "c" };
+  await remote.command({ type: "list_conversation_navigation", payload: { owner, cursor: null } });
+  await remote.command({ type: "get_conversation_message_preview", payload: { owner, generation: 1, message_id: "m" } });
+  for (const [, init] of transport.fetch.mock.calls.slice(-2)) {
+    expect(new Headers(init?.headers).get("x-ez-target-device")).toBe(A);
+    expect(JSON.parse(String(init?.body)).command.payload.payload.owner).toEqual(owner);
+  }
   const before = transport.fetch.mock.calls.length;
   await expect(remote.command({ type: "set_session_pinned", payload: { session_id: "blocked", is_pinned: true } })).rejects.toMatchObject({ code: "remote_operation_unavailable", target_device: A });
   await expect(remote.resource("/attachments/file", {}, async () => undefined)).rejects.toMatchObject({ code: "remote_operation_unavailable" });

@@ -41,15 +41,25 @@ async fn application_snapshot_refreshes_requested_prefixes_beyond_old_page_limit
         .unwrap()
         .snapshot
         .value;
-    assert_eq!(defaults.active_sessions.len(), 100);
-    assert_eq!(defaults.active_sessions_next_offset, Some(100));
-    assert_eq!(defaults.archived_sessions.len(), 5);
-    assert_eq!(defaults.archived_sessions_next_offset, None);
+    assert_eq!(defaults.session_groups[0].sessions.len(), 10);
+    assert_eq!(defaults.session_groups[0].next_offset, Some(10));
+    assert_eq!(defaults.session_groups.len(), 1);
 
     let snapshot = runtime
         .get_application_snapshot(GetApplicationSnapshotRequest {
-            active_sessions_limit: Some(500),
-            archived_sessions_limit: Some(3),
+            workspaces_limit: None,
+            session_groups: Some(vec![
+                assistant_protocol::SessionGroupRequest {
+                    group: assistant_protocol::SessionGroup::Unbound,
+                    filter: assistant_protocol::SessionListFilter::Active,
+                    limit: Some(500),
+                },
+                assistant_protocol::SessionGroupRequest {
+                    group: assistant_protocol::SessionGroup::Unbound,
+                    filter: assistant_protocol::SessionListFilter::Archived,
+                    limit: Some(3),
+                },
+            ]),
         })
         .await
         .unwrap()
@@ -63,26 +73,37 @@ async fn application_snapshot_refreshes_requested_prefixes_beyond_old_page_limit
         .unwrap();
     assert_eq!(page.sessions.len(), 500);
     assert!(page.has_more);
-    assert_eq!(snapshot.value.active_sessions, page.sessions);
-    assert_eq!(snapshot.value.active_sessions_next_offset, Some(500));
-    assert_eq!(snapshot.value.archived_sessions.len(), 3);
-    assert_eq!(snapshot.value.archived_sessions_next_offset, Some(3));
+    assert_eq!(snapshot.value.session_groups[0].sessions, page.sessions);
+    assert_eq!(snapshot.value.session_groups[0].next_offset, Some(500));
+    assert_eq!(snapshot.value.session_groups[1].sessions.len(), 3);
+    assert_eq!(snapshot.value.session_groups[1].next_offset, Some(3));
     assert_eq!(snapshot.observed_sequence, runtime.event_sender.sequence());
 
     // 数值边界不溢出；不足请求数量时终止分页，而不是编造下一页。
     let all = runtime
         .get_application_snapshot(GetApplicationSnapshotRequest {
-            active_sessions_limit: Some(u32::MAX),
-            archived_sessions_limit: Some(0),
+            workspaces_limit: None,
+            session_groups: Some(vec![
+                assistant_protocol::SessionGroupRequest {
+                    group: assistant_protocol::SessionGroup::Unbound,
+                    filter: assistant_protocol::SessionListFilter::Active,
+                    limit: Some(u32::MAX),
+                },
+                assistant_protocol::SessionGroupRequest {
+                    group: assistant_protocol::SessionGroup::Unbound,
+                    filter: assistant_protocol::SessionListFilter::Archived,
+                    limit: Some(0),
+                },
+            ]),
         })
         .await
         .unwrap()
         .snapshot
         .value;
-    assert_eq!(all.active_sessions.len(), 501);
-    assert_eq!(all.active_sessions_next_offset, None);
-    assert_eq!(all.archived_sessions.len(), 1);
-    assert_eq!(all.archived_sessions_next_offset, Some(1));
+    assert_eq!(all.session_groups[0].sessions.len(), 501);
+    assert_eq!(all.session_groups[0].next_offset, None);
+    assert_eq!(all.session_groups[1].sessions.len(), 1);
+    assert_eq!(all.session_groups[1].next_offset, Some(1));
 }
 
 #[tokio::test]
@@ -118,9 +139,8 @@ async fn application_snapshot_ignores_stream_output_but_rejects_summary_changes(
         .unwrap()
         .snapshot;
     assert!(
-        snapshot
-            .value
-            .active_sessions
+        snapshot.value.session_groups[0]
+            .sessions
             .iter()
             .any(|session| session.session_id == session_id)
     );
@@ -500,6 +520,7 @@ async fn markdown_export_contains_product_content_without_runtime_metadata() {
         .expect("session");
     let submitted = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session.session.session_id.clone(),
             message: "exported question".to_owned(),
@@ -597,6 +618,7 @@ async fn completed_assistant_turn_exposes_the_reliable_run_finish_time() {
         .session_id;
     let run = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "finish time".to_owned(),
@@ -616,7 +638,7 @@ async fn completed_assistant_turn_exposes_the_reliable_run_finish_time() {
         .list_conversation_page(ListConversationPageRequest {
             owner: ConversationOwner::MainSession { session_id },
             cursor: None,
-            limit: 20,
+            turn_limit: Some(20),
         })
         .await
         .expect("conversation")
@@ -678,6 +700,7 @@ async fn session_usage_projects_latest_and_token_weighted_cache_hit_rates() {
     for message in ["first request", "second request"] {
         let run = runtime
             .submit_started_input(SubmitInputRequest {
+                delivery: Default::default(),
                 mode: assistant_protocol::SubmitInputMode::Normal,
                 session_id: session_id.clone(),
                 message: message.to_owned(),
@@ -723,6 +746,7 @@ async fn assistant_feedback_is_persisted_in_the_conversation_projection_and_can_
         .session_id;
     let run = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "question".to_owned(),
@@ -744,7 +768,7 @@ async fn assistant_feedback_is_persisted_in_the_conversation_projection_and_can_
         .list_conversation_page(ListConversationPageRequest {
             owner: owner.clone(),
             cursor: None,
-            limit: 20,
+            turn_limit: Some(20),
         })
         .await
         .expect("page")
@@ -773,7 +797,7 @@ async fn assistant_feedback_is_persisted_in_the_conversation_projection_and_can_
         .list_conversation_page(ListConversationPageRequest {
             owner: owner.clone(),
             cursor: None,
-            limit: 20,
+            turn_limit: Some(20),
         })
         .await
         .expect("feedback page")
@@ -800,7 +824,7 @@ async fn assistant_feedback_is_persisted_in_the_conversation_projection_and_can_
         .list_conversation_page(ListConversationPageRequest {
             owner,
             cursor: None,
-            limit: 20,
+            turn_limit: Some(20),
         })
         .await
         .expect("cleared page")
@@ -848,7 +872,7 @@ async fn product_event_envelopes_and_application_snapshot_share_a_waterline() {
         .expect("application snapshot")
         .snapshot;
     assert_eq!(snapshot.observed_sequence, 1);
-    assert_eq!(snapshot.value.active_sessions.len(), 1);
+    assert_eq!(snapshot.value.session_groups[0].sessions.len(), 1);
     assert!(snapshot.value.capabilities.conversation_paging);
 }
 
@@ -945,6 +969,7 @@ async fn mcp_discovery_is_hierarchical_filtered_and_persisted() {
         .expect("persist deny");
     let submitted = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "find the right GitHub tool".to_owned(),
@@ -1057,6 +1082,7 @@ async fn selected_mcp_freezes_queue_conversation_fork_and_full_run_disclosure() 
     controller.lock_state().expect("state").resume_required = true;
     let submitted = runtime
         .submit_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "use GitHub".to_owned(),
@@ -1233,6 +1259,7 @@ async fn selected_mcp_is_inherited_by_goal_runs_but_not_the_next_ordinary_input(
         .session_id;
     let goal = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::StartGoal,
             session_id: session_id.clone(),
             message: "finish with GitHub".to_owned(),
@@ -1273,6 +1300,7 @@ async fn selected_mcp_is_inherited_by_goal_runs_but_not_the_next_ordinary_input(
     .expect("Goal continuation completes");
     let ordinary = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "ordinary next turn".to_owned(),
@@ -1368,6 +1396,7 @@ async fn selected_mcp_disclosure_and_fixed_gateways_are_inherited_by_child_agent
     set_auto_approval(&runtime, &session_id).await;
     let submitted = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "delegate with selected GitHub".to_owned(),
@@ -1452,6 +1481,7 @@ async fn mcp_gateway_uses_real_identity_approval_schema_two_and_history_projecti
         .session_id;
     let first = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "create the first issue".to_owned(),
@@ -1544,6 +1574,7 @@ async fn mcp_gateway_uses_real_identity_approval_schema_two_and_history_projecti
         .expect("set Auto");
     let second = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "create the second issue".to_owned(),
@@ -1643,6 +1674,7 @@ async fn invalid_mcp_arguments_and_explicit_deny_never_reach_the_remote_server()
         .session_id;
     let invalid = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "invalid arguments".to_owned(),
@@ -1713,6 +1745,7 @@ async fn invalid_mcp_arguments_and_explicit_deny_never_reach_the_remote_server()
         .expect("set Auto");
     let denied = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "denied call".to_owned(),
@@ -1768,6 +1801,7 @@ async fn refreshing_a_server_cancels_its_pending_approval_without_calling_remote
         .session_id;
     let run = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "call before refresh".to_owned(),
@@ -1884,6 +1918,7 @@ async fn conversation_pages_are_latest_first_queries_with_generation_bound_curso
     for message in ["one", "two"] {
         let submitted = runtime
             .submit_started_input(SubmitInputRequest {
+                delivery: Default::default(),
                 mode: assistant_protocol::SubmitInputMode::Normal,
                 session_id: session.session.session_id.clone(),
                 message: message.to_owned(),
@@ -1912,7 +1947,7 @@ async fn conversation_pages_are_latest_first_queries_with_generation_bound_curso
         .list_conversation_page(ListConversationPageRequest {
             owner: owner.clone(),
             cursor: None,
-            limit: 2,
+            turn_limit: Some(1),
         })
         .await
         .expect("latest page")
@@ -1929,13 +1964,85 @@ async fn conversation_pages_are_latest_first_queries_with_generation_bound_curso
             if matches!(&message.segments[0], assistant_protocol::AssistantSegment::Text { text, .. } if text == "second")
     ));
 
+    let navigation = runtime
+        .list_conversation_navigation(assistant_protocol::ListConversationNavigationRequest {
+            owner: owner.clone(),
+            cursor: None,
+            limit: Some(1),
+        })
+        .await
+        .unwrap()
+        .snapshot
+        .value;
+    assert_eq!(navigation.items.len(), 1);
+    let reply = navigation.items[0].assistant_message_id.clone().unwrap();
+    assert_eq!(reply.as_str(), "a-page-2");
+    let preview = runtime
+        .get_conversation_message_preview(
+            assistant_protocol::GetConversationMessagePreviewRequest {
+                owner: owner.clone(),
+                generation: navigation.generation,
+                message_id: reply,
+            },
+        )
+        .await
+        .unwrap()
+        .snapshot
+        .value;
+    assert_eq!(
+        (preview.text.as_str(), preview.truncated),
+        ("second", false)
+    );
+    let nav_cursor = navigation.previous_cursor.clone().unwrap();
+    let previous_navigation = runtime
+        .list_conversation_navigation(assistant_protocol::ListConversationNavigationRequest {
+            owner: owner.clone(),
+            cursor: Some(nav_cursor.clone()),
+            limit: Some(1),
+        })
+        .await
+        .unwrap()
+        .snapshot
+        .value;
+    assert_eq!(
+        previous_navigation.items[0]
+            .assistant_message_id
+            .as_ref()
+            .unwrap()
+            .as_str(),
+        "a-page-1"
+    );
+    assert!(previous_navigation.next_cursor.is_some());
+    assert!(matches!(
+        runtime
+            .list_conversation_navigation(assistant_protocol::ListConversationNavigationRequest {
+                owner: owner.clone(),
+                cursor: latest.previous_cursor.clone(),
+                limit: Some(1),
+            })
+            .await,
+        Err(RuntimeError::InvalidRequest { .. })
+    ));
+    let another_owner = ConversationOwner::MainSession {
+        session_id: assistant_protocol::SessionId::new("different-session").unwrap(),
+    };
+    assert!(matches!(
+        runtime
+            .list_conversation_navigation(assistant_protocol::ListConversationNavigationRequest {
+                owner: another_owner,
+                cursor: Some(nav_cursor.clone()),
+                limit: Some(1),
+            })
+            .await,
+        Err(RuntimeError::InvalidRequest { .. })
+    ));
     let old_cursor = latest.previous_cursor.clone().expect("older cursor");
     let old_generation = latest.generation;
     let older = runtime
         .list_conversation_page(ListConversationPageRequest {
             owner,
             cursor: Some(old_cursor.clone()),
-            limit: 2,
+            turn_limit: Some(1),
         })
         .await
         .expect("older page")
@@ -1963,7 +2070,7 @@ async fn conversation_pages_are_latest_first_queries_with_generation_bound_curso
         .get_conversation_page_around_run(GetConversationPageAroundRunRequest {
             session_id: view.value.session.session_id.clone(),
             run_id: view.value.runs[1].run_id.clone(),
-            limit: 2,
+            turn_limit: Some(1),
         })
         .await
         .expect("page around run");
@@ -1976,7 +2083,7 @@ async fn conversation_pages_are_latest_first_queries_with_generation_bound_curso
             session_id: view.value.session.session_id.clone(),
         },
         message_id: around.anchor_message_id.clone(),
-        limit: 2,
+        turn_limit: Some(1),
     };
     runtime
         .get_conversation_page_around_message(around_message_request.clone())
@@ -2007,7 +2114,7 @@ async fn conversation_pages_are_latest_first_queries_with_generation_bound_curso
             .get_conversation_page_around_run(GetConversationPageAroundRunRequest {
                 session_id: view.value.session.session_id.clone(),
                 run_id: view.value.runs[1].run_id.clone(),
-                limit: 2,
+                turn_limit: Some(1),
             })
             .await,
         Err(RuntimeError::SnapshotBusy)
@@ -2024,13 +2131,26 @@ async fn conversation_pages_are_latest_first_queries_with_generation_bound_curso
         panic!("older page starts with user")
     };
     let rewritten = runtime
-        .reenter_from_user_message(ReenterFromUserMessageRequest {
-            session_id: view.value.session.session_id.clone(),
-            message_id: first_user.message_id.clone(),
-            message: "replacement".to_owned(),
-            attachment_ids: Vec::new(),
-            idempotency_key: None,
-            variant: assistant_protocol::AgentVariant::Build,
+        .reenter_from_user_message({
+            let (expected_generation, expected_message_count) =
+                edit_basis(&runtime, &view.value.session.session_id.clone()).await;
+            ReenterFromUserMessageRequest {
+                session_id: view.value.session.session_id.clone(),
+                message_id: first_user.message_id.clone(),
+                message: "replacement".to_owned(),
+                attachment_ids: Vec::new(),
+                idempotency_key: assistant_protocol::IdempotencyKey::new(
+                    crate::id::generate("edit-test").unwrap(),
+                )
+                .unwrap(),
+                variant: assistant_protocol::AgentVariant::Build,
+
+                expected_generation,
+                expected_message_count,
+                quotes: Vec::new(),
+                skill_edit: assistant_protocol::UserMessageSkillEdit::Retain,
+                mcp_edit: assistant_protocol::UserMessageMcpEdit::Retain,
+            }
         })
         .await
         .expect("rewrite conversation");
@@ -2046,7 +2166,7 @@ async fn conversation_pages_are_latest_first_queries_with_generation_bound_curso
                 session_id: view.value.session.session_id.clone(),
             },
             cursor: None,
-            limit: 2,
+            turn_limit: Some(1),
         })
         .await
         .expect("latest page after rewrite")
@@ -2055,12 +2175,35 @@ async fn conversation_pages_are_latest_first_queries_with_generation_bound_curso
     assert_eq!(latest_after_rewrite.generation, old_generation + 1);
     assert!(matches!(
         runtime
+            .list_conversation_navigation(assistant_protocol::ListConversationNavigationRequest {
+                owner: navigation.owner.clone(),
+                cursor: Some(nav_cursor),
+                limit: Some(1),
+            })
+            .await,
+        Err(RuntimeError::SnapshotStale)
+    ));
+    assert!(matches!(
+        runtime
+            .get_conversation_message_preview(
+                assistant_protocol::GetConversationMessagePreviewRequest {
+                    owner: navigation.owner,
+                    generation: navigation.generation,
+                    message_id: navigation.items[0].user_message_id.clone(),
+                }
+            )
+            .await,
+        Err(RuntimeError::SnapshotStale)
+    ));
+
+    assert!(matches!(
+        runtime
             .list_conversation_page(ListConversationPageRequest {
                 owner: ConversationOwner::MainSession {
                     session_id: view.value.session.session_id,
                 },
                 cursor: Some(old_cursor),
-                limit: 2,
+                turn_limit: Some(1),
             })
             .await,
         Err(RuntimeError::SnapshotStale)
@@ -2085,6 +2228,7 @@ async fn queue_priority_and_interrupt_pause_resume_on_new_user_intent() {
         .session_id;
     let active = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "active".to_owned(),
@@ -2102,6 +2246,7 @@ async fn queue_priority_and_interrupt_pause_resume_on_new_user_intent() {
         .expect("model entered");
     let second = runtime
         .submit_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "second".to_owned(),
@@ -2116,6 +2261,7 @@ async fn queue_priority_and_interrupt_pause_resume_on_new_user_intent() {
         .expect("second input");
     let third = runtime
         .submit_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "third".to_owned(),
@@ -2194,6 +2340,7 @@ async fn queue_priority_and_interrupt_pause_resume_on_new_user_intent() {
     assert_eq!(paused.items[0].input_id(), &third.input_id);
     runtime
         .submit_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "continue".to_owned(),
@@ -2260,6 +2407,7 @@ async fn tool_detail_is_loaded_by_stable_owner_message_and_call_ids() {
     set_auto_approval(&runtime, &session_id).await;
     let run = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "save a report".to_owned(),
@@ -2283,7 +2431,7 @@ async fn tool_detail_is_loaded_by_stable_owner_message_and_call_ids() {
         .get_conversation_page_around_run(GetConversationPageAroundRunRequest {
             session_id: session_id.clone(),
             run_id: run.run.run_id.clone(),
-            limit: 8,
+            turn_limit: Some(8),
         })
         .await
         .expect("conversation page")
@@ -2512,6 +2660,7 @@ async fn reasoning_sources_and_run_times_recover_from_reliable_conversation() {
     let mut events = first.subscribe_events();
     let accepted = first
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: session_id.clone(),
             message: "sources".into(),
@@ -2607,4 +2756,104 @@ async fn reasoning_sources_and_run_times_recover_from_reliable_conversation() {
         }
     ));
     recovered.shutdown(ShutdownRuntimeRequest {}).await.unwrap();
+}
+
+#[tokio::test]
+async fn sidebar_order_commands_publish_application_watermark_and_leave_global_search_order() {
+    use assistant_protocol::{
+        MoveSidebarItemRequest, ResetSidebarOrderRequest, SessionGroup, SidebarPlacement,
+    };
+    let runtime = runtime(empty_model());
+    for _ in 0..3 {
+        runtime
+            .create_session(CreateSessionRequest::default())
+            .await
+            .unwrap();
+    }
+    let before = runtime
+        .get_application_snapshot(GetApplicationSnapshotRequest::default())
+        .await
+        .unwrap()
+        .snapshot;
+    let original: Vec<_> = before.value.session_groups[0]
+        .sessions
+        .iter()
+        .map(|s| s.session_id.clone())
+        .collect();
+    let search_before = runtime
+        .list_sessions(Default::default())
+        .await
+        .unwrap()
+        .sessions;
+    let mut events = runtime.subscribe_events();
+    let session = runtime.prepared_session(&original[0]).await.unwrap();
+    let mutation = session.mutation().await;
+    runtime
+        .move_sidebar_item(MoveSidebarItemRequest::Sessions {
+            group: SessionGroup::Unbound,
+            session_id: original[2].clone(),
+            reference_id: original[0].clone(),
+            placement: SidebarPlacement::Before,
+        })
+        .await
+        .unwrap();
+    drop(mutation);
+    assert!(matches!(
+        events.recv().await.unwrap(),
+        RuntimeEvent::SidebarOrderChanged
+    ));
+    let moved = runtime
+        .get_application_snapshot(GetApplicationSnapshotRequest::default())
+        .await
+        .unwrap()
+        .snapshot;
+    assert!(moved.observed_sequence > before.observed_sequence);
+    assert_eq!(
+        moved.value.session_groups[0].sessions[0].session_id,
+        original[2]
+    );
+    assert_eq!(
+        runtime
+            .list_sessions(Default::default())
+            .await
+            .unwrap()
+            .sessions,
+        search_before
+    );
+    let invalid = runtime
+        .move_sidebar_item(MoveSidebarItemRequest::Pins {
+            session_id: original[2].clone(),
+            reference_id: original[0].clone(),
+            placement: SidebarPlacement::Before,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        invalid.to_protocol_info().code,
+        assistant_protocol::RuntimeErrorCode::Conflict
+    );
+    assert!(events.try_recv().is_err());
+    runtime
+        .reset_sidebar_order(ResetSidebarOrderRequest::Sessions {
+            group: SessionGroup::Unbound,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        events.recv().await.unwrap(),
+        RuntimeEvent::SidebarOrderChanged
+    ));
+    let reset = runtime
+        .get_application_snapshot(GetApplicationSnapshotRequest::default())
+        .await
+        .unwrap()
+        .snapshot;
+    assert_eq!(
+        reset.value.session_groups[0]
+            .sessions
+            .iter()
+            .map(|s| s.session_id.clone())
+            .collect::<Vec<_>>(),
+        original
+    );
 }

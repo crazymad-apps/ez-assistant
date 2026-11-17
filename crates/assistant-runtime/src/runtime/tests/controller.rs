@@ -122,6 +122,7 @@ async fn controller_user_run_gets_controller_tools_but_standard_run_does_not() {
 
     let controller_run = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             session_id: controller.session.session_id.clone(),
             message: "inspect sessions".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -146,6 +147,7 @@ async fn controller_user_run_gets_controller_tools_but_standard_run_does_not() {
     );
     let standard_run = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             session_id: standard.session.session_id.clone(),
             message: "ordinary work".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -209,6 +211,7 @@ async fn queued_delivery_is_silently_removed_when_user_takes_over() {
         .expect("target");
     let controller_input = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             session_id: controller.session.session_id.clone(),
             message: "hold controller run".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -300,6 +303,7 @@ async fn queued_delivery_is_silently_removed_when_user_takes_over() {
 
     let user = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             session_id: target.session.session_id.clone(),
             message: "user takes over".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -364,6 +368,7 @@ async fn controller_delivery_goal_keeps_reply_route_through_continuation_and_rep
         .expect("target");
     let source = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             session_id: controller.session.session_id.clone(),
             message: "delegate a long task".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -559,6 +564,7 @@ async fn proxy_reports_only_the_run_that_drains_the_queue_and_gets_no_controller
         .resume_required = true;
     let first = runtime
         .submit_input(SubmitInputRequest {
+            delivery: Default::default(),
             session_id: target.session.session_id.clone(),
             message: "first queued task".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -573,6 +579,7 @@ async fn proxy_reports_only_the_run_that_drains_the_queue_and_gets_no_controller
         .expect("first input");
     let last = runtime
         .submit_input(SubmitInputRequest {
+            delivery: Default::default(),
             session_id: target.session.session_id.clone(),
             message: "last queued task".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -731,6 +738,7 @@ async fn recovery_interrupts_source_without_creating_proxy_report() {
         .queue_paused_by_user = true;
     let accepted = first_runtime
         .submit_claimed_input(SubmitInputRequest {
+            delivery: Default::default(),
             session_id: target.session.session_id.clone(),
             message: "work interrupted by crash".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -828,6 +836,7 @@ async fn enabling_proxy_during_an_active_run_reports_that_run_at_settlement() {
         .expect("target");
     let source = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             session_id: target.session.session_id.clone(),
             message: "start before proxy".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -916,6 +925,7 @@ async fn failed_prestart_run_reports_a_stable_failure_when_it_drains_the_queue()
         .resume_required = true;
     let source = runtime
         .submit_input(SubmitInputRequest {
+            delivery: Default::default(),
             session_id: target.session.session_id.clone(),
             message: "fail safely".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -999,6 +1009,7 @@ async fn disabling_proxy_during_an_active_run_suppresses_its_report() {
         .expect("target");
     let source = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             session_id: target.session.session_id.clone(),
             message: "toggle proxy during work".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -1078,6 +1089,7 @@ async fn cancelled_run_reports_cancelled_after_proxy_is_enabled_mid_run() {
         .expect("target");
     let source = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             session_id: target.session.session_id.clone(),
             message: "cancel managed work".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,

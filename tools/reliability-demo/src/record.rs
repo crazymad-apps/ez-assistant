@@ -421,7 +421,7 @@ fn record_agent_event(sink: &TraceSink, event: agent_core::AgentEvent) {
     let dropped_events = match &event {
         agent_core::AgentEvent::ExecutionCompleted { dropped_events, .. }
         | agent_core::AgentEvent::ExecutionFailed { dropped_events, .. }
-        | agent_core::AgentEvent::ExecutionCancelled { dropped_events }
+        | agent_core::AgentEvent::ExecutionCancelled { dropped_events, .. }
         | agent_core::AgentEvent::ExecutionCompactionRequired { dropped_events, .. }
         | agent_core::AgentEvent::ExecutionContinuationRequired { dropped_events, .. } => {
             *dropped_events
@@ -1038,7 +1038,10 @@ mod tests {
         .expect("start collector");
         record_agent_event(
             &collector.sink(),
-            agent_core::AgentEvent::ExecutionCancelled { dropped_events: 1 },
+            agent_core::AgentEvent::ExecutionCancelled {
+                dropped_events: 1,
+                partial: None,
+            },
         );
         let summary = collector.finish().await.expect("finish collector");
         assert_eq!(summary.completeness, CollectorCompleteness::Incomplete);

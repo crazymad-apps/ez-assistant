@@ -250,8 +250,9 @@ pub(crate) fn format_event(event: &AgentEvent) -> String {
         AgentEvent::ExecutionFailed {
             error,
             dropped_events,
+            ..
         } => format!("agent.execution_failed error={error} dropped={dropped_events}"),
-        AgentEvent::ExecutionCancelled { dropped_events } => {
+        AgentEvent::ExecutionCancelled { dropped_events, .. } => {
             format!("agent.execution_cancelled dropped={dropped_events}")
         }
         AgentEvent::ExecutionCompactionRequired {

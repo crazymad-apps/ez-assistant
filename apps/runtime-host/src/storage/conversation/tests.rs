@@ -91,6 +91,7 @@ fn streaming_generation_stops_pulling_messages_at_the_first_write_failure() {
             &mut FailingWriter { remaining: 1_024 },
             &owner(),
             1,
+            HISTORY_VERSION,
             messages,
             &StoredHistoryFacts::default()
         )
@@ -140,11 +141,10 @@ fn upgrade_streams_large_bodies_and_verifies_every_message_without_a_full_snapsh
     assert_eq!(keys.messages.len(), 257);
     assert!(old_history.is_none());
     write_upgraded_generation(
-        &source,
-        &target,
+        (&source, 1),
+        (&target, 2),
         &owner(),
-        1,
-        2,
+        HISTORY_VERSION,
         257,
         &StoredHistoryFacts::default(),
     )
@@ -157,10 +157,11 @@ fn upgrade_streams_large_bodies_and_verifies_every_message_without_a_full_snapsh
     }
     assert_eq!(total, 257);
     assert_eq!(
-        stream::verify_generation(
+        stream::verify_version(
             &target,
             &owner(),
             2,
+            HISTORY_VERSION,
             (0..257).map(|index| Ok(message(index))),
             &StoredHistoryFacts::default()
         )
@@ -169,10 +170,11 @@ fn upgrade_streams_large_bodies_and_verifies_every_message_without_a_full_snapsh
     );
     // 同 ID、同数量但中间正文被替换，必须拒绝，不能只比较主键和首尾。
     assert!(
-        stream::verify_generation(
+        stream::verify_version(
             &target,
             &owner(),
             2,
+            HISTORY_VERSION,
             (0..257).map(|index| {
                 let mut expected = message(index);
                 if index == 128
@@ -304,11 +306,11 @@ fn batched_frames_preserve_raw_and_visible_ordinals_without_counting_metadata() 
     ]);
     fs::write(&path, encoded).unwrap();
     let mut cache = ConversationIndexCache::default();
-    let first = cache.read_window(&path, 1, Some(1), 1).unwrap();
-    assert_eq!((first.start, first.end, first.total), (0, 1, 2));
-    assert_eq!(first.conversation.messages, messages[..2]);
-    let last = cache.read_window(&path, 1, None, 1).unwrap();
-    assert_eq!(last.conversation.messages, messages[2..]);
+    let page = cache
+        .read_window(&path, 1, ConversationWindowEnd::Latest, 1)
+        .unwrap();
+    assert_eq!((page.start, page.end, page.total), (0, 2, 2));
+    assert_eq!(page.conversation.messages, messages);
     let (raw, end, total) = cache.read_raw_window(&path, 1, 1).unwrap();
     assert_eq!((end, total), (2, 3));
     assert_eq!(raw.messages, messages[1..2]);
@@ -336,17 +338,33 @@ fn cache_rebuilds_after_a_new_commit_and_rejects_a_broken_tail() {
     ]);
     fs::write(&path, &encoded).unwrap();
     let mut cache = ConversationIndexCache::default();
-    assert_eq!(cache.read_window(&path, 1, None, 10).unwrap().total, 1);
+    assert_eq!(
+        cache
+            .read_window(&path, 1, ConversationWindowEnd::Latest, 10)
+            .unwrap()
+            .total,
+        1
+    );
     let appended = bytes(&[commit("next", vec![user("two", false)], Default::default())]);
     reconcile_append(&path, encoded.len() as u64, &appended).unwrap();
-    assert_eq!(cache.read_window(&path, 1, None, 10).unwrap().total, 2);
+    assert_eq!(
+        cache
+            .read_window(&path, 1, ConversationWindowEnd::Latest, 10)
+            .unwrap()
+            .total,
+        2
+    );
     fs::OpenOptions::new()
         .append(true)
         .open(&path)
         .unwrap()
         .write_all(b"{\"type\":")
         .unwrap();
-    assert!(cache.read_window(&path, 1, None, 10).is_err());
+    assert!(
+        cache
+            .read_window(&path, 1, ConversationWindowEnd::Latest, 10)
+            .is_err()
+    );
 }
 
 #[test]
@@ -356,7 +374,13 @@ fn empty_framed_file_has_zero_messages_and_a_real_header() {
     fs::write(&path, bytes(&[header()])).unwrap();
     assert!(read_owned(&path, &owner(), 1).unwrap().messages.is_empty());
     let mut cache = ConversationIndexCache::default();
-    assert_eq!(cache.read_window(&path, 1, None, 10).unwrap().total, 0);
+    assert_eq!(
+        cache
+            .read_window(&path, 1, ConversationWindowEnd::Latest, 10)
+            .unwrap()
+            .total,
+        0
+    );
     assert_eq!(
         cache
             .locate_message(&path, &MessageId::new("missing").unwrap())
@@ -386,7 +410,7 @@ fn missing_duplicate_and_unknown_headers_fail_closed() {
     assert!(decode(Cursor::new(no_header)).is_err());
     assert!(decode(Cursor::new(bytes(&[header(), header()]))).is_err());
     let mut unknown: serde_json::Value = serde_json::to_value(header()).unwrap();
-    unknown["version"] = 2.into();
+    unknown["version"] = (HISTORY_VERSION + 1).into();
     let mut encoded = serde_json::to_vec(&unknown).unwrap();
     encoded.push(b'\n');
     assert!(decode(Cursor::new(encoded)).is_err());
@@ -472,15 +496,29 @@ fn generation_batches_and_old_pages_read_latest_metadata_in_file_order() {
         finish_reason: FinishReason::Stop,
         usage: None,
     });
+    let ConversationMessage::Assistant(mut next) = first.clone() else {
+        unreachable!()
+    };
+    next.id = MessageId::new("late-assistant").unwrap();
     let mut messages = vec![first];
     messages.extend((0..129).map(|index| user(&format!("user-{index}"), false)));
+    messages.push(ConversationMessage::Assistant(next));
+    let next_run = StoredRunHistory {
+        run_id: RunId::new("run-two").unwrap(),
+        ..run()
+    };
     let history = StoredHistoryFacts {
-        runs: vec![run()],
+        runs: vec![run(), next_run.clone()],
         message_origins: messages
             .iter()
-            .map(|message| StoredMessageOrigin {
+            .enumerate()
+            .map(|(index, message)| StoredMessageOrigin {
                 message_id: message_id(message).clone(),
-                run_id: Some(RunId::new("run-one").unwrap()),
+                run_id: Some(if index == 0 {
+                    run().run_id
+                } else {
+                    next_run.run_id.clone()
+                }),
                 input_id: None,
                 attempt: Some(1),
                 step: Some(1),
@@ -532,7 +570,9 @@ fn generation_batches_and_old_pages_read_latest_metadata_in_file_order() {
     .unwrap();
     reconcile_append(&path, path.metadata().unwrap().len(), &clear).unwrap();
     let mut cache = ConversationIndexCache::default();
-    let page = cache.read_window(&path, 1, Some(1), 1).unwrap();
+    let page = cache
+        .read_window(&path, 1, ConversationWindowEnd::Around(0), 1)
+        .unwrap();
     assert_eq!(page.conversation.messages, snapshot.messages[..1]);
     let facts = page.history.unwrap();
     assert_eq!(facts.message_origins.len(), 1);
@@ -570,7 +610,7 @@ fn foreign_owner_metadata_is_rejected_before_staged_effect_or_page_projection() 
     fs::write(&path, encoded).unwrap();
     assert!(
         ConversationIndexCache::default()
-            .read_window(&path, 1, None, 10)
+            .read_window(&path, 1, ConversationWindowEnd::Latest, 10)
             .is_err()
     );
 }
@@ -594,7 +634,11 @@ fn file_header_identity_is_checked_even_when_history_ids_repeat() {
     cache.validate_owner(&path, &owner(), 1).unwrap();
     assert!(cache.validate_owner(&path, &other_owner, 1).is_err());
     assert!(cache.validate_owner(&path, &owner(), 2).is_err());
-    assert!(cache.read_window(&path, 2, None, 10).is_err());
+    assert!(
+        cache
+            .read_window(&path, 2, ConversationWindowEnd::Latest, 10)
+            .is_err()
+    );
     assert!(read_owned(&path, &other_owner, 1).is_err());
     assert!(read_owned(&path, &owner(), 2).is_err());
     assert_eq!(
@@ -650,7 +694,9 @@ fn a_tool_exchange_is_atomic_even_if_two_adjacent_frames_would_pair() {
     .unwrap();
     assert_eq!(read_owned(&path, &owner(), 1).unwrap().messages, closed);
     let mut cache = ConversationIndexCache::default();
-    let page = cache.read_window(&path, 1, None, 1).unwrap();
+    let page = cache
+        .read_window(&path, 1, ConversationWindowEnd::Latest, 1)
+        .unwrap();
     assert_eq!(page.total, 1);
     assert_eq!(page.conversation.messages, closed);
 
@@ -673,6 +719,54 @@ fn a_tool_exchange_is_atomic_even_if_two_adjacent_frames_would_pair() {
     ));
     assert_eq!(records.next().unwrap().unwrap().messages, prefix);
     assert!(records.next().unwrap().is_none());
+
+    // 字节预算按序列化结果计算；超限工具交换单独占一帧，不能把无关正文带入。
+    let large_user = |id| {
+        let ConversationMessage::User(mut message) = user(id, false) else {
+            unreachable!();
+        };
+        message
+            .parts
+            .push(agent_types::UserPart::Text(agent_types::TextPart {
+                id: agent_types::PartId::new(id).unwrap(),
+                text: "\"".repeat(150_000),
+            }));
+        ConversationMessage::User(message)
+    };
+    let mut large_exchange = closed.clone();
+    let ConversationMessage::Tool(tool) = &mut large_exchange[1] else {
+        unreachable!();
+    };
+    tool.result.content = ToolResultContent::text("output".repeat(90_000));
+    let sized_messages = [
+        vec![large_user("large-first"), large_user("large-second")],
+        large_exchange.clone(),
+    ]
+    .concat();
+    let sized = home.path().join("conversation.3.jsonl");
+    super::write_generation(
+        &sized,
+        &owner(),
+        3,
+        &ConversationSnapshot::new(sized_messages.clone()),
+        &StoredHistoryFacts::default(),
+    )
+    .unwrap();
+    let file = fs::read(&sized).unwrap();
+    let frames: Vec<_> = file
+        .split_inclusive(|&byte| byte == b'\n')
+        .skip(1)
+        .collect();
+    assert_eq!(frames.len(), 3);
+    for (index, frame) in frames[..2].iter().enumerate() {
+        assert!(frame.len() <= 512 * 1024);
+        assert_eq!(
+            decode_commit(frame).unwrap().messages,
+            sized_messages[index..=index]
+        );
+    }
+    assert!(frames[2].len() > 512 * 1024);
+    assert_eq!(decode_commit(frames[2]).unwrap().messages, large_exchange);
 
     // 每帧各自配对仍不足够：同一压缩作用域不能跨帧复用调用 ID。
     let mut repeated = closed.clone();
@@ -708,7 +802,11 @@ fn a_tool_exchange_is_atomic_even_if_two_adjacent_frames_would_pair() {
     )
     .unwrap();
     assert!(scan_document(&path, &owner(), 1).is_err());
-    assert!(cache.read_window(&path, 1, None, 10).is_err());
+    assert!(
+        cache
+            .read_window(&path, 1, ConversationWindowEnd::Latest, 10)
+            .is_err()
+    );
 }
 
 #[test]
@@ -754,8 +852,12 @@ fn committed_append_index_matches_a_full_rebuild_and_rejects_duplicate_ids() {
         cache.record_committed_append(&path, base, payload.len(), &owner(), 1, &batch);
         let mut rebuilt = ConversationIndexCache::default();
         assert_eq!(
-            cache.read_window(&path, 1, None, 50).unwrap(),
-            rebuilt.read_window(&path, 1, None, 50).unwrap()
+            cache
+                .read_window(&path, 1, ConversationWindowEnd::Latest, 50)
+                .unwrap(),
+            rebuilt
+                .read_window(&path, 1, ConversationWindowEnd::Latest, 50)
+                .unwrap()
         );
         assert_eq!(
             cache.read_history(&path, &owner(), 1).unwrap(),
@@ -869,4 +971,394 @@ fn child_directory_lookup_selects_latest_target_and_preserves_owner_checks() {
         session_id: SessionId::new("foreign").unwrap(),
     };
     assert!(cache.read_child_history(&path, &foreign, 1, None).is_err());
+}
+
+#[test]
+fn complete_turn_pages_keep_large_batches_and_trailing_inputs() {
+    use agent_types::{AssistantMessage, FinishReason, ModelIdentity, ProviderId};
+
+    let home = home();
+    let path = home.path().join("large-turns.jsonl");
+    let mut messages = Vec::new();
+    let mut facts = StoredHistoryFacts::default();
+    for turn in 0..23 {
+        let run_id = RunId::new(format!("run-{turn}")).unwrap();
+        facts.runs.push(StoredRunHistory {
+            run_id: run_id.clone(),
+            ..run()
+        });
+        messages.push(user(&format!("input-{turn}"), false));
+        for step in 1..=if turn == 12 { 5_000 } else { 2 } {
+            let id = MessageId::new(format!("reply-{turn}-{step}")).unwrap();
+            messages.push(ConversationMessage::Assistant(AssistantMessage {
+                id: id.clone(),
+                purpose: Default::default(),
+                model: ModelIdentity::new(ProviderId::new("fixture").unwrap(), "fixture"),
+                parts: Vec::new(),
+                finish_reason: FinishReason::Stop,
+                usage: None,
+            }));
+            facts.message_origins.push(StoredMessageOrigin {
+                message_id: id,
+                run_id: Some(run_id.clone()),
+                input_id: None,
+                attempt: Some(1),
+                step: Some(step),
+                inherited: false,
+            });
+        }
+    }
+    messages.push(user("pending-input", false));
+    let snapshot = ConversationSnapshot::new(messages);
+    super::write_generation(&path, &owner(), 1, &snapshot, &facts).unwrap();
+
+    let mut cache = ConversationIndexCache::default();
+    let started = std::time::Instant::now();
+    let latest = cache
+        .read_window(&path, 1, ConversationWindowEnd::Latest, 10)
+        .unwrap();
+    let cold = started.elapsed();
+    assert_eq!(latest.start, 5_037);
+    assert_eq!(
+        latest.conversation.messages,
+        snapshot.messages[latest.start..]
+    );
+    let started = std::time::Instant::now();
+    let middle = cache
+        .read_window(&path, 1, ConversationWindowEnd::Before(latest.start), 10)
+        .unwrap();
+    let large_page = started.elapsed();
+    assert_eq!(middle.start, 9);
+    assert_eq!(
+        middle.conversation.messages,
+        snapshot.messages[9..latest.start]
+    );
+    let first = cache
+        .read_window(&path, 1, ConversationWindowEnd::Before(middle.start), 10)
+        .unwrap();
+    assert_eq!(first.conversation.messages, snapshot.messages[..9]);
+
+    let around = cache
+        .read_window(&path, 1, ConversationWindowEnd::Around(2_000), 1)
+        .unwrap();
+    assert_eq!((around.start, around.end), (36, latest.start));
+    assert_eq!(around.conversation.messages.len(), 5_001);
+    assert_eq!(
+        message_id(around.conversation.messages.last().unwrap()).as_str(),
+        "reply-12-5000"
+    );
+    let invalid = cache.read_window(&path, 1, ConversationWindowEnd::Before(2_000), 10);
+    assert_eq!(
+        invalid.err().unwrap().kind(),
+        assistant_runtime::StoreErrorKind::InvalidInput
+    );
+    eprintln!("cold index + newest page {cold:?}, warm page with 5000-step Run {large_page:?}");
+}
+
+#[test]
+fn navigation_reads_ten_thousand_users_from_hot_positions_and_previews_only_the_target_frame() {
+    use agent_types::{PartId, TextPart, UserPart};
+    use assistant_runtime::{NavigationBoundary, NavigationReplyContext};
+
+    let home = home();
+    let path = home.path().join("navigation.jsonl");
+    let mut messages: Vec<_> = (0..10_000)
+        .map(|index| user(&format!("user-{index}"), false))
+        .collect();
+    let ConversationMessage::User(first) = &mut messages[0] else {
+        unreachable!()
+    };
+    first.parts.push(UserPart::Text(TextPart {
+        id: PartId::new("preview-text").unwrap(),
+        text: "🪴".repeat(200_000),
+    }));
+    let generation = 1;
+    let history = StoredHistoryFacts {
+        inputs: (0..10_000)
+            .map(|index| assistant_runtime::StoredInputHistory {
+                input_id: assistant_protocol::InputId::new(format!("input-{index}")).unwrap(),
+                idempotency_key: Some(
+                    assistant_protocol::IdempotencyKey::new(format!("key-{index}")).unwrap(),
+                ),
+                rewritten_from: None,
+                user_message_id: MessageId::new(format!("user-{index}")).unwrap(),
+                queue_order: index + 1,
+                agent_variant: assistant_protocol::AgentVariant::Build,
+                origin: assistant_runtime::InputOrigin::User,
+                goal_binding: None,
+                cross_session: None,
+                channel_source: Some(assistant_runtime::InputChannelSource::desktop_text()),
+                agent_shell_target: None,
+                accepted_at_ms: 1,
+                inherited: false,
+            })
+            .collect(),
+        ..Default::default()
+    };
+    super::write_generation(
+        &path,
+        &owner(),
+        generation,
+        &ConversationSnapshot::new(messages),
+        &history,
+    )
+    .unwrap();
+
+    let mut cache = ConversationIndexCache::default();
+    let started = std::time::Instant::now();
+    let initial = cache.offsets(&path).unwrap();
+    let cold = started.elapsed();
+    let mut cursor = None;
+    let started = std::time::Instant::now();
+    let mut end = 10_000;
+    let first_newer;
+    super::INDEXED_FRAME_READS.with(|reads| reads.set(0));
+    for index in [0, 4999, 9999] {
+        let key = assistant_protocol::IdempotencyKey::new(format!("key-{index}")).unwrap();
+        let hot = cache.history_index(&path, &owner(), generation).unwrap();
+        assert!(Arc::ptr_eq(&hot, &initial.history));
+        assert_eq!(
+            hot.request_key(&key),
+            Some(RequestKeyOwner::Message(
+                assistant_protocol::InputId::new(format!("input-{index}")).unwrap(),
+            ))
+        );
+    }
+    loop {
+        let StoredConversationNavigation::Page {
+            items,
+            previous,
+            next,
+        } = cache
+            .read_navigation(
+                &path,
+                ConversationNavigationRequest {
+                    owner: owner(),
+                    generation,
+                    read: ConversationNavigationRead::Page {
+                        boundary: cursor,
+                        limit: 128,
+                    },
+                    context: NavigationReplyContext::default(),
+                },
+            )
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        let start = end - items.len();
+        for (index, item) in (start..end).zip(items) {
+            assert_eq!(item.user_message_id.as_str(), format!("user-{index}"));
+            assert_eq!(item.assistant_message_id, None);
+        }
+        end = start;
+        cursor = previous;
+        if cursor.is_none() {
+            first_newer = next;
+            break;
+        }
+    }
+    let hot = started.elapsed();
+    assert_eq!(end, 0);
+    assert_eq!(first_newer, Some(NavigationBoundary::After(16)));
+    assert!(Arc::ptr_eq(
+        &initial.navigation,
+        &cache.offsets(&path).unwrap().navigation
+    ));
+    super::INDEXED_FRAME_READS.with(|reads| assert_eq!(reads.get(), 0));
+    let started = std::time::Instant::now();
+    let preview = cache
+        .read_navigation(
+            &path,
+            ConversationNavigationRequest {
+                owner: owner(),
+                generation,
+                read: ConversationNavigationRead::Preview {
+                    message_id: MessageId::new("user-0").unwrap(),
+                },
+                context: NavigationReplyContext::default(),
+            },
+        )
+        .unwrap();
+    let large_frame = started.elapsed();
+    assert_eq!(
+        preview,
+        StoredConversationNavigation::Preview(Some(("🪴".repeat(160), true)))
+    );
+    super::INDEXED_FRAME_READS.with(|reads| assert_eq!(reads.get(), 1));
+
+    let StoredConversationNavigation::Page {
+        items, previous, ..
+    } = cache
+        .read_navigation(
+            &path,
+            ConversationNavigationRequest {
+                owner: owner(),
+                generation,
+                read: ConversationNavigationRead::Page {
+                    boundary: first_newer,
+                    limit: 128,
+                },
+                context: NavigationReplyContext::default(),
+            },
+        )
+        .unwrap()
+    else {
+        unreachable!()
+    };
+    assert_eq!(items[0].user_message_id.as_str(), "user-16");
+    assert_eq!(previous, Some(NavigationBoundary::Before(16)));
+    eprintln!(
+        "navigation cold index {cold:?}, full hot ID walk {hot:?}, large target frame {large_frame:?}"
+    );
+    for index in 0..INDEX_CACHE_CAPACITY {
+        let other = home.path().join(format!("evict-{index}.jsonl"));
+        super::create_empty(&other, &owner(), generation).unwrap();
+        cache.history_index(&other, &owner(), generation).unwrap();
+    }
+    let rebuilt = cache.history_index(&path, &owner(), generation).unwrap();
+    assert!(!Arc::ptr_eq(&rebuilt, &initial.history));
+    let key = assistant_protocol::IdempotencyKey::new("key-9999").unwrap();
+    assert_eq!(rebuilt.request_key(&key), initial.history.request_key(&key));
+}
+
+#[test]
+fn reliable_metadata_only_settlement_updates_reply_without_rebuilding_navigation() {
+    use agent_types::{
+        AssistantMessage, AssistantPart, FinishReason, ModelIdentity, PartId, ProviderId,
+        ReasoningPart, TextPart,
+    };
+    use assistant_protocol::RunStatus;
+    use assistant_runtime::NavigationReplyContext;
+
+    let home = home();
+    let path = home.path().join("navigation-append.jsonl");
+    let text = |id: &str, part| {
+        ConversationMessage::Assistant(AssistantMessage {
+            id: MessageId::new(id).unwrap(),
+            purpose: Default::default(),
+            model: ModelIdentity::new(ProviderId::new("fixture").unwrap(), "fixture"),
+            parts: vec![part],
+            finish_reason: FinishReason::Stop,
+            usage: None,
+        })
+    };
+    let reply = text(
+        "reply",
+        AssistantPart::Text(TextPart {
+            id: PartId::new("text").unwrap(),
+            text: "可靠正文".into(),
+        }),
+    );
+    let reasoning = text(
+        "reasoning",
+        AssistantPart::Reasoning(ReasoningPart {
+            id: PartId::new("reasoning-text").unwrap(),
+            source: Default::default(),
+            text: "后续过程".into(),
+        }),
+    );
+    let initial = ConversationSnapshot::new(vec![
+        user("unanswered", false),
+        user("input", false),
+        user("hidden", true),
+        reply.clone(),
+    ]);
+    let run = run();
+    let origin = |message: &ConversationMessage, step| StoredMessageOrigin {
+        message_id: message_id(message).clone(),
+        run_id: Some(run.run_id.clone()),
+        input_id: None,
+        attempt: Some(1),
+        step: Some(step),
+        inherited: false,
+    };
+    super::write_generation(
+        &path,
+        &owner(),
+        1,
+        &initial,
+        &StoredHistoryFacts {
+            runs: vec![run.clone()],
+            message_origins: vec![origin(&reply, 1)],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut cache = ConversationIndexCache::default();
+    let page = |cache: &mut ConversationIndexCache, active_step| {
+        let StoredConversationNavigation::Page { items, .. } = cache
+            .read_navigation(
+                &path,
+                ConversationNavigationRequest {
+                    owner: owner(),
+                    generation: 1,
+                    read: ConversationNavigationRead::Page {
+                        boundary: None,
+                        limit: 128,
+                    },
+                    context: NavigationReplyContext {
+                        active_step,
+                        child_status: None,
+                    },
+                },
+            )
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].user_message_id.as_str(), "unanswered");
+        assert_eq!(items[0].assistant_message_id, None);
+        items[1]
+            .assistant_message_id
+            .as_ref()
+            .map(ToString::to_string)
+    };
+    assert_eq!(
+        page(&mut cache, Some((Some(run.run_id.clone()), 1))),
+        Some("reply".into())
+    );
+    assert_eq!(page(&mut cache, Some((Some(run.run_id.clone()), 2))), None);
+
+    let terminal = StoredRunHistory {
+        status: Some(RunStatus::Completed),
+        finished_at_ms: Some(30),
+        ..run.clone()
+    };
+    for (id, messages, facts, expected) in [
+        (
+            "step-two",
+            vec![reasoning.clone()],
+            StoredHistoryFacts {
+                message_origins: vec![origin(&reasoning, 2)],
+                ..Default::default()
+            },
+            None,
+        ),
+        (
+            "settled",
+            vec![],
+            StoredHistoryFacts {
+                runs: vec![terminal],
+                ..Default::default()
+            },
+            Some("reply".to_owned()),
+        ),
+    ] {
+        let base = path.metadata().unwrap().len();
+        let payload = encode_history_append(id, &messages, facts).unwrap();
+        let batch = decode_append(&payload, true, &owner()).unwrap();
+        cache.retain_current_prefix(&path);
+        reconcile_append(&path, base, &payload).unwrap();
+        cache.record_committed_append(&path, base, payload.len(), &owner(), 1, &batch);
+        assert_eq!(
+            cache.entries.len(),
+            1,
+            "valid append advances the existing cache"
+        );
+        let cold = page(&mut ConversationIndexCache::default(), None);
+        assert_eq!(page(&mut cache, None), cold);
+        assert_eq!(cold, expected);
+    }
 }

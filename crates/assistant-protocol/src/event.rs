@@ -140,6 +140,8 @@ pub enum RuntimeEvent {
         name: String,
         enabled: bool,
     },
+    /// 侧栏顺序已提交；客户端重取列表，不携带实体或排序值。
+    SidebarOrderChanged,
     /// Workspace Registry 已经变化；客户端应重新获取 ApplicationSnapshot。
     WorkspaceChanged {
         workspace_id: WorkspaceId,

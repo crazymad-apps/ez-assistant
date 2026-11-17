@@ -41,6 +41,7 @@ async fn max_steps_zero_fails_before_any_model_call() {
         vec![
             AgentEvent::ExecutionStarted,
             AgentEvent::ExecutionFailed {
+                partial: None,
                 error: ExecutionError::BudgetExceeded {
                     kind: BudgetKind::Steps,
                     limit: 0,
@@ -161,6 +162,7 @@ async fn max_steps_exceeded_fails_at_next_precheck() {
                 status: ToolCompletionStatus::Success,
             },
             AgentEvent::ExecutionFailed {
+                partial: None,
                 error: ExecutionError::BudgetExceeded {
                     kind: BudgetKind::Steps,
                     limit: 1,
@@ -252,6 +254,7 @@ async fn max_tool_calls_zero_settles_batch_without_dispatch() {
                 status: ToolCompletionStatus::Failed,
             },
             AgentEvent::ExecutionFailed {
+                partial: None,
                 error: ExecutionError::BudgetExceeded {
                     kind: BudgetKind::ToolCalls,
                     limit: 0,
@@ -407,6 +410,7 @@ async fn max_tool_calls_crossed_within_batch_settles_rest() {
                 status: ToolCompletionStatus::Failed,
             },
             AgentEvent::ExecutionFailed {
+                partial: None,
                 error: ExecutionError::BudgetExceeded {
                     kind: BudgetKind::ToolCalls,
                     limit: 1,

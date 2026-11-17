@@ -409,24 +409,27 @@ mod tests {
             .expect("create parent run");
         let child_task_id = ChildTaskId::new("ct-recorder-child").expect("child id");
         store
-            .claim_input(crate::StoredRun {
-                shell: None,
-                run_id: run_id.clone(),
-                session_id: session_id.clone(),
-                input_id: InputId::new("input-recorder-child").unwrap(),
-                attempt: 1,
-                status: assistant_protocol::RunStatus::Accepted,
-                agent_variant: AgentVariant::Build,
-                approval_mode: ApprovalMode::Ask,
-                reasoning_effort: None,
-                cancel_requested: false,
-                error: None,
-                message_ids: Vec::new(),
-                message_steps: Default::default(),
-                created_at_ms: 2,
-                started_at_ms: None,
-                finished_at_ms: None,
-            })
+            .claim_input(
+                crate::StoredRun {
+                    shell: None,
+                    run_id: run_id.clone(),
+                    session_id: session_id.clone(),
+                    input_id: InputId::new("input-recorder-child").unwrap(),
+                    attempt: 1,
+                    status: assistant_protocol::RunStatus::Accepted,
+                    agent_variant: AgentVariant::Build,
+                    approval_mode: ApprovalMode::Ask,
+                    reasoning_effort: None,
+                    cancel_requested: false,
+                    error: None,
+                    message_ids: Vec::new(),
+                    message_steps: Default::default(),
+                    created_at_ms: 2,
+                    started_at_ms: None,
+                    finished_at_ms: None,
+                },
+                None,
+            )
             .await
             .unwrap();
         store

@@ -367,7 +367,12 @@ fn test_fork_environment(
         system_prompt: SystemPromptSnapshot::new(parts),
         environment: SessionExecutionEnvironment {
             workspace_id: request.source_environment.workspace_id.clone(),
-            working_directory: request.source_environment.working_directory.clone(),
+            // 与正式 Host 一致：无工作区分支使用新 owner 的 private，清空时仍能重建同一环境。
+            working_directory: if request.source_environment.workspace_id.is_some() {
+                request.source_environment.working_directory.clone()
+            } else {
+                private.clone()
+            },
             additional_workspace_directories: request
                 .source_environment
                 .additional_workspace_directories
@@ -817,6 +822,7 @@ async fn submit_completed_turn(
 ) -> RunId {
     let accepted = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session_id.clone(),
@@ -1104,7 +1110,7 @@ impl AssistantRuntime {
             }
         };
         self.store
-            .claim_input(stored.clone())
+            .claim_input(stored.clone(), None)
             .await
             .map_err(|source| RuntimeError::from_store("test claim", source))?;
         let record = crate::run::RunRecord::accepted(&stored, Vec::new());
@@ -1135,4 +1141,13 @@ impl AssistantRuntime {
         );
         Ok(result)
     }
+}
+
+async fn edit_basis(
+    runtime: &AssistantRuntime,
+    session_id: &assistant_protocol::SessionId,
+) -> (u64, u64) {
+    let controller = runtime.session(session_id).await.expect("session");
+    let state = controller.lock_state().expect("state");
+    (state.body_generation, state.message_count)
 }

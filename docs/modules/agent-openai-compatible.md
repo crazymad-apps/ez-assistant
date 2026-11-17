@@ -97,6 +97,7 @@ Codec、流状态机和 Service，不能通过单次请求失败后互相回退�
 - `OpenAiChatCompletionsService::new_with_capabilities` 接收 Runtime 唯一编译的能力事实；协议 Adapter
   仍独立校验 wire 约束，不能根据一次响应反推或修改模型能力。
 - `OpenAiResponsesService` 默认使用 `/responses`、`store: false`、`stream: true` 和完整本地历史。
+  宿主可绑定不透明的稳定 `prompt_cache_key` 默认值，请求显式提供的值优先；编码与续接前缀校验使用同一值，输入计量及压缩接口不携带该字段。Adapter 不派生 Session／Run 身份。
   v0.29.0 F06 M0 的宿主可显式提供可靠 owner/连接绑定启用 `store: true`；Adapter 从已提交
   Conversation 的 `responses.continuation` 状态校验完整前缀、路由及当前请求参数，再用
   `previous_response_id` 发送新增消息或成批工具结果。服务实例不持有可变链头，不写存储，

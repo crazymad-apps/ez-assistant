@@ -125,3 +125,14 @@ WebView 使用非持久模式。窗口状态插件使用场景中的绝对文件
 macOS 的主体加载前底色受 Sidebar 材质影响，不保证与预设 RGB 完全一致。此夹具不代表正式
 Host 页面、所有系统首帧、减少透明度、更新重开及其他平台已经验收；完整界面和渲染器由后续
 里程碑验证。结束后停止这次 Vite 即可。
+
+
+# v0.33.1 F04 侧栏排序
+
+先完成 `npm run build:host`，再在 Desktop 工程运行 `node scripts/verify-sidebar-native.mjs`。
+探针为本次场景新建 `.runtime-test/f04-m2-native-*`，通过正式命令创建测试会话，
+以非持久 WKWebView 加载内嵌页面；原生鼠标事件验证短按、拖动，Esc 和第二个真实窗口验证取消。
+完成后核对 Host 快照与只读 SQLite 计数／完整性。保留测试现场，不读取用户 Runtime Home。
+
+本探针只证明 macOS WKWebView 输入与正式 Host 组合，不代替完整 Tauri 客户端、Windows
+原生或真实跨设备验收。测试源码与脚本不用于产品启动。

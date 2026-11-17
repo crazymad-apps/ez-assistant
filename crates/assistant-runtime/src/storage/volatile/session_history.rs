@@ -57,11 +57,11 @@ impl VolatileRuntimeStore {
                 .inputs
                 .retain(|_, input| input.session_id != clear.session_id);
             state
+                .input_identities
+                .retain(|_, input| input.session_id != clear.session_id);
+            state
                 .session_commands
                 .retain(|_, command| command.session_id != clear.session_id);
-            state
-                .command_identities
-                .retain(|_, identity| identity.session_id != clear.session_id);
             state
                 .runs
                 .retain(|_, run| run.session_id != clear.session_id);

@@ -15,12 +15,15 @@ test("formal Web bounds reads, isolates selection, and recovers an SSE gap durin
     expect(response.status, JSON.stringify(body)).toBe(200);
     return body.result.payload.payload;
   }
+  const inputRun = async (session_id: string, input_id: string) => (
+    await command("get_session_view", { session_id })
+  ).snapshot.value.runs.find(run => run.input_id === input_id);
   const app = (await command("get_application_snapshot")).snapshot.value;
   const sessions = [];
   for (const [title, message] of [["F02 加载 A", "FIRST_CASE"], ["F02 加载 B", "QUEUED_CASE"]]) {
     const session = (await command("create_session", { title, workspace_id: app.workspaces[0].workspace_id })).session;
     const accepted = await command("submit_input", { session_id: session.session_id, message, mode: "normal", variant: "build", attachment_ids: [], quotes: [] });
-    await expect.poll(async () => (await command("get_run", { session_id: session.session_id, run_id: accepted.run.run_id })).run.status).toBe("completed");
+    await expect.poll(async () => (await inputRun(session.session_id, accepted.input_id))?.status).toBe("completed");
     sessions.push(session);
   }
   const [first, second] = sessions;
@@ -145,7 +148,7 @@ test("formal Web bounds reads, isolates selection, and recovers an SSE gap durin
   await navigation.getByRole("button", { name: second.title, exact: true }).click();
   await expect.poll(() => counts.get(second.session_id)).toBe(second_reads + 1);
   await expect(page.getByText("离线回复：QUEUED_CASE", { exact: true })).toBeVisible();
-  expect((await command("get_run", { session_id: stream_session.session_id, run_id: streaming.run.run_id })).run.status).toBe("running");
+  expect((await inputRun(stream_session.session_id, streaming.input_id))?.status).toBe("running");
 
   const before_gap = application_reads;
   await page.evaluate(() => { (window as unknown as { f02Faults: Faults }).f02Faults.injectGap = true; });
@@ -154,7 +157,7 @@ test("formal Web bounds reads, isolates selection, and recovers an SSE gap durin
   await expect(navigation.getByRole("button", { name: "F02 gap 已恢复", exact: true })).toBeVisible();
   expect(application_reads).toBeGreaterThan(before_gap);
   await expect.poll(() => page.evaluate(() => (window as unknown as { f02Faults: Faults }).f02Faults.streams)).toBeGreaterThan(1);
-  await expect.poll(async () => (await command("get_run", { session_id: stream_session.session_id, run_id: streaming.run.run_id })).run.status).toBe("completed");
+  await expect.poll(async () => (await inputRun(stream_session.session_id, streaming.input_id))?.status).toBe("completed");
   await expect(page.getByText("离线回复：QUEUED_CASE", { exact: true })).toHaveCount(1);
   await expect(page.getByText("正在读取会话", { exact: true })).toHaveCount(0);
   expect(errors).toEqual([]);

@@ -333,6 +333,7 @@ export class SessionManagementController {
       const workspace_result = await client.command({ type: "register_workspace", payload: input });
       const workspace_id = workspace_result.payload.workspace.workspace_id;
       await runtime.loadApplication();
+      runtime.applyWorkspaceSummary(workspace_result.payload.workspace);
       navigation.ensureWorkspaceExpanded(workspace_id);
       this.dependencies.save_preferences();
       this.dependencies.select_draft(workspace_id);
@@ -360,6 +361,7 @@ export class SessionManagementController {
     try {
       const result = await client.command({ type: "update_workspace", payload: input });
       await runtime.loadApplication();
+      runtime.applyWorkspaceSummary(result.payload.workspace);
       const selected_session_id = this.dependencies.navigation.selected_session_id;
       if (selected_session_id && this.dependencies.navigation.target_device === client.target_device) {
         await runtime.loadSession(selected_session_id);
@@ -423,8 +425,9 @@ export class SessionManagementController {
       state.interaction_error = null;
     });
     try {
-      await runtime.client.command({ type: "restore_workspace", payload: { workspace_id } });
+      const result = await runtime.client.command({ type: "restore_workspace", payload: { workspace_id } });
       await runtime.loadApplication();
+      runtime.applyWorkspaceSummary(result.payload.workspace);
       navigation.ensureWorkspaceExpanded(workspace_id);
       this.dependencies.save_preferences();
       this.dependencies.select_draft(workspace_id);

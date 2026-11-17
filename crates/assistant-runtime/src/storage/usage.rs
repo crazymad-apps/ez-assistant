@@ -53,6 +53,7 @@ impl StoredConversationUsage {
         }
         if let ConversationMessage::Assistant(assistant) = message
             && assistant.purpose.is_model_response()
+            && !assistant.finish_reason.is_partial()
         {
             self.completed_tokens = assistant.usage.as_ref().map(|usage| usage.total_tokens);
             self.pending_tokens = 0;

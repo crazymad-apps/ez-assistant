@@ -24,8 +24,21 @@ export class DesktopPinsStore {
 
   async set(pin: DesktopPin, enabled: boolean): Promise<boolean> {
     if (this.busy || this.#disposed) return false;
+    if (this.has(pin.session_id, pin.device) === enabled) return true;
     const items = this.value.items.filter((item) => item.device !== pin.device || item.session_id !== pin.session_id);
     return this.#commit({ ...this.value, items: enabled ? [...items, pin] : items });
+  }
+
+  async move(item: string, reference: string, placement: "before" | "after"): Promise<boolean> {
+    if (this.busy || this.#disposed) return false;
+    const items = [...this.value.items];
+    const index = items.findIndex((pin) => desktopPinKey(pin) === item);
+    if (index < 0 || item === reference) return false;
+    const [pin] = items.splice(index, 1);
+    const target = items.findIndex((pin) => desktopPinKey(pin) === reference);
+    if (target < 0) return false;
+    items.splice(target + Number(placement === "after"), 0, pin);
+    return this.#commit({ ...this.value, items });
   }
 
   async importLegacy(client: RuntimeClient, local: boolean): Promise<void> {
@@ -34,18 +47,11 @@ export class DesktopPinsStore {
     try {
       const pins = new Map(this.value.items.map((pin) => [JSON.stringify([pin.device, pin.session_id]), pin]));
       if (local) {
-        let offset = 0;
-        for (;;) {
-          const page = await client.command({ type: "list_sessions", payload: { filter: "active", offset, limit: 100, query: null } });
-          if (this.#disposed) return;
-          for (const session of page.payload.sessions) {
-            if (session.is_pinned && session.role !== "controller") {
-              const key = JSON.stringify([null, session.session_id]);
-              if (!pins.has(key)) pins.set(key, pinReference(session, null, "本机"));
-            }
-          }
-          offset += page.payload.sessions.length;
-          if (!page.payload.has_more || !page.payload.sessions.length || page.payload.sessions.some((session) => !session.is_pinned)) break;
+        const result = await client.command({ type: "get_application_snapshot", payload: { session_groups: [] } });
+        if (this.#disposed) return;
+        for (const session of result.payload.snapshot.value.pinned_sessions) {
+          const key = JSON.stringify([null, session.session_id]);
+          if (!pins.has(key)) pins.set(key, pinReference(session, null, "本机"));
         }
       }
       await this.#write({ imported: true, items: [...pins.values()] });
@@ -72,4 +78,8 @@ export class DesktopPinsStore {
 
 export function pinReference(session: SessionSummary, device: string | null, device_name: string): DesktopPin {
   return { device, session_id: session.session_id, title: session.title, device_name };
+}
+
+export function desktopPinKey(pin: DesktopPin): string {
+  return JSON.stringify([pin.device, pin.session_id]);
 }

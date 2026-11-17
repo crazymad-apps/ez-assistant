@@ -405,13 +405,26 @@ async fn mcp_reentered_input_gets_persistent_context_before_the_model_call() {
         panic!("first user");
     };
     let accepted = runtime
-        .reenter_from_user_message(assistant_protocol::ReenterFromUserMessageRequest {
-            session_id: session_id.clone(),
-            message_id: assistant_protocol::MessageId::new(user.id.as_str()).unwrap(),
-            message: "replacement".into(),
-            attachment_ids: vec![],
-            variant: AgentVariant::Build,
-            idempotency_key: None,
+        .reenter_from_user_message({
+            let (expected_generation, expected_message_count) =
+                edit_basis(&runtime, &session_id.clone()).await;
+            assistant_protocol::ReenterFromUserMessageRequest {
+                session_id: session_id.clone(),
+                message_id: assistant_protocol::MessageId::new(user.id.as_str()).unwrap(),
+                message: "replacement".into(),
+                attachment_ids: vec![],
+                variant: AgentVariant::Build,
+                idempotency_key: assistant_protocol::IdempotencyKey::new(
+                    crate::id::generate("edit-test").unwrap(),
+                )
+                .unwrap(),
+
+                expected_generation,
+                expected_message_count,
+                quotes: Vec::new(),
+                skill_edit: assistant_protocol::UserMessageSkillEdit::Retain,
+                mcp_edit: assistant_protocol::UserMessageMcpEdit::Retain,
+            }
         })
         .await
         .unwrap();

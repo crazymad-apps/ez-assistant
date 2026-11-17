@@ -50,7 +50,7 @@ export async function resolveNotificationContent(
     // 此查询锚定指定 Run 的最后可靠消息，不能改用当前尾页（可能已经有后继 Run）。
     const around = await client.command({
       type: 'get_conversation_page_around_run',
-      payload: { session_id: target.owner.session_id, run_id: target.run_id, limit: 1 },
+      payload: { session_id: target.owner.session_id, run_id: target.run_id, turn_limit: 1 },
     });
     const page = around.payload.snapshot.value;
     if (page.owner.type !== 'main_session' || page.owner.session_id !== target.owner.session_id) return null;

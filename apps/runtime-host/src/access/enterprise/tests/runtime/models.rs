@@ -386,6 +386,7 @@ async fn submit_recovery_test(runtime: &AssistantRuntime, session_id: &SessionId
         .submit_session_input(assistant_runtime::SubmitSessionInputRequest {
             source: assistant_runtime::InputChannelSource::desktop_text(),
             input: SubmitInputRequest {
+                delivery: Default::default(),
                 session_id: session_id.clone(),
                 message: "continue".into(),
                 mode: SubmitInputMode::Normal,
@@ -975,8 +976,8 @@ async fn organization_and_personal_session_selection_route_and_survive_domain_re
         .snapshot
         .value;
     assert_eq!(
-        summaries
-            .active_sessions
+        summaries.session_groups[0]
+            .sessions
             .iter()
             .find(|item| item.session_id == session)
             .unwrap()

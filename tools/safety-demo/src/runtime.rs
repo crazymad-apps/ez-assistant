@@ -1028,7 +1028,7 @@ mod tests {
                 tool_turn(
                     "call-read",
                     "read_file",
-                    serde_json::json!({"path": "note.txt", "offset": 1, "limit": 20}),
+                    serde_json::json!({"path": "note.txt", "offset_chars": 0, "limit_chars": 20}),
                 ),
                 final_turn("assistant-final"),
             ],

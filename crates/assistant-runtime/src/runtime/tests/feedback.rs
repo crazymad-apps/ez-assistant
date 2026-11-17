@@ -13,6 +13,7 @@ fn question(mode: &str) -> AssistantMessage {
 }
 fn input(session_id: &SessionId, text: &str) -> SubmitInputRequest {
     SubmitInputRequest {
+        delivery: Default::default(),
         session_id: session_id.clone(),
         message: text.into(),
         variant: assistant_protocol::AgentVariant::Build,
@@ -234,13 +235,26 @@ async fn rewriting_another_session_keeps_pending_end_turn_control_after_parent_r
         panic!("User")
     };
     let rewritten = runtime
-        .reenter_from_user_message(assistant_protocol::ReenterFromUserMessageRequest {
-            session_id: other.clone(),
-            message_id: assistant_protocol::MessageId::new(user.id.as_str()).unwrap(),
-            message: "new".into(),
-            attachment_ids: vec![],
-            idempotency_key: None,
-            variant: assistant_protocol::AgentVariant::Build,
+        .reenter_from_user_message({
+            let (expected_generation, expected_message_count) =
+                edit_basis(&runtime, &other.clone()).await;
+            assistant_protocol::ReenterFromUserMessageRequest {
+                session_id: other.clone(),
+                message_id: assistant_protocol::MessageId::new(user.id.as_str()).unwrap(),
+                message: "new".into(),
+                attachment_ids: vec![],
+                idempotency_key: assistant_protocol::IdempotencyKey::new(
+                    crate::id::generate("edit-test").unwrap(),
+                )
+                .unwrap(),
+                variant: assistant_protocol::AgentVariant::Build,
+
+                expected_generation,
+                expected_message_count,
+                quotes: Vec::new(),
+                skill_edit: assistant_protocol::UserMessageSkillEdit::Retain,
+                mcp_edit: assistant_protocol::UserMessageMcpEdit::Retain,
+            }
         })
         .await
         .unwrap();

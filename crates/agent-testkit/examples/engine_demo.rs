@@ -253,8 +253,9 @@ fn describe_event(event: &AgentEvent) -> String {
         AgentEvent::ExecutionFailed {
             error,
             dropped_events,
+            ..
         } => format!("execution.failed: {error} (dropped_events={dropped_events})"),
-        AgentEvent::ExecutionCancelled { dropped_events } => {
+        AgentEvent::ExecutionCancelled { dropped_events, .. } => {
             format!("execution.cancelled (dropped_events={dropped_events})")
         }
         AgentEvent::ExecutionCompactionRequired {

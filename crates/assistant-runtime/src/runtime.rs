@@ -21,6 +21,7 @@ mod model_management;
 mod ui;
 mod ui_tools;
 pub use model_management::ExternalModelPublication;
+mod message_edit;
 mod permission;
 pub(crate) mod product;
 mod quote;
@@ -33,6 +34,7 @@ mod session_management;
 mod shell;
 mod shutdown;
 pub use shutdown::ShutdownWork;
+mod sidebar;
 mod skills;
 pub(crate) mod tasks;
 mod title;
@@ -756,9 +758,20 @@ impl AssistantRuntime {
         self.session(&created.session.session_id).await
     }
 
+    /// 设备路由直接按角色取得当前主控，不依赖普通列表首页。
+    pub async fn controller_summary(&self) -> RuntimeResult<SessionSummary> {
+        self.controller_summaries()
+            .await?
+            .into_iter()
+            .next()
+            .ok_or(RuntimeError::ControllerUnavailable)
+    }
+
     async fn controller_summaries(&self) -> RuntimeResult<Vec<SessionSummary>> {
         let mut rows = self
             .query_session_summaries(crate::SessionSummaryQuery {
+                group: None,
+                pinned_only: false,
                 filter: assistant_protocol::SessionListFilter::Active,
                 session_id: None,
                 role: Some(assistant_protocol::SessionRoleSnapshot::Controller),
@@ -796,7 +809,7 @@ impl AssistantRuntime {
         .await
     }
 
-    /// 按置顶、最近活动时间和 SessionId 的确定性顺序列出当前进程内 Session。
+    /// 全局按创建时间查询；指定分组时由存储按侧栏顺序分页。
     pub async fn list_sessions(
         &self,
         request: ListSessionsRequest,
@@ -805,6 +818,8 @@ impl AssistantRuntime {
         let limit = request.limit.unwrap_or(100).clamp(1, u32::MAX - 1);
         let mut summaries = self
             .query_session_summaries(crate::SessionSummaryQuery {
+                group: request.group,
+                pinned_only: false,
                 filter: request.filter,
                 session_id: None,
                 role: None,
@@ -841,6 +856,8 @@ impl AssistantRuntime {
     pub async fn get_session(&self, request: GetSessionRequest) -> RuntimeResult<GetSessionResult> {
         let session = self
             .query_session_summaries(crate::SessionSummaryQuery {
+                group: None,
+                pinned_only: false,
                 filter: assistant_protocol::SessionListFilter::All,
                 session_id: Some(request.session_id.clone()),
                 role: None,
@@ -929,18 +946,27 @@ impl AssistantRuntime {
                 });
             }
         }
-        self.cancel_run_approvals(&request.session_id, &request.run_id)
-            .await?;
+        self.cancel_active_run_locked(&session, &request.run_id)
+            .await
+    }
+
+    /// 调用方持有 Session mutation gate，并已核对活动 Run 的资格。
+    /// 复用审批取消和活动句柄，重复请求不会重复发布取消事件。可靠终态由队列结算。
+    async fn cancel_active_run_locked(
+        &self,
+        session: &crate::session::SessionController,
+        run_id: &assistant_protocol::RunId,
+    ) -> RuntimeResult<CancelRunResult> {
+        self.cancel_run_approvals(session.id(), run_id).await?;
         let (snapshot, cancellation) = {
             let mut state = session.lock_state()?;
-            let existing =
-                state
-                    .runs
-                    .get(&request.run_id)
-                    .ok_or_else(|| RuntimeError::RunNotFound {
-                        session_id: request.session_id.clone(),
-                        run_id: request.run_id.clone(),
-                    })?;
+            let existing = state
+                .runs
+                .get(run_id)
+                .ok_or_else(|| RuntimeError::RunNotFound {
+                    session_id: session.id().clone(),
+                    run_id: run_id.clone(),
+                })?;
             // 文件没有可靠终态时不把已结束的内存观察伪装成结算成功。
             if existing.status().is_terminal() {
                 return Err(RuntimeError::SnapshotStale);
@@ -948,31 +974,33 @@ impl AssistantRuntime {
             if state
                 .active_run
                 .as_ref()
-                .is_none_or(|active| active.run_id != request.run_id)
+                .is_none_or(|active| &active.run_id != run_id)
             {
                 return Err(RuntimeError::InvalidRequest {
                     reason: "queued input must be cancelled with cancel_queued_input",
                 });
             }
-            let record = state.runs.get_mut(&request.run_id).ok_or(
-                RuntimeError::InternalStateUnavailable {
-                    component: "active run record",
-                },
-            )?;
+            let record =
+                state
+                    .runs
+                    .get_mut(run_id)
+                    .ok_or(RuntimeError::InternalStateUnavailable {
+                        component: "active run record",
+                    })?;
             let first_request = record.mark_cancelling();
             let snapshot = record.snapshot();
             let cancellation = state
                 .active_run
                 .as_ref()
-                .filter(|active| active.run_id == request.run_id)
+                .filter(|active| &active.run_id == run_id)
                 .map(|active| active.cancellation.clone())
                 .ok_or(RuntimeError::InternalStateUnavailable {
                     component: "active run cancellation",
                 })?;
             if first_request {
                 self.publish(RuntimeEvent::RunCancelling {
-                    session_id: request.session_id.clone(),
-                    run_id: request.run_id.clone(),
+                    session_id: session.id().clone(),
+                    run_id: run_id.clone(),
                 });
             }
             (snapshot, cancellation)
@@ -1123,6 +1151,65 @@ pub(crate) async fn load_identity_history(
         return Err(crate::RuntimeError::SnapshotStale);
     }
     Ok(history.facts)
+}
+
+/// 常规提交只向 Store 核对本次生成的两个身份；冲突时重新取样。
+async fn allocate_new_input(
+    store: &dyn crate::RuntimeStore,
+    session: &crate::session::SessionController,
+    message_id: &mut agent_types::MessageId,
+) -> crate::RuntimeResult<assistant_protocol::InputId> {
+    let empty = crate::StoredHistoryFacts::default();
+    for _ in 0..crate::id::GENERATION_ATTEMPTS {
+        let input_id = {
+            let state = session.lock_state()?;
+            crate::run::ensure_message_id_available(message_id, &state, &empty)?;
+            crate::run::allocate_input_id(&state, &empty)?
+        };
+        if store
+            .new_conversation_identity_available(
+                session.id(),
+                crate::NewConversationIdentity::Input {
+                    input_id: input_id.clone(),
+                    message_id: message_id.clone(),
+                },
+            )
+            .await
+            .map_err(|source| crate::RuntimeError::from_store("check Input identity", source))?
+        {
+            return Ok(input_id);
+        }
+        *message_id = crate::run::allocate_message_id()?;
+    }
+    Err(crate::RuntimeError::InternalStateUnavailable {
+        component: "identifier collision",
+    })
+}
+
+async fn allocate_new_run(
+    store: &dyn crate::RuntimeStore,
+    session: &crate::session::SessionController,
+) -> crate::RuntimeResult<assistant_protocol::RunId> {
+    let empty = crate::StoredHistoryFacts::default();
+    for _ in 0..crate::id::GENERATION_ATTEMPTS {
+        let id = {
+            let state = session.lock_state()?;
+            crate::run::allocate_run_id(&state, &empty)?
+        };
+        if store
+            .new_conversation_identity_available(
+                session.id(),
+                crate::NewConversationIdentity::Run(id.clone()),
+            )
+            .await
+            .map_err(|source| crate::RuntimeError::from_store("check Run identity", source))?
+        {
+            return Ok(id);
+        }
+    }
+    Err(crate::RuntimeError::InternalStateUnavailable {
+        component: "identifier collision",
+    })
 }
 
 #[cfg(test)]

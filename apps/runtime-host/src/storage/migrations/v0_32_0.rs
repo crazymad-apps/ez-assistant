@@ -15,7 +15,7 @@ pub(super) fn entry() -> Migration {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{align, backup, compatibility, manifest, migrate};
+    use super::super::{DATABASE_SCHEMA_VERSION, align, backup, compatibility, manifest, migrate};
     use rusqlite::{Connection, OpenFlags};
 
     #[test]
@@ -87,7 +87,7 @@ mod tests {
         let registered: i64 = current
             .query_row(
                 "SELECT COUNT(*) FROM schema_migrations WHERE version=?1 AND migration_key='release'",
-                [env!("CARGO_PKG_VERSION")],
+                [DATABASE_SCHEMA_VERSION],
                 |row| row.get(0),
             )
             .unwrap();

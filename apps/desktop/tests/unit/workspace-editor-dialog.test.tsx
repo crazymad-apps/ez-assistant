@@ -1,3 +1,4 @@
+import { sidebarFixture } from "../support/sidebarFixture";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceEditorDialog } from "../../src/features/workspaces/WorkspaceEditorDialog";
@@ -35,15 +36,15 @@ describe("WorkspaceEditorDialog", () => {
       observed_sequence: 1,
       value: {
         runtime_lifecycle: "running",
-        active_sessions_next_offset: null,
-        archived_sessions_next_offset: null,
+        ...sidebarFixture({ active_next: null, archived_next: null, active: [], archived: [] }),
+
         configuration: { state: "ready" },
         providers: [], model_settings: { default_model: null, vision_model: null },
         workspaces: [{
           workspace_id: "workspace-1", label: "项目", user_directory: "/workspace/project",
           additional_directories: [], lifecycle: "active",
         }],
-        active_sessions: [], archived_sessions: [],
+
       },
     } as unknown as Parameters<RootStore["projection"]["applyApplicationSnapshot"]>[0]);
     store.openWorkspaceEditor("workspace-1");
@@ -66,8 +67,8 @@ describe("WorkspaceEditorDialog", () => {
       observed_sequence: 1,
       value: {
         runtime_lifecycle: "running",
-        active_sessions_next_offset: null,
-        archived_sessions_next_offset: null,
+        ...sidebarFixture({ active_next: null, archived_next: null, active: [], archived: [] }),
+
         configuration: { state: "ready" },
         providers: [], model_settings: { default_model: null, vision_model: null },
         workspaces: [{
@@ -77,8 +78,8 @@ describe("WorkspaceEditorDialog", () => {
           additional_directories: ["/workspace/docs"],
           lifecycle: "active",
         }],
-        active_sessions: [],
-        archived_sessions: [],
+
+
       },
     } as unknown as Parameters<RootStore["projection"]["applyApplicationSnapshot"]>[0]);
     store.openWorkspaceEditor("workspace-1");
@@ -110,8 +111,8 @@ describe("WorkspaceEditorDialog", () => {
       observed_sequence: 1,
       value: {
         runtime_lifecycle: "running",
-        active_sessions_next_offset: null,
-        archived_sessions_next_offset: null,
+        ...sidebarFixture({ active_next: null, archived_next: null, active: [], archived: [] }),
+
         configuration: { state: "ready" },
         providers: [], model_settings: { default_model: null, vision_model: null },
         workspaces: [{
@@ -121,8 +122,8 @@ describe("WorkspaceEditorDialog", () => {
           additional_directories: [],
           lifecycle: "active",
         }],
-        active_sessions: [],
-        archived_sessions: [],
+
+
       },
     } as unknown as Parameters<RootStore["projection"]["applyApplicationSnapshot"]>[0]);
     store.openWorkspaceEditor("workspace-1");

@@ -209,6 +209,8 @@ impl StoredHistoryFacts {
                     .cloned()
                     .unwrap_or(input.user_message_id);
                 input.inherited = true;
+                input.idempotency_key = None;
+                input.rewritten_from = None;
                 history.inputs.push(input);
             }
         }

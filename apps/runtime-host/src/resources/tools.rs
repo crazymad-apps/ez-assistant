@@ -116,7 +116,7 @@ impl RunToolFactory for HostRunToolFactory {
 
 impl LocalToolResources {
     fn new(paths: Arc<crate::user_paths::UserPaths>) -> Result<Self, ToolResourceError> {
-        let read_config = ReadFileToolConfig::new(nonzero32(1), nonzero32(200), nonzero32(2_000))
+        let read_config = ReadFileToolConfig::new(0, nonzero32(10_000), nonzero32(20_000))
             .map_err(ToolResourceError::configuration)?;
         let search_config = SearchFilesToolConfig::new(
             nonzero32(100),
@@ -963,7 +963,12 @@ mod tests {
         let environment = environment(&root, "work");
         let attachment =
             std::path::Path::new(&environment.session_attachment_directory).join("reference.txt");
-        std::fs::write(&attachment, "provider-visible-token-73\n").expect("attachment");
+        // 真实工具经过 Host 装配再进入模型：超长单行不能绕过默认字符分页。
+        std::fs::write(
+            &attachment,
+            format!("provider-visible-token-73\n{}", "x".repeat(2_000_000)),
+        )
+        .expect("attachment");
         let factory = HostRunToolFactory::new(root.path()).expect("factory");
         let (tools, policies) = compile_bundle(&factory, &environment).into_parts();
         let authorizer = test_authorizer(policies);
@@ -1058,6 +1063,13 @@ mod tests {
                 .expect("tool result json")
                 .contains("provider-visible-token-73")
         );
+        let encoded = serde_json::to_value(tool_result).unwrap();
+        let page = &encoded["parts"][0]["value"];
+        assert_eq!(page["content"].as_str().unwrap().chars().count(), 10_000);
+        assert_eq!(page["next_offset_chars"], 10_000);
+        assert_eq!(page["truncated"], true);
+        assert_eq!(page["start_line"], 1);
+        assert_eq!(page["start_column"], 1);
     }
 
     #[test]

@@ -62,6 +62,7 @@ impl AssistantRuntime {
                 )
             };
             let input = SubmitInputRequest {
+                delivery: Default::default(),
                 session_id: request.session_id.clone(),
                 message: answer_message(&feedback, &request.answers),
                 variant,
@@ -144,14 +145,7 @@ impl AssistantRuntime {
         if feedback.status != FeedbackStatus::Pending {
             return Err(invalid("问题已处理或失效"));
         }
-        feedback.status = FeedbackStatus::Cancelled;
-        self.store
-            .mutate_feedback(FeedbackMutation {
-                request: feedback.clone(),
-                expected_status: Some(FeedbackStatus::Pending),
-            })
-            .await
-            .map_err(|e| crate::RuntimeError::from_store("cancel feedback", e))?;
+        self.persist_cancelled_feedback(&mut feedback).await?;
         {
             let mut state = session.lock_state()?;
             state
@@ -204,5 +198,20 @@ impl AssistantRuntime {
             }
         }
         Ok(feedback)
+    }
+    /// 调用方持有问题所属 Session 的 mutation gate；成功后再镜像和通知。
+    pub(super) async fn persist_cancelled_feedback(
+        &self,
+        feedback: &mut FeedbackRequestSnapshot,
+    ) -> RuntimeResult<()> {
+        feedback.status = FeedbackStatus::Cancelled;
+        self.store
+            .mutate_feedback(FeedbackMutation {
+                request: feedback.clone(),
+                expected_status: Some(FeedbackStatus::Pending),
+            })
+            .await
+            .map_err(|e| crate::RuntimeError::from_store("cancel feedback", e))?;
+        Ok(())
     }
 }

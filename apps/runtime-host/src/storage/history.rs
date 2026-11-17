@@ -1,6 +1,9 @@
 //! 文件历史与旧 SQL 来源之间的迁出边界；正常历史不回写为 SQL 关联。
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use agent_types::{ConversationMessage, ConversationSnapshot, UserPart};
 use assistant_protocol::{ConversationOwner, RunStatus};
@@ -19,11 +22,16 @@ use super::{
 #[derive(Default)]
 pub(super) struct HistoryMessageKeys {
     pub(super) messages: HashMap<agent_types::MessageId, usize>,
+    users: HashSet<agent_types::MessageId>,
     calls: HashSet<String>,
     attachment_paths: HashSet<String>,
 }
 
 impl HistoryMessageKeys {
+    pub(super) fn is_user(&self, id: &agent_types::MessageId) -> bool {
+        self.users.contains(id)
+    }
+
     pub(super) fn record(&mut self, message: &ConversationMessage) -> StorageResult<()> {
         let ordinal = self.messages.len();
         if self
@@ -44,6 +52,7 @@ impl HistoryMessageKeys {
                     }));
             }
             ConversationMessage::User(user) => {
+                self.users.insert(user.id.clone());
                 self.attachment_paths.extend(
                     user.parts
                         .iter()
@@ -70,6 +79,24 @@ impl HistoryMessageKeys {
 }
 
 impl StorageEngine {
+    pub(super) fn load_run_conversation(
+        &mut self,
+        session_id: &assistant_protocol::SessionId,
+        run_id: &assistant_protocol::RunId,
+    ) -> StorageResult<assistant_runtime::StoredConversationRawWindow> {
+        let owner = ConversationOwner::MainSession {
+            session_id: session_id.clone(),
+        };
+        self.ensure_no_pending_history(&owner)?;
+        if self.unavailable_sessions.contains(session_id.as_str()) {
+            return Err(invalid_data("Run conversation is unavailable"));
+        }
+        let generation = self.session_generation(session_id)?;
+        let path = body_path(&self.session_directory(session_id)?, generation);
+        self.conversation_indexes
+            .read_run_conversation(&path, &owner, generation, run_id)
+    }
+
     /// 只读取来源及顺序，不解码 queued_message_json，也不创建可执行 StoredInput。
     fn read_input_history(
         &self,
@@ -78,7 +105,8 @@ impl StorageEngine {
     ) -> StorageResult<Vec<assistant_runtime::StoredInputHistory>> {
         let mut statement = self.connection.prepare(
             "SELECT json_object(
-                'input_id',input_id,'user_message_id',user_message_id,'queue_order',queue_order,
+                'input_id',input_id,'idempotency_key',idempotency_key,
+                'user_message_id',user_message_id,'queue_order',queue_order,
                 'agent_variant',agent_variant,'origin',origin,'accepted_at_ms',accepted_at_ms,
                 'agent_shell_target',agent_shell_target,'inherited',json('false'),
                 'goal_binding',CASE WHEN goal_id IS NULL AND goal_generation IS NULL AND goal_turn IS NULL AND goal_reply_route_json IS NULL
@@ -141,16 +169,17 @@ impl StorageEngine {
                 )
             }
         };
-        let document = self.read_owner_document(&path, owner, generation)?;
-        let previous: HashSet<_> = document
-            .conversation
-            .messages
-            .iter()
-            .map(conversation::message_id)
-            .collect();
-        let mut history = match document.history {
-            Some(history) => history,
-            None => self.legacy_history_facts(owner, &document.conversation)?,
+        let (previous, mut history) = if self.allow_legacy_history {
+            let document = self.read_owner_document(&path, owner, generation)?;
+            let keys = HistoryMessageKeys::from_conversation(&document.conversation)?;
+            let history = match document.history {
+                Some(history) => history,
+                None => self.legacy_history_facts_for_keys(owner, &keys)?,
+            };
+            (Arc::new(keys.messages), history)
+        } else {
+            self.conversation_indexes
+                .replacement_source(&path, owner, generation)?
         };
         retain_replacement_facts(&mut history, owner, replacement)?;
         // 真正新增的上下文消息也是本 owner 的可靠事实；不给摘要或系统边界虚构 Run／Step。
@@ -160,7 +189,7 @@ impl StorageEngine {
                 .messages
                 .iter()
                 .map(conversation::message_id)
-                .filter(|id| !previous.contains(id))
+                .filter(|id| !previous.contains_key(*id))
                 .map(|id| StoredMessageOrigin {
                     message_id: id.clone(),
                     run_id: None,

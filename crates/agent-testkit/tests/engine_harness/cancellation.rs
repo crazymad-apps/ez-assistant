@@ -334,7 +334,16 @@ async fn cancel_during_model_stream_converges_to_cancelled() {
                 id: part_id("text_1"),
                 delta: "partial".to_owned(),
             },
-            AgentEvent::ExecutionCancelled { dropped_events: 0 },
+            AgentEvent::ExecutionCancelled {
+                dropped_events: 0,
+                partial: Some(Box::new(agent_core::PartialModelResponse {
+                    step: 1,
+                    message: AssistantMessage {
+                        finish_reason: FinishReason::Cancelled,
+                        ..text_message("message_1", "partial")
+                    },
+                })),
+            },
         ]
     );
     // 模型流中取消：无落账、无授权、无工具执行。
@@ -453,7 +462,10 @@ async fn cancel_during_tool_execution_settles_rest_of_batch() {
                 call_id: call_id("call_3"),
                 status: ToolCompletionStatus::Failed,
             },
-            AgentEvent::ExecutionCancelled { dropped_events: 0 },
+            AgentEvent::ExecutionCancelled {
+                dropped_events: 0,
+                partial: None
+            },
         ]
     );
     // 顺序日志：fast 执行完成，slow 收到取消并完成清理，never 未授权未执行；
@@ -576,7 +588,10 @@ async fn cancel_during_authorize_hang_settles_batch() {
                 call_id: call_id("call_2"),
                 status: ToolCompletionStatus::Failed,
             },
-            AgentEvent::ExecutionCancelled { dropped_events: 0 },
+            AgentEvent::ExecutionCancelled {
+                dropped_events: 0,
+                partial: None
+            },
         ]
     );
     // 只有一次 authorize 尝试（第二个调用未到达授权闸），无任何工具执行。

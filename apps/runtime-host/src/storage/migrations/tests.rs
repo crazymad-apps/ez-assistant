@@ -7,7 +7,11 @@ use super::*;
 
 #[test]
 fn compiled_release_has_complete_migration_manifest() {
-    validate_manifest(env!("CARGO_PKG_VERSION"), &product_manifest()).unwrap();
+    validate_manifest(DATABASE_SCHEMA_VERSION, &product_manifest()).unwrap();
+    assert!(
+        parse_version(DATABASE_SCHEMA_VERSION).unwrap()
+            <= parse_version(env!("CARGO_PKG_VERSION")).unwrap()
+    );
 }
 
 fn db(home: &Path) -> Connection {
@@ -1178,6 +1182,38 @@ fn product_upgrade_removes_only_its_backup_after_verified_success() {
         UPDATE model_settings SET vision_provider_instance_id='managed', vision_model_id='image-model'
         WHERE singleton_key=1;
     ").unwrap();
+    for id in ["legacy-managed", "personal", "following"] {
+        let directory = home.path().join("data/sessions").join(id);
+        source.execute("INSERT INTO session_resources(session_id,workspace_id,working_directory,additional_workspace_directories_json,attachment_directory,private_directory,created_at_ms) VALUES(?1,NULL,?2,'[]',?3,?2,1)", rusqlite::params![id,directory.join("private").to_string_lossy(),directory.join("attachments").to_string_lossy()]).unwrap();
+
+        let path = home
+            .path()
+            .join("data/sessions")
+            .join(id)
+            .join("conversation.1.jsonl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let owner = assistant_protocol::ConversationOwner::MainSession {
+            session_id: assistant_protocol::SessionId::new(id).unwrap(),
+        };
+        crate::storage::conversation::write_generation_version(
+            &path,
+            &owner,
+            1,
+            crate::storage::conversation::PREVIOUS_HISTORY_VERSION,
+            &agent_types::ConversationSnapshot::new(Vec::new()),
+            &Default::default(),
+        )
+        .unwrap();
+    }
+    // 新排序列不参与原资源字段比较，原有全部列仍须逐值保持。
+    let resources = |connection: &Connection| {
+        connection.prepare("SELECT session_id,workspace_id,working_directory,additional_workspace_directories_json,attachment_directory,private_directory,created_at_ms FROM session_resources ORDER BY session_id")
+            .unwrap().query_map([], |row| {
+                (0..7).map(|index| row.get::<_, rusqlite::types::Value>(index))
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            }).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+    };
+    let original_resources = resources(&source);
     let expected = backup::evidence(&source).unwrap();
     let ledger_rows: i64 = source
         .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
@@ -1238,12 +1274,41 @@ fn product_upgrade_removes_only_its_backup_after_verified_success() {
     assert_eq!(fs::read(prior.join("preserve")).unwrap(), b"earlier backup");
     let source = db(home.path());
     backup::check_integrity(&source).unwrap();
+    let before_old_host = backup::evidence(&source).unwrap();
+    assert!(matches!(
+        migrate(
+            home.path(),
+            "0.33.0",
+            &entries[..entries
+                .iter()
+                .position(|entry| entry.version == "0.33.1")
+                .unwrap()]
+        ),
+        Err(MigrationError::HostTooOld)
+    ));
+    assert_eq!(backup::evidence(&source).unwrap(), before_old_host);
+    let owner = assistant_protocol::ConversationOwner::MainSession {
+        session_id: assistant_protocol::SessionId::new("personal").unwrap(),
+    };
+    let current_body = home
+        .path()
+        .join("data/sessions/personal/conversation.2.jsonl");
+    assert!(crate::storage::conversation::read_document(&current_body, &owner, 2).is_ok());
+    assert!(
+        crate::storage::conversation::read_document_version(
+            &current_body,
+            &owner,
+            2,
+            crate::storage::conversation::PREVIOUS_HISTORY_VERSION
+        )
+        .is_err()
+    );
     assert_eq!(
         source
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row
                 .get::<_, i64>(0))
             .unwrap(),
-        ledger_rows + 3
+        ledger_rows + 5
     );
     assert_eq!(
         source
@@ -1272,9 +1337,13 @@ fn product_upgrade_removes_only_its_backup_after_verified_success() {
     original.tables.remove("database_compatibility");
     assert_eq!(
         compatibility::read(&source).unwrap(),
-        Some(parse_version("0.33.0").unwrap())
+        Some(parse_version(DATABASE_SCHEMA_VERSION).unwrap())
     );
-    for (table, expected_count) in [("sessions", 3), ("model_settings", 1)] {
+    for (table, expected_count) in [
+        ("sessions", 3),
+        ("model_settings", 1),
+        ("session_resources", 3),
+    ] {
         actual.tables.remove(table).unwrap();
         original.tables.remove(table).unwrap();
         assert_eq!(
@@ -1285,6 +1354,7 @@ fn product_upgrade_removes_only_its_backup_after_verified_success() {
             expected_count
         );
     }
+    assert_eq!(resources(&source), original_resources);
     let selections = source.prepare("SELECT session_id, model_provider_instance_id, model_id, model_source FROM sessions ORDER BY session_id")
         .unwrap().query_map([], |row| Ok((
             row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?,

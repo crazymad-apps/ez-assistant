@@ -58,6 +58,7 @@ export class LiveExecutionStore {
       child_runs: observable,
       child_tasks: observable,
       flush: action,
+      seedInputRun: action,
       reconcileSession: action,
       reconcileChildTask: action,
       rebaseSession: action,
@@ -65,6 +66,12 @@ export class LiveExecutionStore {
       invalidateForGap: action,
       clear: action,
     });
+  }
+
+  /** 命令回执可提供首个 Run 投影；已经接收的实时或快照状态优先。 */
+  seedInputRun(run: RunSnapshot): void {
+    if (this.#pending.length) this.flush();
+    if (!this.runs.has(runKey(run.session_id, run.run_id))) this.#reconcileRunSnapshot(run);
   }
 
   buffer(envelope: RuntimeEventEnvelope): void {

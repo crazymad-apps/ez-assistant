@@ -139,11 +139,17 @@ pub enum AgentEvent {
     ExecutionFailed {
         /// 已脱敏的失败原因。
         error: ExecutionError,
+        /// 与 completion 相同的部分模型消息；与观察 delta 是否送达无关。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        partial: Option<Box<crate::PartialModelResponse>>,
         /// 本次执行因背压或订阅断开丢弃的事件数。
         dropped_events: u64,
     },
     /// 取消终态；收敛前执行内所有未结算调用已先行结算。
     ExecutionCancelled {
+        /// 与 completion 相同的部分模型消息；与观察 delta 是否送达无关。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        partial: Option<Box<crate::PartialModelResponse>>,
         /// 本次执行因背压或订阅断开丢弃的事件数。
         dropped_events: u64,
     },
@@ -386,13 +392,17 @@ mod tests {
                 dropped_events: 2,
             },
             AgentEvent::ExecutionFailed {
+                partial: None,
                 error: ExecutionError::BudgetExceeded {
                     kind: BudgetKind::Steps,
                     limit: 4,
                 },
                 dropped_events: 3,
             },
-            AgentEvent::ExecutionCancelled { dropped_events: 0 },
+            AgentEvent::ExecutionCancelled {
+                dropped_events: 0,
+                partial: None,
+            },
             AgentEvent::ExecutionCompactionRequired {
                 reason: CompactionReason::ThresholdReached,
                 step: 2,
@@ -455,13 +465,17 @@ mod tests {
                 dropped_events: 0,
             },
             AgentEvent::ExecutionFailed {
+                partial: None,
                 error: ExecutionError::BudgetExceeded {
                     kind: BudgetKind::ToolCalls,
                     limit: 2,
                 },
                 dropped_events: 0,
             },
-            AgentEvent::ExecutionCancelled { dropped_events: 0 },
+            AgentEvent::ExecutionCancelled {
+                dropped_events: 0,
+                partial: None,
+            },
             AgentEvent::ExecutionCompactionRequired {
                 reason: CompactionReason::ProviderOverflow,
                 step: 3,
@@ -613,7 +627,10 @@ mod tests {
         drop(stream);
         // 订阅断开：发送方不阻塞、不 panic，事件计入丢弃数。
         sender.send(AgentEvent::ExecutionStarted);
-        sender.send(AgentEvent::ExecutionCancelled { dropped_events: 0 });
+        sender.send(AgentEvent::ExecutionCancelled {
+            dropped_events: 0,
+            partial: None,
+        });
         assert_eq!(sender.dropped_events(), 2);
     }
 }

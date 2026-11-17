@@ -57,6 +57,7 @@ async fn model_establishment_failure_converges_to_failed() {
             AgentEvent::ExecutionStarted,
             AgentEvent::StepStarted { step: 1 },
             AgentEvent::ExecutionFailed {
+                partial: None,
                 error: ExecutionError::Model(ModelError::Auth("bad key".to_owned())),
                 dropped_events: 0,
             },
@@ -126,6 +127,13 @@ async fn model_in_stream_failure_converges_to_failed() {
                 delta: "partial".to_owned(),
             },
             AgentEvent::ExecutionFailed {
+                partial: Some(Box::new(agent_core::PartialModelResponse {
+                    step: 1,
+                    message: AssistantMessage {
+                        finish_reason: FinishReason::Failed,
+                        ..text_message("message_1", "partial")
+                    },
+                })),
                 error: ExecutionError::Model(ModelError::Provider {
                     message: "upstream exploded".to_owned(),
                     status: Some(500),

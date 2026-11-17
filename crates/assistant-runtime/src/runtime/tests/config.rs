@@ -44,6 +44,7 @@ async fn reload_and_start_race_keeps_database_credentials_independent() {
 
     let old_run = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: before_reload.session.session_id.clone(),
@@ -80,6 +81,7 @@ async fn reload_and_start_race_keeps_database_credentials_independent() {
     let new_run = tokio::spawn(async move {
         start_runtime
             .submit_started_input(SubmitInputRequest {
+                delivery: Default::default(),
                 mode: assistant_protocol::SubmitInputMode::Normal,
                 variant: assistant_protocol::AgentVariant::Build,
                 session_id: start_session_id,
@@ -179,6 +181,7 @@ async fn provider_changes_affect_future_runs_and_invalid_global_config_does_not_
 
     let first_run = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: first.session.session_id.clone(),
@@ -217,6 +220,7 @@ async fn provider_changes_affect_future_runs_and_invalid_global_config_does_not_
     );
     let second_run = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: second.session.session_id.clone(),
@@ -621,6 +625,7 @@ async fn deleting_a_provider_does_not_interrupt_an_already_started_run() {
 
 fn test_input(session_id: &SessionId, message: &str) -> SubmitInputRequest {
     SubmitInputRequest {
+        delivery: Default::default(),
         session_id: session_id.clone(),
         message: message.into(),
         mode: assistant_protocol::SubmitInputMode::Normal,

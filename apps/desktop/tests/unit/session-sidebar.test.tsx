@@ -1,3 +1,8 @@
+import { RuntimeClientError } from "../../src/runtime-client/RuntimeClient";
+import { sessionScope, WORKSPACES } from "../../src/stores/SidebarOrderStore";
+import { RuntimeLifecycleCoordinator } from "../../src/stores/RuntimeLifecycleCoordinator";
+import type { RuntimeClient } from "../../src/runtime-client/RuntimeClient";
+import { sidebarFixture, sessionsIn } from "../support/sidebarFixture";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -25,6 +30,45 @@ afterEach(() => {
 });
 
 describe("SessionSidebar grouping", () => {
+  it("does not let an old page clear the replacement request's loading state", async () => {
+    const store = connectedStore();
+    const snapshot = applicationSnapshot();
+    snapshot.session_groups[1].next_offset = 1;
+    store.projection.applyApplicationSnapshot({ observed_sequence: 2, value: snapshot });
+    const pending: Array<(value: unknown) => void> = [];
+    const command = vi.fn(() => new Promise(resolve => pending.push(resolve)));
+    vi.spyOn(RuntimeLifecycleCoordinator.prototype, "client", "get").mockReturnValue({ command } as unknown as RuntimeClient);
+    const first = store.loadSessionGroup(null, "active", true);
+    store.projection.refreshApplicationSnapshot({ observed_sequence: 3, value: snapshot });
+    const second = store.loadSessionGroup(null, "active", true);
+    pending[0]({ payload: { sessions: [sessionSummary("stale", "旧页", null)], has_more: false } });
+    await first;
+    expect(store.projection.listLoadState(JSON.stringify([null, "active"])).status).toBe("loading");
+    pending[1]({ payload: { sessions: [sessionSummary("fresh", "新页", null)], has_more: false } });
+    await second;
+    expect(store.projection.sessionGroup(null, "active")?.sessions.map(row => row.session_id)).toEqual(["unbound-session", "fresh"]);
+    expect(store.projection.listLoadState(JSON.stringify([null, "active"])).status).toBe("idle");
+    store.dispose();
+  });
+
+  it("loads only an opened missing group and distinguishes all-pinned pages from empty groups", async () => {
+    const store = connectedStore();
+    const snapshot = applicationSnapshot();
+    snapshot.session_groups = snapshot.session_groups.filter(group => group.group.type !== "workspace");
+    store.projection.applyApplicationSnapshot({ observed_sequence: 2, value: snapshot });
+    const load = vi.spyOn(store, "loadSessionGroup").mockResolvedValue();
+    render(<RootStoreProvider store={store}><SessionSidebar /></RootStoreProvider>);
+    expect(load).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "project" }));
+    await waitFor(() => expect(load).toHaveBeenCalledWith("workspace-1", "active"));
+    expect(screen.getByLabelText("正在加载会话")).toBeInTheDocument();
+    act(() => store.projection.appendSessionGroup({ group: { type: "workspace", workspace_id: "workspace-1" }, filter: "active", sessions: [{ ...sessionSummary("pin", "只置顶", "workspace-1"), is_pinned: true }], next_offset: 20 }, 0, store.projection.list_revision));
+    expect(screen.queryByText("暂无会话")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "加载更多" })).toBeInTheDocument();
+    act(() => store.projection.appendSessionGroup({ group: { type: "workspace", workspace_id: "workspace-1" }, filter: "active", sessions: [], next_offset: null }, 0, store.projection.list_revision));
+    expect(screen.getByText("暂无会话")).toBeInTheDocument();
+  });
+
   it("opens agent and plugin management from separate sidebar shortcuts", () => {
     const store = connectedStore();
     render(<RootStoreProvider store={store}><SessionSidebar /></RootStoreProvider>);
@@ -42,17 +86,17 @@ describe("SessionSidebar grouping", () => {
   it("loads another summary page only when requested and keeps existing rows", async () => {
     const store = connectedStore();
     const snapshot = applicationSnapshot();
-    snapshot.active_sessions_next_offset = 100;
+    snapshot.session_groups[1].next_offset = 1;
     store.projection.applyApplicationSnapshot({ observed_sequence: 2, value: snapshot });
-    const page = vi.spyOn(store, "loadMoreSessions").mockImplementation(async (filter) => {
-      store.projection.appendSessionPage(filter, [sessionSummary("older", "更早的会话", null)], null);
+    const page = vi.spyOn(store, "loadSessionGroup").mockImplementation(async (workspace_id, filter) => {
+      store.projection.appendSessionGroup({ group: { type: "unbound" }, filter, sessions: [sessionSummary("older", "更早的会话", null)], next_offset: null }, 1, store.projection.list_revision);
     });
     render(<RootStoreProvider store={store}><SessionSidebar /></RootStoreProvider>);
     expect(page).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
     expect(await screen.findByRole("button", { name: /^更早的会话/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^未绑定会话/ })).toBeInTheDocument();
-    expect(page).toHaveBeenCalledWith("active");
+    expect(page).toHaveBeenCalledWith(null, "active", true);
     await waitFor(() => expect(screen.queryByRole("button", { name: "加载更多" })).not.toBeInTheDocument());
   });
 
@@ -60,7 +104,6 @@ describe("SessionSidebar grouping", () => {
     const store = connectedStore();
     const snapshot = applicationSnapshot();
     const controller = { ...sessionSummary("controller-1", "版本主控", null), role: "controller" as const };
-    snapshot.active_sessions.unshift(controller);
     snapshot.controller_availability = { status: "available", session_id: controller.session_id };
     store.projection.applyApplicationSnapshot({ observed_sequence: 2, value: snapshot });
 
@@ -85,7 +128,8 @@ describe("SessionSidebar grouping", () => {
   it("shows a pinned session once and returns it to its workspace after unpinning", async () => {
     const store = connectedStore();
     const snapshot = applicationSnapshot();
-    snapshot.active_sessions[0] = { ...snapshot.active_sessions[0]!, is_pinned: true };
+    snapshot.session_groups[0].sessions[0] = { ...snapshot.session_groups[0].sessions[0]!, is_pinned: true };
+    snapshot.pinned_sessions = [snapshot.session_groups[0].sessions[0]!];
     store.projection.applyApplicationSnapshot({ observed_sequence: 2, value: snapshot });
     store.navigation.ensureWorkspaceExpanded("workspace-1");
     render(<RootStoreProvider store={store}><SessionSidebar /></RootStoreProvider>);
@@ -95,7 +139,7 @@ describe("SessionSidebar grouping", () => {
 
     store.projection.applyApplicationSnapshot({ observed_sequence: 3, value: {
       ...snapshot,
-      active_sessions: [{ ...snapshot.active_sessions[0]!, is_pinned: false }, ...snapshot.active_sessions.slice(1)],
+      ...sidebarFixture({ active: [{ ...snapshot.session_groups[0].sessions[0]!, is_pinned: false }, ...sessionsIn(snapshot).slice(1)] }),
     } });
     await waitFor(() => expect(screen.queryByRole("region", { name: "置顶会话" })).not.toBeInTheDocument());
     expect(screen.getAllByRole("button", { name: /^工作区会话/ })).toHaveLength(1);
@@ -105,7 +149,8 @@ describe("SessionSidebar grouping", () => {
   it("collapses and expands pinned sessions from either header control", async () => {
     const store = connectedStore();
     const snapshot = applicationSnapshot();
-    snapshot.active_sessions[0] = { ...snapshot.active_sessions[0]!, is_pinned: true };
+    snapshot.session_groups[0].sessions[0] = { ...snapshot.session_groups[0].sessions[0]!, is_pinned: true };
+    snapshot.pinned_sessions = [snapshot.session_groups[0].sessions[0]!];
     store.projection.applyApplicationSnapshot({ observed_sequence: 2, value: snapshot });
 
     render(<RootStoreProvider store={store}><SessionSidebar /></RootStoreProvider>);
@@ -122,10 +167,10 @@ describe("SessionSidebar grouping", () => {
     expect(within(pinned).getByRole("button", { name: /^工作区会话/ })).toBeInTheDocument();
   });
 
-  it("shows archived sessions only in explicit search scope and restores active scope on close", () => {
+  it("shows archived sessions only in explicit search scope and restores active scope on close", async () => {
     const store = connectedStore();
     const snapshot = applicationSnapshot();
-    snapshot.archived_sessions = [{ ...sessionSummary("old", "历史会话", null), lifecycle: "archived", archived_at_ms: 2 }];
+    snapshot.session_groups[2].sessions = [{ ...sessionSummary("old", "历史会话", null), lifecycle: "archived", archived_at_ms: 2 }];
     store.projection.applyApplicationSnapshot({ observed_sequence: 2, value: snapshot });
     render(<RootStoreProvider store={store}><SessionSidebar /></RootStoreProvider>);
 
@@ -133,7 +178,7 @@ describe("SessionSidebar grouping", () => {
     fireEvent.click(screen.getByRole("button", { name: "搜索会话" }));
     const dialog = screen.getByRole("dialog", { name: "搜索会话" });
     fireEvent.click(within(dialog).getByRole("button", { name: "已归档" }));
-    expect(within(dialog).getByRole("button", { name: /^历史会话/ })).toBeInTheDocument();
+    expect(await within(dialog).findByRole("button", { name: /^历史会话/ })).toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole("button", { name: "关闭搜索" }));
     expect(store.navigation.list_mode).toBe("active");
     expect(screen.queryByRole("button", { name: /^历史会话/ })).not.toBeInTheDocument();
@@ -143,7 +188,7 @@ describe("SessionSidebar grouping", () => {
     const store = connectedStore();
     const history_search = vi.spyOn(store, "searchConversationHistory");
     const list_page = vi.spyOn(store, "listSessionPage").mockImplementation(async (_filter, _offset, query) => ({
-      sessions: store.projection.application!.active_sessions.filter((session) => session.title.includes(query ?? "")), has_more: false,
+      sessions: sessionsIn(store.projection.application!).filter((session) => session.title.includes(query ?? "")), has_more: false,
     }));
 
     render(
@@ -203,6 +248,8 @@ describe("SessionSidebar grouping", () => {
 
   it("keeps unbound sessions in a top-level disclosure independent from workspaces", () => {
     const store = new RootStore();
+  vi.spyOn(store, "listWorkspaceOptions").mockImplementation(async () => store.projection.application?.workspaces ?? []);
+  vi.spyOn(store, "listSessionPage").mockImplementation(async (filter, _offset, query) => ({ sessions: sessionsIn(store.projection.application!, filter).filter(session => !query || session.title.includes(query)), has_more: false }));
     store.projection.applyApplicationSnapshot({
       observed_sequence: 1,
       value: applicationSnapshot(),
@@ -331,8 +378,8 @@ describe("SessionSidebar grouping", () => {
   it("shows the running indicator instead of a timestamp", () => {
     const store = connectedStore();
     const snapshot = applicationSnapshot();
-    snapshot.active_sessions[0] = {
-      ...snapshot.active_sessions[0],
+    snapshot.session_groups[0].sessions[0] = {
+      ...snapshot.session_groups[0].sessions[0],
       active_run_id: "run-1",
     };
     store.projection.applyApplicationSnapshot({
@@ -364,7 +411,7 @@ describe("SessionSidebar grouping", () => {
       expect(screen.queryByRole("img", { name: "正在运行" })).not.toBeInTheDocument();
       act(() => projection.applyApplicationSnapshot({ observed_sequence: 3, value: {
         ...snapshot,
-        active_sessions: [{ ...snapshot.active_sessions[0]!, active_run_id: "run-1" }],
+        ...sidebarFixture({ active: [{ ...snapshot.session_groups[0].sessions[0]!, active_run_id: "run-1" }] }),
       } }));
       expect(screen.getByRole("img", { name: "正在运行" })).toBeInTheDocument();
 
@@ -375,7 +422,7 @@ describe("SessionSidebar grouping", () => {
       const other = device ? store.local_projection : store.network.context("22222222-2222-4222-8222-222222222222").projection;
       act(() => other.applyApplicationSnapshot({ observed_sequence: 5, value: {
         ...snapshot,
-        active_sessions: [{ ...snapshot.active_sessions[0]!, active_run_id: "other-run" }],
+        ...sidebarFixture({ active: [{ ...snapshot.session_groups[0].sessions[0]!, active_run_id: "other-run" }] }),
       } }));
       expect(screen.queryByRole("img", { name: "正在运行" })).not.toBeInTheDocument();
     } finally {
@@ -388,7 +435,7 @@ describe("SessionSidebar grouping", () => {
     const store = connectedStore();
     const snapshot = applicationSnapshot();
     snapshot.workspaces = [];
-    snapshot.active_sessions = Array.from({ length: 500 }, (_, index) =>
+    snapshot.session_groups[1].sessions = Array.from({ length: 500 }, (_, index) =>
       sessionSummary(
         `performance-session-${index.toString().padStart(3, "0")}`,
         `性能会话-${index.toString().padStart(3, "0")}`,
@@ -419,6 +466,8 @@ describe("SessionSidebar grouping", () => {
 
 function connectedStore(): RootStore {
   const store = new RootStore();
+  vi.spyOn(store, "listWorkspaceOptions").mockImplementation(async () => store.projection.application?.workspaces ?? []);
+  vi.spyOn(store, "listSessionPage").mockImplementation(async (filter, _offset, query) => ({ sessions: sessionsIn(store.projection.application!, filter).filter(session => !query || session.title.includes(query)), has_more: false }));
   store.connection.markConnected("instance-1", {
     mode: "personal", min_compatible_version: "0.25.2",
     runtime_version: "0.25.2",
@@ -438,8 +487,11 @@ function connectedStore(): RootStore {
 function applicationSnapshot(): ApplicationSnapshot {
   return {
     runtime_lifecycle: "running",
-    active_sessions_next_offset: null,
-    archived_sessions_next_offset: null,
+    ...sidebarFixture({ active_next: null, archived_next: null, active: [
+      sessionSummary("bound-session", "工作区会话", "workspace-1"),
+      sessionSummary("unbound-session", "未绑定会话", null),
+    ], archived: [] }),
+
     configuration: {
       config_path: null,
       revision: "fixture-revision",
@@ -459,15 +511,12 @@ function applicationSnapshot(): ApplicationSnapshot {
       updated_at_ms: 1,
       removed_at_ms: null,
     }],
-    active_sessions: [
-      sessionSummary("bound-session", "工作区会话", "workspace-1"),
-      sessionSummary("unbound-session", "未绑定会话", null),
-    ],
-    archived_sessions: [],
+
+
     controller_availability: { status: "unavailable" },
     additional_controller_count: 0,
     capabilities: {
-      conversation_paging: true, mcp_tools: true, mcp_management: true, session_commands: true,
+      conversation_paging: true, mcp_tools: true, mcp_management: true, session_commands: true, user_message_edit: false,
       tool_detail: true,
       queue_control: true,
       approval_queue: true,
@@ -505,3 +554,68 @@ function sessionSummary(
     active_run_status: null,
   };
 }
+
+
+it("optimistically orders one scope, rejects stale pages and rolls back on conflict", async () => {
+  const store = connectedStore();
+  const scope = sessionScope(null);
+  const before = ["a", "b", "c"];
+  const revision = store.projection.list_revision;
+  let reject!: (error: unknown) => void;
+  const command = vi.fn(() => new Promise((_resolve, fail) => { reject = fail; }));
+  vi.spyOn(RuntimeLifecycleCoordinator.prototype, "client", "get").mockReturnValue({ command } as unknown as RuntimeClient);
+  const refresh = vi.spyOn(RuntimeLifecycleCoordinator.prototype, "loadApplication").mockResolvedValue();
+  const pending = store.sidebar_order.move(scope, "c", "a", "before", before);
+  expect(store.sidebar_order.rows(scope, before, row => row)).toEqual(["c", "a", "b"]);
+  expect(store.sidebar_order.enabled(scope)).toBe(false);
+  expect(store.sidebar_order.enabled(WORKSPACES)).toBe(true);
+  store.projection.invalidateListPages();
+  expect(store.sidebar_order.rows(scope, before, row => row)).toEqual(["c", "a", "b"]);
+  expect(store.projection.list_revision).toBeGreaterThan(revision);
+  store.projection.appendSessionGroup({ group: { type: "unbound" }, filter: "active", sessions: [], next_offset: null }, 0, revision);
+  expect(store.projection.sessionGroup(null, "active")?.sessions[0].session_id).toBe("unbound-session");
+  reject(new RuntimeClientError("conflict", "changed"));
+  expect(await pending).toBe(false);
+  expect(store.sidebar_order.rows(scope, before, row => row)).toBe(before);
+  expect(store.sidebar_order.error(scope)).toBe("列表已更新，请重试");
+  expect(refresh).toHaveBeenCalledTimes(1);
+  expect(command).toHaveBeenCalledTimes(1);
+  store.dispose();
+});
+
+it("uses newer snapshots over optimistic order and never retries an uncertain write", async () => {
+  const store = connectedStore();
+  const scope = sessionScope(null);
+  let reject!: (error: unknown) => void;
+  const command = vi.fn(() => new Promise((_resolve, fail) => { reject = fail; }));
+  vi.spyOn(RuntimeLifecycleCoordinator.prototype, "client", "get").mockReturnValue({ command } as unknown as RuntimeClient);
+  vi.spyOn(RuntimeLifecycleCoordinator.prototype, "loadApplication").mockResolvedValue();
+  const pending = store.sidebar_order.move(scope, "b", "a", "before", ["a", "b"]);
+  store.projection.refreshApplicationSnapshot({ observed_sequence: 8, value: applicationSnapshot() });
+  expect(store.sidebar_order.rows(scope, ["a", "b"], row => row)).toEqual(["a", "b"]);
+  reject(new RuntimeClientError("timeout", "unknown"));
+  expect(await pending).toBe(false);
+  expect(command).toHaveBeenCalledTimes(1);
+  expect(store.sidebar_order.error(scope)).toBe("顺序保存失败，请重试");
+  expect(await store.sidebar_order.move(scope, "a", "b", "before", ["a", "b"])).toBe(true);
+  expect(command).toHaveBeenCalledTimes(1);
+  store.dispose();
+});
+
+it("keeps reset confirmation open on failure and disables sorting in archived view", async () => {
+  const store = connectedStore();
+  const command = vi.fn().mockRejectedValue(new RuntimeClientError("conflict", "changed"));
+  vi.spyOn(RuntimeLifecycleCoordinator.prototype, "client", "get").mockReturnValue({ command } as unknown as RuntimeClient);
+  vi.spyOn(RuntimeLifecycleCoordinator.prototype, "loadApplication").mockResolvedValue();
+  render(<RootStoreProvider store={store}><SessionSidebar /></RootStoreProvider>);
+  fireEvent.click(screen.getByRole("button", { name: "恢复独立会话默认顺序" }));
+  const dialog = screen.getByRole("dialog", { name: "恢复独立会话的默认顺序？" });
+  fireEvent.click(within(dialog).getByRole("button", { name: "恢复默认" }));
+  await waitFor(() => expect(within(dialog).getByRole("alert")).toHaveTextContent("列表已更新，请重试"));
+  expect(command).toHaveBeenCalledWith({ type: "reset_sidebar_order", payload: sessionScope(null) });
+  fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+  act(() => store.sidebar_navigation.setListMode("archived"));
+  expect(store.sidebar_order.enabled(WORKSPACES)).toBe(false);
+  expect(screen.queryByRole("button", { name: "恢复项目默认顺序" })).not.toBeInTheDocument();
+  store.dispose();
+});

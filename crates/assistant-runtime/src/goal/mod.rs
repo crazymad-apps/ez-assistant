@@ -218,18 +218,6 @@ impl GoalControl {
         forked
     }
 
-    pub(crate) fn paused_for_recovery(&self, changed_at_ms: i64) -> Result<Self, ()> {
-        if changed_at_ms < self.updated_at_ms {
-            return Err(());
-        }
-        let mut paused = self.clone();
-        paused.state = GoalState::Paused(GoalPauseReason::RecoveryRequired);
-        paused.generation = paused.generation.checked_add(1).ok_or(())?;
-        paused.updated_at_ms = changed_at_ms;
-        paused.completed_at_ms = None;
-        Ok(paused)
-    }
-
     pub(crate) fn stored_objective_parts(&self) -> Vec<StoredGoalObjectivePart> {
         self.objective
             .payload

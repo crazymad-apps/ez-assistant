@@ -237,8 +237,8 @@ fn verify_long_goal_physical_state(runtime_home: &std::path::Path, session_id: &
     let input_counts: (i64, i64, i64) = connection
         .query_row(
             "SELECT COUNT(*),
-                    SUM(CASE WHEN origin = 'user' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN origin = 'runtime' THEN 1 ELSE 0 END)
+                    COALESCE(SUM(CASE WHEN origin = 'user' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN origin = 'runtime' THEN 1 ELSE 0 END), 0)
              FROM inputs WHERE session_id = ?1",
             [session_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -246,8 +246,8 @@ fn verify_long_goal_physical_state(runtime_home: &std::path::Path, session_id: &
         .expect("Goal Input counts");
     assert_eq!(
         input_counts,
-        (1, 0, 0),
-        "completed Input keeps only its identity"
+        (0, 0, 0),
+        "completed Input releases all SQL control"
     );
     assert_eq!(connection.query_row("SELECT COUNT(*) FROM inputs WHERE session_id=?1 AND (user_message_id IS NOT NULL OR accepted_at_ms IS NOT NULL OR agent_variant IS NOT NULL OR origin IS NOT NULL OR goal_id IS NOT NULL OR channel_source_json IS NOT NULL OR queued_message_json IS NOT NULL)",[session_id],|row|row.get::<_,i64>(0)).unwrap(),0);
     let completed_runs: i64 = connection

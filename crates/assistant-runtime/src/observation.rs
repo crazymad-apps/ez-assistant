@@ -336,6 +336,7 @@ impl ObservationState {
                 self.mcp = self.sequence;
                 (None, true)
             }
+            SidebarOrderChanged => (None, true),
             WorkspaceChanged { workspace_id } => {
                 if let Some(scope) = self.workspaces.get_mut(workspace_id) {
                     scope.sequence = self.sequence;

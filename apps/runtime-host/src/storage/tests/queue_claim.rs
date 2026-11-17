@@ -11,6 +11,11 @@ fn home() -> TempDir {
 }
 
 #[test]
+fn normal_input_claim_resumes_goal_atomically_and_only_once() {
+    super::exercise_goal_run_continuation_and_resume(true);
+}
+
+#[test]
 fn queue_is_retractable_without_a_run_and_claim_creates_exactly_one_execution() {
     let home = home();
     let mut engine = open_engine(&home);
@@ -94,7 +99,7 @@ fn queue_is_retractable_without_a_run_and_claim_creates_exactly_one_execution() 
         .load_run_control(&session, &fixture_run_id(&second))
         .unwrap()
         .unwrap();
-    assert!(engine.claim_input(run).is_err());
+    assert!(engine.claim_input(run, None).is_err());
     super::input_selections::complete_selected_turn(&mut engine, &second);
     assert!(
         engine
@@ -112,7 +117,7 @@ fn queue_is_retractable_without_a_run_and_claim_creates_exactly_one_execution() 
             .query_row("SELECT COUNT(*) FROM inputs", [], |row| row
                 .get::<_, i64>(0))
             .unwrap(),
-        1
+        0
     );
 }
 
@@ -134,7 +139,15 @@ fn upgrade_detaches_only_unstarted_queue_controls_and_removes_successful_backup(
         .execute("UPDATE skill_activations SET run_id='old-queued-run'", [])
         .unwrap();
     engine.connection.execute("UPDATE inputs SET skill_activation_json=json_set(skill_activation_json,'$.run_id','old-queued-run') WHERE input_id=?1",[input.input_id.as_str()]).unwrap();
-    engine.connection.execute_batch("DELETE FROM schema_migrations WHERE migration_key='conversation_usage_snapshots_v1' OR version IN ('0.32.2','0.33.0');
+    engine.connection.execute_batch("DROP INDEX workspaces_sort_order;
+         DROP INDEX session_resources_workspace_order;
+         DROP INDEX sessions_pin_order;
+         DROP INDEX sessions_created_order;
+         ALTER TABLE workspaces DROP COLUMN sort_order;
+         ALTER TABLE session_resources DROP COLUMN sort_order;
+         ALTER TABLE sessions DROP COLUMN pin_order;
+         CREATE INDEX session_resources_workspace ON session_resources(workspace_id,session_id);
+         DELETE FROM schema_migrations WHERE migration_key='conversation_usage_snapshots_v1' OR version IN ('0.32.2','0.33.0','0.33.1');
         DROP TABLE conversation_usage_snapshots;
         DROP TABLE message_cards;
         UPDATE database_compatibility SET min_compatible_host_version='0.32.1';
@@ -151,6 +164,7 @@ fn upgrade_detaches_only_unstarted_queue_controls_and_removes_successful_backup(
             .unwrap(),
         1
     );
+    downgrade_fixture_header(&body_path(&engine.session_directory(&session).unwrap(), 1));
     drop(engine);
     let mut engine = open_engine(&home);
     assert_eq!(engine.load_inputs().unwrap(), before);
@@ -219,7 +233,15 @@ fn queue_upgrade_preserves_an_already_claimed_start_receipt_for_normal_recovery(
         .connection
         .execute_batch("DROP TRIGGER pause_claimed_start")
         .unwrap();
-    engine.connection.execute_batch("DELETE FROM schema_migrations WHERE migration_key='conversation_usage_snapshots_v1' OR version IN ('0.32.2','0.33.0');
+    engine.connection.execute_batch("DROP INDEX workspaces_sort_order;
+         DROP INDEX session_resources_workspace_order;
+         DROP INDEX sessions_pin_order;
+         DROP INDEX sessions_created_order;
+         ALTER TABLE workspaces DROP COLUMN sort_order;
+         ALTER TABLE session_resources DROP COLUMN sort_order;
+         ALTER TABLE sessions DROP COLUMN pin_order;
+         CREATE INDEX session_resources_workspace ON session_resources(workspace_id,session_id);
+         DELETE FROM schema_migrations WHERE migration_key='conversation_usage_snapshots_v1' OR version IN ('0.32.2','0.33.0','0.33.1');
         DROP TABLE conversation_usage_snapshots;
         DROP TABLE message_cards;
         UPDATE database_compatibility SET min_compatible_host_version='0.32.1';
@@ -236,6 +258,7 @@ fn queue_upgrade_preserves_an_already_claimed_start_receipt_for_normal_recovery(
             .unwrap(),
         1
     );
+    downgrade_fixture_header(&body_path(&engine.session_directory(&session).unwrap(), 1));
     drop(engine);
     let mut engine = open_engine(&home);
     let loaded = engine.prepare_session_execution(&session).unwrap();

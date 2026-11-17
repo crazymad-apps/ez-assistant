@@ -175,6 +175,34 @@ impl RuntimeStore for VolatileRuntimeStore {
         VolatileRuntimeStore::load_session_state(self, session_id)
     }
 
+    fn move_sidebar_item(
+        &self,
+        request: assistant_protocol::MoveSidebarItemRequest,
+    ) -> StoreFuture<'_, ()> {
+        VolatileRuntimeStore::move_sidebar_item(self, request)
+    }
+
+    fn reset_sidebar_order(
+        &self,
+        request: assistant_protocol::ResetSidebarOrderRequest,
+    ) -> StoreFuture<'_, ()> {
+        VolatileRuntimeStore::reset_sidebar_order(self, request)
+    }
+
+    fn query_workspaces(
+        &self,
+        request: assistant_protocol::ListWorkspacesRequest,
+    ) -> StoreFuture<'_, crate::WorkspacePage> {
+        VolatileRuntimeStore::query_workspaces(self, request)
+    }
+
+    fn query_sidebar(
+        &self,
+        request: assistant_protocol::GetApplicationSnapshotRequest,
+    ) -> StoreFuture<'_, crate::SidebarSnapshot> {
+        VolatileRuntimeStore::query_sidebar(self, request)
+    }
+
     fn query_session_summaries(
         &self,
         query: crate::SessionSummaryQuery,
@@ -313,8 +341,120 @@ impl RuntimeStore for VolatileRuntimeStore {
         VolatileRuntimeStore::upload_attachment(self, upload)
     }
 
-    fn claim_input(&self, run: StoredRun) -> StoreFuture<'_, ()> {
-        VolatileRuntimeStore::claim_input(self, run)
+    fn claim_input(
+        &self,
+        run: StoredRun,
+        goal_resume: Option<GoalHeldInputResume>,
+    ) -> StoreFuture<'_, ()> {
+        VolatileRuntimeStore::claim_input(self, run, goal_resume)
+    }
+
+    fn new_conversation_identity_available(
+        &self,
+        session: &SessionId,
+        identity: crate::NewConversationIdentity,
+    ) -> StoreFuture<'_, bool> {
+        let session = session.clone();
+        Box::pin(async move {
+            let state = self.lock()?;
+            if !state.is_history_available(&session) {
+                return Err(StoreError::new(
+                    StoreErrorKind::InvalidData,
+                    "conversation history is unavailable",
+                ));
+            }
+            Ok(match identity {
+                crate::NewConversationIdentity::Input {
+                    input_id,
+                    message_id,
+                } => state
+                    .ensure_new_input_identity(&session, &input_id, None, &message_id)
+                    .is_ok(),
+                crate::NewConversationIdentity::Run(run) => {
+                    state.ensure_new_run_identity(&session, &run).is_ok()
+                }
+            })
+        })
+    }
+
+    fn load_run_conversation(
+        &self,
+        session: &SessionId,
+        run: &RunId,
+    ) -> StoreFuture<'_, crate::StoredConversationRawWindow> {
+        let session = session.clone();
+        let run = run.clone();
+        Box::pin(async move {
+            let state = self.lock()?;
+            let history = state
+                .histories
+                .get(&session)
+                .ok_or_else(|| conflict("Run history is missing"))?;
+            let body = state
+                .conversations
+                .get(&session)
+                .ok_or_else(|| conflict("Run conversation is missing"))?;
+            let origins: Vec<_> = history
+                .message_origins
+                .iter()
+                .filter(|origin| !origin.inherited && origin.run_id.as_ref() == Some(&run))
+                .cloned()
+                .collect();
+            let owned: BTreeSet<_> = origins.iter().map(|origin| &origin.message_id).collect();
+            let mut positions = body
+                .messages
+                .iter()
+                .enumerate()
+                .filter_map(|(index, message)| {
+                    owned.contains(message_id(message)).then_some(index)
+                });
+            let (start, end) = positions.next().map_or((0, 0), |first| {
+                (first, positions.next_back().unwrap_or(first) + 1)
+            });
+            Ok(crate::StoredConversationRawWindow {
+                generation: state
+                    .sessions
+                    .get(&session)
+                    .ok_or_else(|| conflict("session is missing"))?
+                    .body_generation,
+                start,
+                end,
+                total: body.messages.len(),
+                conversation: ConversationSnapshot::new(body.messages[start..end].to_vec()),
+                history: Some(crate::StoredHistoryFacts {
+                    message_origins: origins,
+                    ..Default::default()
+                }),
+            })
+        })
+    }
+
+    fn find_request_acceptance(
+        &self,
+        session: &SessionId,
+        key: &IdempotencyKey,
+    ) -> StoreFuture<'_, Option<crate::StoredRequestAcceptance>> {
+        let session = session.clone();
+        let key = key.clone();
+        Box::pin(async move {
+            let state = self.lock()?;
+            let mut result = None;
+            if let Some(id) = state.message_request(&session, &key) {
+                let input = state.input_projection(&session, id)?;
+                result = Some(crate::StoredRequestAcceptance::Message(Box::new(
+                    state.existing_input_acceptance(input)?,
+                )));
+            }
+            if let Some(id) = state.command_request(&session, &key) {
+                if result.is_some() {
+                    return Err(conflict("request key belongs to both message and command"));
+                }
+                result = Some(crate::StoredRequestAcceptance::Command(Box::new(
+                    state.command_projection(&session, id)?,
+                )));
+            }
+            Ok(result)
+        })
     }
 
     fn accept_input(&self, input: NewStoredInput) -> StoreFuture<'_, AcceptedInput> {
@@ -523,6 +663,13 @@ impl RuntimeStore for VolatileRuntimeStore {
         request: ConversationWindowRequest,
     ) -> StoreFuture<'_, StoredConversationWindow> {
         VolatileRuntimeStore::load_conversation_window(self, request)
+    }
+
+    fn read_conversation_navigation(
+        &self,
+        request: ConversationNavigationRequest,
+    ) -> StoreFuture<'_, StoredConversationNavigation> {
+        VolatileRuntimeStore::read_conversation_navigation(self, request)
     }
 
     fn load_conversation_raw_window(

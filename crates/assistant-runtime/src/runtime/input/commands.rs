@@ -24,9 +24,30 @@ impl AssistantRuntime {
         let _mutation = session.mutation().await;
         session.ensure_active()?;
         session.ensure_healthy()?;
+        let should_move = self
+            .prioritize_input_locked(&session, &request.input_id, Some(request.expected_revision))
+            .await?;
+        let queue = super::super::product::queue_snapshot(&session, &self.device_names()?)?;
+        if should_move {
+            self.publish(assistant_protocol::RuntimeEvent::QueueChanged {
+                session_id: request.session_id,
+                revision: queue.revision,
+            });
+        }
+        Ok(PrioritizeQueuedInputResult { queue })
+    }
+
+    /// 调用方持有 Session mutation gate；先提交持久顺序，再镜像队列，事件由调用方发布。
+    /// 已在队首时幂等返回；Store 失败时内存顺序保持原状。
+    pub(super) async fn prioritize_input_locked(
+        &self,
+        session: &crate::session::SessionController,
+        input_id: &assistant_protocol::InputId,
+        expected_revision: Option<u64>,
+    ) -> RuntimeResult<bool> {
         let should_move = {
             let state = session.lock_state()?;
-            if state.queue_revision != request.expected_revision {
+            if expected_revision.is_some_and(|revision| state.queue_revision != revision) {
                 return Err(RuntimeError::QueueConflict);
             }
             if state.executing_command.is_some() {
@@ -35,18 +56,18 @@ impl AssistantRuntime {
             let position = state
                 .queue_item_ids
                 .iter()
-                .position(|input_id| input_id == &request.input_id)
+                .position(|candidate| candidate == input_id)
                 .ok_or_else(|| RuntimeError::InputNotFound {
-                    session_id: request.session_id.clone(),
-                    input_id: request.input_id.clone(),
+                    session_id: session.id().clone(),
+                    input_id: input_id.clone(),
                 })?;
             position > 0
         };
         if should_move {
             self.store
                 .prioritize_queued_input(QueuePriorityChange {
-                    session_id: request.session_id.clone(),
-                    input_id: request.input_id.clone(),
+                    session_id: session.id().clone(),
+                    input_id: input_id.clone(),
                 })
                 .await
                 .map_err(|source| RuntimeError::from_store("prioritize queued input", source))?;
@@ -54,7 +75,7 @@ impl AssistantRuntime {
             let position = state
                 .queue_item_ids
                 .iter()
-                .position(|input_id| input_id == &request.input_id)
+                .position(|candidate| candidate == input_id)
                 .ok_or(RuntimeError::QueueConflict)?;
             let input_id = state.queue_item_ids.remove(position).ok_or(
                 RuntimeError::InternalStateUnavailable {
@@ -65,14 +86,7 @@ impl AssistantRuntime {
             renumber_queue_items(&mut state)?;
             state.queue_revision = state.queue_revision.saturating_add(1);
         }
-        let queue = super::super::product::queue_snapshot(&session, &self.device_names()?)?;
-        if should_move {
-            self.publish(assistant_protocol::RuntimeEvent::QueueChanged {
-                session_id: request.session_id,
-                revision: queue.revision,
-            });
-        }
-        Ok(PrioritizeQueuedInputResult { queue })
+        Ok(should_move)
     }
 
     /// 恢复整个队列；可选目标会在恢复前可靠置顶。

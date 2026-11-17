@@ -492,6 +492,9 @@ mod tests {
         let acknowledgement = InputAccepted::from_submission(
             "device-input".to_owned(),
             SubmitInputResult {
+                user_message: None,
+                generation: None,
+                not_executed: None,
                 input_id: InputId::new("queued-input").unwrap(),
                 run: None,
             },

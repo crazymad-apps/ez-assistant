@@ -509,7 +509,12 @@ impl StorageEngine {
             let path =
                 self.child_body(&task.session_id, &task.child_task_id, task.body_generation)?;
             if self.allow_legacy_history
-                && !conversation::has_history_header(&path, &owner, task.body_generation)?
+                && !conversation::has_history_header(
+                    &path,
+                    &owner,
+                    task.body_generation,
+                    self.history_version(),
+                )?
             {
                 // 仅限完成备份后的旧格式恢复；下一步整体迁出把该终态冻结到新文件。
                 // 正常产品没有无头零消息格式，也不能据此保留 SQL 历史兜底。

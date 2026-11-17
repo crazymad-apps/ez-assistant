@@ -9,10 +9,10 @@ use std::{
 use agent_model::SystemPromptSnapshot;
 use assistant_protocol::{ConversationOwner, SessionId, SessionTitleOrigin};
 use assistant_runtime::{
-    ConversationMessageLocationRequest, ConversationRawWindowRequest, ConversationWindowRequest,
-    NewStoredSession, RecoveredRuntime, StoredConversationMessageLocation,
-    StoredConversationRawWindow, StoredConversationState, StoredConversationWindow, StoredSession,
-    StoredSessionLifecycle,
+    ConversationMessageLocationRequest, ConversationNavigationRequest,
+    ConversationRawWindowRequest, ConversationWindowRequest, NewStoredSession, RecoveredRuntime,
+    StoredConversationMessageLocation, StoredConversationNavigation, StoredConversationRawWindow,
+    StoredConversationState, StoredConversationWindow, StoredSession, StoredSessionLifecycle,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -46,16 +46,27 @@ pub(super) struct StorageEngine {
     pub(super) recall_index_available: bool,
     // 仅由完成独立备份后的迁移控制器启用，不作为产品配置或持久化兼容开关。
     pub(super) allow_legacy_history: bool,
+    // 迁移期间按 v1 完成原有回执，源 SQL 幂等键留待同一次换代交接。
+    pub(super) retain_input_identities: bool,
 }
 
 impl StorageEngine {
+    pub(super) fn history_version(&self) -> u32 {
+        if self.retain_input_identities {
+            conversation::PREVIOUS_HISTORY_VERSION
+        } else {
+            conversation::HISTORY_VERSION
+        }
+    }
+
     pub(super) fn read_owner_document(
         &self,
         path: &Path,
         owner: &ConversationOwner,
         generation: u64,
     ) -> StorageResult<conversation::ConversationDocument> {
-        let document = conversation::read_document(path, owner, generation)?;
+        let document =
+            conversation::read_document_version(path, owner, generation, self.history_version())?;
         if document.history.is_none() && !self.allow_legacy_history {
             return Err(invalid_data("conversation history header is missing"));
         }
@@ -149,9 +160,12 @@ impl StorageEngine {
             connection,
             unavailable_sessions: HashSet::new(),
             unavailable_child_tasks: HashSet::new(),
-            conversation_indexes: conversation::ConversationIndexCache::default(),
+            conversation_indexes: conversation::ConversationIndexCache::with_version(
+                conversation::PREVIOUS_HISTORY_VERSION,
+            ),
             recall_index_available: false,
             allow_legacy_history: true,
+            retain_input_identities: true,
         })
     }
 
@@ -264,6 +278,7 @@ impl StorageEngine {
             conversation_indexes: conversation::ConversationIndexCache::default(),
             recall_index_available,
             allow_legacy_history: false,
+            retain_input_identities: false,
         };
         if let Some(progress) = progress {
             progress.send_modify(|current| {
@@ -500,17 +515,33 @@ super::agent_shell::encode_environment(session.agent_shell_environment.as_ref())
         &mut self,
         request: ConversationWindowRequest,
     ) -> StorageResult<StoredConversationWindow> {
-        self.ensure_no_pending_history(&request.owner)?;
-        let path = match &request.owner {
+        let path = self.conversation_body_for_generation(&request.owner, request.generation)?;
+        self.conversation_indexes
+            .validate_owner(&path, &request.owner, request.generation)?;
+        self.conversation_indexes.read_window(
+            &path,
+            request.generation,
+            request.end,
+            request.turn_limit,
+        )
+    }
+
+    fn conversation_body_for_generation(
+        &mut self,
+        owner: &ConversationOwner,
+        generation: u64,
+    ) -> StorageResult<PathBuf> {
+        self.ensure_no_pending_history(owner)?;
+        let path = match owner {
             ConversationOwner::MainSession { session_id } => {
                 super::filesystem::validate_session_component(session_id)?;
                 if self.unavailable_sessions.contains(session_id.as_str()) {
                     return Err(invalid_data("session conversation is unavailable"));
                 }
-                if self.session_generation(session_id)? != request.generation {
+                if self.session_generation(session_id)? != generation {
                     return Err(conflict("conversation generation changed"));
                 }
-                body_path(&self.session_directory(session_id)?, request.generation)
+                body_path(&self.session_directory(session_id)?, generation)
             }
             ConversationOwner::ChildTask {
                 session_id,
@@ -524,52 +555,28 @@ super::agent_shell::encode_environment(session.agent_shell_environment.as_ref())
                 )) {
                     return Err(invalid_data("child conversation is unavailable"));
                 }
-                if self.child_history_generation(session_id, child_task_id)? != request.generation {
+                if self.child_history_generation(session_id, child_task_id)? != generation {
                     return Err(conflict("conversation generation changed"));
                 }
-                self.child_body(session_id, child_task_id, request.generation)?
+                self.child_body(session_id, child_task_id, generation)?
             }
         };
-        self.conversation_indexes
-            .validate_owner(&path, &request.owner, request.generation)?;
-        self.conversation_indexes
-            .read_window(&path, request.generation, request.end, request.limit)
+        Ok(path)
+    }
+
+    pub(super) fn read_conversation_navigation(
+        &mut self,
+        request: ConversationNavigationRequest,
+    ) -> StorageResult<StoredConversationNavigation> {
+        let path = self.conversation_body_for_generation(&request.owner, request.generation)?;
+        self.conversation_indexes.read_navigation(&path, request)
     }
 
     pub(super) fn load_conversation_raw_window(
         &mut self,
         request: ConversationRawWindowRequest,
     ) -> StorageResult<StoredConversationRawWindow> {
-        self.ensure_no_pending_history(&request.owner)?;
-        let path = match &request.owner {
-            ConversationOwner::MainSession { session_id } => {
-                super::filesystem::validate_session_component(session_id)?;
-                if self.unavailable_sessions.contains(session_id.as_str()) {
-                    return Err(invalid_data("session conversation is unavailable"));
-                }
-                if self.session_generation(session_id)? != request.generation {
-                    return Err(conflict("conversation generation changed"));
-                }
-                body_path(&self.session_directory(session_id)?, request.generation)
-            }
-            ConversationOwner::ChildTask {
-                session_id,
-                child_task_id,
-            } => {
-                super::filesystem::validate_session_component(session_id)?;
-                super::filesystem::validate_child_task_component(child_task_id)?;
-                if self.unavailable_child_tasks.contains(&(
-                    session_id.as_str().to_owned(),
-                    child_task_id.as_str().to_owned(),
-                )) {
-                    return Err(invalid_data("child conversation is unavailable"));
-                }
-                if self.child_history_generation(session_id, child_task_id)? != request.generation {
-                    return Err(conflict("conversation generation changed"));
-                }
-                self.child_body(session_id, child_task_id, request.generation)?
-            }
-        };
+        let path = self.conversation_body_for_generation(&request.owner, request.generation)?;
         self.conversation_indexes
             .validate_owner(&path, &request.owner, request.generation)?;
         let (conversation, end, total) =

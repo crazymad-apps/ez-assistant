@@ -310,7 +310,7 @@ async fn manual_compaction_replaces_history_without_creating_a_run_and_is_idempo
         .get_conversation_page_around_run(GetConversationPageAroundRunRequest {
             session_id: session_id.clone(),
             run_id: first_run_id,
-            limit: 10,
+            turn_limit: Some(10),
         })
         .await
         .expect("page around a run before the compaction boundary");
@@ -598,13 +598,26 @@ async fn fork_and_reentry_normalize_truncated_compaction_usage_references() {
     assert_latest_summary_usage_unavailable(&forked_history);
 
     let reentered = runtime
-        .reenter_from_user_message(assistant_protocol::ReenterFromUserMessageRequest {
-            session_id: session_id.clone(),
-            message_id: reentry_target,
-            message: "replacement turn".to_owned(),
-            attachment_ids: Vec::new(),
-            variant: assistant_protocol::AgentVariant::Build,
-            idempotency_key: None,
+        .reenter_from_user_message({
+            let (expected_generation, expected_message_count) =
+                edit_basis(&runtime, &session_id.clone()).await;
+            assistant_protocol::ReenterFromUserMessageRequest {
+                session_id: session_id.clone(),
+                message_id: reentry_target,
+                message: "replacement turn".to_owned(),
+                attachment_ids: Vec::new(),
+                variant: assistant_protocol::AgentVariant::Build,
+                idempotency_key: assistant_protocol::IdempotencyKey::new(
+                    crate::id::generate("edit-test").unwrap(),
+                )
+                .unwrap(),
+
+                expected_generation,
+                expected_message_count,
+                quotes: Vec::new(),
+                skill_edit: assistant_protocol::UserMessageSkillEdit::Retain,
+                mcp_edit: assistant_protocol::UserMessageMcpEdit::Retain,
+            }
         })
         .await
         .unwrap();
@@ -691,6 +704,7 @@ async fn manual_compaction_rejects_a_session_with_an_active_run() {
     let session_id = session.session.session_id;
     let accepted = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session_id.clone(),
@@ -880,6 +894,7 @@ async fn manual_compaction_can_be_cancelled_and_rejects_new_input_while_active()
     assert!(active.cancellable);
     let busy = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session_id.clone(),

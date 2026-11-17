@@ -23,7 +23,7 @@ impl ModelIdentity {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
-/// Provider 结束本次模型输出的原因。
+/// 模型输出结束或流被终止的原因。
 pub enum FinishReason {
     /// 模型正常结束，通常表示已经给出最终回答。
     Stop,
@@ -35,8 +35,17 @@ pub enum FinishReason {
     ContentFilter,
     /// 调用方主动取消了本次模型请求。
     Cancelled,
+    /// 模型流失败，只留下已接收的部分输出。
+    Failed,
     /// 尚未纳入规范枚举的 Provider 原生结束原因。
     Other(String),
+}
+
+impl FinishReason {
+    /// 终止前留下的可见输出不构成完整模型响应。
+    pub fn is_partial(&self) -> bool {
+        matches!(self, Self::Cancelled | Self::Failed)
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]

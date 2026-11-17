@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
-import type { ApplicationSnapshot, RunSnapshot, SystemContextSnapshot } from "@ez-assistant/protocol";
+import type { ListSessionsResult, ListWorkspacesResult, RunSnapshot, SystemContextSnapshot } from "@ez-assistant/protocol";
 
 type Fixture = Readonly<{ base_url: string; access_token: string }>;
 const fixture = (): Fixture => JSON.parse(process.env.EZ_ASSISTANT_E2E_BOOTSTRAP ?? "null") as Fixture;
@@ -168,10 +168,10 @@ async function runtimeCommand<T>(type: string, payload: object): Promise<T> {
 }
 
 test("主控与普通会话都能 refresh，Skill 新目录即时更新且不创建 Run", async ({ page }, info) => {
-  const before = await runtimeCommand<{ snapshot: { value: ApplicationSnapshot } }>("get_application_snapshot", {});
+  const before = await runtimeCommand<ListSessionsResult>("list_sessions", { limit: 10000 });
   const prompts = new Map<string, string[]>();
   const existing_runs = new Map<string, string[]>();
-  for (const session of before.snapshot.value.active_sessions) {
+  for (const session of before.sessions) {
     const context = await runtimeCommand<{ snapshot: SystemContextSnapshot }>("get_system_context", { session_id: session.session_id });
     prompts.set(session.session_id, context.snapshot.parts);
     const result = await runtimeCommand<{ runs: RunSnapshot[] }>("list_runs", { session_id: session.session_id });
@@ -211,7 +211,8 @@ Current fixture instructions.
     await expect(page.getByText("refresh-check", { exact: true })).toBeVisible();
     await input.fill("/skill refresh");
     await input.press("Enter");
-    await expect(page.getByRole("article", { name: "技能刷新完成", exact: true })).toContainText("1 个技能");
+    const skill_snapshot = await runtimeCommand<{ snapshot: { skills: unknown[] } }>("list_skills", { include_plugins: true });
+    await expect(page.getByRole("article", { name: "技能刷新完成", exact: true })).toContainText(`${skill_snapshot.snapshot.skills.length} 个技能`);
     await input.fill("/skill");
     await input.press("Enter");
     await expect(page.getByRole("option", { name: /refresh-check/ })).toBeVisible();
@@ -221,8 +222,8 @@ Current fixture instructions.
     await expect(page.getByRole("article", { name: "MCP 刷新完成", exact: true })).toBeVisible();
     await page.screenshot({ path: info.outputPath(controller ? "controller-refresh.png" : "session-refresh.png") });
   }
-  const snapshot = await runtimeCommand<{ snapshot: { value: ApplicationSnapshot } }>("get_application_snapshot", {});
-  for (const session of snapshot.snapshot.value.active_sessions) {
+  const snapshot = await runtimeCommand<ListSessionsResult>("list_sessions", { limit: 10000 });
+  for (const session of snapshot.sessions) {
     const result = await runtimeCommand<{ runs: RunSnapshot[] }>("list_runs", { session_id: session.session_id });
     // 同组文件用例可能已产生合法历史 Run；refresh 必须保留历史且不能新增 Run。
     expect(result.runs.map((run) => run.run_id).sort()).toEqual(existing_runs.get(session.session_id));
@@ -239,7 +240,7 @@ test("Web 新会话使用底部抽屉并可从私有工作空间首次发送", a
   await page.getByLabel("访问密码", { exact: true }).fill("isolated-web-password");
   await page.getByRole("button", { name: "进入项目" }).click();
   await expectWorkspaceReady(page);
-  const before = await runtimeCommand<{ snapshot: { value: ApplicationSnapshot } }>("get_application_snapshot", {});
+  const before = await runtimeCommand<ListSessionsResult>("list_sessions", { limit: 10000 });
   await page.getByRole("button", { name: "新建会话" }).click();
   const header = page.locator('header[aria-label="会话标题栏"]');
   await expect(header.getByRole("button", { name: "新对话" })).toHaveCount(0);
@@ -251,18 +252,44 @@ test("Web 新会话使用底部抽屉并可从私有工作空间首次发送", a
   await editor.getByRole("button", { name: "创建" }).click();
   await expect(editor).toBeHidden();
   await expect(page.getByRole("button", { name: "新会话项目" })).toContainText("Web M4 私有工作空间");
-  const after_create = await runtimeCommand<{ snapshot: { value: ApplicationSnapshot } }>("get_application_snapshot", {});
-  expect(after_create.snapshot.value.active_sessions.length).toBe(before.snapshot.value.active_sessions.length);
-  const workspace = after_create.snapshot.value.workspaces.find((item) => item.label === "Web M4 私有工作空间");
+  const after_create = await runtimeCommand<ListSessionsResult>("list_sessions", { limit: 10000 });
+  expect(after_create.sessions.length).toBe(before.sessions.length);
+  const workspace = (await runtimeCommand<ListWorkspacesResult>("list_workspaces", {})).workspaces.find((item) => item.label === "Web M4 私有工作空间");
   expect(workspace?.user_directory).toBeNull();
   const input = page.getByRole("textbox", { name: "输入消息" });
-  await page.getByRole("button", { name: "整理文档" }).click();
-  await expect(input).toHaveValue(/请整理我提供的材料/);
   await input.fill("PRIVATE_CASE");
   await input.press("Enter");
   await expect(page.getByText("离线回复：PRIVATE_CASE", { exact: true })).toBeVisible();
-  const after_send = await runtimeCommand<{ snapshot: { value: ApplicationSnapshot } }>("get_application_snapshot", {});
-  expect(after_send.snapshot.value.active_sessions.length).toBe(before.snapshot.value.active_sessions.length + 1);
+  const after_send = await runtimeCommand<ListSessionsResult>("list_sessions", { limit: 10000 });
+  expect(after_send.sessions.length).toBe(before.sessions.length + 1);
+});
+
+test("Web 普通输入领取后延续暂停的目标", async ({ page }) => {
+  await page.goto(fixture().base_url);
+  await page.getByLabel("访问密码", { exact: true }).fill("isolated-web-password");
+  await page.getByRole("button", { name: "进入项目" }).click();
+  await expectWorkspaceReady(page);
+  await page.getByRole("button", { name: "新建会话" }).click();
+  const input = page.getByRole("textbox", { name: "输入消息" });
+  await input.fill("/goal");
+  await input.press("Enter");
+  await expect(page.getByRole("button", { name: "取消目标标记" })).toBeVisible();
+  await input.fill("GOAL_QUEUE_START");
+  await input.press("Enter");
+  await expect(page.getByText("目标等待输入", { exact: true })).toBeVisible();
+  await expect(page.getByText("Goal paused for guidance", { exact: true })).toBeVisible();
+
+  const submitted = page.waitForRequest(request => {
+    if (request.method() !== "POST" || new URL(request.url()).pathname !== "/commands") return false;
+    const command = request.postDataJSON()?.command?.payload;
+    return command?.type === "submit_input" && command.payload.message === "GOAL_QUEUE_GUIDANCE";
+  });
+  await input.fill("GOAL_QUEUE_GUIDANCE");
+  await input.press("Enter");
+  expect((await submitted).postDataJSON().command.payload.payload.mode).toBe("normal");
+  await expect(page.getByText("GOAL_QUEUE_GUIDANCE", { exact: true })).toBeVisible();
+  await expect(page.getByText("Goal guidance applied", { exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "目标", exact: true })).toHaveCount(0);
 });
 
 test("C03 Web 可创建个人智能体、选择并冻结到新会话", async ({ page }) => {
@@ -281,19 +308,19 @@ test("C03 Web 可创建个人智能体、选择并冻结到新会话", async ({ 
   await page.getByRole("button", { name: "保存智能体" }).click();
   await expect(page.getByRole("button", { name: /Web C03 助手/ })).toBeVisible();
   await page.getByRole("button", { name: "关闭设置" }).click();
-  const before = await runtimeCommand<{ snapshot: { value: ApplicationSnapshot } }>("get_application_snapshot", {});
+  const before = await runtimeCommand<ListSessionsResult>("list_sessions", { limit: 10000 });
   await page.getByRole("button", { name: "新建会话" }).click();
   await page.getByRole("button", { name: "选择智能体" }).click();
   await page.getByRole("dialog", { name: "选择智能体" }).getByRole("option", { name: /Web C03 助手/ }).click();
   await expect(page.getByRole("button", { name: "选择智能体" })).toHaveText(/Web C03 助手/);
-  const after_select = await runtimeCommand<{ snapshot: { value: ApplicationSnapshot } }>("get_application_snapshot", {});
-  expect(after_select.snapshot.value.active_sessions.length).toBe(before.snapshot.value.active_sessions.length);
+  const after_select = await runtimeCommand<ListSessionsResult>("list_sessions", { limit: 10000 });
+  expect(after_select.sessions.length).toBe(before.sessions.length);
   await page.getByRole("textbox", { name: "输入消息" }).fill("FIRST_CASE");
   await page.getByRole("button", { name: "发送消息" }).click();
   await expect(page.getByText("离线回复：FIRST_CASE", { exact: true })).toBeVisible();
-  const after_send = await runtimeCommand<{ snapshot: { value: ApplicationSnapshot } }>("get_application_snapshot", {});
-  expect(after_send.snapshot.value.active_sessions.length).toBe(before.snapshot.value.active_sessions.length + 1);
-  expect(after_send.snapshot.value.active_sessions.some((session) => session.custom_agent?.name === "Web C03 助手" && session.custom_agent.source.type === "personal")).toBe(true);
+  const after_send = await runtimeCommand<ListSessionsResult>("list_sessions", { limit: 10000 });
+  expect(after_send.sessions.length).toBe(before.sessions.length + 1);
+  expect(after_send.sessions.some((session) => session.custom_agent?.name === "Web C03 助手" && session.custom_agent.source.type === "personal")).toBe(true);
 });
 
 test("C03 缺少插件候选时保留草稿并提供处理入口", async ({ page }) => {
@@ -319,11 +346,11 @@ test("C03 缺少插件候选时保留草稿并提供处理入口", async ({ page
   await page.getByRole("dialog", { name: "选择智能体" }).getByRole("option", { name: /缺包测试智能体/ }).click();
   await expect(page.getByText(/缺少插件/)).toBeVisible();
   await page.getByRole("textbox", { name: "输入消息" }).fill("MISSING_PLUGIN_CASE");
-  const before = await runtimeCommand<{ snapshot: { value: ApplicationSnapshot } }>("get_application_snapshot", {});
+  const before = await runtimeCommand<ListSessionsResult>("list_sessions", { limit: 10000 });
   await page.getByRole("button", { name: "发送消息" }).click();
   await expect(page.getByRole("button", { name: "管理插件" })).toBeVisible();
-  const after = await runtimeCommand<{ snapshot: { value: ApplicationSnapshot } }>("get_application_snapshot", {});
-  expect(after.snapshot.value.active_sessions.length).toBe(before.snapshot.value.active_sessions.length);
+  const after = await runtimeCommand<ListSessionsResult>("list_sessions", { limit: 10000 });
+  expect(after.sessions.length).toBe(before.sessions.length);
   await page.getByRole("button", { name: "管理插件" }).click();
   await expect(page.getByRole("button", { name: "上传插件" })).toBeVisible();
   await page.getByRole("button", { name: "关闭设置" }).click();

@@ -13,7 +13,7 @@ impl ConversationIndexCache {
         owner: &ConversationOwner,
         generation: u64,
         messages: &[ConversationMessage],
-    ) -> StorageResult<Option<StoredHistoryFacts>> {
+    ) -> StorageResult<Option<Arc<HistoryOffsets>>> {
         let offsets = self.offsets(path)?;
         if offsets
             .header
@@ -25,7 +25,7 @@ impl ConversationIndexCache {
             ));
         }
         validate_messages(&offsets, messages)?;
-        Ok(offsets.header.as_ref().map(|_| offsets.history.snapshot()))
+        Ok(offsets.header.map(|_| offsets.history))
     }
 
     /// 写文件前再次核对前缀证据。恢复或外部改动后的旧索引不能参与增量推进。
@@ -95,6 +95,65 @@ impl ConversationIndexCache {
     }
 }
 
+impl PreparedGeneration {
+    pub(super) fn check_prefix(&self) -> StorageResult<()> {
+        let entry = &self.0;
+        let metadata = entry
+            .path
+            .metadata()
+            .map_err(|source| internal_error("prepared history could not be inspected", source))?;
+        if metadata.len() != entry.file_length || metadata.modified().ok() != Some(entry.modified) {
+            return Err(invalid_data("prepared history changed after verification"));
+        }
+        Ok(())
+    }
+
+    pub(in crate::storage) fn children(&self) -> Vec<assistant_runtime::StoredChildTaskHistory> {
+        self.0.offsets.history.children(None)
+    }
+
+    /// 准备件的正文已校验；SQLite 分配真实队列顺序后，只同步并核对新追加的事实帧。
+    /// 调用方仍持 Store 串行所有权和发布事务，失败时丢弃准备件及其索引。
+    pub(in crate::storage) fn append_history(
+        &mut self,
+        operation_id: &str,
+        expected: StoredHistoryFacts,
+    ) -> StorageResult<()> {
+        self.check_prefix()?;
+        let entry = &mut self.0;
+        let header = entry
+            .offsets
+            .header
+            .as_ref()
+            .expect("verified generation has a header");
+        let payload = encode_history_append(operation_id, &[], expected.clone())?;
+        reconcile_append(&entry.path, entry.file_length, &payload)?;
+        let mut file = File::open(&entry.path)
+            .map_err(|source| internal_error("prepared history could not be opened", source))?;
+        let metadata = file
+            .metadata()
+            .map_err(|source| internal_error("prepared history could not be inspected", source))?;
+        if entry.file_length.checked_add(payload.len() as u64) != Some(metadata.len()) {
+            return Err(invalid_data("rewrite history append length does not match"));
+        }
+        file.seek(SeekFrom::Start(entry.file_length))
+            .map_err(|source| internal_error("prepared history could not be positioned", source))?;
+        let mut tail = vec![0; payload.len()];
+        file.read_exact(&mut tail)
+            .map_err(|source| internal_error("rewrite history append could not be read", source))?;
+        let batch = decode_append(&tail, true, &header.owner)?;
+        if tail != payload || batch.history.as_ref() != Some(&expected) {
+            return Err(invalid_data("rewrite input history verification failed"));
+        }
+        entry.offsets = append_offsets(entry.offsets.clone(), entry.file_length, &[], &expected)?;
+        entry.file_length = metadata.len();
+        entry.modified = metadata.modified().map_err(|source| {
+            internal_error("prepared history timestamp could not be read", source)
+        })?;
+        self.check_prefix()
+    }
+}
+
 fn validate_messages(
     offsets: &ConversationOffsets,
     messages: &[ConversationMessage],
@@ -126,18 +185,55 @@ fn append_offsets(
     let mut positions = offsets.message.to_vec();
     let mut display = offsets.display.to_vec();
     let locations = Arc::make_mut(&mut offsets.locations);
-    for (index, message) in messages.iter().enumerate() {
-        locations.insert(message_id(message).clone(), positions.len());
-        if message.is_transcript_visible()
-            || matches!(message, ConversationMessage::ContextSummary(_))
-        {
-            display.push(positions.len());
-        }
-        positions.push(MessagePosition { offset, index });
+    // 旧助手归属或既有输入被追记为控制项时，按可靠文件重建受影响的历史接缝。
+    if history.message_origins.iter().any(|origin| {
+        locations
+            .get(&origin.message_id)
+            .is_some_and(|&position| positions[position].visible_assistant)
+    }) {
+        return Err(invalid_data(
+            "conversation append revises an indexed assistant",
+        ));
     }
     let history_offsets = Arc::make_mut(&mut offsets.history);
     history_offsets.record(history);
-    history_offsets.finish();
+    history_offsets.finish()?;
+    let facts = NavigationHistory::new(history_offsets.facts());
+    if facts.controls().any(|id| {
+        locations
+            .get(id)
+            .and_then(|raw| display.binary_search(raw).ok())
+            .is_some_and(|ordinal| offsets.navigation.has_user_at(ordinal))
+    }) {
+        return Err(invalid_data("conversation append revises an indexed input"));
+    }
+    let is_child = offsets
+        .header
+        .as_ref()
+        .is_some_and(|header| matches!(header.owner, ConversationOwner::ChildTask { .. }));
+    let turns = Arc::make_mut(&mut offsets.turns);
+    let navigation = Arc::make_mut(&mut offsets.navigation);
+    for (index, message) in messages.iter().enumerate() {
+        let id = message_id(message);
+        locations.insert(id.clone(), positions.len());
+        let kind = NavigationMessageKind::classify(message);
+        let visible_assistant = matches!(kind, Some(NavigationMessageKind::Assistant { .. }));
+        if let Some(kind) = kind {
+            let ordinal = display.len();
+            if visible_assistant
+                && let Some(run_id) = facts.origin(id).and_then(|origin| origin.run_id.as_ref())
+            {
+                turns.record_assistant(ordinal, run_id);
+            }
+            navigation.push(ordinal, id, kind, &facts, is_child);
+            display.push(positions.len());
+        }
+        positions.push(MessagePosition {
+            offset,
+            index,
+            visible_assistant,
+        });
+    }
     if history.message_origins.iter().any(|origin| {
         !locations.contains_key(&origin.message_id)
             || origin

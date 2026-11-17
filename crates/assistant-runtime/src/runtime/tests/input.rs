@@ -97,24 +97,27 @@ async fn consumed_input_keeps_identity_and_retry_uses_history_without_losing_que
         original_order
     );
     store
-        .claim_input(crate::StoredRun {
-            shell: None,
-            run_id: RunId::new("run-history").unwrap(),
-            session_id: owner.clone(),
-            input_id: original.input_id.clone(),
-            attempt: 1,
-            status: assistant_protocol::RunStatus::Accepted,
-            agent_variant: original.agent_variant,
-            approval_mode: assistant_protocol::ApprovalMode::Ask,
-            reasoning_effort: None,
-            cancel_requested: false,
-            error: None,
-            message_ids: Vec::new(),
-            message_steps: Default::default(),
-            created_at_ms: at_ms,
-            started_at_ms: None,
-            finished_at_ms: None,
-        })
+        .claim_input(
+            crate::StoredRun {
+                shell: None,
+                run_id: RunId::new("run-history").unwrap(),
+                session_id: owner.clone(),
+                input_id: original.input_id.clone(),
+                attempt: 1,
+                status: assistant_protocol::RunStatus::Accepted,
+                agent_variant: original.agent_variant,
+                approval_mode: assistant_protocol::ApprovalMode::Ask,
+                reasoning_effort: None,
+                cancel_requested: false,
+                error: None,
+                message_ids: Vec::new(),
+                message_steps: Default::default(),
+                created_at_ms: at_ms,
+                started_at_ms: None,
+                finished_at_ms: None,
+            },
+            None,
+        )
         .await
         .unwrap();
     assert!(
@@ -381,6 +384,7 @@ async fn quoted_text_direct_locator_is_normalized_and_submitted_as_a_structured_
         .session_id;
     let first = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             session_id: session_id.clone(),
             message: "prefix selected suffix".to_owned(),
             variant: AgentVariant::Build,
@@ -400,7 +404,7 @@ async fn quoted_text_direct_locator_is_normalized_and_submitted_as_a_structured_
                 session_id: session_id.clone(),
             },
             cursor: None,
-            limit: 20,
+            turn_limit: Some(20),
         })
         .await
         .expect("page")
@@ -443,6 +447,7 @@ async fn quoted_text_direct_locator_is_normalized_and_submitted_as_a_structured_
 
     let second = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             session_id: session_id.clone(),
             message: String::new(),
             variant: AgentVariant::Build,
@@ -496,6 +501,7 @@ async fn repeated_idempotency_key_returns_the_first_input_and_run() {
     let key = IdempotencyKey::new("submit-1").expect("key");
     let first = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: AgentVariant::Plan,
             session_id: session.session.session_id.clone(),
@@ -510,6 +516,7 @@ async fn repeated_idempotency_key_returns_the_first_input_and_run() {
         .expect("first submit");
     let repeated = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -577,15 +584,19 @@ async fn repeated_idempotency_key_returns_the_first_input_and_run() {
         .remove(&session.session.session_id)
         .unwrap();
     assert!(recovered_session.lock_state().unwrap().runs.is_empty());
-    let (input_id, run) = runtime
-        .find_idempotent_run(
+    let accepted = runtime
+        .find_message_acceptance(
             &recovered_session,
             &IdempotencyKey::new("submit-1").unwrap(),
         )
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(input_id, first.input_id);
+    let run = runtime
+        .project_accepted_run(&recovered_session, &accepted)
+        .await
+        .unwrap();
+    assert_eq!(accepted.input_id(), &first.input_id);
     assert_eq!(run.as_ref().unwrap().run_id, first.run.run_id);
     assert_eq!(
         run.as_ref().unwrap().status,
@@ -606,6 +617,7 @@ async fn queued_input_can_be_cancelled_without_entering_the_conversation() {
     set_auto_approval(&runtime, &session.session.session_id).await;
     let active = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -623,6 +635,7 @@ async fn queued_input_can_be_cancelled_without_entering_the_conversation() {
         .expect("tool entered");
     let queued = runtime
         .submit_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -721,6 +734,7 @@ async fn same_queue_item_ids_execute_in_acceptance_order() {
     set_auto_approval(&runtime, &session.session.session_id).await;
     let first = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -738,6 +752,7 @@ async fn same_queue_item_ids_execute_in_acceptance_order() {
         .expect("first entered");
     let second = runtime
         .submit_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -813,6 +828,15 @@ async fn same_queue_item_ids_execute_in_acceptance_order() {
 
 #[tokio::test]
 async fn retrying_a_prestart_failure_reuses_the_user_message_and_creates_a_new_attempt() {
+    prestart_failure_uses_normal_run_result(assistant_protocol::InputDelivery::Queued).await;
+}
+
+#[tokio::test]
+async fn intervention_returns_existing_failed_run_after_prestart_failure() {
+    prestart_failure_uses_normal_run_result(assistant_protocol::InputDelivery::Intervention).await;
+}
+
+async fn prestart_failure_uses_normal_run_result(delivery: assistant_protocol::InputDelivery) {
     let source = Arc::new(MutableConfigSource::new(TEST_CONFIG.to_owned()));
     let model = Arc::new(ScriptedModelService::new(
         model_capabilities(false),
@@ -839,8 +863,9 @@ async fn retrying_a_prestart_failure_reuses_the_user_message_and_creates_a_new_a
         .create_session(CreateSessionRequest::default())
         .await
         .expect("session");
-    let first = runtime
-        .submit_started_input(SubmitInputRequest {
+    let submitted = runtime
+        .submit_input(SubmitInputRequest {
+            delivery,
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -849,10 +874,32 @@ async fn retrying_a_prestart_failure_reuses_the_user_message_and_creates_a_new_a
             quotes: Vec::new(),
             skill_name: None,
             mcp_server_key: None,
-            idempotency_key: None,
+            idempotency_key: Some(
+                assistant_protocol::IdempotencyKey::new("prestart-failure").unwrap(),
+            ),
         })
         .await
         .expect("accepted");
+    let first = if delivery == assistant_protocol::InputDelivery::Intervention {
+        assert!(submitted.not_executed.is_none());
+        assert_eq!(submitted.user_message.unwrap().text, "retry me");
+        let run = submitted.run.unwrap();
+        assert_eq!(run.status, assistant_protocol::RunStatus::Failed);
+        assert!(run.error.is_some());
+        StartedInputResult {
+            input_id: submitted.input_id,
+            run,
+        }
+    } else {
+        let run = runtime
+            .wait_for_input_claim(&session.session.session_id, &submitted.input_id)
+            .await
+            .unwrap();
+        StartedInputResult {
+            input_id: submitted.input_id,
+            run,
+        }
+    };
     assert_eq!(
         wait_for_terminal(&runtime, &session.session.session_id, &first.run.run_id)
             .await
@@ -1022,6 +1069,7 @@ async fn queued_input_recovers_without_run_and_idempotent_resubmit_does_not_clai
     );
     let duplicate = runtime
         .submit_input(SubmitInputRequest {
+            delivery: Default::default(),
             session_id: session_id.clone(),
             message: "ignored retry body".into(),
             variant: AgentVariant::Build,

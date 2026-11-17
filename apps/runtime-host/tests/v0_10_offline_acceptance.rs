@@ -210,16 +210,33 @@ fn two_real_host_processes_recover_and_complete_the_v0_10_session_lifecycle() {
     assert_eq!(changed["session"]["model_selection"], selection);
     let before_reentry = client.conversation(&session_id);
     let target_message_id = first_user_message_id(&before_reentry);
-    let replacement = client.runtime(
-        "reenter_from_user_message",
+    let prepared = client.runtime(
+        "get_user_message_edit",
         json!({
-            "session_id": session_id,
-            "message_id": target_message_id,
-            "message": "REPLACEMENT_CASE",
-            "variant": "build",
-            "idempotency_key": "replacement-submit"
+            "session_id": session_id, "message_id": target_message_id,
         }),
     );
+    let prepared = &prepared["snapshot"]["value"];
+    assert_eq!(prepared["type"], "ready");
+    assert_eq!(prepared["message"]["message_id"], target_message_id);
+    let request = json!({
+        "session_id": session_id,
+        "message_id": target_message_id,
+        "message": "REPLACEMENT_CASE",
+        "variant": "plan",
+        "attachment_ids": [],
+        "quotes": [],
+        "skill_edit": {"type": "retain"},
+        "mcp_edit": {"type": "retain"},
+        "expected_generation": prepared["generation"],
+        "expected_message_count": prepared["message_count"],
+        "idempotency_key": "replacement-submit"
+    });
+    let replacement = client.runtime("reenter_from_user_message", request.clone());
+    let repeated = client.runtime("reenter_from_user_message", request);
+    assert_eq!(replacement["input_id"], repeated["input_id"]);
+    assert_eq!(replacement["run"]["run_id"], repeated["run"]["run_id"]);
+    assert_eq!(replacement["generation"], repeated["generation"]);
     let replacement_run = string(&replacement["run"]["run_id"]);
     assert_eq!(
         client.wait_for_status(
@@ -324,19 +341,34 @@ fn verify_physical_state(runtime_home: &Path, session_id: &str) {
     let database = runtime_home.join("users/_personal/data/runtime.sqlite3");
     let connection = Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .expect("open acceptance database read-only phase");
-    let (lifecycle, model_id, generation, message_count): (String, String, i64, i64) = connection
+    let (lifecycle, model_id, variant, generation, message_count): (
+        String,
+        String,
+        String,
+        i64,
+        i64,
+    ) = connection
         .query_row(
-            "SELECT lifecycle, model_id, body_generation, message_count
+            "SELECT lifecycle, model_id, current_variant, body_generation, message_count
              FROM sessions WHERE session_id = ?1",
             [session_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .expect("session row");
     assert_eq!(lifecycle, "active");
     assert_eq!(model_id, "offline-alternate");
+    assert_eq!(variant, "build");
     assert!(generation > 1);
     assert_eq!(message_count, 2);
-    for (table, expected) in [("inputs", 1_i64), ("runs", 0)] {
+    for (table, expected) in [("inputs", 0_i64), ("runs", 0)] {
         let count: i64 = connection
             .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
                 row.get(0)
@@ -374,7 +406,7 @@ fn verify_physical_state(runtime_home: &Path, session_id: &str) {
         .collect();
     assert_eq!(records[0]["type"], "header");
     assert_eq!(records[0]["format"], "ez_assistant_history");
-    assert_eq!(records[0]["version"], 1);
+    assert_eq!(records[0]["version"], 2);
     assert_eq!(
         records[0]["owner"],
         json!({"type":"main_session","session_id":session_id})

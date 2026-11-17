@@ -1594,6 +1594,7 @@ async fn submit_speech_input(
     let result = runtime
         .submit_session_input(SubmitSessionInputRequest {
             input: SubmitInputRequest {
+                delivery: Default::default(),
                 session_id,
                 message: transcript,
                 variant,
@@ -1702,6 +1703,7 @@ async fn submit_text_input(
         .runtime
         .submit_session_input(SubmitSessionInputRequest {
             input: SubmitInputRequest {
+                delivery: Default::default(),
                 session_id,
                 message: request.text,
                 variant,
@@ -1732,13 +1734,7 @@ async fn submit_text_input(
 async fn route_device_channel(
     runtime: &assistant_runtime::AssistantRuntime,
 ) -> Result<assistant_protocol::SessionSummary, assistant_runtime::RuntimeError> {
-    runtime
-        .list_sessions(assistant_protocol::ListSessionsRequest::default())
-        .await?
-        .sessions
-        .into_iter()
-        .find(|session| session.role == assistant_protocol::SessionRoleSnapshot::Controller)
-        .ok_or(assistant_runtime::RuntimeError::ControllerUnavailable)
+    runtime.controller_summary().await
 }
 
 fn validate_text_input(request: &TextInput) -> Result<(), ConnectionError> {

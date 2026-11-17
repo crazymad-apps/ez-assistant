@@ -103,8 +103,7 @@ impl State {
         {
             return Ok(control.clone());
         }
-        let mut command = self
-            .histories
+        self.histories
             .get(session_id)
             .and_then(|history| {
                 history
@@ -113,48 +112,74 @@ impl State {
                     .find(|command| &command.input_id == input_id)
             })
             .cloned()
-            .ok_or_else(|| conflict("session command history does not exist"))?;
-        command.idempotency_key = self
-            .command_identities
-            .get(input_id)
-            .filter(|identity| &identity.session_id == session_id)
-            .and_then(|identity| identity.idempotency_key.clone());
-        Ok(command)
+            .ok_or_else(|| conflict("session command history does not exist"))
     }
 
-    /// 只读装配现有端口的命令值；queued 仍来自实际控制，完成项仅来自所属历史。
     pub(super) fn command_projections(
         &self,
         owner: Option<&SessionId>,
-    ) -> Result<Vec<StoredSessionCommand>, StoreError> {
-        let mut commands = self
+    ) -> Vec<StoredSessionCommand> {
+        let mut commands: Vec<_> = self
             .session_commands
             .values()
             .filter(|command| owner.is_none_or(|owner| owner == &command.session_id))
             .cloned()
-            .collect::<Vec<_>>();
-        for (session_id, history) in &self.histories {
-            if owner.is_some_and(|owner| owner != session_id)
-                || self.sessions.get(session_id).is_some_and(|session| {
-                    session.conversation_state == StoredConversationState::Unavailable
-                })
-            {
-                continue;
-            }
-            for command in &history.commands {
-                if !self
-                    .session_commands
-                    .get(&command.input_id)
-                    .is_some_and(|control| &control.session_id == session_id)
-                {
-                    commands.push(self.command_projection(session_id, &command.input_id)?);
-                }
+            .collect();
+        for (session, history) in &self.histories {
+            if owner.is_none_or(|owner| owner == session) && self.is_history_available(session) {
+                commands.extend(history.commands.iter().cloned());
             }
         }
-        commands.sort_by(|left, right| {
-            (left.queue_order, &left.input_id).cmp(&(right.queue_order, &right.input_id))
-        });
-        Ok(commands)
+        commands.sort_by_key(|command| command.queue_order);
+        commands
+    }
+
+    pub(super) fn is_history_available(&self, session: &SessionId) -> bool {
+        self.sessions
+            .get(session)
+            .is_some_and(|session| session.conversation_state == StoredConversationState::Available)
+    }
+
+    pub(super) fn message_request(
+        &self,
+        session: &SessionId,
+        key: &IdempotencyKey,
+    ) -> Option<&InputId> {
+        self.inputs
+            .values()
+            .find(|input| {
+                &input.session_id == session && input.idempotency_key.as_ref() == Some(key)
+            })
+            .map(|input| &input.input_id)
+            .or_else(|| {
+                self.histories
+                    .get(session)?
+                    .inputs
+                    .iter()
+                    .find(|input| !input.inherited && input.idempotency_key.as_ref() == Some(key))
+                    .map(|input| &input.input_id)
+            })
+    }
+
+    pub(super) fn command_request(
+        &self,
+        session: &SessionId,
+        key: &IdempotencyKey,
+    ) -> Option<&InputId> {
+        self.session_commands
+            .values()
+            .find(|command| {
+                &command.session_id == session && command.idempotency_key.as_ref() == Some(key)
+            })
+            .map(|command| &command.input_id)
+            .or_else(|| {
+                self.histories
+                    .get(session)?
+                    .commands
+                    .iter()
+                    .find(|command| command.idempotency_key.as_ref() == Some(key))
+                    .map(|command| &command.input_id)
+            })
     }
 
     /// 仅为读取投影或真正的新 retry 提供原 Input 值；历史字段从可靠事实回读，不安装控制。
@@ -163,67 +188,27 @@ impl State {
         session_id: &SessionId,
         input_id: &InputId,
     ) -> Result<StoredInput, StoreError> {
-        let identity = self
-            .input_identities
-            .get(input_id)
-            .filter(|identity| &identity.session_id == session_id)
-            .ok_or_else(|| conflict("Input acceptance identity is missing"))?;
-        if let Some(control) = self
-            .inputs
-            .get(input_id)
-            .filter(|input| &input.session_id == session_id)
-        {
-            let mut input = control.clone();
-            if input.state == StoredInputState::Committed {
-                input.skill_activation = self
-                    .histories
-                    .get(session_id)
-                    .and_then(|history| {
-                        history
-                            .skill_activations
-                            .iter()
-                            .find(|activation| activation.input_id.as_ref() == Some(input_id))
-                    })
-                    .cloned();
-            }
-            return Ok(input);
+        if let Some(control) = self.inputs.get(input_id).filter(|input| {
+            &input.session_id == session_id && input.state == StoredInputState::Queued
+        }) {
+            return Ok(control.clone());
         }
         let history = self
             .histories
             .get(session_id)
             .ok_or_else(|| conflict("Input history is missing"))?;
-        let fact = history
+        let mut input = history
             .inputs
             .iter()
-            .find(|input| &input.input_id == input_id && !input.inherited)
+            .find(|input| &input.input_id == input_id)
+            .and_then(|fact| fact.committed_projection(session_id.clone()))
             .ok_or_else(|| conflict("local Input history is missing"))?;
-        if fact.queue_order != identity.queue_order {
-            return Err(StoreError::new(
-                StoreErrorKind::InvalidData,
-                "Input identity does not match reliable order",
-            ));
-        }
-        Ok(StoredInput {
-            input_id: input_id.clone(),
-            session_id: session_id.clone(),
-            idempotency_key: identity.idempotency_key.clone(),
-            queue_order: fact.queue_order,
-            agent_variant: fact.agent_variant,
-            origin: fact.origin,
-            goal_binding: fact.goal_binding.clone(),
-            cross_session: fact.cross_session.clone(),
-            channel_source: fact.channel_source.clone(),
-            agent_shell_target: fact.agent_shell_target,
-            skill_activation: history
-                .skill_activations
-                .iter()
-                .find(|activation| activation.input_id.as_ref() == Some(input_id))
-                .cloned(),
-            user_message_id: fact.user_message_id.clone(),
-            state: StoredInputState::Committed,
-            queued_message: None,
-            accepted_at_ms: fact.accepted_at_ms,
-        })
+        input.skill_activation = history
+            .skill_activations
+            .iter()
+            .find(|activation| activation.input_id.as_ref() == Some(input_id))
+            .cloned();
+        Ok(input)
     }
 
     pub(super) fn input_projections(
@@ -231,25 +216,29 @@ impl State {
         owner: Option<&SessionId>,
     ) -> Result<Vec<StoredInput>, StoreError> {
         let mut inputs = Vec::new();
-        for (id, identity) in &self.input_identities {
-            if owner.is_some_and(|owner| owner != &identity.session_id) {
-                continue;
-            }
-            if !self.inputs.contains_key(id)
-                && self
-                    .sessions
-                    .get(&identity.session_id)
-                    .is_some_and(|session| {
-                        session.conversation_state == StoredConversationState::Unavailable
-                    })
+        for input in self
+            .inputs
+            .values()
+            .filter(|input| owner.is_none_or(|owner| owner == &input.session_id))
+        {
+            if input.state == StoredInputState::Committed
+                && self.is_history_available(&input.session_id)
             {
-                continue;
+                inputs.push(self.input_projection(&input.session_id, &input.input_id)?);
+            } else {
+                inputs.push(input.clone());
             }
-            inputs.push(self.input_projection(&identity.session_id, id)?);
         }
-        inputs.sort_by(|left, right| {
-            (left.queue_order, &left.input_id).cmp(&(right.queue_order, &right.input_id))
-        });
+        for (session, history) in &self.histories {
+            if owner.is_none_or(|owner| owner == session) && self.is_history_available(session) {
+                for input in &history.inputs {
+                    if !input.inherited && !self.inputs.contains_key(&input.input_id) {
+                        inputs.push(self.input_projection(session, &input.input_id)?);
+                    }
+                }
+            }
+        }
+        inputs.sort_by_key(|input| input.queue_order);
         Ok(inputs)
     }
 
@@ -274,13 +263,11 @@ impl State {
         if input.state != StoredInputState::Committed || input.queued_message.is_some() {
             return Err(conflict("unfinished Input control cannot be released"));
         }
-        self.input_identities
-            .get(input_id)
-            .filter(|identity| {
-                identity.session_id == input.session_id
-                    && identity.idempotency_key == input.idempotency_key
-            })
-            .ok_or_else(|| conflict("completed Input acceptance identity is missing"))?;
+        if self.input_identities.contains_key(input_id) {
+            return Err(conflict(
+                "completed Input acceptance identity was not published",
+            ));
+        }
         self.inputs.remove(input_id);
         Ok(())
     }
@@ -291,10 +278,13 @@ impl State {
         run_id: &RunId,
     ) -> Result<(), StoreError> {
         if self.runs.contains_key(run_id)
-            || self
-                .histories
-                .get(session_id)
-                .is_some_and(|history| history.runs.iter().any(|run| &run.run_id == run_id))
+            || self.histories.get(session_id).is_some_and(|history| {
+                history.runs.iter().any(|run| &run.run_id == run_id)
+                    || history
+                        .child_tasks
+                        .iter()
+                        .any(|child| &child.parent_run_id == run_id)
+            })
         {
             return Err(conflict(
                 "new Run identity collides with existing execution or history",
@@ -315,7 +305,6 @@ impl State {
         }
         let identity_conflict =
             self.input_identities.contains_key(input_id)
-                || self.command_identities.contains_key(input_id)
                 || self.inputs.contains_key(input_id)
                 || self.session_commands.contains_key(input_id)
                 || self.materialization_inputs.get(session_id) == Some(input_id)
@@ -335,7 +324,14 @@ impl State {
                         &input.input_id == input_id || &input.user_message_id == message
                     }) || history.commands.iter().any(|command| {
                         &command.input_id == input_id || &command.user_message_id == message
-                    })
+                    }) || history.runs.iter().any(|run| {
+                        run.input_id.as_ref() == Some(input_id)
+                            || run.user_message_id.as_ref() == Some(message)
+                            || run.last_message_id.as_ref() == Some(message)
+                    }) || history
+                        .message_origins
+                        .iter()
+                        .any(|origin| origin.input_id.as_ref() == Some(input_id))
                 });
         if identity_conflict {
             return Err(conflict(
@@ -489,13 +485,17 @@ impl State {
                 .map(|message| message_id(message).clone());
         }
         let history = self.histories.entry(run.session_id.clone()).or_default();
-        let mut fact = StoredInputHistory::from_input(input);
-        fact.queue_order = self
-            .input_identities
-            .get(&input.input_id)
-            .ok_or_else(|| conflict("Input identity is missing before history commit"))?
-            .queue_order;
-        history.inputs.push(fact);
+        if let Some(identity) = self.input_identities.remove(&input.input_id) {
+            let mut fact = StoredInputHistory::from_input(input);
+            fact.queue_order = identity.queue_order;
+            history.inputs.push(fact);
+        } else if !history
+            .inputs
+            .iter()
+            .any(|fact| fact.input_id == input.input_id && !fact.inherited)
+        {
+            return Err(conflict("Input identity is missing before history commit"));
+        }
         history.runs.push(run_fact);
         for message_id in &run.message_ids {
             if !history
@@ -535,10 +535,12 @@ impl State {
             .retain(|_, activation| activation.input_id.as_ref() != Some(&run.input_id));
         self.mcp_input_selections
             .retain(|_, selection| selection.input_id.as_ref() != Some(&run.input_id));
-        self.inputs
+        let control = self
+            .inputs
             .get_mut(&run.input_id)
-            .expect("checked history Input")
-            .skill_activation = None;
+            .expect("checked history Input");
+        control.skill_activation = None;
+        control.idempotency_key = None;
         Ok(())
     }
 

@@ -25,6 +25,57 @@ impl ModelService for GatedQuestionModel {
 }
 
 #[tokio::test]
+async fn intervention_cancels_pending_end_turn_question_without_recording_an_answer() {
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(true),
+        8192,
+        [
+            ModelScript::Events(message_events(&question("end_turn"))),
+            ModelScript::Events(message_events(&assistant_text(
+                "after-question",
+                "continued",
+            ))),
+        ],
+    ));
+    let runtime = runtime_with_tools(model, ToolSetSnapshot::default());
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    let old = runtime
+        .submit_started_input(input(&session_id, "initial question"))
+        .await
+        .unwrap();
+    let question = pending(&runtime, &session_id).await;
+    wait_for_terminal(&runtime, &session_id, &old.run.run_id).await;
+    let mut request = input(&session_id, "change direction");
+    request.delivery = assistant_protocol::InputDelivery::Intervention;
+    request.idempotency_key =
+        Some(assistant_protocol::IdempotencyKey::new("intervene-question").unwrap());
+    let result = tokio::time::timeout(Duration::from_secs(3), runtime.submit_input(request))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.user_message.unwrap().text, "change direction");
+    assert!(result.not_executed.is_none());
+    let feedback = runtime
+        .list_feedback_requests(assistant_protocol::ListFeedbackRequestsRequest { session_id })
+        .await
+        .unwrap();
+    let changed = feedback
+        .iter()
+        .find(|item| item.request_id == question.request_id)
+        .unwrap();
+    assert_eq!(
+        changed.status,
+        assistant_protocol::FeedbackStatus::Cancelled
+    );
+    assert!(changed.answers.is_none());
+}
+
+#[tokio::test]
 async fn end_turn_blocks_preexisting_queue_and_reply_precedes_it() {
     let inner = Arc::new(ScriptedModelService::new(
         model_capabilities(true),

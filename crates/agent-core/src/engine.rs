@@ -32,7 +32,8 @@ use agent_context::ContextWindowDecision;
 use agent_model::{LifecycleValidator, ModelCallContext, ModelError, ModelEvent, ModelRequest};
 use agent_tools::Dispatcher;
 use agent_types::{
-    AssistantMessage, AssistantPart, ConversationMessage, ConversationSnapshot, ToolCall,
+    AssistantMessage, AssistantPart, ConversationMessage, ConversationSnapshot, FinishReason,
+    MessageId, ModelIdentity, ReasoningPart, TextPart, ToolCall,
 };
 use futures_util::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -40,7 +41,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     AgentEvent, BudgetKind, CompactionHandoff, CompactionReason, ContinuationReason,
     ExecutionConsumption, ExecutionContext, ExecutionError, ExecutionInput, ExecutionOutcome,
-    ExecutionSpec, event::AgentEventSender, guardrail::GuardrailState,
+    ExecutionSpec, PartialModelResponse, event::AgentEventSender, guardrail::GuardrailState,
 };
 
 mod tool_batch;
@@ -74,6 +75,41 @@ enum TurnEnd {
     Finished(AssistantMessage),
     /// 执行已收敛到终态（Failed/Cancelled/CompactionRequired），直接返回。
     Terminal(ExecutionOutcome),
+}
+
+/// 当前模型流中已通过生命周期校验的可见输出，由 Core 持有到本次尝试结束。
+/// 顺序取自 PartStarted；ProviderState 与工具参数由完整 TurnFinished 单独交付。
+struct TurnOutput {
+    id: MessageId,
+    model: ModelIdentity,
+    parts: Vec<AssistantPart>,
+}
+
+impl TurnOutput {
+    fn into_partial(
+        mut self,
+        step: u32,
+        finish_reason: FinishReason,
+    ) -> Option<Box<PartialModelResponse>> {
+        self.parts.retain(|part| match part {
+            AssistantPart::Text(part) => !part.text.is_empty(),
+            AssistantPart::Reasoning(part) => !part.text.is_empty(),
+            _ => false,
+        });
+        (!self.parts.is_empty()).then(|| {
+            Box::new(PartialModelResponse {
+                step,
+                message: AssistantMessage {
+                    purpose: Default::default(),
+                    id: self.id,
+                    model: self.model,
+                    parts: self.parts,
+                    finish_reason,
+                    usage: None,
+                },
+            })
+        })
+    }
 }
 
 impl Engine {
@@ -186,17 +222,6 @@ impl Engine {
                 TurnEnd::Finished(message) => message,
                 TurnEnd::Terminal(outcome) => return outcome,
             };
-            if !message.purpose.is_model_response() {
-                return self.fail(ExecutionError::Model(ModelError::Protocol(
-                    "ordinary generation returned a compaction operation".into(),
-                )));
-            }
-
-            // 使用本轮请求的冻结快照；拒绝必须早于 pending、授权和工具副作用。
-            if snapshot.validate_response_tool_call_ids(&message).is_err() {
-                return self.fail(ExecutionError::DuplicateToolCallId);
-            }
-
             let calls = tool_calls_of(&message);
             if calls.is_empty() {
                 // 无工具调用：最终消息 Core 不落账，经完成事件交 Runtime。
@@ -270,31 +295,60 @@ impl Engine {
     ///
     /// 取消经 `ModelCallContext` 传播给模型服务；本函数不 race，只在终态收敛点
     /// 检查令牌（服务契约保证取消后流以受控终态结束）。
-    async fn stream_turn(
-        &mut self,
-        request: ModelRequest,
-        call_context: ModelCallContext,
-    ) -> TurnEnd {
-        let handoff_request = request.clone();
-        let established = self.spec.model.stream(request, call_context).await;
+    async fn stream_turn(&self, request: ModelRequest, call_context: ModelCallContext) -> TurnEnd {
+        let established = self.spec.model.stream(request.clone(), call_context).await;
         let stream = match established {
             Ok(stream) => stream,
             // 建立前失败；已取消或 Cancelled 错误归取消收敛。
             Err(error) => {
-                return TurnEnd::Terminal(self.model_failure(error, handoff_request).await);
+                return TurnEnd::Terminal(self.model_failure(error, request, None));
             }
         };
         let mut stream = LifecycleValidator::new(stream);
         let mut latest_usage = None;
+        let mut output: Option<TurnOutput> = None;
         while let Some(event) = stream.next().await {
             match event {
                 ModelEvent::TurnRestarted => {
+                    output = None;
                     latest_usage = None;
                     self.events.send(AgentEvent::StepStarted {
                         step: self.current_step(),
                     });
                 }
+                ModelEvent::TurnStarted { message_id, model } => {
+                    output = Some(TurnOutput {
+                        id: message_id,
+                        model,
+                        parts: Vec::new(),
+                    });
+                }
+                ModelEvent::TextStarted { id } => {
+                    if let Some(output) = &mut output {
+                        output.parts.push(AssistantPart::Text(TextPart {
+                            id,
+                            text: String::new(),
+                        }));
+                    }
+                }
+                ModelEvent::ReasoningStarted { id } => {
+                    if let Some(output) = &mut output {
+                        output.parts.push(AssistantPart::Reasoning(ReasoningPart {
+                            id,
+                            text: String::new(),
+                            source: Default::default(),
+                        }));
+                    }
+                }
                 ModelEvent::TextDelta { id, delta } => {
+                    if let Some(part) = output.as_mut().and_then(|output| {
+                        output.parts.iter_mut().rev().find_map(|part| match part {
+                            AssistantPart::Text(part) if part.id == id => Some(part),
+                            _ => None,
+                        })
+                    }) {
+                        part.text.push_str(&delta);
+                    }
                     self.events.send(AgentEvent::TextDelta {
                         step: self.current_step(),
                         id,
@@ -302,6 +356,15 @@ impl Engine {
                     });
                 }
                 ModelEvent::ReasoningDelta { id, delta, source } => {
+                    if let Some(part) = output.as_mut().and_then(|output| {
+                        output.parts.iter_mut().rev().find_map(|part| match part {
+                            AssistantPart::Reasoning(part) if part.id == id => Some(part),
+                            _ => None,
+                        })
+                    }) {
+                        part.source = source;
+                        part.text.push_str(&delta);
+                    }
                     self.events.send(AgentEvent::ReasoningDelta {
                         source,
                         step: self.current_step(),
@@ -319,34 +382,50 @@ impl Engine {
                             usage,
                         });
                     }
+                    // 核对冻结请求；拒绝发生在 pending、授权及工具副作用之前。
+                    let rejection = if !message.purpose.is_model_response() {
+                        Some(ExecutionError::Model(ModelError::Protocol(
+                            "ordinary generation returned a compaction operation".into(),
+                        )))
+                    } else if request
+                        .conversation
+                        .validate_response_tool_call_ids(&message)
+                        .is_err()
+                    {
+                        Some(ExecutionError::DuplicateToolCallId)
+                    } else {
+                        None
+                    };
+                    if let Some(error) = rejection {
+                        return TurnEnd::Terminal(self.fail_with_output(error, output));
+                    }
                     return TurnEnd::Finished(message);
                 }
                 ModelEvent::TurnFailed { error } => {
-                    return TurnEnd::Terminal(
-                        self.model_failure(error, handoff_request.clone()).await,
-                    );
+                    return TurnEnd::Terminal(self.model_failure(error, request, output));
                 }
-                // TurnStarted、Part Started/Finished、ToolCall* 没有对应的
-                // AgentEvent，只在最终消息与契约校验中体现。
                 _ => {}
             }
         }
         // LifecycleValidator 保证恰一个终态，正常不可达；保持状态机 total。
-        TurnEnd::Terminal(self.fail(ExecutionError::Model(ModelError::Protocol(
-            "model stream ended without a terminal event".to_owned(),
-        ))))
+        TurnEnd::Terminal(self.model_failure(
+            ModelError::Protocol("model stream ended without a terminal event".to_owned()),
+            request,
+            output,
+        ))
     }
 
     /// 模型失败收敛：执行令牌已取消或错误为 `ModelError::Cancelled` 时归
     /// `ExecutionCancelled`（此时没有已宣告的 Tool Call，收敛无需补记）；
     /// Provider Context Overflow 归压缩交接终态，其余归 `ExecutionFailed{Model}`。
-    async fn model_failure(
-        &mut self,
+    fn model_failure(
+        &self,
         error: ModelError,
         handoff_request: ModelRequest,
+        output: Option<TurnOutput>,
     ) -> ExecutionOutcome {
         if self.cancellation.is_cancelled() || matches!(error, ModelError::Cancelled) {
-            self.cancelled()
+            self.cancelled_with_output(output)
         } else if matches!(error, ModelError::ContextOverflow { .. }) {
             self.compaction_required(
                 CompactionReason::ProviderOverflow,
@@ -354,28 +433,48 @@ impl Engine {
                 handoff_request,
             )
         } else {
-            self.fail(ExecutionError::Model(error))
+            self.fail_with_output(ExecutionError::Model(error), output)
         }
     }
 
     /// 收敛为 `ExecutionFailed`：发送终态事件（携带丢弃计数）并返回镜像结果。
     fn fail(&self, error: ExecutionError) -> ExecutionOutcome {
+        self.fail_with_output(error, None)
+    }
+
+    fn fail_with_output(
+        &self,
+        error: ExecutionError,
+        output: Option<TurnOutput>,
+    ) -> ExecutionOutcome {
+        let partial = output
+            .and_then(|output| output.into_partial(self.current_step(), FinishReason::Failed));
         self.events.send(AgentEvent::ExecutionFailed {
             error: error.clone(),
+            partial: partial.clone(),
             dropped_events: self.events.dropped_events(),
         });
         ExecutionOutcome::Failed {
             error,
+            partial,
             consumption: self.consumption(),
         }
     }
 
     /// 收敛为取消终态；仅在没有 pending exchange 或 exchange 已完整完成后调用。
     fn cancelled(&self) -> ExecutionOutcome {
+        self.cancelled_with_output(None)
+    }
+
+    fn cancelled_with_output(&self, output: Option<TurnOutput>) -> ExecutionOutcome {
+        let partial = output
+            .and_then(|output| output.into_partial(self.current_step(), FinishReason::Cancelled));
         self.events.send(AgentEvent::ExecutionCancelled {
+            partial: partial.clone(),
             dropped_events: self.events.dropped_events(),
         });
         ExecutionOutcome::Cancelled {
+            partial,
             consumption: self.consumption(),
         }
     }

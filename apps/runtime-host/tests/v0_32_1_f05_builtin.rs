@@ -460,7 +460,7 @@ fn audit(path: &Path, skill_states: i64, inputs: i64) {
     }
     for (table, expected) in [
         ("sessions", 1 + i64::from(inputs > 0)),
-        ("inputs", inputs),
+        ("inputs", 0),
         ("runs", 0),
         ("plugins", 0),
         ("plugin_operations", 0),

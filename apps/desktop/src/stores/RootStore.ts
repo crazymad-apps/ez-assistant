@@ -1,3 +1,4 @@
+import { SidebarOrderStore } from "./SidebarOrderStore";
 import { childKey } from "./liveExecutionProjection";
 import { DesktopPinsStore, pinReference, type DesktopPins, type DesktopPin } from "./DesktopPinsStore";
 import { parseDesktopWorkspace, type DesktopWorkspaceSnapshot } from "../features/resource-workspace/desktopWorkspaceSnapshot";
@@ -17,6 +18,7 @@ import type {
   ConversationOwner,
   ConversationHistoryHit,
   GoalId,
+  InputDelivery,
   InputId,
   ListMcpServerOptionsRequest,
   SkillManagementSnapshot,
@@ -28,6 +30,7 @@ import type {
   QuotedTextSnapshot,
   PrepareDeleteSessionResult,
   RecallNavigationTarget,
+  ReenterFromUserMessageResult,
   RunId,
   SessionMaterializationManifest,
   SessionMaterializationResult,
@@ -52,7 +55,9 @@ import type { RuntimeBootstrap } from "../native-bridge/runtimeBootstrap";
 import { NetworkDevicesStore } from "./NetworkDevicesStore";
 import { ConnectionStore } from "./ConnectionStore";
 import { ComposerQuoteStore } from "./ComposerQuoteStore";
+import { ConversationNavigationStore } from "./ConversationNavigationStore";
 import { ConversationSearchStore } from "./ConversationSearchStore";
+import { HistoryEditStore } from "./HistoryEditStore";
 import { DesktopLifecycleStore } from "./DesktopLifecycleStore";
 import { DeviceGatewayStore } from "./DeviceGatewayStore";
 import { LiveExecutionStore } from "./LiveExecutionStore";
@@ -65,8 +70,8 @@ import {
   type NewSessionDraft,
   type NewSessionDraftKey,
 } from "./NewSessionDraftStore";
-import { RuntimeLifecycleCoordinator } from "./RuntimeLifecycleCoordinator";
-import { RuntimeProjectionStore } from "./RuntimeProjectionStore";
+import { RuntimeLifecycleCoordinator, type RuntimeReadQuery } from "./RuntimeLifecycleCoordinator";
+import { RuntimeProjectionStore, SIDEBAR_PAGE_SIZE, sessionGroupKey } from "./RuntimeProjectionStore";
 import { RunInteractionController } from "./RunInteractionController";
 import { SessionManagementController } from "./SessionManagementController";
 import { SettingsStore } from "./SettingsStore";
@@ -89,12 +94,12 @@ export class RootStore {
   readonly pending_notifications = new PendingNotificationStore({
     client: () => this.#runtime.client,
     selectedSession: () => this.navigation.selected_session_id,
-    title: (id) => [...(this.projection.application?.active_sessions ?? []), ...(this.projection.application?.archived_sessions ?? [])]
-      .find((session) => session.session_id === id)?.title,
+    title: (id) => this.projection.sessionSummary(id)?.title,
     feedback: this.feedback,
   });
   readonly local_connection = new ConnectionStore();
   readonly local_composer_quotes = new ComposerQuoteStore();
+  readonly history_edit = new HistoryEditStore(this);
   readonly transient_focus = new TransientFocusStore();
   readonly local_projection = new RuntimeProjectionStore();
   readonly local_live_execution = new LiveExecutionStore();
@@ -137,6 +142,7 @@ export class RootStore {
     action?: "retry_title";
   }> | null = null;
 
+  readonly conversation_navigation: ConversationNavigationStore;
   readonly #local_runtime: RuntimeLifecycleCoordinator;
   readonly #run_interaction: RunInteractionController;
   readonly #session_management: SessionManagementController;
@@ -148,6 +154,7 @@ export class RootStore {
   #initial_connection: Promise<void> | null = null;
   #bootstrap_mode: RuntimeBootstrap['capabilities']['mode'] | undefined;
   #pending_snapshot: ResourceWorkspaceSnapshot | null = null;
+  readonly sidebar_order = new SidebarOrderStore(this, (target) => target ? this.network.context(target).runtime : this.#local_runtime);
   readonly pins = new DesktopPinsStore((pins) => this.flushPreferences(pins));
   #workspace_snapshot: DesktopWorkspaceSnapshot | null = null;
   #preferences_read_failed = false;
@@ -159,12 +166,15 @@ export class RootStore {
   readonly #save_view_state = () => this.#schedulePreferencesSave();
   readonly #flush_view_state = () => { void this.flushPreferences().catch(() => undefined); };
   #conversation_search_revision = 0;
+  #conversation_location_read: AbortController | null = null;
+  #previous_page_reads = new WeakMap<object, Promise<boolean>>();
   #title_notice_timer: number | null = null;
   #runtime_state_disposer: IReactionDisposer;
   #resource_scope_disposer: IReactionDisposer;
   #provider_defaults_disposer: IReactionDisposer;
   #pending_notifications_disposer: IReactionDisposer;
   #feedback_disposer: IReactionDisposer;
+  #history_edit_selection_disposer: IReactionDisposer;
   #device_navigation_disposer: IReactionDisposer;
   #feedback_navigator_disposer: () => void;
 
@@ -172,7 +182,9 @@ export class RootStore {
     this.#local_runtime = new RuntimeLifecycleCoordinator({
       on_event: (event) => {
         this.notifications.ingest(event, this.notificationScopeFor(this.#local_runtime.client));
+        this.history_edit.observe(event, this.#local_runtime.client);
         if (this.navigation.target_device) return;
+        this.conversation_navigation.observe(event.event, this.#local_runtime.client);
         this.feedback.setScope(this.notificationScope());
         this.feedback.ingest(event);
         this.pending_notifications.setConnection(this.notificationScope(), this.local_connection.state === "connected" && !this.local_projection.is_stale);
@@ -221,7 +233,9 @@ export class RootStore {
       (message) => this.showInteractionError(message), () => this.local_files.desktop,
       (device, event) => {
         this.notifications.ingest(event, this.notificationScopeFor(this.network.contexts.get(device)?.runtime.client ?? null));
+        this.history_edit.observe(event, this.network.contexts.get(device)?.runtime.client ?? null);
         if (this.navigation.target_device !== device) return;
+        this.conversation_navigation.observe(event.event, this.#runtime.client);
         this.feedback.setScope(this.notificationScope());
         this.feedback.ingest(event);
         this.pending_notifications.setConnection(this.notificationScope(), this.connection.state === "connected" && !this.projection.is_stale);
@@ -237,6 +251,17 @@ export class RootStore {
         },
         retain: () => { this.#workspace_snapshot = this.captureDesktopWorkspace(); },
       });
+    const selectedHistory = () => {
+      const session_id = this.navigation.selected_session_id;
+      return session_id ? this.#conversationHistoryForLocation({ session_id, child_task_id: this.navigation.selected_child_task_id }) : undefined;
+    };
+    this.conversation_navigation = new ConversationNavigationStore(() => {
+      if (this.connection.state !== "connected" || this.projection.is_stale) return null;
+      const history = selectedHistory();
+      const runtime = this.#runtime;
+      const client = runtime.client;
+      return history && client ? { owner: history.owner, generation: history.generation, runtime, client } : null;
+    }, () => selectedHistory()?.items ?? []);
     this.#device_navigation_disposer = reaction(() => this.navigation.target_device, () => {
       this.conversation_search.reset();
       this.#conversation_search_revision++;
@@ -320,9 +345,7 @@ export class RootStore {
       get_client: () => this.#local_runtime.client,
       get_permission_context: () => {
         const session_id = this.navigation.target_device ? null : this.navigation.selected_session_id;
-        const session = this.local_projection.application?.active_sessions.find(
-          (candidate) => candidate.session_id === session_id,
-        );
+        const session = this.local_projection.sessionSummary(session_id);
         return {
           session_id,
           workspace_id: session?.workspace_id ?? null,
@@ -335,6 +358,11 @@ export class RootStore {
     });
     const current_resources = () => this.resource_workspace;
     const current_files = () => this.files;
+    this.#history_edit_selection_disposer = reaction(
+      () => [this.navigation.target_device, this.navigation.selected_session_id, this.navigation.selected_child_task_id],
+      () => this.history_edit.selectionChanged(),
+      { equals: (left, right) => left.every((value, index) => value === right[index]) },
+    );
     const current_connection = () => this.connection;
     const current_runtime = () => this.#runtime;
     this.#session_management = new SessionManagementController({
@@ -352,6 +380,9 @@ export class RootStore {
       get connection() { return current_connection(); },
       get runtime() { return current_runtime(); },
       state: this,
+      input_scope: () => this.history_edit.ordinaryKey,
+      supports_intervention: () => !this.projection.is_stale && Boolean(this.projection.application?.capabilities.input_intervention),
+      queue_notice: (session_id, message) => { this.session_notice = { session_id, tone: "neutral", message }; },
     });
     this.#provider_defaults_disposer = reaction(
       () => this.local_projection.application?.providers.map((provider) => `${provider.source ?? 'local'}:${provider.provider_instance_id}`).join("\n") ?? null,
@@ -423,6 +454,7 @@ export class RootStore {
       setMessageFeedback: action,
       archiveSession: action,
       prioritizeQueuedInput: action,
+      interveneQueuedInput: action,
       cancelQueuedInput: action,
       resumeQueuedInput: action,
       resumeAllQueuedInputs: action,
@@ -504,7 +536,7 @@ export class RootStore {
     });
     const named_pins = { ...pins, items: pins.items.map((pin) => {
       const projection = pin.device ? this.network.contexts.get(pin.device)?.projection : this.local_projection;
-      const current = projection?.application?.active_sessions.find((session) => session.session_id === pin.session_id);
+      const current = projection?.sessionSummary(pin.session_id);
       const device_name = pin.device ? this.network.devices.find((device) => device.id === pin.device)?.name ?? pin.device_name : pin.device_name;
       return { ...pin, title: current?.title ?? pin.title, device_name };
     }) };
@@ -523,6 +555,7 @@ export class RootStore {
 
   get local_runtime_client() { return this.#local_runtime.client; }
   get runtime_client() { return this.#runtime.client; }
+  get intervention() { return this.#run_interaction.intervention; }
 
   connect(bootstrap?: RuntimeBootstrap): Promise<void> {
     this.#initial_connection ??= this.#connectAndRestore(bootstrap);
@@ -738,7 +771,7 @@ export class RootStore {
     if (previous?.target_device) this.network.context(previous.target_device);
     const location = this.navigation.goBack();
     if (location) {
-      await this.#loadConversationLocation(location);
+      if (await this.#loadConversationLocation(location)) await this.#runtime.loadSession(location.session_id);
     }
   }
 
@@ -749,7 +782,7 @@ export class RootStore {
     if (next?.target_device) this.network.context(next.target_device);
     const location = this.navigation.goForward();
     if (location) {
-      await this.#loadConversationLocation(location);
+      if (await this.#loadConversationLocation(location)) await this.#runtime.loadSession(location.session_id);
     }
   }
 
@@ -837,6 +870,7 @@ export class RootStore {
     this.navigation.setListMode(hit.lifecycle === "archived" ? "archived" : "active");
     this.navigation.navigateTo(location);
     this.conversation_search.closeRecall();
+    await this.#runtime.loadSession(location.session_id);
   }
 
   /** 打开 Runtime 已校验的 Recall 来源，并将当前位置压入 UI 导航历史栈。 */
@@ -852,6 +886,7 @@ export class RootStore {
     }
     this.navigation.setListMode(target.lifecycle === "archived" ? "archived" : "active");
     this.navigation.navigateTo(location);
+    await this.#runtime.loadSession(location.session_id);
   }
 
   async locateTextQuoteSource(session_id: SessionId, quote: QuotedTextSnapshot): Promise<boolean> {
@@ -871,6 +906,41 @@ export class RootStore {
       this.navigation.navigateTo(location);
       this.transient_focus.focus(quote);
     });
+    await this.#runtime.loadSession(location.session_id);
+    return true;
+  }
+
+  /** 按 F01 的连续分页补齐锚点，不改动编辑草稿或重新选择会话。 */
+  async locateHistoryEditMessage(session_id: SessionId, message_id: MessageId, generation?: number): Promise<boolean> {
+    const client = this.#runtime.client;
+    const device = this.navigation.target_device;
+    const current = () => !this.#disposed && client === this.#runtime.client
+      && device === this.navigation.target_device && session_id === this.navigation.selected_session_id
+      && !this.navigation.selected_child_task_id;
+    if (!client || !current()) return false;
+    const loaded = await this.#loadConversationLocation({
+      session_id, child_task_id: null, anchor_message_id: message_id, scroll_offset: null, target_device: device,
+    }, generation, () => {});
+    if (!loaded || !current()) return false;
+    runInAction(() => this.navigation.requestConversationAnchor(message_id));
+    return true;
+  }
+
+  async refreshHistoryEdit(session_id: SessionId, result: ReenterFromUserMessageResult): Promise<boolean> {
+    const runtime = this.#runtime;
+    const client = runtime.client;
+    const projection = this.projection;
+    if (!client || this.navigation.selected_session_id !== session_id || this.navigation.selected_child_task_id) return false;
+    projection.noteConversationGeneration(session_id, result.generation);
+    await runtime.loadSession(session_id);
+    if (client !== runtime.client || runtime !== this.#runtime || this.navigation.selected_session_id !== session_id) return false;
+    const history = projection.conversation_histories.get(session_id);
+    if (!history || history.generation < result.generation) return false;
+    const found = await this.locateHistoryEditMessage(session_id, result.user_message_id, history.generation);
+    if (client !== runtime.client || runtime !== this.#runtime || this.navigation.selected_session_id !== session_id) return false;
+    if (!found && history.generation === result.generation) return false;
+    if (result.execution_error) this.showInteractionError(`修改已发送，执行未能继续：${result.execution_error.message}`);
+    else if (!found) this.showInteractionError("修改已发送，历史随后发生了变化。");
     return true;
   }
 
@@ -885,10 +955,8 @@ export class RootStore {
     const projection = context?.projection ?? this.local_projection;
     this.transient_focus.clear();
     if (workspace_id) {
-      const workspace = projection.application?.workspaces.find((item) => (
-        item.workspace_id === workspace_id && item.lifecycle === "active"
-      ));
-      if (!workspace) {
+      const workspace = projection.workspaceSummary(workspace_id);
+      if (!workspace || workspace.lifecycle !== "active") {
         this.interaction_error = "项目当前不可用，请选择其他项目。";
         return;
       }
@@ -943,8 +1011,7 @@ export class RootStore {
   moveNewSessionDraft(source: NewSessionDraftKey, workspace_id: WorkspaceId | null, picker_pending = false): boolean {
     const target = draftKeyForWorkspace(workspace_id);
     if (source === target) return true;
-    if (workspace_id && !this.projection.application?.workspaces.some((workspace) =>
-      workspace.workspace_id === workspace_id && workspace.lifecycle === "active")) {
+    if (workspace_id && this.projection.workspaceSummary(workspace_id)?.lifecycle !== "active") {
       this.interaction_error = "目标项目当前不可用。";
       return false;
     }
@@ -1254,6 +1321,8 @@ export class RootStore {
     skill_name: string | null = null,
     quotes: readonly QuotedTextSnapshot[] = [],
     mcp_server_key: McpServerKey | null = null,
+    delivery?: InputDelivery,
+    on_accepted?: () => void,
   ): Promise<boolean> {
     this.transient_focus.clear();
     return this.#run_interaction.submitInput(
@@ -1265,11 +1334,24 @@ export class RootStore {
       skill_name,
       quotes,
       mcp_server_key,
+      delivery,
+      on_accepted,
     );
   }
 
   async exportSession(session_id: SessionId, title: string): Promise<boolean> {
     return this.#session_management.exportSession(session_id, title);
+  }
+
+  async listWorkspaceOptions(target: string | null = this.network.browsing_device): Promise<WorkspaceSummary[]> {
+    const runtime = target ? this.network.context(target).runtime : this.#local_runtime;
+    const client = runtime.client;
+    if (!client) throw new Error("Runtime 未连接");
+    const result = await client.command({ type: "list_workspaces", payload: { lifecycle: "active" } });
+    if (client !== runtime.client) throw new Error("Runtime 连接已变化，请重试");
+    const projection = target ? this.network.context(target).projection : this.local_projection;
+    projection.cacheWorkspaces(result.payload.workspaces);
+    return result.payload.workspaces;
   }
 
   async listSessionPage(filter: "active" | "archived", offset: number, query?: string, target_device: string | null = this.network.browsing_device) {
@@ -1281,15 +1363,58 @@ export class RootStore {
     return result.payload;
   }
 
-  async loadMoreSessions(filter: "active" | "archived"): Promise<void> {
+  /** 分组页独立读取；连接与整份列表修订同时匹配才允许合并。 */
+  async loadSessionGroup(workspace_id: WorkspaceId | null, filter: "active" | "archived", more = false): Promise<void> {
+    const target = this.network.browsing_device;
+    const runtime = target ? this.network.context(target).runtime : this.#local_runtime;
     const projection = this.sidebar_projection;
-    const application = projection.application;
-    if (!application) return;
-    const offset = filter === "active" ? application.active_sessions_next_offset : application.archived_sessions_next_offset;
-    if (offset === null || offset === undefined) return;
-    const page = await this.listSessionPage(filter, offset);
-    if (application !== projection.application) return;
-    projection.appendSessionPage(filter, page.sessions, page.has_more ? offset + 100 : null);
+    const client = runtime.client;
+    const key = sessionGroupKey(workspace_id, filter);
+    if (!client || this.sidebar_connection.state !== "connected" || projection.listLoadState(key).status === "loading") return;
+    const current = projection.sessionGroup(workspace_id, filter);
+    if (more && current?.next_offset == null) return;
+    const offset = more ? current!.next_offset! : 0;
+    const limit = more ? SIDEBAR_PAGE_SIZE : projection.group_limits.get(key) ?? SIDEBAR_PAGE_SIZE;
+    const revision = projection.list_revision;
+    const loading_state = { status: "loading", error: null } as const;
+    projection.setListLoadState(key, loading_state);
+    try {
+      const group = workspace_id === null ? { type: "unbound" as const } : { type: "workspace" as const, workspace_id };
+      const result = await client.command({ type: "list_sessions", payload: { group, filter, offset, limit, query: null } });
+      if (this.#disposed || client !== runtime.client || target !== this.network.browsing_device) return;
+      projection.appendSessionGroup({ group, filter, sessions: result.payload.sessions, next_offset: result.payload.has_more ? offset + result.payload.sessions.length : null }, offset, revision);
+      if (projection.listLoadState(key) === loading_state) projection.setListLoadState(key, { status: "idle", error: null });
+    } catch {
+      if (client === runtime.client && target === this.network.browsing_device && revision === projection.list_revision && projection.listLoadState(key) === loading_state) {
+        projection.setListLoadState(key, { status: "error", error: "加载失败" });
+      }
+    } finally {
+      if (projection.listLoadState(key) === loading_state) projection.setListLoadState(key, { status: "idle", error: null });
+    }
+  }
+
+  async loadMoreWorkspaces(): Promise<void> {
+    const target = this.network.browsing_device;
+    const runtime = target ? this.network.context(target).runtime : this.#local_runtime;
+    const projection = this.sidebar_projection;
+    const client = runtime.client;
+    const offset = projection.application?.workspaces_next_offset;
+    if (!client || this.sidebar_connection.state !== "connected" || offset == null || projection.listLoadState("workspaces").status === "loading") return;
+    const revision = projection.list_revision;
+    const loading_state = { status: "loading", error: null } as const;
+    projection.setListLoadState("workspaces", loading_state);
+    try {
+      const result = await client.command({ type: "list_workspaces", payload: { offset, limit: SIDEBAR_PAGE_SIZE, lifecycle: "active" } });
+      if (this.#disposed || client !== runtime.client || target !== this.network.browsing_device) return;
+      projection.appendWorkspacePage(result.payload.workspaces, offset, result.payload.has_more ? offset + result.payload.workspaces.length : null, revision);
+      if (projection.listLoadState("workspaces") === loading_state) projection.setListLoadState("workspaces", { status: "idle", error: null });
+    } catch {
+      if (client === runtime.client && target === this.network.browsing_device && revision === projection.list_revision && projection.listLoadState("workspaces") === loading_state) {
+        projection.setListLoadState("workspaces", { status: "error", error: "加载失败" });
+      }
+    } finally {
+      if (projection.listLoadState("workspaces") === loading_state) projection.setListLoadState("workspaces", { status: "idle", error: null });
+    }
   }
 
   async listSkills(workspace_id?: WorkspaceId | null): Promise<SkillManagementSnapshot> {
@@ -1385,7 +1510,7 @@ export class RootStore {
     if (!this.local_files.desktop) return this.#session_management.setSessionPinned(session_id, is_pinned);
     if (!this.#preferences_ready || !this.pins.value.imported) return false;
     const projection = device ? this.network.contexts.get(device)?.projection : this.local_projection;
-    const session = projection?.session_views.get(session_id)?.session ?? projection?.application?.active_sessions.find((item) => item.session_id === session_id);
+    const session = projection?.sessionSummary(session_id);
     if (!session) return false;
     return this.pins.set(pinReference(session, device, this.deviceLabel(device)), is_pinned);
   }
@@ -1404,6 +1529,14 @@ export class RootStore {
 
   async prioritizeQueuedInput(session_id: SessionId, input_id: InputId, revision: number): Promise<void> {
     await this.#run_interaction.prioritizeQueuedInput(session_id, input_id, revision);
+  }
+
+  async interveneQueuedInput(session_id: SessionId, input_id: InputId): Promise<void> {
+    await this.#run_interaction.interveneQueuedInput(session_id, input_id);
+  }
+
+  async confirmIntervention(session_id: SessionId, automatic = false): Promise<void> {
+    await this.#run_interaction.confirmIntervention(session_id, automatic);
   }
 
   async cancelQueuedInput(session_id: SessionId, input_id: InputId): Promise<void> {
@@ -1467,36 +1600,66 @@ export class RootStore {
     session_id: SessionId,
     child_task_id: ChildTaskId | null = null,
   ): Promise<boolean> {
+    if (!this.#runtime.client) return false;
+    return this.#runtime.readConversation((query, signal) =>
+      this.#loadPreviousConversationPage(session_id, child_task_id, query, signal));
+  }
+
+  async #loadPreviousConversationPage(
+    session_id: SessionId,
+    child_task_id: ChildTaskId | null,
+    query: RuntimeReadQuery,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    const location = { session_id, child_task_id };
+    const history = this.#conversationHistoryForLocation(location);
+    const request = history?.previous_request;
+    const pending = request && this.#previous_page_reads.get(request);
+    if (pending) {
+      const client = this.#runtime.client;
+      const projection = this.projection;
+      const loaded = await pending;
+      signal.throwIfAborted();
+      if (this.#runtime.client !== client || this.projection !== projection) return false;
+      const current = this.#conversationHistoryForLocation(location);
+      if (loaded || current?.load_error || current?.generation !== history.generation) return loaded;
+      // 被取代的定位可能取消了自己发出的翻页；新意图从已保存的边界接续。
+    }
+    signal.throwIfAborted();
+    const read = this.#readPreviousConversationPage(session_id, child_task_id, query, signal);
+    const active_request = this.#conversationHistoryForLocation(location)?.previous_request;
+    if (active_request && !this.#previous_page_reads.has(active_request)) this.#previous_page_reads.set(active_request, read);
+    return read;
+  }
+
+  async #readPreviousConversationPage(
+    session_id: SessionId,
+    child_task_id: ChildTaskId | null,
+    query: RuntimeReadQuery,
+    signal: AbortSignal,
+  ): Promise<boolean> {
     const client = this.#runtime.client;
     if (!client) return false;
-    const instance_id = client.instance_id;
-    const currentHistory = () => child_task_id
-      ? this.projection.child_conversation_histories.get(childKey(session_id, child_task_id))
-      : this.projection.conversation_histories.get(session_id);
-    const history = child_task_id
-      ? this.projection.child_conversation_histories.get(childKey(session_id, child_task_id))
-      : this.projection.conversation_histories.get(session_id);
-    const began = child_task_id
+    const currentHistory = () => this.#conversationHistoryForLocation({ session_id, child_task_id });
+    const history = currentHistory();
+    if (!history) return false;
+    const began = runInAction(() => child_task_id
       ? this.projection.beginLoadingPreviousChild(session_id, child_task_id)
-      : this.projection.beginLoadingPrevious(session_id);
-    if (!client || !history || !began) {
-      return false;
-    }
+      : this.projection.beginLoadingPrevious(session_id));
+    if (!began) return false;
+    const projection = this.projection;
     const pending = currentHistory()?.previous_request;
-    const is_current = () => this.#runtime.client === client && client.instance_id === instance_id
+    const is_current = () => this.#runtime.client === client && this.projection === projection
       && currentHistory()?.previous_request === pending
       && currentHistory()?.generation === history.generation
       && currentHistory()?.previous_cursor === history.previous_cursor
       && (currentHistory()?.items[0]?.message_id ?? null) === pending?.first_id;
     try {
-      const result = await client.command({
+      const result = await query({
         type: "list_conversation_page",
-        payload: {
-          owner: history.owner,
-          cursor: history.previous_cursor,
-          limit: 30,
-        },
+        payload: { owner: history.owner, cursor: history.previous_cursor },
       });
+      signal.throwIfAborted();
       if (!is_current()) return false;
       const page = result.payload.snapshot.value;
       if (page.owner.type !== history.owner.type || page.owner.session_id !== session_id
@@ -1504,23 +1667,26 @@ export class RootStore {
         || page.generation !== history.generation) {
         throw new RuntimeClientError("snapshot_stale", "历史已更新，请重新加载。");
       }
+      if (page.items.length === 0 || page.previous_cursor === history.previous_cursor
+        || page.has_more !== (page.previous_cursor !== null)) {
+        throw new RuntimeClientError("protocol_mismatch", "历史分页未能向前推进，请重试。");
+      }
       return runInAction(() => child_task_id
-        ? this.projection.applyPreviousChildConversationPage(session_id, child_task_id, result.payload.snapshot)
-        : this.projection.applyPreviousConversationPage(session_id, result.payload.snapshot));
+        ? projection.applyPreviousChildConversationPage(session_id, child_task_id, result.payload.snapshot)
+        : projection.applyPreviousConversationPage(session_id, result.payload.snapshot));
     } catch (error: unknown) {
-      if (!is_current()) return false;
-      const message = error instanceof RuntimeClientError && error.code === "snapshot_busy"
-        ? "历史正在更新，请重试。" : "历史加载失败，请重试。";
-      runInAction(() => child_task_id
-        ? this.projection.failLoadingPreviousChild(session_id, child_task_id, message)
-        : this.projection.failLoadingPrevious(session_id, message));
-      if (error instanceof RuntimeClientError && error.code === "snapshot_stale") {
-        if (child_task_id) {
-          await this.#runtime.loadChildTask(session_id, child_task_id);
-        } else {
-          await this.#runtime.loadSession(session_id);
-        }
-        return false;
+      // 连接或选择失效时只收回自己的 loading，不能覆盖新读取的错误或数据。
+      const cancelled = error instanceof DOMException && error.name === "AbortError";
+      const message = cancelled ? null : error instanceof RuntimeClientError
+        ? error.code === "snapshot_busy" ? "历史正在更新，请重试。" : error.message
+        : "历史加载失败，请重试。";
+      const stored = child_task_id
+        ? projection.child_conversation_histories.get(childKey(session_id, child_task_id))
+        : projection.conversation_histories.get(session_id);
+      if (stored?.previous_request === pending) {
+        runInAction(() => child_task_id
+          ? projection.failLoadingPreviousChild(session_id, child_task_id, is_current() ? message : null)
+          : projection.failLoadingPrevious(session_id, is_current() ? message : null));
       }
       return false;
     }
@@ -1542,150 +1708,183 @@ export class RootStore {
   }
 
   async locateConversationRun(session_id: SessionId, run_id: RunId): Promise<boolean> {
-    const client = this.#runtime.client;
-    if (!client) {
-      return false;
-    }
-    try {
-      const result = await client.command({
+    return this.#readConversationLocation(async (query, signal) => {
+      const result = await query({
         type: "get_conversation_page_around_run",
-        payload: { session_id, run_id, limit: 30 },
+        payload: { session_id, run_id, turn_limit: 1 },
       });
-      if (client !== this.#runtime.client) return false;
-      const location: ConversationLocation = {
-        session_id,
-        child_task_id: null,
-        anchor_message_id: result.payload.anchor_message_id,
-        scroll_offset: null,
-      };
-      const loaded = await this.#loadConversationLocation(
-        location,
-        result.payload.snapshot.value.generation,
+      const message_id = result.payload.anchor_message_id;
+      const loaded = await this.#fillConversationLocation(
+        { session_id, child_task_id: null, anchor_message_id: message_id, scroll_offset: null },
+        query, signal, result.payload.snapshot.value.generation,
       );
       if (loaded) {
-        runInAction(() => this.navigation.requestConversationAnchor(
-          result.payload.anchor_message_id,
-        ));
+        signal.throwIfAborted();
+        runInAction(() => this.navigation.requestConversationAnchor(message_id));
       }
       return loaded;
-    } catch (error: unknown) {
-      if (client !== this.#runtime.client) return false;
-      runInAction(() => this.projection.failLoadingPrevious(session_id, displayError(error)));
-      return false;
-    }
+    });
+  }
+
+  /** 用已核实的用户标记补齐连续正文，由视图在同一 owner 和代次内滚动。 */
+  async locateConversationUser(
+    owner: ConversationOwner,
+    generation: number,
+    message_id: MessageId,
+    on_error: (message: string) => void,
+  ): Promise<boolean> {
+    const { session_id } = owner;
+    const child_task_id = owner.type === "child_task" ? owner.child_task_id : null;
+    const location = { session_id, child_task_id, anchor_message_id: message_id, scroll_offset: null };
+    const is_selected = () => this.navigation.selected_session_id === session_id
+      && this.navigation.selected_child_task_id === child_task_id;
+    return this.#readConversationLocation(async (query, signal) => {
+      if (!is_selected() || this.#conversationHistoryForLocation(location)?.generation !== generation) return false;
+      if (!await this.#fillConversationLocation(location, query, signal, generation)) {
+        on_error(this.#conversationHistoryForLocation(location)?.load_error ?? "历史加载失败，请重试。");
+        return false;
+      }
+      signal.throwIfAborted();
+      return is_selected() && Boolean(this.#conversationHistoryForLocation(location)?.items.some(
+        item => item.type === "user" && item.message_id === message_id,
+      ));
+    }, error => on_error(error instanceof RuntimeClientError && error.code === "message_not_found"
+      ? "这条消息已不可用" : displayError(error)));
   }
 
   /** 仅补齐当前阅读锚点，不改变导航或业务事件水位。 */
-  async restoreReadingAnchor(session_id: SessionId, child_task_id: ChildTaskId | null, message_id: MessageId): Promise<boolean> {
+  async restoreReadingAnchor(
+    session_id: SessionId, child_task_id: ChildTaskId | null, message_id: MessageId,
+  ): Promise<boolean | "missing"> {
+    if (this.navigation.selected_session_id !== session_id
+      || this.navigation.selected_child_task_id !== child_task_id) return false;
+    let missing = false;
+    const loaded = await this.#loadConversationLocation(
+      { session_id, child_task_id, anchor_message_id: message_id, scroll_offset: null },
+      undefined,
+      error => {
+        missing = error instanceof RuntimeClientError && error.code === "message_not_found";
+        if (!missing) this.showInteractionError(conversationSourceError(error));
+      },
+    );
+    if (!missing || this.navigation.selected_session_id !== session_id
+      || this.navigation.selected_child_task_id !== child_task_id) return loaded;
+    runInAction(() => { this.session_notice = { session_id, tone: "neutral", message: "原位置已不可用" }; });
+    return "missing";
+  }
+
+  cancelConversationLocation(): void {
+    this.#conversation_location_read?.abort(new DOMException("Conversation location changed", "AbortError"));
+  }
+
+  async #readConversationLocation(
+    operation: (query: RuntimeReadQuery, signal: AbortSignal) => Promise<boolean>,
+    on_error: (error: unknown) => void = error => this.showInteractionError(conversationSourceError(error)),
+  ): Promise<boolean> {
+    this.cancelConversationLocation();
+    const controller = new AbortController();
+    this.#conversation_location_read = controller;
     const client = this.#runtime.client;
-    const index = this.navigation.conversation_history_index;
-    const is_current = () => this.#runtime.client === client
-      && this.navigation.conversation_history_index === index
-      && this.navigation.selected_session_id === session_id
-      && this.navigation.selected_child_task_id === child_task_id;
-    if (!client || !is_current()) return false;
     try {
-      // 先确认消息仍存在，避免为了已删除的锚点自动翻完整份历史。
-      const located = await client.command({ type: "get_conversation_page_around_message", payload: {
-        owner: child_task_id ? { type: "child_task", session_id, child_task_id } : { type: "main_session", session_id },
-        message_id, limit: 1,
-      } });
-      if (!is_current()) return false;
-      return this.#loadConversationLocation(
-        { session_id, child_task_id, anchor_message_id: message_id, scroll_offset: null },
-        located.payload.snapshot.value.generation, is_current,
-      );
-    } catch {
-      if (is_current()) this.showInteractionError("原阅读位置暂不可用，已保留当前有效历史。");
+      return await this.#runtime.readConversation(async (query, signal) => {
+        const guard: RuntimeReadQuery = async (command) => {
+          const result = await query(command);
+          if (this.#runtime.client !== client) throw new DOMException("Runtime connection changed", "AbortError");
+          return result;
+        };
+        return operation(guard, signal);
+      }, controller.signal);
+    } catch (error: unknown) {
+      if (this.#conversation_location_read === controller && !controller.signal.aborted
+        && client === this.#runtime.client && !(error instanceof DOMException && error.name === "AbortError")) {
+        runInAction(() => on_error(error));
+      }
       return false;
+    } finally {
+      if (this.#conversation_location_read === controller) this.#conversation_location_read = null;
     }
   }
 
   async #loadConversationLocation(
-    location: ConversationLocation,
-    expected_generation?: number,
-    is_current: () => boolean = () => true,
+    location: ConversationLocation, expected_generation?: number, on_error?: (error: unknown) => void,
   ): Promise<boolean> {
     const device = location.target_device === undefined ? this.navigation.target_device : location.target_device;
-    if (device) await this.network.ensureConnected(device);
-    const client = this.#runtime.client;
-    const prior_guard = is_current;
-    is_current = () => prior_guard() && this.#runtime.client === client && this.navigation.target_device === device;
-    if (!is_current()) return false;
-    if (!client) {
-      this.showInteractionError("Runtime 当前不可用。");
-      return false;
-    }
-    try {
-      const selected_location = this.navigation.selected_session_id === location.session_id
-        && this.navigation.selected_child_task_id === location.child_task_id;
-      const current = this.#conversationHistoryForLocation(location);
-      if (
-        selected_location
-        && location.anchor_message_id
-        && current
-        && (expected_generation === undefined || current.generation === expected_generation)
-        && current.items.some((item) => item.message_id === location.anchor_message_id)
-      ) {
-        return true;
-      }
+    if (device && !this.#runtime.client) await this.network.ensureConnected(device);
+    if (this.navigation.target_device !== device) return false;
+    return this.#readConversationLocation((query, signal) =>
+      this.#fillConversationLocation(location, query, signal, expected_generation), on_error);
+  }
 
-      await this.#runtime.loadSession(location.session_id);
-      if (!is_current()) return false;
-      if (location.child_task_id) {
-        await this.#runtime.loadChildTask(location.session_id, location.child_task_id);
-      }
-
-      if (!is_current()) return false;
-      let history = this.#conversationHistoryForLocation(location);
-      if (!history) {
-        throw new RuntimeClientError("conversation_unavailable", "来源会话暂时无法读取。");
-      }
-      if (expected_generation !== undefined && history.generation !== expected_generation) {
-        throw new RuntimeClientError("snapshot_stale", "引用来源已更新。");
-      }
-      while (
-        location.anchor_message_id
-        && !history.items.some((item) => item.message_id === location.anchor_message_id)
-      ) {
-        if (!history.has_more || !history.previous_cursor) {
+  async #fillConversationLocation(
+    location: ConversationLocation,
+    query: RuntimeReadQuery,
+    signal: AbortSignal,
+    expected_generation?: number,
+  ): Promise<boolean> {
+    const { session_id, child_task_id, anchor_message_id } = location;
+    const owner: ConversationOwner = child_task_id
+      ? { type: "child_task", session_id, child_task_id } : { type: "main_session", session_id };
+    let history = this.#conversationHistoryForLocation(location);
+    const has_anchor = () => Boolean(history?.items.some(item => item.message_id === anchor_message_id));
+    if (anchor_message_id && !has_anchor() && expected_generation === undefined) {
+      // 校验已失效的锚点，避免为了找不到的消息读完整份历史。
+      const result = await query({
+        type: "get_conversation_page_around_message",
+        payload: { owner, message_id: anchor_message_id, turn_limit: 1 },
+      }).catch((error: unknown) => {
+        if (error instanceof RuntimeClientError && error.code === "invalid_request") {
           throw new RuntimeClientError("message_not_found", "来源消息已不可用。");
         }
-        const previous_cursor = history.previous_cursor;
-        const previous_item_count = history.items.length;
-        const loaded = await this.loadPreviousConversationPage(
-          location.session_id,
-          location.child_task_id,
-        );
-        if (!is_current()) return false;
-        history = this.#conversationHistoryForLocation(location);
-        if (!loaded || !history) {
-          throw new RuntimeClientError("conversation_unavailable", "来源会话暂时无法读取。");
-        }
-        if (expected_generation !== undefined && history.generation !== expected_generation) {
-          throw new RuntimeClientError("snapshot_stale", "引用来源已更新。");
-        }
-        if (
-          history.previous_cursor === previous_cursor
-          && history.items.length === previous_item_count
-        ) {
-          throw new RuntimeClientError("conversation_unavailable", "来源会话暂时无法继续加载。");
-        }
+        throw error;
+      });
+      if (result.payload.anchor_message_id !== anchor_message_id) {
+        throw new RuntimeClientError("protocol_mismatch", "Runtime 返回了不匹配的消息锚点。");
       }
-      return true;
-    } catch (error: unknown) {
-      if (!is_current()) return false;
-      runInAction(() => this.showInteractionError(
-        conversationSourceError(error),
-      ));
-      return false;
+      expected_generation = result.payload.snapshot.value.generation;
+      history = this.#conversationHistoryForLocation(location);
+    }
+    if (!history || (expected_generation !== undefined && history.generation !== expected_generation)) {
+      // 首次进入或换代时以最新快照作为连续起点，不安装 around 查询返回的孤立页。
+      if (child_task_id) {
+        const result = await query({ type: "get_child_task_view", payload: { session_id, child_task_id } });
+        signal.throwIfAborted();
+        const task = result.payload.snapshot.value.task.task;
+        if (task.session_id !== session_id || task.child_task_id !== child_task_id) {
+          throw new RuntimeClientError("protocol_mismatch", "Runtime 返回了归属不匹配的子任务快照。");
+        }
+        this.projection.applyChildTaskSnapshot(result.payload.snapshot);
+      } else {
+        const result = await query({ type: "get_session_view", payload: { session_id } });
+        signal.throwIfAborted();
+        if (result.payload.snapshot.value.session.session_id !== session_id) {
+          throw new RuntimeClientError("protocol_mismatch", "Runtime 返回了归属不匹配的会话快照。");
+        }
+        this.projection.applySessionSnapshot(result.payload.snapshot);
+      }
+      history = this.#conversationHistoryForLocation(location);
+    }
+    if (!history) throw new RuntimeClientError("conversation_unavailable", "来源会话暂时无法读取。");
+    const generation = expected_generation ?? history.generation;
+    const visited = new Set<string>();
+    for (;;) {
+      signal.throwIfAborted();
+      if (history.generation !== generation) throw new RuntimeClientError("snapshot_stale", "来源会话已更新。");
+      if (!anchor_message_id || has_anchor()) return true;
+      const cursor = history.previous_cursor;
+      if (!history.has_more || !cursor) throw new RuntimeClientError("message_not_found", "来源消息已不可用。");
+      if (visited.has(cursor)) throw new RuntimeClientError("protocol_mismatch", "历史分页未能向前推进。");
+      visited.add(cursor);
+      const loaded = await this.#loadPreviousConversationPage(session_id, child_task_id, query, signal);
+      signal.throwIfAborted();
+      history = this.#conversationHistoryForLocation(location);
+      if (!loaded || !history) return false;
     }
   }
 
-  #conversationHistoryForLocation(location: ConversationLocation) {
-    return location.child_task_id
-      ? this.projection.child_conversation_histories.get(childKey(location.session_id, location.child_task_id))
-      : this.projection.conversation_histories.get(location.session_id);
+  #conversationHistoryForLocation({ session_id, child_task_id }: Pick<ConversationLocation, "session_id" | "child_task_id">) {
+    return child_task_id
+      ? this.projection.child_conversation_histories.get(childKey(session_id, child_task_id))
+      : this.projection.conversation_histories.get(session_id);
   }
 
   async getSystemContext(session_id: SessionId): Promise<SystemContextSnapshot> {
@@ -1718,6 +1917,10 @@ export class RootStore {
     if (this.#disposed) return;
     this.#flush_view_state();
     this.#disposed = true;
+    this.cancelConversationLocation();
+    this.conversation_navigation.dispose();
+    this.#history_edit_selection_disposer();
+    this.history_edit.dispose();
     this.#pending_notifications_disposer();
     this.pending_notifications.dispose();
     this.#feedback_disposer();
@@ -1736,6 +1939,7 @@ export class RootStore {
     window.removeEventListener("pagehide", this.local_resource_workspace.disconnectTerminals);
     this.transient_focus.clear();
     this.#resource_scope_disposer();
+    this.sidebar_order.dispose();
     this.pins.dispose();
     this.local_resource_workspace.dispose();
     this.local_files.dispose();

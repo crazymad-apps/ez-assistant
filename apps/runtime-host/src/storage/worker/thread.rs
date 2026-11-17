@@ -157,6 +157,18 @@ pub(super) fn run_worker(
             Command::LoadSessionState { session_id, reply } => {
                 let _ = reply.send(engine.load_session_state(&session_id));
             }
+            Command::MoveSidebarItem { request, reply } => {
+                let _ = reply.send(engine.move_sidebar_item(request));
+            }
+            Command::ResetSidebarOrder { request, reply } => {
+                let _ = reply.send(engine.reset_sidebar_order(request));
+            }
+            Command::QueryWorkspaces { request, reply } => {
+                let _ = reply.send(engine.query_workspaces(request));
+            }
+            Command::QuerySidebar { request, reply } => {
+                let _ = reply.send(engine.query_sidebar(request));
+            }
             Command::QuerySessionSummaries { query, reply } => {
                 let _ = reply.send(engine.query_session_summaries(query));
             }
@@ -292,8 +304,34 @@ pub(super) fn run_worker(
             Command::ReplaceContext { replacement, reply } => {
                 let _ = reply.send(engine.replace_context(replacement));
             }
-            Command::ClaimInput { run, reply } => {
-                let _ = reply.send(engine.claim_input(run));
+            Command::ClaimInput {
+                run,
+                goal_resume,
+                reply,
+            } => {
+                let _ = reply.send(engine.claim_input(run, goal_resume.map(|resume| *resume)));
+            }
+            Command::CheckConversationIdentity {
+                session_id,
+                identity,
+                reply,
+            } => {
+                let _ =
+                    reply.send(engine.new_conversation_identity_available(&session_id, identity));
+            }
+            Command::LoadRunConversation {
+                session_id,
+                run_id,
+                reply,
+            } => {
+                let _ = reply.send(engine.load_run_conversation(&session_id, &run_id));
+            }
+            Command::FindRequestAcceptance {
+                session_id,
+                key,
+                reply,
+            } => {
+                let _ = reply.send(engine.find_request_acceptance(&session_id, &key));
             }
             Command::AcceptInput { input, reply } => {
                 let _ = reply.send(engine.accept_input(*input));
@@ -370,6 +408,9 @@ pub(super) fn run_worker(
             }
             Command::LoadConversationWindow { request, reply } => {
                 let _ = reply.send(engine.load_conversation_window(request));
+            }
+            Command::ReadConversationNavigation { request, reply } => {
+                let _ = reply.send(engine.read_conversation_navigation(request));
             }
             Command::LoadConversationRawWindow { request, reply } => {
                 let _ = reply.send(engine.load_conversation_raw_window(request));

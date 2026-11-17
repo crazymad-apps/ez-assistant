@@ -185,7 +185,7 @@ fn formal_host_manages_mcp_and_persists_refresh_without_creating_runs() {
         "SELECT (SELECT COUNT(*) FROM inputs), (SELECT COUNT(*) FROM runs), (SELECT COUNT(*) FROM body_appends)",
         [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     ).expect("exact isolated table counts");
-    assert_eq!(counts, (2, 0, 0));
+    assert_eq!(counts, (0, 0, 0));
 }
 
 #[test]

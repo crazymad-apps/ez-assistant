@@ -553,6 +553,7 @@ async fn start_work(runtime: &AssistantRuntime) -> SessionId {
         .submit_session_input(assistant_runtime::SubmitSessionInputRequest {
             source: assistant_runtime::InputChannelSource::desktop_text(),
             input: SubmitInputRequest {
+                delivery: Default::default(),
                 session_id: id.clone(),
                 message: "wait".into(),
                 variant: AgentVariant::default(),

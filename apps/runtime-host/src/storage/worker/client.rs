@@ -6,15 +6,15 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use assistant_protocol::{ChildTaskId, InputId, SessionId};
+use assistant_protocol::{ChildTaskId, InputId, RunId, SessionId};
 use assistant_runtime::{
     AcceptedInput, AcceptedStoredSessionCommand, ApprovalModeChange, ArchiveChange, ChildTaskStart,
     ChildToolExecutionStart, CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
-    ContextReplacementResult, ConversationMessageLocationRequest, ConversationRawWindowRequest,
-    ConversationRewrite, ConversationSearchPage, ConversationSearchRequest,
-    ConversationWindowRequest, DeviceNameChange, DeviceRevocation, DeviceRevocationResult,
-    GoalClear, GoalHeldInputResume, GoalHeldInputResumeResult, GoalStop, GoalStopResult,
-    MemoryContextSnapshot, MessageFeedbackChange, ModelChange, NewAttachmentUpload,
+    ContextReplacementResult, ConversationMessageLocationRequest, ConversationNavigationRequest,
+    ConversationRawWindowRequest, ConversationRewrite, ConversationSearchPage,
+    ConversationSearchRequest, ConversationWindowRequest, DeviceNameChange, DeviceRevocation,
+    DeviceRevocationResult, GoalClear, GoalHeldInputResume, GoalHeldInputResumeResult, GoalStop,
+    GoalStopResult, MemoryContextSnapshot, MessageFeedbackChange, ModelChange, NewAttachmentUpload,
     NewPairedDevice, NewStoredChildTask, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
     NewStoredSessionCommand, NewStoredSessionMaterialization, NewWorkspaceRegistration,
     PairedDevice, PcOutputHostingChange, PendingChildToolExchange, PendingToolExchange,
@@ -27,13 +27,14 @@ use assistant_runtime::{
     SessionPinnedChange, SessionProxyChange, SessionTitleChange, SessionTitleGenerationCommit,
     SessionTitleGenerationCommitResult, SkillNameState, SkillNameStateChange, StoreError,
     StoreErrorKind, StoreFuture, StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
-    StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationWindow,
-    StoredMessageFeedback, StoredPinnedMemory, StoredRun, StoredRunContinuation,
-    StoredRunContinuationResult, StoredRunSettlement, StoredRunSettlementResult, StoredSession,
-    StoredSessionCommand, StoredSessionFork, StoredSessionMaterialization, StoredSessionUsage,
-    StoredTerminalRunInputReconciliation, StoredWorkPlan, StoredWorkspace, ToolExecutionStart,
-    UserMessageCommit, VariantChange, WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult,
-    WorkspaceRemoval, WorkspaceRestoration, WorkspaceUpdate,
+    StoredConversationMessageLocation, StoredConversationNavigation, StoredConversationRawWindow,
+    StoredConversationWindow, StoredMessageFeedback, StoredPinnedMemory, StoredRun,
+    StoredRunContinuation, StoredRunContinuationResult, StoredRunSettlement,
+    StoredRunSettlementResult, StoredSession, StoredSessionCommand, StoredSessionFork,
+    StoredSessionMaterialization, StoredSessionUsage, StoredTerminalRunInputReconciliation,
+    StoredWorkPlan, StoredWorkspace, ToolExecutionStart, UserMessageCommit, VariantChange,
+    WorkPlanClear, WorkPlanMutation, WorkPlanMutationResult, WorkspaceRemoval,
+    WorkspaceRestoration, WorkspaceUpdate,
 };
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 
@@ -542,6 +543,46 @@ impl RuntimeStore for LocalRuntimeStore {
                 .await
         })
     }
+    fn move_sidebar_item(
+        &self,
+        request: assistant_protocol::MoveSidebarItemRequest,
+    ) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            self.request(|reply| Command::MoveSidebarItem { request, reply })
+                .await
+        })
+    }
+
+    fn reset_sidebar_order(
+        &self,
+        request: assistant_protocol::ResetSidebarOrderRequest,
+    ) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            self.request(|reply| Command::ResetSidebarOrder { request, reply })
+                .await
+        })
+    }
+
+    fn query_workspaces(
+        &self,
+        request: assistant_protocol::ListWorkspacesRequest,
+    ) -> StoreFuture<'_, assistant_runtime::WorkspacePage> {
+        Box::pin(async move {
+            self.request(|reply| Command::QueryWorkspaces { request, reply })
+                .await
+        })
+    }
+
+    fn query_sidebar(
+        &self,
+        request: assistant_protocol::GetApplicationSnapshotRequest,
+    ) -> StoreFuture<'_, assistant_runtime::SidebarSnapshot> {
+        Box::pin(async move {
+            self.request(|reply| Command::QuerySidebar { request, reply })
+                .await
+        })
+    }
+
     fn query_session_summaries(
         &self,
         query: assistant_runtime::SessionSummaryQuery,
@@ -889,10 +930,68 @@ impl RuntimeStore for LocalRuntimeStore {
         })
     }
 
-    fn claim_input(&self, run: StoredRun) -> StoreFuture<'_, ()> {
+    fn claim_input(
+        &self,
+        run: StoredRun,
+        goal_resume: Option<GoalHeldInputResume>,
+    ) -> StoreFuture<'_, ()> {
         Box::pin(async move {
-            self.request(|reply| Command::ClaimInput { run, reply })
-                .await
+            self.request(|reply| Command::ClaimInput {
+                run,
+                goal_resume: goal_resume.map(Box::new),
+                reply,
+            })
+            .await
+        })
+    }
+
+    fn new_conversation_identity_available(
+        &self,
+        session: &SessionId,
+        identity: assistant_runtime::NewConversationIdentity,
+    ) -> StoreFuture<'_, bool> {
+        let session_id = session.clone();
+        Box::pin(async move {
+            self.request(|reply| Command::CheckConversationIdentity {
+                session_id,
+                identity,
+                reply,
+            })
+            .await
+        })
+    }
+
+    fn load_run_conversation(
+        &self,
+        session: &SessionId,
+        run: &RunId,
+    ) -> StoreFuture<'_, assistant_runtime::StoredConversationRawWindow> {
+        let session_id = session.clone();
+        let run_id = run.clone();
+        Box::pin(async move {
+            self.request(|reply| Command::LoadRunConversation {
+                session_id,
+                run_id,
+                reply,
+            })
+            .await
+        })
+    }
+
+    fn find_request_acceptance(
+        &self,
+        session: &SessionId,
+        key: &assistant_protocol::IdempotencyKey,
+    ) -> StoreFuture<'_, Option<assistant_runtime::StoredRequestAcceptance>> {
+        let session_id = session.clone();
+        let key = key.clone();
+        Box::pin(async move {
+            self.request(|reply| Command::FindRequestAcceptance {
+                session_id,
+                key,
+                reply,
+            })
+            .await
         })
     }
 
@@ -1100,6 +1199,16 @@ impl RuntimeStore for LocalRuntimeStore {
     ) -> StoreFuture<'_, StoredConversationWindow> {
         Box::pin(async move {
             self.request(|reply| Command::LoadConversationWindow { request, reply })
+                .await
+        })
+    }
+
+    fn read_conversation_navigation(
+        &self,
+        request: ConversationNavigationRequest,
+    ) -> StoreFuture<'_, StoredConversationNavigation> {
+        Box::pin(async move {
+            self.request(|reply| Command::ReadConversationNavigation { request, reply })
                 .await
         })
     }

@@ -41,7 +41,9 @@ pub(crate) fn latest_model_result_id(
         .iter()
         .rev()
         .find_map(|message| match message {
-            ConversationMessage::Assistant(message) if message.purpose.is_model_response() => {
+            ConversationMessage::Assistant(message)
+                if message.purpose.is_model_response() && !message.finish_reason.is_partial() =>
+            {
                 Some(&message.id)
             }
             _ => None,
@@ -367,9 +369,16 @@ impl RuntimeContextCompactor {
     fn compaction_input(
         &self,
         snapshot: &ConversationSnapshot,
-        normal_request: ModelRequest,
+        mut normal_request: ModelRequest,
     ) -> Result<CompactionInput, RuntimeCompactionError> {
-        validate_live_request(snapshot, &normal_request)?;
+        let policy = self.model.context_policy();
+        let effective = agent_context::project_effective_context(snapshot, policy)
+            .map_err(CompactionError::Model)?;
+        normal_request.conversation =
+            agent_context::project_effective_context(&normal_request.conversation, policy)
+                .map_err(CompactionError::Model)?;
+        validate_live_request(&effective, &normal_request)?;
+        // 替换校验仍以原始快照为准，防止摘要操作改写受保护尾部的 reasoning。
         let layout = ContextLayout::build(snapshot)
             .map_err(|_| RuntimeCompactionError::InvalidConversation)?;
         Ok(CompactionInput {

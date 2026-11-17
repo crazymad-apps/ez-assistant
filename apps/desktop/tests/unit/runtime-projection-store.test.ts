@@ -1,3 +1,4 @@
+import { sidebarFixture } from "../support/sidebarFixture";
 import { describe, expect, it } from "vitest";
 import type {
   ApplicationSnapshot,
@@ -5,6 +6,7 @@ import type {
   ConversationItem,
   ConversationPage,
   RuntimeEventEnvelope,
+  RunSnapshot,
   SessionViewSnapshot,
 } from "@ez-assistant/protocol";
 import { conversationItemId, RuntimeProjectionStore } from "../../src/stores/RuntimeProjectionStore";
@@ -12,8 +14,8 @@ import { childKey } from "../../src/stores/liveExecutionProjection";
 
 const application: ApplicationSnapshot = {
   runtime_lifecycle: "running",
-  active_sessions_next_offset: null,
-  archived_sessions_next_offset: null,
+  ...sidebarFixture({ active_next: null, archived_next: null, active: [], archived: [] }),
+
   configuration: {
     config_path: null,
     revision: "fixture-revision",
@@ -23,12 +25,12 @@ const application: ApplicationSnapshot = {
   },
   providers: [], model_settings: { default_model: null, vision_model: null },
   workspaces: [],
-  active_sessions: [],
-  archived_sessions: [],
+
+
   controller_availability: { status: "unavailable" },
   additional_controller_count: 0,
   capabilities: {
-    conversation_paging: true, mcp_tools: true, mcp_management: true, session_commands: true,
+    conversation_paging: true, mcp_tools: true, mcp_management: true, session_commands: true, user_message_edit: false,
     tool_detail: true,
     queue_control: true,
     approval_queue: true,
@@ -38,6 +40,38 @@ const application: ApplicationSnapshot = {
 };
 
 describe("RuntimeProjectionStore", () => {
+  it("isolates group pages and discards session and project pages after a snapshot refresh", () => {
+    const store = new RuntimeProjectionStore();
+    const session = sessionView(page(1, [], null, false)).session;
+    const groups = ["a", "b"].map(workspace_id => ({ group: { type: "workspace" as const, workspace_id }, filter: "active" as const,
+      sessions: [{ ...session, session_id: workspace_id, workspace_id }], next_offset: 1 }));
+    store.applyApplicationSnapshot({ observed_sequence: 2, value: { ...application, session_groups: groups, workspaces_next_offset: 50 } });
+    const revision = store.list_revision;
+    for (const group of groups) store.appendSessionGroup({ ...group, sessions: [{ ...session, session_id: `${group.group.workspace_id}-more` }], next_offset: null }, 1, revision);
+    expect(store.sessionGroup("a", "active")?.sessions.map(row => row.session_id)).toEqual(["a", "a-more"]);
+    expect(store.sessionGroup("b", "active")?.sessions.map(row => row.session_id)).toEqual(["b", "b-more"]);
+    store.refreshApplicationSnapshot({ observed_sequence: 3, value: { ...application, session_groups: groups, workspaces_next_offset: 50 } });
+    store.appendSessionGroup({ ...groups[0], sessions: [{ ...session, session_id: "stale" }], next_offset: null }, 1, revision);
+    store.appendWorkspacePage([{ workspace_id: "stale", label: "stale", lifecycle: "active", user_directory: null, agent_directory: "/fixture", additional_directories: [], created_at_ms: 0, updated_at_ms: 0, removed_at_ms: null }], 50, null, revision);
+    expect(store.sessionGroup("a", "active")?.sessions.map(row => row.session_id)).toEqual(["a"]);
+    expect(store.application?.workspaces).toEqual([]);
+    expect(store.application?.workspaces_next_offset).toBe(50);
+    const current = store.list_revision;
+    store.refreshApplicationSnapshot({ observed_sequence: 1, value: application });
+    expect(store.list_revision).toBe(current);
+  });
+
+  it("resolves off-page selection from the view without adding a sidebar row", () => {
+    const store = new RuntimeProjectionStore();
+    const view = sessionView(page(1, [], null, false));
+    store.applyApplicationSnapshot({ observed_sequence: 1, value: { ...application, pinned_sessions: [{ ...view.session, title: "old pin" }] } });
+    store.applySessionSnapshot({ observed_sequence: 2, value: view });
+    expect(store.sessionSummary(view.session.session_id)).toEqual(view.session);
+    expect(store.loadedSessions()).toEqual([]);
+    store.refreshApplicationSnapshot({ observed_sequence: 3, value: application });
+    expect(store.sessionSummary(view.session.session_id)).toEqual(view.session);
+  });
+
   it("isolates identical child IDs, watermarks and pagination by the complete owner", () => {
     const store = new RuntimeProjectionStore();
     const view = (session_id: string, generation: number): ChildTaskViewSnapshot => ({
@@ -83,6 +117,32 @@ describe("RuntimeProjectionStore", () => {
     expect(store.conversation_histories.get("session-1")?.items.map(conversationItemId)).toEqual(["m1", "m2", "m3", "m4", "m5"]);
     expect(store.observed_sequence).toBe(0);
     expect(store.applySessionSnapshot({ observed_sequence: 9, value: sessionView(page(1, [], null, false)) })).toBe(false);
+  });
+
+  it("shows a committed receipt until its history page arrives and ignores replay after a newer run", () => {
+    const store = new RuntimeProjectionStore();
+    const run: RunSnapshot = { run_id: "run", session_id: "session-1", input_id: "input", attempt: 1,
+      status: "running", created_at_ms: 2, finished_at_ms: null, variant: "build", approval_mode: "ask",
+      cancel_requested: false, reasoning_parts: [], tools: [], text: "", error: null };
+    const message = { message_id: "new-user", input_id: "input", text: "介入", created_at_ms: 1,
+      inherited: false, attachment_ids: [], quotes: [], source: { type: "user" as const } };
+    const before = sessionView(page(1, [assistant("old-tail")], "prev", true));
+    const receipt = { input_id: "input", run, user_message: message, generation: 1 };
+    store.applySessionSnapshot({ observed_sequence: 2, value: before });
+    expect(store.applyInputReceipt("session-1", receipt)).toBe(true);
+    expect(store.applyInputReceipt("session-1", receipt)).toBe(true);
+    expect(store.input_receipts.get("session-1")).toHaveLength(1);
+    store.applySessionSnapshot({ observed_sequence: 3, value: before });
+    expect(store.input_receipts.get("session-1")).toHaveLength(1);
+    expect(store.conversation_histories.get("session-1")?.previous_cursor).toBe("prev");
+    store.applySessionSnapshot({ observed_sequence: 4, value: sessionView(page(1,
+      [assistant("old-tail"), assistant("old-final"), { ...message, type: "user" }], "prev", true)) });
+    expect(store.input_receipts.has("session-1")).toBe(false);
+    expect(store.conversation_histories.get("session-1")?.items.map(conversationItemId)).toEqual(["old-tail", "old-final", "new-user"]);
+    store.applySessionSnapshot({ observed_sequence: 6, value: { ...sessionView(page(1, [assistant("newer-tail")], "prev", true)),
+      runs: [{ ...run, run_id: "newer-run", input_id: "newer-input", created_at_ms: 5 }] } });
+    expect(store.applyInputReceipt("session-1", receipt)).toBe(false);
+    expect(store.input_receipts.has("session-1")).toBe(false);
   });
 
   it("uses a snapshot watermark and detects an event gap", () => {

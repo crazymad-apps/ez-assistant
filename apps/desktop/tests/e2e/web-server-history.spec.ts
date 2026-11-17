@@ -1,4 +1,4 @@
-import { compatibilityHeaders, type ProviderSummary } from "@ez-assistant/protocol";
+import { compatibilityHeaders, type ProviderSummary, type GetSessionViewResult, type ListConversationNavigationResult } from "@ez-assistant/protocol";
 import { expect, test } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -12,7 +12,7 @@ type Wire = { store: boolean; previous_response_id?: string; input: { type?: str
 for (const milestone of ["m0", "m1"] as const) test(`personal Responses history ${milestone}: tools, isolation and real Host restart`, async ({ page }) => {
   test.setTimeout(150_000);
   page.setDefaultTimeout(10_000);
-  const root = resolve(`../../.runtime-test/f06-${milestone}`);
+  const root = resolve(process.env.EZ_ASSISTANT_E2E_TEST_ROOT ?? `../../.runtime-test/f06-${milestone}`);
   await mkdir(root, { recursive: true });
   const home = await mkdtemp(join(root, "runtime-"));
   const os_home = await mkdtemp(join(root, "os-home-"));
@@ -106,11 +106,14 @@ for (const milestone of ["m0", "m1"] as const) test(`personal Responses history 
     await command("shutdown_runtime", {});
     await expect.poll(() => child?.exitCode, { timeout: 10_000 }).not.toBeNull();
   }
-  async function open() {
+  async function login() {
     const response = await fetch(`${discovery.address}/auth/login`, { method: "POST", headers: headers(), body: JSON.stringify({ method: "desktop" }) });
     expect(response.ok).toBe(true);
     const { token } = await response.json();
     await page.goto(`${discovery.address}/#token=${encodeURIComponent(token)}`);
+  }
+  async function open() {
+    await login();
     await page.getByRole("button", { name: "账号与 Runtime" }).click();
     await page.getByRole("menuitem", { name: "设置" }).click();
     await page.getByRole("dialog", { name: "设置", exact: true }).getByRole("button", { name: "模型", exact: true }).click();
@@ -149,12 +152,14 @@ for (const milestone of ["m0", "m1"] as const) test(`personal Responses history 
     await command("save_model_fixed_config", { selection, origin: "manual", parameters });
     await command("set_default_model", { selection });
     const registered = await command<{ workspace: { workspace_id: string } }>("register_workspace", { label: "F06", primary_directory: workspace, additional_directories: [] });
-    const created = await command<{ session: { session_id: string } }>("create_session", { title: "F06", workspace_id: registered.workspace.workspace_id, model_selection: null });
+    const session_title = "F06 原始会话";
+    const created = await command<{ session: { session_id: string } }>("create_session", { title: session_title, workspace_id: registered.workspace.workspace_id, model_selection: null });
     const session_id = created.session.session_id;
     async function run(message: string, target = session_id, status = "completed") {
-      const submitted = await command<{ run: { run_id: string } }>("submit_input", { session_id: target, message, variant: "build" });
-      await expect.poll(async () => (await command<{ run: { status: string } }>("get_run", { session_id: target, run_id: submitted.run.run_id })).run.status, { timeout: 20_000 }).toBe(status);
-      return submitted.run.run_id;
+      const submitted = await command<{ input_id: string }>("submit_input", { session_id: target, message, mode: "normal", variant: "build" });
+      const findRun = async () => (await command<GetSessionViewResult>("get_session_view", { session_id: target })).snapshot.value.runs.find(run => run.input_id === submitted.input_id);
+      await expect.poll(async () => (await findRun())?.status, { timeout: 20_000 }).toBe(status);
+      return (await findRun())!.run_id;
     }
     await run("F06_FIRST");
     const first = calls.filter(call => call.store);
@@ -258,7 +263,7 @@ for (const milestone of ["m0", "m1"] as const) test(`personal Responses history 
       expect(new Set(childRejected.map(call => call.previous_response_id)).size).toBe(2);
       // A Fork copies reliable local history but starts its own remote chain.
       const owner = { type: "main_session", session_id };
-      const pageSnapshot = await command<{ snapshot: { value: { generation: number; items: { message_id: string }[] } } }>("list_conversation_page", { owner, cursor: null, limit: 100 });
+      const pageSnapshot = await command<{ snapshot: { value: { generation: number; items: { message_id: string }[] } } }>("list_conversation_page", { owner, cursor: null, turn_limit: 50 });
       const conversation = pageSnapshot.snapshot.value;
       const fork = await command<{ session: { session_id: string } }>("fork_session", { session_id, fork_point: conversation.items.at(-1)!.message_id, expected_generation: conversation.generation });
       await run("F06_FORK_FIRST", fork.session.session_id);
@@ -266,17 +271,53 @@ for (const milestone of ["m0", "m1"] as const) test(`personal Responses history 
       previous = responses.get(full());
       await run("F06_FORK_NEXT", fork.session.session_id);
       expect(full().previous_response_id).toBe(previous);
+
+      // F01 使用同一条正式压缩与重启链路，核对聊天中的缩略导航按新代次恢复。
+      const navigation = async () => (await command<ListConversationNavigationResult>("list_conversation_navigation", { owner, cursor: null })).snapshot.value;
+      const before_compaction = await navigation();
+      await page.setViewportSize({ width: 2000, height: 800 });
+      const selectSession = () => page.getByRole("complementary", { name: "会话导航" }).getByRole("button", { name: session_title, exact: true }).click();
+      await login();
+      await selectSession();
+      const markers = page.getByRole("navigation", { name: "消息导航" }).locator("[data-navigation-message-id]");
+      const markerIds = () => markers.evaluateAll(nodes => nodes.map(node => node.getAttribute("data-navigation-message-id")));
+      const preview = page.getByRole("region", { name: "消息预览" });
+      await expect(markers).toHaveCount(before_compaction.items.length);
+      await markers.first().hover();
+      await expect(preview.getByRole("group", { name: "用户输入" })).toHaveText("F06_FIRST");
+
       // Compaction is stateless; committed generation then rebuilds from summary and retained input.
       const compact = await command<{ outcome: { type: string; result_generation: number } }>("compact_session", { session_id, operation_id: crypto.randomUUID(), expected_generation: conversation.generation });
       expect(compact.outcome.type).toBe("compacted");
       expect(calls.some(call => !call.store && !call.previous_response_id)).toBe(true);
+      const compacted = await navigation();
+      expect(compacted.generation).toBeGreaterThan(before_compaction.generation);
+      const stale_preview = await fetch(`${discovery.address}/commands`, {
+        method: "POST",
+        headers: headers(),
+        body: JSON.stringify({ request_id: crypto.randomUUID(), command: { scope: "runtime", payload: {
+          type: "get_conversation_message_preview",
+          payload: { owner, generation: before_compaction.generation, message_id: before_compaction.items[0].user_message_id },
+        } } }),
+      });
+      expect(stale_preview.ok).toBe(false);
+      expect(await stale_preview.text()).toContain("snapshot_stale");
+      await expect(preview).toBeHidden();
+      await expect.poll(markerIds).toEqual(compacted.items.map(item => item.user_message_id));
       await stop(); await start();
+      expect(await navigation()).toEqual(compacted);
       await run("F06_COMPACTED");
       expect(full().previous_response_id).toBeUndefined();
       expect(JSON.stringify(full().input)).toContain("F06_OK");
       previous = responses.get(full());
       await run("F06_COMPACTED_NEXT");
       expect(full().previous_response_id).toBe(previous);
+      await login();
+      await selectSession();
+      await markers.last().hover();
+      await expect(preview.getByRole("group", { name: "用户输入" })).toHaveText("F06_COMPACTED_NEXT");
+      await markers.last().click();
+      await expect(page.getByLabel("消息列表", { exact: true }).getByText("F06_COMPACTED_NEXT", { exact: true })).toBeInViewport();
       const autoSelection = { ...selection, model_id: "auto-model" };
       await command("save_model_fixed_config", { selection: autoSelection, origin: "manual", parameters });
       const automatic = await command<{ session: { session_id: string } }>("create_session", { title: "F06 automatic", workspace_id: registered.workspace.workspace_id, model_selection: autoSelection });
@@ -287,7 +328,7 @@ for (const milestone of ["m0", "m1"] as const) test(`personal Responses history 
       expect(autoCalls.some(call => !call.store && !call.previous_response_id)).toBe(true);
       expect(full().previous_response_id).toBeUndefined();
       expect(JSON.stringify(full().input)).toContain("F06_AUTO_NEXT");
-      const automaticPage = await command<{ snapshot: { value: { generation: number } } }>("list_conversation_page", { owner: { type: "main_session", session_id: automatic.session.session_id }, cursor: null, limit: 100 });
+      const automaticPage = await command<{ snapshot: { value: { generation: number } } }>("list_conversation_page", { owner: { type: "main_session", session_id: automatic.session.session_id }, cursor: null, turn_limit: 50 });
       expect(automaticPage.snapshot.value.generation).toBe(2);
       await writeFile(join(home, "m1-wire.json"), JSON.stringify({ calls, rejected, readFileCalls }, null, 2));
     }

@@ -1,5 +1,161 @@
 use super::{store::FaultInjectingStore, *};
 
+fn intervention_request(session_id: &SessionId, text: &str) -> SubmitInputRequest {
+    SubmitInputRequest {
+        delivery: assistant_protocol::InputDelivery::Intervention,
+        session_id: session_id.clone(),
+        message: text.into(),
+        variant: assistant_protocol::AgentVariant::Build,
+        mode: assistant_protocol::SubmitInputMode::Normal,
+        attachment_ids: vec![],
+        quotes: vec![],
+        skill_name: None,
+        mcp_server_key: None,
+        idempotency_key: Some(assistant_protocol::IdempotencyKey::new(text).unwrap()),
+    }
+}
+
+#[tokio::test]
+async fn concurrent_interventions_serialize_and_same_key_cannot_cancel_the_next_run() {
+    let entered = Arc::new(Notify::new());
+    let runtime = runtime(Arc::new(CancellationAwareModel {
+        capabilities: model_capabilities(false),
+        entered: entered.clone(),
+    }));
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    let mut initial = intervention_request(&session_id, "original");
+    initial.delivery = assistant_protocol::InputDelivery::Queued;
+    let old = runtime.submit_started_input(initial).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .unwrap();
+    let mut invalid = intervention_request(&session_id, "invalid-guidance");
+    invalid.attachment_ids =
+        vec![assistant_protocol::AttachmentId::new("missing-attachment").unwrap()];
+    assert!(runtime.submit_input(invalid).await.is_err());
+    assert!(
+        !runtime
+            .session_for_test(&session_id)
+            .await
+            .lock_state()
+            .unwrap()
+            .active_run
+            .as_ref()
+            .unwrap()
+            .cancellation
+            .is_cancelled()
+    );
+    let a = intervention_request(&session_id, "guidance-a");
+    let b = intervention_request(&session_id, "guidance-b");
+    let (first, second) = tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::join!(biased; runtime.submit_input(a.clone()), runtime.submit_input(b))
+    })
+    .await
+    .unwrap();
+    let first = first.unwrap();
+    let second = second.unwrap();
+    let first_run = first.run.unwrap();
+    let second_run = second.run.unwrap();
+    assert_eq!(first.user_message.unwrap().text, "guidance-a");
+    assert_eq!(second.user_message.unwrap().text, "guidance-b");
+    for run in [old.run, first_run.clone()] {
+        assert_eq!(
+            wait_for_terminal(&runtime, &session_id, &run.run_id)
+                .await
+                .status,
+            assistant_protocol::RunStatus::Cancelled
+        );
+    }
+    let retry = runtime.submit_input(a).await.unwrap();
+    assert_eq!(retry.input_id, first.input_id);
+    assert_eq!(retry.run.unwrap().run_id, first_run.run_id);
+    let session = runtime.session_for_test(&session_id).await;
+    let state = session.lock_state().unwrap();
+    let active = state.active_run.as_ref().unwrap();
+    assert_eq!(active.run_id, second_run.run_id);
+    assert!(!active.cancellation.is_cancelled());
+}
+
+#[tokio::test]
+async fn explicit_stop_while_intervention_waits_preserves_queue_head() {
+    let entered = Arc::new(Notify::new());
+    let runtime = runtime(Arc::new(CancellationAwareModel {
+        capabilities: model_capabilities(false),
+        entered: entered.clone(),
+    }));
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    let mut initial = intervention_request(&session_id, "original");
+    initial.delivery = assistant_protocol::InputDelivery::Queued;
+    let old = runtime.submit_started_input(initial).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .unwrap();
+    let mut tail = intervention_request(&session_id, "tail");
+    tail.delivery = assistant_protocol::InputDelivery::Queued;
+    let tail = runtime.submit_input(tail).await.unwrap();
+    let session = runtime.session_for_test(&session_id).await;
+    // 单线程测试中先把介入推进到等待点，随后在旧执行任务恢复前调用产品停止入口。
+    let intervention = runtime.submit_input(intervention_request(&session_id, "paused-guidance"));
+    tokio::pin!(intervention);
+    assert!(futures_util::poll!(&mut intervention).is_pending());
+    assert!(
+        session
+            .lock_state()
+            .unwrap()
+            .active_run
+            .as_ref()
+            .unwrap()
+            .cancellation
+            .is_cancelled()
+    );
+    runtime
+        .interrupt_run(InterruptRunRequest {
+            session_id: session_id.clone(),
+            run_id: old.run.run_id,
+        })
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(3), intervention)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        result.not_executed,
+        Some(assistant_protocol::InterventionNotExecuted::QueuePaused)
+    );
+    assert!(result.run.is_none());
+    assert_eq!(
+        session
+            .lock_state()
+            .unwrap()
+            .queue_item_ids
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        [result.input_id.clone(), tail.input_id]
+    );
+    runtime
+        .resume_session(assistant_protocol::ResumeSessionRequest {
+            session_id: session_id.clone(),
+        })
+        .await
+        .unwrap();
+    runtime
+        .wait_for_input_claim(&session_id, &result.input_id)
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn host_recycling_rechecks_work_after_inflight_admission_and_observes_its_completion() {
     let runtime = Arc::new(runtime(empty_model()));
@@ -58,6 +214,7 @@ async fn sessions_run_concurrently_and_cancellation_is_isolated_and_idempotent()
 
     let first_run = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: first.session.session_id.clone(),
@@ -75,6 +232,7 @@ async fn sessions_run_concurrently_and_cancellation_is_isolated_and_idempotent()
         .expect("first run entered tool");
     let second_run = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: second.session.session_id.clone(),
@@ -142,6 +300,7 @@ async fn sessions_run_concurrently_and_cancellation_is_isolated_and_idempotent()
 
     let reused = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: first.session.session_id.clone(),
@@ -237,6 +396,7 @@ async fn shutdown_cancels_active_runs_waits_for_settlement_and_is_idempotent() {
     for session_id in [&first.session.session_id, &second.session.session_id] {
         let run = runtime
             .submit_started_input(SubmitInputRequest {
+                delivery: Default::default(),
                 mode: assistant_protocol::SubmitInputMode::Normal,
                 variant: assistant_protocol::AgentVariant::Build,
                 session_id: session_id.clone(),
@@ -331,6 +491,7 @@ async fn shutdown_timeout_aborts_supervisor_and_force_settles_active_run() {
         .expect("session");
     let run = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id.clone(),
@@ -433,6 +594,7 @@ async fn force_settlement_failure_still_shuts_down_store() {
         .expect("session");
     runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session.session_id,
@@ -481,6 +643,7 @@ async fn start_and_shutdown_race_has_no_untracked_active_run() {
         start_barrier.wait().await;
         start_runtime
             .submit_started_input(SubmitInputRequest {
+                delivery: Default::default(),
                 mode: assistant_protocol::SubmitInputMode::Normal,
                 variant: assistant_protocol::AgentVariant::Build,
                 session_id,

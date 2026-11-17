@@ -28,7 +28,7 @@ pub use capability::{
         ListDirectoryRequest, ListDirectoryResult, MAX_EDIT_FILES, MAX_EDIT_GROUPS,
         MAX_EDIT_INPUT_BYTES, MAX_EDITS_PER_FILE, ReadFileRequest, ReadFileResult,
         SearchFilesRequest, SearchFilesResult, SearchKind, SearchMatch, SearchTruncationReason,
-        WriteFileRequest, WriteFileResult, exact_replace, paginate_with_line_numbers,
+        WriteFileRequest, WriteFileResult, exact_replace, paginate_file_text,
     },
     image::{
         ImageInspection, ImageInspectionFuture, ImageInspector, ImageInspectorError,

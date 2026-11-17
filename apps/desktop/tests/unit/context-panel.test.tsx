@@ -1,3 +1,4 @@
+import { sidebarFixture } from "../support/sidebarFixture";
 import { render } from "../support/renderWithAppearance";
 import { modelProvider, modelSelection } from "../support/modelManagement";
 import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
@@ -283,13 +284,13 @@ describe("ContextPanel", () => {
     const store = contextStore();
     const application = store.projection.application!;
     const controller = {
-      ...application.active_sessions[0]!,
+      ...application.session_groups[0].sessions[0]!,
       role: "controller" as const,
       pc_output_hosting: { device_id: "device-1", device_name: "客厅终端" },
     };
     store.projection.refreshApplicationSnapshot({
       observed_sequence: 2,
-      value: { ...application, active_sessions: [controller] },
+      value: { ...application, ...sidebarFixture({ active: [controller] }),},
     });
     const view = store.projection.session_views.get("session-1")!;
     store.projection.applySessionSnapshot({
@@ -335,10 +336,10 @@ describe("ContextPanel", () => {
       value: {
         ...application,
         providers: [], model_settings: { default_model: null, vision_model: null },
-        active_sessions: application.active_sessions.map((session) => ({
+        ...sidebarFixture({ active: application.session_groups[0].sessions.map((session) => ({
           ...session,
           model_selection: { source: 'local' as const, provider_instance_id: "provider-1", model_id: "removed-model" },
-        })),
+        })) }),
       },
     });
     const view = store.projection.session_views.get("session-1")!;
@@ -346,6 +347,7 @@ describe("ContextPanel", () => {
       observed_sequence: 2,
       value: {
         ...view,
+        session: { ...view.session, model_selection: { source: "local", provider_instance_id: "provider-1", model_id: "removed-model" } },
         attachments: view.attachments.map((attachment) => ({ ...attachment, state: "unavailable" })),
         runs: view.runs.map((run) => ({ ...run, created_at_ms: null, finished_at_ms: null })),
         usage: {
@@ -387,8 +389,19 @@ function contextStore(): RootStore {
     observed_sequence: 1,
     value: {
       runtime_lifecycle: "running",
-      active_sessions_next_offset: null,
-      archived_sessions_next_offset: null,
+      ...sidebarFixture({ active_next: null, archived_next: null, active: [{
+        session_id: "session-1",
+        title: "当前会话", lifecycle: "active", role: "standard", active_run_id: null,
+        queued_input_count: 0, resume_required: false, created_at_ms: 1, updated_at_ms: 1,
+        archived_at_ms: null, is_pinned: false, title_origin: "user", pending_approval_count: 0,
+        active_child_count: 0, active_run_status: null,
+        workspace_id: "workspace-1",
+        model_selection: { source: 'local' as const, provider_instance_id: "provider-1", model_id: "fixture" },
+        current_variant: "build",
+        approval_mode: "ask",
+        message_count: 2,
+      }], archived: [] }),
+
       configuration: { state: "ready" },
       providers: [modelProvider], model_settings: { default_model: modelSelection, vision_model: null },
       workspaces: [{
@@ -397,15 +410,8 @@ function contextStore(): RootStore {
         user_directory: "/workspace/new-project",
         additional_directories: ["/workspace/new-docs"],
       }],
-      active_sessions: [{
-        session_id: "session-1",
-        workspace_id: "workspace-1",
-        model_selection: { source: 'local' as const, provider_instance_id: "provider-1", model_id: "fixture" },
-        current_variant: "build",
-        approval_mode: "ask",
-        message_count: 2,
-      }],
-      archived_sessions: [],
+
+
     },
   } as unknown as Parameters<RootStore["projection"]["applyApplicationSnapshot"]>[0]);
   store.projection.applySessionSnapshot({

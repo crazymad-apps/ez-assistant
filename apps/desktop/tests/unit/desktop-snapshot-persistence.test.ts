@@ -89,13 +89,13 @@ it("clears a remembered model when its provider disappears without rewriting mea
 
   store.projection.applyApplicationSnapshot({
     observed_sequence: 1,
-    value: { providers: [{ provider_instance_id: "provider-removed" }] },
+    value: { session_groups: [], providers: [{ provider_instance_id: "provider-removed" }] },
   } as unknown as Parameters<RootStore["projection"]["applyApplicationSnapshot"]>[0]);
   expect(store.new_session_drafts.default_model_selection).toEqual(remembered);
 
   store.projection.applyApplicationSnapshot({
     observed_sequence: 2,
-    value: { providers: [] },
+    value: { session_groups: [], providers: [] },
   } as unknown as Parameters<RootStore["projection"]["applyApplicationSnapshot"]>[0]);
 
   expect(store.new_session_drafts.default_model_selection).toBeNull();

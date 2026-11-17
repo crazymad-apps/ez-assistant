@@ -1,14 +1,20 @@
+import { PINS, WORKSPACES, sessionScope } from "../../../stores/SidebarOrderStore";
+import type { ResetSidebarOrderRequest } from "@ez-assistant/protocol";
+import { ResetOrderDialog } from "./ResetOrderDialog";
+import { useSidebarDrag } from "./useSidebarDrag";
 import { DesktopPins } from "./DesktopPins";
 import { DeviceSelector } from "../DeviceSelector";
-import { Button } from "../../../components/Button";
 import { observer } from "mobx-react-lite";
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { Icon } from "../../../components/Icon";
 import { Collapse } from "../../../components/Collapse";
 import { Tooltip } from "../../../components/Tooltip";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { draftKeyForWorkspace } from "../../../stores/NewSessionDraftStore";
-import { SessionList, WorkspaceGroup } from "./WorkspaceGroup";
+import { SessionGroupPage } from "./SessionGroupPage";
+import { SidebarLoadMore } from "./SidebarLoadMore";
+import { WorkspaceGroup } from "./WorkspaceGroup";
+import { SessionList } from "./SessionList";
 import { AccountMenu } from "../../runtime-access/AccountMenu";
 import { useApplicationConnection } from "../../runtime-access/ApplicationConnectionContext";
 import { SessionNavigation } from "../SessionNavigation";
@@ -21,66 +27,23 @@ export const SessionSidebar = observer(function SessionSidebar({ hidden = false,
   on_toggle: () => void;
 }>) {
   const store = useRootStore();
+  const scroll_ref = useSidebarDrag(store);
+  const [reset_scope, setResetScope] = useState<ResetSidebarOrderRequest | null>(null);
+  const order = store.sidebar_order;
   const application_connection = useApplicationConnection();
   const application = store.sidebar_projection.application;
   const local_application = store.local_projection.application;
   const [pinned_section_open, setPinnedSectionOpen] = useState(true);
-  const [workspace_section_open, setWorkspaceSectionOpen] = useState(true);
+  const workspace_section_open = store.sidebar_navigation.workspace_section_open;
+  const setWorkspaceSectionOpen = () => store.sidebar_navigation.setSectionOpen("workspaces", !workspace_section_open);
   const [restore_dialog_open, setRestoreDialogOpen] = useState(false);
-  const [unbound_section_open, setUnboundSectionOpen] = useState(true);
-  const previous_pinned_ids = useRef<Set<string> | null>(null);
-  const browse_device = store.network.browsing_device;
-  const [list_loading, setListLoading] = useState(false);
-  const [list_error, setListError] = useState<string | null>(null);
-  const sessions =
-    store.sidebar_navigation.list_mode === "active"
-      ? (application?.active_sessions ?? [])
-      : (application?.archived_sessions ?? []);
-  const workspaces = application?.workspaces ?? [];
-  const active_workspaces = workspaces.filter((workspace) => workspace.lifecycle === "active");
-  const active_workspace_ids = new Set(active_workspaces.map((workspace) => workspace.workspace_id));
-  const visible_sessions = sessions.filter((session) => (
-    session.role !== "controller"
-    && (!session.workspace_id || active_workspace_ids.has(session.workspace_id))
-  ));
-  const next_offset = store.sidebar_navigation.list_mode === "active" ? application?.active_sessions_next_offset : application?.archived_sessions_next_offset;
-  const pinned = (local_application?.active_sessions ?? []).filter((session) => session.is_pinned && session.role !== "controller"
-    && (!session.workspace_id || local_application?.workspaces.some((workspace) => workspace.workspace_id === session.workspace_id && workspace.lifecycle === "active")));
-  const unpinned = visible_sessions.filter((session) => !store.isSessionPinned(session, browse_device));
+  const unbound_section_open = store.sidebar_navigation.unbound_section_open;
+  const setUnboundSectionOpen = () => store.sidebar_navigation.setSectionOpen("unbound", !unbound_section_open);
+  const workspaces = order.rows(WORKSPACES, application?.workspaces.filter(workspace => workspace.lifecycle === "active") ?? [], (workspace) => workspace.workspace_id);
+  const list_state = store.sidebar_projection.listLoadState("workspaces");
+  const pinned = local_application?.pinned_sessions ?? [];
   const controller_id = local_application?.controller_availability.status === "available"
     ? local_application.controller_availability.session_id : null;
-
-  async function loadMore() {
-    if (list_loading || next_offset == null) return;
-    const target = browse_device;
-    setListLoading(true);
-    setListError(null);
-    try {
-      await store.loadMoreSessions(store.sidebar_navigation.list_mode);
-    } catch (error) {
-      if (store.network.browsing_device === target) setListError(error instanceof Error ? error.message : "加载失败");
-    } finally { if (store.network.browsing_device === target) setListLoading(false); }
-  }
-  const groups = active_workspaces
-    .map((workspace) => ({
-      workspace,
-      sessions: unpinned.filter((session) => session.workspace_id === workspace.workspace_id),
-    }));
-  const unbound = unpinned.filter((session) => !session.workspace_id);
-
-  useEffect(() => { setListLoading(false); setListError(null); }, [browse_device]);
-
-  useEffect(() => {
-    if (browse_device && !store.local_files.desktop) return;
-    const current_ids = new Set(visible_sessions.filter((session) => store.isSessionPinned(session, browse_device)).map((session) => session.session_id));
-    for (const session of visible_sessions) {
-      if (previous_pinned_ids.current?.has(session.session_id) && !current_ids.has(session.session_id)) {
-        if (session.workspace_id) store.sidebar_navigation.ensureWorkspaceExpanded(session.workspace_id);
-        else setUnboundSectionOpen(true);
-      }
-    }
-    previous_pinned_ids.current = current_ids;
-  }, [store.navigation, visible_sessions, browse_device]);
 
   return (
     <aside
@@ -133,7 +96,8 @@ export const SessionSidebar = observer(function SessionSidebar({ hidden = false,
         </button>
       </div>
 
-      <div className={styles.session_scroll}>
+      {order.visibleError && <p role="alert" className={styles.order_error}>{order.visibleError}</p>}
+      <div className={styles.session_scroll} ref={scroll_ref}>
           <>
             {(store.local_files.desktop ? store.pins.value.items.length > 0 || !!store.pins.error : pinned.length > 0) && <section aria-label="置顶会话" className={styles.pinned_section}>
               <div className={styles.section_header}>
@@ -152,15 +116,15 @@ export const SessionSidebar = observer(function SessionSidebar({ hidden = false,
                 ><Icon name="chevron-down" size={14} /></button>
               </div>
               <Collapse open={pinned_section_open}>
-                {store.local_files.desktop ? <DesktopPins /> : <SessionList indent="root" sessions={pinned} target_device={null} />}
+                {store.local_files.desktop ? <DesktopPins /> : <SessionList indent="root" sessions={pinned} target_device={null} scope={PINS} />}
               </Collapse>
             </section>}
             <DeviceSelector />
-            <div className={`${styles.section_header} ${styles.workspace_section_header}`}>
+            <div className={styles.section_header}>
               <button
                 aria-expanded={workspace_section_open}
                 className={styles.section_label}
-                onClick={() => setWorkspaceSectionOpen((open) => !open)}
+                onClick={() => setWorkspaceSectionOpen()}
                 type="button"
               >
                 项目
@@ -189,11 +153,14 @@ export const SessionSidebar = observer(function SessionSidebar({ hidden = false,
                   type="button"
                 ><Icon name="refresh" size={14} /></button>
               </Tooltip>
+              {store.sidebar_navigation.list_mode === "active" && <Tooltip content="恢复默认顺序">
+                <button type="button" aria-label="恢复项目默认顺序" className={styles.section_action} disabled={!order.enabled(WORKSPACES)} onClick={() => setResetScope({ scope: "workspaces" })}><Icon name="sort" size={14} /></button>
+              </Tooltip>}
               <button
                 aria-expanded={workspace_section_open}
                 aria-label={workspace_section_open ? "收起项目" : "展开项目"}
                 className={styles.section_chevron}
-                onClick={() => setWorkspaceSectionOpen((open) => !open)}
+                onClick={() => setWorkspaceSectionOpen()}
                 type="button"
               >
                 <Icon name="chevron-down" size={14} />
@@ -201,22 +168,26 @@ export const SessionSidebar = observer(function SessionSidebar({ hidden = false,
             </div>
             <Collapse open={workspace_section_open}>
               <div>
-                {groups.map((group) => (
-                  <WorkspaceGroup
-                    key={`${store.network.browsing_device ?? "local"}:${group.workspace.workspace_id}`}
-                    sessions={group.sessions}
-                    workspace={group.workspace}
-                  />
+                {workspaces.map((workspace) => (
+                  <WorkspaceGroup key={`${store.network.browsing_device ?? "local"}:${workspace.workspace_id}`} workspace={workspace} />
                 ))}
+                {application?.workspaces_next_offset != null && (
+                  <SidebarLoadMore
+                    scope={WORKSPACES}
+                    loading={list_state.status === "loading"}
+                    onLoad={() => void store.loadMoreWorkspaces()}
+                  />
+                )}
+                {list_state.error && <p role="alert">加载失败</p>}
               </div>
             </Collapse>
-            {unbound.length > 0 && (
+            {(workspaces.length > 0 || !store.sidebar_projection.sessionGroup(null, store.sidebar_navigation.list_mode) || (store.sidebar_projection.sessionGroup(null, store.sidebar_navigation.list_mode)?.sessions.length ?? 0) > 0) && (
               <section className={styles.unbound_section}>
                 <div className={styles.section_header}>
                   <button
                     aria-expanded={unbound_section_open}
                     className={styles.section_label}
-                    onClick={() => setUnboundSectionOpen((open) => !open)}
+                    onClick={() => setUnboundSectionOpen()}
                     type="button"
                   >
                     独立会话
@@ -238,27 +209,29 @@ export const SessionSidebar = observer(function SessionSidebar({ hidden = false,
                       </button>
                     </Tooltip>
                   )}
+                  {store.sidebar_navigation.list_mode === "active" && <Tooltip content="恢复默认顺序">
+                    <button type="button" aria-label="恢复独立会话默认顺序" className={styles.section_action} disabled={!order.enabled(sessionScope(null))} onClick={() => setResetScope(sessionScope(null))}><Icon name="sort" size={14} /></button>
+                  </Tooltip>}
                   <button
                     aria-expanded={unbound_section_open}
                     aria-label={unbound_section_open ? "收起独立会话" : "展开独立会话"}
                     className={styles.section_chevron}
-                    onClick={() => setUnboundSectionOpen((open) => !open)}
+                    onClick={() => setUnboundSectionOpen()}
                     type="button"
                   >
                     <Icon name="chevron-down" size={14} />
                   </button>
                 </div>
                 <Collapse open={unbound_section_open}>
-                  <SessionList indent="root" sessions={unbound} />
+                  <SessionGroupPage workspace_id={null} open={unbound_section_open} />
                 </Collapse>
               </section>
             )}
-            {store.sidebar_connection.state === "connected" && sessions.length === 0 && <div className={styles.empty_list}>暂无会话</div>}
+            {store.sidebar_connection.state === "connected" && workspaces.length === 0 && store.sidebar_projection.sessionGroup(null, store.sidebar_navigation.list_mode)?.sessions.length === 0 && <div className={styles.empty_list}>暂无会话</div>}
           </>
-        {next_offset != null && <Button variant="text" size="small" disabled={list_loading} onClick={() => void loadMore()}>{list_loading ? "加载中…" : "加载更多"}</Button>}
-        {list_error && <p role="alert">{list_error}</p>}
       </div>
       {application_connection && <AccountMenu connection={application_connection} sidebar />}
+      {reset_scope && <ResetOrderDialog scope={reset_scope} title={reset_scope.scope === "workspaces" ? "恢复项目的默认顺序？" : "恢复独立会话的默认顺序？"} on_close={() => setResetScope(null)} />}
       <RemovedWorkspacesDialog key={store.network.browsing_device ?? "local"} on_close={() => setRestoreDialogOpen(false)} open={restore_dialog_open} />
     </aside>
   );

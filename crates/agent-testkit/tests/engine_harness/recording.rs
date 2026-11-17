@@ -282,6 +282,7 @@ async fn recorder_failure_blocks_all_side_effects() {
             AgentEvent::ExecutionStarted,
             AgentEvent::StepStarted { step: 1 },
             AgentEvent::ExecutionFailed {
+                partial: None,
                 error: ExecutionError::Record(RecordError {
                     message: "injected record failure at call 1".to_owned(),
                 }),

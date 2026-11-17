@@ -11,28 +11,71 @@ use crate::{
 };
 
 impl AssistantRuntime {
-    /// 幂等准入仍由已接受 Input 证明；终态返回值直接读取文件，不恢复执行句柄。
-    pub(super) async fn find_idempotent_run(
+    pub(super) async fn find_message_acceptance(
         &self,
         session: &SessionController,
         key: &assistant_protocol::IdempotencyKey,
-    ) -> RuntimeResult<Option<(assistant_protocol::InputId, Option<RunSnapshot>)>> {
-        let Some((input_id, run_id)) = session.find_idempotent(key)? else {
+    ) -> RuntimeResult<Option<crate::AcceptedInput>> {
+        match self
+            .store
+            .find_request_acceptance(session.id(), key)
+            .await
+            .map_err(|source| RuntimeError::from_store("find input acceptance", source))?
+        {
+            None => Ok(None),
+            Some(crate::StoredRequestAcceptance::Message(accepted)) => Ok(Some(*accepted)),
+            Some(crate::StoredRequestAcceptance::Command(_)) => Err(RuntimeError::InvalidRequest {
+                reason: "input idempotency key belongs to a session control command",
+            }),
+        }
+    }
+
+    pub(super) async fn project_accepted_run(
+        &self,
+        session: &SessionController,
+        accepted: &crate::AcceptedInput,
+    ) -> RuntimeResult<Option<RunSnapshot>> {
+        let Some(run_id) = accepted.run_id() else {
             return Ok(None);
         };
-        let Some(run_id) = run_id else {
-            return Ok(Some((input_id, None)));
+        let observed = session
+            .lock_state()?
+            .runs
+            .get(run_id)
+            .map(|run| run.snapshot());
+        let snapshots = if let crate::AcceptedInput::Historical { run, .. } = accepted {
+            let window = self
+                .store
+                .load_run_conversation(session.id(), run_id)
+                .await
+                .map_err(|source| {
+                    RuntimeError::from_store("load accepted Run conversation", source)
+                })?;
+            let mut facts = window
+                .history
+                .ok_or(RuntimeError::InternalStateUnavailable {
+                    component: "accepted Run message origins",
+                })?;
+            facts.runs.push(run.clone());
+            let history = crate::StoredConversationHistory {
+                generation: window.generation,
+                facts,
+            };
+            self.project_product_run_snapshots(session, &history, &window.conversation)?
+        } else if let Some(snapshot) = observed {
+            vec![snapshot]
+        } else {
+            self.product_run_snapshots(session).await?
         };
-        let run = self
-            .product_run_snapshots(session)
-            .await?
+        snapshots
             .into_iter()
-            .find(|run| run.run_id == run_id && run.input_id == input_id)
+            .find(|run| &run.run_id == run_id && &run.input_id == accepted.input_id())
+            .map(Some)
             .ok_or(RuntimeError::InternalStateUnavailable {
                 component: "idempotent Run history",
-            })?;
-        Ok(Some((input_id, Some(run))))
+            })
     }
+
     /// 读取当前 owner/generation 的可靠历史，活动执行只补充实时观察。
     ///
     /// 不安装历史执行对象、不写 Store。调用方可持 Session mutation；本函数只短暂读取

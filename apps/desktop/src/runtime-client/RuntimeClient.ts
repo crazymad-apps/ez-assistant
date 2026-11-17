@@ -55,6 +55,15 @@ export class RuntimeClientError extends Error {
   }
 }
 
+/** 写命令收到这些失败时，连接层无法证明 Runtime 是否已经接纳。 */
+export function isCommandOutcomeUnknown(error: unknown): boolean {
+  if (!(error instanceof RuntimeClientError)) return true;
+  return error.outcome === "unknown" || (error.outcome !== "not_executed" && [
+    "transport_error", "protocol_mismatch", "runtime_unavailable", "connection_interrupted",
+    "storage_unavailable", "timeout", "cancelled", "internal",
+  ].includes(error.code));
+}
+
 export type RuntimeEventListener = {
   readonly onEvent: (event: RuntimeEventEnvelope) => void;
   /** Host 保活结果，仅用于提示，与 Runtime 业务序列独立。 */
@@ -429,12 +438,16 @@ const REMOTE_BUSINESS_COMMANDS = new Set<RuntimeCommand["type"]>([
   "update_workspace",
   "get_workspace",
   "list_workspaces",
+  "move_sidebar_item",
+  "reset_sidebar_order",
   "remove_workspace",
   "restore_workspace",
   "get_application_snapshot",
   "get_session_view",
   "get_child_task_view",
   "list_conversation_page",
+  "list_conversation_navigation",
+  "get_conversation_message_preview",
   "get_conversation_page_around_run",
   "get_conversation_page_around_message",
   "search_conversation_history",
@@ -458,8 +471,10 @@ const REMOTE_BUSINESS_COMMANDS = new Set<RuntimeCommand["type"]>([
   "rename_session",
   "generate_session_title",
   "set_message_feedback",
+  "get_user_message_edit",
   "reenter_from_user_message",
   "prioritize_queued_input",
+  "intervene_queued_input",
   "interrupt_run",
   "resume_queued_input",
   "reject_approval_and_stop_run",

@@ -14,36 +14,7 @@ export const ReasoningBox = observer(function ReasoningBox(
   const theme = useAppearance().preset;
   const id = useId();
   const preview = useRef<HTMLElement>(null);
-  const scroll = useRef<HTMLDivElement>(null);
-  const content = useRef<HTMLDivElement>(null);
-  const store = useRootStore();
-  const session = store.navigation.selected_session_id;
-  const child = store.navigation.selected_child_task_id;
-  let history = session ? store.projection.conversation_histories.get(session) : undefined;
-  if (child && session) history = store.projection.child_conversation_histories.get(childKey(session, child));
-  const generation = history?.generation ?? 0;
   const open = !props.summary && props.is_open;
-  useOutputFollow({
-    scroll,
-    content,
-    identity: `${session}:${child}:${store.navigation.conversation_history_index}:${generation}:${props.state_key}`,
-    active: open,
-    restore: () => {
-      const location = store.navigation.current_conversation_location;
-      return location?.session_id === session &&
-        location.child_task_id === child &&
-        location.reading_generation === generation
-        ? location.reasoning?.[props.state_key]
-        : undefined;
-    },
-    save: (position) => {
-      // 导航切换后的卸载回调不得把旧 reasoning 位置写入新的 owner。
-      const location = store.navigation.current_conversation_location;
-      if (location?.session_id === session && location.child_task_id === child) {
-        store.navigation.updateReadingPosition(position, generation, props.state_key);
-      }
-    },
-  });
   useLayoutEffect(() => {
     // 仅移动单行预览自身，不调用 scrollIntoView，避免抢走主列表和原文的自由滚动。
     const node = preview.current;
@@ -85,10 +56,48 @@ export const ReasoningBox = observer(function ReasoningBox(
         )}
       </button>
       <Collapse open={open} id={id}>
-        <div className={styles.content} ref={scroll} tabIndex={0} aria-label="思考内容" data-output-scroll="true">
-          <div ref={content}>{props.text}</div>
-        </div>
+        <ReasoningContent state_key={props.state_key} text={props.text} />
       </Collapse>
     </section>
+  );
+});
+
+// Collapse 延迟挂载正文，滚动监听随实际容器建立和清理。
+const ReasoningContent = observer(function ReasoningContent(
+  { state_key, text }: Readonly<{ state_key: string; text: string }>,
+) {
+  const scroll = useRef<HTMLDivElement>(null);
+  const content = useRef<HTMLDivElement>(null);
+  const store = useRootStore();
+  const session = store.navigation.selected_session_id;
+  const child = store.navigation.selected_child_task_id;
+  const history = session && (child
+    ? store.projection.child_conversation_histories.get(childKey(session, child))
+    : store.projection.conversation_histories.get(session));
+  const generation = history ? history.generation : 0;
+  useOutputFollow({
+    scroll,
+    content,
+    identity: `${session}:${child}:${store.navigation.conversation_history_index}:${generation}:${state_key}`,
+    active: true,
+    restore: () => {
+      const location = store.navigation.current_conversation_location;
+      return location?.session_id === session &&
+        location.child_task_id === child &&
+        location.reading_generation === generation
+        ? location.reasoning?.[state_key]
+        : undefined;
+    },
+    save: (position) => {
+      const location = store.navigation.current_conversation_location;
+      if (location?.session_id === session && location.child_task_id === child) {
+        store.navigation.updateReadingPosition(position, generation, state_key);
+      }
+    },
+  });
+  return (
+    <div className={styles.content} ref={scroll} tabIndex={0} aria-label="思考内容" data-output-scroll="true">
+      <div ref={content}>{text}</div>
+    </div>
   );
 });

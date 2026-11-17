@@ -96,7 +96,7 @@ pub struct GoalClear {
     pub expected_generation: u64,
 }
 
-/// 将一条 held 用户 Input 原子绑定到恢复后的新 Goal generation。
+/// 将暂存的用户输入绑定到恢复后的 Goal generation。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GoalHeldInputResume {
     pub session_id: SessionId,
@@ -105,6 +105,18 @@ pub struct GoalHeldInputResume {
     pub expected_generation: u64,
     pub resumed_goal: StoredGoal,
     pub message: UserMessage,
+}
+
+impl GoalHeldInputResume {
+    /// 直接用户输入沿自身通道返回，Goal 绑定只冻结本轮身份。
+    pub fn binding(&self) -> super::GoalInputBinding {
+        super::GoalInputBinding {
+            goal_id: self.resumed_goal.goal_id.clone(),
+            generation: self.resumed_goal.generation,
+            turn: self.resumed_goal.turn,
+            reply_route: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

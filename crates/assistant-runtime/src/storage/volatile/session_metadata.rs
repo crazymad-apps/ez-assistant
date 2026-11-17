@@ -169,7 +169,14 @@ impl VolatileRuntimeStore {
             if session.lifecycle != StoredSessionLifecycle::Active {
                 return Err(conflict("session is archived"));
             }
+            if session.is_pinned == change.is_pinned {
+                return Ok(());
+            }
             session.is_pinned = change.is_pinned;
+            state.sidebar.pins.retain(|id| id != &change.session_id);
+            if change.is_pinned {
+                state.sidebar.pins.push(change.session_id);
+            }
             Ok(())
         })
     }

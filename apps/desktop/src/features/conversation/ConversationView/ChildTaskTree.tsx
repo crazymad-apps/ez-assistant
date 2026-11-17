@@ -35,7 +35,7 @@ export function ChildTaskTree({ embedded = false, items, on_open }: Readonly<{
             <i data-status={item.task.status} />
             <span className={styles.task_text}>
               <strong>{item.task.title}</strong>
-              <small>{childTaskStatusLabel(item.task.status)}{item.task.inherited && " · 继承"}{item.task.body_unavailable && " · 正文不可用"}{item.pending_approval_count > 0 ? ` · ${item.pending_approval_count} 项待审批` : ""}</small>
+              <small>{childTaskStatusLabel(item.task.status)}{item.task.body_unavailable && " · 正文不可用"}{item.pending_approval_count > 0 ? ` · ${item.pending_approval_count} 项待审批` : ""}</small>
             </span>
             <span className={styles.task_usages}>
               <span className={styles.task_usage} title="当前上下文窗口占用">上下文 {context_label}{context?.calibration_pending && " · 待校准"}</span>

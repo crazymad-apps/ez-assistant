@@ -49,9 +49,6 @@ pub(crate) fn project_accepted_input(
     } else {
         state.queue_item_ids.push_back(input_id.clone());
         state.queue_revision = state.queue_revision.saturating_add(1);
-        if state.goal.is_some() {
-            state.resume_required = true;
-        }
         Some(state.queue_revision)
     };
 

@@ -179,11 +179,7 @@ fn repeated_forks_keep_children_and_files_after_source_deletion_restart_and_new_
     {
         let connection = readonly(&database);
         let counts: (i64,i64) = connection.query_row("SELECT COUNT(*), COALESCE(SUM(queued_message_json IS NOT NULL),0) FROM inputs WHERE session_id=?1", [survivor_id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
-        assert_eq!(
-            counts,
-            (1, 0),
-            "only original idempotency identity remains after consuming the queue"
-        );
+        assert_eq!(counts, (0, 0), "completed inputs release SQL control");
         assert_eq!(
             connection
                 .query_row(

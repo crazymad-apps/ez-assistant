@@ -1,4 +1,5 @@
 import type { QueuedSessionCommandSnapshot } from "@ez-assistant/protocol";
+import { Button } from "../../../components/Button";
 import styles from "./index.module.scss";
 
 /** Command 只显示队列状态，不暴露取消或伪 Run 操作。 */
@@ -30,7 +31,8 @@ export function QueueCommandRow(props: Readonly<{
       <div className={styles.queue_actions}>
         {executing
           ? <span aria-label={`正在执行${label}`} className={styles.loading_ring} role="status" />
-          : <button disabled={props.disabled || (props.item.is_prioritized && !props.needs_resume)} onClick={on_action} type="button">{action_label}</button>}
+          : <Button disabled={props.disabled || (props.item.is_prioritized && !props.needs_resume)}
+              onClick={on_action} size="small" variant="text">{action_label}</Button>}
       </div>
     </div>
   );

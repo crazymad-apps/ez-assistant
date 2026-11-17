@@ -16,6 +16,7 @@ export function presentTurn(
   live: LiveRunProjection | null,
   status: RunStatus | null = live?.status ?? messages.at(-1)?.status ?? null,
 ) {
+  const terminal = status !== null && !isRunActive(status);
   let entries: TurnEntry[] = messages.flatMap((message, message_index) =>
     message.segments.map((segment) => ({
       key: `${message.step ?? message.message_id}:${segment.type}:${segment.type === 'tool_group' ? segment.tools[0]?.call_id : segment.part_id}`,
@@ -25,7 +26,10 @@ export function presentTurn(
       live: false as const,
     })),
   );
+  // 终态快照与 SSE 可能在同一帧交接。当前 Run 的已提交 Step 优先，保留正式消息身份和片段顺序。
+  const committed_steps = terminal ? new Set(messages.filter((message) => message.run_id === live?.run_id).map((message) => message.step)) : null;
   for (const step of live?.steps ?? []) {
+    if (committed_steps?.has(step.step)) continue;
     for (const segment of step.segments) {
       entries.push({
         key: `${step.step}:${segment.type}:${segment.type === 'tool_group' ? segment.tools[0]?.call_id : segment.part_id}`,
@@ -41,7 +45,6 @@ export function presentTurn(
   // 活动轮次仍按最新 Step 判断，不能提前把中间说明当作最终回复。
   // 终态可能由问答/交付等工具结束，没有后继纯文本消息；保留最后一个有正文的消息，
   // 即使它自身带工具，或后续消息只有工具/reasoning，也不能把已交付正文全部折掉。
-  const terminal = status !== null && !isRunActive(status);
   const last = terminal
     ? [...entries].reverse().find((entry) => entry.segment.type === 'text' && entry.segment.text.trim().length > 0)
     : entries.at(-1);

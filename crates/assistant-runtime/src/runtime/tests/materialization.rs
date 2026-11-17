@@ -600,6 +600,7 @@ async fn cleared_materialization_key_never_returns_or_replays_a_later_input() {
     assert_eq!(reuse.unwrap_err().kind(), crate::StoreErrorKind::Conflict);
     let later = runtime
         .submit_started_input(assistant_protocol::SubmitInputRequest {
+            delivery: Default::default(),
             session_id: original.session.session_id.clone(),
             message: "later input".into(),
             variant: assistant_protocol::AgentVariant::Build,

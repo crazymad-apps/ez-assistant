@@ -91,6 +91,7 @@ async fn submit(
     }
     let accepted = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant,
             session_id: id.clone(),

@@ -162,6 +162,12 @@ pub(super) fn encode_request_unchecked(
         }
     }
 
+    if let Some(key) = &adapter.prompt_cache_key {
+        extra
+            .entry("prompt_cache_key".to_owned())
+            .or_insert_with(|| Value::String(key.clone()));
+    }
+
     Ok(ResponsesRequest {
         model: model.to_owned(),
         instructions: (!request.system.parts().is_empty())

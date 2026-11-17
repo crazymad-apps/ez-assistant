@@ -10,7 +10,8 @@ export function useOutputFollow(options: {
   active: boolean;
   restore: () => ReadingPosition | undefined;
   save?: (position: ReadingPosition) => void;
-  recoverAnchor?: (message_id: string) => Promise<boolean>;
+  recoverAnchor?: (message_id: string) => Promise<boolean | "missing">;
+  onUserScroll?: (node: HTMLDivElement) => void;
 }) {
   const callbacks = useRef(options);
   callbacks.current = options;
@@ -52,7 +53,10 @@ export function useOutputFollow(options: {
             requestAnimationFrame(() => {
               if (recovery.current !== pending || callbacks.current.identity !== pending.identity) return;
               recovery.current = null;
-              if (!loaded || !findAnchor(node, pending.message_id)) {
+              if (loaded === "missing") {
+                following.current = true;
+                position.current = { following: true, top: 0 };
+              } else if (!loaded || !findAnchor(node, pending.message_id)) {
                 position.current = { following: false, top: node.scrollTop };
               }
               align();
@@ -113,7 +117,10 @@ export function useOutputFollow(options: {
         : nested.scrollTop + nested.clientHeight >= nested.scrollHeight - 1;
     };
     const wheel = (event: WheelEvent) => {
-      if (event.deltaY && owns(event.target, event.deltaY)) markUser(event.deltaY < 0);
+      if (event.deltaY && owns(event.target, event.deltaY)) {
+        markUser(event.deltaY < 0);
+        if (event.deltaY < 0 && node.scrollTop === 0) callbacks.current.onUserScroll?.(node);
+      }
     };
     const touchStart = (event: TouchEvent) => { touch_y = event.touches[0]?.clientY ?? null; };
     const touchMove = (event: TouchEvent) => {
@@ -148,6 +155,7 @@ export function useOutputFollow(options: {
       expected_top.current = null;
       if (user_scroll.current || programmatic) remember();
       else align();
+      if (user_scroll.current && !programmatic) callbacks.current.onUserScroll?.(node);
     };
     node.dataset.outputScroll = "true";
     node.addEventListener("wheel", wheel, { passive: true });

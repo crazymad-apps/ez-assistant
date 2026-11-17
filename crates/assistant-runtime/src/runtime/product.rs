@@ -4,6 +4,8 @@
 #[path = "product/history_tests.rs"]
 mod history_tests;
 
+mod navigation;
+
 use std::collections::HashMap;
 
 use agent_memory::{MemoryPropertyValue, MemoryRecallResponse};
@@ -24,19 +26,18 @@ use assistant_protocol::{
     GetConversationRecallWindowResult, GetSessionViewRequest, GetSessionViewResult,
     GetToolDetailRequest, GetToolDetailResult, GoalBudgetSnapshot, GoalPauseReasonSnapshot,
     GoalSnapshot, GoalStateSnapshot, ImageHandlingMode, ListAttachmentsRequest,
-    ListConversationPageRequest, ListConversationPageResult, ListSessionsRequest,
-    ListWorkspacesRequest, McpToolIdentity, MessageId, ObservedSnapshot, PartId,
-    QueueExecutionState, QueueSnapshot, QueuedInputSnapshot, QueuedSessionCommandSnapshot,
-    QueuedSessionItemSnapshot, ReasoningEffortKey, ReasoningEffortOptionSnapshot,
-    RecallNavigationTarget, RecallToolDetailFailure, RecallToolDetailItem,
-    RecallToolDetailSnapshot, ResourceRefId, RunId, SearchConversationHistoryRequest,
-    SearchConversationHistoryResult, SessionId, SessionListFilter, SessionUsageSnapshot,
-    SessionViewSnapshot, SkillActivationTagSnapshot, SkillActivationTriggerSnapshot,
-    SkillDiagnosticSeveritySnapshot, SkillDiagnosticSnapshot, SkillHealthSnapshot,
-    SkillManagementSnapshot, SkillSourceSnapshot, SkillSummarySnapshot, TodoItemStatusSnapshot,
-    TokenUsageSnapshot, ToolActivityStatus, ToolCallId, ToolDetailSnapshot, ToolEventSnapshot,
-    ToolFileReference, ToolFileResourceOrigin, ToolFileResourceState, ToolInputSnapshot,
-    UsageTotals, UserMessageSnapshot, WorkPlanItemSnapshot, WorkPlanSnapshot,
+    ListConversationPageRequest, ListConversationPageResult, McpToolIdentity, MessageId,
+    ObservedSnapshot, PartId, QueueExecutionState, QueueSnapshot, QueuedInputSnapshot,
+    QueuedSessionCommandSnapshot, QueuedSessionItemSnapshot, ReasoningEffortKey,
+    ReasoningEffortOptionSnapshot, RecallNavigationTarget, RecallToolDetailFailure,
+    RecallToolDetailItem, RecallToolDetailSnapshot, ResourceRefId, RunId,
+    SearchConversationHistoryRequest, SearchConversationHistoryResult, SessionId,
+    SessionUsageSnapshot, SessionViewSnapshot, SkillActivationTagSnapshot,
+    SkillActivationTriggerSnapshot, SkillDiagnosticSeveritySnapshot, SkillDiagnosticSnapshot,
+    SkillHealthSnapshot, SkillManagementSnapshot, SkillSourceSnapshot, SkillSummarySnapshot,
+    TodoItemStatusSnapshot, TokenUsageSnapshot, ToolActivityStatus, ToolCallId, ToolDetailSnapshot,
+    ToolEventSnapshot, ToolFileReference, ToolFileResourceOrigin, ToolFileResourceState,
+    ToolInputSnapshot, UsageTotals, UserMessageSnapshot, WorkPlanItemSnapshot, WorkPlanSnapshot,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
@@ -46,12 +47,13 @@ use super::tool_input_projection::{project_json, project_tool_input};
 use crate::observation::SharedSnapshotSources;
 use crate::{
     ConversationMessageLocationRequest, ConversationRawWindowRequest, ConversationSearchRequest,
-    ConversationSearchScope, ConversationWindowRequest, CrossSessionInputBinding,
-    InputChannelSource, InputModality, OutputPreference, RuntimeError, RuntimeResult,
-    StoreErrorKind, StoredConversationWindow,
+    ConversationSearchScope, ConversationWindowEnd, ConversationWindowRequest,
+    CrossSessionInputBinding, InputChannelSource, InputModality, OutputPreference, RuntimeError,
+    RuntimeResult, StoreErrorKind, StoredConversationWindow,
 };
 
-const DEFAULT_PAGE_SIZE: usize = 30;
+const DEFAULT_TURN_LIMIT: usize = 10;
+const MAX_TURN_LIMIT: usize = 50;
 const MAX_PAGE_SIZE: usize = 100;
 const SNAPSHOT_ATTEMPTS: usize = 4;
 const TOOL_SUMMARY_CHARS: usize = 160;
@@ -59,8 +61,9 @@ const TOOL_DETAIL_JSON_CHARS: usize = 64 * 1024;
 
 #[derive(Deserialize, Serialize)]
 struct ConversationCursor {
+    owner: ConversationOwner,
     generation: u64,
-    end: usize,
+    before_turn: usize,
 }
 
 #[derive(Clone)]
@@ -191,54 +194,23 @@ impl AssistantRuntime {
             let observation = self.event_sender.read_application();
             let configuration = self.get_config_status(Default::default())?.status;
             let (providers, model_settings) = self.model_management_snapshot()?;
-            let workspaces = self
-                .list_workspaces(ListWorkspacesRequest::default())?
-                .workspaces;
-            let active_page = self
-                .list_sessions(ListSessionsRequest {
-                    filter: SessionListFilter::Active,
-                    limit: request.active_sessions_limit,
-                    ..Default::default()
-                })
-                .await?;
-            let archived_page = self
-                .list_sessions(ListSessionsRequest {
-                    filter: SessionListFilter::Archived,
-                    limit: request.archived_sessions_limit,
-                    ..Default::default()
-                })
-                .await?;
-            // 分页位置按实际查询前缀计算，先于可见工作区过滤和固定主控入口补入。
-            let active_sessions_next_offset = active_page
+            let mut sidebar = self
+                .store
+                .query_sidebar(request.clone())
+                .await
+                .map_err(|source| RuntimeError::from_store("query sidebar snapshot", source))?;
+            let workspaces_next_offset = sidebar
+                .workspaces
                 .has_more
-                .then_some(active_page.sessions.len() as u32);
-            let archived_sessions_next_offset = archived_page
-                .has_more
-                .then_some(archived_page.sessions.len() as u32);
-            let mut active_sessions = active_page.sessions;
-            let mut archived_sessions = archived_page.sessions;
-            let active_workspace_ids = workspaces
+                .then_some(sidebar.workspaces.workspaces.len() as u32);
+            let workspaces = sidebar
+                .workspaces
+                .workspaces
                 .iter()
-                .map(|workspace| workspace.workspace_id.clone())
-                .collect::<std::collections::BTreeSet<_>>();
-            let belongs_to_visible_workspace = |session: &assistant_protocol::SessionSummary| {
-                session
-                    .workspace_id
-                    .as_ref()
-                    .is_none_or(|workspace_id| active_workspace_ids.contains(workspace_id))
-            };
-            active_sessions.retain(&belongs_to_visible_workspace);
-            archived_sessions.retain(belongs_to_visible_workspace);
+                .map(crate::workspace::summary)
+                .collect();
             let runtime_lifecycle = self.lifecycle()?;
             let controllers = self.controller_summaries().await?;
-            // 主控是固定入口，不受普通会话首页分页截断。
-            if let Some(controller) = controllers.first()
-                && !active_sessions
-                    .iter()
-                    .any(|row| row.session_id == controller.session_id)
-            {
-                active_sessions.push(controller.clone());
-            }
             let controller_availability = controllers
                 .first()
                 .map(
@@ -249,10 +221,15 @@ impl AssistantRuntime {
                 .unwrap_or_default();
             let additional_controller_count = controllers.len().saturating_sub(1) as u64;
             let mut approval_revisions = Vec::new();
-            for session in active_sessions
+            for session in sidebar
+                .session_groups
                 .iter_mut()
-                .chain(archived_sessions.iter_mut())
+                .flat_map(|group| group.sessions.iter_mut())
+                .chain(sidebar.pinned_sessions.iter_mut())
             {
+                if let Some(cached) = self.session_loader.cached(&session.session_id)? {
+                    *session = cached.summary()?;
+                }
                 let (approvals, revision) = self
                     .approval_registry
                     .list_with_revision(&session.session_id)?;
@@ -282,10 +259,9 @@ impl AssistantRuntime {
                             providers,
                             model_settings,
                             workspaces,
-                            active_sessions,
-                            archived_sessions,
-                            active_sessions_next_offset,
-                            archived_sessions_next_offset,
+                            workspaces_next_offset,
+                            session_groups: sidebar.session_groups,
+                            pinned_sessions: sidebar.pinned_sessions,
                             controller_availability,
                             additional_controller_count,
                             capabilities: ApplicationCapabilities {
@@ -298,6 +274,8 @@ impl AssistantRuntime {
                                 mcp_tools,
                                 mcp_management: self.mcp_service.management_available(),
                                 session_commands: true,
+                                user_message_edit: true,
+                                input_intervention: true,
                             },
                         },
                     },
@@ -381,8 +359,8 @@ impl AssistantRuntime {
                 .load_product_conversation_window(
                     owner.clone(),
                     generation,
-                    None,
-                    DEFAULT_PAGE_SIZE,
+                    ConversationWindowEnd::Latest,
+                    DEFAULT_TURN_LIMIT,
                 )
                 .await
             {
@@ -589,8 +567,8 @@ impl AssistantRuntime {
                 .load_product_conversation_window(
                     owner.clone(),
                     stored.body_generation,
-                    None,
-                    DEFAULT_PAGE_SIZE,
+                    ConversationWindowEnd::Latest,
+                    DEFAULT_TURN_LIMIT,
                 )
                 .await
             {
@@ -637,7 +615,7 @@ impl AssistantRuntime {
         &self,
         request: ListConversationPageRequest,
     ) -> RuntimeResult<ListConversationPageResult> {
-        let limit = validated_limit(request.limit)?;
+        let turn_limit = validated_turn_limit(request.turn_limit)?;
         let owner_session_id = match &request.owner {
             ConversationOwner::MainSession { session_id }
             | ConversationOwner::ChildTask { session_id, .. } => session_id,
@@ -682,18 +660,23 @@ impl AssistantRuntime {
                 .map(decode_cursor)
                 .transpose()?
                 .map(|cursor| {
+                    if cursor.owner != request.owner {
+                        return Err(RuntimeError::InvalidRequest {
+                            reason: "conversation cursor belongs to a different owner",
+                        });
+                    }
                     if cursor.generation != generation {
                         return Err(RuntimeError::SnapshotStale);
                     }
-                    Ok(cursor.end)
+                    Ok(ConversationWindowEnd::Before(cursor.before_turn))
                 })
                 .transpose()?;
             let window = match self
                 .load_product_conversation_window(
                     request.owner.clone(),
                     generation,
-                    requested_end,
-                    limit,
+                    requested_end.unwrap_or(ConversationWindowEnd::Latest),
+                    turn_limit,
                 )
                 .await
             {
@@ -747,38 +730,31 @@ impl AssistantRuntime {
         &self,
         owner: ConversationOwner,
         generation: u64,
-        end: Option<usize>,
-        limit: usize,
+        end: ConversationWindowEnd,
+        turn_limit: usize,
     ) -> RuntimeResult<StoredConversationWindow> {
-        let window = self
-            .store
+        self.store
             .load_conversation_window(ConversationWindowRequest {
                 owner,
                 generation,
                 end,
-                limit,
+                turn_limit,
             })
             .await
-            .map_err(|source| {
-                if source.kind() == StoreErrorKind::Conflict {
-                    RuntimeError::SnapshotStale
-                } else {
-                    RuntimeError::from_store("load conversation page", source)
-                }
-            })?;
-        if end.is_some_and(|expected| expected != window.end) {
-            return Err(RuntimeError::InvalidRequest {
-                reason: "conversation cursor is outside the current generation",
-            });
-        }
-        Ok(window)
+            .map_err(|source| match source.kind() {
+                StoreErrorKind::Conflict => RuntimeError::SnapshotStale,
+                StoreErrorKind::InvalidInput => RuntimeError::InvalidRequest {
+                    reason: "conversation cursor or anchor position is invalid",
+                },
+                _ => RuntimeError::from_store("load conversation page", source),
+            })
     }
 
     pub async fn get_conversation_page_around_run(
         &self,
         request: GetConversationPageAroundRunRequest,
     ) -> RuntimeResult<GetConversationPageAroundRunResult> {
-        let limit = validated_limit(request.limit)?;
+        let turn_limit = validated_turn_limit(request.turn_limit)?;
         let session = self.session(&request.session_id).await?;
         session
             .ensure_conversation_loaded(self.store.as_ref())
@@ -871,18 +847,17 @@ impl AssistantRuntime {
                 });
             };
             let anchor_message_id = protocol_message_id(anchor_message_id.as_str())?;
-            let requested_end = usize::try_from(display_ordinal)
-                .ok()
-                .and_then(|ordinal| ordinal.checked_add(1))
-                .ok_or(RuntimeError::InternalStateUnavailable {
+            let ordinal = usize::try_from(display_ordinal).map_err(|_| {
+                RuntimeError::InternalStateUnavailable {
                     component: "run conversation location",
-                })?;
+                }
+            })?;
             let window = match self
                 .load_product_conversation_window(
                     owner.clone(),
                     generation,
-                    Some(requested_end),
-                    limit,
+                    ConversationWindowEnd::Around(ordinal),
+                    turn_limit,
                 )
                 .await
             {
@@ -1061,7 +1036,7 @@ impl AssistantRuntime {
         &self,
         request: GetConversationPageAroundMessageRequest,
     ) -> RuntimeResult<GetConversationPageAroundMessageResult> {
-        let limit = validated_limit(request.limit)?;
+        let turn_limit = validated_turn_limit(request.turn_limit)?;
         let session_id = match &request.owner {
             ConversationOwner::MainSession { session_id }
             | ConversationOwner::ChildTask { session_id, .. } => session_id,
@@ -1081,18 +1056,17 @@ impl AssistantRuntime {
                 .ok_or(RuntimeError::InvalidRequest {
                     reason: "conversation message is not visible in the product conversation",
                 })?;
-            let requested_end = usize::try_from(display_ordinal)
-                .map_err(|_| RuntimeError::InvalidRequest {
+            let ordinal =
+                usize::try_from(display_ordinal).map_err(|_| RuntimeError::InvalidRequest {
                     reason: "conversation display position is outside the supported range",
-                })?
-                .saturating_add(1);
+                })?;
             let projection = self.projection_context_for_owner(&request.owner).await?;
             let window = self
                 .load_product_conversation_window(
                     request.owner.clone(),
                     location.generation,
-                    Some(requested_end),
-                    limit,
+                    ConversationWindowEnd::Around(ordinal),
+                    turn_limit,
                 )
                 .await?;
             let page = page_from_window(
@@ -1180,6 +1154,61 @@ impl AssistantRuntime {
             .ok_or(RuntimeError::InvalidRequest {
                 reason: "conversation message no longer exists",
             })
+    }
+
+    /// 编辑只投影目标一条消息。关联来自原始窗口，避免复制整会话的 Run 和反馈映射。
+    pub(super) fn project_edit_user_message(
+        &self,
+        session_id: &SessionId,
+        snapshot: &ConversationSnapshot,
+        history: &crate::StoredHistoryFacts,
+    ) -> RuntimeResult<Option<UserMessageSnapshot>> {
+        let [ConversationMessage::User(user)] = snapshot.messages.as_slice() else {
+            return Ok(None);
+        };
+        let paths: std::collections::HashSet<_> = user
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                UserPart::FileReferences(references) => Some(&references.files),
+                _ => None,
+            })
+            .flatten()
+            .map(|file| file.readable_path.as_str())
+            .collect();
+        let mut projection = empty_child_projection();
+        projection.device_names = self.device_names()?;
+        if !paths.is_empty() {
+            let known =
+                self.attachments
+                    .read()
+                    .map_err(|_| RuntimeError::InternalStateUnavailable {
+                        component: "attachment registry",
+                    })?;
+            for attachment in known
+                .values()
+                .filter(|attachment| &attachment.session_id == session_id)
+            {
+                let current = &attachment.agent_readable_path;
+                if paths.contains(current.as_str()) {
+                    projection
+                        .attachment_by_path
+                        .insert(current.clone(), attachment.attachment_id.clone());
+                }
+                if let Some(path) = self.store.historical_attachment_path(attachment)
+                    && paths.contains(path.as_str())
+                {
+                    projection
+                        .attachment_by_path
+                        .insert(path, attachment.attachment_id.clone());
+                }
+            }
+        }
+        let mut items = project_conversation_with_history(snapshot, Some(history), &projection)?;
+        match items.pop() {
+            Some(ConversationItem::User(message)) => Ok(Some(message)),
+            _ => Ok(None),
+        }
     }
 
     async fn projection_context_for_owner(
@@ -2085,7 +2114,10 @@ pub(super) fn queue_snapshot(
     device_names: &HashMap<assistant_protocol::DeviceId, String>,
 ) -> RuntimeResult<QueueSnapshot> {
     let state = session.lock_state()?;
-    let held_by_goal = state.goal.is_some();
+    let held_by_goal = state
+        .goal
+        .as_ref()
+        .is_some_and(|goal| goal.state == crate::goal::GoalState::Running);
     let items = state
         .queue_item_ids
         .iter()
@@ -3222,7 +3254,7 @@ fn page_from_window(
         });
     }
     let previous_cursor = (window.start > 0)
-        .then(|| encode_cursor(window.generation, window.start))
+        .then(|| encode_cursor(owner.clone(), window.generation, window.start))
         .transpose()?;
     Ok(ConversationPage {
         owner,
@@ -3231,6 +3263,16 @@ fn page_from_window(
         previous_cursor,
         has_more: window.start > 0,
     })
+}
+
+fn validated_turn_limit(limit: Option<u32>) -> RuntimeResult<usize> {
+    let limit = limit.map_or(DEFAULT_TURN_LIMIT, |limit| limit as usize);
+    if !(1..=MAX_TURN_LIMIT).contains(&limit) {
+        return Err(RuntimeError::InvalidRequest {
+            reason: "conversation turn_limit must be between 1 and 50",
+        });
+    }
+    Ok(limit)
 }
 
 fn validated_limit(limit: u32) -> RuntimeResult<usize> {
@@ -3250,12 +3292,20 @@ fn owner_session_id(owner: &ConversationOwner) -> &SessionId {
     }
 }
 
-fn encode_cursor(generation: u64, end: usize) -> RuntimeResult<String> {
-    serde_json::to_vec(&ConversationCursor { generation, end })
-        .map(|bytes| URL_SAFE_NO_PAD.encode(bytes))
-        .map_err(|_| RuntimeError::InternalStateUnavailable {
-            component: "conversation cursor encoder",
-        })
+fn encode_cursor(
+    owner: ConversationOwner,
+    generation: u64,
+    before_turn: usize,
+) -> RuntimeResult<String> {
+    serde_json::to_vec(&ConversationCursor {
+        owner,
+        generation,
+        before_turn,
+    })
+    .map(|bytes| URL_SAFE_NO_PAD.encode(bytes))
+    .map_err(|_| RuntimeError::InternalStateUnavailable {
+        component: "conversation cursor encoder",
+    })
 }
 
 fn decode_cursor(cursor: &str) -> RuntimeResult<ConversationCursor> {
@@ -3336,16 +3386,7 @@ fn project_output_preference(
 }
 
 fn user_text(message: &agent_types::UserMessage) -> String {
-    message
-        .parts
-        .iter()
-        .filter_map(|part| match part {
-            UserPart::Text(text) => Some(text.text.as_str()),
-            UserPart::Injected(_)
-            | UserPart::InternalContext(_)
-            | UserPart::QuotedText(_)
-            | UserPart::FileReferences(_) => None,
-        })
+    crate::storage::user_text_parts(message)
         .collect::<Vec<_>>()
         .join("\n")
 }

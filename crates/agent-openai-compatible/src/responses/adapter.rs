@@ -60,6 +60,7 @@ pub struct ResponsesProtocolAdapter {
     pub(crate) reasoning_summary: Option<&'static str>,
     pub(crate) opaque_reasoning: OpaqueReasoningPolicy,
     pub(crate) route_fingerprint: Option<String>,
+    pub(crate) prompt_cache_key: Option<String>,
 }
 
 impl ResponsesProtocolAdapter {
@@ -90,6 +91,7 @@ impl ResponsesProtocolAdapter {
             reasoning_summary: None,
             opaque_reasoning: OpaqueReasoningPolicy::None,
             route_fingerprint: None,
+            prompt_cache_key: None,
         }
     }
 

@@ -39,7 +39,11 @@ mod permission;
 mod plugin;
 mod product;
 mod resource;
+mod sidebar;
 mod skill;
+pub use sidebar::{
+    MoveSidebarItemRequest, ResetSidebarOrderRequest, SidebarOrderResult, SidebarPlacement,
+};
 mod snapshot;
 mod software_version;
 
@@ -84,16 +88,17 @@ pub use command::{
     GetPermissionDocumentResult, GetPersonaRequest, GetPersonaResult, GetRunRequest, GetRunResult,
     GetSessionMaterializationRequest, GetSessionMaterializationResult, GetSessionRequest,
     GetSessionResult, GetSkillDetailRequest, GetSkillDetailResult, GetSystemContextRequest,
-    GetSystemContextResult, GetWorkspaceRequest, GetWorkspaceResult, ListAttachmentsRequest,
-    ListAttachmentsResult, ListChildTasksRequest, ListChildTasksResult,
-    ListPendingApprovalsRequest, ListPendingApprovalsResult, ListPinnedMemoriesRequest,
-    ListPinnedMemoriesResult, ListRunsRequest, ListRunsResult, ListSessionsRequest,
-    ListSessionsResult, ListSkillsRequest, ListSkillsResult, ListWorkspacesRequest,
-    ListWorkspacesResult, PinnedMemoryMutationResult, PrepareDeleteSessionRequest,
-    PrepareDeleteSessionResult, ReenterFromUserMessageRequest, ReenterFromUserMessageResult,
-    RegisterWorkspaceRequest, RegisterWorkspaceResult, ReloadConfigRequest, ReloadConfigResult,
-    ReloadPermissionsRequest, ReloadPermissionsResult, RemoveWorkspaceRequest,
-    RemoveWorkspaceResult, RenameSessionRequest, RenameSessionResult,
+    GetSystemContextResult, GetUserMessageEditRequest, GetUserMessageEditResult,
+    GetWorkspaceRequest, GetWorkspaceResult, InputDelivery, InterveneQueuedInputRequest,
+    InterventionNotExecuted, ListAttachmentsRequest, ListAttachmentsResult, ListChildTasksRequest,
+    ListChildTasksResult, ListPendingApprovalsRequest, ListPendingApprovalsResult,
+    ListPinnedMemoriesRequest, ListPinnedMemoriesResult, ListRunsRequest, ListRunsResult,
+    ListSessionsRequest, ListSessionsResult, ListSkillsRequest, ListSkillsResult,
+    ListWorkspacesRequest, ListWorkspacesResult, PinnedMemoryMutationResult,
+    PrepareDeleteSessionRequest, PrepareDeleteSessionResult, ReenterFromUserMessageRequest,
+    ReenterFromUserMessageResult, RegisterWorkspaceRequest, RegisterWorkspaceResult,
+    ReloadConfigRequest, ReloadConfigResult, ReloadPermissionsRequest, ReloadPermissionsResult,
+    RemoveWorkspaceRequest, RemoveWorkspaceResult, RenameSessionRequest, RenameSessionResult,
     ReplacePermissionDocumentRequest, ReplacePermissionDocumentResult, RestoreSessionRequest,
     RestoreSessionResult, RestoreWorkspaceRequest, RestoreWorkspaceResult, ResumeGoalRequest,
     ResumeGoalResult, ResumeSessionRequest, ResumeSessionResult, RetryRunRequest, RetryRunResult,
@@ -107,7 +112,9 @@ pub use command::{
     SetSessionVariantResult, SetSkillEnabledRequest, SetSkillEnabledResult, ShutdownRuntimeRequest,
     ShutdownRuntimeResult, StopGoalRequest, StopGoalResult, SubmitInputMode, SubmitInputRequest,
     SubmitInputResult, UpdatePinnedMemoryRequest, UpdateWorkspaceRequest, UpdateWorkspaceResult,
-    UploadAttachmentResult, ValidateModelConnectionRequest, ValidateModelConnectionResult,
+    UploadAttachmentResult, UserMessageEditBlockedReason, UserMessageEditPreparation,
+    UserMessageMcpEdit, UserMessageSkillEdit, ValidateModelConnectionRequest,
+    ValidateModelConnectionResult,
 };
 pub use config::{
     ConfigurationIssue, ConfigurationIssueCode, ConfigurationState, ConfigurationStatus,
@@ -187,14 +194,17 @@ pub use product::{
     ChildTaskViewSnapshot, ComposerCapabilitiesSnapshot, ContextManagementModeSnapshot,
     ContextUsageAccuracy, ContextUsageSnapshot, ConversationFileReference, ConversationHistoryHit,
     ConversationHistoryMatchKind, ConversationHistoryScope, ConversationInputSourceSnapshot,
-    ConversationItem, ConversationOwner, ConversationPage, GetApplicationSnapshotRequest,
+    ConversationItem, ConversationMessagePreview, ConversationNavigationItem,
+    ConversationNavigationPage, ConversationOwner, ConversationPage, GetApplicationSnapshotRequest,
     GetApplicationSnapshotResult, GetChildTaskViewRequest, GetChildTaskViewResult,
+    GetConversationMessagePreviewRequest, GetConversationMessagePreviewResult,
     GetConversationPageAroundMessageRequest, GetConversationPageAroundMessageResult,
     GetConversationPageAroundRunRequest, GetConversationPageAroundRunResult,
     GetConversationRecallWindowRequest, GetConversationRecallWindowResult, GetSessionViewRequest,
     GetSessionViewResult, GetToolDetailRequest, GetToolDetailResult, GoalBudgetSnapshot,
     GoalPauseReasonSnapshot, GoalSnapshot, GoalStateSnapshot, ImageHandlingMode,
     ImageInspectionDetailSnapshot, InputModalitySnapshot, InterruptRunRequest, InterruptRunResult,
+    ListConversationNavigationRequest, ListConversationNavigationResult,
     ListConversationPageRequest, ListConversationPageResult, MessageFeedback, ObservedSnapshot,
     OutputPreferenceSnapshot, PrioritizeQueuedInputRequest, PrioritizeQueuedInputResult,
     QueueExecutionState, QueueSnapshot, QueuedInputSnapshot, QuotedTextSnapshot,
@@ -202,10 +212,11 @@ pub use product::{
     ReasoningSource, RecallNavigationTarget, RecallToolDetailFailure, RecallToolDetailItem,
     RecallToolDetailSnapshot, RejectApprovalAndStopRunRequest, RejectApprovalAndStopRunResult,
     ResumeQueuedInputRequest, ResumeQueuedInputResult, SearchConversationHistoryRequest,
-    SearchConversationHistoryResult, SessionUsageSnapshot, SessionViewSnapshot,
-    SessionWorkspaceSnapshot, TodoItemStatusSnapshot, ToolDetailSnapshot, ToolEventSnapshot,
-    ToolFileReference, ToolFileResourceOrigin, ToolFileResourceState, ToolInputProjection,
-    ToolInputSnapshot, UsageTotals, UserMessageSnapshot, WorkPlanItemSnapshot, WorkPlanSnapshot,
+    SearchConversationHistoryResult, SessionGroup, SessionGroupRequest, SessionGroupSnapshot,
+    SessionUsageSnapshot, SessionViewSnapshot, SessionWorkspaceSnapshot, TodoItemStatusSnapshot,
+    ToolDetailSnapshot, ToolEventSnapshot, ToolFileReference, ToolFileResourceOrigin,
+    ToolFileResourceState, ToolInputProjection, ToolInputSnapshot, UsageTotals,
+    UserMessageSnapshot, WorkPlanItemSnapshot, WorkPlanSnapshot,
 };
 pub use resource::{
     HostFileEntry, HostFileRequest, ListHostFilesRequest, ListHostFilesResult,

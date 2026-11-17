@@ -29,7 +29,7 @@ export const ResourcePage = observer(function ResourcePage(props: Readonly<{
   const session_id = scope_key.startsWith("session:") ? scope_key.slice(8) : null;
   const session_view = session_id ? root_store.reading_projection.session_views.get(session_id) : undefined;
   const draft = scope_key.startsWith("draft:") ? root_store.reading_drafts.get(scope_key.slice(6) as NewSessionDraftKey) : undefined;
-  const workspace = root_store.reading_projection.application?.workspaces.find((item) => item.workspace_id === draft?.workspace_id);
+  const workspace = root_store.reading_projection.workspaceSummary(draft?.workspace_id);
   const view_state = store.view_states.get(key)!;
   const roots = session_view ? sessionRoots(session_view.workspace)
     : workspace ? draftRoots(workspace.user_directory ?? workspace.agent_directory, workspace.additional_directories)

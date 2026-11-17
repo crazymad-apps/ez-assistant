@@ -44,6 +44,7 @@ async fn automatic_and_manual_title_triggers_share_the_same_side_path() {
         .automatic_title_pending = true;
     let submitted = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             session_id: session.session_id.clone(),
             message: "请实现标题旁路".to_owned(),
             variant: AgentVariant::Build,
@@ -142,6 +143,7 @@ async fn manual_title_failure_publishes_a_safe_model_diagnostic() {
         .session_id;
     let submitted = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             session_id: session_id.clone(),
             message: "需要一个可重命名的会话".to_owned(),
             variant: AgentVariant::Build,
@@ -223,6 +225,7 @@ async fn plain_text_title_continuation_never_overwrites_the_fallback_title() {
         .automatic_title_pending = true;
     let submitted = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             session_id: session.session_id.clone(),
             message: "分析 computer use 实现".to_owned(),
             variant: AgentVariant::Build,
@@ -296,6 +299,7 @@ async fn fork_creates_an_independent_session_at_a_reliable_assistant_message() {
         .session;
     let submitted = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: source.session_id.clone(),
             message: "first turn".to_owned(),
@@ -315,7 +319,7 @@ async fn fork_creates_an_independent_session_at_a_reliable_assistant_message() {
                 session_id: source.session_id.clone(),
             },
             cursor: None,
-            limit: 30,
+            turn_limit: Some(30),
         })
         .await
         .expect("source page")
@@ -437,19 +441,32 @@ async fn fork_creates_an_independent_session_at_a_reliable_assistant_message() {
         );
         assert!(matches!(
             runtime
-                .reenter_from_user_message(ReenterFromUserMessageRequest {
-                    session_id: target.clone(),
-                    message_id: assistant_protocol::MessageId::new(
-                        history.inputs[0].user_message_id.as_str(),
-                    )
-                    .unwrap(),
-                    message: "cannot rewrite inherited execution".to_owned(),
-                    attachment_ids: Vec::new(),
-                    idempotency_key: None,
-                    variant: AgentVariant::Build,
+                .reenter_from_user_message({
+                    let (expected_generation, expected_message_count) =
+                        edit_basis(&runtime, &target.clone()).await;
+                    ReenterFromUserMessageRequest {
+                        session_id: target.clone(),
+                        message_id: assistant_protocol::MessageId::new(
+                            history.inputs[0].user_message_id.as_str(),
+                        )
+                        .unwrap(),
+                        message: "cannot rewrite inherited execution".to_owned(),
+                        attachment_ids: Vec::new(),
+                        idempotency_key: assistant_protocol::IdempotencyKey::new(
+                            crate::id::generate("edit-test").unwrap(),
+                        )
+                        .unwrap(),
+                        variant: AgentVariant::Build,
+
+                        expected_generation,
+                        expected_message_count,
+                        quotes: Vec::new(),
+                        skill_edit: assistant_protocol::UserMessageSkillEdit::Retain,
+                        mcp_edit: assistant_protocol::UserMessageMcpEdit::Retain,
+                    }
                 })
                 .await,
-            Err(RuntimeError::InvalidRequest { .. })
+            Err(RuntimeError::UserMessageNotEditable)
         ));
     }
     assert_eq!(model.take_requests().len(), 1, "Fork never runs a model");
@@ -488,6 +505,7 @@ async fn fork_creates_an_independent_session_at_a_reliable_assistant_message() {
     }
     let continuation = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: forked.session_id.clone(),
             message: "continue independently".to_owned(),
@@ -611,6 +629,7 @@ async fn faulted_idle_session_can_fork_reliable_history_and_be_deleted() {
         .session;
     let submitted = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: source.session_id.clone(),
             message: "persist a reliable turn".to_owned(),
@@ -636,7 +655,7 @@ async fn faulted_idle_session_can_fork_reliable_history_and_be_deleted() {
                 session_id: source.session_id.clone(),
             },
             cursor: None,
-            limit: 30,
+            turn_limit: Some(30),
         })
         .await
         .expect("reliable source conversation")
@@ -688,6 +707,7 @@ async fn first_input_generates_a_bounded_title_without_overwriting_a_user_title(
         .session;
     runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: generated.session_id.clone(),
             message: "\n  首行作为会话标题  \n后续正文".to_owned(),
@@ -727,6 +747,7 @@ async fn first_input_generates_a_bounded_title_without_overwriting_a_user_title(
         .expect("rename");
     runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             session_id: renamed.session_id.clone(),
             message: "不应覆盖标题".to_owned(),
@@ -751,7 +772,7 @@ async fn first_input_generates_a_bounded_title_without_overwriting_a_user_title(
 }
 
 #[tokio::test]
-async fn pinned_sessions_sort_first_and_pin_is_idempotent() {
+async fn pin_is_idempotent_and_does_not_change_global_creation_order() {
     let runtime = runtime(empty_model());
     let first = runtime
         .create_session(CreateSessionRequest::default())
@@ -764,6 +785,14 @@ async fn pinned_sessions_sort_first_and_pin_is_idempotent() {
         .expect("second")
         .session;
     let activity_time = first.updated_at_ms;
+    let before = runtime
+        .list_sessions(ListSessionsRequest::default())
+        .await
+        .unwrap()
+        .sessions
+        .into_iter()
+        .map(|s| s.session_id)
+        .collect::<Vec<_>>();
     for _ in 0..2 {
         runtime
             .set_session_pinned(SetSessionPinnedRequest {
@@ -778,10 +807,28 @@ async fn pinned_sessions_sort_first_and_pin_is_idempotent() {
         .await
         .expect("sessions")
         .sessions;
-    assert_eq!(listed[0].session_id, first.session_id);
-    assert!(listed[0].is_pinned);
-    assert_eq!(listed[0].updated_at_ms, activity_time);
-    assert_eq!(listed[1].session_id, second.session_id);
+    assert_eq!(
+        listed
+            .iter()
+            .map(|s| s.session_id.clone())
+            .collect::<Vec<_>>(),
+        before
+    );
+    let pinned = listed
+        .iter()
+        .find(|s| s.session_id == first.session_id)
+        .unwrap();
+    assert!(pinned.is_pinned);
+    assert_eq!(pinned.updated_at_ms, activity_time);
+    assert!(listed.iter().any(|s| s.session_id == second.session_id));
+    let snapshot = runtime
+        .get_application_snapshot(assistant_protocol::GetApplicationSnapshotRequest::default())
+        .await
+        .unwrap()
+        .snapshot
+        .value;
+    assert_eq!(snapshot.pinned_sessions.len(), 1);
+    assert_eq!(snapshot.pinned_sessions[0].session_id, first.session_id);
 }
 
 #[tokio::test]
@@ -896,6 +943,7 @@ async fn archived_session_is_filtered_read_only_and_can_be_restored() {
     assert!(matches!(
         runtime
             .submit_started_input(SubmitInputRequest {
+                delivery: Default::default(),
                 mode: assistant_protocol::SubmitInputMode::Normal,
                 variant: assistant_protocol::AgentVariant::Build,
                 session_id: session_id.clone(),
@@ -993,6 +1041,7 @@ async fn active_run_blocks_archive_model_switch_and_history_reentry() {
     let session_id = created.session.session_id;
     let active = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session_id.clone(),
@@ -1064,13 +1113,26 @@ async fn active_run_blocks_archive_model_switch_and_history_reentry() {
     ));
     assert!(matches!(
         runtime
-            .reenter_from_user_message(ReenterFromUserMessageRequest {
-                variant: assistant_protocol::AgentVariant::Build,
-                session_id: session_id.clone(),
-                message_id: assistant_protocol::MessageId::new("unknown").expect("message id"),
-                message: "replacement".to_owned(),
-                attachment_ids: Vec::new(),
-                idempotency_key: None,
+            .reenter_from_user_message({
+                let (expected_generation, expected_message_count) =
+                    edit_basis(&runtime, &session_id.clone()).await;
+                ReenterFromUserMessageRequest {
+                    variant: assistant_protocol::AgentVariant::Build,
+                    session_id: session_id.clone(),
+                    message_id: assistant_protocol::MessageId::new("unknown").expect("message id"),
+                    message: "replacement".to_owned(),
+                    attachment_ids: Vec::new(),
+                    idempotency_key: assistant_protocol::IdempotencyKey::new(
+                        crate::id::generate("edit-test").unwrap(),
+                    )
+                    .unwrap(),
+
+                    expected_generation,
+                    expected_message_count,
+                    quotes: Vec::new(),
+                    skill_edit: assistant_protocol::UserMessageSkillEdit::Retain,
+                    mcp_edit: assistant_protocol::UserMessageMcpEdit::Retain,
+                }
             })
             .await,
         Err(RuntimeError::SessionNotIdle { .. })
@@ -1096,7 +1158,11 @@ async fn active_run_blocks_archive_model_switch_and_history_reentry() {
 
 #[tokio::test]
 async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branch() {
-    let runtime = runtime(Arc::new(ScriptedModelService::new(
+    use assistant_protocol::{
+        GetUserMessageEditRequest, UserMessageEditPreparation, UserMessageMcpEdit,
+        UserMessageSkillEdit,
+    };
+    let model = Arc::new(ScriptedModelService::new(
         model_capabilities(false),
         8_192,
         [
@@ -1104,7 +1170,15 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
             ModelScript::Events(message_events(&assistant_text("a-2", "second answer"))),
             ModelScript::Events(message_events(&assistant_text("a-3", "replacement answer"))),
         ],
-    )));
+    ));
+    let factory = Arc::new(FailOnceModelFactory::new(model));
+    factory.should_fail.store(false, Ordering::SeqCst);
+    let runtime = runtime_with_factories(
+        factory.clone(),
+        Arc::new(StaticSystemPromptFactory),
+        ToolSetSnapshot::default(),
+        32,
+    );
     let created = runtime
         .create_session(CreateSessionRequest::default())
         .await
@@ -1136,6 +1210,7 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
         .attachment;
     let first = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session_id.clone(),
@@ -1149,8 +1224,59 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
         .await
         .expect("first input");
     wait_for_terminal(&runtime, &session_id, &first.run.run_id).await;
+    let first_message = runtime
+        .conversation_snapshot(&session_id)
+        .await
+        .unwrap()
+        .messages
+        .into_iter()
+        .find_map(|message| match message {
+            ConversationMessage::User(user) => {
+                Some(assistant_protocol::MessageId::new(user.id.as_str()).unwrap())
+            }
+            _ => None,
+        })
+        .unwrap();
+    let prepare = || async {
+        let result = runtime
+            .get_user_message_edit(GetUserMessageEditRequest {
+                session_id: session_id.clone(),
+                message_id: first_message.clone(),
+            })
+            .await
+            .expect("read edit preparation");
+        let UserMessageEditPreparation::Ready {
+            message,
+            variant,
+            generation,
+            message_count,
+        } = result.snapshot.value
+        else {
+            panic!("original user input must be editable");
+        };
+        assert_eq!(
+            message.attachment_ids.as_slice(),
+            std::slice::from_ref(&old_attachment.attachment_id)
+        );
+        assert_eq!(variant, AgentVariant::Build);
+        ReenterFromUserMessageRequest {
+            session_id: session_id.clone(),
+            message_id: first_message.clone(),
+            message: "replacement question".to_owned(),
+            variant: AgentVariant::Plan,
+            attachment_ids: vec![replacement_attachment.attachment_id.clone()],
+            quotes: message.quotes,
+            skill_edit: UserMessageSkillEdit::Retain,
+            mcp_edit: UserMessageMcpEdit::Retain,
+            expected_generation: generation,
+            expected_message_count: message_count,
+            idempotency_key: IdempotencyKey::new("replace-1").unwrap(),
+        }
+    };
+    let stale = prepare().await;
     let second = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session_id.clone(),
@@ -1168,37 +1294,31 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
         .conversation_snapshot(&session_id)
         .await
         .expect("conversation before replacement");
-    let target = before
-        .messages
-        .iter()
-        .find_map(|message| match message {
-            ConversationMessage::User(user) => Some(user.id.clone()),
-            _ => None,
-        })
-        .expect("first user message");
+    assert!(matches!(
+        runtime.reenter_from_user_message(stale).await,
+        Err(RuntimeError::SnapshotStale)
+    ));
+    let request = prepare().await;
+    factory.should_fail.store(true, Ordering::SeqCst);
+    assert!(
+        runtime
+            .reenter_from_user_message(request.clone())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        runtime.conversation_snapshot(&session_id).await.unwrap(),
+        before
+    );
 
     let replacement = runtime
-        .reenter_from_user_message(ReenterFromUserMessageRequest {
-            variant: assistant_protocol::AgentVariant::Build,
-            session_id: session_id.clone(),
-            message_id: assistant_protocol::MessageId::new(target.as_str()).expect("message id"),
-            message: "replacement question".to_owned(),
-            attachment_ids: vec![replacement_attachment.attachment_id.clone()],
-            idempotency_key: Some(IdempotencyKey::new("replace-1").expect("key")),
-        })
+        .reenter_from_user_message(request.clone())
         .await
         .expect("replace history");
     let repeated = runtime
-        .reenter_from_user_message(ReenterFromUserMessageRequest {
-            variant: assistant_protocol::AgentVariant::Build,
-            session_id: session_id.clone(),
-            message_id: assistant_protocol::MessageId::new("already-removed").expect("message id"),
-            message: "different retry payload is ignored".to_owned(),
-            attachment_ids: Vec::new(),
-            idempotency_key: Some(IdempotencyKey::new("replace-1").expect("key")),
-        })
+        .reenter_from_user_message(request)
         .await
-        .expect("idempotent replacement retry");
+        .expect("read the committed receipt");
     assert_eq!(repeated.input_id, replacement.input_id);
     assert_eq!(repeated.run.run_id, replacement.run.run_id);
     assert_eq!(
@@ -1279,13 +1399,142 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
             .await
             .is_err()
     );
-    assert_eq!(
+    let session = runtime
+        .get_session(GetSessionRequest { session_id })
+        .await
+        .expect("session")
+        .session;
+    assert_eq!(session.message_count, 2);
+    assert_eq!(session.current_variant, AgentVariant::Build);
+}
+
+#[tokio::test]
+async fn unchanged_edit_resends_with_frozen_skill_after_catalog_disables_it() {
+    use assistant_protocol::{
+        GetUserMessageEditRequest, UserMessageEditPreparation, UserMessageMcpEdit,
+        UserMessageSkillEdit,
+    };
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(false),
+        8_192,
+        [
+            ModelScript::Events(message_events(&assistant_text("skill-initial", "done"))),
+            ModelScript::Events(message_events(&assistant_text(
+                "skill-edited",
+                "done again",
+            ))),
+        ],
+    ));
+    let mut runtime = runtime(model.clone());
+    runtime.skill_package_source = Arc::new(super::sessions::StaticSkillPackageSource);
+    let session_id = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .unwrap()
+        .session
+        .session_id;
+    let first = runtime
+        .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            session_id: session_id.clone(),
+            message: "review first draft".to_owned(),
+            variant: AgentVariant::Build,
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: Some("review".to_owned()),
+            mcp_server_key: None,
+            idempotency_key: None,
+        })
+        .await
+        .unwrap();
+    wait_for_terminal(&runtime, &session_id, &first.run.run_id).await;
+    let body = runtime.conversation_snapshot(&session_id).await.unwrap();
+    let original = body
+        .messages
+        .iter()
+        .find_map(|message| match message {
+            ConversationMessage::User(user) => Some(user),
+            _ => None,
+        })
+        .unwrap();
+    runtime
+        .set_skill_enabled(assistant_protocol::SetSkillEnabledRequest {
+            workspace_id: None,
+            name: "review".to_owned(),
+            enabled: false,
+        })
+        .await
+        .unwrap();
+
+    let message_id = assistant_protocol::MessageId::new(original.id.as_str()).unwrap();
+    let preparation = runtime
+        .get_user_message_edit(GetUserMessageEditRequest {
+            session_id: session_id.clone(),
+            message_id: message_id.clone(),
+        })
+        .await
+        .unwrap();
+    let UserMessageEditPreparation::Ready {
+        message,
+        variant,
+        generation,
+        message_count,
+    } = preparation.snapshot.value
+    else {
+        panic!("frozen skill can be recovered");
+    };
+    assert_eq!(message.skill.as_ref().unwrap().name, "review");
+    let request = ReenterFromUserMessageRequest {
+        session_id: session_id.clone(),
+        message_id,
+        message: message.text,
+        variant,
+        attachment_ids: Vec::new(),
+        quotes: Vec::new(),
+        expected_generation: generation,
+        expected_message_count: message_count,
+        idempotency_key: IdempotencyKey::new("edit-frozen-skill").unwrap(),
+        skill_edit: UserMessageSkillEdit::Retain,
+        mcp_edit: UserMessageMcpEdit::Retain,
+    };
+    assert!(
         runtime
-            .get_session(GetSessionRequest { session_id })
+            .reenter_from_user_message(ReenterFromUserMessageRequest {
+                skill_edit: UserMessageSkillEdit::Select {
+                    name: "review".to_owned()
+                },
+                ..request.clone()
+            })
             .await
-            .expect("session")
-            .session
-            .message_count,
-        2
+            .is_err()
     );
+    let edited = runtime.reenter_from_user_message(request).await.unwrap();
+    assert_ne!(edited.run.run_id, first.run.run_id);
+    assert_ne!(edited.user_message_id.as_str(), original.id.as_str());
+    assert_eq!(
+        wait_for_terminal(&runtime, &session_id, &edited.run.run_id)
+            .await
+            .status,
+        assistant_protocol::RunStatus::Completed
+    );
+    let requests = model.take_requests();
+    let frozen = |index: usize| {
+        requests[index]
+            .conversation
+            .messages
+            .iter()
+            .find_map(|message| match message {
+                ConversationMessage::User(user) => user.parts.iter().find_map(|part| match part {
+                    UserPart::InternalContext(part) if part.kind == "skill_activation" => {
+                        Some(part)
+                    }
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .unwrap()
+    };
+    assert_eq!(frozen(0).text, frozen(1).text);
+    assert_ne!(frozen(0).boundary_id, frozen(1).boundary_id);
 }

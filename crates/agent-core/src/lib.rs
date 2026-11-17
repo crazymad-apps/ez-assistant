@@ -40,7 +40,7 @@ pub use error::{BudgetKind, ExecutionError};
 pub use event::{AgentEvent, AgentEventStream, ToolCompletionStatus};
 pub use execution::{
     AgentExecution, CompactionHandoff, CompactionReason, CompletionFuture, ContinuationReason,
-    ExecutionConsumption, ExecutionControl, ExecutionOutcome,
+    ExecutionConsumption, ExecutionControl, ExecutionOutcome, PartialModelResponse,
 };
 pub use guardrail::{ActiveGuardrailMode, GuardrailCheckConfig, GuardrailConfig, GuardrailKind};
 pub use input::ExecutionInput;

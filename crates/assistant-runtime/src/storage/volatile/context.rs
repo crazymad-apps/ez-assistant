@@ -351,7 +351,6 @@ impl VolatileRuntimeStore {
                     .pending_child_tool_exchanges
                     .values()
                     .any(|exchange| exchange.session_id == commit.session_id)
-                || state.goals.contains_key(&commit.session_id)
             {
                 return Err(conflict("session command target is blocked"));
             }
@@ -396,7 +395,7 @@ impl VolatileRuntimeStore {
             let history = state.histories.entry(commit.session_id).or_default();
             history.commands.push(stored.clone());
             history.normalize();
-            // 正文与结果已经在同一独占提交内冻结；只保留最小接纳身份供幂等读取。
+            // 正文与结果已经在同一独占提交内冻结；接纳身份由历史提供。
             state.session_commands.remove(&commit.input_id);
             Ok(stored)
         })

@@ -121,7 +121,7 @@ fn formal_agent_configures_refreshes_searches_and_creates_a_loadable_skill() {
     let db = Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
     for (table, count) in [
         ("sessions", 2),
-        ("inputs", 2),
+        ("inputs", 0),
         ("runs", 0),
         ("plugins", 0),
         ("plugin_operations", 0),

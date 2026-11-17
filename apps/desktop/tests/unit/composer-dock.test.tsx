@@ -1,3 +1,4 @@
+import { sidebarFixture } from "../support/sidebarFixture";
 import { modelProvider, modelSelection, discoveredModel } from "../support/modelManagement";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -11,6 +12,7 @@ import type {
   SessionViewSnapshot,
   SkillManagementSnapshot,
   ChildTaskTreeItemSnapshot,
+  UserMessageEditPreparation,
   WorkPlanSnapshot,
 } from "@ez-assistant/protocol";
 import {
@@ -22,6 +24,7 @@ import {
 } from "../../src/native-bridge/nativeResource";
 import { RootStore } from "../../src/stores/RootStore";
 import { RuntimeLifecycleCoordinator } from "../../src/stores/RuntimeLifecycleCoordinator";
+import { RuntimeClientError, type RuntimeClient } from "../../src/runtime-client/RuntimeClient";
 import { RootStoreProvider } from "../../src/stores/RootStoreContext";
 import { ComposerDock } from "../../src/features/composer/ComposerDock";
 
@@ -40,6 +43,78 @@ vi.mock("../../src/native-bridge/nativeResource", () => ({
 }));
 
 describe("ComposerDock", () => {
+  it("keeps the ordinary draft while editing and treats slash text and shortcuts as edit input", async () => {
+    const store = renderComposer();
+    const command = enableHistoryEditing(store);
+    const submitted = vi.spyOn(store, "submitInput");
+    const control = vi.spyOn(store, "submitSessionCommand");
+    fireEvent.change(screen.getByRole("textbox", { name: "输入消息" }), { target: { value: "普通草稿" } });
+    await act(async () => store.history_edit.begin("original"));
+    const edit = screen.getByRole("textbox", { name: "编辑消息" });
+    expect(edit).toHaveValue("原正文");
+    expect(edit).toHaveFocus();
+    expect(screen.getByRole("button", { name: "发送修改" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "添加输入内容" })).toHaveAttribute("data-button-variant", "text");
+    expect(screen.getByRole("button", { name: "添加输入内容" })).toHaveAttribute("data-button-icon-only", "true");
+    fireEvent.change(edit, { target: { value: "/compact" } });
+    fireEvent.keyDown(edit, { key: "Enter", ctrlKey: true });
+    expect(command).toHaveBeenCalledTimes(1);
+    expect(submitted).not.toHaveBeenCalled();
+    expect(control).not.toHaveBeenCalled();
+    fireEvent.change(edit, { target: { value: "   " } });
+    expect(screen.getByRole("button", { name: "发送修改" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("普通草稿");
+  });
+
+  it("retries the same frozen edit request after losing its result and only retries reads after acceptance", async () => {
+    const store = renderComposer();
+    const command = enableHistoryEditing(store);
+    command.mockRejectedValueOnce(new RuntimeClientError("transport_error", "断线"));
+    command.mockResolvedValueOnce({
+      type: "reenter_from_user_message", payload: { generation: 2, user_message_id: "replacement" },
+    });
+    const refresh = vi.spyOn(store, "refreshHistoryEdit").mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    await act(async () => store.history_edit.begin("original"));
+    const edit = screen.getByRole("textbox", { name: "编辑消息" });
+    fireEvent.change(edit, { target: { value: "修改" } });
+    fireEvent.keyDown(edit, { key: "Enter" });
+    await screen.findByText("发送结果尚未确认。");
+    expect(edit).toHaveAttribute("readonly");
+    expect(screen.getByRole("button", { name: "取消" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "重试原发送" }));
+    await screen.findByText("修改已发送，消息刷新失败。");
+    expect(command.mock.calls[2]?.[0]).toEqual(command.mock.calls[1]?.[0]);
+    expect(screen.getByRole("textbox", { name: "输入消息" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "重新读取" }));
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(2));
+    expect(command).toHaveBeenCalledTimes(3);
+  });
+
+  it("discards a late preparation across session navigation and resumes an existing edit draft", async () => {
+    const store = renderComposer();
+    const command = enableHistoryEditing(store);
+    const reply = await command();
+    let complete!: (value: unknown) => void;
+    command.mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
+    let preparing!: Promise<void>;
+    act(() => { preparing = store.history_edit.begin("original"); });
+    act(() => {
+      store.navigation.selectSession("other-session");
+      store.navigation.selectSession("session-1");
+    });
+    await act(async () => { complete(reply); await preparing; });
+    expect(screen.queryByRole("textbox", { name: "编辑消息" })).not.toBeInTheDocument();
+
+    command.mockResolvedValueOnce(reply);
+    await act(async () => store.history_edit.begin("original"));
+    fireEvent.change(screen.getByRole("textbox", { name: "编辑消息" }), { target: { value: "跨会话保留" } });
+    act(() => store.navigation.selectSession("other-session"));
+    expect(screen.queryByRole("textbox", { name: "编辑消息" })).not.toBeInTheDocument();
+    act(() => store.navigation.selectSession("session-1"));
+    expect(screen.getByRole("textbox", { name: "编辑消息" })).toHaveValue("跨会话保留");
+  });
+
   it("uses the existing borderless button type for attachments in sessions and drafts", () => {
     const store = renderComposer();
     expect(screen.getByRole("button", { name: "添加附件" })).toHaveAttribute("data-button-variant", "text");
@@ -251,6 +326,21 @@ describe("ComposerDock", () => {
     fireEvent.click(screen.getByRole("button", { name: "新会话项目" }));
     fireEvent.keyDown(screen.getByRole("combobox", { name: "搜索项目" }), { key: "Enter" });
     expect(store.navigation.selected_draft_key).toBe("workspace:workspace-2");
+  });
+
+  it("moves a draft into a project outside the sidebar page without injecting that project", async () => {
+    const store = renderComposer();
+    const off_page = { ...store.projection.application!.workspaces[0]!, workspace_id: "workspace-off-page", label: "页外项目" };
+    vi.spyOn(store, "listWorkspaceOptions").mockImplementation(async () => {
+      store.projection.cacheWorkspaces([off_page]);
+      return [off_page];
+    });
+    act(() => store.openNewSessionDraft(null));
+    fireEvent.click(screen.getByRole("button", { name: "新会话项目" }));
+    fireEvent.click(await screen.findByRole("option", { name: /页外项目/ }));
+    expect(store.navigation.selected_draft_key).toBe("workspace:workspace-off-page");
+    expect(store.projection.application!.workspaces.some(item => item.workspace_id === off_page.workspace_id)).toBe(false);
+    expect(screen.getByRole("button", { name: "新会话项目" })).toHaveTextContent("页外项目");
   });
 
   it("marks a different workspace's existing draft without changing the current draft", () => {
@@ -788,6 +878,87 @@ describe("ComposerDock", () => {
     fireEvent.keyUp(input, { key: "Enter", keyCode: 13 });
     fireEvent.keyDown(input, { key: "Enter", keyCode: 13 });
     await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  });
+
+  it("keeps the draft on an older Host and uses the original macOS shortcut for normal input only", async () => {
+    vi.spyOn(window.navigator, "platform", "get").mockReturnValue("MacIntel");
+    const store = renderComposer();
+    const submit = vi.spyOn(store, "submitInput").mockResolvedValue(false);
+    const input = screen.getByRole("textbox", { name: "输入消息" });
+    fireEvent.change(input, { target: { value: "普通草稿" } });
+    fireEvent.keyDown(input, { key: "Enter", ctrlKey: true });
+    fireEvent.keyDown(input, { key: "Enter", metaKey: true });
+    expect(submit).not.toHaveBeenCalled();
+    enableIntervention(store);
+    expect(screen.getByRole("button", { name: "发送消息" })).toHaveAttribute("title", "发送（Enter）· 介入（Command + Enter）");
+    fireEvent.keyDown(input, { key: "Enter", ctrlKey: true, keyCode: 229 });
+    fireEvent.keyDown(input, { key: "Enter", ctrlKey: true, shiftKey: true });
+    expect(submit).not.toHaveBeenCalled();
+    fireEvent.change(input, { target: { value: "/skill refresh" } });
+    fireEvent.keyDown(input, { key: "Enter", metaKey: true });
+    expect(submit).not.toHaveBeenCalled();
+    fireEvent.change(input, { target: { value: "普通草稿" } });
+    fireEvent.keyDown(input, { key: "Enter", metaKey: true });
+    await waitFor(() => expect(submit).toHaveBeenCalledWith("session-1", "普通草稿", "build", [], "normal", null, [], null,
+      "intervention", expect.any(Function)));
+    expect(input).toHaveValue("普通草稿");
+  });
+
+  it("keeps Stop available during queue intervention and verifies a lost response without sending it again", async () => {
+    const queue: QueueSnapshot = { revision: 1, state: "automatic", items: [{ type: "message", payload: {
+      input_id: "waiting", text_preview: "待发消息", submitted_at_ms: 1, position: 0, is_prioritized: true,
+      held_by_goal: false, source: { type: "user" },
+    } }] };
+    const store = renderComposer({ queue, session: { active_run_id: "active" } });
+    let loseResponse: (error: Error) => void = () => {};
+    const command = vi.fn()
+      .mockImplementationOnce(() => new Promise((_, reject) => { loseResponse = reject; }))
+      .mockResolvedValueOnce({ payload: { snapshot: { value: sessionView({ queue }) } } });
+    vi.spyOn(RuntimeLifecycleCoordinator.prototype, "client", "get").mockReturnValue({
+      command, instance_id: "instance-1", target_device: null, address: "http://localhost", login_context: "tester",
+    } as unknown as RuntimeClient);
+    enableIntervention(store);
+    const intervene = screen.getByRole("button", { name: /^介入$/ });
+    fireEvent.click(intervene);
+    expect(screen.getByText("正在介入…")).toBeVisible();
+    expect(screen.getByRole("button", { name: "中断当前轮次" })).toBeEnabled();
+    expect(intervene).toBeDisabled();
+    act(() => loseResponse(new RuntimeClientError("transport_error", "断线")));
+    fireEvent.click(await screen.findByRole("button", { name: "核实" }));
+    expect(await screen.findByText("消息仍在队列。")).toBeVisible();
+    expect(command.mock.calls.map(call => call[0])).toEqual([
+      { type: "intervene_queued_input", payload: { session_id: "session-1", input_id: "waiting" } },
+      { type: "get_session_view", payload: { session_id: "session-1" } },
+    ]);
+  });
+
+  it("reconciles the frozen intervention on reconnect and clears a draft already retained in the paused queue", async () => {
+    const store = renderComposer();
+    const before = vi.fn().mockRejectedValue(new RuntimeClientError("transport_error", "连接中断"));
+    const after = vi.fn(async (request: { type: string }) => {
+      if (request.type === "list_sessions") return { payload: { sessions: [], next_offset: null } };
+      if (request.type === "list_feedback_requests") return { payload: [] };
+      return { payload: { input_id: "waiting", run: null, not_executed: "queue_paused" } };
+    });
+    const binding = { target_device: null, address: "http://localhost", login_context: "tester" };
+    const client = vi.spyOn(RuntimeLifecycleCoordinator.prototype, "client", "get").mockReturnValue({
+      ...binding, command: before, instance_id: "instance-1",
+    } as unknown as RuntimeClient);
+    enableIntervention(store);
+    const input = screen.getByRole("textbox", { name: "输入消息" });
+    fireEvent.change(input, { target: { value: "待确认的草稿" } });
+    fireEvent.keyDown(input, { key: "Enter", ctrlKey: true });
+    await screen.findByText("正在确认…");
+    expect(input).toHaveValue("待确认的草稿");
+    expect(input).toHaveAttribute("readonly");
+
+    const capabilities = store.connection.capabilities!;
+    act(() => store.connection.beginReconnect());
+    client.mockReturnValue({ ...binding, command: after, instance_id: "instance-2" } as unknown as RuntimeClient);
+    act(() => store.connection.markConnected("instance-2", capabilities));
+    await screen.findByText("已停止，消息保留在队列。");
+    expect(after.mock.calls.filter(([request]) => request.type === "submit_input")).toEqual(before.mock.calls);
+    expect(input).toHaveValue("");
   });
 
   it("recognizes the WebKit input method keyCode fallback", () => {
@@ -1429,7 +1600,7 @@ describe("ComposerDock", () => {
       .toHaveStyle({ top: "402px" }));
   });
 
-  it("keeps Goal-held guidance queued until a paused Goal explicitly consumes it", async () => {
+  it("lets a paused Goal use the ordinary send and queue recovery controls", async () => {
     const user = userEvent.setup();
     const queue: QueueSnapshot = {
       revision: 7,
@@ -1440,14 +1611,15 @@ describe("ComposerDock", () => {
         submitted_at_ms: 1,
         position: 1,
         is_prioritized: false,
-        held_by_goal: true,
+        held_by_goal: false,
         source: { type: "user" },
       } }],
     };
     const store = renderComposer({ queue, goal: goalSnapshot("paused") });
-    const resume_goal = vi.spyOn(store, "resumeGoal").mockResolvedValue(true);
+    const resume = vi.spyOn(store, "resumeQueuedInput").mockResolvedValue(undefined);
+    const submit = vi.spyOn(store, "submitInput").mockResolvedValue(true);
 
-    const queue_trigger = screen.getByRole("button", { name: /待处理指导/ });
+    const queue_trigger = screen.getByRole("button", { name: /待恢复队列/ });
     const goal_trigger = screen.getByRole("button", { name: /目标等待输入/ });
     expect(queue_trigger).toHaveAttribute("aria-expanded", "true");
     expect(goal_trigger).toHaveAttribute("aria-expanded", "false");
@@ -1458,9 +1630,15 @@ describe("ComposerDock", () => {
     expect(queue_trigger).toHaveAttribute("aria-expanded", "true");
     expect(goal_trigger).toHaveAttribute("aria-expanded", "false");
 
-    expect(screen.queryByRole("button", { name: "确认并继续全部" })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "用于目标" }));
-    expect(resume_goal).toHaveBeenCalledWith("session-1", "goal-1", 2, "input-held");
+    expect(screen.getByRole("button", { name: "确认并继续全部" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: /^恢复$/ }));
+    expect(resume).toHaveBeenCalledWith("session-1", "input-held", 7);
+
+    await user.type(screen.getByRole("textbox", { name: "输入消息" }), "继续检查");
+    await user.click(screen.getByRole("button", { name: "发送消息" }));
+    await waitFor(() => expect(submit).toHaveBeenCalledWith(
+      "session-1", "继续检查", "build", [], "normal", null, [], null,
+    ));
   });
 
   it("stops a running Goal from the primary action and disables duplicate /goal", async () => {
@@ -1555,6 +1733,32 @@ describe("ComposerDock", () => {
   });
 });
 
+function enableHistoryEditing(store: RootStore) {
+  const prepared: UserMessageEditPreparation = {
+    type: "ready", generation: 1, message_count: 2, variant: "plan",
+    message: { inherited: false, message_id: "original", input_id: "input", text: "原正文", attachment_ids: [],
+      quotes: [], source: { type: "user" }, created_at_ms: 1 },
+  };
+  const command = vi.fn().mockResolvedValueOnce({
+    type: "get_user_message_edit", payload: { snapshot: { value: prepared, observed_sequence: 0 } },
+  });
+  vi.spyOn(RuntimeLifecycleCoordinator.prototype, "client", "get").mockReturnValue({
+    command, instance_id: "instance-1", target_device: null, address: "http://localhost", login_context: "tester",
+  } as unknown as RuntimeClient);
+  const app = applicationSnapshot();
+  act(() => store.projection.applyApplicationSnapshot(observed({
+    ...app, capabilities: { ...app.capabilities, user_message_edit: true },
+  })));
+  return command;
+}
+
+function enableIntervention(store: RootStore): void {
+  const app = applicationSnapshot();
+  act(() => store.projection.applyApplicationSnapshot(observed({
+    ...app, capabilities: { ...app.capabilities, input_intervention: true },
+  })));
+}
+
 function renderComposer(overrides: Readonly<{
   queue?: QueueSnapshot;
   approvals?: readonly ApprovalSnapshot[];
@@ -1607,8 +1811,8 @@ async function expectPositionedOverlay(label: string): Promise<void> {
 function applicationSnapshot(): ApplicationSnapshot {
   return {
     runtime_lifecycle: "running",
-    active_sessions_next_offset: null,
-    archived_sessions_next_offset: null,
+    ...sidebarFixture({ active_next: null, archived_next: null, active: [sessionSummary()], archived: [] }),
+
     configuration: { config_path: null, revision: "fixture-revision", state: "ready", schema_version: 1, issues: [] },
     providers: [modelProvider], model_settings: { default_model: modelSelection, vision_model: null },
     workspaces: [{
@@ -1622,11 +1826,11 @@ function applicationSnapshot(): ApplicationSnapshot {
       updated_at_ms: 1,
       removed_at_ms: null,
     }],
-    active_sessions: [sessionSummary()],
-    archived_sessions: [],
+
+
     controller_availability: { status: "unavailable" },
     additional_controller_count: 0,
-    capabilities: { conversation_paging: true, mcp_tools: true, mcp_management: true, session_commands: true, tool_detail: true, queue_control: true, approval_queue: true, child_task_view: true, conversation_search: true },
+    capabilities: { conversation_paging: true, mcp_tools: true, mcp_management: true, session_commands: true, user_message_edit: false, tool_detail: true, queue_control: true, approval_queue: true, child_task_view: true, conversation_search: true },
   };
 }
 

@@ -142,14 +142,14 @@ function pauseReasonLabel(reason: GoalPauseReasonSnapshot): string {
     case "blocked":
       return `等待用户：${reason.summary}`;
     case "user_stopped":
-      return "已由用户停止，可显式继续。";
+      return "已由用户停止。";
     case "run_limit_reached":
       return "已达到运行次数预算上限。";
     case "consecutive_failures":
       return "连续执行失败达到保护上限。";
     case "recovery_required":
-      return "目标已暂停，需要显式继续。";
+      return "Runtime 重启时暂停了目标。";
     case "forked":
-      return "这是分叉后的独立目标，需要显式恢复。";
+      return "目标来自分叉前的会话，当前分支独立推进。";
   }
 }

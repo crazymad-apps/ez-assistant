@@ -59,6 +59,18 @@ afterEach(() => {
 });
 
 describe('processing turn', () => {
+  it('replaces a terminated live step with its committed message', () => {
+    const segments = [
+      { type: 'reasoning' as const, source: 'raw' as const, part_id: 'thought', text: '检查资料' },
+      { type: 'text' as const, part_id: 'answer', text: '保留正文' },
+    ];
+    const run = { ...live(), status: 'cancelled' as const, steps: [{ step: 1, segments }] };
+    expect(presentTurn([], run).reply).toHaveLength(1);
+    const result = presentTurn([message('committed', 1, segments, 'cancelled')], run);
+    expect(result.reply).toMatchObject([{ live: false, message_id: 'committed' }]);
+    expect(result.process).toMatchObject([{ live: false, message_id: 'committed' }]);
+  });
+
   it('renders inherited partial history without future status, full duration or a live tail', () => {
     const store = new RootStore();
     const inherited = {
@@ -72,7 +84,7 @@ describe('processing turn', () => {
     const mounted = render(<RootStoreProvider store={store}>
       <ProcessingTurn {...options} messages={[inherited]} live_run={live()} awaiting_approval />
     </RootStoreProvider>);
-    expect(screen.getByRole('status')).toHaveTextContent('继承 · 截至分支点');
+    expect(screen.getByRole('status')).toHaveTextContent('截至分支点');
     expect(screen.queryByLabelText('处理耗时')).not.toBeInTheDocument();
     expect(screen.getByText('可靠前缀')).toBeVisible();
     expect(screen.queryByText('检查资料')).not.toBeInTheDocument();
@@ -80,7 +92,7 @@ describe('processing turn', () => {
     mounted.rerender(<RootStoreProvider store={store}>
       <ProcessingTurn {...options} messages={[{ ...inherited, partial: false }]} live_run={null} />
     </RootStoreProvider>);
-    expect(screen.getByRole('status')).toHaveTextContent('继承 · 已完成');
+    expect(screen.getByRole('status')).toHaveTextContent('已完成');
     store.dispose();
   });
 

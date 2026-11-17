@@ -760,6 +760,7 @@ async fn supervise(
                 &session,
                 &run_id,
                 ExecutionOutcome::Cancelled {
+                    partial: None,
                     consumption: Default::default(),
                 },
                 &runtime,
@@ -797,6 +798,7 @@ async fn supervise(
                     &session,
                     &run_id,
                     ExecutionOutcome::Cancelled {
+                        partial: None,
                         consumption: Default::default(),
                     },
                     &runtime,
@@ -939,7 +941,7 @@ fn record_event(
                 }
                 AgentEvent::ExecutionCompleted { dropped_events, .. }
                 | AgentEvent::ExecutionFailed { dropped_events, .. }
-                | AgentEvent::ExecutionCancelled { dropped_events }
+                | AgentEvent::ExecutionCancelled { dropped_events, .. }
                 | AgentEvent::ExecutionCompactionRequired { dropped_events, .. }
                 | AgentEvent::ExecutionContinuationRequired { dropped_events, .. } => {
                     run.dropped_events = *dropped_events;
@@ -1859,7 +1861,7 @@ mod tests {
         let snapshot = run_to_idle(
             &runtime,
             &session.session_id,
-            mode_request(r#"/repeat 3 read_file {"path":".core-demo-denied/visible.txt","offset":1,"limit":10}"#, ExecutionMode::Build, ApprovalMode::Ask),
+            mode_request(r#"/repeat 3 read_file {"path":".core-demo-denied/visible.txt","offset_chars":0,"limit_chars":1000}"#, ExecutionMode::Build, ApprovalMode::Ask),
         ).await;
         assert!(snapshot.approval.is_none());
         assert_eq!(snapshot.run.expect("run").guardrail_triggers, 1);

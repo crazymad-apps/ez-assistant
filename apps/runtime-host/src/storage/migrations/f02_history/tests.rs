@@ -33,6 +33,9 @@ fn fixture() -> tempfile::TempDir {
          VALUES('old-run','old-session','old-input',1,'failed',0,1,10,20);
          INSERT INTO run_message_refs(run_id,message_id,step) VALUES('old-run','old-user',NULL);"
     ).unwrap();
+    // 旧版本的正式会话也有资源绑定；夹具按旧结构写入，不调用带新排序列的当前写入口。
+    let directory = home.path().join("data/sessions/old-session");
+    connection.execute("INSERT INTO session_resources(session_id,workspace_id,working_directory,additional_workspace_directories_json,attachment_directory,private_directory,created_at_ms) VALUES('old-session',NULL,?1,'[]',?2,?1,1)", rusqlite::params![directory.join("private").to_string_lossy(),directory.join("attachments").to_string_lossy()]).unwrap();
     let path = owner_path(home.path(), &owner(), 1).unwrap();
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let message = ConversationMessage::User(UserMessage {
@@ -549,6 +552,7 @@ fn terminal_run_release_failure_restores_source_and_later_admission_rejects_rein
         expected.facts.runs[0].status,
         Some(assistant_protocol::RunStatus::Failed)
     );
+    engine.connection.execute("INSERT INTO inputs(input_id,session_id,state,agent_variant,origin) VALUES('old-input','old-session','committed',NULL,NULL)", []).unwrap();
     engine.connection.execute("INSERT INTO runs(run_id,session_id,input_id,attempt,status,cancel_requested,created_at_ms,started_at_ms,shell_snapshot_json) VALUES('old-run','old-session','old-input',1,'failed',0,999,9999,'{}')", []).unwrap();
     assert!(
         engine
@@ -919,12 +923,6 @@ fn upgrade_binds_only_provable_original_materialization_identity() {
     for rewritten in [false, true] {
         let home = fixture();
         let connection = database(home.path());
-        // 跟正式 Store 一样逐级拼接，避免 Windows 夹具保存混合分隔符的资源路径。
-        let sessions = home.path().join("data").join("sessions");
-        let session = crate::storage::tests::new_session("old-session", &sessions);
-        let transaction = connection.unchecked_transaction().unwrap();
-        StorageEngine::insert_session_resources(&transaction, &session).unwrap();
-        transaction.commit().unwrap();
         connection.execute("UPDATE sessions SET materialization_key='legacy-materialization-key' WHERE session_id='old-session'", []).unwrap();
         if rewritten {
             let old = owner_path(home.path(), &owner(), 1).unwrap();
@@ -1059,9 +1057,13 @@ fn upgrade_moves_terminal_questions_to_files_and_preserves_pending_after_parent_
         serde_json::from_str::<assistant_protocol::FeedbackRequestSnapshot>(&saved_answer).unwrap(),
         answered
     );
-    let document =
-        conversation::read_document(&owner_path(home.path(), &owner(), 2).unwrap(), &owner(), 2)
-            .unwrap();
+    let document = conversation::read_document_version(
+        &owner_path(home.path(), &owner(), 2).unwrap(),
+        &owner(),
+        2,
+        conversation::PREVIOUS_HISTORY_VERSION,
+    )
+    .unwrap();
     assert_eq!(document.history.unwrap().questions, vec![answered.clone()]);
     assert_eq!(document.conversation.messages.len(), 1);
     let connection = database(home.path());
@@ -1240,9 +1242,13 @@ fn upgrade_keeps_known_child_directory_when_the_parent_call_is_absent_from_legac
         fs::read(owner_path(&saved, &child_owner, 1).unwrap()).unwrap(),
         b""
     );
-    let document =
-        conversation::read_document(&owner_path(home.path(), &owner(), 2).unwrap(), &owner(), 2)
-            .unwrap();
+    let document = conversation::read_document_version(
+        &owner_path(home.path(), &owner(), 2).unwrap(),
+        &owner(),
+        2,
+        conversation::PREVIOUS_HISTORY_VERSION,
+    )
+    .unwrap();
     assert_eq!(document.conversation.messages.len(), 1);
     let history = document.history.unwrap();
     assert_eq!(history.child_tasks.len(), 1);
@@ -1253,10 +1259,11 @@ fn upgrade_keeps_known_child_directory_when_the_parent_call_is_absent_from_legac
     assert_eq!(child.body_generation, 2);
     assert_eq!(child.started_at_ms, None);
     assert_eq!(child.finished_at_ms, Some(3));
-    let child_document = conversation::read_document(
+    let child_document = conversation::read_document_version(
         &owner_path(home.path(), &child_owner, 2).unwrap(),
         &child_owner,
         2,
+        conversation::PREVIOUS_HISTORY_VERSION,
     )
     .unwrap();
     assert!(child_document.conversation.messages.is_empty());
@@ -1326,18 +1333,19 @@ fn upgrade_keeps_known_child_directory_when_the_parent_call_is_absent_from_legac
         0
     );
     let mut restored_engine = StorageEngine::open(restored.path()).unwrap();
-    assert_eq!(
-        restored_engine
-            .load_child_history_catalog(&SessionId::new("old-session").unwrap())
-            .unwrap(),
-        history.child_tasks
-    );
+    let restored_children = restored_engine
+        .load_child_history_catalog(&SessionId::new("old-session").unwrap())
+        .unwrap();
+    let mut expected_children = history.child_tasks;
+    assert!(restored_children[0].body_generation > expected_children[0].body_generation);
+    expected_children[0].body_generation = restored_children[0].body_generation;
+    assert_eq!(restored_children, expected_children);
     let mut engine = StorageEngine::open(home.path()).unwrap();
     assert_eq!(
         engine
             .load_child_history_catalog(&SessionId::new("old-session").unwrap())
             .unwrap(),
-        history.child_tasks
+        expected_children
     );
     assert!(
         engine
@@ -1501,9 +1509,13 @@ fn upgrade_preserves_the_sql_input_queue_and_never_publishes_queued_payload_as_h
             .unwrap(),
         0
     );
-    let document =
-        conversation::read_document(&owner_path(home.path(), &owner(), 2).unwrap(), &owner(), 2)
-            .unwrap();
+    let document = conversation::read_document_version(
+        &owner_path(home.path(), &owner(), 2).unwrap(),
+        &owner(),
+        2,
+        conversation::PREVIOUS_HISTORY_VERSION,
+    )
+    .unwrap();
     assert_eq!(document.conversation.messages.len(), 1);
     let history = document.history.unwrap();
     assert_eq!(history.inputs.len(), 1);
@@ -1578,9 +1590,13 @@ fn same_version_upgrade_prepares_files_then_switches_once_with_matching_backup()
             .unwrap(),
         4
     );
-    let document =
-        conversation::read_document(&owner_path(home.path(), &owner(), 2).unwrap(), &owner(), 2)
-            .unwrap();
+    let document = conversation::read_document_version(
+        &owner_path(home.path(), &owner(), 2).unwrap(),
+        &owner(),
+        2,
+        conversation::PREVIOUS_HISTORY_VERSION,
+    )
+    .unwrap();
     assert_eq!(document.conversation.messages.len(), 1);
     let history = document.history.unwrap();
     assert_eq!(history.runs[0].run_id.as_str(), "old-run");
@@ -1682,9 +1698,13 @@ fn upgrade_reconciles_only_terminal_queued_input_before_streaming_its_history() 
         queue("waiting-input"),
         ("queued".into(), Some(waiting_json), Some(1))
     );
-    let document =
-        conversation::read_document(&owner_path(home.path(), &owner(), 2).unwrap(), &owner(), 2)
-            .unwrap();
+    let document = conversation::read_document_version(
+        &owner_path(home.path(), &owner(), 2).unwrap(),
+        &owner(),
+        2,
+        conversation::PREVIOUS_HISTORY_VERSION,
+    )
+    .unwrap();
     assert_eq!(document.conversation.messages, decoded.messages);
     let facts = document.history.unwrap();
     assert_eq!(facts.runs.len(), 1);

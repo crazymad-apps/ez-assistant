@@ -500,15 +500,33 @@ impl ParentDelegationController {
             let event_parent_run_id = stored.parent_run_id.clone();
             let event_child_task_id = stored.child_task_id.clone();
             let event_mcp_registry = self.mcp_registry.clone();
+            let event_child_registry = self.registry.clone();
             let event_drain = tokio::spawn(async move {
                 while let Some(event) = events.next().await {
                     if let Some(event) = super::events::project(event, &event_mcp_registry) {
-                        let _ = event_sender.send(RuntimeEvent::ChildTaskEvent {
+                        let step = match &event {
+                            assistant_protocol::ChildTaskEvent::StepStarted { step }
+                            | assistant_protocol::ChildTaskEvent::TextDelta { step, .. }
+                            | assistant_protocol::ChildTaskEvent::ReasoningDelta { step, .. }
+                            | assistant_protocol::ChildTaskEvent::ToolProposed { step, .. } => {
+                                Some(*step)
+                            }
+                            _ => None,
+                        };
+                        let event = RuntimeEvent::ChildTaskEvent {
                             session_id: event_session_id.clone(),
                             parent_run_id: event_parent_run_id.clone(),
                             child_task_id: event_child_task_id.clone(),
                             event,
-                        });
+                        };
+                        if let Some(step) = step {
+                            let _ = event_sender.publish_transition(|| {
+                                event_child_registry.observe_step(&event_child_task_id, step)?;
+                                Ok(((), Some(event)))
+                            });
+                        } else {
+                            let _ = event_sender.send(event);
+                        }
                     }
                 }
             });
@@ -659,6 +677,7 @@ impl ParentDelegationController {
                 Err(error) if !error.is_committed() && (error.is_cancelled() || child_token.is_cancelled()) => {
                     break (
                         Some(agent_core::ExecutionOutcome::Cancelled {
+                            partial: None,
                             consumption: agent_core::ExecutionConsumption::default(),
                         }),
                         None,

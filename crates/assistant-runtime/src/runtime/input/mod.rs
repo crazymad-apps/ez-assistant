@@ -1,6 +1,7 @@
 //! 单 Session 队列执行器：持久化领取、启动 Agent，并等待 Run 收敛后领取下一项。
 
 mod commands;
+mod intervention;
 pub(crate) mod projection;
 mod session_command;
 mod submission;
@@ -26,17 +27,17 @@ use super::{
     model::{RunAuthorizationInput, RunCompilationResources, compile_run_agent},
 };
 use crate::{
-    RuntimeError, RuntimeResult, RuntimeStore, StoredInputState, StoredRunSettlement,
-    UserMessageCommit,
+    GoalHeldInputResume, RuntimeError, RuntimeResult, RuntimeStore, StoredInputState,
+    StoredRunSettlement, UserMessageCommit,
     config::ConfigRegistry,
     context_compaction::{
         AutomaticCompactionInput, MAX_AUTOMATIC_COMPACTIONS, compact_parent_context,
         compaction_reason_label, consume_execution_budget,
     },
-    goal::GoalRunBinding,
+    goal::{GoalControl, GoalRunBinding, GoalState},
     observation::ObservationCoordinator,
     run::{ActiveRun, RunModelDiagnostics, RuntimeRecorder, observe_run_execution},
-    session::SessionController,
+    session::{InputRecord, SessionController},
 };
 
 #[derive(Clone)]
@@ -236,7 +237,10 @@ fn wake_queue_with(
         let panic_context = context.clone();
         let panic_session = session.clone();
         tasks.spawn(
-            run_queue(context, session),
+            async move {
+                run_queue(context.clone(), session.clone()).await;
+                publish_driver_fault(&context, &session);
+            },
             recover_panicked_queue(panic_context, panic_session),
         );
     }
@@ -246,12 +250,29 @@ fn wake_queue_with(
 /// Runtime 自己的队列/supervisor task 若 panic，先取消可能仍在运行的 Core，随后
 /// 把无 pending 的 Run 结算为内部失败；存在持久 pending 时 fail-closed，交由重启修复。
 async fn recover_panicked_queue(context: QueueDriverContext, session: Arc<SessionController>) {
-    let fallback_session = session.clone();
-    let recovered = AssertUnwindSafe(recover_panicked_queue_inner(context, session))
-        .catch_unwind()
-        .await;
+    let recovered = AssertUnwindSafe(recover_panicked_queue_inner(
+        context.clone(),
+        session.clone(),
+    ))
+    .catch_unwind()
+    .await;
     if recovered.is_err() {
-        fault_driver(&fallback_session);
+        fault_driver(&session);
+    }
+    publish_driver_fault(&context, &session);
+}
+
+/// 故障退出后唤醒等待领取的调用方。事件只提示复查 Session 权威状态。
+fn publish_driver_fault(context: &QueueDriverContext, session: &SessionController) {
+    let revision = session
+        .lock_state()
+        .ok()
+        .and_then(|state| state.is_faulted.then_some(state.queue_revision));
+    if let Some(revision) = revision {
+        let _ = context.events.send(RuntimeEvent::QueueChanged {
+            session_id: session.id().clone(),
+            revision,
+        });
     }
 }
 
@@ -349,15 +370,25 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
             continue;
         }
         // 这里只准备候选身份用于装配权限与模型；尚未写 Store/Session，也不发布 Run 事件。
-        let identity_history =
-            match crate::runtime::load_identity_history(context.store.as_ref(), &session).await {
-                Ok(history) => history,
+        let needs_run = match session.lock_state() {
+            Ok(state) => state
+                .inputs
+                .get(&input_id)
+                .is_some_and(|input| input.latest_run_id.is_none()),
+            Err(_) => return,
+        };
+        let new_run = if needs_run {
+            match crate::runtime::allocate_new_run(context.store.as_ref(), &session).await {
+                Ok(id) => Some(id),
                 Err(_) => {
                     fault_driver(&session);
                     return;
                 }
-            };
-        let next = {
+            }
+        } else {
+            None
+        };
+        let (next, goal) = {
             let mut state = match session.lock_state() {
                 Ok(state) => state,
                 Err(_) => return,
@@ -372,22 +403,22 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     return;
                 };
                 run.snapshot().run_id
+            } else if let Some(run_id) = new_run {
+                run_id
             } else {
-                match crate::run::allocate_run_id(&state, &identity_history) {
-                    Ok(id) => id,
-                    Err(_) => {
-                        fault_locked_driver(&mut state);
-                        return;
-                    }
-                }
+                fault_locked_driver(&mut state);
+                return;
             };
             (
-                input_id,
-                input,
-                run_id,
-                state.body_generation,
-                state.model_selection.clone(),
-                state.agent_shell_kind,
+                (
+                    input_id,
+                    input,
+                    run_id,
+                    state.body_generation,
+                    state.model_selection.clone(),
+                    state.agent_shell_kind,
+                ),
+                state.goal.clone(),
             )
         };
         let model_diagnostics = Arc::new(RunModelDiagnostics::new(
@@ -408,6 +439,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
             }
         };
         let preparation = async {
+            let goal_resume = prepare_claim_goal_resume(session.id(), &next.1, goal.as_ref())?;
             let factory = context.run_tool_factory.clone();
             let target = if next.1.stored.state == StoredInputState::Queued {
                 next.1.stored.agent_shell_target.or(next.5)
@@ -464,20 +496,24 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     run_id: next.2.clone(),
                     cancellation: run_cancellation.clone(),
                     events: context.events.clone(),
-                    goal_binding: next.1.stored.goal_binding.as_ref().map(|binding| {
-                        GoalRunBinding {
-                            goal_id: binding.goal_id.clone(),
+                    goal_binding: goal_resume
+                        .as_ref()
+                        .map(|resume| resume.binding())
+                        .or_else(|| next.1.stored.goal_binding.clone())
+                        .map(|binding| GoalRunBinding {
+                            goal_id: binding.goal_id,
                             generation: binding.generation,
                             run_id: next.2.clone(),
-                        }
-                    }),
+                        }),
+                    resume_paused_goal: goal_resume.is_some(),
+                    rewrite_input: None,
                     input_origin: next.1.stored.origin,
                     cross_session: next.1.stored.cross_session.clone(),
                 },
                 Some(model_diagnostics.clone()),
             )
             .await
-            .map(|compiled| (compiled, plugin_leases))
+            .map(|compiled| (compiled, plugin_leases, goal_resume))
         };
         // 这里尚未领取 Input 或写入正文；丢弃目录读取 future 不丢失持久化进度。
         let prepared = {
@@ -532,84 +568,19 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                 && state.body_generation == next.3
                 && state.model_selection == next.4
                 && state.agent_shell_kind == next.5
+                && state.goal.as_ref().map(|goal| (&goal.id, goal.generation))
+                    == goal.as_ref().map(|goal| (&goal.id, goal.generation))
         });
         if !still_current {
             // 取消、暂停或置顶使本次准备失效，不得为旧 Run 写入失败或用户正文。
             continue;
         }
-        if next.1.latest_run_id.is_none() {
-            // 装配期间仍可撤销/置顶；重新核对队首并持 mutation 后才真正领取。
-            // Store 成功后安装唯一 Run 控制，再发布接纳事实；失败保留队列并封闭本 Session。
-            let created_at_ms = match super::now_ms() {
-                Ok(now) => now,
-                Err(_) => {
-                    fault_driver(&session);
-                    return;
-                }
-            };
-            let run = crate::StoredRun {
-                shell: None,
-                run_id: next.2.clone(),
-                session_id: session.id().clone(),
-                input_id: next.0.clone(),
-                attempt: 1,
-                status: RunStatus::Accepted,
-                agent_variant: next.1.stored.agent_variant,
-                approval_mode: match session.lock_state() {
-                    Ok(state) => state.approval_mode,
-                    Err(_) => return,
-                },
-                reasoning_effort: None,
-                cancel_requested: false,
-                error: None,
-                message_ids: Vec::new(),
-                message_steps: Default::default(),
-                created_at_ms,
-                started_at_ms: None,
-                finished_at_ms: None,
-            };
-            if context.store.claim_input(run.clone()).await.is_err() {
-                fault_driver(&session);
-                return;
-            }
-            {
-                let mut state = match session.lock_state() {
-                    Ok(state) => state,
-                    Err(_) => return,
-                };
-                state.runs.insert(
-                    run.run_id.clone(),
-                    crate::run::RunRecord::accepted(&run, Vec::new()),
-                );
-                let input = state
-                    .inputs
-                    .get_mut(&next.0)
-                    .expect("verified queued input");
-                input.first_run_id = Some(run.run_id.clone());
-                input.latest_run_id = Some(run.run_id.clone());
-                if let Some(activation) = input.stored.skill_activation.as_mut() {
-                    activation.run_id = Some(run.run_id.clone());
-                }
-                for activation in state
-                    .skill_activations
-                    .iter_mut()
-                    .filter(|activation| activation.input_id.as_ref() == Some(&next.0))
-                {
-                    activation.run_id = Some(run.run_id.clone());
-                }
-            }
-            let _ = context.events.send(RuntimeEvent::RunAccepted {
-                session_id: session.id().clone(),
-                run_id: run.run_id,
-                created_at_ms: Some(created_at_ms),
-            });
-        }
-        let prepared = prepared.and_then(|(compiled, leases)| {
+        let prepared = prepared.and_then(|(compiled, leases, goal_resume)| {
             compiled.ensure_models_current(&context.config_registry)?;
-            Ok((compiled, leases))
+            Ok((compiled, leases, goal_resume))
         });
         let start_error = match prepared {
-            Ok((compiled, plugin_leases)) => {
+            Ok((compiled, plugin_leases, goal_resume)) => {
                 // 目录正文已完成装配；租约只保护装配，不因目录含插件锁住整个 Run。
                 drop(plugin_leases);
                 let super::model::CompiledRunParts {
@@ -638,9 +609,16 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                 {
                     Ok(journal) => journal,
                     Err(error) => {
+                        if claim_first_input(&context, &session, &next.1, &next.2, None)
+                            .await
+                            .is_err()
+                        {
+                            fault_driver(&session);
+                            return;
+                        }
                         fail_before_start(&context, &session, &next.2, error.to_protocol_info())
                             .await;
-                        continue;
+                        return;
                     }
                 };
                 let shell_context = match shell
@@ -666,7 +644,10 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                         }
                     };
                     match crate::work_plan::inject_claimed_context(
-                        next.1.stored.queued_message.clone(),
+                        goal_resume
+                            .as_ref()
+                            .map(|resume| resume.message.clone())
+                            .or_else(|| next.1.stored.queued_message.clone()),
                         plan.as_ref(),
                     ) {
                         Ok(message) => message,
@@ -714,14 +695,21 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     fault_driver(&session);
                     return;
                 }
-                let started_at = match super::now_ms() {
+                let operation_id = match crate::id::generate("append") {
                     Ok(value) => value,
                     Err(_) => {
                         fault_driver(&session);
                         return;
                     }
                 };
-                let operation_id = match crate::id::generate("append") {
+                if claim_first_input(&context, &session, &next.1, &next.2, goal_resume)
+                    .await
+                    .is_err()
+                {
+                    fault_driver(&session);
+                    return;
+                }
+                let started_at = match super::now_ms() {
                     Ok(value) => value,
                     Err(_) => {
                         fault_driver(&session);
@@ -961,7 +949,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                                 .clone()
                                 .map(agent_core::CompactionHandoff::into_request),
                         ),
-                        Some(agent_core::ExecutionOutcome::Cancelled { consumption })
+                        Some(agent_core::ExecutionOutcome::Cancelled { consumption, .. })
                         | Some(agent_core::ExecutionOutcome::ContinuationRequired {
                             reason: agent_core::ContinuationReason::ReturnToHost,
                             consumption,
@@ -1171,6 +1159,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                         {
                             break (
                                 Some(agent_core::ExecutionOutcome::Cancelled {
+                                    partial: None,
                                     consumption: agent_core::ExecutionConsumption::default(),
                                 }),
                                 None,
@@ -1238,6 +1227,13 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
             }
             Err(error) => Some(error.to_protocol_info()),
         };
+        if claim_first_input(&context, &session, &next.1, &next.2, None)
+            .await
+            .is_err()
+        {
+            fault_driver(&session);
+            return;
+        }
         fail_before_start(
             &context,
             &session,
@@ -1252,6 +1248,131 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
         .await;
         return;
     }
+}
+
+fn prepare_claim_goal_resume(
+    session_id: &assistant_protocol::SessionId,
+    input: &InputRecord,
+    goal: Option<&GoalControl>,
+) -> RuntimeResult<Option<GoalHeldInputResume>> {
+    let Some(goal) = goal.filter(|goal| matches!(goal.state, GoalState::Paused(_))) else {
+        return Ok(None);
+    };
+    if input.latest_run_id.is_some()
+        || input.stored.state != StoredInputState::Queued
+        || input.stored.goal_binding.is_some()
+        || input.stored.origin != crate::InputOrigin::User
+    {
+        return Ok(None);
+    }
+    let mut message =
+        input
+            .stored
+            .queued_message
+            .clone()
+            .ok_or(RuntimeError::InternalStateUnavailable {
+                component: "queued Goal guidance",
+            })?;
+    let resumed = super::goal::prepare_goal_resume(goal, &mut message, super::now_ms()?)?;
+    Ok(Some(GoalHeldInputResume {
+        session_id: session_id.clone(),
+        input_id: input.stored.input_id.clone(),
+        expected_goal_id: goal.id.clone(),
+        expected_generation: goal.generation,
+        resumed_goal: resumed.to_stored(session_id.clone()),
+        message,
+    }))
+}
+
+/// 同一 Session mutation 内提交首次领取；准备失败仍可记录原有未启动失败，Goal 保持原状态。
+async fn claim_first_input(
+    context: &QueueDriverContext,
+    session: &SessionController,
+    input: &InputRecord,
+    run_id: &assistant_protocol::RunId,
+    mut goal_resume: Option<GoalHeldInputResume>,
+) -> RuntimeResult<()> {
+    if input.latest_run_id.is_some() {
+        return Ok(());
+    }
+    let created_at_ms = super::now_ms()?;
+    let approval_mode = session.lock_state()?.approval_mode;
+    let run = crate::StoredRun {
+        shell: None,
+        run_id: run_id.clone(),
+        session_id: session.id().clone(),
+        input_id: input.stored.input_id.clone(),
+        attempt: 1,
+        status: RunStatus::Accepted,
+        agent_variant: input.stored.agent_variant,
+        approval_mode,
+        reasoning_effort: None,
+        cancel_requested: false,
+        error: None,
+        message_ids: Vec::new(),
+        message_steps: Default::default(),
+        created_at_ms,
+        started_at_ms: None,
+        finished_at_ms: None,
+    };
+    if let Some(resume) = &mut goal_resume {
+        resume.resumed_goal.updated_at_ms = created_at_ms.max(resume.resumed_goal.updated_at_ms);
+    }
+    let goal = goal_resume
+        .as_ref()
+        .map(|resume| GoalControl::try_from(resume.resumed_goal.clone()))
+        .transpose()
+        .map_err(|_| RuntimeError::InternalStateUnavailable {
+            component: "claimed Goal projection",
+        })?;
+    context
+        .store
+        .claim_input(run.clone(), goal_resume.clone())
+        .await
+        .map_err(|source| RuntimeError::from_store("claim queued input", source))?;
+    {
+        let mut state = session.lock_state()?;
+        state.runs.insert(
+            run.run_id.clone(),
+            crate::run::RunRecord::accepted(&run, Vec::new()),
+        );
+        let input = state
+            .inputs
+            .get_mut(&run.input_id)
+            .expect("verified queued input");
+        input.first_run_id = Some(run.run_id.clone());
+        input.latest_run_id = Some(run.run_id.clone());
+        if let Some(resume) = goal_resume {
+            input.stored.goal_binding = Some(resume.binding());
+            input.stored.queued_message = Some(resume.message);
+        }
+        if let Some(activation) = input.stored.skill_activation.as_mut() {
+            activation.run_id = Some(run.run_id.clone());
+        }
+        for activation in state
+            .skill_activations
+            .iter_mut()
+            .filter(|activation| activation.input_id.as_ref() == Some(&run.input_id))
+        {
+            activation.run_id = Some(run.run_id.clone());
+        }
+        if let Some(goal) = &goal {
+            state.goal = Some(goal.clone());
+        }
+    }
+    if let Some(goal) = goal {
+        let _ = context.events.send(RuntimeEvent::GoalChanged {
+            session_id: session.id().clone(),
+            goal_id: goal.id,
+            generation: goal.generation,
+        });
+    }
+    let _ = context.events.send(RuntimeEvent::RunAccepted {
+        session_id: session.id().clone(),
+        run_id: run.run_id,
+        created_at_ms: Some(created_at_ms),
+    });
+    Ok(())
 }
 
 fn publish_settlement_events(
@@ -1289,6 +1410,7 @@ fn publish_settlement_events(
             },
             generation,
         });
+        // 终止输出随历史快照交接，避免 StepCommitted 在正文到达前移除实时尾部。
         if let Some(step) = final_message_step {
             let _ = context.events.send(RuntimeEvent::StepCommitted {
                 owner: ConversationOwner::MainSession {
@@ -1494,6 +1616,7 @@ async fn fail_before_start(
         .map(ConversationMessage::User)
         .chain(messages.iter().cloned())
         .collect::<Vec<_>>();
+    let mut queue_revision = None;
     if let Ok(mut state) = session.lock_state() {
         for message in &committed_messages {
             let Some(journal) = state.journal.as_mut() else {
@@ -1524,11 +1647,14 @@ async fn fail_before_start(
             input.stored.state = StoredInputState::Committed;
             input.stored.queued_message = None;
         }
-        if let Some(input_id) = failed_input_id.as_ref()
-            && let Some(is_user) = state.pop_runnable_input(input_id)
-            && is_user
-        {
+        let removed_from_queue = failed_input_id
+            .as_ref()
+            .is_some_and(|input_id| state.pop_runnable_input(input_id) == Some(true));
+        let needs_recovery = !state.queue_item_ids.is_empty() && !state.resume_required;
+        state.resume_required |= needs_recovery;
+        if removed_from_queue || needs_recovery {
             state.queue_revision = state.queue_revision.saturating_add(1);
+            queue_revision = Some(state.queue_revision);
         }
         if let Some(run) = state.runs.get_mut(run_id) {
             run.extend_message_ids(
@@ -1559,6 +1685,12 @@ async fn fail_before_start(
                 session_id: session.id().clone(),
             },
             generation: state.body_generation,
+        });
+    }
+    if let Some(revision) = queue_revision {
+        let _ = context.events.send(RuntimeEvent::QueueChanged {
+            session_id: session.id().clone(),
+            revision,
         });
     }
     let _ = context

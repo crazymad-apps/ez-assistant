@@ -13,7 +13,7 @@ export const SessionNavigation = observer(function SessionNavigation({ sidebar_o
   on_search: () => void;
 }>) {
   const store = useRootStore();
-  const recent = [...(store.sidebar_projection.application?.active_sessions ?? [])]
+  const recent = store.sidebar_projection.loadedSessions("active")
     .sort((left, right) => (right.updated_at_ms ?? 0) - (left.updated_at_ms ?? 0))
     .slice(0, 8);
 

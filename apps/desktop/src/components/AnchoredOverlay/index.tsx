@@ -3,6 +3,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type HTMLAttributes,
   type ReactNode,
   type RefObject,
 } from "react";
@@ -17,7 +18,9 @@ type AnchoredOverlayProps = Readonly<{
   on_request_close: () => void;
   open?: boolean;
   overlay_ref: RefObject<HTMLDivElement | null>;
-  placement?: "above" | "auto";
+  placement?: "above" | "auto" | "right";
+  bounds_ref?: RefObject<HTMLElement | null>;
+  region_props?: Pick<HTMLAttributes<HTMLDivElement>, "role" | "onPointerEnter" | "onPointerLeave" | "onBlur" | "onKeyDown">;
   trigger_ref: RefObject<HTMLElement | null>;
 }>;
 
@@ -39,6 +42,24 @@ export function AnchoredOverlay(props: AnchoredOverlayProps) {
       const viewport_padding = 8;
       const gap = 6;
       const trigger_rect = trigger.getBoundingClientRect();
+      if (props.placement === "right") {
+        const bounds = props.bounds_ref?.current?.getBoundingClientRect();
+        const visual = window.visualViewport;
+        const left = trigger_rect.right + 12;
+        const right = Math.min(bounds?.right ?? Infinity, (visual ? visual.offsetLeft + visual.width : window.innerWidth) - viewport_padding);
+        const top_edge = Math.max(bounds?.top ?? 0, (visual?.offsetTop ?? 0) + viewport_padding);
+        const bottom = Math.min(bounds?.bottom ?? Infinity, (visual ? visual.offsetTop + visual.height : window.innerHeight) - viewport_padding);
+        if (left < (visual?.offsetLeft ?? 0) + viewport_padding || right - left < 160 || bottom - top_edge < 88) {
+          props.on_request_close();
+          return;
+        }
+        overlay.style.maxWidth = `${right - left}px`;
+        overlay.style.maxHeight = `${bottom - top_edge}px`;
+        const height = overlay.getBoundingClientRect().height;
+        const top = Math.min(Math.max(top_edge, trigger_rect.top + (trigger_rect.height - height) / 2), bottom - height);
+        setPosition(current => current.ready && current.left === left && current.top === top ? current : { left, top, ready: true });
+        return;
+      }
       const overlay_rect = overlay.getBoundingClientRect();
       const preferred_left = props.horizontal_align === "center"
         ? trigger_rect.left + ((trigger_rect.width - overlay_rect.width) / 2)
@@ -61,15 +82,26 @@ export function AnchoredOverlay(props: AnchoredOverlayProps) {
 
     updatePosition();
     window.addEventListener("resize", updatePosition);
+    const visual = props.placement === "right" ? window.visualViewport : null;
+    visual?.addEventListener("resize", updatePosition);
+    visual?.addEventListener("scroll", updatePosition);
+    const bounds = props.bounds_ref?.current;
+    const observer = bounds && typeof ResizeObserver !== "undefined" ? new ResizeObserver(updatePosition) : null;
+    if (bounds) observer?.observe(bounds);
     document.addEventListener("scroll", updatePosition, true);
     return () => {
       window.removeEventListener("resize", updatePosition);
+      visual?.removeEventListener("resize", updatePosition);
+      visual?.removeEventListener("scroll", updatePosition);
+      observer?.disconnect();
       document.removeEventListener("scroll", updatePosition, true);
     };
   }, [
     props.children,
+    props.bounds_ref,
     props.horizontal_align,
     props.overlay_ref,
+    props.on_request_close,
     open,
     presence.mounted,
     props.placement,
@@ -94,6 +126,7 @@ export function AnchoredOverlay(props: AnchoredOverlayProps) {
   const overlay_root = document.querySelector<HTMLElement>("#overlay-root") ?? document.body;
   return createPortal(
     <div
+      {...props.region_props}
       aria-label={props.aria_label}
       aria-hidden={presence.state === "exiting" ? true : undefined}
       className={props.class_name}

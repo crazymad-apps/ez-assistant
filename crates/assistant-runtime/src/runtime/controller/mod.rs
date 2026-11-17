@@ -134,6 +134,8 @@ impl ControllerToolCoordinator {
         let sessions = self
             .store
             .query_session_summaries(crate::SessionSummaryQuery {
+                group: None,
+                pinned_only: false,
                 filter: assistant_protocol::SessionListFilter::Active,
                 session_id: None,
                 role: Some(assistant_protocol::SessionRoleSnapshot::Standard),
@@ -479,6 +481,8 @@ impl ControllerToolCoordinator {
         let mut controllers = self
             .store
             .query_session_summaries(crate::SessionSummaryQuery {
+                group: None,
+                pinned_only: false,
                 filter: assistant_protocol::SessionListFilter::Active,
                 session_id: None,
                 role: Some(assistant_protocol::SessionRoleSnapshot::Controller),

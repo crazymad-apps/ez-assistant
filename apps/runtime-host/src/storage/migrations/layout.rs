@@ -21,7 +21,7 @@ pub(crate) fn admit(path: &Path) -> Result<Option<Connection>> {
     )?;
     let target = parse_version(env!("CARGO_PKG_VERSION"))?;
     let entries = product_manifest();
-    let versions = validate_manifest(env!("CARGO_PKG_VERSION"), &entries)?;
+    let versions = validate_manifest(DATABASE_SCHEMA_VERSION, &entries)?;
     let minimum = compatibility::read(&connection)?;
     compatibility::admit(minimum.as_ref(), &target)?;
     inspect_state(&connection, &versions, &entries, minimum.as_ref(), false)?;
@@ -121,11 +121,16 @@ pub(crate) fn upgrade(home: &Path, paths: &Relocation) -> Result<()> {
 // 布局投影只计算确定性的 SQL 迁移；F02 文件准备在布局正式发布后的常规启动执行。
 // 已经完成 F02 的库仍须用完整身份链准入，不能退回旧账本解释。
 fn layout_manifest(connection: &Connection) -> Result<Vec<Migration>> {
-    Ok(if f02_history::committed(connection)? {
-        product_manifest()
-    } else {
-        manifest().to_vec()
-    })
+    if !f02_history::committed(connection)? {
+        return Ok(manifest().to_vec());
+    }
+    let mut entries = product_manifest();
+    let versions = validate_manifest(DATABASE_SCHEMA_VERSION, &entries)?;
+    if completed_prefix(connection, &versions, &entries)? < entries.len() {
+        // v2 的代次切换只在配套文件正式落位后运行。
+        entries.pop();
+    }
+    Ok(entries)
 }
 
 #[cfg(test)]

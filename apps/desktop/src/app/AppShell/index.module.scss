@@ -456,6 +456,14 @@
   overflow: hidden;
 }
 
+.conversation_navigation_slot {
+  position: absolute;
+  inset: 0;
+  grid-row: 3 / 5;
+  grid-column: 1;
+  pointer-events: none;
+}
+
 .composer_slot {
   grid-row: 4;
   min-width: 0;

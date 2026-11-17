@@ -119,7 +119,14 @@
   align-items: flex-end;
   margin: 0 0 24px;
 
-  time { margin-top: 5px; color: var(--ez-text-muted); font-size: var(--ez-font-small); }
+  .message_actions { align-self: flex-end; }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .user_message:not(:hover):not(:focus-within) .message_actions button {
+    opacity: 0;
+    pointer-events: none;
+  }
 }
 
 .external_message {
@@ -134,7 +141,6 @@
     background: var(--ez-surface-subtle);
   }
 
-  time { align-self: flex-start; }
 }
 
 .message_source_header {
@@ -194,6 +200,18 @@
 .proxy_report_body {
   position: relative;
   min-width: 0;
+}
+
+.user_message[data-history-edit-target] .user_bubble {
+  // 消息行启用了绘制隔离；将编辑标记画在气泡内，避免靠边时被裁掉。
+  border-color: var(--ez-primary);
+  background: color-mix(in srgb, var(--ez-primary) 12%, var(--ez-primary-soft));
+  box-shadow: inset 0 0 0 1px var(--ez-primary);
+}
+
+.user_message[data-navigation-highlight]:not([data-history-edit-target]) :is(.user_bubble, .proxy_report_body) {
+  outline: 1px solid var(--ez-primary);
+  outline-offset: 2px;
 }
 
 .proxy_report_viewport {
@@ -416,6 +434,7 @@
 
 .message_actions {
   display: flex;
+  position: relative;
   min-height: 28px;
   align-items: center;
   gap: 2px;
@@ -434,9 +453,24 @@
     background: transparent;
   }
 
-  button:hover:not(:disabled) { color: var(--ez-text-secondary); background: var(--ez-surface-muted); }
-  button:disabled { opacity: 0.45; }
+  button:hover:not(:disabled):not([aria-disabled="true"]) { color: var(--ez-text-secondary); background: var(--ez-surface-muted); }
+  button:disabled, button[aria-disabled="true"] { opacity: 0.45; }
+  button:focus-visible { outline: 2px solid var(--ez-primary-border); }
   time { margin-left: 5px; font-size: var(--ez-font-small); }
+}
+
+.message_action_notice {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 1;
+  max-width: min(220px, 70vw);
+  width: max-content;
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: var(--ez-text-secondary);
+  background: var(--ez-surface-muted);
+  font-size: var(--ez-font-small);
 }
 
 .waiting_text { margin: 0; color: var(--ez-text-muted); font-size: var(--ez-font-base); }

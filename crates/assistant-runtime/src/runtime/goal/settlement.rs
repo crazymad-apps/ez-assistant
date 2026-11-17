@@ -270,11 +270,13 @@ fn transition(
             })?;
     goal.completed_at_ms = matches!(state, GoalState::Completed).then_some(finished_at_ms);
     goal.state = state;
+    let resume_required = session.resume_required
+        || (goal.consecutive_failures > 0 && !session.queue_item_ids.is_empty());
     Ok(Some(StoredGoalSettlementEffect::Transition {
         expected_goal_id: current.id.clone(),
         expected_generation: current.generation,
         goal: goal.to_stored(session_id.clone()),
-        resume_required: !session.queue_item_ids.is_empty(),
+        resume_required,
     }))
 }
 

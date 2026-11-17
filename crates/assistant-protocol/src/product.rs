@@ -160,6 +160,13 @@ pub struct ApplicationCapabilities {
     /// Runtime 是否已经支持可靠 Session Command 队列。
     #[serde(default)]
     pub session_commands: bool,
+    /// 完整用户消息编辑链路在 Desktop 和 Host Web 接通后启用。
+    #[serde(default)]
+    pub user_message_edit: bool,
+    /// 介入界面接通后由 Host 开启。
+    #[serde(default)]
+    #[ts(as = "Option<bool>", optional)]
+    pub input_intervention: bool,
 }
 
 /// Desktop 首屏所需的稳定组合投影。
@@ -170,12 +177,11 @@ pub struct ApplicationSnapshot {
     pub configuration: ConfigurationStatus,
     pub providers: Vec<crate::ProviderSummary>,
     pub model_settings: crate::ModelSettings,
-    /// 活动 Workspace，以及仍被当前 Session 绑定的已移除 Workspace。
+    /// 按侧栏顺序返回的活动项目页。
     pub workspaces: Vec<WorkspaceSummary>,
-    pub active_sessions: Vec<SessionSummary>,
-    pub archived_sessions: Vec<SessionSummary>,
-    pub active_sessions_next_offset: Option<u32>,
-    pub archived_sessions_next_offset: Option<u32>,
+    pub workspaces_next_offset: Option<u32>,
+    pub session_groups: Vec<SessionGroupSnapshot>,
+    pub pinned_sessions: Vec<SessionSummary>,
     /// 当前按稳定顺序选定的主控；创建失败或配置不可用时为 unavailable。
     #[serde(default)]
     pub controller_availability: crate::ControllerAvailabilitySnapshot,
@@ -860,17 +866,45 @@ pub struct SessionViewSnapshot {
 ///
 /// 这些类型先稳定跨层契约；对应 `RuntimeCommand` variant 在 M1 权威实现同时启用，避免 Host
 /// 出现可路由却没有业务实现的命令。
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct GetApplicationSnapshotRequest {
-    /// 从列表起点一次读取的活动会话数量；缺省 100，刷新时传入已加载数量。
+    /// 从头读取的项目数量。缺省使用侧栏默认页大小，刷新时可传入已加载的条数。
     #[serde(default)]
     #[ts(optional)]
-    pub active_sessions_limit: Option<u32>,
-    /// 从列表起点一次读取的归档会话数量；缺省 100。
+    pub workspaces_limit: Option<u32>,
+    /// 缺省返回项目页与独立会话的活动首页；空数组表示不读取分组。
     #[serde(default)]
     #[ts(optional)]
-    pub archived_sessions_limit: Option<u32>,
+    pub session_groups: Option<Vec<SessionGroupRequest>>,
+}
+
+/// 侧栏中的会话归属；省略分组条件的列表查询仍表示全局搜索。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[ts(export_to = "assistant-protocol.ts")]
+pub enum SessionGroup {
+    Workspace { workspace_id: crate::WorkspaceId },
+    Unbound,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SessionGroupRequest {
+    pub group: SessionGroup,
+    pub filter: crate::SessionListFilter,
+    #[serde(default)]
+    #[ts(optional)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SessionGroupSnapshot {
+    pub group: SessionGroup,
+    pub filter: crate::SessionListFilter,
+    pub sessions: Vec<SessionSummary>,
+    pub next_offset: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -909,7 +943,10 @@ pub struct GetChildTaskViewResult {
 pub struct ListConversationPageRequest {
     pub owner: ConversationOwner,
     pub cursor: Option<String>,
-    pub limit: u32,
+    /// 省略时读取 10 个完整 Run 批次。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub turn_limit: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -918,12 +955,74 @@ pub struct ListConversationPageResult {
     pub snapshot: ObservedSnapshot<ConversationPage>,
 }
 
+/// 一项缩略导航只有可靠消息身份。没有可预览回复时，助手 ID 为空。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ConversationNavigationItem {
+    pub user_message_id: MessageId,
+    pub assistant_message_id: Option<MessageId>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ConversationNavigationPage {
+    pub owner: ConversationOwner,
+    pub generation: u64,
+    pub items: Vec<ConversationNavigationItem>,
+    pub previous_cursor: Option<String>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ListConversationNavigationRequest {
+    pub owner: ConversationOwner,
+    pub cursor: Option<String>,
+    /// 省略时读取 128 项，允许 1 到 256 项。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ListConversationNavigationResult {
+    pub snapshot: ObservedSnapshot<ConversationNavigationPage>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct GetConversationMessagePreviewRequest {
+    pub owner: ConversationOwner,
+    pub generation: u64,
+    pub message_id: MessageId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ConversationMessagePreview {
+    pub owner: ConversationOwner,
+    pub generation: u64,
+    pub message_id: MessageId,
+    pub text: String,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct GetConversationMessagePreviewResult {
+    pub snapshot: ObservedSnapshot<ConversationMessagePreview>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct GetConversationPageAroundRunRequest {
     pub session_id: SessionId,
     pub run_id: RunId,
-    pub limit: u32,
+    /// 省略时读取 10 个完整 Run 批次。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub turn_limit: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -1023,7 +1122,10 @@ pub struct GetConversationRecallWindowResult {
 pub struct GetConversationPageAroundMessageRequest {
     pub owner: ConversationOwner,
     pub message_id: MessageId,
-    pub limit: u32,
+    /// 省略时读取 10 个完整 Run 批次。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub turn_limit: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]

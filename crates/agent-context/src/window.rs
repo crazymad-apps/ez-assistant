@@ -156,7 +156,9 @@ pub fn context_token_usage(snapshot: &ConversationSnapshot) -> ContextTokenUsage
         .enumerate()
         .rev()
         .find_map(|(index, message)| match message {
-            ConversationMessage::Assistant(message) if message.purpose.is_model_response() => {
+            ConversationMessage::Assistant(message)
+                if message.purpose.is_model_response() && !message.finish_reason.is_partial() =>
+            {
                 Some((index, message))
             }
             _ => None,
@@ -284,7 +286,17 @@ fn estimate_unreported_message_tokens(message: &ConversationMessage) -> u64 {
                     total.saturating_add(PART_OVERHEAD).saturating_add(content)
                 })
         }
-        // latest_index 指向最后一条 Assistant；正常快照不会进入此分支。
+        ConversationMessage::Assistant(message) if message.finish_reason.is_partial() => {
+            let mut text_tokens = message.parts.iter().filter_map(|part| match part {
+                agent_types::AssistantPart::Text(part) if !part.text.trim().is_empty() => {
+                    Some(PART_OVERHEAD.saturating_add(estimate_text_tokens(&part.text)))
+                }
+                _ => None,
+            });
+            text_tokens.next().map_or(0, |first| {
+                text_tokens.fold(MESSAGE_OVERHEAD.saturating_add(first), u64::saturating_add)
+            })
+        }
         ConversationMessage::Assistant(_) => 0,
     }
 }
@@ -414,6 +426,58 @@ mod tests {
                 reasoning_tokens: None,
             }),
         })
+    }
+
+    #[test]
+    fn terminated_output_uses_only_text_for_both_context_policies_and_usage() {
+        let mut messages = vec![assistant("completed", Some(100))];
+        for (id, reason) in [
+            ("cancelled", FinishReason::Cancelled),
+            ("failed", FinishReason::Failed),
+        ] {
+            let ConversationMessage::Assistant(mut partial) = assistant(id, None) else {
+                unreachable!()
+            };
+            partial.finish_reason = reason;
+            partial
+                .parts
+                .push(AssistantPart::Reasoning(agent_types::ReasoningPart {
+                    id: agent_types::PartId::new(format!("{id}-reasoning")).unwrap(),
+                    source: Default::default(),
+                    text: "not replayed".repeat(100),
+                }));
+            if id == "failed" {
+                partial
+                    .parts
+                    .push(AssistantPart::Text(agent_types::TextPart {
+                        id: agent_types::PartId::new("failed-text").unwrap(),
+                        text: "text".into(),
+                    }));
+            }
+            messages.push(ConversationMessage::Assistant(partial));
+        }
+        let history = ConversationSnapshot::new(messages);
+        for policy in [
+            agent_model::ContextPolicy::LocalSummary,
+            agent_model::ContextPolicy::ServerCompaction {
+                threshold_tokens: std::num::NonZeroU64::MIN,
+                state_scope_fingerprint: "fixture".into(),
+            },
+        ] {
+            let effective = crate::project_effective_context(&history, &policy).unwrap();
+            let [_, ConversationMessage::Assistant(partial)] = effective.messages.as_slice() else {
+                panic!("unexpected projection")
+            };
+            assert_eq!(partial.id.as_str(), "failed");
+            assert!(
+                matches!(partial.parts.as_slice(), [AssistantPart::Text(part)] if part.text == "text")
+            );
+            assert_eq!(
+                context_token_usage(&effective),
+                context_token_usage(&history)
+            );
+            assert_eq!(context_token_usage(&effective).total_tokens(), Some(107));
+        }
     }
 
     fn assistant_with_provider_state(

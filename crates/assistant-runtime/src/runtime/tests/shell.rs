@@ -11,7 +11,7 @@ async fn conversation_items(
                 session_id: session_id.clone(),
             },
             cursor: None,
-            limit: 30,
+            turn_limit: Some(30),
         })
         .await
         .unwrap()
@@ -79,6 +79,7 @@ async fn verify_queued_shell_change(target: ShellKind) {
         .session
         .session_id;
     let request = SubmitInputRequest {
+        delivery: Default::default(),
         session_id: session_id.clone(),
         message: "normal input".to_owned(),
         variant: assistant_protocol::AgentVariant::Build,
@@ -320,6 +321,7 @@ async fn shell_control_failure_retry_and_forks_never_call_the_model() {
     assert!(model.take_requests().is_empty());
     let ordinary = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             session_id: session_id.clone(),
             message: "after controls".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -457,6 +459,7 @@ async fn shell_preparation_failure_atomically_commits_the_failed_input() {
     }
     let accepted = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             session_id: session.session_id.clone(),
             message: "shell failure must preserve this input".to_owned(),
             variant: assistant_protocol::AgentVariant::Build,
@@ -658,6 +661,7 @@ async fn shell_binding_survives_archive_restore_and_clear_after_default_changes(
         }
         let accepted = runtime
             .submit_started_input(SubmitInputRequest {
+                delivery: Default::default(),
                 session_id: session_id.clone(),
                 message: format!("shell lifecycle stage {stage}"),
                 variant: assistant_protocol::AgentVariant::Build,
@@ -740,6 +744,7 @@ async fn run_persists_the_exact_shell_used_to_compile_tools() {
         .await
         .unwrap();
     let request = SubmitInputRequest {
+        delivery: Default::default(),
         session_id: session_id.clone(),
         message: "use the bound shell".to_owned(),
         variant: assistant_protocol::AgentVariant::Build,
@@ -831,6 +836,7 @@ async fn shell_context_returns_after_real_compaction_without_changing_the_bindin
         .session
         .session_id;
     let request = SubmitInputRequest {
+        delivery: Default::default(),
         session_id: session_id.clone(),
         message: "execute in this Shell".into(),
         variant: assistant_protocol::AgentVariant::Build,
@@ -967,6 +973,7 @@ async fn verify_shell_after_automatic_compaction(provider_overflow: bool) {
     for message in ["first turn", "continue after automatic compaction"] {
         let accepted = runtime
             .submit_started_input(SubmitInputRequest {
+                delivery: Default::default(),
                 session_id: session_id.clone(),
                 message: message.into(),
                 variant: assistant_protocol::AgentVariant::Build,
@@ -1103,6 +1110,7 @@ async fn delegated_model_receives_the_parent_run_shell_and_execution_directory()
     set_auto_approval(&runtime, &session_id).await;
     let accepted = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             session_id: session_id.clone(),
             message: "delegate environment inspection".into(),
             variant: assistant_protocol::AgentVariant::Build,

@@ -11,19 +11,20 @@ use crate::{
 use super::{
     AcceptedInput, AcceptedStoredSessionCommand, ApprovalModeChange, ArchiveChange, ChildTaskStart,
     ChildToolExecutionStart, CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
-    ContextReplacementResult, ConversationMessageLocationRequest, ConversationRawWindowRequest,
-    ConversationRewrite, ConversationSearchPage, ConversationSearchRequest,
-    ConversationWindowRequest, GoalClear, GoalHeldInputResume, GoalHeldInputResumeResult, GoalStop,
-    GoalStopResult, MessageFeedbackChange, ModelChange, NewAttachmentUpload, NewStoredChildTask,
-    NewStoredInput, NewStoredRunAttempt, NewStoredSession, NewStoredSessionCommand,
-    NewStoredSessionMaterialization, NewWorkspaceRegistration, PendingChildToolExchange,
-    PendingToolExchange, PluginOperationUpdate, PluginSettingsChange, QueuePriorityChange,
-    ReasoningEffortChange, RewriteResult, SessionCommandCommit, SessionDeletion, SessionFork,
-    SessionHistoryClear, SessionHistoryClearResult, SessionHistoryCompactionFinish,
-    SessionHistoryCompactionPreparation, SessionHistoryCompactionPreparationResult,
-    SessionPinnedChange, SessionProxyChange, SessionTitleChange, SessionTitleGenerationCommit,
-    SessionTitleGenerationCommitResult, StoreFuture, StoredAttachment, StoredChildTask,
-    StoredChildTaskSettlement, StoredConversationMessageLocation, StoredConversationRawWindow,
+    ContextReplacementResult, ConversationMessageLocationRequest, ConversationNavigationRequest,
+    ConversationRawWindowRequest, ConversationRewrite, ConversationSearchPage,
+    ConversationSearchRequest, ConversationWindowRequest, GoalClear, GoalHeldInputResume,
+    GoalHeldInputResumeResult, GoalStop, GoalStopResult, MessageFeedbackChange, ModelChange,
+    NewAttachmentUpload, NewStoredChildTask, NewStoredInput, NewStoredRunAttempt, NewStoredSession,
+    NewStoredSessionCommand, NewStoredSessionMaterialization, NewWorkspaceRegistration,
+    PendingChildToolExchange, PendingToolExchange, PluginOperationUpdate, PluginSettingsChange,
+    QueuePriorityChange, ReasoningEffortChange, RewriteResult, SessionCommandCommit,
+    SessionDeletion, SessionFork, SessionHistoryClear, SessionHistoryClearResult,
+    SessionHistoryCompactionFinish, SessionHistoryCompactionPreparation,
+    SessionHistoryCompactionPreparationResult, SessionPinnedChange, SessionProxyChange,
+    SessionTitleChange, SessionTitleGenerationCommit, SessionTitleGenerationCommitResult,
+    StoreFuture, StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
+    StoredConversationMessageLocation, StoredConversationNavigation, StoredConversationRawWindow,
     StoredConversationWindow, StoredGoal, StoredInput, StoredMcpSelection, StoredMessageFeedback,
     StoredPlugin, StoredPluginOperation, StoredRun, StoredRunContinuation,
     StoredRunContinuationResult, StoredRunSettlement, StoredRunSettlementResult, StoredSession,
@@ -55,14 +56,33 @@ pub struct RecoveredRuntime {
 }
 
 /// 有界的会话摘要查询，不读取冻结提示词、输入、Run 或正文。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct SessionSummaryQuery {
+    pub group: Option<assistant_protocol::SessionGroup>,
+    pub pinned_only: bool,
     pub filter: assistant_protocol::SessionListFilter,
     pub session_id: Option<SessionId>,
     pub role: Option<assistant_protocol::SessionRoleSnapshot>,
     pub query: Option<String>,
     pub offset: u32,
     pub limit: u32,
+}
+
+/// 侧栏项目列表和每个会话分组的默认页大小。
+pub const SIDEBAR_PAGE_SIZE: u32 = 10;
+
+/// 侧栏只读组合由一次存储调用返回，防止分组间穿插写操作。
+#[derive(Clone, Debug)]
+pub struct WorkspacePage {
+    pub workspaces: Vec<super::StoredWorkspace>,
+    pub has_more: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct SidebarSnapshot {
+    pub workspaces: WorkspacePage,
+    pub session_groups: Vec<assistant_protocol::SessionGroupSnapshot>,
+    pub pinned_sessions: Vec<assistant_protocol::SessionSummary>,
 }
 
 /// 单会话装配及其跨会话身份引用；引用只有角色与生命周期，不带历史正文。
@@ -196,6 +216,26 @@ pub trait RuntimeStore: Send + Sync {
 
     /// 用户显式操作前收敛目标会话的未完成提交；不重放工具、不调度 Run。
     fn prepare_session_execution(&self, session_id: &SessionId) -> StoreFuture<'_, LoadedSession>;
+
+    fn move_sidebar_item(
+        &self,
+        request: assistant_protocol::MoveSidebarItemRequest,
+    ) -> StoreFuture<'_, ()>;
+
+    fn reset_sidebar_order(
+        &self,
+        request: assistant_protocol::ResetSidebarOrderRequest,
+    ) -> StoreFuture<'_, ()>;
+
+    fn query_workspaces(
+        &self,
+        request: assistant_protocol::ListWorkspacesRequest,
+    ) -> StoreFuture<'_, WorkspacePage>;
+
+    fn query_sidebar(
+        &self,
+        request: assistant_protocol::GetApplicationSnapshotRequest,
+    ) -> StoreFuture<'_, SidebarSnapshot>;
 
     fn query_session_summaries(
         &self,
@@ -389,6 +429,27 @@ pub trait RuntimeStore: Send + Sync {
         replacement: ContextReplacement,
     ) -> StoreFuture<'_, ContextReplacementResult>;
 
+    /// 检查当前会话的可靠历史及控制是否已占用候选身份。
+    fn new_conversation_identity_available(
+        &self,
+        session: &SessionId,
+        identity: super::NewConversationIdentity,
+    ) -> StoreFuture<'_, bool>;
+
+    /// 读取单个 Run 的正文范围及其归属，用于精确回读原接纳结果。
+    fn load_run_conversation(
+        &self,
+        session: &SessionId,
+        run: &assistant_protocol::RunId,
+    ) -> StoreFuture<'_, StoredConversationRawWindow>;
+
+    /// 在准备输入资源之前读取同 owner 的原接纳。文件读取失败必须返回错误。
+    fn find_request_acceptance(
+        &self,
+        session: &SessionId,
+        key: &IdempotencyKey,
+    ) -> StoreFuture<'_, Option<super::StoredRequestAcceptance>>;
+
     /// 只暂存可撤销 Input；幂等命中返回原输入及已经存在的首次 Run（未领取时为空）。
     fn accept_input(&self, input: NewStoredInput) -> StoreFuture<'_, AcceptedInput>;
 
@@ -397,7 +458,11 @@ pub trait RuntimeStore: Send + Sync {
     ///
     /// # Errors
     /// 输入已领取、会话不具备执行条件、身份冲突或可靠提交失败时返回错误，保留原暂存输入。
-    fn claim_input(&self, run: StoredRun) -> StoreFuture<'_, ()>;
+    fn claim_input(
+        &self,
+        run: StoredRun,
+        goal_resume: Option<GoalHeldInputResume>,
+    ) -> StoreFuture<'_, ()>;
 
     /// 原子接受一个不创建 Run 的结构化 Session Command。
     fn accept_session_command(
@@ -526,6 +591,12 @@ pub trait RuntimeStore: Send + Sync {
         &self,
         request: ConversationWindowRequest,
     ) -> StoreFuture<'_, StoredConversationWindow>;
+
+    /// 读取有界缩略 ID 页或单条获准预览，不安装执行状态。
+    fn read_conversation_navigation(
+        &self,
+        request: ConversationNavigationRequest,
+    ) -> StoreFuture<'_, StoredConversationNavigation>;
 
     /// 按权威 JSONL 原始消息序号读取有限窗口，仅供签名 Recall 引用二次定位。
     fn load_conversation_raw_window(

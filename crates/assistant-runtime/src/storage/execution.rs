@@ -442,9 +442,26 @@ pub enum AcceptedInput {
     /// 已结束的首次 Run 从当前 owner 文件读取；不含队列载荷、Shell 环境或恢复句柄。
     Historical {
         session_id: SessionId,
-        input: super::StoredInputHistory,
+        input: Box<super::StoredInputHistory>,
         run: super::StoredRunHistory,
     },
+}
+
+/// 正式接纳前核对由 Runtime 分配的新身份；写入仍需独立复核。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum NewConversationIdentity {
+    Input {
+        input_id: InputId,
+        message_id: MessageId,
+    },
+    Run(RunId),
+}
+
+/// 由同一 Session 请求键命中的原接纳结果。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StoredRequestAcceptance {
+    Message(Box<AcceptedInput>),
+    Command(Box<StoredSessionCommand>),
 }
 
 impl AcceptedInput {
@@ -510,7 +527,7 @@ pub struct StoredRunSettlement {
     /// 来源 Input 仍为 queued 时必须携带的原始 UserMessage；Store 将它放在本批首位并原子提交 Input。
     pub queued_user_message: Option<UserMessage>,
     pub messages: Vec<ConversationMessage>,
-    /// 本批最终 AssistantMessage 的可靠 step；旧调用方或无消息结算时为空。
+    /// 本批终态输出的可靠 step；旧调用方或无消息结算时为空。
     pub message_step: Option<u32>,
     pub goal_effect: Option<StoredGoalSettlementEffect>,
     /// 源 Run 结算时，同事务可靠接受到 Controller 的可见代理报告。

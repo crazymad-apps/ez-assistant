@@ -60,6 +60,13 @@ pub struct OpenAiResponsesService {
 }
 
 impl OpenAiResponsesService {
+    /// 绑定宿主派生的稳定缓存身份；请求显式提供 `prompt_cache_key` 时优先使用请求值。
+    /// Adapter 不解析会话身份，也不按请求内容、Step 或重试重新派生 key。
+    pub fn with_prompt_cache_key(mut self, key: impl Into<String>) -> Self {
+        self.adapter.prompt_cache_key = Some(key.into());
+        self
+    }
+
     /// 绑定 OpenCode 的不可变请求身份；其他方言不会发送这些头。
     pub fn with_opencode_identity(mut self, identity: crate::OpenCodeRequestIdentity) -> Self {
         self.opencode_identity = Some(identity);

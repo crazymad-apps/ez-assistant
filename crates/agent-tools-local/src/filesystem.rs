@@ -8,7 +8,7 @@ use agent_tools::{
     AbsolutePath, DeleteFileRequest, DeleteFileResult, EditFileRequest, EditFileResult, FileEntry,
     FileEntryKind, FileSystemTool, FileToolContext, FileToolError, FsFuture, ListDirectoryRequest,
     ListDirectoryResult, ReadFileRequest, ReadFileResult, SearchFilesRequest, SearchFilesResult,
-    WriteFileRequest, WriteFileResult, paginate_with_line_numbers,
+    WriteFileRequest, WriteFileResult, paginate_file_text,
 };
 
 use crate::{path_lock::PathLockTable, search};
@@ -172,16 +172,7 @@ impl FileSystemTool for LocalFileSystem {
                     path: request.path.clone(),
                 }
             })?;
-            let (content, next_offset, truncated) =
-                paginate_with_line_numbers(text, request.offset, request.limit);
-            Ok(ReadFileResult {
-                path: request.path,
-                offset: request.offset,
-                limit: request.limit,
-                content,
-                next_offset,
-                truncated,
-            })
+            Ok(paginate_file_text(text, request))
         })
     }
 
@@ -426,6 +417,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn filesystem_read_bounds_a_two_million_character_single_line() {
+        let (directory, filesystem) = fixture(4 * 1024 * 1024);
+        let path = directory.path().join("minified.html");
+        tokio::fs::write(&path, "x".repeat(2_000_000))
+            .await
+            .unwrap();
+        let result = filesystem
+            .read(
+                ReadFileRequest {
+                    path: absolute(&path),
+                    offset_chars: 0,
+                    limit_chars: nonzero(20_000),
+                },
+                FileToolContext::default(),
+            )
+            .await
+            .unwrap();
+        assert!(result.content.chars().count() <= 20_000);
+        assert!(result.truncated);
+        assert_eq!(result.next_offset_chars, Some(20_000));
+        let last = filesystem
+            .read(
+                ReadFileRequest {
+                    path: absolute(&path),
+                    offset_chars: 1_999_997,
+                    limit_chars: nonzero(20_000),
+                },
+                FileToolContext::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(last.content, "xxx");
+        assert_eq!(last.next_offset_chars, None);
+        assert_eq!((last.start_line, last.start_column), (1, 1_999_998));
+    }
+
+    #[tokio::test]
     async fn filesystem_read_paginates_empty_bom_encoding_type_and_size() {
         let (directory, filesystem) = fixture(16);
         let text_path = directory.path().join("text.txt");
@@ -436,15 +464,16 @@ mod tests {
             .read(
                 ReadFileRequest {
                     path: absolute(&text_path),
-                    offset: nonzero(2),
-                    limit: nonzero(1),
+                    offset_chars: 4,
+                    limit_chars: nonzero(3),
                 },
                 FileToolContext::default(),
             )
             .await
             .expect("read text");
-        assert_eq!(result.content, "2\ttwo");
-        assert_eq!(result.next_offset, NonZeroU32::new(3));
+        assert_eq!(result.content, "two");
+        assert_eq!((result.start_line, result.start_column), (2, 1));
+        assert_eq!(result.next_offset_chars, Some(7));
 
         let empty_path = directory.path().join("empty.txt");
         tokio::fs::write(&empty_path, [])
@@ -454,8 +483,8 @@ mod tests {
             .read(
                 ReadFileRequest {
                     path: absolute(&empty_path),
-                    offset: nonzero(1),
-                    limit: nonzero(1),
+                    offset_chars: 0,
+                    limit_chars: nonzero(1),
                 },
                 FileToolContext::default(),
             )
@@ -471,14 +500,15 @@ mod tests {
             .read(
                 ReadFileRequest {
                     path: absolute(&bom_path),
-                    offset: nonzero(1),
-                    limit: nonzero(1),
+                    offset_chars: 0,
+                    limit_chars: nonzero(5),
                 },
                 FileToolContext::default(),
             )
             .await
             .expect("read bom");
-        assert_eq!(result.content, "1\thello");
+        assert_eq!(result.content, "hello");
+        assert_eq!(result.next_offset_chars, None);
 
         let invalid_path = directory.path().join("invalid.txt");
         tokio::fs::write(&invalid_path, [0xff])
@@ -489,8 +519,8 @@ mod tests {
                 .read(
                     ReadFileRequest {
                         path: absolute(&invalid_path),
-                        offset: nonzero(1),
-                        limit: nonzero(1),
+                        offset_chars: 0,
+                        limit_chars: nonzero(1),
                     },
                     FileToolContext::default(),
                 )
@@ -507,8 +537,8 @@ mod tests {
                 .read(
                     ReadFileRequest {
                         path: absolute(&nul_path),
-                        offset: nonzero(1),
-                        limit: nonzero(1),
+                        offset_chars: 0,
+                        limit_chars: nonzero(1),
                     },
                     FileToolContext::default(),
                 )
@@ -521,8 +551,8 @@ mod tests {
                 .read(
                     ReadFileRequest {
                         path: absolute(directory.path()),
-                        offset: nonzero(1),
-                        limit: nonzero(1),
+                        offset_chars: 0,
+                        limit_chars: nonzero(1),
                     },
                     FileToolContext::default(),
                 )
@@ -539,8 +569,8 @@ mod tests {
                 .read(
                     ReadFileRequest {
                         path: absolute(&large_path),
-                        offset: nonzero(1),
-                        limit: nonzero(1),
+                        offset_chars: 0,
+                        limit_chars: nonzero(1),
                     },
                     FileToolContext::default(),
                 )
@@ -941,8 +971,8 @@ mod tests {
                 .read(
                     ReadFileRequest {
                         path: absolute(&socket),
-                        offset: nonzero(1),
-                        limit: nonzero(1),
+                        offset_chars: 0,
+                        limit_chars: nonzero(1),
                     },
                     FileToolContext::default(),
                 )

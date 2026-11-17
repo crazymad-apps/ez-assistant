@@ -37,10 +37,9 @@ export const ResourceWorkspace = observer(function ResourceWorkspace(props: Read
   const scope_key = root_store.reading_scope;
   const session_id = scope_key.startsWith("session:") ? scope_key.slice(8) : null;
   const draft_key = scope_key.startsWith("draft:") ? scope_key.slice(6) : null;
-  const application = root_store.reading_projection.application;
   const session_view = session_id ? root_store.reading_projection.session_views.get(session_id) : undefined;
   const draft = root_store.reading_drafts.get(draft_key as import("../../../stores/NewSessionDraftStore").NewSessionDraftKey | null);
-  const draft_workspace = application?.workspaces.find((item) => item.workspace_id === draft?.workspace_id);
+  const draft_workspace = root_store.reading_projection.workspaceSummary(draft?.workspace_id);
   const [app_picker, setAppPicker] = useState(false);
   const [closing_terminal, setClosingTerminal] = useState<string | null>(null);
   const connected = root_store.reading_connection.state === "connected";

@@ -172,6 +172,7 @@ async fn child_cards_keep_the_real_child_owner() {
     set_auto_approval(&runtime, &session).await;
     let run = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             session_id: session.clone(),
             message: "delegate".into(),
             variant: AgentVariant::Build,
@@ -352,6 +353,7 @@ async fn mcp_card_case(oversized: bool) {
         .session_id;
     let run = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             session_id: session.clone(),
             message: "MCP card".into(),
             variant: AgentVariant::Build,
@@ -468,6 +470,7 @@ async fn cards_publish_without_client_and_snapshot_cas_rejects_old_instances() {
         .session
         .session_id;
     let input = SubmitInputRequest {
+        delivery: Default::default(),
         session_id: session.clone(),
         message: "publish".into(),
         variant: AgentVariant::Build,

@@ -118,24 +118,28 @@ impl FileToolError {
 pub struct ReadFileRequest {
     /// 已解析的目标绝对逻辑路径。
     pub path: AbsolutePath,
-    /// 起始行号（1 起始，含）。
-    pub offset: NonZeroU32,
-    /// 最多返回行数。
-    pub limit: NonZeroU32,
+    /// 0 起始的 Unicode scalar value 偏移；不是字节、UTF-16 单元或行号。
+    pub offset_chars: u64,
+    /// 本页最多返回的 Unicode scalar value 数量，由工具壳落实实例上限。
+    pub limit_chars: NonZeroU32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ReadFileResult {
     /// 实际读取的绝对逻辑路径。
     pub path: AbsolutePath,
-    /// 本页采用的 1 起始首行行号。
-    pub offset: NonZeroU32,
-    /// 本页采用的最大行数。
-    pub limit: NonZeroU32,
-    /// 带 1 起始行号的内容，每行格式为 `{行号}\t{行文本}`。
+    /// 本页采用的 0 起始字符偏移。
+    pub offset_chars: u64,
+    /// 本页采用的最大字符数。
+    pub limit_chars: NonZeroU32,
+    /// 原样正文片段，保留换行；不插入行号，连续页可无损拼接。
     pub content: String,
-    /// 下一页起始行；`None` 表示已经到达文件尾。
-    pub next_offset: Option<NonZeroU32>,
+    /// 片段起点的 1 起始行号，LF 开始新行；空页定位在文件尾。
+    pub start_line: u64,
+    /// 片段起点的 1 起始字符列；空页定位在文件尾。
+    pub start_column: u64,
+    /// 下一页的字符偏移；`None` 表示已经到达文件尾。
+    pub next_offset_chars: Option<u64>,
     /// 是否还有内容因分页上限未返回。
     pub truncated: bool,
 }
@@ -472,36 +476,44 @@ pub trait FileSystemTool: Send + Sync {
     ) -> FsFuture<'a, EditFileResult>;
 }
 
-/// 对文本按显式非零行号和行数分页，并生成下一页位置。
-pub fn paginate_with_line_numbers(
-    text: &str,
-    offset: NonZeroU32,
-    limit: NonZeroU32,
-) -> (String, Option<NonZeroU32>, bool) {
-    let lines: Vec<&str> = text.lines().collect();
-    let start = offset.get() as usize;
-    if start > lines.len() {
-        return (String::new(), None, false);
-    }
-    let available = &lines[start - 1..];
-    let take = limit.get() as usize;
-    let taken = &available[..take.min(available.len())];
-    let mut content = String::new();
-    for (index, line) in taken.iter().enumerate() {
-        if index > 0 {
-            content.push('\n');
+/// 从已读取的 UTF-8 正文按 Unicode scalar value 分页，真实 Adapter 与 fake 共用。
+/// 不读取文件、不保存游标；正文不加行号或改写换行，超长单行仍受字符数量限制。
+/// 调用方负责读取前的文件大小、编码和 BOM 规则；重复调用反映调用方当次提供的正文。
+pub fn paginate_file_text(text: &str, request: ReadFileRequest) -> ReadFileResult {
+    let mut remaining = text.chars();
+    let (mut start_line, mut start_column) = (1_u64, 1_u64);
+    for _ in 0..request.offset_chars {
+        let Some(character) = remaining.next() else {
+            break;
+        };
+        if character == '\n' {
+            start_line += 1;
+            start_column = 1;
+        } else {
+            start_column += 1;
         }
-        content.push_str(&format!("{}\t{}", start + index, line));
     }
-    let truncated = taken.len() < available.len();
-    let next_offset = if truncated {
-        u32::try_from(start + taken.len())
-            .ok()
-            .and_then(NonZeroU32::new)
-    } else {
-        None
-    };
-    (content, next_offset, truncated)
+    let start = text.len() - remaining.as_str().len();
+    let mut taken = 0_u64;
+    for _ in 0..request.limit_chars.get() {
+        if remaining.next().is_none() {
+            break;
+        }
+        taken += 1;
+    }
+    let end = text.len() - remaining.as_str().len();
+    let truncated = !remaining.as_str().is_empty();
+    ReadFileResult {
+        path: request.path,
+        offset_chars: request.offset_chars,
+        limit_chars: request.limit_chars,
+        content: text[start..end].to_owned(),
+        start_line,
+        start_column,
+        // 仍有后缀时 offset + taken 不大于正文字符总数，不会因超大 offset 溢出。
+        next_offset_chars: truncated.then(|| request.offset_chars + taken),
+        truncated,
+    }
 }
 
 /// 契约级精确替换，供 fake 与真实 Adapter 复用。
@@ -545,18 +557,57 @@ mod tests {
     }
 
     #[test]
-    fn paginate_adds_line_numbers_and_next_offset() {
-        let (content, next_offset, truncated) =
-            paginate_with_line_numbers("a\nb\nc\nd", nonzero(2), nonzero(2));
-        assert_eq!(content, "2\tb\n3\tc");
-        assert_eq!(next_offset, Some(nonzero(4)));
-        assert!(truncated);
+    fn paginate_preserves_unicode_and_newlines_across_every_page_boundary() {
+        // 包括多字节中文、四字节字符、组合字符和 CRLF；每种页宽都必须原样拼回。
+        let text = "中🦀e\u{301}\r\n文\n尾\r\n";
+        for limit in 1..=text.chars().count() as u32 + 1 {
+            let mut offset = 0;
+            let mut restored = String::new();
+            loop {
+                let page = paginate_file_text(text, read_request(offset, limit));
+                assert_eq!(page, paginate_file_text(text, read_request(offset, limit)));
+                assert!(page.content.chars().count() <= limit as usize);
+                assert_eq!(page.truncated, page.next_offset_chars.is_some());
+                restored.push_str(&page.content);
+                let Some(next) = page.next_offset_chars else {
+                    break;
+                };
+                assert!(next > offset);
+                offset = next;
+            }
+            assert_eq!(restored, text);
+        }
+        let page = paginate_file_text(text, read_request(6, 2));
+        assert_eq!(page.content, "文\n");
+        assert_eq!((page.start_line, page.start_column), (2, 1));
+        assert_eq!(page.next_offset_chars, Some(8));
+    }
 
-        let (content, next_offset, truncated) =
-            paginate_with_line_numbers("a\nb", nonzero(5), nonzero(2));
-        assert!(content.is_empty());
-        assert_eq!(next_offset, None);
-        assert!(!truncated);
+    #[test]
+    fn paginate_handles_empty_exact_eof_and_out_of_range_offsets() {
+        for (text, offset) in [("", 0), ("a\n", 2), ("a\n", u64::MAX)] {
+            let page = paginate_file_text(text, read_request(offset, 10));
+            assert!(page.content.is_empty());
+            assert_eq!(page.next_offset_chars, None);
+            assert!(!page.truncated);
+        }
+        let page = paginate_file_text("a\n", read_request(0, 2));
+        assert_eq!(page.content, "a\n");
+        assert_eq!(page.next_offset_chars, None);
+        assert!(!page.truncated);
+    }
+
+    fn read_request(offset_chars: u64, limit_chars: u32) -> ReadFileRequest {
+        let path = if cfg!(windows) {
+            "C:/fixture.txt"
+        } else {
+            "/fixture.txt"
+        };
+        ReadFileRequest {
+            path: AbsolutePath::new(path).unwrap(),
+            offset_chars,
+            limit_chars: nonzero(limit_chars),
+        }
     }
 
     #[test]

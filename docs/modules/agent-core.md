@@ -16,7 +16,7 @@
 - 模型 Provider trait 和流式响应抽象。
 - 单次 `AgentExecution` 的上下文组装、工具结果回填和事件输出。
 - 每个 Model Step 建立请求前通过共享 Context Window Evaluator 执行上下文预检；
-  判断使用最近完整 Provider Result 的 `total_tokens`、此后尚未计量的 User/Tool 文本增量和当前模型
+  判断使用最近完整 Provider Result 的 `total_tokens`、此后尚未计量的 User/Tool 与终止输出正文增量和当前模型
   `context_window_tokens`。达到原有窗口压缩阈值或 Provider 报告 Context Overflow 时，以
   可靠终态交回 Runtime。
 - 终态 usage 与未计量增量由共享 Context Window Evaluator 分开投影；新 step 完成后替换终态基数并
@@ -70,9 +70,9 @@ Context Window Evaluator、历史布局和 replacement 校验归
   Runtime Harness 临时验证，正式 Runtime 接口留待总体设计。
 - Provider 的 Context Overflow 通过 provider-neutral `ModelError` 进入 Core，Core
   转换为 Agent 层 CompactionRequired 终态；Provider 不直接发布 AgentEvent。
-- 未完成 Model Step 的流式 delta 不是规范事实。Context Overflow 时丢弃当前 Step；
-  Core 只有在完整 `TurnFinished` 后才记录 Tool Call 并执行工具，因此压缩交接不得
-  留下未配对 Tool Call/Result。
+- Core 在发送可丢弃的 delta 前保留当前模型尝试的可见输出。取消或失败时，唯一终态事件与 completion
+  交付相同的部分消息及 Step。重试废弃被替换的尝试，压缩交接仍丢弃未完成 Step。只有完整且通过校验的
+  `TurnFinished` 才能创建工具交换。
 
 ## 最小可执行 Agent
 

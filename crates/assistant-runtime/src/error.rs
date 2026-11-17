@@ -16,6 +16,9 @@ use crate::{
 /// Runtime 操作失败。
 #[derive(Debug, Error)]
 pub enum RuntimeError {
+    #[error("sidebar order changed; reload the list")]
+    SidebarOrderConflict,
+
     /// 客户端提交的业务字段不满足 Runtime 约束。
     #[error("runtime request is invalid: {reason}")]
     InvalidRequest {
@@ -43,6 +46,8 @@ pub enum RuntimeError {
     /// 归档 Session 只允许只读查询。
     #[error("session `{session_id}` is archived")]
     SessionArchived { session_id: SessionId },
+    #[error("user message cannot be edited")]
+    UserMessageNotEditable,
     /// Session 尚有活动、排队或未终结 Run。
     #[error("session `{session_id}` is not idle")]
     SessionNotIdle { session_id: SessionId },
@@ -272,6 +277,10 @@ impl RuntimeError {
     /// 转换为 Host 可以安全发送给客户端的稳定错误信息。
     pub fn to_protocol_info(&self) -> RuntimeErrorInfo {
         match self {
+            Self::SidebarOrderConflict => RuntimeErrorInfo::new(
+                RuntimeErrorCode::Conflict,
+                "sidebar order changed; reload the list",
+            ),
             Self::InvalidRequest { reason } => {
                 RuntimeErrorInfo::new(RuntimeErrorCode::InvalidRequest, *reason)
             }
@@ -292,6 +301,10 @@ impl RuntimeError {
             Self::SessionArchived { .. } => {
                 RuntimeErrorInfo::new(RuntimeErrorCode::SessionArchived, "session is archived")
             }
+            Self::UserMessageNotEditable => RuntimeErrorInfo::new(
+                RuntimeErrorCode::UserMessageNotEditable,
+                "user message cannot be edited",
+            ),
             Self::SessionNotIdle { .. } => {
                 RuntimeErrorInfo::new(RuntimeErrorCode::SessionNotIdle, "session is not idle")
             }

@@ -3,6 +3,7 @@ import { revealFileLabel } from "../../../platform/fileManager";
 import { observer } from "mobx-react-lite";
 import { McpControlResult } from "../McpControlResult";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type {
   AttachmentSummary,
   ConversationOwner,
@@ -10,12 +11,15 @@ import type {
   QuotedTextSnapshot,
   ToolFileReference,
   ToolCallId,
+  UserMessageSnapshot,
 } from "@ez-assistant/protocol";
 import { Icon } from "../../../components/Icon";
+import { Tooltip } from "../../../components/Tooltip";
 import { Collapse } from "../../../components/Collapse";
 import { PresenceBoundary, usePresence } from "../../../components/Presence";
 import type { LiveToolSnapshot } from "../../../stores/LiveExecutionStore";
 import { useRootStore } from "../../../stores/RootStoreContext";
+import { sameConversationOwner } from "../../../stores/ConversationNavigationStore";
 import { ToolDetailDialog, type ToolDetailView } from "../ToolDetailDialog";
 import { SessionActionDialog } from "../../sessions/SessionActionDialog";
 import { AttachmentPreviewDialog } from "../../context-panel/AttachmentPreviewDialog";
@@ -23,6 +27,7 @@ import { mergeChildTaskItems } from "../childTaskPresentation";
 import { attachLiveTurn, groupConversationTurns, type ConversationRow } from "./conversationRows";
 import { EmptyConversation, UserMessage } from "./MessageViews";
 import { ProcessingTurn } from "./ProcessingTurn";
+import { ConversationNavigation } from "./ConversationNavigation";
 import { MessageCards } from '../../message-cards';
 import { createQuotedTextSnapshot, quoteSourceRange } from "../quoteSelection";
 import { ConversationMarkdownContent } from "../../resource-workspace/ConversationMarkdownContent";
@@ -40,7 +45,9 @@ import { useOutputFollow } from "./useOutputFollow";
 
 const BOTTOM_THRESHOLD = 72;
 
-export const ConversationView = observer(function ConversationView() {
+export const ConversationView = observer(function ConversationView({ navigation_slot }: Readonly<{
+  navigation_slot?: HTMLDivElement | null;
+}>) {
   const store = useRootStore();
   const session_id = store.navigation.selected_session_id;
   const child_task_id = store.navigation.selected_child_task_id;
@@ -48,6 +55,7 @@ export const ConversationView = observer(function ConversationView() {
     ? store.projection.child_conversation_histories.get(childKey(session_id, child_task_id))
     : session_id ? store.projection.conversation_histories.get(session_id) : undefined;
   const child_view = child_task_id && session_id ? store.projection.child_task_views.get(childKey(session_id, child_task_id)) : undefined;
+  const receipts = !child_task_id && session_id ? store.projection.input_receipts.get(session_id) : undefined;
   const load_state = session_id ? store.projection.conversationLoadState(session_id, child_task_id) : undefined;
   const load_failure = load_state?.status === "error" ? (
     <div role="alert" className={styles.load_error}>
@@ -62,6 +70,9 @@ export const ConversationView = observer(function ConversationView() {
   const message_list_ref = useRef<HTMLDivElement>(null);
   const quote_scroll_top = useRef<number | null>(null);
   const [show_scroll_bottom, setShowScrollBottom] = useState(false);
+  const [locate_revision, setLocateRevision] = useState(0);
+  const [located, setLocated] = useState<{ id: MessageId; scope: number } | null>(null);
+  const navigation_scope = store.conversation_navigation.scope_revision;
   const follow = useOutputFollow({
     scroll: scroll_ref,
     content: message_list_ref,
@@ -75,6 +86,7 @@ export const ConversationView = observer(function ConversationView() {
     },
     recoverAnchor: (message_id) => session_id
       ? store.restoreReadingAnchor(session_id, child_task_id, message_id) : Promise.resolve(false),
+    onUserScroll: node => { if (node.scrollTop < 160) void loadPrevious(); },
     save: (position) => {
       const location = store.navigation.current_conversation_location;
       if (history && location?.session_id === session_id && location.child_task_id === child_task_id) {
@@ -107,8 +119,12 @@ export const ConversationView = observer(function ConversationView() {
   const retained_selection_action_ref = useRef(selection_action);
   if (selection_action) retained_selection_action_ref.current = selection_action;
   const conversation_rows = useMemo(
-    () => attachLiveTurn(groupConversationTurns(history?.items ?? [], child_task_id !== null), live_run, child_task_id),
-    [child_task_id, history?.items, live_run],
+    () => {
+      const items = history?.items ?? [];
+      const visible = receipts ? [...items, ...receipts.map(receipt => receipt.message)] : items;
+      return attachLiveTurn(groupConversationTurns(visible, child_task_id !== null), live_run, child_task_id);
+    },
+    [child_task_id, history?.items, live_run, receipts],
   );
 
   let owner: ConversationOwner | null = history?.owner ?? null;
@@ -119,13 +135,14 @@ export const ConversationView = observer(function ConversationView() {
   const focus_target = store.transient_focus.target;
   if (focus_target && owner && sameConversationOwner(focus_target.owner, owner)
     && focus_target.generation === history?.generation) reveal_message_id = focus_target.message_id;
-  const session = store.projection.application?.active_sessions.find((item) => item.session_id === session_id)
-    ?? store.projection.application?.archived_sessions.find((item) => item.session_id === session_id);
-  const all_sessions = [
-    ...(store.projection.application?.active_sessions ?? []),
-    ...(store.projection.application?.archived_sessions ?? []),
-  ];
+  const session = store.projection.sessionSummary(session_id);
   const session_view = session_id ? store.projection.session_views.get(session_id) : undefined;
+  const editor = store.history_edit;
+  const edit_target = !child_task_id ? editor.draft?.message_id : undefined;
+  const active_session_run = session_id && store.live_execution.activeRunId(session_id,
+    receipts?.at(-1)?.run.run_id ?? session_view?.session.active_run_id ?? session?.active_run_id ?? null);
+  const show_edit = !active_session_run;
+  const switch_target = editor.switchTarget;
   const child_task_items = session_id
     ? mergeChildTaskItems(
         session_view?.child_tasks ?? [],
@@ -188,7 +205,9 @@ export const ConversationView = observer(function ConversationView() {
         && quote_target.generation === history?.generation
         && owner !== null
         && sameConversationOwner(quote_target.owner, owner);
-      if (!quote_will_position_range) {
+      if (store.navigation.conversation_anchor_follows_output) {
+        follow.bottom();
+      } else if (!quote_will_position_range) {
         is_pinned_to_bottom.current = false;
         target.scrollIntoView({ block: "center" });
         follow.remember();
@@ -199,6 +218,7 @@ export const ConversationView = observer(function ConversationView() {
   }, [
     history?.generation,
     history?.items,
+    receipts,
     owner,
     store.navigation,
     store.navigation.conversation_anchor_message_id,
@@ -216,9 +236,6 @@ export const ConversationView = observer(function ConversationView() {
       expected_quote_scroll_top !== null
       && Math.abs(node.scrollTop - expected_quote_scroll_top) < 1
     );
-    if (!is_quote_positioning_scroll && node.scrollTop < 96) {
-      void loadPrevious();
-    }
     store.navigation.updateCurrentScrollOffset(node.scrollTop);
     updateScrollState(node);
     if (is_quote_positioning_scroll) {
@@ -226,7 +243,7 @@ export const ConversationView = observer(function ConversationView() {
     }
     setSelectionAction(null);
     store.transient_focus.clear();
-  }, [loadPrevious, store.navigation, updateScrollState]);
+  }, [store.navigation, updateScrollState]);
 
   const captureSelection = useCallback(() => {
     if (!session_id || !owner || !history) return;
@@ -283,10 +300,14 @@ export const ConversationView = observer(function ConversationView() {
 
   const submitSelectionQuote = useCallback(() => {
     if (!selection_action) return;
+    if (store.history_edit.draft && store.history_edit.draft.phase !== "editing") {
+      store.showInteractionError("请等待修改的发送结果。");
+      return;
+    }
     const quote = selection_action.quote;
     setSelectionAction(null);
     window.getSelection()?.removeAllRanges();
-    store.composer_quotes.add(session_id!, quote);
+    if (!store.history_edit.addQuote(quote)) store.composer_quotes.add(session_id!, quote);
     store.transient_focus.clear();
     if (store.navigation.selected_child_task_id) store.closeChildTask();
   }, [selection_action, session_id, store]);
@@ -384,7 +405,34 @@ export const ConversationView = observer(function ConversationView() {
 
   useEffect(() => () => store.transient_focus.clear(), [store.transient_focus]);
 
-  const scrollToBottom = follow.bottom;
+  const scrollToBottom = () => {
+    store.cancelConversationLocation();
+    setLocateRevision(value => value + 1);
+    follow.bottom();
+  };
+
+  async function locateNavigationMessage(
+    id: MessageId, on_error: (message: string) => void, current: () => boolean,
+  ): Promise<boolean> {
+    if (!history) return false;
+    follow.pause();
+    if (!await store.locateConversationUser(history.owner, history.generation, id, on_error) || !current()) return false;
+    setLocated({ id, scope: navigation_scope });
+    return true;
+  }
+
+  useLayoutEffect(() => {
+    const node = scroll_ref.current;
+    if (!node || !located || located.scope !== navigation_scope) return;
+    const target = node.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(located.id)}"]`);
+    if (!target) return;
+    node.scrollTop += target.getBoundingClientRect().top - node.getBoundingClientRect().top - 32;
+    quote_scroll_top.current = node.scrollTop;
+    follow.pause();
+    store.navigation.updateCurrentScrollOffset(node.scrollTop);
+    const timer = setTimeout(() => setLocated(null), 1200);
+    return () => clearTimeout(timer);
+  }, [located, navigation_scope, follow.pause, store.navigation]);
 
   const openToolDetail = useCallback(async (message_id: MessageId, call_id: ToolCallId) => {
     if (!owner) {
@@ -480,6 +528,13 @@ export const ConversationView = observer(function ConversationView() {
               return attachment ? [attachment] : [];
             })}
             key={row.message.message_id}
+            editing={edit_target === row.message.message_id}
+            edit={show_edit ? {
+              loading: editor.busyTarget === row.message.message_id,
+              disabled_reason: editReason(row.message),
+              on_select: () => void editor.begin(row.message.message_id),
+            } : undefined}
+            navigation_highlight={located?.scope === navigation_scope && located.id === row.message.message_id}
             message={row.message}
             on_attachment_click={openAttachment}
             on_attachment_menu={(attachment, location) => setAttachmentMenu({ attachment, location })}
@@ -490,9 +545,7 @@ export const ConversationView = observer(function ConversationView() {
               store.navigation.setListMode(source_session.lifecycle === "archived" ? "archived" : "active");
               void store.selectSession(source_session.session_id);
             }}
-            source_session={all_sessions.find(
-              (item) => item.session_id === sourceSessionId(row.message.source),
-            )}
+            source_session={store.projection.sessionSummary(sourceSessionId(row.message.source))}
           />
         )
       : (
@@ -522,6 +575,21 @@ export const ConversationView = observer(function ConversationView() {
           </div>
         ); })
   );
+
+  function editReason(message: UserMessageSnapshot): string | undefined {
+    if (child_task_id) return "子任务只读，无法编辑";
+    if (!store.projection.application?.capabilities.user_message_edit) return "当前 Host 不支持消息编辑";
+    if (session_view?.session.lifecycle === "archived" || session?.lifecycle === "archived") return "归档会话不可编辑";
+    if (message.inherited) return "继承消息不可编辑";
+    if (!message.input_id || message.source?.type === "controller_delivery" || message.source?.type === "proxy_report") {
+      return "这条消息不能编辑";
+    }
+    if (store.connection.state !== "connected" || store.projection.is_stale) return "Runtime 未连接";
+    if (editor.draft && editor.draft.phase !== "editing") return "请等待发送结果";
+    if (editor.busyTarget && editor.busyTarget !== message.message_id) return "正在读取原消息";
+    if (editor.sessionBusy) return "会话当前无法编辑历史消息";
+    return undefined;
+  }
 
   if (!session_id) {
     if (store.navigation.selected_draft_key) {
@@ -599,13 +667,26 @@ export const ConversationView = observer(function ConversationView() {
           )}
           {history.has_more && (
             <button className={styles.load_previous} disabled={history.is_loading_previous} onClick={() => void loadPrevious(true)} type="button">
-              {history.is_loading_previous ? "正在加载更早消息…" : "加载更早消息"}
+              {history.is_loading_previous ? "正在加载更早消息…" : history.load_error ? "重试" : "加载更早消息"}
             </button>
           )}
           {history.load_error && <p className={styles.load_error}>{history.load_error}</p>}
           {renderConversationRows(conversation_rows)}
         </div>
       </div>
+      {navigation_slot && createPortal(
+        <ConversationNavigation
+          key={navigation_scope}
+          store={store.conversation_navigation}
+          layout={navigation_slot}
+          content_ref={message_list_ref}
+          scroll_ref={scroll_ref}
+          locate={locateNavigationMessage}
+          locate_revision={locate_revision}
+          cancel_location={() => store.cancelConversationLocation()}
+        />,
+        navigation_slot,
+      )}
       {selection_presence.mounted && retained_selection_action_ref.current && (
         <div
           aria-hidden={selection_presence.state === "exiting" ? true : undefined}
@@ -623,14 +704,16 @@ export const ConversationView = observer(function ConversationView() {
         </div>
       )}
       {show_scroll_bottom && (
+        <Tooltip content="返回最新">
         <button
-          aria-label="回到底部"
+          aria-label="返回最新"
           className={styles.scroll_bottom}
           onClick={scrollToBottom}
           type="button"
         >
           <Icon name="arrow-down" size={16} />
         </button>
+        </Tooltip>
       )}
       {attachment_menu && (
         <ResourceContextMenu
@@ -699,6 +782,18 @@ export const ConversationView = observer(function ConversationView() {
         </SessionActionDialog>
       )}
       </PresenceBoundary>
+      {switch_target && !child_task_id && (
+        <SessionActionDialog
+          cancel_label="继续当前编辑"
+          confirm_label="放弃修改并切换"
+          is_pending={false}
+          on_cancel={() => editor.dismissSwitch()}
+          on_confirm={() => void editor.begin(switch_target, true)}
+          title="切换编辑的消息？"
+        >
+          <p>切换后，当前编辑稿中的修改会丢失。</p>
+        </SessionActionDialog>
+      )}
       <PresenceBoundary present={preview_attachment !== null}>
       {preview_attachment && (
         <AttachmentPreviewDialog
@@ -766,11 +861,4 @@ function centeredRangeScrollTop(container: HTMLElement, range: Range): number | 
     Math.max(0, container.scrollHeight - container.clientHeight),
     Math.max(0, unclamped),
   );
-}
-
-function sameConversationOwner(left: ConversationOwner, right: ConversationOwner): boolean {
-  return left.type === right.type
-    && left.session_id === right.session_id
-    && (left.type !== "child_task"
-      || (right.type === "child_task" && left.child_task_id === right.child_task_id));
 }

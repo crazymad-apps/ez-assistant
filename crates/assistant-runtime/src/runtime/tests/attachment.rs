@@ -121,6 +121,7 @@ async fn input_accepts_an_attachment_without_text() {
 
     let accepted = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: session.session_id.clone(),
@@ -203,6 +204,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
     let key = IdempotencyKey::new("files-submit").expect("key");
     let accepted = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: first_session.session_id.clone(),
@@ -257,6 +259,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
 
     let reused = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: first_session.session_id.clone(),
@@ -303,6 +306,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
 
     let idempotent = runtime
         .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
             mode: assistant_protocol::SubmitInputMode::Normal,
             variant: assistant_protocol::AgentVariant::Build,
             session_id: first_session.session_id.clone(),
@@ -319,6 +323,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
     assert!(matches!(
         runtime
             .submit_started_input(SubmitInputRequest {
+                delivery: Default::default(),
                 mode: assistant_protocol::SubmitInputMode::Normal,
                 variant: assistant_protocol::AgentVariant::Build,
                 session_id: first_session.session_id.clone(),
@@ -335,6 +340,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
     assert!(matches!(
         runtime
             .submit_started_input(SubmitInputRequest {
+                delivery: Default::default(),
                 mode: assistant_protocol::SubmitInputMode::Normal,
                 variant: assistant_protocol::AgentVariant::Build,
                 session_id: second_session.session_id,
@@ -358,6 +364,7 @@ async fn input_freezes_ordered_file_references_and_rejects_invalid_session_relat
     assert!(matches!(
         runtime
             .submit_started_input(SubmitInputRequest {
+                delivery: Default::default(),
                 mode: assistant_protocol::SubmitInputMode::Normal,
                 variant: assistant_protocol::AgentVariant::Build,
                 session_id: first_session.session_id,

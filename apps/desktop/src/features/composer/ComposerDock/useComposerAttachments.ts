@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useState } from "react";
 import type { AttachmentId } from "@ez-assistant/protocol";
 import type { ComposerAttachment } from "../../../stores/NewSessionDraftStore";
 import type { AttachmentSelection } from "../../../native-bridge/nativeResource";
@@ -17,22 +17,34 @@ export function useComposerAttachments(options: Readonly<{
   owner_key: string | null;
 }>) {
   const files = useRootStore().files;
-  const owner = useMemo(() => ({active: true, operations: new Set<string>()}), [files, options.owner_key]);
-  useEffect(() => { owner.active = true; setPendingAction(null); return () => { owner.active = false; for (const id of owner.operations) void files.cancelResourceOperation(id).catch(() => undefined); }; }, [owner, files]);
+  const owner = useMemo(() => ({
+    active: true, operations: new Set<string>(), attachments: [] as readonly ComposerAttachment[],
+  }), [files, options.owner_key]);
+  useLayoutEffect(() => {
+    owner.active = true;
+    setPendingAction(null);
+    return () => {
+      owner.active = false;
+      for (const id of owner.operations) void files.cancelResourceOperation(id).catch(() => undefined);
+      if (owner.operations.size) {
+        options.on_attachments_change?.(owner.attachments.map(item => item.state === "uploading"
+          ? { ...item, state: "failed", operation_id: null, error: "上传未完成，请重试。" } : item));
+      }
+    };
+  }, [owner, files]);
   const [local_attachments, setLocalAttachments] = useState<readonly ComposerAttachment[]>([]);
   const [pending_action, setPendingAction] = useState<"choose" | "paste" | "upload" | null>(null);
   const pending = pending_action !== null;
   const attachments = options.attachments ?? local_attachments;
 
-  const current = useRef(attachments);
-  current.current = attachments;
+  owner.attachments = attachments;
 
   function setAttachments(
     update: readonly ComposerAttachment[] | ((current: readonly ComposerAttachment[]) => readonly ComposerAttachment[]),
   ) {
     if (!owner.active) return;
-    const next = typeof update === "function" ? update(current.current) : update;
-    current.current = next;
+    const next = typeof update === "function" ? update(owner.attachments) : update;
+    owner.attachments = next;
     if (options.on_attachments_change) {
       options.on_attachments_change(next);
     } else {
@@ -69,7 +81,7 @@ export function useComposerAttachments(options: Readonly<{
     try {
       const selected = await files.chooseAttachmentFiles();
       if (!owner.active) { await Promise.allSettled(selected.map((item) => files.releaseAttachmentSelection(item.selection_id))); return; }
-      if (current.current.length + selected.length > MAX_COMPOSER_ATTACHMENTS) {
+      if (owner.attachments.length + selected.length > MAX_COMPOSER_ATTACHMENTS) {
         await Promise.allSettled(selected.map((item) => files.releaseAttachmentSelection(item.selection_id)));
         options.on_error("每条消息最多添加 32 个附件。");
         return;
@@ -146,7 +158,7 @@ export function useComposerAttachments(options: Readonly<{
       return;
     }
     setAttachments((current) => current.filter((item) => item.selection_id !== attachment.selection_id));
-    if (attachment.state !== "uploaded") {
+    if (!attachment.attachment_id) {
       void files.releaseAttachmentSelection(attachment.selection_id).catch(() => undefined);
     }
   }
@@ -155,7 +167,7 @@ export function useComposerAttachments(options: Readonly<{
     setPendingAction("upload");
     const attachment_ids: AttachmentId[] = [];
     try {
-      for (const attachment of current.current) {
+      for (const attachment of owner.attachments) {
         if (!owner.active) return null;
         if (attachment.attachment_id) {
           attachment_ids.push(attachment.attachment_id);

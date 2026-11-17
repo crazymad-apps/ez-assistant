@@ -26,15 +26,22 @@ pub use child_task::{
     ChildTaskStart, ChildToolExecutionStart, CompletedChildToolExchange, NewStoredChildTask,
     PendingChildToolExchange, StoredChildTask, StoredChildTaskSettlement,
 };
-pub use contract::{LoadedSession, RecoveredRuntime, RuntimeStore, SessionSummaryQuery};
+pub use contract::{
+    LoadedSession, RecoveredRuntime, RuntimeStore, SIDEBAR_PAGE_SIZE, SessionSummaryQuery,
+    SidebarSnapshot, WorkspacePage,
+};
+pub(crate) use conversation::user_text_parts;
 pub use conversation::{
     ContextReplacement, ContextReplacementResult, ContextReplacementTarget,
-    ConversationMessageLocationRequest, ConversationRawWindowRequest, ConversationRewrite,
+    ConversationMessageLocationRequest, ConversationNavigationIndex, ConversationNavigationRead,
+    ConversationNavigationRequest, ConversationRawWindowRequest, ConversationRewrite,
     ConversationSearchHit, ConversationSearchPage, ConversationSearchRequest,
-    ConversationSearchScope, ConversationWindowRequest, RewriteGoalEffect, RewriteResult,
-    StoredConversationMessageLocation, StoredConversationRawWindow, StoredConversationWindow,
-    execution_context_from_product_history, merge_context_replacement_with_product_history,
-    normalize_context_usage_adjustments,
+    ConversationSearchScope, ConversationTurnBoundaries, ConversationWindowEnd,
+    ConversationWindowRequest, NavigationBoundary, NavigationHistory, NavigationMessageKind,
+    NavigationReplyContext, RewriteGoalEffect, RewriteResult, StoredConversationMessageLocation,
+    StoredConversationNavigation, StoredConversationRawWindow, StoredConversationWindow,
+    conversation_preview_text, execution_context_from_product_history,
+    merge_context_replacement_with_product_history, normalize_context_usage_adjustments,
 };
 pub use custom_agent::{
     CustomAgentMutation, StoredCustomAgent, custom_agent_revision, valid_custom_agent_config,
@@ -44,13 +51,13 @@ pub use error::{StoreError, StoreErrorKind, StoreFuture};
 pub use execution::{
     AcceptedInput, AcceptedStoredSessionCommand, CompletedToolExchange, CrossSessionInputBinding,
     CrossSessionInputEnvelope, GoalInputBinding, InputMessageValidationError, InputOrigin,
-    NewStoredInput, NewStoredRunAttempt, NewStoredSessionCommand, PendingToolExchange,
-    QueuePriorityChange, SessionCommandCommit, StoredGoalSettlementEffect, StoredInput,
-    StoredInputState, StoredMcpSelection, StoredQueueItem, StoredRun, StoredRunContinuation,
-    StoredRunContinuationResult, StoredRunSettlement, StoredRunSettlementResult,
-    StoredSessionCommand, StoredSessionCommandResult, StoredSessionCommandState,
-    StoredTerminalRunInputReconciliation, ToolExecutionStart, UserMessageCommit,
-    validate_input_message, validate_input_message_with_channel_source,
+    NewConversationIdentity, NewStoredInput, NewStoredRunAttempt, NewStoredSessionCommand,
+    PendingToolExchange, QueuePriorityChange, SessionCommandCommit, StoredGoalSettlementEffect,
+    StoredInput, StoredInputState, StoredMcpSelection, StoredQueueItem, StoredRequestAcceptance,
+    StoredRun, StoredRunContinuation, StoredRunContinuationResult, StoredRunSettlement,
+    StoredRunSettlementResult, StoredSessionCommand, StoredSessionCommandResult,
+    StoredSessionCommandState, StoredTerminalRunInputReconciliation, ToolExecutionStart,
+    UserMessageCommit, validate_input_message, validate_input_message_with_channel_source,
 };
 pub use goal::{
     GoalClear, GoalHeldInputResume, GoalHeldInputResumeResult, GoalStop, GoalStopResult,

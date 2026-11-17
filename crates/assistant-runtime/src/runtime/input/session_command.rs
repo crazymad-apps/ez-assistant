@@ -38,47 +38,37 @@ impl AssistantRuntime {
         session.ensure_active()?;
         session.ensure_healthy()?;
         session.ensure_not_compacting()?;
-        let history = crate::runtime::load_identity_history(self.store.as_ref(), &session).await?;
-        let (input_id, message_id, agent_variant) = {
-            let state = session.lock_state()?;
-            if let Some(key) = request.idempotency_key.as_ref()
-                && state
-                    .inputs
-                    .values()
-                    .any(|input| input.stored.idempotency_key.as_ref() == Some(key))
-            {
+        if let Some(key) = &request.idempotency_key
+            && let Some(existing) = self
+                .store
+                .find_request_acceptance(session.id(), key)
+                .await
+                .map_err(|source| RuntimeError::from_store("find command acceptance", source))?
+        {
+            let crate::StoredRequestAcceptance::Command(existing) = existing else {
                 return Err(RuntimeError::InvalidRequest {
                     reason: "session command idempotency key belongs to a Run input",
                 });
-            }
-            if let Some(key) = request.idempotency_key.as_ref()
-                && let Some(existing) = state
-                    .commands
-                    .values()
-                    .find(|command| command.idempotency_key.as_ref() == Some(key))
-            {
-                if existing.command != request.command {
-                    return Err(RuntimeError::InvalidRequest {
-                        reason: "session command idempotency key was reused with different content",
-                    });
-                }
-                return Ok(SubmitSessionCommandResult {
-                    accepted: AcceptedSessionCommand {
-                        run_id: None,
-                        input_id: existing.input_id.clone(),
-                        command: existing.command.clone(),
-                        is_duplicate: true,
-                    },
+            };
+            if existing.command != request.command {
+                return Err(RuntimeError::InvalidRequest {
+                    reason: "session command idempotency key was reused with different content",
                 });
             }
-            let mut message_id = crate::run::allocate_message_id()?;
-            crate::run::ensure_message_id_available(&mut message_id, &state, &history)?;
-            (
-                crate::run::allocate_input_id(&state, &history)?,
-                message_id,
-                state.current_variant,
-            )
-        };
+            return Ok(SubmitSessionCommandResult {
+                accepted: AcceptedSessionCommand {
+                    run_id: None,
+                    input_id: existing.input_id,
+                    command: existing.command,
+                    is_duplicate: true,
+                },
+            });
+        }
+        let mut message_id = crate::run::allocate_message_id()?;
+        let input_id =
+            crate::runtime::allocate_new_input(self.store.as_ref(), &session, &mut message_id)
+                .await?;
+        let agent_variant = session.lock_state()?.current_variant;
         let accepted_at_ms = super::super::now_ms()?;
         let accepted = self
             .store
@@ -109,9 +99,6 @@ impl AssistantRuntime {
                 state.queue_item_ids.push_back(input_id);
                 state.queue_revision = state.queue_revision.saturating_add(1);
                 state.updated_at_ms = accepted_at_ms;
-                if state.goal.is_some() {
-                    state.resume_required = true;
-                }
                 state.queue_revision
             };
             self.publish(RuntimeEvent::QueueChanged {

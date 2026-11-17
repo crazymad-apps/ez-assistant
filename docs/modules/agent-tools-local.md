@@ -41,6 +41,10 @@
 - Adapter 接收已经 resolve 的绝对逻辑路径，不重新应用默认工作目录或授权规则。
 - 权限规则匹配逻辑路径，不得把 canonical path 或 symlink 目标描述为强沙盒边界。
 - read/edit/search-content 只处理 UTF-8 文本；大小、NUL、BOM 和换行语义必须显式。
+- read 在既有文件字节上限及 UTF-8 校验、去除开头 BOM 后，按请求的 Unicode scalar value
+  偏移和数量返回原样片段；中文和 emoji 不从 UTF-8 字节中间切开，CRLF 和结尾换行保留。
+  行列只作为结果元数据，不向正文插入行号；超长单行同样受页大小约束。读取文件的字节
+  上限与返回页的字符上限分别生效，不能为分页改动放宽 write/edit 的文件上限。
 - 二进制读取只返回受限原始字节，不嗅探 MIME、不解码图片，也不知道 Session、
   `tool-images/`、哈希命名或物化策略；这些语义由 Host 组合。
 - list 同时返回目标类型和独立 symlink 标记；symlink 不是与 File/Directory 平级的

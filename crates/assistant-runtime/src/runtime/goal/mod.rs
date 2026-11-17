@@ -5,6 +5,6 @@ mod settlement;
 
 pub(super) use commands::{
     GoalSubmissionPersistence, PreparedGoalSubmission, ensure_goal_model_supported,
-    prepare_goal_start,
+    prepare_goal_resume, prepare_goal_start,
 };
 pub(crate) use settlement::{GoalRunDecision, GoalRunFacts, prepare_goal_run_decision};

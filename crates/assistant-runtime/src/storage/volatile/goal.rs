@@ -126,82 +126,83 @@ impl VolatileRuntimeStore {
     ) -> StoreFuture<'_, GoalHeldInputResumeResult> {
         Box::pin(async move {
             let mut state = self.lock()?;
-            let current_goal = state
-                .goals
-                .get(&resume.session_id)
-                .ok_or_else(|| conflict("Goal does not exist"))?;
-            let goal = &resume.resumed_goal;
-            if current_goal.goal_id != resume.expected_goal_id
-                || current_goal.generation != resume.expected_generation
-                || current_goal.state != StoredGoalState::Paused
-                || goal.goal_id != current_goal.goal_id
-                || goal.session_id != current_goal.session_id
-                || goal.objective != current_goal.objective
-                || goal.state != StoredGoalState::Running
-                || goal.pause_reason.is_some()
-                || goal.generation
-                    != current_goal
-                        .generation
-                        .checked_add(1)
-                        .ok_or_else(|| conflict("Goal generation is exhausted"))?
-                || goal.turn
-                    != current_goal
-                        .turn
-                        .checked_add(1)
-                        .ok_or_else(|| conflict("Goal turn is exhausted"))?
-                || goal.budget != current_goal.budget
-                || goal.consecutive_failures != current_goal.consecutive_failures
-                || goal.created_at_ms != current_goal.created_at_ms
-                || goal.completed_at_ms.is_some()
-            {
-                return Err(conflict("held Input Goal resume is stale"));
-            }
-            let input = state
-                .inputs
-                .get(&resume.input_id)
-                .ok_or_else(|| conflict("held Input does not exist"))?;
-            if input.session_id != resume.session_id
-                || input.state != StoredInputState::Queued
-                || input.origin != InputOrigin::User
-                || input.goal_binding.is_some()
-                || input.user_message_id != resume.message.id
-            {
-                return Err(conflict("Input is not held user guidance"));
-            }
-            let binding = super::super::GoalInputBinding {
-                goal_id: goal.goal_id.clone(),
-                generation: goal.generation,
-                turn: goal.turn,
-                reply_route: input
-                    .goal_binding
-                    .as_ref()
-                    .and_then(|binding| binding.reply_route.clone()),
-            };
-            validate_input_message(InputOrigin::User, Some(&binding), None, &resume.message)
-                .map_err(|_| conflict("held Goal resume message is invalid"))?;
-            if state
-                .runs
-                .values()
-                .any(|run| run.input_id == resume.input_id)
-            {
-                return Err(conflict("held Input was already claimed"));
-            }
-            let run = None;
-            let input = state
-                .inputs
-                .get_mut(&resume.input_id)
-                .expect("checked held Input");
-            input.goal_binding = Some(binding);
-            input.queued_message = Some(resume.message);
-            let input = input.clone();
-            state
-                .goals
-                .insert(resume.session_id, resume.resumed_goal.clone());
+            let input = state.bind_held_input_to_resumed_goal(&resume)?;
             Ok(GoalHeldInputResumeResult {
                 goal: resume.resumed_goal,
                 input,
-                run,
+                run: None,
             })
         })
+    }
+}
+
+impl State {
+    pub(super) fn bind_held_input_to_resumed_goal(
+        &mut self,
+        resume: &GoalHeldInputResume,
+    ) -> Result<StoredInput, StoreError> {
+        let current_goal = self
+            .goals
+            .get(&resume.session_id)
+            .ok_or_else(|| conflict("Goal does not exist"))?;
+        let goal = &resume.resumed_goal;
+        if current_goal.goal_id != resume.expected_goal_id
+            || current_goal.generation != resume.expected_generation
+            || current_goal.state != StoredGoalState::Paused
+            || goal.goal_id != current_goal.goal_id
+            || goal.session_id != current_goal.session_id
+            || goal.objective != current_goal.objective
+            || goal.state != StoredGoalState::Running
+            || goal.pause_reason.is_some()
+            || goal.generation
+                != current_goal
+                    .generation
+                    .checked_add(1)
+                    .ok_or_else(|| conflict("Goal generation is exhausted"))?
+            || goal.turn
+                != current_goal
+                    .turn
+                    .checked_add(1)
+                    .ok_or_else(|| conflict("Goal turn is exhausted"))?
+            || goal.budget != current_goal.budget
+            || goal.consecutive_failures != current_goal.consecutive_failures
+            || goal.created_at_ms != current_goal.created_at_ms
+            || goal.updated_at_ms < current_goal.updated_at_ms
+            || goal.completed_at_ms.is_some()
+        {
+            return Err(conflict("held Input Goal resume is stale"));
+        }
+        let input = self
+            .inputs
+            .get(&resume.input_id)
+            .ok_or_else(|| conflict("held Input does not exist"))?;
+        if input.session_id != resume.session_id
+            || input.state != StoredInputState::Queued
+            || input.origin != InputOrigin::User
+            || input.goal_binding.is_some()
+            || input.user_message_id != resume.message.id
+        {
+            return Err(conflict("Input is not held user guidance"));
+        }
+        let binding = resume.binding();
+        validate_input_message(InputOrigin::User, Some(&binding), None, &resume.message)
+            .map_err(|_| conflict("held Goal resume message is invalid"))?;
+        if self
+            .runs
+            .values()
+            .any(|run| run.input_id == resume.input_id)
+        {
+            return Err(conflict("held Input was already claimed"));
+        }
+        let input = self
+            .inputs
+            .get_mut(&resume.input_id)
+            .expect("checked held Input");
+        input.goal_binding = Some(binding);
+        input.queued_message = Some(resume.message.clone());
+        let input = input.clone();
+        self.goals
+            .insert(resume.session_id.clone(), resume.resumed_goal.clone());
+        Ok(input)
     }
 }

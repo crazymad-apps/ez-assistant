@@ -37,7 +37,7 @@ pub(crate) fn build_tools(
         ripgrep_program: OsString::from("rg"),
         max_search_stderr_bytes: nonzero64(MAX_SEARCH_STDERR_BYTES),
     }));
-    let read_config = ReadFileToolConfig::new(nonzero32(1), nonzero32(200), nonzero32(2_000))
+    let read_config = ReadFileToolConfig::new(0, nonzero32(10_000), nonzero32(20_000))
         .map_err(tool_config_error)?;
     let search_config = SearchFilesToolConfig::new(
         nonzero32(100),
