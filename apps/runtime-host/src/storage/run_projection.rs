@@ -330,6 +330,9 @@ fn parse_run_status(value: &str) -> StorageResult<RunStatus> {
 pub(super) fn parse_error_code(value: &str) -> StorageResult<RuntimeErrorCode> {
     match value {
         "invalid_request" => Ok(RuntimeErrorCode::InvalidRequest),
+        "schedule_not_found" => Ok(RuntimeErrorCode::ScheduleNotFound),
+        "schedule_execution_not_found" => Ok(RuntimeErrorCode::ScheduleExecutionNotFound),
+        "schedule_busy" => Ok(RuntimeErrorCode::ScheduleBusy),
         "session_not_found" => Ok(RuntimeErrorCode::SessionNotFound),
         "session_busy" => Ok(RuntimeErrorCode::SessionBusy),
         "session_archived" => Ok(RuntimeErrorCode::SessionArchived),
@@ -414,6 +417,9 @@ pub(super) fn run_status_value(status: RunStatus) -> &'static str {
 pub(super) fn error_code_value(code: RuntimeErrorCode) -> &'static str {
     match code {
         RuntimeErrorCode::InvalidRequest => "invalid_request",
+        RuntimeErrorCode::ScheduleNotFound => "schedule_not_found",
+        RuntimeErrorCode::ScheduleExecutionNotFound => "schedule_execution_not_found",
+        RuntimeErrorCode::ScheduleBusy => "schedule_busy",
         RuntimeErrorCode::SessionNotFound => "session_not_found",
         RuntimeErrorCode::SessionBusy => "session_busy",
         RuntimeErrorCode::SessionArchived => "session_archived",
@@ -424,6 +430,9 @@ pub(super) fn error_code_value(code: RuntimeErrorCode) -> &'static str {
         RuntimeErrorCode::ControllerUnavailable => "controller_unavailable",
         RuntimeErrorCode::SessionRoleRestricted => "session_role_restricted",
         RuntimeErrorCode::RunNotFound => "run_not_found",
+        RuntimeErrorCode::BackgroundRunNotFound => "background_run_not_found",
+        RuntimeErrorCode::BackgroundOutputUnavailable => "background_output_unavailable",
+        RuntimeErrorCode::BackgroundCleanupUnconfirmed => "background_cleanup_unconfirmed",
         RuntimeErrorCode::ChildTaskNotFound => "child_task_not_found",
         RuntimeErrorCode::InputNotFound => "input_not_found",
         RuntimeErrorCode::RunNotRetryable => "run_not_retryable",

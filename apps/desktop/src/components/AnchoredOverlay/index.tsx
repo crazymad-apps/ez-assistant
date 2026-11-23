@@ -15,6 +15,7 @@ type AnchoredOverlayProps = Readonly<{
   children: ReactNode;
   class_name: string;
   horizontal_align?: "start" | "center";
+  match_trigger_width?: boolean;
   on_request_close: () => void;
   open?: boolean;
   overlay_ref: RefObject<HTMLDivElement | null>;
@@ -60,6 +61,12 @@ export function AnchoredOverlay(props: AnchoredOverlayProps) {
         setPosition(current => current.ready && current.left === left && current.top === top ? current : { left, top, ready: true });
         return;
       }
+      if (props.match_trigger_width) {
+        const width = Math.min(trigger_rect.width, Math.max(0, window.innerWidth - 2 * viewport_padding));
+        overlay.style.width = `${width}px`;
+      } else {
+        overlay.style.removeProperty("width");
+      }
       const overlay_rect = overlay.getBoundingClientRect();
       const preferred_left = props.horizontal_align === "center"
         ? trigger_rect.left + ((trigger_rect.width - overlay_rect.width) / 2)
@@ -77,7 +84,7 @@ export function AnchoredOverlay(props: AnchoredOverlayProps) {
         Math.max(viewport_padding, preferred_top),
         Math.max(viewport_padding, window.innerHeight - overlay_rect.height - viewport_padding),
       );
-      setPosition({ left, top, ready: true });
+      setPosition(current => current.ready && current.left === left && current.top === top ? current : { left, top, ready: true });
     }
 
     updatePosition();
@@ -86,8 +93,11 @@ export function AnchoredOverlay(props: AnchoredOverlayProps) {
     visual?.addEventListener("resize", updatePosition);
     visual?.addEventListener("scroll", updatePosition);
     const bounds = props.bounds_ref?.current;
-    const observer = bounds && typeof ResizeObserver !== "undefined" ? new ResizeObserver(updatePosition) : null;
-    if (bounds) observer?.observe(bounds);
+    const resize_target = bounds ?? (props.match_trigger_width ? props.trigger_ref.current : null);
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(updatePosition) : null;
+    // 异步加载的内容可能在打开后改变尺寸，需要按新尺寸重新翻转和限制浮层位置。
+    if (props.overlay_ref.current) observer?.observe(props.overlay_ref.current);
+    if (resize_target) observer?.observe(resize_target);
     document.addEventListener("scroll", updatePosition, true);
     return () => {
       window.removeEventListener("resize", updatePosition);
@@ -100,6 +110,7 @@ export function AnchoredOverlay(props: AnchoredOverlayProps) {
     props.children,
     props.bounds_ref,
     props.horizontal_align,
+    props.match_trigger_width,
     props.overlay_ref,
     props.on_request_close,
     open,

@@ -137,6 +137,19 @@ impl VolatileRuntimeStore {
                     accepted,
                 });
             }
+            if let Some(id) = &materialization.schedule_execution_id
+                && !state.schedule_executions.get(id).is_some_and(|execution| {
+                    execution.record.summary.status
+                        == assistant_protocol::ScheduleExecutionStatus::Running
+                        && execution.record.agent_session_id.is_none()
+                        && matches!(
+                            execution.record.settings.configuration.action,
+                            assistant_protocol::ScheduleAction::Agent { .. }
+                        )
+                })
+            {
+                return Err(conflict("scheduled execution cannot bind a session"));
+            }
             if state
                 .sessions
                 .contains_key(&materialization.session.session_id)
@@ -284,6 +297,11 @@ impl VolatileRuntimeStore {
                 state
                     .mcp_input_selections
                     .insert(selection.selection_id.clone(), selection);
+            }
+            if let Some(id) = &materialization.schedule_execution_id
+                && let Some(execution) = state.schedule_executions.get_mut(id)
+            {
+                execution.record.agent_session_id = Some(stored_input.session_id.clone());
             }
             Ok(StoredSessionMaterialization {
                 goal: state.goals.get(&stored_input.session_id).cloned(),
@@ -800,67 +818,68 @@ impl VolatileRuntimeStore {
             if current != deletion.expected_impact {
                 return Err(conflict("delete session impact changed"));
             }
-            let run_ids = state
-                .runs
-                .values()
-                .filter(|run| run.session_id == deletion.session_id)
-                .map(|run| run.run_id.clone())
-                .collect::<BTreeSet<_>>();
-            let input_ids = state
-                .inputs
-                .values()
-                .filter(|input| input.session_id == deletion.session_id)
-                .map(|input| input.input_id.clone())
-                .collect::<BTreeSet<_>>();
-            state
-                .feedback
-                .retain(|_, request| request.session_id != deletion.session_id);
-            state.sessions.remove(&deletion.session_id);
-            state.message_cards.retain(|_, card| {
-                crate::message_card_owner(&card.summary.owner).0 != &deletion.session_id
-            });
-            state.materialization_inputs.remove(&deletion.session_id);
-            state.conversations.remove(&deletion.session_id);
-            state.histories.remove(&deletion.session_id);
-            state
-                .input_identities
-                .retain(|_, identity| identity.session_id != deletion.session_id);
-            state
-                .child_histories
-                .retain(|(owner, _), _| owner != &deletion.session_id);
-            state.session_usage.remove(&deletion.session_id);
-            state.work_plans.remove(&deletion.session_id);
-            state.goals.remove(&deletion.session_id);
-            state
-                .usage_request_ids
-                .retain(|(session_id, _)| session_id != &deletion.session_id);
-            state.inputs.retain(|id, _| !input_ids.contains(id));
-            state
-                .session_commands
-                .retain(|_, command| command.session_id != deletion.session_id);
-            state.runs.retain(|id, _| !run_ids.contains(id));
-            state
-                .child_tasks
-                .retain(|_, task| task.session_id != deletion.session_id);
-            state
-                .child_conversations
-                .retain(|(owner, _), _| owner != &deletion.session_id);
-            state
-                .attachments
-                .retain(|_, attachment| attachment.session_id != deletion.session_id);
-            state
-                .skill_activations
-                .retain(|_, activation| activation.session_id != deletion.session_id);
-            state
-                .mcp_input_selections
-                .retain(|_, selection| selection.session_id != deletion.session_id);
-            state
-                .pending_tool_exchanges
-                .retain(|_, exchange| exchange.session_id != deletion.session_id);
-            state
-                .pending_child_tool_exchanges
-                .retain(|_, exchange| exchange.session_id != deletion.session_id);
+            purge_session(&mut state, &deletion.session_id);
             Ok(())
         })
     }
+}
+
+/// 私有任务只在计划监督已收敛后清理，也可含未提交的首条输入。
+pub(super) fn purge_session(state: &mut State, id: &SessionId) {
+    let run_ids = state
+        .runs
+        .values()
+        .filter(|run| run.session_id == *id)
+        .map(|run| run.run_id.clone())
+        .collect::<BTreeSet<_>>();
+    let input_ids = state
+        .inputs
+        .values()
+        .filter(|input| input.session_id == *id)
+        .map(|input| input.input_id.clone())
+        .collect::<BTreeSet<_>>();
+    state
+        .feedback
+        .retain(|_, request| request.session_id != *id);
+    state.sessions.remove(id);
+    state
+        .message_cards
+        .retain(|_, card| crate::message_card_owner(&card.summary.owner).0 != id);
+    state.materialization_inputs.remove(id);
+    state.conversations.remove(id);
+    state.histories.remove(id);
+    state
+        .input_identities
+        .retain(|_, identity| identity.session_id != *id);
+    state.child_histories.retain(|(owner, _), _| owner != id);
+    state.session_usage.remove(id);
+    state.work_plans.remove(id);
+    state.goals.remove(id);
+    state
+        .usage_request_ids
+        .retain(|(session_id, _)| session_id != id);
+    state.inputs.retain(|id, _| !input_ids.contains(id));
+    state
+        .session_commands
+        .retain(|_, command| command.session_id != *id);
+    state.runs.retain(|id, _| !run_ids.contains(id));
+    state.child_tasks.retain(|_, task| task.session_id != *id);
+    state
+        .child_conversations
+        .retain(|(owner, _), _| owner != id);
+    state
+        .attachments
+        .retain(|_, attachment| attachment.session_id != *id);
+    state
+        .skill_activations
+        .retain(|_, activation| activation.session_id != *id);
+    state
+        .mcp_input_selections
+        .retain(|_, selection| selection.session_id != *id);
+    state
+        .pending_tool_exchanges
+        .retain(|_, exchange| exchange.session_id != *id);
+    state
+        .pending_child_tool_exchanges
+        .retain(|_, exchange| exchange.session_id != *id);
 }

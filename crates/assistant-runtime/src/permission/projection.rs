@@ -152,6 +152,9 @@ fn rule_from_protocol(rule: protocol::PermissionRuleDefinition) -> PermissionRul
                         protocol::PermissionProcessModeDefinition::Detached => {
                             PermissionProcessMode::Detached
                         }
+                        protocol::PermissionProcessModeDefinition::Background => {
+                            PermissionProcessMode::Background
+                        }
                     },
                 })
             }
@@ -236,6 +239,9 @@ fn rule_to_protocol(rule: &PermissionRule) -> protocol::PermissionRuleDefinition
                         }
                         PermissionProcessMode::Detached => {
                             protocol::PermissionProcessModeDefinition::Detached
+                        }
+                        PermissionProcessMode::Background => {
+                            protocol::PermissionProcessModeDefinition::Background
                         }
                     },
                 })

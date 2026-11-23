@@ -404,6 +404,9 @@ async fn submit_recovery_test(runtime: &AssistantRuntime, session_id: &SessionId
         loop {
             if let Some(run) = runtime
                 .list_runs(assistant_protocol::ListRunsRequest {
+                    summary_only: None,
+                    page: None,
+                    input_id: None,
                     session_id: session_id.clone(),
                 })
                 .await

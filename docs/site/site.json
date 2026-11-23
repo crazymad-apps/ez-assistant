@@ -159,6 +159,10 @@
           "file": "manual/projects.md"
         },
         {
+          "id": "scheduled-tasks",
+          "file": "manual/scheduled-tasks.md"
+        },
+        {
           "id": "appearance",
           "file": "manual/appearance.md"
         }

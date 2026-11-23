@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { SessionArtifact, SessionId } from "@ez-assistant/protocol";
+import { EmptyRow } from "../../../components/EmptyRow";
 import { Icon } from "../../../components/Icon";
 import { InlineIconButton } from "../../../components/InlineIconButton";
 import { useRootStore } from "../../../stores/RootStoreContext";
@@ -65,7 +66,7 @@ export function ArtifactList(props: Readonly<{ session_id: SessionId; artifacts:
     }
   }
 
-  if (props.artifacts.length === 0) return <p className={styles.empty}>尚无产物</p>;
+  if (props.artifacts.length === 0) return <EmptyRow>尚无产物</EmptyRow>;
   return <div className={styles.list}>
     {props.artifacts.map((artifact) => {
       const key = JSON.stringify(artifact.locator);

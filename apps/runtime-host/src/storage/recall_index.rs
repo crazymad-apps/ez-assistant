@@ -567,16 +567,17 @@ impl StorageEngine {
         // Scope 只决定纳入哪些主 Session；每个命中的 Session 还会带上其 child Conversation。
         // 历史 child 来自主文件目录，在途 child 来自未完成控制；不以搜索索引头发现历史。
         let session_filter = match scope {
-            ConversationSearchScope::Session { .. } => "WHERE sessions.session_id = ?1",
+            ConversationSearchScope::Session { .. } => "AND sessions.session_id = ?1",
             ConversationSearchScope::Workspace { .. } => {
-                "JOIN session_resources ON session_resources.session_id = sessions.session_id WHERE session_resources.workspace_id = ?1"
+                "AND EXISTS(SELECT 1 FROM session_resources WHERE session_resources.session_id = sessions.session_id AND workspace_id = ?1)"
             }
             ConversationSearchScope::Global => "",
         };
         let query = format!(
             "SELECT sessions.session_id, sessions.body_generation, sessions.message_count,
-                    sessions.updated_at_ms FROM sessions {session_filter}
-             ORDER BY sessions.updated_at_ms DESC, sessions.session_id"
+                    sessions.updated_at_ms FROM sessions
+             WHERE NOT EXISTS(SELECT 1 FROM schedule_executions se WHERE se.session_id=sessions.session_id)
+             {session_filter} ORDER BY sessions.updated_at_ms DESC, sessions.session_id"
         );
         let mut statement = self
             .connection
@@ -747,6 +748,7 @@ impl StorageEngine {
              JOIN conversation_recall_documents AS documents ON documents.document_rowid=conversation_recall_fts.rowid
              JOIN conversation_recall_heads AS heads ON heads.owner_kind=documents.owner_kind AND heads.owner_id=documents.owner_id
              WHERE conversation_recall_fts.normalized_text MATCH ?1 AND heads.state='ready'
+               AND NOT EXISTS(SELECT 1 FROM schedule_executions se WHERE se.session_id=documents.session_id)
                AND heads.session_id=documents.session_id
                AND heads.child_task_id IS documents.child_task_id
                AND heads.body_generation=documents.body_generation

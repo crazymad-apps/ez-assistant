@@ -82,7 +82,7 @@
 - `managed` 在主 Shell 退出后也清理仍可管理的后代；`detached` 只有主 Shell 已退出且
   两条输出管道在同一 deadline 内 EOF 后才交接。在交接完成前，输出未 EOF 导致的超时或
   cancellation 仍会清理并等待整个可管理进程组；成功交接后才不再由本次工具主动停止后代。
-  Adapter 不提供后台句柄、健康检查、自动停止或恢复。
+- 受 Runtime 监督的后台 Shell 复用受管进程组、解释器、环境及 UTF-8 解码，保留有界尾部日志，按字符读取。身份文件在交接前落盘，进程树正常回收后删除身份与日志。Host 持独占锁启动时按系统身份补清旧实例登记的主 PID。
 - Shell 非零退出是带 exit code 的正常完成结果，不等同于 Adapter 执行失败。
 - 子进程环境采用 allow/deny/override 组合并经 `env_clear` 后显式注入；默认过滤通用
   `_API_KEY`、`_TOKEN`、`_SECRET` 后缀，完整继承必须显式选择；不内置具体 Provider

@@ -117,7 +117,19 @@ impl AssistantRuntime {
         &self,
         request: ListAttachmentsRequest,
     ) -> RuntimeResult<ListAttachmentsResult> {
+        let window = super::context_page::PageWindow::new(request.page)?;
         self.session(&request.session_id).await?;
+        let (attachments, page) = window.take(
+            self.session_attachment_summaries(&request.session_id)?
+                .into_iter(),
+        );
+        Ok(ListAttachmentsResult { attachments, page })
+    }
+
+    pub(super) fn session_attachment_summaries(
+        &self,
+        session_id: &SessionId,
+    ) -> RuntimeResult<Vec<AttachmentSummary>> {
         let mut attachments = self
             .attachments
             .read()
@@ -125,14 +137,14 @@ impl AssistantRuntime {
                 component: "attachment registry",
             })?
             .values()
-            .filter(|attachment| attachment.session_id == request.session_id)
+            .filter(|attachment| &attachment.session_id == session_id)
             .map(summary)
             .collect::<Vec<_>>();
         attachments.sort_by(|left, right| {
             (left.created_at_ms, left.attachment_id.as_str())
                 .cmp(&(right.created_at_ms, right.attachment_id.as_str()))
         });
-        Ok(ListAttachmentsResult { attachments })
+        Ok(attachments)
     }
 
     /// 把有序应用层 ID 冻结为规范 User Part 所需的文件信息。

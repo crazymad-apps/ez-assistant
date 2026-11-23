@@ -1,0 +1,64 @@
+$dot-size: 7px;
+$column-gap: 8px;
+$row-gap: 3px;
+$radius: 6px;
+$title-line-height: 20px;
+$metadata-line-height: 17px;
+
+@mixin control {
+  --ez-control-default-height: var(--ez-control-height-large);
+  min-width: 0;
+  height: auto;
+  min-height: var(--ez-control-height);
+  padding: 5px 7px;
+  color: var(--ez-text-secondary);
+  border: 0;
+  border-radius: $radius;
+  background: transparent;
+}
+
+@mixin secondary {
+  white-space: nowrap;
+  color: var(--ez-text-muted);
+  font-size: var(--ez-font-small);
+  font-style: normal;
+}
+
+@mixin summary {
+  i {
+    width: $dot-size;
+    height: $dot-size;
+    border-radius: 50%;
+    background: var(--ez-primary);
+  }
+
+  i[data-status="completed"] { background: var(--ez-success); }
+  i[data-status="accepted"],
+  i[data-status="compaction_required"] { background: var(--ez-warning); }
+  i[data-status="failed"],
+  i[data-status="cancelled"],
+  i[data-status="interrupted"],
+  i[data-status="cleanup_unconfirmed"] { background: var(--ez-danger); }
+
+  span {
+    display: grid;
+    min-width: 0;
+    // 统一文字占位，避免命令里的表情通过回退字体额外撑高这一行。
+    grid-template-rows: $title-line-height $metadata-line-height;
+    gap: 2px;
+  }
+
+  strong {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: var(--ez-font-base);
+    font-weight: 600;
+    line-height: $title-line-height;
+  }
+
+  small {
+    @include secondary;
+    line-height: $metadata-line-height;
+  }
+}

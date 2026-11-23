@@ -5,6 +5,8 @@
 //! 用户目录限制作为默认权限规则注入；与 Plan 边界、三层权限文件和交互审批一起由
 //! `assistant-runtime` 的 Authorizer 决策。
 
+mod scheduled_scripts;
+
 use std::{
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     path::Path,
@@ -14,15 +16,16 @@ use std::{
 
 use agent_core::{PolicyEvaluation, ToolAuthorization, ToolPolicy};
 use agent_tools::{
-    AbsolutePath, FileAuthorizationFacts, FileBatchAuthorizationFacts, FileOperation, FsDeleteTool,
-    FsEditTool, FsFindTool, FsListTool, FsReadTool, FsSearchTool, FsWriteTool, InspectImagesTool,
-    ListPinnedMemoriesTool, PinMemoryTool, ReadFileToolConfig, ReadImageTool, RecallMemoryTool,
-    RecallMemoryToolConfig, ResolvedToolBatch, ResolvedToolInvocation, SearchFilesToolConfig,
-    SessionPathResolver, ShellExecTool, ShellExecToolConfig, Tool, ToolRegistry, UnpinMemoryTool,
-    UpdatePinnedMemoryTool,
+    AbsolutePath, BackgroundShellExecTool, FileAuthorizationFacts, FileBatchAuthorizationFacts,
+    FileOperation, FsDeleteTool, FsEditTool, FsFindTool, FsListTool, FsReadTool, FsSearchTool,
+    FsWriteTool, InspectImagesTool, ListPinnedMemoriesTool, PinMemoryTool, ReadFileToolConfig,
+    ReadImageTool, RecallMemoryTool, RecallMemoryToolConfig, ResolvedToolBatch,
+    ResolvedToolInvocation, SearchFilesToolConfig, SessionPathResolver, ShellExecTool,
+    ShellExecToolConfig, Tool, ToolRegistry, UnpinMemoryTool, UpdatePinnedMemoryTool,
 };
 use agent_tools_local::{
-    EnvironmentPolicy, LocalFileSystem, LocalFileSystemConfig, LocalShell, LocalShellConfig,
+    EnvironmentPolicy, LocalBackgroundShell, LocalFileSystem, LocalFileSystemConfig, LocalShell,
+    LocalShellConfig,
 };
 use assistant_runtime::{
     RunToolBundle, RunToolFactory, RunToolFactoryError, RunToolFactoryErrorKind,
@@ -81,6 +84,19 @@ impl HostRunToolFactory {
 }
 
 impl RunToolFactory for HostRunToolFactory {
+    fn background_shell(
+        &self,
+        shell: Option<&assistant_runtime::FrozenShellEnvironment>,
+    ) -> Option<Arc<dyn agent_tools::BackgroundShell>> {
+        if shell.is_some_and(|shell| shell.operating_system != std::env::consts::OS) {
+            return None;
+        }
+        Some(Arc::new(LocalBackgroundShell::new(
+            self.resources.shell_for(shell),
+            self.resources.paths.user_root.clone(),
+        )))
+    }
+
     fn shell_catalog(&self) -> Vec<assistant_protocol::ShellCatalogEntry> {
         super::shell::catalog()
     }
@@ -115,6 +131,21 @@ impl RunToolFactory for HostRunToolFactory {
 }
 
 impl LocalToolResources {
+    fn shell_for(
+        &self,
+        shell: Option<&assistant_runtime::FrozenShellEnvironment>,
+    ) -> Arc<LocalShell> {
+        shell.map_or_else(
+            || self.shell.clone(),
+            |snapshot| {
+                Arc::new(LocalShell::new(LocalShellConfig {
+                    launcher: super::shell::launcher(snapshot),
+                    environment: self.shell_environment.clone(),
+                }))
+            },
+        )
+    }
+
     fn new(paths: Arc<crate::user_paths::UserPaths>) -> Result<Self, ToolResourceError> {
         let read_config = ReadFileToolConfig::new(0, nonzero32(10_000), nonzero32(20_000))
             .map_err(ToolResourceError::configuration)?;
@@ -222,21 +253,21 @@ impl LocalToolResources {
             &mut registry,
             FsDeleteTool::new(self.filesystem.clone(), resolver.clone()),
         )?;
+        let shell = self.shell_for(request.shell);
+        let mut parent_shell = ToolRegistry::new();
+        let background_enabled = request.background_shell.is_some();
+        if let Some(launcher) = request.background_shell {
+            register(
+                &mut parent_shell,
+                BackgroundShellExecTool::new(
+                    ShellExecTool::managed(shell.clone(), resolver.clone(), self.shell_config),
+                    launcher,
+                ),
+            )?;
+        }
         register(
             &mut registry,
-            ShellExecTool::new(
-                request.shell.map_or_else(
-                    || self.shell.clone(),
-                    |snapshot| {
-                        Arc::new(LocalShell::new(LocalShellConfig {
-                            launcher: super::shell::launcher(snapshot),
-                            environment: self.shell_environment.clone(),
-                        }))
-                    },
-                ),
-                resolver.clone(),
-                self.shell_config,
-            ),
+            ShellExecTool::managed(shell, resolver.clone(), self.shell_config),
         )?;
         let limits = pinned_memory_limits();
         register(
@@ -279,7 +310,7 @@ impl LocalToolResources {
         AbsolutePath::new(&request.environment.session_tool_image_directory).map_err(|source| {
             RunToolFactoryError::with_source(RunToolFactoryErrorKind::InvalidConfiguration, source)
         })?;
-        Ok(RunToolBundle::new(
+        let bundle = RunToolBundle::new(
             registry.snapshot(),
             vec![
                 Arc::new(AttachmentMutationPolicy {
@@ -300,7 +331,12 @@ impl LocalToolResources {
                 request.environment.clone(),
                 self.paths.clone(),
             ),
-        )))
+        ));
+        Ok(if background_enabled {
+            bundle.with_parent_shell(parent_shell.snapshot())
+        } else {
+            bundle
+        })
     }
 }
 
@@ -550,6 +586,7 @@ mod tests {
                 session_id: &session_id,
                 environment,
                 shell: None,
+                background_shell: None,
                 pinned_memory: Arc::new(FakePinnedMemoryStore::new(Vec::new())),
                 conversation_recall: conversation_recall.clone(),
                 conversation_recall_reader: conversation_recall,
@@ -585,6 +622,7 @@ mod tests {
                 session_id: &session_id,
                 environment: &environment,
                 shell: Some(&shell),
+                background_shell: None,
                 pinned_memory: Arc::new(FakePinnedMemoryStore::new(Vec::new())),
                 conversation_recall: recall.clone(),
                 conversation_recall_reader: recall.clone(),

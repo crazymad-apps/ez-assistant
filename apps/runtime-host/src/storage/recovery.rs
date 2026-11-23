@@ -345,15 +345,21 @@ impl StorageEngine {
                 ConversationStorageTarget::SessionMetadata { .. }
             )
         {
+            let report = matches!(&staged.purpose, AppendPurpose::ScheduleReport { .. });
             let expected = self.history_for_append(
                 &staged.target,
-                &[],
+                if report {
+                    &batch.conversation.messages
+                } else {
+                    &[]
+                },
                 None,
                 &staged.purpose,
                 staged.created_at_ms,
                 None,
             )?;
-            if !batch.conversation.messages.is_empty() || batch.history.as_ref() != Some(&expected)
+            if (!report && !batch.conversation.messages.is_empty())
+                || batch.history.as_ref() != Some(&expected)
             {
                 return Err(invalid_data(
                     "session metadata receipt does not match its frozen history",

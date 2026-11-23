@@ -430,13 +430,12 @@ impl ControllerToolCoordinator {
         Ok(input)
     }
 
-    /// 将已经随源 Run settlement 落库的代理报告投影到主控 Session，并启动其执行。
+    /// 将 Store 可靠接纳的代理报告或定时结果投影到主控队列。
     ///
-    /// `accepted` 不是待提交命令，而是 Store 已可靠接受的 `ProxyReport` Input；本函数
-    /// 不再写 Store。调用方必须先完成源 Session 的内存结算并释放源 mutation gate，本函数随后只取
+    /// 调用方已完成入队事务，本函数只投影并唤醒主控。调用方必须先完成源 Session 的内存结算并释放源 mutation gate，本函数随后只取
     /// 主控 Session gate，避免同时持有两个 Session gate。若崩溃恢复或安全重试发现同一 Input 已在
     /// 内存中，则直接返回；否则完成统一 Session lane 投影，再发布可丢失的观察事件并唤醒 Queue。
-    pub(crate) async fn project_proxy_report(
+    pub(crate) async fn project_controller_report(
         &self,
         accepted: crate::AcceptedInput,
     ) -> RuntimeResult<()> {

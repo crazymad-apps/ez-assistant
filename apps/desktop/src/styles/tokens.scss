@@ -30,4 +30,10 @@
   --ez-z-toast: 40;
   --conversation-content-max-width: 820px;
   --ez-conversation-edge-spacing: 16px;
+  --ez-conversation-top-spacing: 24px;
+  --ez-conversation-bottom-spacing: 28px;
+}
+
+@media (max-width: 720px) {
+  :root { --ez-conversation-top-spacing: 18px; }
 }

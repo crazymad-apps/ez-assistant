@@ -2,6 +2,7 @@
 //!
 //! 该 crate 应保持轻量，避免依赖具体 UI、存储或模型实现。
 
+mod background;
 mod command;
 mod compatibility;
 mod config;
@@ -44,12 +45,31 @@ mod skill;
 pub use sidebar::{
     MoveSidebarItemRequest, ResetSidebarOrderRequest, SidebarOrderResult, SidebarPlacement,
 };
+mod schedule;
 mod snapshot;
 mod software_version;
+
+pub use id::{ScheduleExecutionId, ScheduleId};
+pub use schedule::{
+    CreateScheduleRequest, ListScheduleExecutionsRequest, ListScheduleExecutionsResult,
+    ListSchedulesRequest, ListSchedulesResult, PreviewScheduleRequest, PreviewScheduleResult,
+    ReadScheduleBackgroundOutputRequest, RunScheduleNowRequest, RunScheduleNowResult,
+    ScheduleAction, ScheduleAgentResult, ScheduleBackgroundExit, ScheduleBackgroundTarget,
+    ScheduleConfiguration, ScheduleDelivery, ScheduleExecution, ScheduleExecutionReason,
+    ScheduleExecutionStatus, ScheduleExecutionSummary, ScheduleExecutionTarget, ScheduleResultFile,
+    ScheduleRule, ScheduleScriptResult, ScheduleSettings, ScheduleSnapshot, ScheduleTarget,
+    ScheduleWeekday, SetScheduleEnabledRequest, UpdateScheduleRequest,
+};
 
 pub use compatibility::{
     CLIENT_VERSION_HEADER, ClientCompatibility, MIN_COMPATIBLE_VERSION_HEADER,
     RuntimeCompatibilityError, RuntimeCompatibilityErrorCode, check_compatibility,
+};
+
+pub use background::{
+    BackgroundRunStatus, BackgroundRunSummary, ListBackgroundRunsRequest, ListBackgroundRunsResult,
+    ReadBackgroundOutputRequest, ReadBackgroundOutputResult, StopBackgroundRunRequest,
+    StopBackgroundRunResult,
 };
 
 pub use software_version::parse_software_version;
@@ -79,26 +99,28 @@ pub use command::{
     ClearGoalResult, ClearSessionRequest, ClearSessionResult, ClearWorkPlanRequest,
     ClearWorkPlanResult, CompactSessionOutcome, CompactSessionRequest, CompactSessionResult,
     ConnectionValidationFailure, ConnectionValidationFailureKind, ConnectionValidationOutcome,
-    CreatePinnedMemoryRequest, CreateSessionRequest, CreateSessionResult, DecideApprovalRequest,
-    DecideApprovalResult, DeletePinnedMemoryRequest, DeleteSessionImpact, DeleteSessionRequest,
-    DeleteSessionResult, ForkSessionRequest, ForkSessionResult, GenerateSessionTitleRequest,
-    GenerateSessionTitleResult, GetAttachmentRequest, GetAttachmentResult, GetChildTaskRequest,
-    GetChildTaskResult, GetConfigStatusRequest, GetConfigStatusResult,
-    GetMemoryCapabilitiesRequest, GetMemoryCapabilitiesResult, GetPermissionDocumentRequest,
-    GetPermissionDocumentResult, GetPersonaRequest, GetPersonaResult, GetRunRequest, GetRunResult,
+    ContextPage, ContextPageRequest, CreatePinnedMemoryRequest, CreateSessionRequest,
+    CreateSessionResult, DecideApprovalRequest, DecideApprovalResult, DeletePinnedMemoryRequest,
+    DeleteSessionImpact, DeleteSessionRequest, DeleteSessionResult, ForkSessionRequest,
+    ForkSessionResult, GenerateSessionTitleRequest, GenerateSessionTitleResult,
+    GetAttachmentRequest, GetAttachmentResult, GetChildTaskRequest, GetChildTaskResult,
+    GetConfigStatusRequest, GetConfigStatusResult, GetMemoryCapabilitiesRequest,
+    GetMemoryCapabilitiesResult, GetPermissionDocumentRequest, GetPermissionDocumentResult,
+    GetPersonaRequest, GetPersonaResult, GetRunRequest, GetRunResult,
     GetSessionMaterializationRequest, GetSessionMaterializationResult, GetSessionRequest,
     GetSessionResult, GetSkillDetailRequest, GetSkillDetailResult, GetSystemContextRequest,
     GetSystemContextResult, GetUserMessageEditRequest, GetUserMessageEditResult,
     GetWorkspaceRequest, GetWorkspaceResult, InputDelivery, InterveneQueuedInputRequest,
-    InterventionNotExecuted, ListAttachmentsRequest, ListAttachmentsResult, ListChildTasksRequest,
-    ListChildTasksResult, ListPendingApprovalsRequest, ListPendingApprovalsResult,
-    ListPinnedMemoriesRequest, ListPinnedMemoriesResult, ListRunsRequest, ListRunsResult,
-    ListSessionsRequest, ListSessionsResult, ListSkillsRequest, ListSkillsResult,
-    ListWorkspacesRequest, ListWorkspacesResult, PinnedMemoryMutationResult,
-    PrepareDeleteSessionRequest, PrepareDeleteSessionResult, ReenterFromUserMessageRequest,
-    ReenterFromUserMessageResult, RegisterWorkspaceRequest, RegisterWorkspaceResult,
-    ReloadConfigRequest, ReloadConfigResult, ReloadPermissionsRequest, ReloadPermissionsResult,
-    RemoveWorkspaceRequest, RemoveWorkspaceResult, RenameSessionRequest, RenameSessionResult,
+    InterventionNotExecuted, ListArtifactsRequest, ListArtifactsResult, ListAttachmentsRequest,
+    ListAttachmentsResult, ListChildTasksRequest, ListChildTasksResult,
+    ListPendingApprovalsRequest, ListPendingApprovalsResult, ListPinnedMemoriesRequest,
+    ListPinnedMemoriesResult, ListRunsRequest, ListRunsResult, ListSessionsRequest,
+    ListSessionsResult, ListSkillsRequest, ListSkillsResult, ListWorkspacesRequest,
+    ListWorkspacesResult, PinnedMemoryMutationResult, PrepareDeleteSessionRequest,
+    PrepareDeleteSessionResult, ReenterFromUserMessageRequest, ReenterFromUserMessageResult,
+    RegisterWorkspaceRequest, RegisterWorkspaceResult, ReloadConfigRequest, ReloadConfigResult,
+    ReloadPermissionsRequest, ReloadPermissionsResult, RemoveWorkspaceRequest,
+    RemoveWorkspaceResult, RenameSessionRequest, RenameSessionResult,
     ReplacePermissionDocumentRequest, ReplacePermissionDocumentResult, RestoreSessionRequest,
     RestoreSessionResult, RestoreWorkspaceRequest, RestoreWorkspaceResult, ResumeGoalRequest,
     ResumeGoalResult, ResumeSessionRequest, ResumeSessionResult, RetryRunRequest, RetryRunResult,

@@ -109,6 +109,10 @@ pub enum CrossSessionInputBinding {
         /// 用于整个投递操作幂等的主控 Tool Call。
         controller_tool_call_id: ToolCallId,
     },
+    /// 定时执行归档后投递给主控的输入，不依赖临时会话或源 Run。
+    ScheduleReport {
+        execution_id: assistant_protocol::ScheduleExecutionId,
+    },
     /// 普通 Session 在代理任务链结束后返回主控的结构化报告来源。
     ProxyReport {
         /// 实际执行任务的普通 Session。
@@ -380,6 +384,7 @@ pub fn validate_input_message_with_channel_source(
         (InputOrigin::Runtime, Some(envelope), None) => {
             let expected_kind = match &envelope.binding {
                 CrossSessionInputBinding::ControllerDelivery { .. } => "controller_delivery",
+                CrossSessionInputBinding::ScheduleReport { .. } => "schedule_report",
                 CrossSessionInputBinding::ProxyReport {
                     source_run_status, ..
                 } => {

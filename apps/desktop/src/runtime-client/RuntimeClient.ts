@@ -10,6 +10,9 @@ import type {
   HostAccessStatus,
   DeviceGatewayCommandResult,
   DeviceGatewayEvent,
+  ListBackgroundRunsRequest,
+  ReadBackgroundOutputRequest,
+  StopBackgroundRunRequest,
   RuntimeCommand,
   RuntimeCommandResult,
   RuntimeErrorInfo,
@@ -215,7 +218,7 @@ export class RuntimeClient {
 
   /** 文件 HTTP 请求复用当前连接的凭据、取消和登录失效处理，不重新发现本机 Host。 */
   async resource<T>(path: string, init: RequestInit, consume: (response: Response) => Promise<T>): Promise<T> {
-    if (this.target_device && !/^\/(sessions\/|session-materializations(?:$|\?)|host-files\/|user-terminals\/shells$)/.test(path)) this.#requireLocal();
+    if (this.target_device && !/^\/(sessions\/|session-materializations(?:$|\?)|schedule-results\/[^/]+\/files\/(?:[^/]+\/)?download$|host-files\/|user-terminals\/shells$)/.test(path)) this.#requireLocal();
     if (!path.startsWith("/") || path.startsWith("//")) throw new Error("资源路径无效。");
     const abort = new AbortController();
     const cancel = () => abort.abort();
@@ -320,6 +323,21 @@ export class RuntimeClient {
       throw new RuntimeClientError("protocol_mismatch", "Host 返回了不匹配的设备命令结果。");
     }
     return body.result.payload;
+  }
+
+  async listBackgroundRuns(request: ListBackgroundRunsRequest, signal?: AbortSignal) {
+    const result = await this.command<"list_background_runs">({ type: "list_background_runs", payload: request }, { signal });
+    return result.payload;
+  }
+
+  async readBackgroundOutput(request: ReadBackgroundOutputRequest, signal?: AbortSignal) {
+    const result = await this.command<"read_background_output">({ type: "read_background_output", payload: request }, { signal });
+    return result.payload;
+  }
+
+  async stopBackgroundRun(request: StopBackgroundRunRequest) {
+    const result = await this.command<"stop_background_run">({ type: "stop_background_run", payload: request });
+    return result.payload;
   }
 
   async connectEvents(
@@ -443,6 +461,21 @@ const REMOTE_BUSINESS_COMMANDS = new Set<RuntimeCommand["type"]>([
   "remove_workspace",
   "restore_workspace",
   "get_application_snapshot",
+  "list_schedules",
+  "get_schedule",
+  "create_schedule",
+  "update_schedule",
+  "set_schedule_enabled",
+  "preview_schedule",
+  "delete_schedule",
+  "run_schedule_now",
+  "list_schedule_executions",
+  "get_schedule_execution",
+  "stop_schedule_execution",
+  "retry_schedule_result",
+  "get_schedule_background",
+  "read_schedule_background_output",
+  "stop_schedule_background",
   "get_session_view",
   "get_child_task_view",
   "list_conversation_page",
@@ -455,6 +488,7 @@ const REMOTE_BUSINESS_COMMANDS = new Set<RuntimeCommand["type"]>([
   "get_tool_detail",
   "get_attachment",
   "list_attachments",
+  "list_artifacts",
   "create_session",
   "fork_session",
   "prepare_delete_session",
@@ -483,6 +517,9 @@ const REMOTE_BUSINESS_COMMANDS = new Set<RuntimeCommand["type"]>([
   "retry_run",
   "get_run",
   "list_runs",
+  "list_background_runs",
+  "read_background_output",
+  "stop_background_run",
   "list_child_tasks",
   "get_child_task",
   "cancel_child_task",

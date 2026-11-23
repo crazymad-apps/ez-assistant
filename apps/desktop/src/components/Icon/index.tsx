@@ -6,6 +6,7 @@ export type IconName =
   | "arrow-down"
   | "bell"
   | "bot"
+  | "calendar"
   | "channel"
   | "check"
   | "check-circle-fill"
@@ -13,6 +14,7 @@ export type IconName =
   | "chevron-up"
   | "chevron-left"
   | "chevron-right"
+  | "clock"
   | "copy"
   | "corner-down-right"
   | "collapse-all"
@@ -77,11 +79,13 @@ const paths: Record<IconName, ReactNode> = {
   "arrow-down": <><path d="M12 4v15M6 13l6 6 6-6" /></>,
   bell: <><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" /></>,
   bot: <><rect x="4" y="6.5" width="16" height="14" rx="4" /><path d="M12 3v3.5M2 11.5v4M22 11.5v4M9 12v3M15 12v3" /></>,
+  calendar: <><rect x="3" y="5" width="18" height="16" rx="2" /><path d="M7 3v4M17 3v4M3 10h18M8 14h1m3 0h1m3 0h1m-9 3h1m3 0h1" /></>,
   channel: <><circle cx="12" cy="12" r="2.5" /><circle cx="5" cy="5" r="2" /><circle cx="19" cy="5" r="2" /><circle cx="12" cy="21" r="2" /><path d="m10.2 10.2-3.8-3.8M13.8 10.2l3.8-3.8M12 14.5V19" /></>,
   check: <path d="m5 12 4 4L19 6" />,
   "check-circle-fill": <path fill="currentColor" stroke="none" fillRule="evenodd" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm4.7 6.3a1 1 0 0 1 0 1.4l-5.5 5.5a1 1 0 0 1-1.4 0l-2.5-2.5a1 1 0 0 1 1.4-1.4l1.8 1.8 4.8-4.8a1 1 0 0 1 1.4 0Z" />,
   "chevron-down": <path d="m7 10 5 5 5-5" />,
   "chevron-up": <path d="m7 14 5-5 5 5" />,
+  clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
   "chevron-left": <path d="m15 18-6-6 6-6" />,
   "chevron-right": <path d="m9 18 6-6-6-6" />,
   copy: <><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3" /></>,

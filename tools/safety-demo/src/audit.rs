@@ -7,7 +7,7 @@ use std::{
 
 use agent_tools::{
     FileAuthorizationFacts, FileBatchAuthorizationFacts, GeneralAuthorizationFacts,
-    ResolvedToolInvocation, ShellAuthorizationFacts, ShellProcessMode,
+    ResolvedToolInvocation, ShellAuthorizationFacts,
 };
 use agent_types::{ToolCallId, ToolResult, ToolResultStatus};
 use serde::{Deserialize, Serialize};
@@ -53,12 +53,10 @@ impl AuditFacts {
             return Self::Shell {
                 command: facts.command.clone(),
                 workdir: facts.workdir.to_string(),
-                timeout_ms: u64::try_from(facts.timeout.as_millis()).unwrap_or(u64::MAX),
-                process_mode: match facts.process_mode {
-                    ShellProcessMode::Managed => "managed",
-                    ShellProcessMode::Detached => "detached",
-                }
-                .to_owned(),
+                timeout_ms: facts.timeout.map_or(0, |timeout| {
+                    u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)
+                }),
+                process_mode: facts.process_mode.as_str().to_owned(),
             };
         }
         let tool_name = invocation.facts::<GeneralAuthorizationFacts>().map_or_else(

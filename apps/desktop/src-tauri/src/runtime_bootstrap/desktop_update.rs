@@ -130,7 +130,7 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
 
-    /// 来源绑定后暂停真实 Host；安装停止必须仅依赖原生锁归属，不再请求已失去响应的 HTTP。
+    /// 来源绑定后暂停真实 Host。关闭超时触发原生兜底，并把后台回收未确认报告给安装入口。
     #[tokio::test]
     #[ignore = "需要显式 EZ_ASSISTANT_TEST_HOST_BINARY；只新建项目隔离 Home"]
     async fn isolated_update_handoff_stops_unresponsive_host_and_rejects_changed_instance() {
@@ -191,13 +191,17 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-            let handoff = handoff.stop().await.unwrap();
-            assert!(instance_lock_released(&worker.runtime_home).unwrap());
             assert!(
                 worker.lifecycle_gate.try_lock().is_err(),
-                "installation retains the same gate"
+                "handoff retains the same gate"
             );
-            drop(handoff);
+            let result = handoff.stop().await;
+            assert!(matches!(
+                result,
+                Err(RuntimeBootstrapError { code: RuntimeBootstrapErrorCode::RuntimeStopFailed, message })
+                    if message.contains("未能确认 Runtime 已回收后台进程")
+            ));
+            assert!(instance_lock_released(&worker.runtime_home).unwrap());
             assert!(worker.lifecycle_gate.try_lock().is_ok());
         })
         .await;

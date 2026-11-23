@@ -372,6 +372,21 @@ impl StorageEngine {
                 ));
             }
             Self::insert_session_resources(&transaction, &materialization.session)?;
+            if let Some(id) = &materialization.schedule_execution_id {
+                let bound = transaction
+                    .execute(
+                        "UPDATE schedule_executions SET session_id=?1 WHERE execution_id=?2
+                     AND status='running' AND session_id IS NULL
+                     AND json_extract(settings_json,'$.action.type')='agent'",
+                        params![materialization.session.session_id.as_str(), id.as_str()],
+                    )
+                    .map_err(|source| {
+                        database_write_error("scheduled session could not be bound", source)
+                    })?;
+                if bound != 1 {
+                    return Err(super::conflict("scheduled execution cannot bind a session"));
+                }
+            }
             transaction
                 .execute(
                     "INSERT INTO session_usage (session_id, backfilled, updated_at_ms)

@@ -9,6 +9,7 @@ import { DesktopLifecycleDialog } from "../../features/desktop-lifecycle/Desktop
 import { ComposerDock } from "../../features/composer/ComposerDock";
 import { ConversationView } from "../../features/conversation/ConversationView";
 import { SettingsDialog } from "../../features/settings/SettingsDialog";
+import { SchedulesPage } from "../../features/schedules/SchedulesPage";
 import { SessionSidebar } from "../../features/sessions/SessionSidebar";
 import { SessionSearchDialog } from "../../features/sessions/SessionSearchDialog";
 import { ConversationSearchDialog } from "../../features/sessions/ConversationSearchDialog";
@@ -30,6 +31,7 @@ import styles from "./index.module.scss";
 export const AppShell = observer(function AppShell() {
   const store = useRootStore();
   const [desktop_platform, setDesktopPlatform] = useState<DesktopPlatform>("unsupported");
+  const [schedules_open, setSchedulesOpen] = useState(false);
   const [search_dialog_open, setSearchDialogOpen] = useState(false);
   const [conversation_navigation_slot, setConversationNavigationSlot] = useState<HTMLDivElement | null>(null);
   const application = store.projection.application;
@@ -67,7 +69,7 @@ export const AppShell = observer(function AppShell() {
     <main
       className={styles.app_shell}
       data-left-sidebar={sidebar_expanded}
-      data-right-sidebar={navigation.effective_right_sidebar_open}
+      data-right-sidebar={!schedules_open && navigation.effective_right_sidebar_open}
       data-platform={desktop_platform}
       style={{
         "--ez-left-sidebar-width": `${navigation.left_sidebar_width}px`,
@@ -77,11 +79,16 @@ export const AppShell = observer(function AppShell() {
       <div className={styles.app_body}>
         <SessionSidebar
           hidden={!sidebar_expanded}
-          on_search={() => setSearchDialogOpen(true)}
+          on_search={() => { setSchedulesOpen(false); setSearchDialogOpen(true); }}
           on_toggle={() => store.toggleLeftSidebar()}
+          schedules_open={schedules_open}
+          on_schedules={() => setSchedulesOpen(true)}
+          on_conversation={() => setSchedulesOpen(false)}
         />
         {sidebar_expanded && <SidebarResizeHandle side="left" />}
-        <section className={styles.conversation_area} data-conversation-area data-new-session={store.navigation.selected_draft_key !== null}>
+        {schedules_open ? <SchedulesPage sidebar_open={sidebar_expanded}
+          on_toggle_sidebar={() => store.toggleLeftSidebar()} on_close={() => setSchedulesOpen(false)} /> :
+          <section className={styles.conversation_area} data-conversation-area data-new-session={store.navigation.selected_draft_key !== null}>
           <div className={styles.conversation_headers} data-tauri-drag-region="deep">
             <SessionHeader on_search={() => setSearchDialogOpen(true)} on_toggle_sidebar={() => store.toggleLeftSidebar()} session={session} sidebar_open={sidebar_expanded} />
             <ChildTaskSubheader />
@@ -107,9 +114,9 @@ export const AppShell = observer(function AppShell() {
           <div className={styles.composer_slot}>
             {<ComposerDock key={navigation.target_device ?? "local"} read_only={store.navigation.selected_child_task_id !== null} />}
           </div>
-        </section>
-        {navigation.effective_right_sidebar_open && <SidebarResizeHandle side="right" />}
-        {<ResourceWorkspace key={store.reading_device ?? "local"} hidden={!navigation.effective_right_sidebar_open} overlay_root_ref={overlay_root_ref} />}
+        </section>}
+        {!schedules_open && navigation.effective_right_sidebar_open && <SidebarResizeHandle side="right" />}
+        {<ResourceWorkspace key={store.reading_device ?? "local"} hidden={schedules_open || !navigation.effective_right_sidebar_open} overlay_root_ref={overlay_root_ref} />}
       </div>
       <div className={styles.window_controls} data-app-title-bar>
         <DesktopWindowControls />

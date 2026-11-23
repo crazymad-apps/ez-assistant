@@ -97,16 +97,12 @@ impl InMemoryJournal {
         self.window.instructions()
     }
 
-    pub(crate) fn display_metadata(
-        &self,
-    ) -> (
-        Vec<assistant_protocol::ConversationFileReference>,
-        Vec<assistant_protocol::SessionArtifact>,
-    ) {
-        (
-            self.window.file_references.clone(),
-            self.window.artifacts.snapshot(),
-        )
+    pub(crate) fn file_references(&self) -> Vec<assistant_protocol::ConversationFileReference> {
+        self.window.file_references.clone()
+    }
+
+    pub(crate) fn artifacts(&self) -> &crate::artifact::ArtifactProjection {
+        &self.window.artifacts
     }
 
     pub(crate) fn message_count(&self) -> usize {
@@ -152,6 +148,20 @@ impl InMemoryJournal {
 
     pub(crate) fn has_pending(&self) -> bool {
         self.pending.is_some()
+    }
+
+    /// 查已经可靠接纳、当前仍待结算的调用。历史工具结果不会重新进入这个边界。
+    pub(crate) fn has_pending_tool_call(
+        &self,
+        run_id: &RunId,
+        call_id: &agent_types::ToolCallId,
+        name: &str,
+    ) -> bool {
+        self.pending.as_ref().is_some_and(|pending| {
+            &pending.run_id == run_id && pending.assistant.parts.iter().any(|part| {
+                matches!(part, AssistantPart::ToolCall(call) if &call.id == call_id && call.name.as_str() == name)
+            })
+        })
     }
 
     pub(crate) fn append_completed(

@@ -14,6 +14,9 @@ type Discovery = {
 const STARTUP_TIMEOUT_MS = 30_000;
 
 export default async function setupRuntimeHost(_config: FullConfig): Promise<() => Promise<void>> {
+  const retain_c03 = process.env.C03_E2E_RETAIN_HOME === "1";
+  const retain_home = retain_c03 || process.env.EZ_ASSISTANT_E2E_RETAIN_HOME === "1";
+  const retained_label = retain_c03 ? "retained C03 E2E Runtime Home" : "retained E2E Runtime Home";
   const test_root = resolve(process.env.EZ_ASSISTANT_E2E_TEST_ROOT ?? "../../.runtime-test/c02-m4");
   await mkdir(test_root, { recursive: true });
   const runtime_home = await mkdtemp(join(test_root, "ez-assistant-e2e-runtime-"));
@@ -118,9 +121,9 @@ server_names = []
   } catch (error) {
     child.kill("SIGTERM");
     await provider.close();
-    if (process.env.C03_E2E_RETAIN_HOME === "1") {
+    if (retain_home) {
       // C03 实包联调保留新建的隔离库，供停机后的精确核验；默认 E2E 行为不变。
-      process.stdout.write(`retained C03 E2E Runtime Home: ${runtime_home}\n`);
+      process.stdout.write(`${retained_label}: ${runtime_home}\n`);
     } else {
       await removeTemporaryDirectories(runtime_home, workspace, additional_workspace, user_directory);
     }
@@ -142,8 +145,8 @@ server_names = []
     }
     await waitForExit(child);
     await provider.close();
-    if (process.env.C03_E2E_RETAIN_HOME === "1") {
-      process.stdout.write(`retained C03 E2E Runtime Home: ${runtime_home}\n`);
+    if (retain_home) {
+      process.stdout.write(`${retained_label}: ${runtime_home}\n`);
     } else {
       await removeTemporaryDirectories(runtime_home, workspace, additional_workspace, user_directory);
     }
@@ -198,7 +201,14 @@ async function startFakeProvider(): Promise<FakeProvider> {
       if (!Array.isArray(message.content)) return "";
       return message.content.map((part: { text?: string }) => part.text ?? "").join("\n");
     }).findLast((text) => text.startsWith("F05_RESOURCES\n"));
-    if (marker === "GOAL_QUEUE_START" || marker === "GOAL_QUEUE_GUIDANCE") {
+    const schedule_summary = body.messages?.some((message) => message.role === "system"
+      && JSON.stringify(message.content).includes("The current input is the result of a scheduled task."));
+    if (schedule_summary) {
+      const source = JSON.stringify(body.messages?.findLast((message) => message.role === "user"));
+      frames = textFrames(response_id, source.includes("Agent 归档汇报") && !body.tools?.length
+        ? "助理已整理定时任务结果，两份文件可以直接下载。"
+        : "定时汇报夹具缺少来源或携带工具。");
+    } else if (marker === "GOAL_QUEUE_START" || marker === "GOAL_QUEUE_GUIDANCE") {
       const history = JSON.stringify(body.messages);
       const guidance = history.includes("GOAL_QUEUE_GUIDANCE");
       const has_resume_context = history.includes("GOAL_RESUME_INJECTION_V1");
@@ -250,12 +260,18 @@ async function startFakeProvider(): Promise<FakeProvider> {
         ...Array.from({ length: 180 }, (_, i) => ({ id: response_id, model: "offline-model", choices: [{ index: 0, delta: { content: `正文 ${i}\n\n`.repeat(3) }, finish_reason: null }] })),
         ...textFrames(response_id, "C05 完成"),
       ];
+    } else if (marker === "F02_CHAT_SCHEDULE" || marker === "F02_AGENT_JOB") {
+      frames = scheduleFrames(response_id, body, marker, has_tool_result);
     } else if (marker === "MCP_CASE") {
       frames = has_tool_result
         ? textFrames(response_id, JSON.stringify(body.messages?.filter((message) => message.role === "tool").at(-1)).includes("called:first_tool") ? "MCP 调用已回传。" : "MCP 调用已拒绝。")
         : mcpToolCallFrames(response_id);
     } else if (marker === "TOOL_CASE" && !has_tool_result) {
       frames = toolCallFrames(response_id);
+    } else if (marker === "F01_BACKGROUND_JOBS" && !has_tool_result) {
+      frames = backgroundShellFrames(response_id);
+    } else if (marker === "F01_CONTEXT_PAGED" && !has_tool_result) {
+      frames = contextPageFrames(response_id, body);
     } else if (marker === "DELEGATE_CASE" && !has_tool_result) {
       frames = delegateTaskFrames(response_id);
     } else {
@@ -295,10 +311,10 @@ async function uploadAttachment(discovery: Discovery, session_id: string): Promi
 }
 
 type ProviderMessage = Readonly<{ role?: string; content?: unknown }>;
-type ProviderRequest = Readonly<{ messages?: readonly ProviderMessage[] }>;
+type ProviderRequest = Readonly<{ messages?: readonly ProviderMessage[]; tools?: readonly unknown[] }>;
 
 function latestMarker(body: string): string {
-  const markers = ["FIRST_CASE", "BLOCK_FOR_QUEUE", "QUEUED_CASE", "TOOL_CASE", "DELEGATE_CASE", "MCP_CASE", "PRIVATE_CASE", "C05_STREAM", "F02_STREAM", "GOAL_QUEUE_START", "GOAL_QUEUE_GUIDANCE", 'F03_CARD', 'F03_MCP_CARD', 'F03_APPS_CARD'];
+  const markers = ["FIRST_CASE", "BLOCK_FOR_QUEUE", "QUEUED_CASE", "TOOL_CASE", "DELEGATE_CASE", "MCP_CASE", "PRIVATE_CASE", "C05_STREAM", "F02_STREAM", "GOAL_QUEUE_START", "GOAL_QUEUE_GUIDANCE", 'F03_CARD', 'F03_MCP_CARD', 'F03_APPS_CARD', "F01_BACKGROUND_JOBS", "F01_CONTEXT_PAGED", "F01_CONTEXT_CHILD", "F02_CHAT_SCHEDULE", "F02_AGENT_JOB"];
   return markers
     .flatMap((marker) => {
       const position = body.lastIndexOf(marker);
@@ -347,6 +363,68 @@ function toolCallFrames(response_id: string): readonly object[] {
       }],
     },
     { id: response_id, model: "offline-model", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }], usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110, prompt_tokens_details: { cached_tokens: 40 } } },
+  ];
+}
+
+function backgroundShellFrames(response_id: string): readonly object[] {
+  const common = { id: response_id, model: "offline-model" };
+  const tool_calls = Array.from({ length: 6 }, (_, index) => ({
+    index, id: `call-f01-background-${response_id}-${index}`, type: "function",
+    function: {
+      name: "shell",
+      arguments: JSON.stringify({
+        command: `printf 'BOOT${index}\\n'; i=1; while [ "$i" -le 250 ]; do printf 'line-%04d 中文🌿 output retained for upward pagination\\n' "$i"; i=$((i+1)); done; printf 'TAIL${index}\\n'; while [ ! -f f01-go-${index} ]; do sleep 0.1; done; printf 'UPDATE${index}\\n'; while [ ! -f f01-exit-${index} ]; do sleep 0.1; done; exit 7`,
+        process_mode: "background", wait_ms: 0, timeout_ms: 45_000,
+      }),
+    },
+  }));
+  return [
+    { ...common, choices: [{ index: 0, delta: { role: "assistant", tool_calls }, finish_reason: null }] },
+    { ...common, choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }], usage: { prompt_tokens: 100, completion_tokens: 40, total_tokens: 140 } },
+  ];
+}
+
+function scheduleFrames(response_id: string, body: ProviderRequest, marker: string, has_tool_result: boolean) {
+  const user = body.messages?.findLast((message) => message.role === "user");
+  const schedule_id = JSON.stringify(user?.content)?.match(/F02_CHAT_SCHEDULE ([a-zA-Z0-9_-]+)/)?.[1];
+  const is_chat = marker === "F02_CHAT_SCHEDULE";
+  if (has_tool_result) {
+    const raw = JSON.stringify(body.messages?.findLast((message) => message.role === "tool"));
+    const text = is_chat
+      ? (raw.includes("false") ? "聊天已暂停定时任务。" : "聊天任务操作已结束。")
+      : "**Agent 归档汇报**\n\n- 生成 `schedule-report.txt`\n- 保存结果和明细";
+    return textFrames(response_id, text);
+  }
+  if (is_chat && !schedule_id) return textFrames(response_id, "缺少计划标识");
+  const calls = is_chat
+    ? [{ name: "manage_schedules", arguments: { operation: "set_enabled", schedule_id, enabled: false } }]
+    : [
+      { name: "declare_artifact", arguments: { action: "declare", path: "schedule-report.txt", title: "定时归档文件" } },
+      { name: "declare_artifact", arguments: { action: "declare", path: "schedule-details.txt", title: "定时明细文件" } },
+    ];
+  const tool_calls = calls.map((call, index) => ({
+    index, id: `schedule-${response_id}-${index}`, type: "function",
+    function: { name: call.name, arguments: JSON.stringify(call.arguments) },
+  }));
+  const common = { id: response_id, model: "offline-model" };
+  return [
+    { ...common, choices: [{ index: 0, delta: { role: "assistant", tool_calls }, finish_reason: null }] },
+    { ...common, choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] },
+  ];
+}
+
+function contextPageFrames(response_id: string, body: ProviderRequest): readonly object[] {
+  const user = body.messages?.filter((message) => message.role === "user").at(-1)?.content;
+  const n = JSON.stringify(user)?.match(/F01_CONTEXT_PAGED (\d+)/)?.[1];
+  if (!n) return textFrames(response_id, "分页夹具");
+  const tool_calls = [
+    { name: "declare_artifact", arguments: { action: "declare", path: `deliver-${n}.txt`, title: `分页产物 ${n}` } },
+    { name: "delegate_task", arguments: { title: `分页子任务 ${n}`, task: `F01_CONTEXT_CHILD ${n}` } },
+  ].map((call, index) => ({ index, id: `f01-context-${n}-${index}`, type: "function",
+    function: { name: call.name, arguments: JSON.stringify(call.arguments) } }));
+  return [
+    { id: response_id, model: "offline-model", choices: [{ index: 0, delta: { role: "assistant", tool_calls }, finish_reason: null }] },
+    { id: response_id, model: "offline-model", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }], usage: { prompt_tokens: 100, completion_tokens: 40, total_tokens: 140 } },
   ];
 }
 

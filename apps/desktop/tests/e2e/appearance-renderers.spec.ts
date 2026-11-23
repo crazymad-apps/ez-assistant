@@ -1,7 +1,52 @@
 import { expect, test } from "@playwright/test";
 import type { TerminalEmulator } from "../../src/features/resource-workspace/terminalEmulator";
 
+test.use({ launchOptions: { ignoreDefaultArgs: ["--hide-scrollbars"] } });
+
 type RendererWindow = Window & { rendererTerminal: TerminalEmulator; savedEditor: Element | null; savedTerminal: TerminalEmulator["terminal"]; savedScroll: number };
+
+test("Markdown table text uses the full cell width before wrapping", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 720 });
+  await page.goto("/tests/support/renderers/index.html");
+  const cell = page.getByRole("cell", { name: "预发环境（已验证）、验收环境（同步完成）", exact: true });
+  const lineCount = () => cell.evaluate((element) => {
+    const range = document.createRange();
+    range.selectNodeContents(element.firstElementChild ?? element);
+    return new Set([...range.getClientRects()].map((rect) => Math.round(rect.top))).size;
+  });
+  await expect.poll(lineCount).toBe(1);
+
+  await page.setViewportSize({ width: 320, height: 720 });
+  await expect.poll(lineCount).toBeGreaterThan(1);
+});
+
+test("wide Markdown tables expose a draggable horizontal scrollbar", async ({ page }) => {
+  await page.setViewportSize({ width: 540, height: 720 });
+  await page.goto("/tests/support/renderers/index.html");
+  const table = page.getByRole("table").filter({ has: page.getByRole("columnheader", { name: "最终结果" }) });
+  const scroller = table.locator("..");
+  await scroller.scrollIntoViewIfNeeded();
+  const track = await scroller.evaluate((element) => {
+    const { left, bottom } = element.getBoundingClientRect();
+    const height = (element as HTMLElement).offsetHeight - element.clientHeight;
+    return {
+      x: left + 12,
+      y: bottom - height / 2,
+      height,
+      drag: element.clientWidth - 24,
+    };
+  });
+  expect(track.height).toBeGreaterThan(0);
+  await page.mouse.move(track.x, track.y);
+  await page.mouse.down();
+  await page.mouse.move(track.x + track.drag, track.y, { steps: 8 });
+  await page.mouse.up();
+  await expect.poll(() => scroller.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
+  await expect(table.getByRole("cell", { name: "通过回归测试" })).toBeInViewport({ ratio: 1 });
+
+  await page.setViewportSize({ width: 1200, height: 720 });
+  await expect.poll(() => scroller.evaluate((element) => element.scrollWidth - element.clientWidth)).toBe(0);
+});
 
 test("theme changes preserve editor, terminal history and selection while syntax and diagrams update", async ({ page }) => {
   const errors: string[] = [];

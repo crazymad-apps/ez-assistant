@@ -49,11 +49,13 @@ use crate::{
 
 const TEST_CONFIG: &str = "schema_version = 1\n";
 
+mod background;
 mod cards;
 mod external_model;
 mod feedback;
 mod mcp_management;
 mod model_fixture;
+mod schedules;
 
 struct MissingConfigSource;
 

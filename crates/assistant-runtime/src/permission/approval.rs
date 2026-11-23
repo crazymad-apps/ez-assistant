@@ -18,7 +18,7 @@ use std::{
 
 use agent_tools::{
     FileAuthorizationFacts, FileBatchAuthorizationFacts, FileOperation, GeneralAuthorizationFacts,
-    ResolvedToolBatch, ResolvedToolInvocation, ShellAuthorizationFacts, ShellProcessMode,
+    ResolvedToolBatch, ResolvedToolInvocation, ShellAuthorizationFacts,
 };
 use assistant_protocol::{
     AgentVariant, ApprovalDecision, ApprovalId, ApprovalMode, ApprovalSnapshot, ApprovalStatus,
@@ -256,7 +256,10 @@ impl ApprovalRegistry {
             invocation.resolved_arguments(),
             mcp_identity.as_ref(),
         );
-        if approval_input_is_incomplete(&input) {
+        let schedule = invocation
+            .facts::<crate::runtime::ScheduleManagementFacts>()
+            .is_some();
+        if approval_input_is_incomplete(&input) || (schedule && input.truncated) {
             return Err(RuntimeError::InvalidRequest {
                 reason: "approval-critical tool input exceeds the safe display limit",
             });
@@ -266,10 +269,12 @@ impl ApprovalRegistry {
                 component: "approval subject",
             })?;
         let exact_rule_preview = exact_rule_subject(&subject);
-        let mut available_decisions =
-            vec![ApprovalDecision::AllowOnce, ApprovalDecision::AllowSession];
-        if context.workspace_id.is_some() {
-            available_decisions.push(ApprovalDecision::AllowWorkspace);
+        let mut available_decisions = vec![ApprovalDecision::AllowOnce];
+        if !schedule {
+            available_decisions.push(ApprovalDecision::AllowSession);
+            if context.workspace_id.is_some() {
+                available_decisions.push(ApprovalDecision::AllowWorkspace);
+            }
         }
         available_decisions.push(ApprovalDecision::Deny);
         let snapshot = ApprovalSnapshot {
@@ -664,6 +669,7 @@ fn approval_input_is_incomplete(input: &ToolInputProjection) -> bool {
 }
 
 pub(crate) struct RuntimeApprovalResolver {
+    pub(crate) scheduled: Option<Arc<crate::runtime::schedule::ScheduledSession>>,
     pub(crate) registry: Arc<ApprovalRegistry>,
     pub(crate) session_id: SessionId,
     pub(crate) run_id: RunId,
@@ -708,6 +714,13 @@ impl PermissionApprovalResolver for RuntimeApprovalResolver {
         effective_approval_mode: ApprovalMode,
     ) -> ApprovalFuture<'a> {
         Box::pin(async move {
+            if let Some(task) = &self.scheduled {
+                task.approval_required
+                    .store(true, std::sync::atomic::Ordering::Release);
+                return super::authorizer::ApprovalResolution::denied(
+                    "scheduled execution requires preauthorized tools",
+                );
+            }
             let (snapshot, receiver) = match self.events.publish_transition(|| {
                 let (snapshot, receiver) = self.registry.register(
                     ApprovalContext {
@@ -817,10 +830,15 @@ pub(crate) fn rules_for_approval(
             command: command.clone(),
             command_match: CommandMatch::Exact,
             working_directory: working_directory.clone(),
-            process_mode: if process_mode == "managed" {
-                PermissionProcessMode::Managed
-            } else {
-                PermissionProcessMode::Detached
+            process_mode: match process_mode.as_str() {
+                "managed" => PermissionProcessMode::Managed,
+                "detached" => PermissionProcessMode::Detached,
+                "background" => PermissionProcessMode::Background,
+                _ => {
+                    return Err(RuntimeError::InvalidRequest {
+                        reason: "unknown Shell process mode",
+                    });
+                }
             },
         })],
         ToolApprovalSubject::Mcp { identity, .. } => {
@@ -876,12 +894,13 @@ fn subject(
             tool_name: invocation.tool_name().as_str().to_owned(),
             command: facts.command.clone(),
             working_directory: facts.workdir.as_path().to_string_lossy().into_owned(),
-            timeout_ms: u64::try_from(facts.timeout.as_millis()).unwrap_or(u64::MAX),
-            process_mode: match facts.process_mode {
-                ShellProcessMode::Managed => "managed",
-                ShellProcessMode::Detached => "detached",
-            }
-            .to_owned(),
+            timeout_ms: facts.timeout.map_or(0, |timeout| {
+                u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)
+            }),
+            wait_ms: facts
+                .wait
+                .map(|wait| u64::try_from(wait.as_millis()).unwrap_or(u64::MAX)),
+            process_mode: facts.process_mode.as_str().to_owned(),
         });
     }
     if invocation.facts::<DelegationAuthorizationFacts>().is_some() {
@@ -914,6 +933,12 @@ fn subject(
     if invocation
         .facts::<crate::runtime::McpManagementAuthorizationFacts>()
         .is_some()
+        || invocation
+            .facts::<crate::runtime::ScheduleManagementFacts>()
+            .is_some()
+        || invocation
+            .facts::<crate::runtime::BackgroundManagementFacts>()
+            .is_some()
     {
         return Some(ToolApprovalSubject::General {
             tool_name: invocation.tool_name().as_str().to_owned(),
@@ -983,6 +1008,7 @@ mod tests {
                 command: "x".to_owned(),
                 working_directory: "/workspace".to_owned(),
                 timeout_ms: 1,
+                wait_ms: None,
                 process_mode: "managed".to_owned(),
             },
             redacted: false,

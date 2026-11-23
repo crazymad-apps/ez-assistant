@@ -28,6 +28,7 @@ pub(crate) struct HostResources {
     pub(crate) model_factory: Arc<dyn ModelServiceFactory>,
     pub(crate) session_environment_factory: Arc<dyn SessionEnvironmentFactory>,
     pub(crate) run_tool_factory: Arc<dyn RunToolFactory>,
+    pub(crate) schedule_executor: Arc<dyn assistant_runtime::ScheduleScriptExecutor>,
     pub(crate) child_task_workspace_factory: Arc<dyn ChildTaskWorkspaceFactory>,
     /// 按当前用户根装配的 Skill 扫描适配器。
     pub(crate) skill_package_source: Arc<dyn SkillPackageSource>,
@@ -52,6 +53,9 @@ impl HostResources {
         paths: Arc<crate::user_paths::UserPaths>,
         feedback: Option<crate::access::enterprise::feedback::FeedbackAccess>,
     ) -> Result<Self, ToolResourceError> {
+        let tools = Arc::new(
+            HostRunToolFactory::with_paths(runtime_home, paths.clone())?.with_feedback(feedback),
+        );
         Ok(Self {
             model_factory,
             session_environment_factory: Arc::new(HostSessionEnvironmentFactory::with_paths(
@@ -59,10 +63,8 @@ impl HostResources {
                 personal,
                 paths.clone(),
             )),
-            run_tool_factory: Arc::new(
-                HostRunToolFactory::with_paths(runtime_home, paths.clone())?
-                    .with_feedback(feedback),
-            ),
+            run_tool_factory: tools.clone(),
+            schedule_executor: tools,
             child_task_workspace_factory: Arc::new(HostChildTaskWorkspaceFactory),
             skill_package_source: Arc::new(if personal {
                 HostSkillPackageSource::personal(runtime_home, paths.clone())

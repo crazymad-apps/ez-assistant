@@ -5,7 +5,10 @@ use assistant_protocol::{
     SetSkillEnabledRequest, SetSkillEnabledResult, SkillDetailSnapshot,
 };
 
-use super::{AssistantRuntime, now_ms, product::project_skill_management};
+use super::{
+    AssistantRuntime, now_ms,
+    product::{project_active_skills, project_skill_management},
+};
 use crate::{
     RuntimeError, RuntimeResult, SessionExecutionEnvironment, SkillDiagnostic, SkillDiagnosticCode,
     SkillDiscovery, SkillDiscoveryStatus, SkillName, SkillNameState, SkillNameStateChange,
@@ -15,17 +18,67 @@ use crate::{
 impl AssistantRuntime {
     /// 每次调用都重新读取四个固定 Root，返回当前管理投影。
     pub async fn list_skills(&self, request: ListSkillsRequest) -> RuntimeResult<ListSkillsResult> {
+        let contextual = request.session_id.is_some() || request.page.is_some();
+        let window = contextual
+            .then(|| super::context_page::PageWindow::new(request.page))
+            .transpose()?;
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
+        let session = match &request.session_id {
+            Some(id) => {
+                let session = self.session(id).await?;
+                session
+                    .ensure_conversation_loaded(self.store.as_ref())
+                    .await?;
+                Some(session)
+            }
+            None => None,
+        };
         let _mutation = self.workspace_mutation_gate.lock().await;
-        let workspace = self.skill_workspace(request.workspace_id.as_ref())?;
+        let workspace_id = session
+            .as_ref()
+            .map_or(request.workspace_id.as_ref(), |session| {
+                session.environment().workspace_id.as_ref()
+            });
+        let workspace = self.skill_workspace(workspace_id)?;
         let (discovery, states) = self.discover_skills(workspace.as_ref()).await?;
+        let mut snapshot = project_skill_management(
+            &discovery,
+            &states,
+            request.include_plugins.unwrap_or(false),
+        );
+        let Some(window) = window else {
+            return Ok(ListSkillsResult {
+                snapshot,
+                page: None,
+                diagnostic_count: None,
+                active_skills: Vec::new(),
+            });
+        };
+        let mut active_skills = match session {
+            Some(session) => project_active_skills(&*session.lock_state()?)?,
+            None => Vec::new(),
+        };
+        let active_names = active_skills
+            .iter()
+            .map(|skill| skill.tag.name.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        snapshot.skills.retain(|skill| {
+            skill.enabled && skill.health == assistant_protocol::SkillHealthSnapshot::Ready
+        });
+        snapshot
+            .skills
+            .sort_by_key(|skill| !active_names.contains(skill.name.as_str()));
+        let (skills, page) = window.take(snapshot.skills.into_iter());
+        active_skills.retain(|active| skills.iter().any(|skill| skill.name == active.tag.name));
+        snapshot.skills = skills;
+        let diagnostic_count = u32::try_from(snapshot.diagnostics.len()).unwrap_or(u32::MAX);
+        snapshot.diagnostics.clear();
         Ok(ListSkillsResult {
-            snapshot: project_skill_management(
-                &discovery,
-                &states,
-                request.include_plugins.unwrap_or(false),
-            ),
+            snapshot,
+            page: Some(page),
+            diagnostic_count: Some(diagnostic_count),
+            active_skills,
         })
     }
 

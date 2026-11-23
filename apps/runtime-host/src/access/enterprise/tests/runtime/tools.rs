@@ -1,5 +1,104 @@
 use super::*;
 
+#[tokio::test]
+async fn schedules_are_private_to_each_authenticated_user() {
+    let mut f = Fixture::with_domains(true, None).await;
+    let alice = f.login("alice").await;
+    let bob = f.login("bob").await;
+    let created = command(
+        &f,
+        &alice,
+        "create_schedule",
+        json!({
+            "name":"Alice fixture", "enabled":false,
+            "rule":{"type":"weekly","weekdays":["monday","friday"],"time":"09:00"},
+            "action":{"type":"script","command":"echo fixture"}
+        }),
+    )
+    .await;
+    let id = serde_json::from_value(created["schedule_id"].clone()).unwrap();
+    assert_eq!(
+        command(&f, &alice, "list_schedules", json!({})).await["page"]["total"],
+        1
+    );
+    assert_eq!(
+        command(&f, &bob, "list_schedules", json!({})).await["page"]["total"],
+        0
+    );
+    let target = assistant_protocol::ScheduleTarget { schedule_id: id };
+    for operation in [
+        RuntimeCommand::GetSchedule(target.clone()),
+        RuntimeCommand::DeleteSchedule(target.clone()),
+    ] {
+        let denied = f.command(&bob, operation).await;
+        assert_eq!(denied.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            denied.json::<Value>().await.unwrap()["error"]["code"],
+            "schedule_not_found"
+        );
+    }
+    let run = command(
+        &f,
+        &alice,
+        "run_schedule_now",
+        json!({
+            "schedule_id":target.schedule_id, "idempotency_key":"isolated-request"
+        }),
+    )
+    .await;
+    let execution = assistant_protocol::ScheduleExecutionTarget {
+        execution_id: serde_json::from_value(run["execution"]["execution_id"].clone()).unwrap(),
+    };
+    for operation in [
+        RuntimeCommand::GetScheduleExecution(execution.clone()),
+        RuntimeCommand::StopScheduleExecution(execution.clone()),
+    ] {
+        let denied = f.command(&bob, operation).await;
+        assert_eq!(denied.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            denied.json::<Value>().await.unwrap()["error"]["code"],
+            "schedule_execution_not_found"
+        );
+    }
+    let history = command(
+        &f,
+        &alice,
+        "list_schedule_executions",
+        json!({"schedule_id":target.schedule_id}),
+    )
+    .await;
+    assert_eq!(history["page"]["total"], 1);
+
+    let reread = command(
+        &f,
+        &alice,
+        "get_schedule",
+        serde_json::to_value(target).unwrap(),
+    )
+    .await;
+    assert_eq!(reread, created);
+    f.stop().await;
+    for (user_id, expected) in [(1, 1), (2, 0)] {
+        let db = f
+            .home
+            .path()
+            .join(format!("users/{CENTER_ID}_{user_id}/data/runtime.sqlite3"));
+        let db =
+            rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
+        let count: i64 = db
+            .query_row("SELECT COUNT(*) FROM schedules", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, expected);
+        let executions: i64 = db
+            .query_row("SELECT COUNT(*) FROM schedule_executions", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(executions, expected);
+    }
+}
+
 async fn command(f: &Fixture, token: &str, kind: &str, payload: Value) -> Value {
     let command = serde_json::from_value(json!({"type":kind,"payload":payload})).unwrap();
     let result: Value = f

@@ -297,6 +297,7 @@ impl StorageEngine {
              FROM {source}
              LEFT JOIN devices d ON d.device_id = s.pc_output_device_id
              WHERE (?1 IS NULL OR s.lifecycle = ?1) AND (?2 IS NULL OR s.session_id = ?2)
+               AND NOT EXISTS(SELECT 1 FROM schedule_executions se WHERE se.session_id=s.session_id)
                AND (?3 IS NULL OR s.role = ?3) AND (?6 IS NULL OR instr(lower(s.title), lower(?6)) > 0)
              AND {scope}
              ORDER BY {order} LIMIT ?4 OFFSET ?5");

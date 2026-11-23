@@ -1779,6 +1779,13 @@ pub(crate) async fn export_session_markdown(
     .await
 }
 
+fn valid_schedule_resource_id(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
 #[tauri::command]
 pub(crate) async fn download_runtime_resource(
     app: AppHandle,
@@ -1790,7 +1797,20 @@ pub(crate) async fn download_runtime_resource(
     open_after: Option<bool>,
 ) -> Result<ExportResult, NativeResourceError> {
     // 只允许当前 Host 的文件下载路由；不能借该入口提交业务命令或跳转到另一台主机。
+    let segments: Vec<_> = path.split('/').collect();
+    let scheduled_file = match segments.as_slice() {
+        ["", "schedule-results", execution, "files", file, "download"] if body.is_none() => {
+            [execution, file]
+                .iter()
+                .all(|part| valid_schedule_resource_id(part))
+        }
+        ["", "schedule-results", execution, "files", "download"] if body.is_some() => {
+            valid_schedule_resource_id(execution)
+        }
+        _ => false,
+    };
     if !(path == "/host-files/download"
+        || scheduled_file
         || (path.starts_with("/sessions/") && path.ends_with("/download")))
         || path.contains(['?', '#', '\\'])
         || path.split('/').any(|part| matches!(part, "." | ".."))

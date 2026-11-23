@@ -21,10 +21,13 @@ import { SessionNavigation } from "../SessionNavigation";
 import { RemovedWorkspacesDialog } from "../../workspaces/RemovedWorkspacesDialog";
 import styles from "./index.module.scss";
 
-export const SessionSidebar = observer(function SessionSidebar({ hidden = false, on_search, on_toggle }: Readonly<{
+export const SessionSidebar = observer(function SessionSidebar({ hidden = false, on_search, on_toggle, schedules_open, on_schedules, on_conversation }: Readonly<{
   hidden?: boolean;
   on_search: () => void;
   on_toggle: () => void;
+  schedules_open?: boolean;
+  on_schedules?: () => void;
+  on_conversation?: () => void;
 }>) {
   const store = useRootStore();
   const scroll_ref = useSidebarDrag(store);
@@ -52,6 +55,11 @@ export const SessionSidebar = observer(function SessionSidebar({ hidden = false,
       className={styles.sidebar}
       data-shell-open={!hidden}
       data-shell-sidebar="left"
+      onClickCapture={(event) => {
+        if (event.target instanceof Element && event.target.closest(
+          "[data-navigation-action]:not([data-schedule-navigation])",
+        )) on_conversation?.();
+      }}
       inert={hidden}
       >
       <div className={styles.native_control_region} data-tauri-drag-region="deep">
@@ -60,7 +68,7 @@ export const SessionSidebar = observer(function SessionSidebar({ hidden = false,
       <div className={styles.primary_actions}>
         <button
           aria-label="新建会话"
-          aria-current={store.navigation.selected_draft_key === draftKeyForWorkspace(null) ? "page" : undefined}
+          aria-current={!schedules_open && store.navigation.selected_draft_key === draftKeyForWorkspace(null) ? "page" : undefined}
           className={styles.quick_action}
           data-navigation-action
           disabled={store.local_connection.state !== "connected" || store.pending_session_action || store.pending_workspace_action}
@@ -69,13 +77,21 @@ export const SessionSidebar = observer(function SessionSidebar({ hidden = false,
         ><Icon name="plus" size={17} /><span>新建会话</span></button>
         <button
           aria-label="助理会话"
-          aria-current={controller_id && store.navigation.selected_session_id === controller_id ? "page" : undefined}
+          aria-current={!schedules_open && controller_id && store.navigation.selected_session_id === controller_id ? "page" : undefined}
           className={styles.quick_action}
           data-navigation-action
           disabled={!controller_id || store.local_connection.state !== "connected"}
           onClick={() => { if (controller_id) void store.selectSession(controller_id, null); }}
           type="button"
         ><Icon name="bot" size={17} /><span>助理会话</span></button>
+        {on_schedules && <button
+          aria-current={schedules_open ? "page" : undefined}
+          className={styles.quick_action}
+          data-navigation-action
+          data-schedule-navigation
+          onClick={on_schedules}
+          type="button"
+        ><Icon name="clock" size={17} /><span>定时任务</span></button>}
         <button
           aria-current={store.settings.is_open && store.settings.page === "agents" ? "page" : undefined}
           className={styles.quick_action}

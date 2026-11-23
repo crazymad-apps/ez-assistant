@@ -346,6 +346,9 @@ async fn end_turn_does_not_call_model_again_until_new_user_reply() {
         loop {
             let runs = runtime
                 .list_runs(assistant_protocol::ListRunsRequest {
+                    summary_only: None,
+                    page: None,
+                    input_id: None,
                     session_id: session.clone(),
                 })
                 .await
@@ -617,6 +620,9 @@ async fn feedback_failures_leave_retryable_state_without_fake_user_messages() {
         assert_eq!(
             runtime
                 .list_runs(assistant_protocol::ListRunsRequest {
+                    summary_only: None,
+                    page: None,
+                    input_id: None,
                     session_id: session.clone()
                 })
                 .await
@@ -628,6 +634,9 @@ async fn feedback_failures_leave_retryable_state_without_fake_user_messages() {
         runtime.answer_feedback(reply(&request)).await.unwrap();
         let runs = runtime
             .list_runs(assistant_protocol::ListRunsRequest {
+                summary_only: None,
+                page: None,
+                input_id: None,
                 session_id: session.clone(),
             })
             .await
@@ -694,6 +703,9 @@ async fn end_turn_survives_restart_without_auto_execution_and_wait_is_invalidate
             recovered.answer_feedback(reply(&request)).await.unwrap();
             let runs = recovered
                 .list_runs(assistant_protocol::ListRunsRequest {
+                    summary_only: None,
+                    page: None,
+                    input_id: None,
                     session_id: session.clone(),
                 })
                 .await

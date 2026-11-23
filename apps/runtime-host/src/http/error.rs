@@ -96,8 +96,11 @@ pub(super) fn runtime_status(code: RuntimeErrorCode) -> StatusCode {
         RuntimeErrorCode::InvalidRequest
         | RuntimeErrorCode::SkillNameInvalid
         | RuntimeErrorCode::McpConfigInvalid => StatusCode::BAD_REQUEST,
-        RuntimeErrorCode::SessionNotFound
+        RuntimeErrorCode::ScheduleExecutionNotFound
+        | RuntimeErrorCode::ScheduleNotFound
+        | RuntimeErrorCode::SessionNotFound
         | RuntimeErrorCode::RunNotFound
+        | RuntimeErrorCode::BackgroundRunNotFound
         | RuntimeErrorCode::ChildTaskNotFound
         | RuntimeErrorCode::InputNotFound
         | RuntimeErrorCode::ModelNotFound
@@ -107,7 +110,8 @@ pub(super) fn runtime_status(code: RuntimeErrorCode) -> StatusCode {
         RuntimeErrorCode::PluginOperationNotFound => StatusCode::NOT_FOUND,
         RuntimeErrorCode::GoalNotFound => StatusCode::NOT_FOUND,
         RuntimeErrorCode::ApprovalNotFound => StatusCode::NOT_FOUND,
-        RuntimeErrorCode::SessionBusy
+        RuntimeErrorCode::ScheduleBusy
+        | RuntimeErrorCode::SessionBusy
         | RuntimeErrorCode::SessionArchived
         | RuntimeErrorCode::UserMessageNotEditable
         | RuntimeErrorCode::SessionNotIdle
@@ -153,6 +157,8 @@ pub(super) fn runtime_status(code: RuntimeErrorCode) -> StatusCode {
         | RuntimeErrorCode::SkillCatalogUnavailable
         | RuntimeErrorCode::SnapshotBusy
         | RuntimeErrorCode::SessionHistoryCleanupPending => StatusCode::SERVICE_UNAVAILABLE,
+        RuntimeErrorCode::BackgroundOutputUnavailable
+        | RuntimeErrorCode::BackgroundCleanupUnconfirmed => StatusCode::SERVICE_UNAVAILABLE,
         RuntimeErrorCode::PluginPackageUnavailable => StatusCode::SERVICE_UNAVAILABLE,
         RuntimeErrorCode::PermissionFileInvalid | RuntimeErrorCode::ResourceNotPreviewable => {
             StatusCode::UNPROCESSABLE_ENTITY

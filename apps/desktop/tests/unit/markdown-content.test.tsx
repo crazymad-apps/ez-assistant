@@ -15,6 +15,43 @@ afterEach(() => {
   vi.mocked(isTauri).mockReturnValue(false);
 });
 
+describe("MarkdownContent CJK emphasis", () => {
+  it.each([false, true])("renders bold next to CJK punctuation with streaming=%s", (is_streaming) => {
+    render(<MarkdownContent theme={THEME_PRESETS.default_light} is_streaming={is_streaming}
+      text={"- **今日主线：**刻赤大桥\n\n`**今日主线：**刻赤大桥`"} />);
+
+    const label = screen.getByText("今日主线：", { selector: '[data-streamdown="strong"]' });
+    expect(label.closest("li")).toHaveTextContent("今日主线：刻赤大桥");
+    expect(screen.getByText("**今日主线：**刻赤大桥", { selector: "code" })).toBeVisible();
+  });
+});
+
+describe("MarkdownContent table columns", () => {
+  it("keeps short labels and long content in separate sizing boxes in any column", () => {
+    const note = "数量仍在复核，已提交采购计划。后续交付批次和预计交付时间将在复核完成后更新。";
+    const description = "这一列用于展示完整说明，有较多文字，应该获得更多宽度并自然换行。";
+    const text = [
+      "| 说明 | 数量 | 编号 |",
+      "| --- | --- | --- |",
+      `| ${description} | **36** | A01 |`,
+      `| ${description} | 45 | A02 |`,
+      `| ${description} | 50 | A03 |`,
+      `| ${description} | ${note} | A04 |`,
+    ].join("\n");
+
+    render(<MarkdownContent theme={THEME_PRESETS.default_light} text={text} />);
+
+    const value = screen.getByRole("cell", { name: "36" });
+    expect(value.firstElementChild?.firstElementChild).toHaveAttribute("data-streamdown", "strong");
+    const note_content = screen.getByRole("cell", { name: note }).firstElementChild;
+    const prose_content = screen.getAllByRole("cell", { name: description })[0]?.firstElementChild;
+    expect(note_content).toHaveTextContent(note);
+    expect(prose_content).toHaveTextContent(description);
+    expect(note_content?.className).not.toBe(prose_content?.className);
+    expect(screen.getByRole("cell", { name: "A01" }).firstElementChild).toHaveTextContent("A01");
+  });
+});
+
 describe("MarkdownContent external links", () => {
   it("leaves Web links to the browser in a new tab, including modified clicks", () => {
     render(<MarkdownContent theme={THEME_PRESETS.default_light} text="[外链](https://example.com/report)" />);

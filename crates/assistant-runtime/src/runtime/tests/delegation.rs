@@ -27,9 +27,10 @@ async fn session_view_does_not_reread_main_history_for_each_child() {
         .unwrap()
         .snapshot
         .value;
-    assert_eq!(view.child_tasks.len(), 3);
+    assert_eq!(view.conversation.child_tasks.len(), 3);
     assert!(
-        view.child_tasks
+        view.conversation
+            .child_tasks
             .iter()
             .all(|child| child.task.status.is_terminal() && child.task.final_text.is_empty())
     );
@@ -45,7 +46,7 @@ async fn session_view_does_not_reread_main_history_for_each_child() {
     let detail = runtime
         .get_child_task(assistant_protocol::GetChildTaskRequest {
             session_id: view.session.session_id.clone(),
-            child_task_id: view.child_tasks[0].task.child_task_id.clone(),
+            child_task_id: view.conversation.child_tasks[0].task.child_task_id.clone(),
         })
         .await
         .unwrap();
@@ -57,7 +58,7 @@ async fn session_view_does_not_reread_main_history_for_each_child() {
     let events = runtime.event_sender.clone();
     let owner = assistant_protocol::ConversationOwner::ChildTask {
         session_id: view.session.session_id.clone(),
-        child_task_id: view.child_tasks[0].task.child_task_id.clone(),
+        child_task_id: view.conversation.child_tasks[0].task.child_task_id.clone(),
     };
     *store.window_read_hook.lock().unwrap() = Some(Box::new(move || {
         let _ = events.send(RuntimeEvent::ConversationCommitted {
@@ -151,14 +152,15 @@ async fn fork_child_history_is_owner_scoped_readonly_and_survives_source_deletio
             .unwrap()
             .snapshot
             .value;
-        assert_eq!(view.child_tasks.len(), 1);
-        assert!(view.child_tasks[0].task.inherited);
-        assert!(!view.child_tasks[0].task.body_unavailable);
-        assert!(!view.child_tasks[0].can_cancel);
+        assert_eq!(view.conversation.child_tasks.len(), 1);
+        assert!(view.conversation.child_tasks[0].task.inherited);
+        assert!(!view.conversation.child_tasks[0].task.body_unavailable);
+        assert!(!view.conversation.child_tasks[0].can_cancel);
         let listed = runtime
             .list_child_tasks(assistant_protocol::ListChildTasksRequest {
+                page: None,
                 session_id: fork.clone(),
-                parent_run_id: submitted.run.run_id.clone(),
+                parent_run_id: Some(submitted.run.run_id.clone()),
             })
             .await
             .unwrap()
@@ -811,8 +813,9 @@ async fn isolated_child_result(interrupt_child: bool) {
 
     let listed = runtime
         .list_child_tasks(assistant_protocol::ListChildTasksRequest {
+            page: None,
             session_id: session.session.session_id.clone(),
-            parent_run_id: started.run.run_id.clone(),
+            parent_run_id: Some(started.run.run_id.clone()),
         })
         .await
         .expect("list child tasks");
@@ -889,8 +892,9 @@ async fn isolated_child_result(interrupt_child: bool) {
     assert_eq!(
         runtime
             .list_child_tasks(assistant_protocol::ListChildTasksRequest {
+                page: None,
                 session_id: session.session.session_id.clone(),
-                parent_run_id: started.run.run_id,
+                parent_run_id: Some(started.run.run_id),
             })
             .await
             .expect("archived child history")

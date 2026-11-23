@@ -17,6 +17,7 @@ export default defineConfig(({ command }) => ({
       this.emitFile({ type: "asset", name: "entry-visual-notices.html", source: `<!doctype html><html lang="en"><meta charset="utf-8"><title>Entry visual notices</title><pre>${notices}</pre></html>` });
     },
   }],
+  build: { license: { fileName: "assets/third-party-licenses.md" } },
   define: {
     __APP_VERSION__: JSON.stringify(app_version),
     __QUICK_ACTIONS_CONFIG__: JSON.stringify(readQuickActionsConfig(

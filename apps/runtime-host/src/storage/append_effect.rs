@@ -34,6 +34,11 @@ pub(super) enum AppendPurpose {
         child_operation_id: String,
         child: Box<assistant_runtime::StoredChildTaskHistory>,
     },
+    /// 主控消息与执行回执使用同一提交，不创建 Input 或 Run。
+    ScheduleReport {
+        execution_id: assistant_protocol::ScheduleExecutionId,
+        message_id: assistant_protocol::MessageId,
+    },
     /// 只追加规范消息，不改变 Input/Run 状态。
     Messages,
     /// 首次 User Message 或已提交 Input 的 retry 开始，可靠启动 Run。
@@ -154,6 +159,18 @@ pub(super) fn apply_purpose(
     legacy_history: bool,
 ) -> StorageResult<()> {
     match (purpose, target) {
+        (
+            AppendPurpose::ScheduleReport {
+                execution_id,
+                message_id,
+            },
+            ConversationStorageTarget::SessionMetadata { session_id },
+        ) => super::schedule::delivery::apply_schedule_report(
+            transaction,
+            execution_id,
+            session_id,
+            message_id,
+        ),
         (
             AppendPurpose::MessageFeedback { .. },
             ConversationStorageTarget::SessionMetadata { .. },

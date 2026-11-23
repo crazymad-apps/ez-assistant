@@ -2062,14 +2062,14 @@ async fn conversation_pages_are_latest_first_queries_with_generation_bound_curso
         .await
         .expect("session view")
         .snapshot;
-    assert_eq!(view.value.runs.len(), 2);
+    assert_eq!(view.value.runs.len(), 1);
     assert!(view.value.queue.items.is_empty());
     assert!(view.observed_sequence >= 5);
     *store.window_read_hook.lock().unwrap() = window_hook;
     let around = runtime
         .get_conversation_page_around_run(GetConversationPageAroundRunRequest {
             session_id: view.value.session.session_id.clone(),
-            run_id: view.value.runs[1].run_id.clone(),
+            run_id: view.value.runs[0].run_id.clone(),
             turn_limit: Some(1),
         })
         .await
@@ -2113,7 +2113,7 @@ async fn conversation_pages_are_latest_first_queries_with_generation_bound_curso
         runtime
             .get_conversation_page_around_run(GetConversationPageAroundRunRequest {
                 session_id: view.value.session.session_id.clone(),
-                run_id: view.value.runs[1].run_id.clone(),
+                run_id: view.value.runs[0].run_id.clone(),
                 turn_limit: Some(1),
             })
             .await,

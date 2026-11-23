@@ -1,3 +1,5 @@
+@use "../run-row";
+
 .panel {
   display: grid;
   overflow: hidden;
@@ -291,19 +293,6 @@
 .more_directories { justify-self: start; color: var(--ez-primary-text); font-size: var(--ez-font-small); }
 .workspace_changed_note { margin: 9px 0 0; color: var(--ez-warning-text); font-size: var(--ez-font-small); }
 
-.empty_row {
-  margin: 0;
-  padding: 8px;
-
-  text-align: center;
-
-  color: var(--ez-text-muted);
-  border: 1px dashed var(--ez-border);
-  border-radius: var(--ez-radius-small);
-
-  font-size: var(--ez-font-small);
-}
-
 .attachment_rows {
   display: grid;
 
@@ -371,74 +360,22 @@
 
 .run_rows {
   display: grid;
-
-  gap: 3px;
+  gap: run-row.$row-gap;
+  @include run-row.summary;
 
   button {
-    --ez-control-default-height: var(--ez-control-height-large); height: auto;
+    @include run-row.control;
     display: grid;
     align-items: center;
-
-    min-width: 0;
-    min-height: var(--ez-control-height);
-    padding: 5px 7px;
-
     text-align: left;
-
-    color: var(--ez-text-secondary);
-    border: 0;
-    border-radius: 6px;
-    background: transparent;
-
-    grid-template-columns: 7px minmax(0, 1fr) auto;
-    gap: 8px;
+    grid-template-columns: run-row.$dot-size minmax(0, 1fr) auto;
+    gap: run-row.$column-gap;
 
     &:hover:not(:disabled) { background: var(--ez-surface-muted); }
     &:disabled { cursor: default; }
   }
 
-  i {
-    width: 7px;
-    height: 7px;
-
-    border-radius: 50%;
-    background: var(--ez-primary);
-  }
-
-  i[data-status="completed"] { background: var(--ez-success); }
-  i[data-status="accepted"],
-  i[data-status="compaction_required"] { background: var(--ez-warning); }
-  i[data-status="failed"],
-  i[data-status="cancelled"],
-  i[data-status="interrupted"] { background: var(--ez-danger); }
-
-  span {
-    display: grid;
-
-    min-width: 0;
-
-    gap: 2px;
-  }
-
-  strong {
-    overflow: hidden;
-
-    white-space: nowrap;
-    text-overflow: ellipsis;
-
-    font-size: var(--ez-font-base);
-    font-weight: 600;
-  }
-
-  small,
-  em {
-    white-space: nowrap;
-
-    color: var(--ez-text-muted);
-
-    font-size: var(--ez-font-small);
-    font-style: normal;
-  }
+  em { @include run-row.secondary; }
 }
 
 .skill_context { display: grid; gap: 8px; }
@@ -448,3 +385,23 @@
 .skill_list span { flex: 0 0 auto; color: var(--ez-text-muted); font-size: var(--ez-font-small); }
 .skill_diagnostics { justify-self: start; color: var(--ez-primary); }
 .skill_diagnostics:hover { background: var(--ez-primary-soft); }
+
+.context_pagination,
+.context_page_error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--ez-font-small);
+}
+
+.context_pagination {
+  justify-content: flex-end;
+  color: var(--ez-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.context_page_error {
+  justify-content: space-between;
+  color: var(--ez-danger);
+  overflow-wrap: anywhere;
+}

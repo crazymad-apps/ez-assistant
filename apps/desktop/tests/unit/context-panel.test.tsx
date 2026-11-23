@@ -3,6 +3,8 @@ import { render } from "../support/renderWithAppearance";
 import { modelProvider, modelSelection } from "../support/modelManagement";
 import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { AttachmentSummary } from "@ez-assistant/protocol";
+import type { RuntimeClient } from "../../src/runtime-client/RuntimeClient";
 import { RootStore } from "../../src/stores/RootStore";
 import { RootStoreProvider } from "../../src/stores/RootStoreContext";
 import { ContextPanel } from "../../src/features/context-panel/ContextPanel";
@@ -154,7 +156,8 @@ describe("ContextPanel", () => {
       ] },
     }));
     expect(screen.getAllByText("review-skill")).toHaveLength(1);
-    expect(screen.getByText("智能体激活")).toBeVisible();
+    fireEvent(window, new Event("focus"));
+    expect(await screen.findByText("智能体激活")).toBeVisible();
     expect(screen.queryByText("removed-skill")).not.toBeInTheDocument();
     expect(screen.getByText("weather-query")).toBeVisible();
   });
@@ -167,7 +170,7 @@ describe("ContextPanel", () => {
     expect(screen.queryByText("review-skill")).not.toBeInTheDocument();
   });
 
-  it("stacks wide context sections in two independent vertical columns", () => {
+  it("stacks wide context sections in two independent vertical columns", async () => {
     vi.stubGlobal("ResizeObserver", class ResizeObserverMock {
       readonly #callback: ResizeObserverCallback;
 
@@ -185,6 +188,7 @@ describe("ContextPanel", () => {
     const store = contextStore();
     const { container } = renderPanel(store);
 
+    await screen.findByRole("button", { name: "会话附件 · 1" });
     const columns = container.querySelectorAll<HTMLElement>("[data-context-column]");
     expect(columns).toHaveLength(2);
     expect(within(columns[0]!).getByRole("button", { name: "产物" })).toBeVisible();
@@ -211,18 +215,36 @@ describe("ContextPanel", () => {
     if (exiting_session) fireEvent.transitionEnd(exiting_session);
     expect(screen.queryByText("测试服务商 / fixture")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /运行 #1/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /运行 #1/ }));
     await waitFor(() => expect(locate).toHaveBeenCalledWith("session-1", "run-1"));
   });
 
-  it("shows session attachments without aggregating tool file references", () => {
+  it("shows session attachments without aggregating tool file references", async () => {
     const store = contextStore();
     renderPanel(store);
 
-    expect(screen.getByRole("button", { name: "会话附件 · 1" })).toBeVisible();
+    expect(await screen.findByRole("button", { name: "会话附件 · 1" })).toBeVisible();
     expect(screen.getByRole("button", { name: /brief\.png/ })).toBeVisible();
     expect(screen.queryByText("工具文件")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /report\.txt/ })).not.toBeInTheDocument();
+  });
+
+  it("refreshes the selected attachment page and falls back after its last rows disappear", async () => {
+    const store = contextStore();
+    const attachments = Array.from({ length: 12 }, (_, index) => ({
+      ...brief, attachment_id: `file-${index}`, original_name: `page-${index}.png`,
+    }));
+    test_attachments.set(store, attachments);
+    renderPanel(store);
+    const pager = await screen.findByRole("navigation", { name: "会话附件分页" });
+    fireEvent.click(within(pager).getByRole("button", { name: "下一页会话附件" }));
+    expect(await screen.findByRole("button", { name: /page-11\.png/ })).toBeVisible();
+    expect(pager).toHaveTextContent("2 / 2");
+    test_attachments.set(store, attachments.slice(0, 10));
+    fireEvent(window, new Event("focus"));
+    expect(await screen.findByRole("button", { name: /page-0\.png/ })).toBeVisible();
+    expect(screen.queryByRole("navigation", { name: "会话附件分页" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "会话附件 · 10" })).toBeVisible();
   });
 
   it("shows frozen Workspace directories without a duplicate label and opens the shared editor", () => {
@@ -328,7 +350,7 @@ describe("ContextPanel", () => {
     expect(within(dialog).getByRole("button", { name: "原文" })).toHaveAttribute("aria-pressed", "true");
   });
 
-  it("degrades missing historical fields and unavailable resources without inventing zero values", () => {
+  it("degrades missing historical fields and unavailable resources without inventing zero values", async () => {
     const store = contextStore();
     const application = store.projection.application!;
     store.projection.refreshApplicationSnapshot({
@@ -348,7 +370,6 @@ describe("ContextPanel", () => {
       value: {
         ...view,
         session: { ...view.session, model_selection: { source: "local", provider_instance_id: "provider-1", model_id: "removed-model" } },
-        attachments: view.attachments.map((attachment) => ({ ...attachment, state: "unavailable" })),
         runs: view.runs.map((run) => ({ ...run, created_at_ms: null, finished_at_ms: null })),
         usage: {
           accumulated: { input_tokens: null, output_tokens: null, total_tokens: null, cached_input_tokens: null },
@@ -359,7 +380,9 @@ describe("ContextPanel", () => {
         },
       },
     } as unknown as Parameters<RootStore["projection"]["applySessionSnapshot"]>[0]);
+    test_attachments.set(store, [{ ...brief, state: "unavailable" }]);
     renderPanel(store);
+    await screen.findByRole("button", { name: "会话附件 · 1" });
 
     expect(screen.getByText("服务商已删除 / removed-model")).toBeVisible();
     expect(screen.getAllByText("未提供").length).toBeGreaterThan(0);
@@ -377,8 +400,39 @@ function renderPanel(store: RootStore) {
   );
 }
 
+const brief: AttachmentSummary = {
+  attachment_id: "attachment-1", session_id: "session-1", original_name: "brief.png", size_bytes: 1024,
+  media_type: "image/png", agent_readable_path: "", state: "ready", created_at_ms: 1,
+};
+const test_attachments = new WeakMap<RootStore, readonly AttachmentSummary[]>();
+
 function contextStore(): RootStore {
   const store = new RootStore();
+  test_attachments.set(store, [brief]);
+  store.connection.markConnected("fixture", {} as never, "fixture");
+  const page = (total: number) => ({ offset: 0, limit: 10, total });
+  vi.spyOn(store, "runtime_client", "get").mockReturnValue({
+    listBackgroundRuns: async () => ({ runs: [], total: 0, offset: 0, limit: 5 }),
+    command: vi.fn(async ({ type, payload }: { type: string; payload?: { page?: { offset?: number; limit?: number } } }) => {
+      const view = store.projection.session_views.get("session-1")!;
+      switch (type) {
+        case "list_runs": return { payload: { runs: view.runs, page: page(view.runs.length) } };
+        case "list_attachments": {
+          const attachments = test_attachments.get(store) ?? [];
+          const offset = payload?.page?.offset ?? 0;
+          const limit = payload?.page?.limit ?? 10;
+          return { payload: { attachments: attachments.slice(offset, offset + limit), page: { offset, limit, total: attachments.length } } };
+        }
+        case "list_child_tasks": return { payload: { tasks: [], page: page(0) } };
+        case "list_artifacts": return { payload: { artifacts: [], page: page(0) } };
+        case "list_skills": {
+          const snapshot = await store.listSkills(view.session.workspace_id);
+          return { payload: { snapshot, active_skills: view.active_skills, diagnostic_count: snapshot.diagnostics.length, page: page(snapshot.skills.length) } };
+        }
+        default: throw new Error(type);
+      }
+    }),
+  } as unknown as RuntimeClient);
   vi.spyOn(store, "getAgentShellSettings").mockResolvedValue({ default_agent_shell: "cmd", catalog: [
     { kind: "cmd", available: true, reason: null },
     { kind: "powershell_7", available: true, reason: null },
@@ -442,15 +496,6 @@ function contextStore(): RootStore {
       active_run: null,
       queue: { revision: 1, state: "automatic", items: [] },
       approvals: { revision: 1, items: [], resolving_approval_id: null },
-      attachments: [{
-        attachment_id: "attachment-1",
-        session_id: "session-1",
-        original_name: "brief.png",
-        size_bytes: 1024,
-        agent_readable_path: "",
-        state: "ready",
-        created_at_ms: 1,
-      }],
       file_references: [{
         message_id: "message-1",
         call_id: "call-1",

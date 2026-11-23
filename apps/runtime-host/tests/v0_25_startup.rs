@@ -11,7 +11,7 @@ use std::{
 };
 
 // 当前发布链及具名迁移；新库、升级与重启保持同一完整账本。
-const CURRENT_MIGRATION_COUNT: i64 = 21;
+const CURRENT_MIGRATION_COUNT: i64 = 25;
 
 struct Host(Child);
 impl Drop for Host {
@@ -339,7 +339,7 @@ fn released_v0251_host_refuses_upgraded_database_without_changing_data_files() {
                 |r| r.get::<_, String>(0)
             )
             .unwrap(),
-        "0.33.1"
+        "0.33.2"
     );
     let backup_dir = fs::read_dir(home.path().join("backups/host-layout"))
         .unwrap()
@@ -562,9 +562,9 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
         .unwrap()
         .json()
         .unwrap();
-    assert_eq!(health["database_version"], "0.33.1");
-    // 数据库最低 Host 与应用协议 minimum 独立；F02 文件历史切换要求新的存储下限。
-    assert_eq!(health["min_compatible_host_version"], "0.33.1");
+    assert_eq!(health["database_version"], "0.33.2");
+    // 数据库最低 Host 与应用协议下限独立，v0.33.2 迁移登记新的存储下限。
+    assert_eq!(health["min_compatible_host_version"], "0.33.2");
     let configuration =
         fs::read_to_string(home.path().join("users/_personal/config.toml")).unwrap();
     assert!(!configuration.contains("default_model"));
@@ -603,7 +603,7 @@ fn fresh_model_schema_and_config_cleanup_survive_repeated_product_startup() {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    assert_eq!(ledger.0, "0.33.1");
+    assert_eq!(ledger.0, "0.33.2");
     let count = |table: &str| {
         database
             .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
@@ -839,7 +839,7 @@ fn provider_usage_counts_unloaded_archived_sessions_and_deletion_preserves_refer
 /// 需要经核实、不含 F04 排序迁移的真实 0.33.1 Host。只使用新建隔离 Home。
 #[test]
 #[ignore = "requires EZ_ASSISTANT_PRE_F04_V0331_HOST"]
-fn real_pre_f04_v0331_host_rejects_same_version_sort_ledger_before_writes() {
+fn real_pre_f04_v0331_host_rejects_upgraded_database_before_writes() {
     let binary =
         std::env::var_os("EZ_ASSISTANT_PRE_F04_V0331_HOST").expect("verified early Host path");
     let binary = Path::new(&binary);
@@ -899,7 +899,7 @@ fn real_pre_f04_v0331_host_rejects_same_version_sort_ledger_before_writes() {
         .unwrap()
         .json()
         .unwrap();
-    assert_eq!(health["error"], "migration_failed");
+    assert_eq!(health["error"], "database_host_too_old");
     gated(&discovery);
     stop(&discovery, &mut old);
     assert_eq!(files(&personal), before);

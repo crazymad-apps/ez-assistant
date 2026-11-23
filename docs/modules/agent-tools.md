@@ -71,11 +71,12 @@
 - Pinned Memory 工具只允许模型处理稳定 ID、分类和正文；领域条目的 `attributes` 是 Runtime
   业务元数据，不能出现在工具输入 Schema 或工具结果中。新增工具条目使用空属性，更新工具必须
   保留 Store 中已有属性。
-- Shell 契约：stdin 封闭、命令原样进入审计，显式区分 `managed` / `detached`
-  生命周期；敏感环境变量默认不传给子进程；超时、输出上限、取消、输出收敛与进程树
-  清理由实现侧负责。`detached` 只有在主 Shell 退出且 stdout/stderr 于 deadline 内 EOF 后
-  才完成交接；交接前超时或取消仍清理进程树。成功交接不代表服务健康，也不提供由 Session
-  持有的后台句柄、自动停止或恢复能力。
+- Shell 封闭 stdin，命令原样进入审计，默认过滤敏感环境变量。超时、输出上限、取消、输出收敛
+  与进程树清理由实现侧负责。正式 Host 的主会话工具声明 `managed` 和 `background`，子任务
+  工具只声明 `managed`。独立验证宿主使用的旧工具壳仍支持 `detached`，在主 Shell 退出且
+  stdout/stderr 在时限内 EOF 后交接，交接前超时或取消仍清理进程树。
+- 后台 Shell 的能力契约表达启动、主进程退出观察、树回收及字符分页输出。工具壳冻结工作目录、
+  首次等待和可选总时限，Runtime 根据真实 Run 和工具调用身份接纳并监督进程。
 - `read_image(path)` 是严格单路径标准工具：resolve 只做 Session 路径词法解析并生成普通
   `FileAuthorizationFacts { operation: Read }`，执行委托 `ImageMaterializer`，成功结果固定为
   单一 Image Part。它显式标记 `ParallelEligible`，不读取文件、不解释 Session 目录，也不调用

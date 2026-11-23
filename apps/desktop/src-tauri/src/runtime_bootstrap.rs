@@ -544,47 +544,19 @@ impl RuntimeBootstrapCoordinator {
         request_id: &str,
         command: RuntimeCommand,
     ) -> Result<RuntimeCommandResult, RuntimeBootstrapError> {
-        #[derive(Serialize)]
-        struct CommandRequest {
-            request_id: String,
-            command: CommandScope,
-        }
-        #[derive(Serialize)]
-        #[serde(tag = "scope", content = "payload", rename_all = "snake_case")]
-        enum CommandScope {
-            Runtime(RuntimeCommand),
-        }
-        #[derive(Deserialize)]
-        struct CommandResponse {
-            result: ResultScope,
-        }
-        #[derive(Deserialize)]
-        #[serde(tag = "scope", content = "payload", rename_all = "snake_case")]
-        enum ResultScope {
-            Runtime(Box<RuntimeCommandResult>),
-        }
-
-        let response = self
-            .http
-            .post(format!("{}/commands", bootstrap.base_url))
-            .timeout(CONTROL_COMMAND_TIMEOUT)
-            .bearer_auth(&bootstrap.access_token)
-            .headers(crate::runtime_compatibility::headers())
-            .json(&CommandRequest {
-                request_id: request_id.to_owned(),
-                command: CommandScope::Runtime(command),
-            })
-            .send()
+        let response = post_runtime_command(
+            &self.http,
+            &bootstrap.base_url,
+            &bootstrap.access_token,
+            request_id,
+            command,
+            CONTROL_COMMAND_TIMEOUT,
+        )
+        .await
+        .map_err(runtime_stop_failed)?;
+        read_runtime_command_result(response)
             .await
-            .map_err(runtime_stop_failed)?
-            .error_for_status()
-            .map_err(runtime_stop_failed)?
-            .json::<CommandResponse>()
-            .await
-            .map_err(runtime_stop_failed)?;
-        match response.result {
-            ResultScope::Runtime(result) => Ok(*result),
-        }
+            .map_err(runtime_stop_failed)
     }
 
     async fn discover(
@@ -776,6 +748,58 @@ impl RuntimeBootstrapCoordinator {
                 message,
             ))
         }
+    }
+}
+
+async fn post_runtime_command(
+    http: &reqwest::Client,
+    address: &str,
+    access_token: &str,
+    request_id: &str,
+    command: RuntimeCommand,
+    timeout: Duration,
+) -> Result<reqwest::Response, reqwest::Error> {
+    #[derive(Serialize)]
+    struct Request<'a> {
+        request_id: &'a str,
+        command: CommandScope,
+    }
+    #[derive(Serialize)]
+    #[serde(tag = "scope", content = "payload", rename_all = "snake_case")]
+    enum CommandScope {
+        Runtime(RuntimeCommand),
+    }
+    http.post(format!("{address}/commands"))
+        .timeout(timeout)
+        .bearer_auth(access_token)
+        .headers(crate::runtime_compatibility::headers())
+        .json(&Request {
+            request_id,
+            command: CommandScope::Runtime(command),
+        })
+        .send()
+        .await
+}
+
+async fn read_runtime_command_result(
+    response: reqwest::Response,
+) -> Result<RuntimeCommandResult, reqwest::Error> {
+    #[derive(Deserialize)]
+    struct Response {
+        result: ResultScope,
+    }
+    #[derive(Deserialize)]
+    #[serde(tag = "scope", content = "payload", rename_all = "snake_case")]
+    enum ResultScope {
+        Runtime(Box<RuntimeCommandResult>),
+    }
+    match response
+        .error_for_status()?
+        .json::<Response>()
+        .await?
+        .result
+    {
+        ResultScope::Runtime(result) => Ok(*result),
     }
 }
 

@@ -69,6 +69,7 @@ pub(crate) fn project_tool_input(
                 .get("timeout_ms")
                 .and_then(Value::as_u64)
                 .unwrap_or_default(),
+            wait_ms: arguments.get("wait_ms").and_then(Value::as_u64),
             process_mode: string_field(arguments, "process_mode", &mut flags),
         }
     } else if name == "edit_file" && arguments.get("files").and_then(Value::as_array).is_some() {

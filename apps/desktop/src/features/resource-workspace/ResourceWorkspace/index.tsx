@@ -227,7 +227,7 @@ export const ResourceWorkspace = observer(function ResourceWorkspace(props: Read
         {store.browser_error && <p role="alert">{store.browser_error}</p>}
         <section className={styles.tab_panel} hidden={store.active_tab_key !== CONTEXT_TAB_KEY}
           aria-labelledby="resource-tab-context" id={tabPanelId(CONTEXT_TAB_KEY)} role="tabpanel">
-          <ContextPanel embedded />
+          <ContextPanel embedded visible={store.active_tab_key === CONTEXT_TAB_KEY} />
         </section>
         {store.mounted_pages.map((page) => {
           const key = resourceTabKey(page.tab);

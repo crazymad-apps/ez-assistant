@@ -42,6 +42,7 @@ use crate::{
 
 #[derive(Clone)]
 struct QueueDriverContext {
+    background: super::background::BackgroundRunServices,
     attachments: Arc<RwLock<BTreeMap<assistant_protocol::AttachmentId, crate::StoredAttachment>>>,
     session_loader: Arc<super::session_loading::SessionLoader>,
     workspaces: Arc<RwLock<BTreeMap<assistant_protocol::WorkspaceId, crate::StoredWorkspace>>>,
@@ -61,6 +62,7 @@ struct QueueDriverContext {
     recall_reference_codec: Arc<crate::HmacRecallReferenceCodec>,
     mcp_registry: Arc<crate::mcp::McpRegistry>,
     mcp_management: super::mcp::McpManagement,
+    schedule_runtime: Option<std::sync::Weak<AssistantRuntime>>,
     mcp_config_store: Arc<crate::mcp::McpConfigStore>,
     mcp_image_materializer: Arc<dyn crate::McpImageMaterializer>,
     events: ObservationCoordinator,
@@ -156,6 +158,7 @@ impl AssistantRuntime {
 
     fn queue_driver_context(&self) -> QueueDriverContext {
         QueueDriverContext {
+            background: self.background_services(),
             attachments: self.attachments.clone(),
             session_loader: self.session_loader.clone(),
             workspaces: self.workspaces.clone(),
@@ -175,6 +178,7 @@ impl AssistantRuntime {
             recall_reference_codec: self.recall_reference_codec.clone(),
             mcp_registry: self.mcp_service.registry.clone(),
             mcp_management: self.mcp_management(),
+            schedule_runtime: self.scheduler.runtime(),
             mcp_config_store: self.mcp_service.config_store.clone(),
             mcp_image_materializer: self.mcp_service.image_materializer.clone(),
             events: self.event_sender.clone(),
@@ -213,11 +217,15 @@ fn controller_tool_coordinator_from(
 }
 
 fn wake_queue_with(
-    context: QueueDriverContext,
+    mut context: QueueDriverContext,
     tasks: Arc<super::tasks::RuntimeTasks>,
     session: Arc<SessionController>,
 ) -> RuntimeResult<()> {
+    if let Some(task) = &session.scheduled {
+        context.root_cancellation = task.cancellation.clone();
+    }
     if context.root_cancellation.is_cancelled() {
+        scheduled_queue_finished(&session);
         return Ok(());
     }
     let should_spawn = {
@@ -240,6 +248,7 @@ fn wake_queue_with(
             async move {
                 run_queue(context.clone(), session.clone()).await;
                 publish_driver_fault(&context, &session);
+                scheduled_queue_finished(&session);
             },
             recover_panicked_queue(panic_context, panic_session),
         );
@@ -260,6 +269,13 @@ async fn recover_panicked_queue(context: QueueDriverContext, session: Arc<Sessio
         fault_driver(&session);
     }
     publish_driver_fault(&context, &session);
+    scheduled_queue_finished(&session);
+}
+
+fn scheduled_queue_finished(session: &SessionController) {
+    if let Some(task) = &session.scheduled {
+        task.queue_finished.send_replace(true);
+    }
 }
 
 /// 故障退出后唤醒等待领取的调用方。事件只提示复查 Session 权威状态。
@@ -470,6 +486,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                 &config,
                 &context.config_registry,
                 RunCompilationResources {
+                    background: context.background.clone(),
                     plugin: context.plugin.clone(),
                     attachments: context.attachments.clone(),
                     shell,
@@ -486,6 +503,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     output_dispatcher: context.output_dispatcher.clone(),
                     mcp_registry: context.mcp_registry.clone(),
                     mcp_management: context.mcp_management.clone(),
+                    schedule_runtime: context.schedule_runtime.clone(),
                     mcp_image_materializer: context.mcp_image_materializer.clone(),
                 },
                 RunAuthorizationInput {
@@ -1705,7 +1723,7 @@ async fn fail_before_start(
         });
     // 源 Run 的 Store 和内存终态均已完成，且未持有源状态锁；此后才进入主控 Session 投影。
     if let Some(report) = stored_result.accepted_proxy_report
-        && controller.project_proxy_report(report).await.is_err()
+        && controller.project_controller_report(report).await.is_err()
     {
         fault_driver(session);
     }

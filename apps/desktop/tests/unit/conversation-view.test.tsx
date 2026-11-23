@@ -80,6 +80,34 @@ describe("ConversationView scroll anchoring", () => {
     expect(screen.getByText("正常正文")).toBeVisible();
   });
 
+  it("renders scheduled report Markdown on demand and keeps archived files available", async () => {
+    const store = new RootStore();
+    store.navigation.selectSession("session-1");
+    const download = vi.spyOn(store.files, "downloadScheduleResultFile").mockResolvedValue();
+    const open = vi.spyOn(store.resource_workspace, "openHostFile").mockImplementation(() => undefined);
+    render(<RootStoreProvider store={store}>
+      <UserMessage attachments={[]} on_attachment_click={vi.fn()} on_source_open={vi.fn()}
+        message={{ inherited: false, message_id: "report-1", input_id: null,
+          text: "**日报已生成：**今日主线\n\n- 提交到 `main`\n- [查看原文件](file:///workspace/daily.md)",
+          attachment_ids: [], quotes: [], created_at_ms: 1,
+          source: { type: "schedule_report", execution_id: "execution-1",
+            files: [{ file_id: "0", name: "daily.txt", title: "日报", size_bytes: 17 }] } }} />
+    </RootStoreProvider>);
+    const trigger = screen.getByText("定时任务结果");
+    expect(trigger.closest("details")).not.toHaveAttribute("open");
+    expect(screen.queryByText(/日报已生成/)).not.toBeInTheDocument();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "日报" })); });
+    expect(download).toHaveBeenCalledWith("execution-1", "0", "daily.txt");
+    fireEvent.click(trigger);
+    expect(await screen.findByText("日报已生成：", { selector: '[data-streamdown="strong"]' })).toBeVisible();
+    const list = screen.getByRole("list");
+    expect(within(list).getAllByRole("listitem")).toHaveLength(2);
+    expect(within(list).getByText("main", { selector: "code" })).toBeVisible();
+    fireEvent.click(within(list).getByRole("button", { name: "查看原文件" }));
+    expect(open).toHaveBeenCalledWith("session:session-1", "/workspace/daily.md");
+    store.dispose();
+  });
+
   it("renders structured controller delivery and proxy report metadata", () => {
     const source_session = {
       session_id: "source-1",
@@ -169,18 +197,16 @@ describe("ConversationView scroll anchoring", () => {
     expect(screen.queryByRole("dialog", { name: "消息来源详情" })).not.toBeInTheDocument();
   });
 
-  it("collapses only overflowing proxy reports and allows expanding them", () => {
-    vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(600);
-    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(360);
-
-    render(
+  it("collapses proxy reports by default and renders their Markdown when opened", async () => {
+    const store = new RootStore();
+    render(<RootStoreProvider store={store}>
       <UserMessage
         attachments={[]}
         message={{
           inherited: false,
           message_id: "long-report",
           input_id: null,
-          text: "较长的会话报告",
+          text: "**较长的会话报告**",
           attachment_ids: [],
           quotes: [],
           source: {
@@ -193,35 +219,37 @@ describe("ConversationView scroll anchoring", () => {
         }}
         on_attachment_click={vi.fn()}
         on_source_open={vi.fn()}
-      />,
-    );
+      />
+    </RootStoreProvider>);
 
-    const expand = screen.getByRole("button", { name: "展开完整会话报告" });
-    expect(expand).toHaveAttribute("aria-expanded", "false");
-    expect(expand.closest("[data-expanded]")).toHaveAttribute("data-expanded", "false");
-
-    fireEvent.click(expand);
-    const collapse = screen.getByRole("button", { name: "收起" });
-    expect(collapse).toHaveAttribute("aria-expanded", "true");
-    expect(collapse.closest("[data-expanded]")).toHaveAttribute("data-expanded", "true");
+    const trigger = screen.getByText("查看原始汇报");
+    const detail = trigger.closest("details");
+    expect(detail).not.toHaveAttribute("open");
+    expect(screen.queryByText("较长的会话报告")).not.toBeInTheDocument();
+    fireEvent.click(trigger);
+    expect(detail).toHaveAttribute("open");
+    expect(await screen.findByText("较长的会话报告", { selector: '[data-streamdown="strong"]' })).toBeVisible();
+    store.dispose();
   });
 
-  it("renders user attachments above the message bubble", () => {
+  it("renders message attachments above the bubble and keeps sibling previews available", () => {
     const store = conversationStore();
+    const attachments = ["参考图片.png", "补充图片.png"].map((original_name, index) => ({
+      attachment_id: `attachment-${index + 1}`,
+      session_id: "session-1",
+      original_name,
+      media_type: "image/png",
+      size_bytes: 1024,
+      agent_readable_path: "",
+      state: "ready",
+      created_at_ms: index + 1,
+    }));
+    const open = vi.spyOn(store.resource_workspace, "openAttachment");
     store.projection.applySessionSnapshot({
       observed_sequence: 0,
       value: {
         session: { session_id: "session-1" },
         active_run: null,
-        attachments: [{
-          attachment_id: "attachment-1",
-          session_id: "session-1",
-          original_name: "参考图片.png",
-          size_bytes: 1024,
-          agent_readable_path: "/private/runtime/attachment-1.png",
-          state: "ready",
-          created_at_ms: 1,
-        }],
         conversation: {
           owner: { type: "main_session", session_id: "session-1" },
           generation: 1,
@@ -229,7 +257,8 @@ describe("ConversationView scroll anchoring", () => {
             type: "user",
             message_id: "message-with-attachment",
             text: "请查看这张图片",
-            attachment_ids: ["attachment-1"],
+            attachment_ids: attachments.map(({ attachment_id }) => attachment_id),
+            attachments,
             created_at_ms: 1,
           }],
           previous_cursor: null,
@@ -240,9 +269,11 @@ describe("ConversationView scroll anchoring", () => {
 
     render(<RootStoreProvider store={store}><ConversationView /></RootStoreProvider>);
 
-    const attachment = screen.getByRole("button", { name: "参考图片.png" });
+    const attachment = screen.getByRole("button", { name: "预览图片 参考图片.png" });
     const message = screen.getByText("请查看这张图片");
     expect(attachment.compareDocumentPosition(message) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    fireEvent.click(attachment);
+    expect(open).toHaveBeenCalledWith("session:session-1", attachments[0], attachments);
   });
 
   it("freezes context around the selected occurrence of repeated short text", async () => {
@@ -394,16 +425,6 @@ describe("ConversationView scroll anchoring", () => {
       value: {
         session: { session_id: "session-1" },
         active_run: null,
-        attachments: [{
-          attachment_id: "image-1",
-          session_id: "session-1",
-          original_name: "示意图.png",
-          media_type: "image/png",
-          size_bytes: 1024,
-          agent_readable_path: "/private/runtime/image-1.png",
-          state: "ready",
-          created_at_ms: 1,
-        }],
         conversation: {
           owner: { type: "main_session", session_id: "session-1" },
           generation: 1,
@@ -412,6 +433,16 @@ describe("ConversationView scroll anchoring", () => {
             message_id: "message-with-image",
             text: "解释图片",
             attachment_ids: ["image-1"],
+            attachments: [{
+              attachment_id: "image-1",
+              session_id: "session-1",
+              original_name: "示意图.png",
+              media_type: "image/png",
+              size_bytes: 1024,
+              agent_readable_path: "/private/runtime/image-1.png",
+              state: "ready",
+              created_at_ms: 1,
+            }],
             created_at_ms: 1,
           }],
           previous_cursor: null,

@@ -15,4 +15,7 @@ mod shell;
 pub use binary::{BinaryReadError, read_binary_file};
 pub use environment::EnvironmentPolicy;
 pub use filesystem::{LocalFileSystem, LocalFileSystemConfig};
-pub use shell::{LocalShell, LocalShellConfig, ShellLauncher};
+pub use shell::{
+    BACKGROUND_SHELL_DIRECTORY, LocalBackgroundShell, LocalShell, LocalShellCompletion,
+    LocalShellConfig, ShellLauncher, recover_background_shells,
+};

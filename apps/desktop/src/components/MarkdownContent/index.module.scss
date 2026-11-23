@@ -2,6 +2,53 @@
 
 .markdown {
   @include content.content;
+
+  // 恢复表格滚动层的横向滚动条，覆盖应用重置对滚动条的全局隐藏。
+  :global([data-streamdown="table-wrapper"]) > div:last-child {
+    scrollbar-width: auto;
+
+    &::-webkit-scrollbar { height: 8px; }
+
+    &::-webkit-scrollbar-track { background: var(--ez-surface-muted); }
+
+    &::-webkit-scrollbar-thumb {
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--ez-text-secondary) 46%, transparent);
+    }
+  }
+
+  :global([data-streamdown="table"]) {
+    th, td {
+      word-break: normal;
+      overflow-wrap: break-word;
+      vertical-align: top;
+    }
+
+    th { white-space: normal; }
+
+    .table_compact { width: 1%; }
+
+    .table_readable { min-width: 12em; }
+
+    // 列宽分配完成后，正文用足单元格的可用空间，固有尺寸仍受下方的行宽上限约束。
+    .table_label, .table_note, .table_prose { min-width: 100%; }
+
+    .table_label {
+      display: inline-block;
+      width: max-content;
+      max-width: 12em;
+      vertical-align: top;
+    }
+
+    .table_note, .table_prose {
+      display: block;
+      overflow-wrap: anywhere;
+    }
+
+    .table_note { max-width: 18em; }
+
+    .table_prose { max-width: 32em; }
+  }
 }
 
 .fallback {

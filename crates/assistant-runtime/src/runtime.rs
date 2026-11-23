@@ -2,10 +2,12 @@
 
 mod approval;
 mod attachment;
+mod background;
 mod cards;
 mod channel;
 mod compaction;
 mod connection_validation;
+mod context_page;
 pub(crate) mod controller;
 mod custom_agents;
 mod delegation;
@@ -29,6 +31,7 @@ mod recovery;
 mod resource;
 pub(crate) mod resource_reference;
 mod run_history;
+pub(crate) mod schedule;
 mod session_loading;
 mod session_management;
 mod shell;
@@ -43,12 +46,19 @@ pub(crate) mod tool_input_projection;
 mod work_plan;
 mod workspace;
 
+pub use schedule::{ScheduleScriptExecutor, ScheduleScriptFuture};
+
 pub use attachment::{StagedAttachmentUpload, StagedSessionAttachment};
+pub(crate) use background::tools::BackgroundManagementFacts;
+pub use background::{
+    BackgroundRunExit, BackgroundRunOrigin, BackgroundShellStart, StartBackgroundShell,
+};
 pub(crate) use channel::{
     MAX_SPEAK_SEGMENTS_PER_OUTPUT_CYCLE, MAX_SPEAK_TEXT_CHARS, SpeakAuthorizationFacts,
     resolve_output_cycle_deliveries,
 };
 pub use product::ResolvedToolFileResource;
+pub(crate) use schedule::management_tools::ScheduleManagementFacts;
 
 use std::{
     collections::{BTreeMap, btree_map::Entry},
@@ -120,6 +130,8 @@ pub struct AssistantRuntime {
     operation_gate: Arc<AsyncRwLock<()>>,
     model_binding_gate: Arc<AsyncRwLock<()>>,
     workspace_mutation_gate: AsyncMutex<()>,
+    schedule_mutation_gate: AsyncMutex<()>,
+    scheduler: schedule::Scheduler,
     device_mutation_gate: AsyncMutex<()>,
     config_registry: Arc<ConfigRegistry>,
     permission_coordinator: Arc<PermissionCoordinator>,
@@ -137,6 +149,7 @@ pub struct AssistantRuntime {
     event_sender: ObservationCoordinator,
     root_cancellation: CancellationToken,
     tasks: Arc<RuntimeTasks>,
+    background_runs: Arc<background::BackgroundRuns>,
     plugin: Arc<crate::plugin::PluginManager>,
     custom_agent_source: Option<Arc<dyn crate::CustomAgentDirectorySource>>,
     custom_agent_directory: AsyncMutex<custom_agents::DirectoryState>,
@@ -153,6 +166,8 @@ impl AssistantRuntime {
     /// 宿主回收前读取既有任务 owner；不把任务清单或登录身份复制到宿主。
     pub fn has_background_work(&self) -> bool {
         self.tasks.has_work()
+            || self.background_runs.needs_cleanup()
+            || self.scheduler.has_deadline()
     }
 
     /// 仅提示宿主重新读取工作事实，覆盖队列驱动、Run、child 及标题等受管任务。
@@ -307,6 +322,8 @@ impl AssistantRuntime {
             operation_gate: Arc::new(AsyncRwLock::new(())),
             model_binding_gate: Arc::new(AsyncRwLock::new(())),
             workspace_mutation_gate: AsyncMutex::new(()),
+            schedule_mutation_gate: AsyncMutex::new(()),
+            scheduler: schedule::Scheduler::new(),
             device_mutation_gate: AsyncMutex::new(()),
             config_registry: Arc::new(ConfigRegistry::new(
                 config_source,
@@ -327,9 +344,10 @@ impl AssistantRuntime {
                     .expect("static context window threshold is valid"),
             ),
             mcp_service: crate::mcp::McpService::unavailable(event_sender.clone()),
-            event_sender,
+            event_sender: event_sender.clone(),
             root_cancellation,
             tasks,
+            background_runs: Arc::new(background::BackgroundRuns::new(event_sender)),
             plugin,
             custom_agent_source: None,
             custom_agent_directory: AsyncMutex::new(custom_agents::DirectoryState::default()),
@@ -586,7 +604,7 @@ impl AssistantRuntime {
             })
             .await?;
         drop(_binding);
-        let _ = self.ensure_controller_session().await;
+        let _ = self.ensure_controller_session(false).await;
         Ok(ReloadConfigResult {
             status: self.configuration_status(&snapshot),
         })
@@ -737,11 +755,16 @@ impl AssistantRuntime {
         Ok(CreateSessionResult { session: summary })
     }
 
-    async fn ensure_controller_session(&self) -> RuntimeResult<Arc<SessionController>> {
+    /// 模型配置与计划汇报共用同一个主控创建边界。结果通知可在只装配脚本的用户域落账。
+    async fn ensure_controller_session(
+        &self,
+        allow_without_model: bool,
+    ) -> RuntimeResult<Arc<SessionController>> {
+        let _creation = self.workspace_mutation_gate.lock().await;
         if let Some(controller) = self.controller_sessions().await?.into_iter().next() {
             return Ok(controller);
         }
-        if self.config_registry.snapshot()?.active().is_none() {
+        if !allow_without_model && self.config_registry.snapshot()?.active().is_none() {
             return Err(RuntimeError::ControllerUnavailable);
         }
         let created = self

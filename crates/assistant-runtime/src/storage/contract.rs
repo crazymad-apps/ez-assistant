@@ -98,6 +98,63 @@ pub struct LoadedSession {
 ///
 /// 该端口以业务原子操作表达 Runtime 对持久化的需求，禁止退化为通用 SQL 或键值接口。
 pub trait RuntimeStore: Send + Sync {
+    fn next_schedule_maintenance(
+        &self,
+        after: Option<String>,
+    ) -> StoreFuture<'_, Option<(String, crate::ScheduleMaintenance)>>;
+    fn mark_schedule_deleting(&self, id: assistant_protocol::ScheduleId) -> StoreFuture<'_, bool>;
+    fn archive_schedule_result(
+        &self,
+        id: assistant_protocol::ScheduleExecutionId,
+    ) -> StoreFuture<'_, ()>;
+    fn commit_schedule_report(
+        &self,
+        commit: crate::ScheduleReportCommit,
+    ) -> StoreFuture<'_, Option<crate::AcceptedInput>>;
+    fn finish_schedule_result(
+        &self,
+        id: assistant_protocol::ScheduleExecutionId,
+    ) -> StoreFuture<'_, ()>;
+    fn resolve_schedule_file(
+        &self,
+        id: assistant_protocol::ScheduleExecutionId,
+        file_id: String,
+    ) -> StoreFuture<'_, Option<crate::ResolvedScheduleFile>>;
+    fn next_schedule_due(&self) -> StoreFuture<'_, Option<crate::StoredSchedule>>;
+    fn admit_schedule(
+        &self,
+        command: crate::ScheduleAdmission,
+    ) -> StoreFuture<'_, crate::ScheduleAdmitted>;
+    fn settle_schedule_execution(
+        &self,
+        settlement: crate::ScheduleSettlement,
+    ) -> StoreFuture<'_, ()>;
+    fn recover_schedule_executions(&self, now: i64, cleanup_verified: bool) -> StoreFuture<'_, ()>;
+    fn get_schedule_execution(
+        &self,
+        id: assistant_protocol::ScheduleExecutionId,
+    ) -> StoreFuture<'_, Option<assistant_protocol::ScheduleExecution>>;
+    fn list_schedule_executions(
+        &self,
+        id: assistant_protocol::ScheduleId,
+        offset: u32,
+        limit: u32,
+    ) -> StoreFuture<'_, Option<assistant_protocol::ListScheduleExecutionsResult>>;
+
+    /// 只查询本用户 Store 的定义。总数和分页来自同一读取，按计划标识稳定排序。
+    fn list_schedules(&self, offset: u32, limit: u32)
+    -> StoreFuture<'_, super::StoredSchedulePage>;
+    fn get_schedule(
+        &self,
+        id: assistant_protocol::ScheduleId,
+    ) -> StoreFuture<'_, Option<super::StoredSchedule>>;
+    /// 原子插入，已有身份时返回 false，避免覆盖。
+    fn insert_schedule(&self, schedule: super::StoredSchedule) -> StoreFuture<'_, bool>;
+    /// 原子替换整份定义，缺失时返回 false，禁止重建已删除计划。
+    fn replace_schedule(&self, schedule: super::StoredSchedule) -> StoreFuture<'_, bool>;
+    /// 删除空闲定义，缺失时返回 false。
+    fn delete_schedule(&self, id: assistant_protocol::ScheduleId) -> StoreFuture<'_, bool>;
+
     /// 核实当前 owner/Run 的 started 调用收据并原子发布；同一收据/调用只产生一张卡片。
     fn publish_message_card(
         &self,

@@ -16,7 +16,11 @@ import styles from "./index.module.scss";
 const appearance = new AppearanceStore({ load: () => ({ theme_id: "default_light", recovered_unknown: false }), save: () => undefined }, { apply: applyDocumentTheme, applyNative: async () => undefined });
 await appearance.initialize();
 const dispose_theme = reaction(() => appearance.theme_id, applyMonacoTheme);
-const text = '## 配色预览\n\n```typescript\nconst greeting: string = "hello";\nconsole.log(greeting);\n```\n\n```unknown-language\nplain text remains readable\n```\n\n```mermaid\ngraph LR\nA[读取配置] --> B[应用配色]\nB --> C[保留内容]\n```';
+const text = [
+  '## 配色预览\n\n```typescript\nconst greeting: string = "hello";\nconsole.log(greeting);\n```\n\n```unknown-language\nplain text remains readable\n```\n\n```mermaid\ngraph LR\nA[读取配置] --> B[应用配色]\nB --> C[保留内容]\n```',
+  "| 阶段 | 交付范围 |\n| --- | --- |\n| 准备 | 测试环境 |\n| 上线 | 预发环境（已验证）、验收环境（同步完成） |\n| 归档 | 测试报告 |",
+  "| 候选方案 | 注册条件 | 双向交互 | 通知策略 | 部署位置 | 认证要求 | 日志保留 | 最终结果 |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| 内测工作流 | 支持个人注册 | 支持会话转发 | 可主动通知 | 本地工作站 | 支持自定义证书 | 每日自动归档 | 通过回归测试 |",
+].join("\n\n");
 const code = Array.from({ length: 100 }, (_, i) => `const line${i} = "value ${i}";`).join("\n");
 const Fixture = observer(function Fixture() {
   const terminal_host = useRef<HTMLDivElement>(null);

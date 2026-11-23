@@ -177,6 +177,7 @@ pub struct RunToolBundle {
     tools: ToolSetSnapshot,
     infrastructure_policies: Vec<Arc<dyn ToolPolicy>>,
     default_rules: Option<Arc<dyn crate::PermissionRuleSource>>,
+    parent_shell: Option<ToolSetSnapshot>,
 }
 
 /// Host 编译单次 Run 工具所需的 Runtime 绑定能力。
@@ -185,6 +186,8 @@ pub struct RunToolFactoryRequest<'a> {
     pub environment: &'a SessionExecutionEnvironment,
     /// Runtime 在队首准备阶段可靠冻结，后续重建工具不能再次读取全局默认。
     pub shell: Option<&'a crate::FrozenShellEnvironment>,
+    /// 只有具备后台运行能力的普通主会话才提供此入口。子任务使用 Bundle 的基础 Shell。
+    pub background_shell: Option<Arc<dyn agent_tools::BackgroundShellLauncher>>,
     pub pinned_memory: Arc<dyn PinnedMemoryStore>,
     pub conversation_recall: Arc<dyn MemoryRecall>,
     pub conversation_recall_reader: Arc<dyn RecallReferenceReader>,
@@ -201,7 +204,18 @@ impl RunToolBundle {
             artifact_files: None,
             infrastructure_policies,
             default_rules: None,
+            parent_shell: None,
         }
+    }
+
+    /// 单独提供绑定当前主 Run 的 Shell 工具，基础工具集仍可供子任务复用。
+    pub fn with_parent_shell(mut self, shell: ToolSetSnapshot) -> Self {
+        self.parent_shell = Some(shell);
+        self
+    }
+
+    pub(crate) fn parent_shell(&self) -> Option<ToolSetSnapshot> {
+        self.parent_shell.clone()
     }
 
     /// 注入当前 Session 冻结根的交付文件检查能力，供父 Agent 声明工具使用。
@@ -271,6 +285,14 @@ impl RunToolFactoryError {
 
 /// 根据 Session 创建时冻结的目录事实编译单次 Run 工具。
 pub trait RunToolFactory: Send + Sync {
+    /// 为当前用户域及冻结解释器构造后台 Shell 端口。
+    fn background_shell(
+        &self,
+        _shell: Option<&crate::FrozenShellEnvironment>,
+    ) -> Option<Arc<dyn agent_tools::BackgroundShell>> {
+        None
+    }
+
     /// 宿主固定解释器目录；不提供真实 Shell 的验证宿主默认返回空目录。
     /// 具体实现若访问文件或注册表，调用方必须在阻塞任务边界执行。
     fn shell_catalog(&self) -> Vec<assistant_protocol::ShellCatalogEntry> {

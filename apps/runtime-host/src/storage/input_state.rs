@@ -1604,6 +1604,16 @@ pub(super) fn apply_input_acceptance(
                 return Err(conflict("controller delivery is not currently accepted"));
             }
         }
+        Some(CrossSessionInputBinding::ScheduleReport { execution_id }) => {
+            let message = assistant_protocol::MessageId::new(input.message.id.as_str())
+                .map_err(|_| invalid_data("schedule report message identity is invalid"))?;
+            super::schedule::delivery::apply_schedule_report(
+                transaction,
+                execution_id,
+                &input.session_id,
+                &message,
+            )?;
+        }
         Some(CrossSessionInputBinding::ProxyReport { .. }) => {
             // 报告必须和来源 Run 结算共用事务，不能从普通输入入口独立插入。
             return Err(invalid_data(

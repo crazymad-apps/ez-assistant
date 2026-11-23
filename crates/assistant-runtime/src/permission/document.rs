@@ -294,6 +294,7 @@ pub enum CommandMatch {
 pub enum PermissionProcessMode {
     Managed,
     Detached,
+    Background,
 }
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]

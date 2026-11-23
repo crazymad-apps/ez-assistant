@@ -4931,6 +4931,8 @@ fn known_unversioned_storage_migrates_without_losing_existing_business_data() {
              DROP TABLE providers;
              DROP TABLE conversation_usage_snapshots;
              DROP TABLE message_cards;
+             DROP TABLE schedule_deliveries;             DROP TABLE schedule_executions;
+             DROP TABLE schedules;
 DROP INDEX workspaces_sort_order;
          DROP INDEX session_resources_workspace_order;
          DROP INDEX sessions_pin_order;
@@ -9293,6 +9295,7 @@ fn session_materialization_is_atomic_and_response_loss_retry_is_idempotent() {
             ],
         };
         NewStoredSessionMaterialization {
+            schedule_execution_id: None,
             session,
             attachments: vec![NewAttachmentUpload {
                 attachment_id,

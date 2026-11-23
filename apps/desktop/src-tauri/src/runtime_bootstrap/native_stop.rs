@@ -1,4 +1,4 @@
-//! 本机停止只依赖实际锁占用与原生身份；不调用 Host HTTP，也不读取业务数据。
+//! 本机停止由实际锁占用与原生身份确定目标；正常退出经该实例的认证关闭入口。
 
 use super::{RuntimeBootstrapError, RuntimeBootstrapErrorCode, RuntimeDiscovery};
 use std::{
@@ -94,8 +94,16 @@ pub(super) fn stop(
         }) {
             return Err(super::instance_changed());
         }
-        // 不要求旧磁盘摘要成立。平台层固定创建时间／句柄，并在结束前重验锁归属。
-        process.terminate(home, &lock).map_err(failed)?;
+        // 发现记录通过锁、进程及创建时间核对后，才把凭据交给固定端点。
+        let method = current
+            .as_ref()
+            .map(request_graceful_stop)
+            .transpose()?
+            .unwrap_or(StopMethod::BeforeDiscovery);
+        if method != StopMethod::Graceful {
+            // 启动中或端点不可达时才走兜底。平台层固定创建时间／句柄并重验锁归属。
+            process.terminate(home, &lock).map_err(failed)?;
+        }
         loop {
             let next = optional_discovery(home)?;
             if next.as_ref().is_some_and(|discovery| {
@@ -116,12 +124,21 @@ pub(super) fn stop(
                     return Err(super::instance_changed());
                 }
                 if available(&fresh)? {
+                    if method == StopMethod::Unconfirmed {
+                        return Err(cleanup_unconfirmed());
+                    }
                     return Ok(current.or(original).map(|discovery| discovery.instance_id));
                 }
                 // 进程对象已退出不表示所有内核文件清理已完成，继续在同一预算内等锁释放。
             }
             if Instant::now() >= deadline {
-                return Err(failed(io::Error::new(io::ErrorKind::TimedOut, "exit wait")));
+                return Err(
+                    if matches!(method, StopMethod::Graceful | StopMethod::Unconfirmed) {
+                        cleanup_unconfirmed()
+                    } else {
+                        failed(io::Error::new(io::ErrorKind::TimedOut, "exit wait"))
+                    },
+                );
             }
             std::thread::sleep(super::POLL_INTERVAL);
         }
@@ -131,6 +148,87 @@ pub(super) fn stop(
         let _ = (deadline, executable);
         Err(unverified())
     }
+}
+
+#[cfg(any(target_os = "macos", windows))]
+#[derive(PartialEq, Eq)]
+enum StopMethod {
+    Graceful,
+    BeforeDiscovery,
+    Legacy,
+    Unconfirmed,
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn request_graceful_stop(
+    discovery: &RuntimeDiscovery,
+) -> Result<StopMethod, RuntimeBootstrapError> {
+    use assistant_protocol::{
+        RuntimeCommand, RuntimeCommandResult, RuntimeLifecycle, ShutdownRuntimeRequest,
+    };
+
+    // 原生停止在阻塞 worker 或安装交接入口执行；短命 I/O runtime 不拥有调用方的生命周期门禁。
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(failed)?;
+    runtime.block_on(async {
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(super::CONNECT_TIMEOUT)
+            .build()
+            .map_err(|_| cleanup_unconfirmed())?;
+        let response = match super::post_runtime_command(
+            &http,
+            &discovery.address,
+            &discovery.access_token,
+            "desktop-shutdown",
+            RuntimeCommand::ShutdownRuntime(ShutdownRuntimeRequest::default()),
+            std::time::Duration::from_secs(18),
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(error) if error.is_connect() || error.is_timeout() => {
+                return Ok(StopMethod::Unconfirmed);
+            }
+            Err(_) => return Err(cleanup_unconfirmed()),
+        };
+        if response.status() == reqwest::StatusCode::CONFLICT {
+            // 旧 Host 的不兼容响应发生在业务准入之前，可以按原生身份关闭。
+            let rejected: serde_json::Value =
+                response.json().await.map_err(|_| cleanup_unconfirmed())?;
+            let previous = rejected
+                .pointer("/error/host/version")
+                .and_then(|version| version.as_str())
+                .and_then(assistant_protocol::parse_software_version);
+            return if previous.is_some_and(|version| version < [0, 33, 2]) {
+                Ok(StopMethod::Legacy)
+            } else {
+                Err(cleanup_unconfirmed())
+            };
+        }
+        match super::read_runtime_command_result(response).await {
+            Ok(RuntimeCommandResult::ShutdownRuntime(result))
+                if matches!(
+                    result.lifecycle,
+                    RuntimeLifecycle::Stopped | RuntimeLifecycle::ShuttingDown
+                ) =>
+            {
+                Ok(StopMethod::Graceful)
+            }
+            _ => Err(cleanup_unconfirmed()),
+        }
+    })
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn cleanup_unconfirmed() -> RuntimeBootstrapError {
+    super::bootstrap_error(
+        RuntimeBootstrapErrorCode::RuntimeStopFailed,
+        "未能确认 Runtime 已回收后台进程，请检查本机服务后重试。",
+    )
 }
 
 fn optional_discovery(home: &Path) -> Result<Option<RuntimeDiscovery>, RuntimeBootstrapError> {

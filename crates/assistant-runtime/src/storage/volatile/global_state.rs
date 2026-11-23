@@ -19,7 +19,8 @@ impl VolatileRuntimeStore {
                         session.environment.workspace_id.as_ref() == Some(workspace_id)
                     }
                 };
-                if !included {
+                if !included || crate::runtime::schedule::is_scheduled_session(&session.session_id)
+                {
                     continue;
                 }
                 let lifecycle = match session.lifecycle {
@@ -722,6 +723,9 @@ fn session_rows(
             continue;
         }
         if query.role.is_some_and(|role| role != row.role) {
+            continue;
+        }
+        if crate::runtime::schedule::is_scheduled_session(&row.session_id) {
             continue;
         }
         if !match query.filter {

@@ -231,7 +231,10 @@ fn recover_registries_with_identities(
             }
             (
                 crate::InputOrigin::Runtime,
-                Some(crate::CrossSessionInputBinding::ProxyReport { .. }),
+                Some(
+                    crate::CrossSessionInputBinding::ProxyReport { .. }
+                    | crate::CrossSessionInputBinding::ScheduleReport { .. },
+                ),
             ) => {
                 input.goal_binding.is_none()
                     && input.channel_source.is_none()

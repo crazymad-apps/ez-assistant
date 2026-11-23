@@ -10,6 +10,9 @@ use ts_rs::TS;
 pub enum RuntimeErrorCode {
     /// 命令字段缺失、格式错误或业务输入无效。
     InvalidRequest,
+    ScheduleNotFound,
+    ScheduleExecutionNotFound,
+    ScheduleBusy,
     /// 指定 Session 不存在。
     SessionNotFound,
     /// 指定 Session 已有活动 Run 或未完成结算。
@@ -29,6 +32,9 @@ pub enum RuntimeErrorCode {
     SessionRoleRestricted,
     /// 指定 Run 不存在。
     RunNotFound,
+    BackgroundRunNotFound,
+    BackgroundOutputUnavailable,
+    BackgroundCleanupUnconfirmed,
     /// 指定子任务不存在于目标 Session。
     ChildTaskNotFound,
     /// 指定持久化输入不存在。

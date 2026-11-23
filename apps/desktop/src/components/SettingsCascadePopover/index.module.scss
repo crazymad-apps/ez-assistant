@@ -1,7 +1,14 @@
+@use "../../styles/fields";
+
 .trigger { display: inline-flex; min-width: 0; align-items: center; justify-content: center; gap: 6px; }
 .trigger[aria-disabled="true"] { cursor: default; opacity: 0.5; }
 .trigger > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .trigger_wrapper { position: relative; display: inline-flex; min-width: 0; max-width: 100%; }
+.trigger_wrapper[data-variant="field"] { width: 100%; }
+.trigger[data-variant="field"] {
+  @include fields.select-trigger;
+  @include fields.select-field-width;
+}
 .clear_space { width: 14px; height: 14px; flex-shrink: 0; }
 .trigger_wrapper > .clear_trigger {
   position: absolute; inset-block: 2px; right: 6px; width: 24px; height: auto; min-height: 0; min-width: 0;
@@ -13,6 +20,10 @@
     .clear_arrow { opacity: 0; }
     .clear_icon { opacity: 1; }
   }
+}
+.trigger_wrapper[data-variant="field"] > .clear_trigger {
+  right: 4px;
+  color: var(--ez-text-muted);
 }
 @media (hover: none) {
   .clear_trigger:not(:disabled) { .clear_arrow { opacity: 0; } .clear_icon { opacity: 1; } }

@@ -16,6 +16,18 @@ use crate::{
 /// Runtime 操作失败。
 #[derive(Debug, Error)]
 pub enum RuntimeError {
+    #[error("schedule was not found")]
+    ScheduleNotFound,
+    #[error("schedule execution was not found")]
+    ScheduleExecutionNotFound,
+    #[error("a schedule execution still occupies this plan")]
+    ScheduleBusy,
+    #[error("background run does not exist or has been cleaned up")]
+    BackgroundRunNotFound,
+    #[error("background output is unavailable")]
+    BackgroundOutputUnavailable,
+    #[error("background process cleanup could not be confirmed")]
+    BackgroundCleanupUnconfirmed,
     #[error("sidebar order changed; reload the list")]
     SidebarOrderConflict,
 
@@ -284,6 +296,17 @@ impl RuntimeError {
             Self::InvalidRequest { reason } => {
                 RuntimeErrorInfo::new(RuntimeErrorCode::InvalidRequest, *reason)
             }
+            Self::ScheduleExecutionNotFound => RuntimeErrorInfo::new(
+                RuntimeErrorCode::ScheduleExecutionNotFound,
+                "schedule execution was not found",
+            ),
+            Self::ScheduleBusy => RuntimeErrorInfo::new(
+                RuntimeErrorCode::ScheduleBusy,
+                "a schedule execution still occupies this plan",
+            ),
+            Self::ScheduleNotFound => {
+                RuntimeErrorInfo::new(RuntimeErrorCode::ScheduleNotFound, "schedule was not found")
+            }
             Self::RuntimeNotRunning { lifecycle } => RuntimeErrorInfo::new(
                 RuntimeErrorCode::RuntimeShuttingDown,
                 match lifecycle {
@@ -323,6 +346,18 @@ impl RuntimeError {
             Self::SessionRoleRestricted { .. } => RuntimeErrorInfo::new(
                 RuntimeErrorCode::SessionRoleRestricted,
                 "session role does not allow this operation",
+            ),
+            Self::BackgroundRunNotFound => RuntimeErrorInfo::new(
+                RuntimeErrorCode::BackgroundRunNotFound,
+                "background run does not exist or has been cleaned up",
+            ),
+            Self::BackgroundOutputUnavailable => RuntimeErrorInfo::new(
+                RuntimeErrorCode::BackgroundOutputUnavailable,
+                "background output is unavailable",
+            ),
+            Self::BackgroundCleanupUnconfirmed => RuntimeErrorInfo::new(
+                RuntimeErrorCode::BackgroundCleanupUnconfirmed,
+                "background process cleanup could not be confirmed",
             ),
             Self::RunNotFound { .. } => {
                 RuntimeErrorInfo::new(RuntimeErrorCode::RunNotFound, "run was not found")

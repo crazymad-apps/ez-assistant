@@ -111,6 +111,15 @@ pub enum ChildTaskEvent {
 #[ts(export_to = "assistant-protocol.ts")]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeEvent {
+    BackgroundRunChanged {
+        session_id: SessionId,
+        background_id: String,
+    },
+    BackgroundRunEnded {
+        session_id: SessionId,
+        run_id: RunId,
+        result: crate::StopBackgroundRunResult,
+    },
     MessageCardsChanged {
         owner: ConversationOwner,
     },

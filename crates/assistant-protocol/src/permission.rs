@@ -130,4 +130,5 @@ pub enum PermissionCommandMatch {
 pub enum PermissionProcessModeDefinition {
     Managed,
     Detached,
+    Background,
 }

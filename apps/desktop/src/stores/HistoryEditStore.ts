@@ -189,7 +189,7 @@ export class HistoryEditStore {
       const view = this.#view();
       if (!view) return;
       const basis = snapshot.value;
-      const by_id = new Map(view.attachments.map(item => [item.attachment_id, item]));
+      const by_id = new Map((basis.message.attachments ?? []).map(item => [item.attachment_id, item]));
       const attachments = basis.message.attachment_ids.map((id): ComposerAttachment => {
         const item = by_id.get(id);
         const error = item?.state === "ready" ? null : "原附件不可用，请移除或替换。";

@@ -463,7 +463,8 @@ function ToolInputValue({ input, is_live }: Readonly<{ input: ToolInputSnapshot;
         <code className={styles.command}>{input.command || "（空命令）"}</code>
         <dl className={styles.facts}>
           <div><dt>工作目录</dt><dd>{input.working_directory || "未记录"}</dd></div>
-          <div><dt>超时</dt><dd>{input.timeout_ms ? `${input.timeout_ms} ms` : "未设置"}</dd></div>
+          <div><dt>{input.process_mode === "background" ? "总时限" : "超时"}</dt><dd>{input.timeout_ms ? `${input.timeout_ms} ms` : "未设置"}</dd></div>
+          {input.wait_ms != null && <div><dt>首次等待</dt><dd>{input.wait_ms} ms</dd></div>}
           <div><dt>进程模式</dt><dd>{formatShellProcessMode(input.process_mode)}</dd></div>
         </dl>
       </>;
@@ -497,6 +498,7 @@ function ToolInputValue({ input, is_live }: Readonly<{ input: ToolInputSnapshot;
 }
 
 function formatShellProcessMode(mode: string | null): string {
+  if (mode === "background") return "Runtime 后台运行";
   if (mode === "managed") return "工具托管（managed）";
   if (mode === "detached") return "完成后交接（detached；交接前超时或取消仍会清理）";
   return mode || "默认（managed）";

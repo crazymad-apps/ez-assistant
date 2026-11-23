@@ -1,5 +1,56 @@
 use super::*;
 
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "需要显式 EZ_ASSISTANT_TEST_HOST_BINARY，只使用新建隔离 Home"]
+async fn isolated_desktop_stop_uses_authenticated_host_shutdown() {
+    use super::super::{RuntimeBootstrapCoordinator, instance_lock_released};
+    use std::{os::unix::fs::PermissionsExt as _, process::Stdio, time::Duration};
+
+    let binary = PathBuf::from(std::env::var_os("EZ_ASSISTANT_TEST_HOST_BINARY").unwrap())
+        .canonicalize()
+        .unwrap();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../.runtime-test")
+        .canonicalize()
+        .unwrap();
+    let home = tempfile::Builder::new()
+        .prefix("f01-m0-graceful-")
+        .tempdir_in(root)
+        .unwrap();
+    let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    let config = home.path().join("host.toml");
+    fs::write(&config, format!(
+        "version = \"0.33.0\"\nmode = \"enterprise\"\n[enterprise]\ncenter_url = \"http://127.0.0.1:9\"\n[host_access]\nremote_enabled = false\nport = {port}\n"
+    )).unwrap();
+    fs::set_permissions(config, fs::Permissions::from_mode(0o600)).unwrap();
+    drop(reservation);
+    let mut child = tokio::process::Command::new(&binary)
+        .args(["serve", "--runtime-home"])
+        .arg(home.path())
+        .env("HOME", home.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let coordinator = RuntimeBootstrapCoordinator::new(home.path().to_owned(), binary).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while coordinator.desktop_update_target().await.is_err() {
+            assert!(child.try_wait().unwrap().is_none());
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+    coordinator.shutdown().await.unwrap();
+    assert!(child.wait().await.unwrap().success());
+    assert!(instance_lock_released(home.path()).unwrap());
+    assert!(!home.path().join("run/runtime.json").exists());
+}
+
 #[tokio::test]
 #[ignore = "需要 EZ_ASSISTANT_TEST_HOST_BINARY；Windows 另需新建并核实的 EARLY_HOME"]
 async fn isolated_native_stop_before_discovery_and_http() {
@@ -172,7 +223,7 @@ fn replaced_lock_file_is_not_the_captured_resource() {
 /// 不连接企业中心、不登录或初始化用户库；只创建本轮独占的临时 Home。
 #[tokio::test]
 #[ignore = "需要 EZ_ASSISTANT_TEST_HOST_BINARY；真实启动中 Host 的原生停止／当前来源重启"]
-async fn isolated_native_restart_uses_current_bundle_without_old_http_or_digest() {
+async fn isolated_native_restart_retries_current_bundle_after_unconfirmed_cleanup() {
     use super::super::{RuntimeBootstrapCoordinator, instance_lock_released, read_discovery};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
@@ -214,7 +265,7 @@ async fn isolated_native_restart_uses_current_bundle_without_old_http_or_digest(
     let port = reservation.local_addr().unwrap().port();
     drop(reservation);
     let configuration = format!(
-        "version = \"0.27.0\"\nmode = \"enterprise\"\n[enterprise]\ncenter_url = \"http://127.0.0.1:9\"\n[host_access]\nremote_enabled = false\nport = {port}\n"
+        "version = \"0.33.0\"\nmode = \"enterprise\"\n[enterprise]\ncenter_url = \"http://127.0.0.1:9\"\n[host_access]\nremote_enabled = false\nport = {port}\n"
     );
     fs::write(home.join("host.toml"), &configuration).unwrap();
     #[cfg(unix)]
@@ -268,20 +319,36 @@ async fn isolated_native_restart_uses_current_bundle_without_old_http_or_digest(
             let unavailable = RuntimeBootstrapCoordinator::new(home.clone(),home.join("missing-bundle")).unwrap();
             assert!(matches!(unavailable.restart().await.unwrap_err().code,RuntimeBootstrapErrorCode::RuntimeExecutableUnavailable));
             assert!(!instance_lock_released(&home).unwrap());
-            let started = worker.restart().await.unwrap();
-            let running = read_discovery(&home).unwrap();
-            assert_eq!(running.executable_path,Some(current.clone()));
-            assert_eq!(running.executable_sha256,Some(crate::runtime_source::digest(&current).unwrap()));
-            assert_eq!(started.instance_id,running.instance_id);
-            assert_ne!(running.pid,pid);
-            assert_eq!(fs::read_to_string(home.join("host.toml")).unwrap(), configuration);
+            // 旧端点不可达时已停止该实例，但回收未经确认，本次不能继续启动新 Host。
+            assert!(matches!(worker.restart().await.unwrap_err().code,RuntimeBootstrapErrorCode::RuntimeStopFailed));
+            assert!(instance_lock_released(&home).unwrap());
+            (home, current, configuration)
         }).await;
-    let stopped = coordinator.shutdown().await;
     // 原始 serve 子进程一直由测试持有；即使断言失败也用 Child 的独占所有权回收。
     if child.try_wait().unwrap().is_none() {
         child.kill().await.unwrap();
     }
     child.wait().await.unwrap();
+    let (home, current, configuration) = result.unwrap();
+    let worker = coordinator.clone();
+    let result = tokio::spawn(async move {
+        // 已核实旧实例退出后，显式重试使用当前安装的 Host。
+        let started = worker.restart().await.unwrap();
+        let running = read_discovery(&home).unwrap();
+        assert_eq!(running.executable_path, Some(current.clone()));
+        assert_eq!(
+            running.executable_sha256,
+            Some(crate::runtime_source::digest(&current).unwrap())
+        );
+        assert_eq!(started.instance_id, running.instance_id);
+        assert_ne!(running.pid, pid);
+        assert_eq!(
+            fs::read_to_string(home.join("host.toml")).unwrap(),
+            configuration
+        );
+    })
+    .await;
+    let stopped = coordinator.shutdown().await;
     if let Err(error) = stopped {
         let path = directory.keep();
         panic!("fixture retained at {}: {error}", path.display());

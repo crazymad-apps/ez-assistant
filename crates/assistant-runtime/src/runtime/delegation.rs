@@ -32,43 +32,50 @@ impl AssistantRuntime {
         &self,
         request: ListChildTasksRequest,
     ) -> RuntimeResult<ListChildTasksResult> {
-        let tasks = self.product_child_tasks(&request.session_id).await?;
-        // 继承父 Run 不属于可控制的 RunSnapshot；其文件目录仍证明只读查询归属。
-        if !tasks
-            .iter()
-            .any(|task| task.parent_run_id == request.parent_run_id)
-        {
-            let history = self
-                .store
-                .load_conversation_history(assistant_protocol::ConversationOwner::MainSession {
-                    session_id: request.session_id.clone(),
-                })
-                .await
-                .map_err(|source| RuntimeError::from_store("load child parent history", source))?;
-            if !history
-                .facts
-                .runs
-                .iter()
-                .any(|run| run.run_id == request.parent_run_id)
-            {
-                self.get_run(GetRunRequest {
-                    session_id: request.session_id.clone(),
-                    run_id: request.parent_run_id.clone(),
-                })
-                .await?;
+        let window = super::context_page::PageWindow::new(request.page)?;
+        let mut tasks = self.product_child_tasks(&request.session_id).await?;
+        let all_parents = request.parent_run_id.is_none();
+        if let Some(parent) = request.parent_run_id {
+            // 继承父 Run 不属于执行登记，但其文件目录证明只读归属。
+            if !tasks.iter().any(|task| task.parent_run_id == parent) {
+                let history = self
+                    .store
+                    .load_conversation_history(assistant_protocol::ConversationOwner::MainSession {
+                        session_id: request.session_id.clone(),
+                    })
+                    .await
+                    .map_err(|source| {
+                        RuntimeError::from_store("load child parent history", source)
+                    })?;
+                if !history.facts.runs.iter().any(|run| run.run_id == parent) {
+                    self.get_run(GetRunRequest {
+                        session_id: request.session_id.clone(),
+                        run_id: parent.clone(),
+                    })
+                    .await?;
+                }
             }
+            tasks.retain(|task| task.parent_run_id == parent);
+        } else {
+            // 当前会话列表将待处理及执行中的任务放在历史项之前，组内沿原顺序。
+            tasks.sort_by_key(|task| task.status.is_some_and(|status| status.is_terminal()));
         }
-        let tasks = tasks
-            .into_iter()
-            .filter(|task| task.parent_run_id == request.parent_run_id);
-        let mut snapshots = Vec::new();
-        for task in tasks {
+        let (tasks, page) = window.take(tasks.into_iter());
+        let mut snapshots = Vec::with_capacity(tasks.len());
+        for mut task in tasks {
+            // 右栏不需要回复正文；按父 Run 的查询继续提供原有详情。
+            if all_parents {
+                task.final_message_id = None;
+            }
             snapshots.push(
                 self.child_history_snapshot(&request.session_id, task)
                     .await?,
             );
         }
-        Ok(ListChildTasksResult { tasks: snapshots })
+        Ok(ListChildTasksResult {
+            tasks: snapshots,
+            page,
+        })
     }
 
     pub async fn get_child_task(

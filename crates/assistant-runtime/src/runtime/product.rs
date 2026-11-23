@@ -15,29 +15,29 @@ use agent_types::{
 };
 use assistant_protocol::{
     ActiveSkillSnapshot, ApplicationCapabilities, ApplicationSnapshot, ApprovalQueueSnapshot,
-    AssistantMessageSnapshot, AssistantSegment, AttachmentId, ChildTaskTreeItemSnapshot,
-    ChildTaskUsageSnapshot, ChildTaskViewSnapshot, ComposerCapabilitiesSnapshot,
-    ConversationFileReference, ConversationHistoryHit, ConversationHistoryMatchKind,
-    ConversationHistoryScope, ConversationInputSourceSnapshot, ConversationItem, ConversationOwner,
-    ConversationPage, GetApplicationSnapshotRequest, GetApplicationSnapshotResult,
-    GetChildTaskViewRequest, GetChildTaskViewResult, GetConversationPageAroundMessageRequest,
+    AssistantMessageSnapshot, AssistantSegment, ChildTaskTreeItemSnapshot, ChildTaskUsageSnapshot,
+    ChildTaskViewSnapshot, ComposerCapabilitiesSnapshot, ConversationFileReference,
+    ConversationHistoryHit, ConversationHistoryMatchKind, ConversationHistoryScope,
+    ConversationInputSourceSnapshot, ConversationItem, ConversationOwner, ConversationPage,
+    GetApplicationSnapshotRequest, GetApplicationSnapshotResult, GetChildTaskViewRequest,
+    GetChildTaskViewResult, GetConversationPageAroundMessageRequest,
     GetConversationPageAroundMessageResult, GetConversationPageAroundRunRequest,
     GetConversationPageAroundRunResult, GetConversationRecallWindowRequest,
     GetConversationRecallWindowResult, GetSessionViewRequest, GetSessionViewResult,
     GetToolDetailRequest, GetToolDetailResult, GoalBudgetSnapshot, GoalPauseReasonSnapshot,
-    GoalSnapshot, GoalStateSnapshot, ImageHandlingMode, ListAttachmentsRequest,
-    ListConversationPageRequest, ListConversationPageResult, McpToolIdentity, MessageId,
-    ObservedSnapshot, PartId, QueueExecutionState, QueueSnapshot, QueuedInputSnapshot,
-    QueuedSessionCommandSnapshot, QueuedSessionItemSnapshot, ReasoningEffortKey,
-    ReasoningEffortOptionSnapshot, RecallNavigationTarget, RecallToolDetailFailure,
-    RecallToolDetailItem, RecallToolDetailSnapshot, ResourceRefId, RunId,
-    SearchConversationHistoryRequest, SearchConversationHistoryResult, SessionId,
-    SessionUsageSnapshot, SessionViewSnapshot, SkillActivationTagSnapshot,
-    SkillActivationTriggerSnapshot, SkillDiagnosticSeveritySnapshot, SkillDiagnosticSnapshot,
-    SkillHealthSnapshot, SkillManagementSnapshot, SkillSourceSnapshot, SkillSummarySnapshot,
-    TodoItemStatusSnapshot, TokenUsageSnapshot, ToolActivityStatus, ToolCallId, ToolDetailSnapshot,
-    ToolEventSnapshot, ToolFileReference, ToolFileResourceOrigin, ToolFileResourceState,
-    ToolInputSnapshot, UsageTotals, UserMessageSnapshot, WorkPlanItemSnapshot, WorkPlanSnapshot,
+    GoalSnapshot, GoalStateSnapshot, ImageHandlingMode, ListConversationPageRequest,
+    ListConversationPageResult, McpToolIdentity, MessageId, ObservedSnapshot, PartId,
+    QueueExecutionState, QueueSnapshot, QueuedInputSnapshot, QueuedSessionCommandSnapshot,
+    QueuedSessionItemSnapshot, ReasoningEffortKey, ReasoningEffortOptionSnapshot,
+    RecallNavigationTarget, RecallToolDetailFailure, RecallToolDetailItem,
+    RecallToolDetailSnapshot, ResourceRefId, RunId, SearchConversationHistoryRequest,
+    SearchConversationHistoryResult, SessionId, SessionUsageSnapshot, SessionViewSnapshot,
+    SkillActivationTagSnapshot, SkillActivationTriggerSnapshot, SkillDiagnosticSeveritySnapshot,
+    SkillDiagnosticSnapshot, SkillHealthSnapshot, SkillManagementSnapshot, SkillSourceSnapshot,
+    SkillSummarySnapshot, TodoItemStatusSnapshot, TokenUsageSnapshot, ToolActivityStatus,
+    ToolCallId, ToolDetailSnapshot, ToolEventSnapshot, ToolFileReference, ToolFileResourceOrigin,
+    ToolFileResourceState, ToolInputSnapshot, UsageTotals, UserMessageSnapshot,
+    WorkPlanItemSnapshot, WorkPlanSnapshot,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
@@ -75,7 +75,7 @@ pub(super) struct ProjectionContext {
     skill_by_message: HashMap<String, SkillActivationTagSnapshot>,
     mcp_selection_by_message: HashMap<String, assistant_protocol::McpSelectionTagSnapshot>,
     control_result_by_message: HashMap<String, crate::StoredSessionCommandResult>,
-    attachment_by_path: HashMap<String, AttachmentId>,
+    attachment_by_path: HashMap<String, assistant_protocol::AttachmentSummary>,
     feedback_by_message: HashMap<String, assistant_protocol::MessageFeedback>,
     mcp_identities: HashMap<(String, String), McpToolIdentity>,
     can_fork: bool,
@@ -339,19 +339,11 @@ impl AssistantRuntime {
             let mut runs =
                 self.project_product_run_snapshots(&session, &run_history, &conversation_snapshot)?;
             let queue = queue_snapshot(&session, &device_names)?;
-            let mut attachments = self
-                .list_attachments(ListAttachmentsRequest {
-                    session_id: request.session_id.clone(),
-                })
-                .await?
-                .attachments;
+            let attachments = self.session_attachment_summaries(&request.session_id)?;
             let generation = session.lock_state()?.body_generation;
             let projection = self
                 .projection_context_with_devices(&session, &attachments, device_names)
                 .await?;
-            for attachment in &mut attachments {
-                attachment.agent_readable_path.clear();
-            }
             let owner = ConversationOwner::MainSession {
                 session_id: request.session_id.clone(),
             };
@@ -368,7 +360,7 @@ impl AssistantRuntime {
                 Err(RuntimeError::SnapshotStale) => continue,
                 Err(error) => return Err(error),
             };
-            let conversation = page_from_window(
+            let mut conversation = page_from_window(
                 owner,
                 &window,
                 project_conversation_with_history(
@@ -418,20 +410,25 @@ impl AssistantRuntime {
                 "",
                 &conversation_snapshot,
             )?;
-            let (file_references, artifacts) = session
+            let file_references = session
                 .lock_state()?
                 .journal
                 .as_ref()
                 .ok_or(RuntimeError::InternalStateUnavailable {
                     component: "session display metadata",
                 })?
-                .display_metadata();
+                .file_references();
             let (work_plan, goal, active_skills, agent_shell_kind) = {
                 let state = session.lock_state()?;
                 (
                     state.work_plan.as_ref().map(project_work_plan),
                     state.goal.as_ref().map(project_goal).transpose()?,
-                    project_active_skills(&state)?,
+                    project_active_skills(&state)?
+                        .into_iter()
+                        .rev()
+                        .take(10)
+                        .rev()
+                        .collect(),
                     state.agent_shell_kind,
                 )
             };
@@ -440,14 +437,31 @@ impl AssistantRuntime {
                 .active_title_generation
                 .as_ref()
                 .map(|active| active.snapshot.clone());
+            let parent_runs = page_parent_runs(&conversation);
             let child_tasks = self.product_child_tasks(&request.session_id).await?;
-            let mut child_task_items = Vec::with_capacity(child_tasks.len());
+            let mut child_task_items = Vec::new();
             for task in child_tasks {
+                let active = !task.inherited
+                    && (!task.status.is_some_and(|status| status.is_terminal())
+                        || approvals.items.iter().any(|approval| {
+                            approval.child_task_id.as_ref() == Some(&task.child_task_id)
+                        }));
+                let in_page = parent_runs.contains(&task.parent_run_id);
+                if !active && !in_page {
+                    continue;
+                }
                 match self
                     .child_task_tree_summary(&request.session_id, task, &approvals.items)
                     .await
                 {
-                    Ok(item) => child_task_items.push(item),
+                    Ok(item) => {
+                        if active {
+                            child_task_items.push(item.clone());
+                        }
+                        if in_page {
+                            conversation.child_tasks.push(item);
+                        }
+                    }
                     Err(RuntimeError::SnapshotStale) => continue 'snapshot,
                     Err(error) => return Err(error),
                 }
@@ -482,6 +496,14 @@ impl AssistantRuntime {
                     .as_ref()
                     .and_then(|id| runs.iter().find(|run| &run.run_id == id))
                     .cloned();
+                let latest_run_created_at_ms =
+                    runs.iter().filter_map(|run| run.created_at_ms).max();
+                let latest_run_id = runs.last().map(|run| run.run_id.clone());
+                runs.retain(|run| {
+                    Some(&run.run_id) == latest_run_id.as_ref()
+                        || (run.status == assistant_protocol::RunStatus::Accepted
+                            && summary.active_run_id.as_ref() != Some(&run.run_id))
+                });
                 return Ok(GetSessionViewResult {
                     snapshot: ObservedSnapshot {
                         observed_at_ms: super::now_ms().ok(),
@@ -498,10 +520,9 @@ impl AssistantRuntime {
                             active_run,
                             queue,
                             approvals,
-                            attachments,
                             file_references,
-                            artifacts,
                             runs,
+                            latest_run_created_at_ms,
                             usage,
                             child_tasks: child_task_items,
                             active_skills,
@@ -630,12 +651,7 @@ impl AssistantRuntime {
             let observation = self.event_sender.read_history();
             let (generation, projection) = match &request.owner {
                 ConversationOwner::MainSession { session_id } => {
-                    let attachments = self
-                        .list_attachments(ListAttachmentsRequest {
-                            session_id: session_id.clone(),
-                        })
-                        .await?
-                        .attachments;
+                    let attachments = self.session_attachment_summaries(session_id)?;
                     let generation = { session.lock_state()?.body_generation };
                     let projection = self.projection_context(&session, &attachments).await?;
                     (generation, projection)
@@ -684,7 +700,7 @@ impl AssistantRuntime {
                 Err(RuntimeError::SnapshotStale) if request.cursor.is_none() => continue,
                 Err(error) => return Err(error),
             };
-            let page = page_from_window(
+            let mut page = page_from_window(
                 request.owner.clone(),
                 &window,
                 project_conversation_with_history(
@@ -693,6 +709,11 @@ impl AssistantRuntime {
                     &projection,
                 )?,
             )?;
+            match self.attach_page_children(&mut page).await {
+                Ok(()) => {}
+                Err(RuntimeError::SnapshotStale) => continue,
+                Err(error) => return Err(error),
+            }
             if let ConversationOwner::ChildTask {
                 session_id,
                 child_task_id,
@@ -762,12 +783,7 @@ impl AssistantRuntime {
         let _mutation = session.mutation().await;
         for _ in 0..SNAPSHOT_ATTEMPTS {
             let observation = self.event_sender.read_history();
-            let attachments = self
-                .list_attachments(ListAttachmentsRequest {
-                    session_id: request.session_id.clone(),
-                })
-                .await?
-                .attachments;
+            let attachments = self.session_attachment_summaries(&request.session_id)?;
             let history = self
                 .store
                 .load_conversation_history(ConversationOwner::MainSession {
@@ -865,7 +881,7 @@ impl AssistantRuntime {
                 Err(RuntimeError::SnapshotStale) => continue,
                 Err(error) => return Err(error),
             };
-            let page = page_from_window(
+            let mut page = page_from_window(
                 owner,
                 &window,
                 project_conversation_with_history(
@@ -874,6 +890,11 @@ impl AssistantRuntime {
                     &self.projection_context(&session, &attachments).await?,
                 )?,
             )?;
+            match self.attach_page_children(&mut page).await {
+                Ok(()) => {}
+                Err(RuntimeError::SnapshotStale) => continue,
+                Err(error) => return Err(error),
+            }
             let Some((observed_sequence, ())) = observation.capture(|| Ok(()))? else {
                 continue;
             };
@@ -1069,7 +1090,7 @@ impl AssistantRuntime {
                     turn_limit,
                 )
                 .await?;
-            let page = page_from_window(
+            let mut page = page_from_window(
                 request.owner.clone(),
                 &window,
                 project_conversation_with_history(
@@ -1078,6 +1099,11 @@ impl AssistantRuntime {
                     &projection,
                 )?,
             )?;
+            match self.attach_page_children(&mut page).await {
+                Ok(()) => {}
+                Err(RuntimeError::SnapshotStale) => continue,
+                Err(error) => return Err(error),
+            }
             let Some((observed_sequence, ())) = observation.capture(|| Ok(()))? else {
                 continue;
             };
@@ -1193,14 +1219,14 @@ impl AssistantRuntime {
                 if paths.contains(current.as_str()) {
                     projection
                         .attachment_by_path
-                        .insert(current.clone(), attachment.attachment_id.clone());
+                        .insert(current.clone(), display_attachment(attachment));
                 }
                 if let Some(path) = self.store.historical_attachment_path(attachment)
                     && paths.contains(path.as_str())
                 {
                     projection
                         .attachment_by_path
-                        .insert(path, attachment.attachment_id.clone());
+                        .insert(path, display_attachment(attachment));
                 }
             }
         }
@@ -1218,12 +1244,7 @@ impl AssistantRuntime {
         match owner {
             ConversationOwner::MainSession { session_id } => {
                 let session = self.session(session_id).await?;
-                let attachments = self
-                    .list_attachments(ListAttachmentsRequest {
-                        session_id: session_id.clone(),
-                    })
-                    .await?
-                    .attachments;
+                let attachments = self.session_attachment_summaries(session_id)?;
                 Ok(self.projection_context(&session, &attachments).await?)
             }
             ConversationOwner::ChildTask { .. } => Ok(empty_child_projection()),
@@ -1677,7 +1698,7 @@ impl AssistantRuntime {
                 .flat_map(|attachment| {
                     std::iter::once(attachment.agent_readable_path.clone())
                         .chain(self.store.historical_attachment_path(attachment))
-                        .map(|path| (path, attachment.attachment_id.clone()))
+                        .map(|path| (path, display_attachment(attachment)))
                         .collect::<Vec<_>>()
                 })
                 .collect()
@@ -1999,7 +2020,7 @@ pub(super) fn project_skill_management(
     }
 }
 
-fn project_active_skills(
+pub(super) fn project_active_skills(
     state: &crate::session::SessionState,
 ) -> RuntimeResult<Vec<ActiveSkillSnapshot>> {
     let mut latest = std::collections::BTreeMap::new();
@@ -2532,7 +2553,7 @@ pub(super) fn project_conversation(
                     });
                     continue;
                 }
-                let attachment_ids = user
+                let attachments: Vec<_> = user
                     .parts
                     .iter()
                     .filter_map(|part| match part {
@@ -2606,12 +2627,14 @@ pub(super) fn project_conversation(
                     message_id: protocol_message_id(user.id.as_str())?,
                     input_id: context.input_by_message.get(user.id.as_str()).cloned(),
                     text: user_text(user),
-                    attachment_ids,
+                    attachment_ids: attachments
+                        .iter()
+                        .map(|attachment| attachment.attachment_id.clone())
+                        .collect(),
+                    attachments,
                     quotes,
-                    source: context
-                        .source_by_message
-                        .get(user.id.as_str())
-                        .cloned()
+                    source: super::schedule::report_source(user)
+                        .or_else(|| context.source_by_message.get(user.id.as_str()).cloned())
                         .unwrap_or_default(),
                     skill: context.skill_by_message.get(user.id.as_str()).cloned(),
                     mcp_selection: context
@@ -3243,6 +3266,47 @@ fn token_usage(usage: &agent_types::TokenUsage) -> TokenUsageSnapshot {
     }
 }
 
+fn display_attachment(
+    attachment: &crate::StoredAttachment,
+) -> assistant_protocol::AttachmentSummary {
+    let mut summary = super::attachment::summary(attachment);
+    summary.agent_readable_path.clear();
+    summary
+}
+
+fn page_parent_runs(page: &ConversationPage) -> std::collections::HashSet<RunId> {
+    page.items
+        .iter()
+        .filter_map(|item| match item {
+            ConversationItem::Assistant(message) => message.run_id.clone(),
+            _ => None,
+        })
+        .collect()
+}
+
+impl AssistantRuntime {
+    /// 正文页只投影自身父 Run 的子任务。复用同一会话观察屏障，分页与右栏互不依赖。
+    async fn attach_page_children(&self, page: &mut ConversationPage) -> RuntimeResult<()> {
+        let ConversationOwner::MainSession { session_id } = &page.owner else {
+            return Ok(());
+        };
+        let parents = page_parent_runs(page);
+        if parents.is_empty() {
+            return Ok(());
+        }
+        let approvals = self.approval_queue(session_id)?;
+        for task in self.product_child_tasks(session_id).await? {
+            if parents.contains(&task.parent_run_id) {
+                page.child_tasks.push(
+                    self.child_task_tree_summary(session_id, task, &approvals.items)
+                        .await?,
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 fn page_from_window(
     owner: ConversationOwner,
     window: &StoredConversationWindow,
@@ -3260,6 +3324,7 @@ fn page_from_window(
         owner,
         generation: window.generation,
         items,
+        child_tasks: Vec::new(),
         previous_cursor,
         has_more: window.start > 0,
     })
@@ -3349,6 +3414,12 @@ fn project_input_source(
                 controller_session_id: controller_session_id.clone(),
                 controller_run_id: controller_run_id.clone(),
             },
+            CrossSessionInputBinding::ScheduleReport { execution_id } => {
+                ConversationInputSourceSnapshot::ScheduleReport {
+                    execution_id: execution_id.clone(),
+                    files: Vec::new(),
+                }
+            }
             CrossSessionInputBinding::ProxyReport {
                 source_session_id,
                 source_run_id,

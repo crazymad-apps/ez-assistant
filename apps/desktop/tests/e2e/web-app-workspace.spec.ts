@@ -229,8 +229,8 @@ test('两张卡片复用同一应用，结果回到各自卡片并持久保存�
   await page.getByRole('button', { name: 'F03 linked cards', exact: true }).click();
   await expect(content(0).locator('#state')).toHaveText('累计 11');
   await expect(content(1).locator('#state')).toHaveText('累计 12');
-  const view = await command('get_session_view', { session_id });
-  expect(view.snapshot.value.runs).toHaveLength(2);
+  const runs = await command('list_runs', { session_id });
+  expect(runs.page.total).toBe(2);
 });
 
 test('外部 HTTP 应用先确认来源，重连重新授权，跨来源跳转撤销桥接', async ({ page }) => {

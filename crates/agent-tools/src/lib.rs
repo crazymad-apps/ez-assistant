@@ -36,8 +36,12 @@ pub use capability::{
         InspectImagesRequest, ReadImageRequest, SharedImageInspector, SharedImageMaterializer,
     },
     shell::{
+        BackgroundOutput, BackgroundOutputPage, BackgroundOutputRequest, BackgroundProcess,
+        BackgroundProcessExit, BackgroundRunExit, BackgroundShell, BackgroundShellFuture,
+        BackgroundShellLauncher, BackgroundShellRequest, BackgroundShellStart,
         ShellAuthorizationFacts, ShellFuture, ShellOutcome, ShellOutputChannel, ShellOutputChunk,
-        ShellOutputSink, ShellProcessMode, ShellRequest, ShellTool, ShellToolError, utf8_prefix,
+        ShellOutputSink, ShellProcessMode, ShellRequest, ShellTool, ShellToolError,
+        StartBackgroundShell, utf8_prefix,
     },
 };
 pub use dispatch::{DispatchError, Dispatcher};
@@ -67,7 +71,9 @@ pub use standard::{
     recall_memory::{
         RecallMemoryInput, RecallMemoryTool, RecallMemoryToolConfig, ResolvedRecallMemoryInput,
     },
-    shell::{ResolvedShellInput, ShellExecTool, ShellExecToolConfig, ShellInput},
+    shell::{
+        BackgroundShellExecTool, ResolvedShellInput, ShellExecTool, ShellExecToolConfig, ShellInput,
+    },
 };
 pub use tool::{
     Tool, ToolContext, ToolError, ToolExecuteFuture, ToolExecutionMode, ToolInputDefaults,

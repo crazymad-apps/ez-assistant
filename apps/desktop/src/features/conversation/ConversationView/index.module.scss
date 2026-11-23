@@ -9,7 +9,7 @@
   height: 100%;
   overflow-x: hidden;
   overflow-y: auto;
-  padding: 24px var(--ez-conversation-edge-spacing) 28px;
+  padding: var(--ez-conversation-top-spacing) var(--ez-conversation-edge-spacing) var(--ez-conversation-bottom-spacing);
   scrollbar-gutter: stable;
   scrollbar-color: auto;
   scrollbar-width: auto;
@@ -197,11 +197,6 @@
   user-select: text;
 }
 
-.proxy_report_body {
-  position: relative;
-  min-width: 0;
-}
-
 .user_message[data-history-edit-target] .user_bubble {
   // 消息行启用了绘制隔离；将编辑标记画在气泡内，避免靠边时被裁掉。
   border-color: var(--ez-primary);
@@ -209,61 +204,9 @@
   box-shadow: inset 0 0 0 1px var(--ez-primary);
 }
 
-.user_message[data-navigation-highlight]:not([data-history-edit-target]) :is(.user_bubble, .proxy_report_body) {
+.user_message[data-navigation-highlight]:not([data-history-edit-target]) :is(.user_bubble, .report_disclosure) {
   outline: 1px solid var(--ez-primary);
   outline-offset: 2px;
-}
-
-.proxy_report_viewport {
-  border-radius: 8px;
-}
-
-.proxy_report_body[data-expanded="false"] .proxy_report_viewport {
-  max-height: 360px;
-  overflow: hidden;
-}
-
-.proxy_report_expand {
-  position: absolute;
-  right: 1px;
-  bottom: 1px;
-  left: 1px;
-  display: flex;
-  height: 104px;
-  align-items: flex-end;
-  justify-content: center;
-  gap: 3px;
-  padding: 0 12px 11px;
-  border: 0;
-  border-radius: 0 0 7px 7px;
-  color: var(--ez-primary);
-  background: linear-gradient(
-    to bottom,
-    transparent,
-    color-mix(in srgb, var(--ez-surface-subtle) 92%, transparent) 66%,
-    var(--ez-surface-subtle) 84%
-  );
-  font-size: var(--ez-font-small);
-  cursor: pointer;
-
-  &:hover { color: var(--ez-primary-hover); }
-}
-
-.proxy_report_collapse {
-  --ez-control-default-height: var(--ez-control-height-small);
-  display: flex;
-  min-height: var(--ez-control-height);
-  align-items: center;
-  gap: 3px;
-  margin: 5px auto 0;
-  padding: 0 8px;
-  border: 0;
-  border-radius: 6px;
-  color: var(--ez-primary);
-  background: transparent;
-  font-size: var(--ez-font-small);
-
-  &:hover { background: var(--ez-surface-muted); }
 }
 
 .user_skill { display: flex; max-width: min(74%, 620px); align-items: center; gap: 6px; margin-top: 5px; }
@@ -659,6 +602,85 @@
 }
 
 @media (max-width: 720px) {
-  .scroll { padding-top: 18px; }
   .user_bubble { max-width: 88%; }
+}
+
+.schedule_report {
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 0 16px;
+  border: 1px solid var(--ez-border);
+  border-radius: var(--ez-radius-small);
+  color: var(--ez-text-secondary);
+
+  &[data-navigation-highlight] { border-color: var(--ez-primary); }
+
+}
+
+.external_message .report_disclosure {
+  align-self: flex-start;
+  max-width: 100%;
+  border: 1px solid var(--ez-border);
+  border-radius: var(--ez-radius-small);
+}
+
+.report_disclosure {
+  min-width: 0;
+  border-radius: inherit;
+
+  summary {
+    display: flex;
+    min-width: 0;
+    min-height: var(--ez-control-height-default);
+    align-items: center;
+    gap: 6px;
+    padding: 0 9px;
+    border-radius: inherit;
+    cursor: pointer;
+    list-style: none;
+
+    &::-webkit-details-marker { display: none; }
+    &:hover { background: var(--ez-surface-subtle); }
+    &:focus-visible { outline: 1px solid var(--ez-primary); outline-offset: -1px; }
+    svg { flex: 0 0 auto; color: var(--ez-text-muted); }
+    span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  }
+
+  &[open] .report_chevron { transform: rotate(90deg); }
+}
+
+.report_detail {
+  max-height: 280px;
+  overflow: auto;
+  padding: 8px 12px;
+  border-top: 1px solid var(--ez-border);
+  background: var(--ez-surface-subtle);
+}
+
+.schedule_report_files {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  gap: 4px;
+  padding: 6px;
+  border-top: 1px solid var(--ez-border);
+
+  button {
+    --ez-control-default-height: var(--ez-control-height-small);
+    display: inline-flex;
+    max-width: 100%;
+    min-width: 0;
+    align-items: center;
+    gap: 5px;
+    padding: 0 5px;
+    border: 0;
+    border-radius: var(--ez-radius-small);
+    background: transparent;
+    color: var(--ez-text-secondary);
+    font-size: var(--ez-font-small);
+
+    &:hover { background: var(--ez-surface-muted); }
+    svg { flex: 0 0 auto; }
+    span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  }
 }

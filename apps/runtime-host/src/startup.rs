@@ -29,7 +29,20 @@ pub(crate) async fn serve(config: ServeConfig) -> Result<(), Box<dyn Error>> {
     prepare_runtime_home(&config.runtime_home)?;
     let instance = RuntimeInstanceGuard::acquire(&config.runtime_home)?;
     let layout_home = config.runtime_home.clone();
-    tokio::task::spawn_blocking(move || crate::host_layout::upgrade(&layout_home)).await??;
+    tokio::task::spawn_blocking(move || {
+        crate::host_layout::upgrade(&layout_home)?;
+        // 整个 Home 已独占且用户域尚未开放，此时只有旧实例的登记文件。
+        match agent_tools_local::recover_background_shells(&layout_home.join("users")) {
+            Ok(errors) => {
+                for error in errors {
+                    eprintln!("background shell startup cleanup unconfirmed: {error}");
+                }
+            }
+            Err(error) => eprintln!("background shell startup cleanup unavailable: {error}"),
+        }
+        Ok::<(), crate::host_layout::Error>(())
+    })
+    .await??;
     let host_source = Arc::new(LocalConfigSource::new(config.config_path.clone()));
     let (mut access_service, access_handle) = access::HostAccessService::new(host_source);
     if config.password_stdin {

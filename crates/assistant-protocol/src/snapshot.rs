@@ -474,6 +474,9 @@ pub enum ToolApprovalSubject {
         command: String,
         working_directory: String,
         timeout_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        wait_ms: Option<u64>,
         process_mode: String,
     },
     /// 已解析到实际 Server 与原始 Tool 的 MCP 调用；网关名不作为授权身份。
@@ -923,6 +926,7 @@ mod tests {
                 command: "git status".to_owned(),
                 working_directory: "/workspace".to_owned(),
                 timeout_ms: 30_000,
+                wait_ms: None,
                 process_mode: "managed".to_owned(),
             },
             input: crate::ToolInputProjection {
@@ -930,6 +934,7 @@ mod tests {
                     command: "git status".to_owned(),
                     working_directory: "/workspace".to_owned(),
                     timeout_ms: 30_000,
+                    wait_ms: None,
                     process_mode: "managed".to_owned(),
                 },
                 redacted: false,
@@ -945,6 +950,7 @@ mod tests {
                 command: "git status".to_owned(),
                 working_directory: "/workspace".to_owned(),
                 timeout_ms: 30_000,
+                wait_ms: None,
                 process_mode: "managed".to_owned(),
             },
             status: ApprovalStatus::Pending,
@@ -955,6 +961,14 @@ mod tests {
         assert_eq!(value["subject"]["type"], "shell");
         assert_eq!(value["available_decisions"][1], "allow_session");
         assert!(value.get("child_task_id").is_none());
+        assert!(value["subject"].get("wait_ms").is_none());
+        assert!(value["input"]["value"].get("wait_ms").is_none());
+        let mut legacy = value.clone();
+        legacy["subject"]["process_mode"] = serde_json::json!("detached");
+        legacy["input"]["value"]["process_mode"] = serde_json::json!("detached");
+        legacy["exact_rule_preview"]["process_mode"] = serde_json::json!("detached");
+        let legacy_snapshot: ApprovalSnapshot = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(serde_json::to_value(legacy_snapshot).unwrap(), legacy);
         assert_eq!(
             serde_json::from_value::<ApprovalSnapshot>(value).expect("deserialize approval"),
             snapshot

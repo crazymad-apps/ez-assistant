@@ -11,6 +11,36 @@ use crate::{
 };
 
 impl AssistantRuntime {
+    /// 右栏复用可靠 Run 目录。正文只在消息与精确 Run 读取中解码。
+    pub(super) async fn product_run_summaries(
+        &self,
+        session: &SessionController,
+    ) -> RuntimeResult<Vec<RunSnapshot>> {
+        let mut runs = if session.lock_state()?.is_conversation_available {
+            let history = self
+                .store
+                .load_conversation_history(ConversationOwner::MainSession {
+                    session_id: session.id().clone(),
+                })
+                .await
+                .map_err(|source| RuntimeError::from_store("load Run summaries", source))?;
+            self.project_product_run_snapshots(
+                session,
+                &history,
+                &ConversationSnapshot::new(Vec::new()),
+            )?
+        } else {
+            session.run_snapshots()?
+        };
+        for run in &mut runs {
+            run.text.clear();
+            run.reasoning_parts.clear();
+            run.tools.clear();
+            run.model_request = None;
+        }
+        Ok(runs)
+    }
+
     pub(super) async fn find_message_acceptance(
         &self,
         session: &SessionController,

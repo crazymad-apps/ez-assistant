@@ -32,6 +32,8 @@ enum ShutdownTask {
     Compaction(SessionId, String),
     Title(SessionId, String),
     AppCall(String, String),
+    BackgroundShell(String),
+    ScheduledExecution(assistant_protocol::ScheduleExecutionId),
 }
 
 impl ShutdownWork {
@@ -95,10 +97,12 @@ impl AssistantRuntime {
             cancellation.cancel();
         }
         if !self.tasks.wait(self.config.shutdown_timeout).await {
+            self.confirm_background_cleanup()?;
             return Err(RuntimeError::InternalStateUnavailable {
                 component: "runtime work shutdown timed out",
             });
         }
+        self.confirm_background_cleanup()?;
         for session in &sessions {
             let state = session.lock_state()?;
             if state.is_faulted
@@ -212,6 +216,18 @@ impl AssistantRuntime {
                 .into_iter()
                 .map(|(instance, request)| ShutdownTask::AppCall(instance, request)),
         );
+        work.tasks.extend(
+            self.background_runs
+                .ids()
+                .into_iter()
+                .map(ShutdownTask::BackgroundShell),
+        );
+        work.tasks.extend(
+            self.scheduler
+                .active_ids()
+                .into_iter()
+                .map(ShutdownTask::ScheduledExecution),
+        );
         work.approvals
             .extend(self.approval_registry.app_approval_ids()?);
         Ok(work)
@@ -244,6 +260,7 @@ impl AssistantRuntime {
     ) -> RuntimeResult<ShutdownRuntimeResult> {
         let _operation = self.operation_gate.write().await;
         if self.lifecycle()? == RuntimeLifecycle::Stopped {
+            self.confirm_background_cleanup()?;
             return Ok(ShutdownRuntimeResult {
                 lifecycle: RuntimeLifecycle::Stopped,
             });
@@ -274,11 +291,26 @@ impl AssistantRuntime {
             self.set_stopped()?;
         }
         store_result?;
+        self.confirm_background_cleanup()?;
         mcp_result?;
         settlement_result?;
         Ok(ShutdownRuntimeResult {
             lifecycle: RuntimeLifecycle::Stopped,
         })
+    }
+
+    fn confirm_background_cleanup(&self) -> RuntimeResult<()> {
+        if self.scheduler.has_unconfirmed_cleanup() {
+            return Err(RuntimeError::InternalStateUnavailable {
+                component: "scheduled script cleanup or settlement unconfirmed",
+            });
+        }
+        if self.background_runs.needs_cleanup() {
+            return Err(RuntimeError::InternalStateUnavailable {
+                component: "background shell process cleanup unconfirmed",
+            });
+        }
+        Ok(())
     }
 
     fn begin_shutdown(&self) -> RuntimeResult<Vec<Arc<SessionController>>> {

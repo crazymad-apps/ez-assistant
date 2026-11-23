@@ -396,7 +396,7 @@ pub fn merge_context_replacement_with_product_history(
         .messages
         .iter()
         .enumerate()
-        .filter(|(_, message)| !is_native_compaction(message))
+        .filter(|(_, message)| !is_native_compaction(message) && !message.is_host_notice())
         .collect();
     if effective.len() < retained.len()
         || !effective[effective.len() - retained.len()..]
@@ -416,7 +416,7 @@ pub fn merge_context_replacement_with_product_history(
     let mut messages = Vec::with_capacity(prefix_len + replacement_body.len());
     messages.extend_from_slice(&history.messages[..prefix_len]);
     messages.push(replacement_body[0].clone());
-    // 原始尾部（含旧原生记录）保持一次且顺序不变；replacement 只增加摘要及可选恢复消息。
+    // 原始尾部中的旧原生记录和宿主通知保持一次且顺序不变，替换只增加摘要及恢复消息。
     messages.extend_from_slice(&history.messages[prefix_len..]);
     let restored_start = 1 + usize::from(expanded_user) + retained.len();
     messages.extend_from_slice(&replacement_body[restored_start..]);

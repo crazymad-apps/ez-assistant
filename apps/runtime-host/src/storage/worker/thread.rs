@@ -13,9 +13,11 @@ pub(super) fn run_worker(
     mut receiver: mpsc::Receiver<Command>,
     ready: oneshot::Sender<Result<(), StoreError>>,
     progress: Option<tokio::sync::watch::Sender<crate::storage::DatabaseStartupProgress>>,
+    paths: std::sync::Arc<crate::user_paths::UserPaths>,
 ) {
     let mut engine = match StorageEngine::open_with_progress(&runtime_home, progress.as_ref()) {
-        Ok(engine) => {
+        Ok(mut engine) => {
+            engine.resource_paths = paths;
             let _ = ready.send(Ok(()));
             engine
         }
@@ -27,6 +29,70 @@ pub(super) fn run_worker(
 
     while let Some(command) = receiver.blocking_recv() {
         match command {
+            Command::NextScheduleMaintenance { after, reply } => {
+                let _ = reply.send(engine.next_schedule_maintenance(after));
+            }
+            Command::MarkScheduleDeleting { id, reply } => {
+                let _ = reply.send(engine.mark_schedule_deleting(id));
+            }
+            Command::ArchiveScheduleResult { id, reply } => {
+                let _ = reply.send(engine.archive_schedule_result(id));
+            }
+            Command::CommitScheduleReport { commit, reply } => {
+                let _ = reply.send(engine.commit_schedule_report(commit));
+            }
+            Command::FinishScheduleResult { id, reply } => {
+                let _ = reply.send(engine.finish_schedule_result(id));
+            }
+            Command::ResolveScheduleFile { id, file_id, reply } => {
+                let _ = reply.send(engine.resolve_schedule_file(id, file_id));
+            }
+            Command::NextScheduleDue { reply } => {
+                let _ = reply.send(engine.next_schedule_due());
+            }
+            Command::AdmitSchedule { command, reply } => {
+                let _ = reply.send(engine.admit_schedule(command));
+            }
+            Command::SettleScheduleExecution { settlement, reply } => {
+                let _ = reply.send(engine.settle_schedule_execution(settlement));
+            }
+            Command::RecoverScheduleExecutions {
+                now,
+                cleanup_verified,
+                reply,
+            } => {
+                let _ = reply.send(engine.recover_schedule_executions(now, cleanup_verified));
+            }
+            Command::GetScheduleExecution { id, reply } => {
+                let _ = reply.send(engine.get_schedule_execution(id));
+            }
+            Command::ListScheduleExecutions {
+                id,
+                offset,
+                limit,
+                reply,
+            } => {
+                let _ = reply.send(engine.list_schedule_executions(id, offset, limit));
+            }
+            Command::ListSchedules {
+                offset,
+                limit,
+                reply,
+            } => {
+                let _ = reply.send(engine.list_schedules(offset, limit));
+            }
+            Command::GetSchedule { id, reply } => {
+                let _ = reply.send(engine.get_schedule(id));
+            }
+            Command::InsertSchedule { schedule, reply } => {
+                let _ = reply.send(engine.insert_schedule(schedule));
+            }
+            Command::ReplaceSchedule { schedule, reply } => {
+                let _ = reply.send(engine.replace_schedule(schedule));
+            }
+            Command::DeleteSchedule { id, reply } => {
+                let _ = reply.send(engine.delete_schedule(id));
+            }
             Command::PublishMessageCard { card, reply } => {
                 let _ = reply.send(engine.publish_message_card(card));
             }

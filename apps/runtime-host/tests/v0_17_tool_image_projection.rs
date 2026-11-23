@@ -139,12 +139,7 @@ fn formal_host_projects_main_and_child_tool_images_across_restart_and_failures()
             .expect("file references")
             .is_empty()
     );
-    assert!(
-        view["snapshot"]["value"]["attachments"]
-            .as_array()
-            .expect("attachments")
-            .is_empty()
-    );
+    assert!(view["snapshot"]["value"].get("attachments").is_none());
 
     assert_preview(
         &first_host,

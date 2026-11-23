@@ -64,7 +64,7 @@ async fn settle_output(
 pub(super) enum OutputCompletion {
     Complete(CollectedOutput),
     TimedOut(CollectedOutput),
-    Cancelled,
+    Cancelled(CollectedOutput),
 }
 
 pub(super) async fn settle_output_until(
@@ -83,8 +83,7 @@ pub(super) async fn settle_output_until(
         _ = cancellation.cancelled() => {
             stdout_abort.abort();
             stderr_abort.abort();
-            settle.await?;
-            Ok(OutputCompletion::Cancelled)
+            Ok(OutputCompletion::Cancelled(settle.await?))
         }
         _ = sleep_until(deadline) => {
             stdout_abort.abort();

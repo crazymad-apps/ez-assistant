@@ -75,6 +75,7 @@ pub struct NewAttachmentUpload {
 /// 新会话首次发送需要由同一 Store 业务操作提交的完整事实。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NewStoredSessionMaterialization {
+    pub schedule_execution_id: Option<assistant_protocol::ScheduleExecutionId>,
     pub session: NewStoredSession,
     pub attachments: Vec<NewAttachmentUpload>,
     pub input: NewStoredInput,

@@ -32,6 +32,7 @@ use crate::{
 /// 可靠事实必须先由 Store 提交，不能仅修改这里的状态。
 pub(crate) struct SessionController {
     id: SessionId,
+    pub(crate) scheduled: Option<Arc<crate::runtime::schedule::ScheduledSession>>,
     pub(crate) feedback_changed: tokio::sync::Notify,
     custom_agent: Option<assistant_protocol::CustomAgentSnapshot>,
     created_at_ms: i64,
@@ -216,6 +217,7 @@ impl SessionController {
     pub(crate) fn new(stored: StoredSession) -> Self {
         Self {
             id: stored.session_id,
+            scheduled: None,
             feedback_changed: tokio::sync::Notify::new(),
             custom_agent: stored.custom_agent,
             created_at_ms: stored.created_at_ms,
@@ -387,6 +389,7 @@ impl SessionController {
         let resume_required = !queue_item_ids.is_empty();
         Self {
             id: stored.session_id,
+            scheduled: None,
             feedback_changed: tokio::sync::Notify::new(),
             custom_agent: stored.custom_agent,
             created_at_ms: stored.created_at_ms,

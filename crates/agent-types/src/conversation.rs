@@ -58,7 +58,8 @@ impl ConversationSnapshot {
                     messages.push(self.messages[index].clone());
                     if let Some(reference) = &summary.retained_user_message_id {
                         let users: Vec<_> = self.messages.iter().enumerate().filter(|(_, message)| {
-                            matches!(message, ConversationMessage::User(user) if &user.id == reference)
+                            matches!(message, ConversationMessage::User(user)
+                                if &user.id == reference && user.origin != UserMessageOrigin::HostNotice)
                         }).collect();
                         match users.as_slice() {
                             [(user_index, user)] if *user_index < index => {
@@ -81,14 +82,15 @@ impl ConversationSnapshot {
                 self.messages[index + 1..]
                     .iter()
                     .filter(|message| {
-                        !matches!(
-                            message,
-                            ConversationMessage::ContextSummary(_)
-                                | ConversationMessage::Assistant(AssistantMessage {
-                                    purpose: AssistantMessagePurpose::ContextCompaction,
-                                    ..
-                                })
-                        )
+                        !message.is_host_notice()
+                            && !matches!(
+                                message,
+                                ConversationMessage::ContextSummary(_)
+                                    | ConversationMessage::Assistant(AssistantMessage {
+                                        purpose: AssistantMessagePurpose::ContextCompaction,
+                                        ..
+                                    })
+                            )
                     })
                     .cloned(),
             );
@@ -97,14 +99,15 @@ impl ConversationSnapshot {
                 self.messages[prefix..]
                     .iter()
                     .filter(|message| {
-                        !matches!(
-                            message,
-                            ConversationMessage::ContextSummary(_)
-                                | ConversationMessage::Assistant(AssistantMessage {
-                                    purpose: AssistantMessagePurpose::ContextCompaction,
-                                    ..
-                                })
-                        )
+                        !message.is_host_notice()
+                            && !matches!(
+                                message,
+                                ConversationMessage::ContextSummary(_)
+                                    | ConversationMessage::Assistant(AssistantMessage {
+                                        purpose: AssistantMessagePurpose::ContextCompaction,
+                                        ..
+                                    })
+                            )
                     })
                     .cloned(),
             );
@@ -242,6 +245,11 @@ pub enum ConversationMessage {
 }
 
 impl ConversationMessage {
+    /// 宿主通知只供历史读取，在执行窗口和模型请求中都忽略。
+    pub fn is_host_notice(&self) -> bool {
+        matches!(self, Self::User(message) if message.origin == UserMessageOrigin::HostNotice)
+    }
+
     /// 返回该消息是否属于产品中可见的用户/助手转录。
     ///
     /// System、Context Summary 和 Tool 始终不是产品转录项；Runtime 隐藏
@@ -343,6 +351,8 @@ pub enum UserMessageOrigin {
     User,
     /// 由 Runtime 为受控执行链内部创建。
     Runtime,
+    /// 宿主回执只进入可见转录，任何模型窗口均排除。
+    HostNotice,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]

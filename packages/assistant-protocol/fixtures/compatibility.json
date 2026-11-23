@@ -319,5 +319,41 @@
       "min_compatible_version": "0.33.0"
     },
     "error": "host_too_old"
+  },
+  {
+    "name": "v0.33.2-context-pagination-pair",
+    "client": {
+      "version": "0.33.2",
+      "min_compatible_version": "0.33.2"
+    },
+    "host": {
+      "version": "0.33.2",
+      "min_compatible_version": "0.33.2"
+    },
+    "error": null
+  },
+  {
+    "name": "v0.33.1-client-rejected-by-v0.33.2-host",
+    "client": {
+      "version": "0.33.1",
+      "min_compatible_version": "0.33.1"
+    },
+    "host": {
+      "version": "0.33.2",
+      "min_compatible_version": "0.33.2"
+    },
+    "error": "client_too_old"
+  },
+  {
+    "name": "v0.33.2-client-rejects-v0.33.1-host",
+    "client": {
+      "version": "0.33.2",
+      "min_compatible_version": "0.33.2"
+    },
+    "host": {
+      "version": "0.33.1",
+      "min_compatible_version": "0.33.1"
+    },
+    "error": "host_too_old"
   }
 ]

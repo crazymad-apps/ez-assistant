@@ -1,10 +1,14 @@
 //! 真实本地 Shell 能力实现。
 
+mod background;
 mod output;
+
+pub use background::{BACKGROUND_SHELL_DIRECTORY, LocalBackgroundShell, recover_background_shells};
 
 use std::{
     ffi::OsString,
     process::{ExitStatus, Stdio},
+    sync::Arc,
 };
 
 use agent_tools::{
@@ -101,6 +105,12 @@ pub struct LocalShell {
     config: LocalShellConfig,
 }
 
+/// 供需要保存取消前输出的受管宿主使用。
+pub enum LocalShellCompletion {
+    Exited(ShellOutcome),
+    Cancelled(ShellOutcome),
+}
+
 impl LocalShell {
     pub fn new(config: LocalShellConfig) -> Self {
         Self { config }
@@ -110,38 +120,94 @@ impl LocalShell {
         &self.config
     }
 
+    /// 复用 Shell 的平台进程树和输出上限，并返回取消前收集的文本。
+    ///
+    /// # Errors
+    /// 参数、启动、输出、超时或回收失败时返回 Shell 错误。
+    pub async fn exec_managed(
+        &self,
+        mut request: ShellRequest,
+        cancellation: CancellationToken,
+    ) -> Result<LocalShellCompletion, ShellToolError> {
+        request.process_mode = ShellProcessMode::Managed;
+        self.run(request, Arc::new(|_| {}), cancellation, None)
+            .await
+    }
+
+    /// 带持久启动身份的受管 Shell，沿用分离管道和原始结果。仅在进程回收确认后删除身份。
+    ///
+    /// # Errors
+    /// 启动登记或执行失败返回已有 Shell 错误，身份保留表示恢复仍需确认。
+    pub async fn exec_recoverable_managed(
+        &self,
+        mut request: ShellRequest,
+        cancellation: CancellationToken,
+        user_root: &std::path::Path,
+        id: &str,
+    ) -> Result<LocalShellCompletion, ShellToolError> {
+        request.process_mode = ShellProcessMode::Managed;
+        let directory =
+            background::prepare_managed_registration(user_root, id).map_err(|error| {
+                ShellToolError::CleanupUnconfirmed {
+                    message: error.to_string(),
+                }
+            })?;
+        let result = self
+            .run(request, Arc::new(|_| {}), cancellation, Some(&directory))
+            .await;
+        if !matches!(result, Err(ShellToolError::CleanupUnconfirmed { .. })) {
+            background::finish_managed_registration(&directory).map_err(|error| {
+                ShellToolError::CleanupUnconfirmed {
+                    message: error.to_string(),
+                }
+            })?;
+        }
+        result
+    }
+
     async fn run(
         &self,
         request: ShellRequest,
         sink: ShellOutputSink,
         cancellation: CancellationToken,
-    ) -> Result<ShellOutcome, ShellToolError> {
+        registration: Option<&std::path::Path>,
+    ) -> Result<LocalShellCompletion, ShellToolError> {
         if request.command.trim().is_empty() {
             return Err(ShellToolError::InvalidInput {
                 message: "command must not be empty".to_owned(),
             });
         }
         if cancellation.is_cancelled() {
-            return Err(ShellToolError::Cancelled);
+            return Ok(LocalShellCompletion::Cancelled(ShellOutcome {
+                exit_code: None,
+                stdout: String::new(),
+                stderr: String::new(),
+                truncated: false,
+                process_mode: request.process_mode,
+            }));
         }
 
-        let mut command = Command::new(&self.config.launcher.program);
-        command
-            .current_dir(request.workdir.as_path())
-            .env_clear()
-            .envs(self.config.environment.resolve_current())
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        append_script_argument(&mut command, &self.config.launcher, request.command.clone());
-
+        let command = self.command(&request.workdir, request.command);
         let spawn = match request.process_mode {
             ShellProcessMode::Managed => process::spawn,
             ShellProcessMode::Detached => process::spawn_detachable,
+            ShellProcessMode::Background => {
+                return Err(ShellToolError::InvalidInput {
+                    message: "background shell requires Runtime supervision".into(),
+                });
+            }
         };
         let mut child = spawn(command).map_err(|error| ShellToolError::Io {
             message: format!("start shell failed: {error}"),
         })?;
+        if let Some(directory) = registration
+            && let Err(error) = background::record_spawned_process(&mut child, directory).await
+        {
+            cleanup_after_setup_failure(&mut child).await?;
+            return Err(ShellToolError::Io {
+                message: format!("managed shell identity could not be recorded: {error}"),
+            });
+        }
         let stdout = match child.stdout().take() {
             Some(stdout) => stdout,
             None => {
@@ -213,13 +279,13 @@ impl LocalShell {
                         // 管道于 deadline 内 EOF 后 drop，明确把仍存活的后代交给操作系统。
                         // 在此边界前，timeout/cancellation 分支仍负责清理并等待进程组。
                         drop(child);
-                        Ok(ShellOutcome {
+                        Ok(LocalShellCompletion::Exited(ShellOutcome {
                             exit_code: status.code(),
                             stdout: output.stdout,
                             stderr: output.stderr,
                             truncated: output.truncated,
                             process_mode: request.process_mode,
-                        })
+                        }))
                     }
                     OutputCompletion::TimedOut(output) => {
                         process::terminate_and_wait(&mut child).await.map_err(|error| {
@@ -235,7 +301,7 @@ impl LocalShell {
                             truncated: output.truncated,
                         })
                     }
-                    OutputCompletion::Cancelled => {
+                    OutputCompletion::Cancelled(output) => {
                         process::terminate_and_wait(&mut child).await.map_err(|error| {
                             ShellToolError::CleanupUnconfirmed {
                                 message: format!(
@@ -243,7 +309,13 @@ impl LocalShell {
                                 ),
                             }
                         })?;
-                        Err(ShellToolError::Cancelled)
+                        Ok(LocalShellCompletion::Cancelled(ShellOutcome {
+                            exit_code: status.code(),
+                            stdout: output.stdout,
+                            stderr: output.stderr,
+                            truncated: output.truncated,
+                            process_mode: request.process_mode,
+                        }))
                     }
                 }
             }
@@ -266,10 +338,28 @@ impl LocalShell {
                     .map_err(|error| ShellToolError::CleanupUnconfirmed {
                         message: format!("terminate cancelled shell process tree failed: {error}"),
                     })?;
-                abort_and_settle_output(stdout_task, stderr_task, output_task).await?;
-                Err(ShellToolError::Cancelled)
+                let output = abort_and_settle_output(stdout_task, stderr_task, output_task).await?;
+                Ok(LocalShellCompletion::Cancelled(ShellOutcome {
+                    exit_code: None,
+                    stdout: output.stdout,
+                    stderr: output.stderr,
+                    truncated: output.truncated,
+                    process_mode: request.process_mode,
+                }))
             }
         }
+    }
+    fn command(&self, workdir: &agent_tools::AbsolutePath, script: String) -> Command {
+        let mut command = Command::new(&self.config.launcher.program);
+        command
+            .current_dir(workdir.as_path())
+            .env_clear()
+            .envs(self.config.environment.resolve_current())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        append_script_argument(&mut command, &self.config.launcher, script);
+        command
     }
 }
 
@@ -315,7 +405,12 @@ impl ShellTool for LocalShell {
         sink: ShellOutputSink,
         cancellation: CancellationToken,
     ) -> ShellFuture<'a> {
-        Box::pin(self.run(request, sink, cancellation))
+        Box::pin(async move {
+            match self.run(request, sink, cancellation, None).await? {
+                LocalShellCompletion::Exited(outcome) => Ok(outcome),
+                LocalShellCompletion::Cancelled(_) => Err(ShellToolError::Cancelled),
+            }
+        })
     }
 }
 

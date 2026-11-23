@@ -22,7 +22,8 @@ export type SelectionOption<T extends string> = Readonly<{
 
 type SelectionPopoverProps<T extends string> = Readonly<{
   aria_label: string;
-  content_width?: "default" | "content";
+  /** 表单可使用 trigger，使选项面板与触发框同宽。 */
+  content_width?: "default" | "content" | "trigger";
   disabled?: boolean;
   editable?: boolean;
   open: boolean;
@@ -267,7 +268,7 @@ export function SelectionPopover<T extends string>(props: SelectionPopoverProps<
 function SelectionPortal<T extends string>(props: Readonly<{
   active_index: number | null;
   aria_label: string;
-  content_width: "default" | "content";
+  content_width: "default" | "content" | "trigger";
   id: string;
   match_trigger_width: boolean;
   on_active_index_change: (index: number) => void;
@@ -285,6 +286,8 @@ function SelectionPortal<T extends string>(props: Readonly<{
 
   useLayoutEffect(() => {
     if (!props.open) return undefined;
+    const exact_width = props.content_width === "trigger";
+    const align_to_trigger = exact_width || props.match_trigger_width;
     function updatePosition() {
       const trigger = props.trigger_ref.current;
       const popover = props.popover_ref.current;
@@ -292,10 +295,17 @@ function SelectionPortal<T extends string>(props: Readonly<{
         return;
       }
       const trigger_rect = trigger.getBoundingClientRect();
-      const popover_rect = popover.getBoundingClientRect();
       const viewport_padding = 8;
-      const popover_width = Math.max(popover_rect.width, props.match_trigger_width ? trigger_rect.width : 0);
-      const preferred_left = props.match_trigger_width
+      if (exact_width) {
+        const width = Math.min(trigger_rect.width, Math.max(0, window.innerWidth - 2 * viewport_padding));
+        popover.style.width = `${width}px`;
+      } else {
+        popover.style.removeProperty("width");
+      }
+      const popover_rect = popover.getBoundingClientRect();
+      const min_width = !exact_width && props.match_trigger_width ? trigger_rect.width : 0;
+      const popover_width = Math.max(popover_rect.width, min_width);
+      const preferred_left = align_to_trigger
         ? trigger_rect.left
         : trigger_rect.left + (trigger_rect.width - popover_width) / 2;
       const left = Math.min(
@@ -314,18 +324,22 @@ function SelectionPortal<T extends string>(props: Readonly<{
       setPosition({
         left,
         top,
-        min_width: props.match_trigger_width ? trigger_rect.width : 0,
+        min_width,
         ready: true,
       });
     }
     updatePosition();
     window.addEventListener("resize", updatePosition);
     document.addEventListener("scroll", updatePosition, true);
+    const trigger = props.trigger_ref.current;
+    const observer = exact_width && trigger && typeof ResizeObserver !== "undefined" ? new ResizeObserver(updatePosition) : null;
+    if (trigger) observer?.observe(trigger);
     return () => {
       window.removeEventListener("resize", updatePosition);
       document.removeEventListener("scroll", updatePosition, true);
+      observer?.disconnect();
     };
-  }, [props.match_trigger_width, props.open, props.options.length, props.popover_ref, props.presence.mounted, props.trigger_ref]);
+  }, [props.content_width, props.match_trigger_width, props.open, props.options.length, props.popover_ref, props.presence.mounted, props.trigger_ref]);
 
   if (!props.presence.mounted) return null;
 

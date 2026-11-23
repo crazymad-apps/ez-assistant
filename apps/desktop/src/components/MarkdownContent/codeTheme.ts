@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { cjk } from "@streamdown/cjk";
 import type { CodeHighlighterPlugin, HighlightResult, ThemeInput } from "@streamdown/code";
 import type { PluginConfig } from "streamdown";
 import type { ThemePreset } from "../../styles/themePresets";
@@ -53,5 +54,5 @@ export function useMarkdownPlugins(text: string, theme: ThemePreset): PluginConf
     }
     return () => { active = false; };
   }, [needs_code, needs_math, theme]);
-  return useMemo(() => ({ code: scopedCodePlugin(code, theme, () => current.current === scope), math }), [code, theme, scope, math]);
+  return useMemo(() => ({ cjk, code: scopedCodePlugin(code, theme, () => current.current === scope), math }), [code, theme, scope, math]);
 }

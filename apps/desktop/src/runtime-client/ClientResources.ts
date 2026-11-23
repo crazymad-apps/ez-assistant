@@ -352,6 +352,16 @@ export class ClientResources {
       undefined,
       open_after,
     );
+  downloadScheduleResultFile = (execution: string, id: string, name: string) =>
+    this.download(
+      `/schedule-results/${encodeURIComponent(execution)}/files/${encodeURIComponent(id)}/download`,
+      name,
+      undefined,
+      true,
+    );
+  downloadScheduleResultBundle = (execution: string, file_ids: readonly string[]) =>
+    this.download(`/schedule-results/${encodeURIComponent(execution)}/files/download`,
+      "schedule-results.zip", { file_ids });
   downloadToolFile = (
     owner: ConversationOwner,
     message: string,

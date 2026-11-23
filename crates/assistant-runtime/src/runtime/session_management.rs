@@ -489,10 +489,11 @@ impl AssistantRuntime {
         let _mutation = session.mutation().await;
         session.ensure_standard_role()?;
         session.ensure_idle()?;
-        if self
-            .child_tasks
-            .active_count_for_session(&request.session_id)?
-            != 0
+        if self.background_runs.has_session(&request.session_id)
+            || self
+                .child_tasks
+                .active_count_for_session(&request.session_id)?
+                != 0
         {
             return Err(RuntimeError::SessionNotIdle {
                 session_id: request.session_id,
@@ -542,10 +543,11 @@ impl AssistantRuntime {
         let _mutation = session.mutation().await;
         session.ensure_standard_role()?;
         session.ensure_idle()?;
-        if self
-            .child_tasks
-            .active_count_for_session(&request.session_id)?
-            != 0
+        if self.background_runs.has_session(&request.session_id)
+            || self
+                .child_tasks
+                .active_count_for_session(&request.session_id)?
+                != 0
         {
             return Err(RuntimeError::SessionNotIdle {
                 session_id: request.session_id,
@@ -762,15 +764,26 @@ impl AssistantRuntime {
         })
     }
 
-    /// 按输入接收顺序和 attempt 返回指定 Session 的全部 Run。
+    /// 复用可靠 Run 顺序，从最新向前读；介入核实按 InputId 限定归属后再分页。
     pub async fn list_runs(&self, request: ListRunsRequest) -> RuntimeResult<ListRunsResult> {
+        let window = super::context_page::PageWindow::new(request.page)?;
         let session = self.prepared_session(&request.session_id).await?;
         session
             .ensure_conversation_loaded(self.store.as_ref())
             .await?;
-        Ok(ListRunsResult {
-            runs: self.product_run_snapshots(&session).await?,
-        })
+        let mut runs = if request.summary_only.unwrap_or(false) {
+            self.product_run_summaries(&session).await?
+        } else {
+            self.product_run_snapshots(&session).await?
+        };
+        if let Some(input_id) = request.input_id {
+            runs.retain(|run| run.input_id == input_id);
+        }
+        // Stable sort retains existing attempt order when timestamps are equal.
+        runs.reverse();
+        runs.sort_by_key(|run| std::cmp::Reverse(run.created_at_ms));
+        let (runs, page) = window.take(runs.into_iter());
+        Ok(ListRunsResult { runs, page })
     }
 
     /// 把完全空闲的活动 Session 转为只读归档状态。

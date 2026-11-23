@@ -933,6 +933,9 @@ async fn archived_session_is_filtered_read_only_and_can_be_restored() {
     assert!(
         runtime
             .list_runs(ListRunsRequest {
+                summary_only: None,
+                page: None,
+                input_id: None,
                 session_id: session_id.clone(),
             })
             .await
@@ -1374,6 +1377,7 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
     assert_eq!(
         runtime
             .list_attachments(ListAttachmentsRequest {
+                page: None,
                 session_id: session_id.clone(),
             })
             .await
@@ -1384,6 +1388,9 @@ async fn reenter_from_user_destroys_the_target_and_tail_without_creating_a_branc
     );
     let runs = runtime
         .list_runs(ListRunsRequest {
+            summary_only: None,
+            page: None,
+            input_id: None,
             session_id: session_id.clone(),
         })
         .await

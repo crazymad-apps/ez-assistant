@@ -630,6 +630,9 @@ async fn cleared_materialization_key_never_returns_or_replays_a_later_input() {
     ));
     let runs = runtime
         .list_runs(assistant_protocol::ListRunsRequest {
+            summary_only: None,
+            page: None,
+            input_id: None,
             session_id: original.session.session_id.clone(),
         })
         .await

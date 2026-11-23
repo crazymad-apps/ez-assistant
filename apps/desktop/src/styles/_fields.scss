@@ -7,3 +7,35 @@
 
   &[aria-invalid="true"] { border-color: var(--ez-danger); }
 }
+
+@mixin select-trigger {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid var(--ez-border-strong);
+  border-radius: var(--ez-radius-small);
+  outline: 0;
+  color: var(--ez-text-secondary);
+  background: var(--ez-surface);
+  font: inherit;
+  text-align: left;
+
+  &:hover:not(:disabled):not([aria-disabled="true"]) {
+    color: var(--ez-text);
+    background: var(--ez-surface-subtle);
+  }
+
+  &:focus-visible { @include focus-border; }
+  &:disabled, &[aria-disabled="true"] { opacity: 0.48; }
+  svg { flex: 0 0 auto; color: var(--ez-text-muted); }
+}
+
+@mixin select-field-width {
+  width: 100%;
+  padding: 0 9px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}

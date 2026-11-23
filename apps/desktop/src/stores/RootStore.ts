@@ -32,6 +32,7 @@ import type {
   RecallNavigationTarget,
   ReenterFromUserMessageResult,
   RunId,
+  RuntimeEvent,
   SessionMaterializationManifest,
   SessionMaterializationResult,
   SessionId,
@@ -82,7 +83,10 @@ import { FeedbackCenterStore } from "../features/feedback-center/FeedbackCenterS
 import { FeedbackStore } from "../features/feedback/FeedbackStore";
 import { NotificationStore, PendingNotificationStore, resolveNotificationContent, type NotificationTarget } from "../features/notifications";
 
+type BackgroundRunEvent = Extract<RuntimeEvent, { type: "background_run_changed" | "background_run_ended" }>;
+
 export class RootStore {
+  readonly #runtime_event_listeners = new Set<(client: RuntimeClient, event: RuntimeEvent) => void>();
   readonly notifications = new NotificationStore({
     scope: () => this.notificationScope(),
     navigate: (target) => this.openNotificationTarget(target),
@@ -183,6 +187,7 @@ export class RootStore {
       on_event: (event) => {
         this.notifications.ingest(event, this.notificationScopeFor(this.#local_runtime.client));
         this.history_edit.observe(event, this.#local_runtime.client);
+        this.#publishRuntimeEvent(this.#local_runtime.client, event.event);
         if (this.navigation.target_device) return;
         this.conversation_navigation.observe(event.event, this.#local_runtime.client);
         this.feedback.setScope(this.notificationScope());
@@ -232,8 +237,10 @@ export class RootStore {
     this.network = new NetworkDevicesStore(() => this.#local_runtime.client, this.navigation,
       (message) => this.showInteractionError(message), () => this.local_files.desktop,
       (device, event) => {
-        this.notifications.ingest(event, this.notificationScopeFor(this.network.contexts.get(device)?.runtime.client ?? null));
-        this.history_edit.observe(event, this.network.contexts.get(device)?.runtime.client ?? null);
+        const source = this.network.contexts.get(device)?.runtime.client ?? null;
+        this.notifications.ingest(event, this.notificationScopeFor(source));
+        this.history_edit.observe(event, source);
+        this.#publishRuntimeEvent(source, event.event);
         if (this.navigation.target_device !== device) return;
         this.conversation_navigation.observe(event.event, this.#runtime.client);
         this.feedback.setScope(this.notificationScope());
@@ -555,7 +562,22 @@ export class RootStore {
 
   get local_runtime_client() { return this.#local_runtime.client; }
   get runtime_client() { return this.#runtime.client; }
-  get intervention() { return this.#run_interaction.intervention; }
+
+  subscribeRuntimeEvents(client: RuntimeClient, listener: (event: RuntimeEvent) => void): () => void {
+    const receive = (source: RuntimeClient, event: RuntimeEvent) => { if (source === client) listener(event); };
+    this.#runtime_event_listeners.add(receive);
+    return () => { this.#runtime_event_listeners.delete(receive); };
+  }
+
+  subscribeBackgroundRuns(client: RuntimeClient, session_id: SessionId, listener: (event: BackgroundRunEvent) => void): () => void {
+    return this.subscribeRuntimeEvents(client, (event) => {
+      if ((event.type === "background_run_changed" || event.type === "background_run_ended") && event.session_id === session_id) listener(event);
+    });
+  }
+
+  #publishRuntimeEvent(client: RuntimeClient | null, event: RuntimeEvent): void {
+    if (client) for (const listener of this.#runtime_event_listeners) listener(client, event);
+  }  get intervention() { return this.#run_interaction.intervention; }
 
   connect(bootstrap?: RuntimeBootstrap): Promise<void> {
     this.#initial_connection ??= this.#connectAndRestore(bootstrap);
@@ -910,8 +932,12 @@ export class RootStore {
     return true;
   }
 
-  /** 按 F01 的连续分页补齐锚点，不改动编辑草稿或重新选择会话。 */
   async locateHistoryEditMessage(session_id: SessionId, message_id: MessageId, generation?: number): Promise<boolean> {
+    return this.locateConversationMessage(session_id, message_id, generation);
+  }
+
+  /** 按连续分页补齐当前会话锚点。 */
+  async locateConversationMessage(session_id: SessionId, message_id: MessageId, generation?: number): Promise<boolean> {
     const client = this.#runtime.client;
     const device = this.navigation.target_device;
     const current = () => !this.#disposed && client === this.#runtime.client

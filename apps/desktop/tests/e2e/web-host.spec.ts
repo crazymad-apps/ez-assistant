@@ -47,7 +47,7 @@ test("Host 内嵌 Web 支持登录、设置、改密撤销和退出", async ({ p
   await page.getByRole("button", { name: "进入项目" }).click();
   await expectWorkspaceReady(page);
   await page.screenshot({ path: testInfo.outputPath("web-workspace-reveal.png") });
-  await expect(page.locator("[data-app-title-bar]")).toBeVisible();
+  await expect(page.getByRole("button", { name: "关闭窗口", exact: true })).toHaveCount(0);
   await expect(page.getByText("M2 临时会话", { exact: true }).first()).toBeVisible();
   await page.getByRole("button", { name: "账号与 Runtime" }).click();
   await page.getByRole("menuitem", { name: "设置" }).click();
@@ -59,15 +59,14 @@ test("Host 内嵌 Web 支持登录、设置、改密撤销和退出", async ({ p
   await page.getByLabel("新密码", { exact: true }).fill("changed-web-password");
   await page.getByRole("button", { name: "保存密码", exact: true }).click();
   await expect(page.getByLabel("Host 登录")).toBeVisible();
-  await expect(page.locator("[data-app-title-bar]")).toHaveCount(0);
+  await expect(page.locator("[data-conversation-area]")).toHaveCount(0);
   await page.getByLabel("访问密码", { exact: true }).fill("changed-web-password");
   await page.getByRole("button", { name: "进入项目" }).click();
   await expectWorkspaceReady(page);
-  await expect(page.locator("[data-app-title-bar]")).toBeVisible();
+  await expect(page.getByRole("button", { name: "账号与 Runtime", exact: true })).toBeVisible();
   await page.reload();
   await expectWorkspaceReady(page);
-  await expect(page.locator("[data-app-title-bar]")).toBeVisible();
-  await page.getByRole("button", { name: "个人用户", exact: true }).click();
+  await page.getByRole("button", { name: "账号与 Runtime", exact: true }).click();
   await page.getByRole("menuitem", { name: "退出登录", exact: true }).click();
   await page.getByRole("button", { name: "中断所有任务并退出", exact: true }).click();
   await expect(page.getByLabel("Host 登录")).toBeVisible();
@@ -112,7 +111,7 @@ test("普通 token fragment 快速登录后立即移除，并在失效时回到�
   const { token } = await issued.json() as { token: string };
   await page.goto(`${host.base_url}/#token=${encodeURIComponent(token)}`);
   await expectWorkspaceReady(page);
-  await expect(page.locator("[data-app-title-bar]")).toBeVisible();
+  await expect(page.locator("[data-conversation-area]")).toBeVisible();
   expect(new URL(page.url()).hash).toBe("");
   const current = await access({ type: "get_status" });
   await access({ type: "set_password", payload: { expected_revision: current.revision, password: "revoked-web-password" } });
@@ -146,10 +145,10 @@ for (const fallback of ["reduced-motion", "webgl-and-storage-unavailable"] as co
     await page.screenshot({ path: testInfo.outputPath(`${fallback}.png`) });
     await page.getByLabel("访问密码", { exact: true }).fill("isolated-web-password");
     await page.getByLabel("访问密码", { exact: true }).press("Enter");
-    await expect(page.locator("[data-app-title-bar]")).toBeVisible();
-    await expect(page.getByRole("button", { name: "个人用户", exact: true })).toBeVisible();
+    await expectWorkspaceReady(page);
+    await expect(page.getByRole("button", { name: "账号与 Runtime", exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.getByRole("button", { name: "个人用户", exact: true }).click();
+    await page.getByRole("button", { name: "账号与 Runtime", exact: true }).click();
     await page.getByRole("menuitem", { name: "退出登录", exact: true }).click();
     await page.getByRole("button", { name: "中断所有任务并退出", exact: true }).click();
     await expect(page.getByLabel("Host 登录")).toBeVisible();
@@ -381,13 +380,14 @@ test("C03 Web 上传真实插件包并显示安装终态", async ({ page }) => {
   await expect(page.getByText("compact-shelving-cad")).toBeVisible();
 });
 
-test("released old Web assets cannot log in to the new Host", async ({ page, request }, info) => {
+test("released 0.33.1 Web assets cannot log in to the new Host", async ({ page, request }, info) => {
   const old = process.env.EZ_ASSISTANT_TEST_OLD_WEB_ORIGIN;
-  test.skip(!old, "requires an explicitly started isolated released Host");
+  test.skip(!old, "requires an isolated Host from the 0.33.1 release");
   expect(old).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
   const host = fixture();
   // Simulate an already cached released page; all application requests still reach the new Host.
-  await page.route(`${host.base_url}/**`, async (route) => {
+  const host_routes = `${host.base_url}/**`;
+  await page.route(host_routes, async (route) => {
     const path = new URL(route.request().url()).pathname;
     if (path === "/" || path.startsWith("/assets/")) {
       const response = await request.get(`${old}${path}`);
@@ -401,10 +401,18 @@ test("released old Web assets cannot log in to the new Host", async ({ page, req
   const rejected = page.waitForResponse((response) => response.url() === `${host.base_url}/auth/login` && response.request().method() === "POST");
   await page.getByRole("button", { name: "进入项目" }).click();
   const response = await rejected;
+  expect(response.request().headers()["x-ez-client-version"]).toBe("0.33.1");
   expect(response.status()).toBe(409);
-  expect((await response.json()).error.code).toBe("missing_declaration");
-  await expect(page.locator("[data-app-title-bar]")).toHaveCount(0);
+  expect((await response.json()).error.code).toBe("client_too_old");
+  expect(response.headers()["set-cookie"]).toBeUndefined();
+  await expect(page.getByText("客户端低于 Host 的最低兼容版本，请更新应用或刷新页面。", { exact: true })).toBeVisible();
+  await expect(page.locator("[data-conversation-area]")).toHaveCount(0);
   await page.screenshot({ path: info.outputPath("released-web-rejected.png") });
-  const health = await request.get(`${host.base_url}/health`, { headers: { Authorization: `Bearer ${host.access_token}` } });
-  expect((await health.json()).status).toBe("ready");
+
+  await page.unroute(host_routes);
+  await page.reload();
+  await page.getByLabel("访问密码", { exact: true }).fill("isolated-web-password");
+  await page.getByRole("button", { name: "进入项目" }).click();
+  await expectWorkspaceReady(page);
+  await expect(page.getByRole("button", { name: "账号与 Runtime", exact: true })).toBeVisible();
 });

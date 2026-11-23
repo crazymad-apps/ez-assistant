@@ -113,7 +113,8 @@ pub(super) async fn initialize(
             database_version: None,
             min_compatible_host_version: None,
         });
-    let opening = LocalRuntimeStore::open_with_progress(user_home, 64, Some(progress));
+    let opening =
+        LocalRuntimeStore::open_with_progress(user_home, 64, Some(progress), paths.clone());
     tokio::pin!(opening);
     let store = Arc::new(loop {
         tokio::select! {
@@ -259,6 +260,10 @@ pub(super) async fn initialize(
         loader.attach(&runtime);
         owner.model_task = Some(tokio::spawn(loader.clone().run()));
     }
+    runtime
+        .start_schedules(resources.schedule_executor)
+        .await
+        .map_err(|_| InitializationFailed)?;
     let (speech_service, speech) = SpeechService::with_slots(source, &owner.speech_slots);
     let (gateway, gateway_handle) = DeviceGatewayService::new(
         user_home.to_path_buf(),

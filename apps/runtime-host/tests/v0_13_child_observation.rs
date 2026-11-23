@@ -303,14 +303,14 @@ fn child_query_cancel_and_product_view_use_the_formal_host_contract() {
     )["snapshot"]["value"]
         .clone();
     assert_eq!(
-        session_view["child_tasks"]
+        session_view["conversation"]["child_tasks"]
             .as_array()
             .expect("task tree")
             .len(),
         1
     );
     assert_eq!(
-        session_view["child_tasks"][0]["task"]["child_task_id"],
+        session_view["conversation"]["child_tasks"][0]["task"]["child_task_id"],
         child_task_id
     );
 

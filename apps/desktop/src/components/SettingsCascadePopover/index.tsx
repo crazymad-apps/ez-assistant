@@ -45,8 +45,9 @@ type SettingsCascadePopoverProps = Readonly<{
     on_select: () => Promise<boolean>;
   }>[];
   footer_content?: ReactNode;
-  trigger_class_name: string;
+  trigger_class_name?: string;
   trigger_content: string;
+  trigger_variant?: "field";
 }>;
 
 /** 两级菜单只组织独立设置项，不把分类关系提升为业务依赖。 */
@@ -160,9 +161,12 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
   function closeAndRestoreFocus() {
     keyboard_category_ref.current = null;
     interaction.current.epoch += 1;
+    // 关闭后浮层会进入 inert，先交还菜单当前持有的焦点。
+    if (overlay_ref.current?.contains(document.activeElement)) trigger_ref.current?.focus();
     props.on_open_change(false);
     setSecondaryCategoryId(null);
     requestAnimationFrame(() => {
+      if (latest.current.open) return;
       const active_element = document.activeElement;
       if (!active_element || active_element === document.body) {
         trigger_ref.current?.focus();
@@ -308,6 +312,7 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
       aria-haspopup="menu"
       aria-label={props.aria_label}
       className={[styles.trigger, props.trigger_class_name].filter(Boolean).join(' ')}
+      data-variant={props.trigger_variant}
       disabled={props.disabled && !props.disabled_reason}
       onClick={() => {
         if (!trigger_disabled) props.on_open_change(!props.open);
@@ -334,7 +339,7 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
 
   return (
     <>
-      <span className={styles.trigger_wrapper}>
+      <span className={styles.trigger_wrapper} data-variant={props.trigger_variant}>
         {props.disabled_reason ? <Tooltip content={props.disabled_reason}>{trigger}</Tooltip> : trigger}
         {clear_action && !props.disabled_reason && (
           <button
@@ -359,6 +364,7 @@ export function SettingsCascadePopover(props: SettingsCascadePopoverProps) {
       <AnchoredOverlay
         aria_label={props.aria_label}
         class_name={styles.settings_cascade}
+        match_trigger_width={props.trigger_variant === "field"}
         on_request_close={closeAndRestoreFocus}
         open={props.open}
         overlay_ref={overlay_ref}

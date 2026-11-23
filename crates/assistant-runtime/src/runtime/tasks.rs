@@ -22,8 +22,13 @@ use tokio_util::task::TaskTracker;
 pub(crate) struct RuntimeTasks {
     tracker: TaskTracker,
     next_id: AtomicU64,
-    aborts: Arc<Mutex<BTreeMap<u64, AbortHandle>>>,
+    aborts: Arc<Mutex<BTreeMap<u64, TrackedTask>>>,
     changed: tokio::sync::watch::Sender<()>,
+}
+
+struct TrackedTask {
+    abort: AbortHandle,
+    keeps_domain_alive: bool,
 }
 
 impl RuntimeTasks {
@@ -42,9 +47,37 @@ impl RuntimeTasks {
         future: impl Future<Output = ()> + Send + 'static,
         on_panic: impl Future<Output = ()> + Send + 'static,
     ) {
+        self.spawn_tracked(future, on_panic, true);
+    }
+
+    /// 空闲调度器参与关闭等待，是否保活由其最近一次到期事实决定。
+    pub(super) fn spawn_passive(
+        &self,
+        future: impl Future<Output = ()> + Send + 'static,
+        on_panic: impl Future<Output = ()> + Send + 'static,
+    ) {
+        self.spawn_tracked(future, on_panic, false);
+    }
+
+    pub(super) fn notify_work_changed(&self) {
+        self.changed.send_replace(());
+    }
+
+    fn spawn_tracked(
+        &self,
+        future: impl Future<Output = ()> + Send + 'static,
+        on_panic: impl Future<Output = ()> + Send + 'static,
+        keeps_domain_alive: bool,
+    ) {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (abort, registration) = AbortHandle::new_pair();
-        self.abort_handles().insert(id, abort);
+        self.abort_handles().insert(
+            id,
+            TrackedTask {
+                abort,
+                keeps_domain_alive,
+            },
+        );
         self.changed.send_replace(());
         let aborts = self.aborts.clone();
         let changed = self.changed.clone();
@@ -67,7 +100,9 @@ impl RuntimeTasks {
     }
 
     pub(super) fn has_work(&self) -> bool {
-        !self.abort_handles().is_empty()
+        self.abort_handles()
+            .values()
+            .any(|task| task.keeps_domain_alive)
     }
 
     pub(super) fn subscribe_work(&self) -> tokio::sync::watch::Receiver<()> {
@@ -89,15 +124,15 @@ impl RuntimeTasks {
         }
 
         let aborts = std::mem::take(&mut *self.abort_handles());
-        for abort in aborts.into_values() {
-            abort.abort();
+        for task in aborts.into_values() {
+            task.abort.abort();
         }
         // Abortable 包装层会在 abort 后收敛；此处等待不再依赖业务 future 配合取消。
         self.tracker.wait().await;
         false
     }
 
-    fn abort_handles(&self) -> std::sync::MutexGuard<'_, BTreeMap<u64, AbortHandle>> {
+    fn abort_handles(&self) -> std::sync::MutexGuard<'_, BTreeMap<u64, TrackedTask>> {
         self.aborts
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())

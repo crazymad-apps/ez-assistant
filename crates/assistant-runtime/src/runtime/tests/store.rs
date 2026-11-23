@@ -281,6 +281,108 @@ impl FaultInjectingStore {
 }
 
 impl RuntimeStore for FaultInjectingStore {
+    fn next_schedule_maintenance(
+        &self,
+        after: Option<String>,
+    ) -> StoreFuture<'_, Option<(String, crate::ScheduleMaintenance)>> {
+        self.inner.next_schedule_maintenance(after)
+    }
+
+    fn mark_schedule_deleting(&self, id: assistant_protocol::ScheduleId) -> StoreFuture<'_, bool> {
+        self.inner.mark_schedule_deleting(id)
+    }
+
+    fn archive_schedule_result(
+        &self,
+        id: assistant_protocol::ScheduleExecutionId,
+    ) -> StoreFuture<'_, ()> {
+        self.inner.archive_schedule_result(id)
+    }
+
+    fn commit_schedule_report(
+        &self,
+        commit: crate::ScheduleReportCommit,
+    ) -> StoreFuture<'_, Option<crate::AcceptedInput>> {
+        self.inner.commit_schedule_report(commit)
+    }
+
+    fn finish_schedule_result(
+        &self,
+        id: assistant_protocol::ScheduleExecutionId,
+    ) -> StoreFuture<'_, ()> {
+        self.inner.finish_schedule_result(id)
+    }
+
+    fn resolve_schedule_file(
+        &self,
+        id: assistant_protocol::ScheduleExecutionId,
+        file_id: String,
+    ) -> StoreFuture<'_, Option<crate::ResolvedScheduleFile>> {
+        self.inner.resolve_schedule_file(id, file_id)
+    }
+
+    fn next_schedule_due(&self) -> StoreFuture<'_, Option<crate::StoredSchedule>> {
+        self.inner.next_schedule_due()
+    }
+
+    fn admit_schedule(
+        &self,
+        command: crate::ScheduleAdmission,
+    ) -> StoreFuture<'_, crate::ScheduleAdmitted> {
+        self.inner.admit_schedule(command)
+    }
+
+    fn settle_schedule_execution(
+        &self,
+        settlement: crate::ScheduleSettlement,
+    ) -> StoreFuture<'_, ()> {
+        self.inner.settle_schedule_execution(settlement)
+    }
+
+    fn recover_schedule_executions(&self, now: i64, cleanup_verified: bool) -> StoreFuture<'_, ()> {
+        self.inner
+            .recover_schedule_executions(now, cleanup_verified)
+    }
+
+    fn get_schedule_execution(
+        &self,
+        id: assistant_protocol::ScheduleExecutionId,
+    ) -> StoreFuture<'_, Option<assistant_protocol::ScheduleExecution>> {
+        self.inner.get_schedule_execution(id)
+    }
+
+    fn list_schedule_executions(
+        &self,
+        id: assistant_protocol::ScheduleId,
+        offset: u32,
+        limit: u32,
+    ) -> StoreFuture<'_, Option<assistant_protocol::ListScheduleExecutionsResult>> {
+        self.inner.list_schedule_executions(id, offset, limit)
+    }
+
+    fn list_schedules(
+        &self,
+        offset: u32,
+        limit: u32,
+    ) -> StoreFuture<'_, crate::StoredSchedulePage> {
+        self.inner.list_schedules(offset, limit)
+    }
+    fn get_schedule(
+        &self,
+        id: assistant_protocol::ScheduleId,
+    ) -> StoreFuture<'_, Option<crate::StoredSchedule>> {
+        self.inner.get_schedule(id)
+    }
+    fn insert_schedule(&self, schedule: crate::StoredSchedule) -> StoreFuture<'_, bool> {
+        self.inner.insert_schedule(schedule)
+    }
+    fn replace_schedule(&self, schedule: crate::StoredSchedule) -> StoreFuture<'_, bool> {
+        self.inner.replace_schedule(schedule)
+    }
+    fn delete_schedule(&self, id: assistant_protocol::ScheduleId) -> StoreFuture<'_, bool> {
+        self.inner.delete_schedule(id)
+    }
+
     fn publish_message_card(
         &self,
         card: crate::NewMessageCard,

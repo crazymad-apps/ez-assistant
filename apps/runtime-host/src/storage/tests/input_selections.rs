@@ -126,6 +126,7 @@ fn consumed_selections_recover_from_files_while_another_input_remains_queued() {
         created.materialization_key =
             Some(IdempotencyKey::new("selection-materialization").unwrap());
         let materialization = NewStoredSessionMaterialization {
+            schedule_execution_id: None,
             session: created,
             attachments: Vec::new(),
             input: consumed.clone(),

@@ -124,6 +124,18 @@ it("requires proxy v2 before any remote request and retains immutable request ta
     expect(new Headers(init?.headers).get("x-ez-target-device")).toBe(A);
     expect(JSON.parse(String(init?.body)).command.payload.payload.owner).toEqual(owner);
   }
+  const background = { session_id: "s", background_id: "b" };
+  await remote.listBackgroundRuns({ session_id: "s", limit: 10 });
+  await remote.readBackgroundOutput({ ...background, cursor: 12 });
+  await remote.stopBackgroundRun(background);
+  expect(transport.fetch.mock.calls.slice(-3).map(([, init]) => {
+    expect(new Headers(init?.headers).get("x-ez-target-device")).toBe(A);
+    return JSON.parse(String(init?.body)).command.payload;
+  })).toEqual([
+    { type: "list_background_runs", payload: { session_id: "s", limit: 10 } },
+    { type: "read_background_output", payload: { ...background, cursor: 12 } },
+    { type: "stop_background_run", payload: background },
+  ]);
   const before = transport.fetch.mock.calls.length;
   await expect(remote.command({ type: "set_session_pinned", payload: { session_id: "blocked", is_pinned: true } })).rejects.toMatchObject({ code: "remote_operation_unavailable", target_device: A });
   await expect(remote.resource("/attachments/file", {}, async () => undefined)).rejects.toMatchObject({ code: "remote_operation_unavailable" });

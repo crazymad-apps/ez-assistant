@@ -453,6 +453,7 @@ fn materialization_identity_never_moves_to_later_inputs_after_clear_or_rewrite()
         let mut created = new_session(session.as_str(), &engine.sessions_directory);
         created.materialization_key = Some(key.clone());
         let original = NewStoredSessionMaterialization {
+            schedule_execution_id: None,
             session: created.clone(),
             attachments: Vec::new(),
             input: NewStoredInput {
@@ -642,6 +643,7 @@ async fn accepted_and_materialized_retries_read_terminal_files_without_decoding_
     let key = IdempotencyKey::new("file-materialization-key").unwrap();
     created.materialization_key = Some(key.clone());
     let original = NewStoredSessionMaterialization {
+        schedule_execution_id: None,
         session: created,
         attachments: Vec::new(),
         input: NewStoredInput {

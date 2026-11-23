@@ -406,10 +406,12 @@ impl Fixture {
         assert_eq!(response.status(), StatusCode::OK);
         let value = response.json::<Value>().await.unwrap();
         assert_eq!(value["identity"]["center_id"], CENTER_ID);
-        let mut without_host_token = value.clone();
-        without_host_token.as_object_mut().unwrap().remove("token");
-        assert!(!without_host_token.to_string().contains("ct_"));
-        assert!(!without_host_token.to_string().contains("cl_"));
+        // 检查夹具发出的完整中心凭据，随机 Host 字段可能恰好含有相同的短前缀。
+        let response_body = value.to_string();
+        for serial in 1..=self.mock.serial.load(Ordering::SeqCst) {
+            assert!(!response_body.contains(&format!("test.{serial:064x}.fixture")));
+            assert!(!response_body.contains(&format!("cl_{serial:064x}")));
+        }
         value["token"].as_str().unwrap().into()
     }
     async fn session(&self, token: &str) -> reqwest::Response {

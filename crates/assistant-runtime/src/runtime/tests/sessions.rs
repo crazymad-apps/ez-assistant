@@ -65,6 +65,8 @@ async fn plugin_skills_are_visible_in_conversation_scope_but_not_independent_man
     assert!(management.snapshot.skills.is_empty());
     let conversation = runtime
         .list_skills(assistant_protocol::ListSkillsRequest {
+            page: None,
+            session_id: None,
             include_plugins: Some(true),
             workspace_id: None,
         })
@@ -131,6 +133,8 @@ async fn plugin_skill_wins_over_same_named_independent_skill_in_catalog_and_mana
     assert_eq!(detail.detail.unwrap().body, None);
     let conversation = runtime
         .list_skills(assistant_protocol::ListSkillsRequest {
+            page: None,
+            session_id: None,
             include_plugins: Some(true),
             workspace_id: None,
         })

@@ -1060,6 +1060,9 @@ async fn queued_input_recovers_without_run_and_idempotent_resubmit_does_not_clai
     assert!(
         runtime
             .list_runs(assistant_protocol::ListRunsRequest {
+                summary_only: None,
+                page: None,
+                input_id: None,
                 session_id: session_id.clone()
             })
             .await

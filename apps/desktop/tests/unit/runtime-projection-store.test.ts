@@ -140,7 +140,7 @@ describe("RuntimeProjectionStore", () => {
     expect(store.input_receipts.has("session-1")).toBe(false);
     expect(store.conversation_histories.get("session-1")?.items.map(conversationItemId)).toEqual(["old-tail", "old-final", "new-user"]);
     store.applySessionSnapshot({ observed_sequence: 6, value: { ...sessionView(page(1, [assistant("newer-tail")], "prev", true)),
-      runs: [{ ...run, run_id: "newer-run", input_id: "newer-input", created_at_ms: 5 }] } });
+      latest_run_created_at_ms: 5, runs: [{ ...run, run_id: "newer-run", input_id: "newer-input", created_at_ms: 5 }] } });
     expect(store.applyInputReceipt("session-1", receipt)).toBe(false);
     expect(store.input_receipts.has("session-1")).toBe(false);
   });

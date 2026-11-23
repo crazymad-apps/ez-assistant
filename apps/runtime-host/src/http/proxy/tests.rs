@@ -38,9 +38,24 @@ fn command_gate_rejects_global_management_and_allows_scoped_permissions() {
         "runtime",
         json!({"type":"prepare_custom_agent","payload":{"selection":{"name":"test","source":{"type":"personal"}}}})
     )));
+    let settings = json!({"name":"fixture","enabled":false,"report_to_controller":false,
+        "rule":{"type":"daily","time":"09:00"},"action":{"type":"script","command":"echo fixture"}});
     for command in [
         json!({"type":"move_sidebar_item","payload":{"scope":"workspaces","workspace_id":"a","reference_id":"b","placement":"before"}}),
         json!({"type":"reset_sidebar_order","payload":{"scope":"sessions","group":{"type":"unbound"}}}),
+        json!({"type":"list_background_runs","payload":{"session_id":"s","limit":10}}),
+        json!({"type":"read_background_output","payload":{"session_id":"s","background_id":"b","cursor":12}}),
+        json!({"type":"stop_background_run","payload":{"session_id":"s","background_id":"b"}}),
+        json!({"type":"list_schedules","payload":{}}),
+        json!({"type":"get_schedule","payload":{"schedule_id":"s"}}),
+        json!({"type":"create_schedule","payload":settings}),
+        json!({"type":"update_schedule","payload":{"schedule_id":"s","settings":settings}}),
+        json!({"type":"delete_schedule","payload":{"schedule_id":"s"}}),
+        json!({"type":"set_schedule_enabled","payload":{"schedule_id":"s","enabled":false}}),
+        json!({"type":"preview_schedule","payload":{"rule":{"type":"daily","time":"09:00"}}}),
+        json!({"type":"read_schedule_background_output","payload":{"execution_id":"e","background_id":"b"}}),
+        json!({"type":"stop_schedule_background","payload":{"execution_id":"e","background_id":"b"}}),
+        json!({"type":"retry_schedule_result","payload":{"execution_id":"e"}}),
     ] {
         assert!(allowed::allowed(&request("runtime", command)));
     }
@@ -86,6 +101,16 @@ fn response_header_filter_does_not_leak_target_credentials() {
 fn only_existing_business_routes_cross_the_bridge() {
     use paths::{Route, route};
     assert_eq!(route("GET", "/events"), Some(Route::Events));
+    assert_eq!(
+        route("GET", "/schedule-results/e/files/f/download"),
+        Some(Route::Media)
+    );
+    assert_eq!(
+        route("POST", "/schedule-results/e/files/download"),
+        Some(Route::Files)
+    );
+    assert_eq!(route("GET", "/schedule-results/e/files/download"), None);
+    assert_eq!(route("POST", "/schedule-results/e/files/f/download"), None);
     assert_eq!(
         route("POST", "/session-materializations"),
         Some(Route::Files)

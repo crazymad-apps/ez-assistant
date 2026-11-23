@@ -368,17 +368,57 @@ pub struct GetAttachmentResult {
     pub attachment: AttachmentSummary,
 }
 
-/// 按创建顺序列出 Session 的全部 Attachment。
+/// 会话上下文列表的偏移分页；空请求使用首页及默认条数。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ContextPageRequest {
+    #[serde(default)]
+    #[ts(optional)]
+    pub offset: Option<u32>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ContextPage {
+    pub offset: u32,
+    pub limit: u32,
+    pub total: u32,
+}
+
+/// 按创建顺序列出 Session 附件。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ListAttachmentsRequest {
     pub session_id: SessionId,
+    #[serde(default)]
+    #[ts(optional)]
+    pub page: Option<ContextPageRequest>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ListAttachmentsResult {
     pub attachments: Vec<AttachmentSummary>,
+    pub page: ContextPage,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ListArtifactsRequest {
+    pub session_id: SessionId,
+    #[serde(default)]
+    #[ts(optional)]
+    pub page: Option<ContextPageRequest>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ListArtifactsResult {
+    pub artifacts: Vec<crate::SessionArtifact>,
+    pub page: ContextPage,
 }
 
 /// HTTP 流式上传完成后的稳定业务结果。
@@ -680,12 +720,27 @@ pub struct ListSkillsRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub workspace_id: Option<WorkspaceId>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub session_id: Option<SessionId>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub page: Option<ContextPageRequest>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ListSkillsResult {
     pub snapshot: SkillManagementSnapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub page: Option<ContextPage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub diagnostic_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<Vec<crate::ActiveSkillSnapshot>>", optional)]
+    pub active_skills: Vec<crate::ActiveSkillSnapshot>,
 }
 
 /// 按名称读取指定管理范围内当前候选的安全详情与指令正文。
@@ -886,30 +941,47 @@ pub struct GetRunResult {
     pub run: RunSnapshot,
 }
 
-/// 查询指定 Session 的全部 Run。
+/// 最新优先的 Run 页；按 InputId 过滤可回查可靠的介入结果。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ListRunsRequest {
     pub session_id: SessionId,
+    #[serde(default)]
+    #[ts(optional)]
+    pub page: Option<ContextPageRequest>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub input_id: Option<InputId>,
+    /// 右栏仅读取运行状态及时间，不展开正文或工具活动。
+    #[serde(default)]
+    #[ts(optional)]
+    pub summary_only: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ListRunsResult {
     pub runs: Vec<RunSnapshot>,
+    pub page: ContextPage,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ListChildTasksRequest {
     pub session_id: SessionId,
-    pub parent_run_id: RunId,
+    #[serde(default)]
+    #[ts(optional)]
+    pub parent_run_id: Option<RunId>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub page: Option<ContextPageRequest>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ListChildTasksResult {
     pub tasks: Vec<ChildTaskSnapshot>,
+    pub page: ContextPage,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -1429,6 +1501,21 @@ pub enum RuntimeCommand {
     DecideApproval(DecideApprovalRequest),
     /// 显式验证指定模型连接。
     ValidateModelConnection(ValidateModelConnectionRequest),
+    ListSchedules(crate::ListSchedulesRequest),
+    GetSchedule(crate::ScheduleTarget),
+    CreateSchedule(crate::CreateScheduleRequest),
+    UpdateSchedule(crate::UpdateScheduleRequest),
+    SetScheduleEnabled(crate::SetScheduleEnabledRequest),
+    PreviewSchedule(crate::PreviewScheduleRequest),
+    DeleteSchedule(crate::ScheduleTarget),
+    RunScheduleNow(crate::RunScheduleNowRequest),
+    ListScheduleExecutions(crate::ListScheduleExecutionsRequest),
+    GetScheduleExecution(crate::ScheduleExecutionTarget),
+    StopScheduleExecution(crate::ScheduleExecutionTarget),
+    RetryScheduleResult(crate::ScheduleExecutionTarget),
+    GetScheduleBackground(crate::ScheduleBackgroundTarget),
+    ReadScheduleBackgroundOutput(crate::ReadScheduleBackgroundOutputRequest),
+    StopScheduleBackground(crate::ScheduleBackgroundTarget),
     /// 登记或恢复 Workspace。
     RegisterWorkspace(RegisterWorkspaceRequest),
     /// 更新 Workspace 当前名称与目录。
@@ -1445,6 +1532,7 @@ pub enum RuntimeCommand {
     GetAttachment(GetAttachmentRequest),
     /// 列出 Session Attachment。
     ListAttachments(ListAttachmentsRequest),
+    ListArtifacts(ListArtifactsRequest),
     /// 创建 Session。
     CreateSession(CreateSessionRequest),
     /// 从可靠 Assistant Message 创建独立 Session。
@@ -1491,6 +1579,9 @@ pub enum RuntimeCommand {
     GetRun(GetRunRequest),
     /// 列出 Session 的全部 Run。
     ListRuns(ListRunsRequest),
+    ListBackgroundRuns(crate::ListBackgroundRunsRequest),
+    ReadBackgroundOutput(crate::ReadBackgroundOutputRequest),
+    StopBackgroundRun(crate::StopBackgroundRunRequest),
     ListChildTasks(ListChildTasksRequest),
     GetChildTask(GetChildTaskRequest),
     CancelChildTask(CancelChildTaskRequest),
@@ -1626,6 +1717,21 @@ pub enum RuntimeCommandResult {
     DecideApproval(DecideApprovalResult),
     /// 模型连接验证已完成。
     ValidateModelConnection(ValidateModelConnectionResult),
+    ListSchedules(crate::ListSchedulesResult),
+    GetSchedule(crate::ScheduleSnapshot),
+    CreateSchedule(crate::ScheduleSnapshot),
+    UpdateSchedule(crate::ScheduleSnapshot),
+    SetScheduleEnabled(crate::ScheduleSnapshot),
+    PreviewSchedule(crate::PreviewScheduleResult),
+    DeleteSchedule(crate::ScheduleTarget),
+    RunScheduleNow(crate::RunScheduleNowResult),
+    ListScheduleExecutions(crate::ListScheduleExecutionsResult),
+    GetScheduleExecution(crate::ScheduleExecution),
+    StopScheduleExecution(crate::ScheduleExecutionSummary),
+    RetryScheduleResult(crate::ScheduleExecution),
+    GetScheduleBackground(crate::BackgroundRunSummary),
+    ReadScheduleBackgroundOutput(crate::ReadBackgroundOutputResult),
+    StopScheduleBackground(crate::StopBackgroundRunResult),
     /// Workspace 已登记或恢复。
     RegisterWorkspace(RegisterWorkspaceResult),
     /// Workspace 当前元数据已更新。
@@ -1642,6 +1748,7 @@ pub enum RuntimeCommandResult {
     GetAttachment(GetAttachmentResult),
     /// Attachment 列表已返回。
     ListAttachments(ListAttachmentsResult),
+    ListArtifacts(ListArtifactsResult),
     /// Session 已创建。
     CreateSession(CreateSessionResult),
     /// Fork Session 已创建。
@@ -1679,6 +1786,9 @@ pub enum RuntimeCommandResult {
     GetRun(GetRunResult),
     /// Run 列表已返回。
     ListRuns(ListRunsResult),
+    ListBackgroundRuns(crate::ListBackgroundRunsResult),
+    ReadBackgroundOutput(crate::ReadBackgroundOutputResult),
+    StopBackgroundRun(crate::StopBackgroundRunResult),
     ListChildTasks(ListChildTasksResult),
     GetChildTask(GetChildTaskResult),
     CancelChildTask(CancelChildTaskResult),
@@ -2138,8 +2248,19 @@ mod tests {
             (
                 RuntimeCommand::ListAttachments(ListAttachmentsRequest {
                     session_id: session_id.clone(),
+                    page: Some(ContextPageRequest {
+                        offset: Some(10),
+                        limit: Some(10),
+                    }),
                 }),
                 "list_attachments",
+            ),
+            (
+                RuntimeCommand::ListArtifacts(ListArtifactsRequest {
+                    session_id: session_id.clone(),
+                    page: None,
+                }),
+                "list_artifacts",
             ),
             (
                 RuntimeCommand::CreateSession(CreateSessionRequest::default()),
@@ -2284,14 +2405,18 @@ mod tests {
             ),
             (
                 RuntimeCommand::ListRuns(ListRunsRequest {
+                    summary_only: None,
                     session_id: session_id.clone(),
+                    page: None,
+                    input_id: None,
                 }),
                 "list_runs",
             ),
             (
                 RuntimeCommand::ListChildTasks(ListChildTasksRequest {
                     session_id: session_id.clone(),
-                    parent_run_id: run_id.clone(),
+                    parent_run_id: Some(run_id.clone()),
+                    page: None,
                 }),
                 "list_child_tasks",
             ),
@@ -2486,9 +2611,25 @@ mod tests {
             ),
             (
                 RuntimeCommandResult::ListAttachments(ListAttachmentsResult {
+                    page: ContextPage {
+                        offset: 0,
+                        limit: 10,
+                        total: 1,
+                    },
                     attachments: Vec::new(),
                 }),
                 "list_attachments",
+            ),
+            (
+                RuntimeCommandResult::ListArtifacts(ListArtifactsResult {
+                    artifacts: Vec::new(),
+                    page: ContextPage {
+                        offset: 0,
+                        limit: 10,
+                        total: 0,
+                    },
+                }),
+                "list_artifacts",
             ),
             (
                 RuntimeCommandResult::CreateSession(CreateSessionResult {
@@ -2631,12 +2772,22 @@ mod tests {
             ),
             (
                 RuntimeCommandResult::ListRuns(ListRunsResult {
+                    page: ContextPage {
+                        offset: 0,
+                        limit: 10,
+                        total: 1,
+                    },
                     runs: vec![run_snapshot()],
                 }),
                 "list_runs",
             ),
             (
                 RuntimeCommandResult::ListChildTasks(ListChildTasksResult {
+                    page: ContextPage {
+                        offset: 0,
+                        limit: 10,
+                        total: 1,
+                    },
                     tasks: vec![child_task_snapshot()],
                 }),
                 "list_child_tasks",

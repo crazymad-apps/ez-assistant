@@ -34,6 +34,7 @@ use crate::config_source::prepare_private_directory;
 /// 单一阻塞 worker 内部的具体存储引擎。
 pub(super) struct StorageEngine {
     pub(super) runtime_home: PathBuf,
+    pub(super) resource_paths: std::sync::Arc<crate::user_paths::UserPaths>,
     pub(super) sessions_directory: PathBuf,
     pub(super) workspaces_directory: PathBuf,
     pub(super) blobs_directory: PathBuf,
@@ -152,6 +153,10 @@ impl StorageEngine {
         }
         Ok(Self {
             runtime_home: runtime_home.to_path_buf(),
+            resource_paths: std::sync::Arc::new(crate::user_paths::UserPaths::new(
+                runtime_home,
+                Vec::new(),
+            )),
             sessions_directory: directories[0].clone(),
             workspaces_directory: directories[1].clone(),
             blobs_directory: directories[2].clone(),
@@ -267,6 +272,10 @@ impl StorageEngine {
 
         let mut engine = Self {
             runtime_home: runtime_home.to_path_buf(),
+            resource_paths: std::sync::Arc::new(crate::user_paths::UserPaths::new(
+                runtime_home,
+                Vec::new(),
+            )),
             sessions_directory,
             workspaces_directory,
             blobs_directory,

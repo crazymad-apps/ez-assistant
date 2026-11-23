@@ -84,7 +84,7 @@ pub(super) fn host_path_guarded(
     Ok(path)
 }
 
-pub(super) fn canonicalize(path: &Path) -> Result<PathBuf, RuntimeErrorInfo> {
+pub(crate) fn canonicalize(path: &Path) -> Result<PathBuf, RuntimeErrorInfo> {
     #[cfg(windows)]
     {
         crate::platform::resource_file::local_path(path).map_err(|_| {
@@ -99,7 +99,7 @@ pub(super) fn canonicalize(path: &Path) -> Result<PathBuf, RuntimeErrorInfo> {
 /// canonicalize 的结果不是永久授权。逐级以目录句柄打开且拒绝再次跟随链接，校验后替换的链接无法改变读取目标。
 /// NONBLOCK 避免被替换成 FIFO 时阻塞；最终文件类型由句柄核验。
 #[cfg(unix)]
-pub(super) fn open_resolved(path: &Path, directory: bool) -> Result<File, RuntimeErrorInfo> {
+pub(crate) fn open_resolved(path: &Path, directory: bool) -> Result<File, RuntimeErrorInfo> {
     if !path.is_absolute() {
         return Err(super::invalid_request("文件路径必须为绝对路径。"));
     }
@@ -133,7 +133,7 @@ pub(super) fn open_resolved(path: &Path, directory: bool) -> Result<File, Runtim
 
 /// Windows 逐级固定目录并拒绝 reparse，返回核验过身份的最终句柄。
 #[cfg(windows)]
-pub(super) fn open_resolved(path: &Path, directory: bool) -> Result<File, RuntimeErrorInfo> {
+pub(crate) fn open_resolved(path: &Path, directory: bool) -> Result<File, RuntimeErrorInfo> {
     crate::platform::resource_file::open(path, directory)
         .map(|opened| opened.file)
         .map_err(error)

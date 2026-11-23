@@ -67,6 +67,7 @@ async fn attachment_upload_deduplicates_by_session_blob_hash_and_is_read_only_qu
     assert_eq!(
         runtime
             .list_attachments(ListAttachmentsRequest {
+                page: None,
                 session_id: first_session.session_id.clone(),
             })
             .await

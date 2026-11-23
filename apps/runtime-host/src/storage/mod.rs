@@ -37,6 +37,7 @@ mod recall_index;
 mod recovery;
 mod run_projection;
 mod run_state;
+mod schedule;
 mod schema;
 mod session_history;
 mod session_loading;

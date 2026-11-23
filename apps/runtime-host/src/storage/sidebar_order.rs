@@ -142,10 +142,10 @@ impl<'a> Scope<'a> {
         match self {
             Self::Workspaces => "lifecycle = 'active'",
             Self::Sessions(_) => {
-                "EXISTS(SELECT 1 FROM sessions s WHERE s.session_id = session_resources.session_id AND s.lifecycle = 'active' AND s.role = 'standard') AND (workspace_id IS NULL OR EXISTS(SELECT 1 FROM workspaces w WHERE w.workspace_id = session_resources.workspace_id AND w.lifecycle = 'active'))"
+                "EXISTS(SELECT 1 FROM sessions s WHERE s.session_id = session_resources.session_id AND s.lifecycle = 'active' AND s.role = 'standard' AND NOT EXISTS(SELECT 1 FROM schedule_executions se WHERE se.session_id=s.session_id)) AND (workspace_id IS NULL OR EXISTS(SELECT 1 FROM workspaces w WHERE w.workspace_id = session_resources.workspace_id AND w.lifecycle = 'active'))"
             }
             Self::Pins => {
-                "lifecycle = 'active' AND role = 'standard' AND EXISTS(SELECT 1 FROM session_resources r WHERE r.session_id = sessions.session_id AND (r.workspace_id IS NULL OR EXISTS(SELECT 1 FROM workspaces w WHERE w.workspace_id = r.workspace_id AND w.lifecycle = 'active')))"
+                "lifecycle = 'active' AND role = 'standard' AND NOT EXISTS(SELECT 1 FROM schedule_executions se WHERE se.session_id=sessions.session_id) AND EXISTS(SELECT 1 FROM session_resources r WHERE r.session_id = sessions.session_id AND (r.workspace_id IS NULL OR EXISTS(SELECT 1 FROM workspaces w WHERE w.workspace_id = r.workspace_id AND w.lifecycle = 'active')))"
             }
         }
     }
@@ -299,7 +299,7 @@ impl<'a> Scope<'a> {
         let lifecycle = if archived { "archived" } else { "active" };
         let sql = match self {
             Self::Workspaces => "SELECT workspace_id FROM workspaces WHERE lifecycle = ?2 AND ?1 IS NULL ORDER BY sort_order DESC, workspace_id LIMIT ?3 OFFSET ?4".into(),
-            Self::Sessions(_) => "SELECT r.session_id FROM session_resources r CROSS JOIN sessions s ON s.session_id = r.session_id WHERE r.workspace_id IS ?1 AND s.lifecycle = ?2 AND s.role = 'standard' ORDER BY r.sort_order DESC, r.session_id LIMIT ?3 OFFSET ?4".into(),
+            Self::Sessions(_) => "SELECT r.session_id FROM session_resources r CROSS JOIN sessions s ON s.session_id = r.session_id WHERE r.workspace_id IS ?1 AND s.lifecycle = ?2 AND s.role = 'standard' AND NOT EXISTS(SELECT 1 FROM schedule_executions se WHERE se.session_id=s.session_id) ORDER BY r.sort_order DESC, r.session_id LIMIT ?3 OFFSET ?4".into(),
             Self::Pins => format!("SELECT session_id FROM sessions WHERE is_pinned = 1 AND ?1 IS NULL AND ?2 = 'active' AND ({}) ORDER BY pin_order DESC, session_id LIMIT ?3 OFFSET ?4", self.visible()),
         };
         let lifecycle = if matches!(self, Self::Workspaces) && archived {

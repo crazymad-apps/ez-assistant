@@ -42,6 +42,7 @@ impl StorageEngine {
                 "SELECT s.session_id,s.title,s.lifecycle,s.updated_at_ms FROM sessions s
              LEFT JOIN session_resources r ON r.session_id=s.session_id
              WHERE (?1 IS NULL OR s.session_id=?1) AND (?2 IS NULL OR r.workspace_id=?2)
+               AND NOT EXISTS(SELECT 1 FROM schedule_executions se WHERE se.session_id=s.session_id)
              ORDER BY s.updated_at_ms DESC,s.session_id",
             )
             .map_err(|source| {

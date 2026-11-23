@@ -79,7 +79,13 @@ export function ApprovalInput({ input }: Readonly<{ input: ToolInputProjection }
 function ApprovalInputValue({ input }: Readonly<{ input: ToolInputSnapshot }>) {
   switch (input.type) {
     case "shell":
-      return <><code className={styles.command_line}><Icon name="terminal" size={15} />{input.command}</code><p>{input.working_directory}</p></>;
+      return <>
+        <code className={styles.command_line}><Icon name="terminal" size={15} />{input.command}</code>
+        <p>{input.working_directory}</p>
+        {input.process_mode === "background" && (
+          <p>首次等待 {input.wait_ms ?? 1000} ms · 总时限 {input.timeout_ms ? `${input.timeout_ms} ms` : "不限"}</p>
+        )}
+      </>;
     case "file":
       return <p>{input.operation} · <code>{input.path}</code></p>;
     case "files":
@@ -103,6 +109,9 @@ function ApprovalInputValue({ input }: Readonly<{ input: ToolInputSnapshot }>) {
 
 function approvalQuestion(subject: ToolApprovalSubject): string {
   if (subject.type === "mcp") return `允许调用 ${subject.identity.server_key} / ${subject.identity.tool_name}？`;
+  if (subject.type === "shell" && subject.process_mode === "background") return "允许在后台执行命令？";
+  if (subject.type === "general" && subject.tool_name === "manage_schedules") return "允许执行这项定时任务操作？";
+  if (subject.type === "general" && subject.tool_name === "stop_background_run") return "允许停止后台运行？";
   return subject.type === "shell" ? "允许执行命令行指令？" : `允许执行 ${subject.tool_name}？`;
 }
 

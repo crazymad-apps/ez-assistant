@@ -28,6 +28,7 @@ export type ConversationHistoryProjection = Readonly<{
   owner: ConversationOwner;
   generation: number;
   items: readonly ConversationItem[];
+  child_tasks: readonly import("@ez-assistant/protocol").ChildTaskTreeItemSnapshot[];
   previous_cursor: string | null;
   has_more: boolean;
   is_loading_previous: boolean;
@@ -276,8 +277,8 @@ export class RuntimeProjectionStore {
       || run.session_id !== session_id || run.input_id !== result.input_id || user_message.input_id !== result.input_id) return false;
     const run_created_at = run.created_at_ms;
     // 断线期间若其他客户端已经启动后续轮次，旧回执只能确认原发送，不能成为新尾页。
-    if (run_created_at !== null && this.session_views.get(session_id)?.runs?.some(item =>
-      item.created_at_ms !== null && item.created_at_ms > run_created_at)) return false;
+    const view = this.session_views.get(session_id);
+    if (run_created_at !== null && (view?.latest_run_created_at_ms ?? -Infinity) > run_created_at) return false;
     const receipts = this.input_receipts.get(session_id) ?? [];
     if (!history.items.some(item => item.message_id === user_message.message_id)
       && !receipts.some(item => item.message.message_id === user_message.message_id)) {
@@ -360,6 +361,7 @@ export class RuntimeProjectionStore {
       owner: page.owner,
       generation: page.generation,
       items: mergeConversationItems(page.items, current.items),
+      child_tasks: mergePageChildren(current.child_tasks, page),
       previous_cursor: page.previous_cursor,
       has_more: page.has_more,
       is_loading_previous: false,
@@ -389,6 +391,7 @@ export class RuntimeProjectionStore {
       owner: page.owner,
       generation: page.generation,
       items: mergeConversationItems(page.items, current.items),
+      child_tasks: [],
       previous_cursor: page.previous_cursor,
       has_more: page.has_more,
       is_loading_previous: false,
@@ -481,6 +484,7 @@ export class RuntimeProjectionStore {
       owner: page.owner,
       generation: page.generation,
       items: mergeConversationItems(current.items, page.items),
+      child_tasks: mergePageChildren(current.child_tasks, page),
       previous_cursor: retained_previous ? current.previous_cursor : page.previous_cursor,
       has_more: retained_previous ? current.has_more : page.has_more,
       is_loading_previous: current.is_loading_previous,
@@ -511,6 +515,7 @@ export class RuntimeProjectionStore {
       owner: page.owner,
       generation: page.generation,
       items: mergeConversationItems(current.items, page.items),
+      child_tasks: [],
       previous_cursor: retained_previous ? current.previous_cursor : page.previous_cursor,
       has_more: retained_previous ? current.has_more : page.has_more,
       is_loading_previous: current.is_loading_previous,
@@ -520,11 +525,17 @@ export class RuntimeProjectionStore {
   }
 }
 
+function mergePageChildren(current: ConversationHistoryProjection["child_tasks"], page: ConversationPage) {
+  const parent_ids = new Set(page.items.flatMap((item) => item.type === "assistant" && item.run_id ? [item.run_id] : []));
+  return [...current.filter((item) => !parent_ids.has(item.task.parent_run_id)), ...(page.child_tasks ?? [])];
+}
+
 function historyFromPage(page: ConversationPage): ConversationHistoryProjection {
   return {
     owner: page.owner,
     generation: page.generation,
     items: page.items,
+    child_tasks: page.child_tasks ?? [],
     previous_cursor: page.previous_cursor,
     has_more: page.has_more,
     is_loading_previous: false,

@@ -43,7 +43,7 @@ test("long output keeps reading intent, pages under load, and shows child contex
   await command("set_session_approval_mode", { session_id, approval_mode: "auto" });
   await submit("DELEGATE_CASE");
   const view = (await command("get_session_view", { session_id })).snapshot.value;
-  expect(view.child_tasks[0].usage.context).toMatchObject({ used_tokens: 140, window_tokens: 16384 });
+  expect(view.conversation.child_tasks?.[0]?.usage.context).toMatchObject({ used_tokens: 140, window_tokens: 16384 });
   const issued = await fetch(`${host.base_url}/auth/login`, { method: "POST", headers, body: JSON.stringify({ method: "desktop" }) });
   const { token } = await issued.json();
   await page.emulateMedia({ reducedMotion: "reduce" });
@@ -152,6 +152,11 @@ test("F01 完整 Run 分页与聊天页顺序定位", async ({ page }) => {
     if (command?.type === "list_conversation_page") cursors.push(command.payload.cursor);
   });
   const context = page.getByRole("tabpanel", { name: "当前上下文" });
+  const runPages = context.getByRole("navigation", { name: "运行记录分页" });
+  for (const number of [2, 3]) {
+    await runPages.getByRole("button", { name: "下一页运行记录" }).click();
+    await expect(runPages).toContainText(`${number} / 3`);
+  }
   await context.getByRole("button", { name: /运行 #1.*0 个工具.*完成/ }).last().click();
   await expect(messages.getByText("历史 0", { exact: true })).toBeInViewport();
   expect(cursors).toEqual([latest.previous_cursor, middle.previous_cursor]);
@@ -217,7 +222,7 @@ test("F01 M1 Host returns paired IDs and bounded previews for authorized owners"
   }
   await rejected({ owner, generation: navigation.generation + 1, message_id: navigation.items[0].user_message_id }, "snapshot_stale");
 
-  const child = main.child_tasks[0].task;
+  const child = main.conversation.child_tasks![0].task;
   const child_owner = { type: "child_task", session_id: session.session_id, child_task_id: child.child_task_id };
   const child_view = (await command("get_child_task_view", { session_id: session.session_id, child_task_id: child.child_task_id })).snapshot.value;
   const child_page = (await command("list_conversation_navigation", { owner: child_owner, cursor: null })).snapshot.value;
@@ -228,7 +233,7 @@ test("F01 M1 Host returns paired IDs and bounded previews for authorized owners"
 
   const attached = (await command("list_sessions", { query: "M2 临时会话" })).sessions.find(item => item.title === "M2 临时会话")!;
   const attached_owner = { type: "main_session", session_id: attached.session_id };
-  const attachments = (await readView(attached.session_id)).attachments;
+  const { attachments } = await command("list_attachments", { session_id: attached.session_id });
   expect(attachments).toHaveLength(1);
   await submit(attached.session_id, "", [attachments[0].attachment_id]);
   const attached_page = (await command("list_conversation_navigation", { owner: attached_owner, cursor: null })).snapshot.value;

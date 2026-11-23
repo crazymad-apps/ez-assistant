@@ -1,6 +1,151 @@
 use super::*;
 
 impl RuntimeStore for VolatileRuntimeStore {
+    fn next_schedule_maintenance(
+        &self,
+        after: Option<String>,
+    ) -> StoreFuture<'_, Option<(String, crate::ScheduleMaintenance)>> {
+        Box::pin(async move { self.next_schedule_maintenance_inner(after) })
+    }
+
+    fn mark_schedule_deleting(&self, id: assistant_protocol::ScheduleId) -> StoreFuture<'_, bool> {
+        Box::pin(async move { self.mark_schedule_deleting_inner(id) })
+    }
+
+    fn archive_schedule_result(
+        &self,
+        id: assistant_protocol::ScheduleExecutionId,
+    ) -> StoreFuture<'_, ()> {
+        Box::pin(async move { self.archive_schedule_result_inner(id) })
+    }
+
+    fn commit_schedule_report(
+        &self,
+        commit: crate::ScheduleReportCommit,
+    ) -> StoreFuture<'_, Option<crate::AcceptedInput>> {
+        Box::pin(self.commit_schedule_report_inner(commit))
+    }
+
+    fn finish_schedule_result(
+        &self,
+        id: assistant_protocol::ScheduleExecutionId,
+    ) -> StoreFuture<'_, ()> {
+        Box::pin(async move { self.finish_schedule_result_inner(id) })
+    }
+
+    fn resolve_schedule_file(
+        &self,
+        id: assistant_protocol::ScheduleExecutionId,
+        file_id: String,
+    ) -> StoreFuture<'_, Option<crate::ResolvedScheduleFile>> {
+        Box::pin(async move { self.resolve_schedule_file_inner(id, file_id) })
+    }
+
+    fn next_schedule_due(&self) -> StoreFuture<'_, Option<crate::StoredSchedule>> {
+        Box::pin(async move { self.next_schedule_due_inner() })
+    }
+
+    fn admit_schedule(
+        &self,
+        command: crate::ScheduleAdmission,
+    ) -> StoreFuture<'_, crate::ScheduleAdmitted> {
+        Box::pin(async move { self.admit_schedule_inner(command) })
+    }
+
+    fn settle_schedule_execution(
+        &self,
+        settlement: crate::ScheduleSettlement,
+    ) -> StoreFuture<'_, ()> {
+        Box::pin(async move { self.settle_schedule_execution_inner(settlement) })
+    }
+
+    fn recover_schedule_executions(
+        &self,
+        now: i64,
+        _cleanup_verified: bool,
+    ) -> StoreFuture<'_, ()> {
+        Box::pin(async move { self.recover_schedule_executions_inner(now) })
+    }
+
+    fn get_schedule_execution(
+        &self,
+        id: assistant_protocol::ScheduleExecutionId,
+    ) -> StoreFuture<'_, Option<assistant_protocol::ScheduleExecution>> {
+        Box::pin(async move { self.get_schedule_execution_inner(id) })
+    }
+
+    fn list_schedule_executions(
+        &self,
+        id: assistant_protocol::ScheduleId,
+        offset: u32,
+        limit: u32,
+    ) -> StoreFuture<'_, Option<assistant_protocol::ListScheduleExecutionsResult>> {
+        Box::pin(async move { self.list_schedule_executions_inner(id, offset, limit) })
+    }
+
+    fn list_schedules(
+        &self,
+        offset: u32,
+        limit: u32,
+    ) -> StoreFuture<'_, crate::StoredSchedulePage> {
+        Box::pin(async move {
+            let state = self.lock()?;
+            let schedules = state
+                .schedules
+                .values()
+                .skip(offset as usize)
+                .take(limit as usize)
+                .cloned()
+                .collect();
+            Ok(crate::StoredSchedulePage {
+                schedules,
+                page: assistant_protocol::ContextPage {
+                    offset,
+                    limit,
+                    total: u32::try_from(state.schedules.len()).unwrap_or(u32::MAX),
+                },
+            })
+        })
+    }
+
+    fn get_schedule(
+        &self,
+        id: assistant_protocol::ScheduleId,
+    ) -> StoreFuture<'_, Option<crate::StoredSchedule>> {
+        Box::pin(async move { Ok(self.lock()?.schedules.get(&id).cloned()) })
+    }
+
+    fn insert_schedule(&self, schedule: crate::StoredSchedule) -> StoreFuture<'_, bool> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            let std::collections::btree_map::Entry::Vacant(entry) =
+                state.schedules.entry(schedule.schedule_id.clone())
+            else {
+                return Ok(false);
+            };
+            entry.insert(schedule);
+            Ok(true)
+        })
+    }
+
+    fn replace_schedule(&self, schedule: crate::StoredSchedule) -> StoreFuture<'_, bool> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            let Some(previous) = state.schedules.get_mut(&schedule.schedule_id) else {
+                return Ok(false);
+            };
+            if previous.deleting {
+                return Ok(false);
+            }
+            *previous = schedule;
+            Ok(true)
+        })
+    }
+
+    fn delete_schedule(&self, id: assistant_protocol::ScheduleId) -> StoreFuture<'_, bool> {
+        Box::pin(async move { self.remove_schedule(id) })
+    }
+
     fn publish_message_card(
         &self,
         card: crate::NewMessageCard,

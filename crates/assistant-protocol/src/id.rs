@@ -107,6 +107,16 @@ define_identifier!(
     "session_id"
 );
 define_identifier!(
+    /// 用户 Runtime 内一条定时计划的不透明标识。
+    ScheduleId,
+    "schedule_id"
+);
+define_identifier!(
+    /// 用户 Runtime 内一次计划执行的不透明标识。
+    ScheduleExecutionId,
+    "schedule_execution_id"
+);
+define_identifier!(
     /// Runtime 中一个 Workspace 的不透明标识。
     WorkspaceId,
     "workspace_id"

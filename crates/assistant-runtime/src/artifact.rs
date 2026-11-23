@@ -3,7 +3,6 @@
 use std::{collections::HashMap, sync::Arc};
 
 use agent_tools::{Tool, ToolContext, ToolError, ToolExecuteFuture, ToolResolution};
-#[cfg(test)]
 use agent_types::ConversationSnapshot;
 use agent_types::{AssistantPart, ConversationMessage, ToolName, ToolResultStatus};
 use assistant_protocol::{RunId, SessionArtifact, SessionResourceLocator};
@@ -182,18 +181,21 @@ impl ArtifactProjection {
             _ => self.calls.clear(),
         }
     }
-    pub(crate) fn snapshot(&self) -> Vec<SessionArtifact> {
-        self.artifacts.iter().flatten().cloned().collect()
+    pub(crate) fn len(&self) -> usize {
+        self.indexes.len()
+    }
+
+    pub(crate) fn entries(&self) -> impl Iterator<Item = &SessionArtifact> {
+        self.artifacts.iter().flatten()
     }
 }
 
-#[cfg(test)]
 pub(crate) fn project_artifacts(history: &ConversationSnapshot) -> Vec<SessionArtifact> {
     let mut projection = ArtifactProjection::default();
     for message in &history.messages {
         projection.push(message);
     }
-    projection.snapshot()
+    projection.entries().cloned().collect()
 }
 
 #[cfg(test)]

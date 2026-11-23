@@ -6,6 +6,8 @@ fn fixture() -> Connection {
     db.execute_batch("CREATE TABLE workspaces(workspace_id TEXT PRIMARY KEY, lifecycle TEXT, created_at_ms INTEGER, updated_at_ms INTEGER);
         CREATE TABLE sessions(session_id TEXT PRIMARY KEY, lifecycle TEXT, role TEXT, is_pinned INTEGER, created_at_ms INTEGER, updated_at_ms INTEGER);
         CREATE TABLE session_resources(session_id TEXT PRIMARY KEY, workspace_id TEXT);
+        CREATE TABLE schedule_executions(session_id TEXT REFERENCES sessions(session_id));
+        CREATE UNIQUE INDEX schedule_execution_owner ON schedule_executions(session_id) WHERE session_id IS NOT NULL;
         CREATE INDEX session_resources_workspace ON session_resources(workspace_id,session_id);
         INSERT INTO workspaces VALUES('w','active',1,10),('x','active',2,20),('removed','removed',3,30);
         INSERT INTO sessions VALUES('a','active','standard',1,1,40),('b','active','standard',0,2,20),('hidden','archived','standard',0,3,30),('c','active','standard',1,4,10),('controller','active','controller',0,5,50),('other','active','standard',0,6,60),('unbound','active','standard',0,7,70),('removed-session','active','standard',1,8,80);

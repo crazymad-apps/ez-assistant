@@ -2,6 +2,16 @@ use super::*;
 use crate::storage::migrations::{migrate, product_manifest};
 use std::{fs, path::Path};
 
+fn through_sidebar_order() -> Vec<Migration> {
+    let mut entries = product_manifest();
+    let milestone = entries
+        .iter()
+        .position(|entry| entry.version == "0.33.1" && entry.key == KEY)
+        .unwrap();
+    entries.truncate(milestone + 1);
+    entries
+}
+
 #[test]
 fn same_version_sort_migration_preserves_history_and_rejects_early_manifest() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.runtime-test");
@@ -10,7 +20,7 @@ fn same_version_sort_migration_preserves_history_and_rejects_early_manifest() {
         .prefix("f04-migration-")
         .tempdir_in(root)
         .unwrap();
-    let entries = product_manifest();
+    let entries = through_sidebar_order();
     let old = &entries[..entries.len() - 1];
     migrate(home.path(), "0.33.1", old).unwrap();
     let db = Connection::open(home.path().join("data/runtime.sqlite3")).unwrap();
@@ -74,7 +84,7 @@ fn failed_sort_migration_rolls_back_columns_values_and_ledger() {
         .prefix("f04-rollback-")
         .tempdir_in(root)
         .unwrap();
-    let mut entries = product_manifest();
+    let mut entries = through_sidebar_order();
     migrate(home.path(), "0.33.1", &entries[..entries.len() - 1]).unwrap();
     let db = Connection::open(home.path().join("data/runtime.sqlite3")).unwrap();
     let before: i64 = db

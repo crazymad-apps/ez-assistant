@@ -46,7 +46,7 @@ function response(session_id: string, lifecycle: 'active' | 'archived' = 'active
     composer_capabilities: { model_error: null, selected_model: null, reasoning_effort_options: [], image_handling: 'unavailable', goal_supported: false },
     work_plan: null, goal: null, active_run: null, queue: { revision: 1, state: 'automatic', items: [] },
     approvals: { revision: 1, items: [], resolving_approval_id: null },
-    attachments: [], file_references: [], artifacts: [], runs: [], child_tasks: [], active_skills: [],
+    file_references: [], runs: [], child_tasks: [], active_skills: [],
     usage: { accumulated: null, previous_turn: null, latest_cache_hit_basis_points: null, overall_cache_hit_basis_points: null, context: null },
     conversation: { owner: { type: 'main_session', session_id }, generation: 1, items: [], previous_cursor: null, has_more: false },
   };

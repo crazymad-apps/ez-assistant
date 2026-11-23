@@ -36,6 +36,82 @@ use tokio::sync::oneshot;
 /// 每个变体只携带业务参数和一次性回复通道；命令按 mpsc 接收顺序在同一线程执行，
 /// 因此不得在调用方假设并行数据库事务或另存一份存储状态。
 pub(super) enum Command {
+    NextScheduleMaintenance {
+        after: Option<String>,
+        reply: oneshot::Sender<
+            Result<Option<(String, assistant_runtime::ScheduleMaintenance)>, StoreError>,
+        >,
+    },
+    MarkScheduleDeleting {
+        id: assistant_protocol::ScheduleId,
+        reply: oneshot::Sender<Result<bool, StoreError>>,
+    },
+    ArchiveScheduleResult {
+        id: assistant_protocol::ScheduleExecutionId,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    CommitScheduleReport {
+        commit: assistant_runtime::ScheduleReportCommit,
+        reply: oneshot::Sender<Result<Option<assistant_runtime::AcceptedInput>, StoreError>>,
+    },
+    FinishScheduleResult {
+        id: assistant_protocol::ScheduleExecutionId,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    ResolveScheduleFile {
+        id: assistant_protocol::ScheduleExecutionId,
+        file_id: String,
+        reply: oneshot::Sender<Result<Option<assistant_runtime::ResolvedScheduleFile>, StoreError>>,
+    },
+    NextScheduleDue {
+        reply: oneshot::Sender<Result<Option<assistant_runtime::StoredSchedule>, StoreError>>,
+    },
+    AdmitSchedule {
+        command: assistant_runtime::ScheduleAdmission,
+        reply: oneshot::Sender<Result<assistant_runtime::ScheduleAdmitted, StoreError>>,
+    },
+    SettleScheduleExecution {
+        settlement: assistant_runtime::ScheduleSettlement,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    RecoverScheduleExecutions {
+        now: i64,
+        cleanup_verified: bool,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    GetScheduleExecution {
+        id: assistant_protocol::ScheduleExecutionId,
+        reply: oneshot::Sender<Result<Option<assistant_protocol::ScheduleExecution>, StoreError>>,
+    },
+    ListScheduleExecutions {
+        id: assistant_protocol::ScheduleId,
+        offset: u32,
+        limit: u32,
+        reply: oneshot::Sender<
+            Result<Option<assistant_protocol::ListScheduleExecutionsResult>, StoreError>,
+        >,
+    },
+    ListSchedules {
+        offset: u32,
+        limit: u32,
+        reply: oneshot::Sender<Result<assistant_runtime::StoredSchedulePage, StoreError>>,
+    },
+    GetSchedule {
+        id: assistant_protocol::ScheduleId,
+        reply: oneshot::Sender<Result<Option<assistant_runtime::StoredSchedule>, StoreError>>,
+    },
+    InsertSchedule {
+        schedule: assistant_runtime::StoredSchedule,
+        reply: oneshot::Sender<Result<bool, StoreError>>,
+    },
+    ReplaceSchedule {
+        schedule: assistant_runtime::StoredSchedule,
+        reply: oneshot::Sender<Result<bool, StoreError>>,
+    },
+    DeleteSchedule {
+        id: assistant_protocol::ScheduleId,
+        reply: oneshot::Sender<Result<bool, StoreError>>,
+    },
     PublishMessageCard {
         card: assistant_runtime::NewMessageCard,
         reply: oneshot::Sender<Result<assistant_runtime::StoredMessageCard, StoreError>>,

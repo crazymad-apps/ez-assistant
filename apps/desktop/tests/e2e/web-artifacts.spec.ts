@@ -62,8 +62,8 @@ test("F02 delivers only declared files, previews/downloads, reloads and withdraw
     await page.goto(`${host.base_url}/#token=${encodeURIComponent(token)}`);
     await page.getByText("F02 交付测试", { exact: true }).first().click();
     async function submit(message: string) {
-      const { run } = await command("submit_input", { session_id, message, mode: "normal", variant: "build", attachment_ids: [], quotes: [] });
-      await expect.poll(async () => (await command("get_run", { session_id, run_id: run.run_id })).run.status).toBe("completed");
+      const { input_id } = await command("submit_input", { session_id, message, mode: "normal", variant: "build", attachment_ids: [], quotes: [] });
+      await expect.poll(async () => (await command("list_runs", { session_id, input_id, page: { limit: 1 }, summary_only: true })).runs[0]?.status).toBe("completed");
     }
     await submit("F02 DECLARE");
     const panel = page.getByRole("complementary", { name: "资源栏" });
@@ -80,9 +80,9 @@ test("F02 delivers only declared files, previews/downloads, reloads and withdraw
     await expect(panel.getByText("F02 FINAL DELIVERY", { exact: false }).first()).toBeVisible();
     await panel.getByRole("tab", { name: "当前上下文", exact: true }).click();
     await submit("F02 UPDATE");
-    expect((await command("get_session_view", { session_id })).snapshot.value.artifacts[0]?.title).toBe("修订报告");
+    expect((await command("list_artifacts", { session_id })).artifacts[0]?.title).toBe("修订报告");
     await expect(panel.getByRole("button", { name: "修订报告", exact: true })).toBeEnabled();
-    expect((await command("get_session_view", { session_id })).snapshot.value.artifacts).toHaveLength(1);
+    expect((await command("list_artifacts", { session_id })).artifacts).toHaveLength(1);
     await page.reload();
     await page.getByText("F02 交付测试", { exact: true }).first().click();
     await expect(panel.getByRole("button", { name: "修订报告", exact: true })).toBeEnabled();

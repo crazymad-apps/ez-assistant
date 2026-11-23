@@ -1,4 +1,4 @@
-//! 手动覆盖当前安装后的显式换代；停止复用原生身份核对，业务准入保持不变。
+//! 手动覆盖当前安装后的显式换代；正常关闭沿用已核验本机实例的停止入口。
 
 use super::*;
 use assistant_protocol::ClientCompatibility;
@@ -46,7 +46,7 @@ impl RuntimeBootstrapCoordinator {
         Ok((source, digest))
     }
 
-    /// 仅由用户明确的“更新并重启”调用。gate 内核对已替换来源，原生停止后启动当前随包文件。
+    /// 仅由用户明确的“更新并重启”调用。gate 内核对已替换来源，关闭原实例后启动当前随包文件。
     /// 数据备份和迁移归新版 Host，桌面只等待发现与业务准入，不能回滚或修复数据库。
     pub(crate) async fn upgrade(&self) -> Result<RuntimeBootstrap, RuntimeBootstrapError> {
         let operation = self.lifecycle_gate.clone().lock_owned().await;

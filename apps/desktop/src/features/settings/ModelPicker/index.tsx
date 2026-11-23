@@ -10,11 +10,13 @@ import type {
   ProviderSummary,
 } from '@ez-assistant/protocol';
 import { SettingsCascadePopover, type SettingsCascadeCategory, type SettingsCascadeOption } from '../../../components/SettingsCascadePopover';
+import type { RuntimeClient } from '../../../runtime-client/RuntimeClient';
 import { useRootStore } from '../../../stores/RootStoreContext';
 
 export type ModelPickerProps = Readonly<{
   source?: "conversation" | "settings";
   providers: readonly ProviderSummary[];
+  runtime_target?: Readonly<{ client: RuntimeClient; model_settings?: ModelSettings }>;
   selection: ModelSelection | null;
   title: string;
   label: string;
@@ -23,7 +25,8 @@ export type ModelPickerProps = Readonly<{
   disabled_reason?: string;
   onOpenChange: (open: boolean) => void;
   onSelect: (selection: ModelSelection | null) => Promise<boolean>;
-  trigger_class_name: string;
+  trigger_class_name?: string;
+  trigger_variant?: "field";
   follow_default?: boolean;
   vision_only?: boolean;
   clearable?: boolean;
@@ -37,9 +40,11 @@ export const ModelPicker = observer(function ModelPicker(props: ModelPickerProps
   const root = useRootStore();
   const settings = root.settings;
   const remote = props.source === "conversation" && root.remote_device;
-  const owner = props.source === 'conversation' ? root.runtime_client : root.local_runtime_client;
-  const client = remote ? owner : null;
-  const model_settings = props.source === 'conversation' ? root.projection.application?.model_settings : settings.model_settings;
+  const owner = props.runtime_target?.client ?? (props.source === 'conversation' ? root.runtime_client : root.local_runtime_client);
+  const client = props.runtime_target || remote ? owner : null;
+  const model_settings = props.runtime_target
+    ? props.runtime_target.model_settings
+    : props.source === 'conversation' ? root.projection.application?.model_settings : settings.model_settings;
   const management = model_settings?.management;
   const selection = props.selection;
   const [result, setResult] = useState<Readonly<{
@@ -213,6 +218,7 @@ export const ModelPicker = observer(function ModelPicker(props: ModelPickerProps
       categories={categories}
       trigger_class_name={props.trigger_class_name}
       trigger_content={props.label}
+      trigger_variant={props.trigger_variant}
       primary_actions={
         props.follow_default
           ? [

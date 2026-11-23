@@ -307,7 +307,9 @@ impl VolatileRuntimeStore {
                 let Some(session) = state.sessions.get(session_id) else {
                     continue;
                 };
-                if !volatile_scope_matches(&request.scope, session) {
+                if crate::runtime::schedule::is_scheduled_session(session_id)
+                    || !volatile_scope_matches(&request.scope, session)
+                {
                     continue;
                 }
                 collect_volatile_hits(

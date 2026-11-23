@@ -3,7 +3,7 @@ use super::{files, invalid_request, resource_error, resource_unavailable};
 use crate::http::HttpState;
 use assistant_protocol::{
     HostFileRequest, ListHostFilesRequest, PreviewSessionResourceFileRequest, RuntimeErrorInfo,
-    SessionId,
+    ScheduleExecutionId, SessionId,
 };
 use axum::{
     Json,
@@ -12,7 +12,12 @@ use axum::{
     http::{HeaderValue, header},
     response::{IntoResponse, Response},
 };
-use std::{fs::File, path::Path};
+use std::{
+    collections::BTreeSet,
+    fs::File,
+    io::{self, Read, Seek},
+    path::Path,
+};
 use tokio::io::AsyncReadExt;
 
 /// 阻塞文件工作随请求有界提交；permit 移入闭包，HTTP 取消也不会提前释放并发名额。
@@ -331,4 +336,124 @@ fn checked_path(
     path: &str,
 ) -> Result<std::path::PathBuf, RuntimeErrorInfo> {
     files::host_path_guarded(Some(path), Some(paths))
+}
+
+/// 文件身份由本用户 Store 的执行或主控回执授权。立即从同一受管路径打开普通文件。
+pub(in crate::http) async fn download_schedule_result_file(
+    State(state): State<HttpState>,
+    axum::Extension(services): axum::Extension<std::sync::Arc<crate::http::ReadyServices>>,
+    RoutePath((execution, file_id)): RoutePath<(String, String)>,
+) -> Response {
+    let id = match ScheduleExecutionId::new(execution) {
+        Ok(id) => id,
+        Err(_) => return resource_error(invalid_request("invalid schedule execution id")),
+    };
+    let resolved = match services
+        .runtime
+        .resolve_schedule_result_file(id, file_id)
+        .await
+    {
+        Ok(file) => file,
+        Err(error) => return resource_error(error.to_protocol_info()),
+    };
+    let permit = match permit(&state) {
+        Ok(permit) => permit,
+        Err(error) => return resource_error(error),
+    };
+    match read(move || {
+        let file = files::open_resolved(&resolved.path, false)?;
+        if file.metadata().map_err(files::error)?.len() != resolved.file.size_bytes {
+            return Err(super::resource_unavailable());
+        }
+        Ok((file, resolved.file.name, permit))
+    })
+    .await
+    {
+        Ok((file, name, permit)) => download(file, Path::new(&name), permit),
+        Err(error) => resource_error(error),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub(in crate::http) struct ScheduleBundleRequest {
+    file_ids: Vec<String>,
+}
+
+/// 只打包本用户已有的受管文件。每项仍沿用独立文件的执行记录与主控回执校验。
+pub(in crate::http) async fn download_schedule_result_bundle(
+    State(state): State<HttpState>,
+    axum::Extension(services): axum::Extension<std::sync::Arc<crate::http::ReadyServices>>,
+    RoutePath(execution): RoutePath<String>,
+    Json(request): Json<ScheduleBundleRequest>,
+) -> Response {
+    const MAX_FILES: usize = 256;
+    const MAX_BYTES: u64 = 512 * 1024 * 1024;
+    let Ok(id) = ScheduleExecutionId::new(execution) else {
+        return resource_error(invalid_request("invalid schedule execution id"));
+    };
+    let ids = request.file_ids;
+    let unique = ids.iter().collect::<BTreeSet<_>>();
+    if !(2..=MAX_FILES).contains(&ids.len()) || unique.len() != ids.len() {
+        return resource_error(invalid_request("每次可打包 2 到 256 个不同的结果文件。"));
+    }
+    let permit = match permit(&state) {
+        Ok(permit) => permit,
+        Err(error) => return resource_error(error),
+    };
+    let mut sources = Vec::with_capacity(ids.len());
+    let mut remaining = MAX_BYTES;
+    for file_id in ids {
+        let file = match services
+            .runtime
+            .resolve_schedule_result_file(id.clone(), file_id)
+            .await
+        {
+            Ok(file) => file,
+            Err(error) => return resource_error(error.to_protocol_info()),
+        };
+        let Some(bytes) = remaining.checked_sub(file.file.size_bytes) else {
+            return resource_error(invalid_request("结果文件合计超过 512 MiB，请单独下载。"));
+        };
+        remaining = bytes;
+        sources.push(file);
+    }
+    match read(move || Ok((create_schedule_zip(sources)?, permit))).await {
+        Ok((file, permit)) => download(file, Path::new("schedule-results.zip"), permit),
+        Err(error) => resource_error(error),
+    }
+}
+
+fn create_schedule_zip(
+    sources: Vec<assistant_runtime::ResolvedScheduleFile>,
+) -> Result<File, RuntimeErrorInfo> {
+    let temporary = tempfile::tempfile().map_err(files::error)?;
+    let mut zip = zip::ZipWriter::new(temporary);
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for (index, resolved) in sources.into_iter().enumerate() {
+        let file = files::open_resolved(&resolved.path, false)?;
+        let name = resolved.file.name.replace(
+            |character: char| {
+                character.is_control()
+                    || matches!(
+                        character,
+                        '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
+                    )
+            },
+            "_",
+        );
+        zip.start_file(
+            format!("{:02}-{}", index + 1, name.trim_end_matches([' ', '.'])),
+            options,
+        )
+        .map_err(|_| resource_unavailable())?;
+        let size = resolved.file.size_bytes;
+        let copied = io::copy(&mut file.take(size + 1), &mut zip).map_err(files::error)?;
+        if copied != size {
+            return Err(resource_unavailable());
+        }
+    }
+    let mut file = zip.finish().map_err(|_| resource_unavailable())?;
+    file.rewind().map_err(files::error)?;
+    Ok(file)
 }

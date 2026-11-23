@@ -2,7 +2,7 @@ import type { RunStatus, SessionViewSnapshot, SkillManagementSnapshot } from "@e
 import { modelSelectionLabel } from "../../settings";
 
 /** 当前目录决定列表；激活标签只说明已进入历史的正文，不补回已删除技能。 */
-export function sessionSkillRows(view: SessionViewSnapshot | undefined, catalog: SkillManagementSnapshot | null) {
+export function sessionSkillRows(view: Pick<SessionViewSnapshot, "active_skills"> | undefined, catalog: SkillManagementSnapshot | null) {
   const active = new Map((view?.active_skills ?? []).map((skill) => [skill.tag.name, skill.trigger]));
   return (catalog?.available ? catalog.skills : [])
     .filter((skill) => skill.enabled && skill.health === "ready")

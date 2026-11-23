@@ -162,6 +162,17 @@ impl<Input: std::fmt::Debug> std::fmt::Debug for ToolResolution<Input> {
 }
 
 impl<Input> ToolResolution<Input> {
+    pub(crate) fn map_input<Output>(
+        self,
+        map: impl FnOnce(Input) -> Output,
+    ) -> ToolResolution<Output> {
+        ToolResolution {
+            input: map(self.input),
+            authorization_facts: self.authorization_facts,
+            semantic_arguments: self.semantic_arguments,
+        }
+    }
+
     /// 为普通工具创建解析结果；使用默认通用事实，并把完整 resolved
     /// 参数作为语义指纹。
     pub fn general(input: Input) -> Self {

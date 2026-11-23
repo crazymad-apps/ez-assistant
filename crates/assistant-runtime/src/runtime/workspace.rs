@@ -170,10 +170,16 @@ impl AssistantRuntime {
         &self,
         request: RemoveWorkspaceRequest,
     ) -> RuntimeResult<RemoveWorkspaceResult> {
-        let _operation = self.operation_gate.read().await;
+        // 与后台登记共用接纳门禁，检查后到删库投影之间不会新增该 Workspace 的后台运行。
+        let _operation = self.operation_gate.write().await;
         self.ensure_running()?;
         let _mutation = self.workspace_mutation_gate.lock().await;
         self.workspace(&request.workspace_id)?;
+        if self.background_runs.has_workspace(&request.workspace_id) {
+            return Err(RuntimeError::InvalidRequest {
+                reason: "workspace has active or unconfirmed background shell work",
+            });
+        }
         let stored = self
             .store
             .remove_workspace(WorkspaceRemoval {

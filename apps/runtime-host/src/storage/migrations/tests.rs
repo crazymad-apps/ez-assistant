@@ -20,6 +20,138 @@ fn db(home: &Path) -> Connection {
     Connection::open(path).unwrap()
 }
 
+#[test]
+fn schedule_schema_upgrade_preserves_previous_tables_and_blocks_rollback() {
+    let mut home = tempfile::Builder::new()
+        .prefix("schedule-upgrade-")
+        .tempdir()
+        .unwrap();
+    if std::env::var_os("EZ_ASSISTANT_KEEP_TEST_FIXTURES").is_some() {
+        home.disable_cleanup(true);
+    }
+    let entries = product_manifest();
+    let boundary = entries
+        .iter()
+        .position(|entry| entry.version == "0.33.2")
+        .unwrap();
+    let previous = &entries[..boundary];
+    migrate(home.path(), "0.33.1", previous).unwrap();
+    let source = db(home.path());
+    let workspace = home.path().join("data/workspaces/w_old");
+    fs::create_dir_all(&workspace).unwrap();
+    assert_eq!(source.execute(
+        "INSERT INTO workspaces(workspace_id,label,agent_directory,lifecycle,created_at_ms,updated_at_ms,sort_order)
+         VALUES('w_old','旧项目',?1,'active',1,1,1024)",
+        [workspace.to_str().unwrap()],
+    ).unwrap(), 1);
+    let before = backup::evidence(&source).unwrap();
+    assert!(!before.tables.contains_key("schedules"));
+    drop(source);
+
+    let report = migrate(home.path(), DATABASE_SCHEMA_VERSION, &entries).unwrap();
+    assert_eq!(report.applied, ["0.33.2", "0.33.2", "0.33.2", "0.33.2"]);
+    let backup = report.backup.unwrap().join(DATABASE_FILE);
+    let saved = Connection::open_with_flags(&backup, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    assert_eq!(backup::evidence(&saved).unwrap(), before);
+    eprintln!("verified isolated migration backup {}", backup.display());
+    let target = db(home.path());
+    let after = backup::evidence(&target).unwrap();
+    let controls = ["schema_migrations", "database_compatibility"];
+    for (name, evidence) in &before.tables {
+        if !controls.contains(&name.as_str()) {
+            assert_eq!(after.tables.get(name), Some(evidence), "{name}");
+        }
+    }
+    assert_eq!(
+        target
+            .query_row("SELECT COUNT(*) FROM schedules", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    let added: i64 = target.query_row(
+        "SELECT COUNT(*) FROM schema_migrations WHERE version='0.33.2' AND migration_key='release'",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(added, 1);
+    assert_eq!(
+        target
+            .query_row("SELECT COUNT(*) FROM database_compatibility", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        compatibility::read(&target).unwrap(),
+        Some(parse_version("0.33.2").unwrap())
+    );
+    drop(target);
+    assert!(matches!(
+        migrate(home.path(), "0.33.1", previous),
+        Err(MigrationError::HostTooOld | MigrationError::NewerDatabase)
+    ));
+    assert_eq!(backup::evidence(&db(home.path())).unwrap(), after);
+}
+
+#[test]
+fn schedule_execution_migration_preserves_m0_definitions() {
+    let mut home = tempfile::Builder::new()
+        .prefix("schedule-m1-upgrade-")
+        .tempdir()
+        .unwrap();
+    if std::env::var_os("EZ_ASSISTANT_KEEP_TEST_FIXTURES").is_some() {
+        home.disable_cleanup(true);
+    }
+    let entries = product_manifest();
+    let m0 = &entries[..entries
+        .iter()
+        .position(|entry| entry.key == "schedule_executions_v1")
+        .unwrap()];
+    migrate(home.path(), "0.33.2", m0).unwrap();
+    let source = db(home.path());
+    let settings = r#"{"name":"existing plan","enabled":false,"report_to_controller":true,"rule":{"type":"daily","time":"09:00"},"action":{"type":"script","command":"echo fixture"}}"#;
+    assert_eq!(
+        source
+            .execute(
+                "INSERT INTO schedules(schedule_id,settings_json) VALUES('plan',?1)",
+                [settings]
+            )
+            .unwrap(),
+        1
+    );
+    let before = backup::evidence(&source).unwrap();
+    assert!(!before.tables.contains_key("schedule_executions"));
+    drop(source);
+
+    let m1 = &entries[..m0.len() + 1];
+    let report = migrate(home.path(), "0.33.2", m1).unwrap();
+    assert_eq!(report.applied, ["0.33.2"]);
+    let backup_path = report.backup.unwrap().join(DATABASE_FILE);
+    let saved =
+        Connection::open_with_flags(&backup_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    assert_eq!(backup::evidence(&saved).unwrap(), before);
+    eprintln!("verified isolated M0 backup {}", backup_path.display());
+    let target = db(home.path());
+    let (count, settings_after, next_due): (i64, String, Option<i64>) = target.query_row(
+        "SELECT (SELECT COUNT(*) FROM schedules),settings_json,next_due_at_ms FROM schedules WHERE schedule_id='plan'",
+        [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).unwrap();
+    assert_eq!(
+        (count, settings_after.as_str(), next_due),
+        (1, settings, None)
+    );
+    assert_eq!(
+        target
+            .query_row("SELECT COUNT(*) FROM schedule_executions", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(target.query_row(
+        "SELECT COUNT(*) FROM schema_migrations WHERE version='0.33.2' AND migration_key='schedule_executions_v1'",
+        [], |row| row.get::<_, i64>(0),
+    ).unwrap(), 1);
+}
+
 fn validate_old_source(connection: &Connection) -> Result<()> {
     connection.prepare(
         "SELECT session_id, model_key, title, body_generation, message_count FROM sessions LIMIT 0",
@@ -1308,7 +1440,7 @@ fn product_upgrade_removes_only_its_backup_after_verified_success() {
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row
                 .get::<_, i64>(0))
             .unwrap(),
-        ledger_rows + 5
+        ledger_rows + i64::try_from(entries.len() - boundary).unwrap()
     );
     assert_eq!(
         source
@@ -1322,15 +1454,22 @@ fn product_upgrade_removes_only_its_backup_after_verified_success() {
     );
     let mut actual = backup::evidence(&source).unwrap();
     let mut original = expected;
-    actual.tables.remove("message_cards").unwrap();
-    assert_eq!(
-        source
-            .query_row("SELECT COUNT(*) FROM message_cards", [], |row| row
-                .get::<_, i64>(0))
-            .unwrap(),
-        0,
-        "upgrade creates the card store without replaying historical tools"
-    );
+    for table in [
+        "message_cards",
+        "schedules",
+        "schedule_executions",
+        "schedule_deliveries",
+    ] {
+        actual.tables.remove(table).unwrap();
+        assert_eq!(
+            source
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0,
+            "{table} must be empty immediately after upgrade"
+        );
+    }
     actual.tables.remove("schema_migrations");
     original.tables.remove("schema_migrations");
     actual.tables.remove("database_compatibility");
@@ -1440,5 +1579,134 @@ fn product_upgrade_failure_preserves_verified_backup_and_source() {
             )
             .unwrap(),
         0
+    );
+}
+
+#[test]
+fn scheduled_session_migration_preserves_m1_execution() {
+    let mut home = tempfile::Builder::new()
+        .prefix("schedule-m2-upgrade-")
+        .tempdir()
+        .unwrap();
+    if std::env::var_os("EZ_ASSISTANT_KEEP_TEST_FIXTURES").is_some() {
+        home.disable_cleanup(true);
+        eprintln!("retained M2 migration fixture: {}", home.path().display());
+    }
+    let entries = product_manifest();
+    let m1 = &entries[..entries
+        .iter()
+        .position(|entry| entry.key == "scheduled_sessions_v1")
+        .unwrap()];
+    migrate(home.path(), "0.33.2", m1).unwrap();
+    let source = db(home.path());
+    let settings = r#"{"name":"M1 fixture","enabled":false,"report_to_controller":false,"rule":{"type":"daily","time":"09:00"},"action":{"type":"script","command":"printf fixture"}}"#;
+    let result =
+        r#"{"exit_code":0,"stdout":"fixture","stderr":"","truncated":false,"reason":null}"#;
+    assert_eq!(
+        source
+            .execute(
+                "INSERT INTO schedules(schedule_id,settings_json) VALUES('plan',?1)",
+                [settings],
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(source.execute(
+        "INSERT INTO schedule_executions(execution_id,schedule_id,request_key,accepted_at_ms,finished_at_ms,status,settings_json,result_json)
+         VALUES('execution','plan','request',100,110,'succeeded',?1,?2)",
+        [settings,result],
+    ).unwrap(), 1);
+    let before = backup::evidence(&source).unwrap();
+    drop(source);
+
+    let m2 = &entries[..m1.len() + 1];
+    let migration = migrate(home.path(), "0.33.2", m2).unwrap();
+    assert_eq!(migration.applied, ["0.33.2"]);
+    let backup_path = migration.backup.unwrap().join(DATABASE_FILE);
+    let saved =
+        Connection::open_with_flags(&backup_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    assert_eq!(backup::evidence(&saved).unwrap(), before);
+    eprintln!("verified isolated M2 backup {}", backup_path.display());
+    let target = db(home.path());
+    let (count, status, output, session): (i64, String, String, Option<String>) = target
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM schedule_executions),status,result_json,session_id
+         FROM schedule_executions WHERE execution_id='execution'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (count, status.as_str(), output.as_str(), session),
+        (1, "succeeded", result, None)
+    );
+    assert_eq!(
+        target
+            .query_row("SELECT COUNT(*) FROM schedules", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(target.query_row("SELECT COUNT(*) FROM schema_migrations WHERE migration_key='scheduled_sessions_v1'",
+        [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+}
+
+#[test]
+fn schedule_delivery_migration_preserves_prior_execution_and_restorable_backup() {
+    let mut home = tempfile::Builder::new()
+        .prefix("schedule-m3-upgrade-")
+        .tempdir()
+        .unwrap();
+    if std::env::var_os("EZ_ASSISTANT_KEEP_TEST_FIXTURES").is_some() {
+        home.disable_cleanup(true);
+        eprintln!("retained M3 migration fixture: {}", home.path().display());
+    }
+    let entries = product_manifest();
+    let m2 = &entries[..entries
+        .iter()
+        .position(|entry| entry.key == "schedule_delivery_v1")
+        .unwrap()];
+    migrate(home.path(), "0.33.2", m2).unwrap();
+    let source = db(home.path());
+    let settings = r#"{"name":"M2 fixture","enabled":false,"report_to_controller":false,"rule":{"type":"daily","time":"09:00"},"action":{"type":"script","command":"echo fixture"}}"#;
+    let result =
+        r#"{"exit_code":0,"stdout":"fixture","stderr":"","truncated":false,"reason":null}"#;
+    assert_eq!(
+        source
+            .execute(
+                "INSERT INTO schedules VALUES('fixture',?1,NULL)",
+                [settings]
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(source.execute(
+        "INSERT INTO schedule_executions(execution_id,schedule_id,request_key,accepted_at_ms,finished_at_ms,status,settings_json,result_json)
+         VALUES('prior','fixture','key',100,101,'succeeded',?1,?2)", [settings,result],
+    ).unwrap(), 1);
+    let before = backup::evidence(&source).unwrap();
+    drop(source);
+
+    let upgraded = migrate(home.path(), "0.33.2", &entries).unwrap();
+    assert_eq!(upgraded.applied, ["0.33.2"]);
+    let backup_path = upgraded.backup.unwrap().join(DATABASE_FILE);
+    let snapshot =
+        Connection::open_with_flags(&backup_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    assert_eq!(backup::evidence(&snapshot).unwrap(), before);
+    eprintln!("verified isolated M3 backup {}", backup_path.display());
+
+    let target = db(home.path());
+    let after: (String, i64, i64, i64, i64) = target.query_row(
+        "SELECT result_json,result_finalized,tracks_script_process,cleanup_confirmed,
+         (SELECT COUNT(*) FROM schedule_deliveries) FROM schedule_executions WHERE execution_id='prior'",
+        [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+    ).unwrap();
+    assert_eq!(after, (result.to_owned(), 0, 0, 0, 0));
+    assert_eq!(
+        target
+            .query_row("SELECT COUNT(*) FROM schedule_executions", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
     );
 }

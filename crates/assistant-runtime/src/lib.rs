@@ -40,6 +40,12 @@ mod runtime;
 mod session;
 mod skill;
 mod storage;
+pub use runtime::{ScheduleScriptExecutor, ScheduleScriptFuture};
+pub use storage::{
+    ResolvedScheduleFile, ScheduleAdmission, ScheduleAdmitted, ScheduleMaintenance,
+    ScheduleReportCommit, ScheduleResult, ScheduleSettlement, ScheduleTrigger, StoredSchedule,
+    StoredSchedulePage,
+};
 mod work_plan;
 mod workspace;
 
@@ -110,8 +116,9 @@ pub use permission::{
     PermissionStoreFuture, ShellPermissionMatcher, file_matcher_matches, resolve_permission_path,
 };
 pub use runtime::{
-    AssistantRuntime, ExternalModelPublication, ResolvedToolFileResource, ShutdownWork,
-    StagedAttachmentUpload, StagedSessionAttachment,
+    AssistantRuntime, BackgroundRunExit, BackgroundRunOrigin, BackgroundShellStart,
+    ExternalModelPublication, ResolvedToolFileResource, ShutdownWork, StagedAttachmentUpload,
+    StagedSessionAttachment, StartBackgroundShell,
 };
 pub use skill::{
     BUILTIN_GUIDE_REFERENCES, BUILTIN_GUIDE_SKILL_NAME, MAX_CATALOG_SKILLS,

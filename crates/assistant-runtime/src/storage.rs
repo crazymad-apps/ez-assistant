@@ -15,6 +15,7 @@ mod goal;
 mod history;
 mod model_management;
 mod plugin;
+mod schedule;
 mod session;
 mod usage;
 mod volatile;
@@ -71,6 +72,11 @@ pub use history::{
 pub use plugin::{
     PluginOperationKind, PluginOperationPhase, PluginOperationUpdate, PluginRecordChange,
     PluginSettingsChange, PluginSource, StoredPlugin, StoredPluginOperation,
+};
+pub use schedule::{
+    ResolvedScheduleFile, ScheduleAdmission, ScheduleAdmitted, ScheduleMaintenance,
+    ScheduleReportCommit, ScheduleResult, ScheduleSettlement, ScheduleTrigger, StoredSchedule,
+    StoredSchedulePage,
 };
 pub use session::{
     ApprovalModeChange, ArchiveChange, ForkedAttachmentReference, ForkedSessionCommand,

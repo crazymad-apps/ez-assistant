@@ -45,6 +45,9 @@ impl UserPaths {
         let host = assistant_runtime::resolve_permission_path(&self.host_root)?;
         let user = assistant_runtime::resolve_permission_path(&self.user_root)?;
         let plugin_root = self.user_root.join("plugins");
+        let background = self
+            .user_root
+            .join(agent_tools_local::BACKGROUND_SHELL_DIRECTORY);
         // 普通文件能力只能读取包内容；配置、数据与过程目录必须走插件专用入口。
         // 枚举从当前用户域的受管目录取得，不接受客户端传入的插件名。
         let readable_packages = match std::fs::read_dir(&plugin_root) {
@@ -107,6 +110,31 @@ impl UserPaths {
                 PathMatch::Exact,
                 Vec::new(),
             )?;
+        }
+        let archived_results = self.user_root.join("data").join("scheduled-runs");
+        for directory in [
+            &background,
+            &assistant_runtime::resolve_permission_path(&background)?,
+            &archived_results,
+            &assistant_runtime::resolve_permission_path(&archived_results)?,
+        ] {
+            for operation in [
+                Op::Read,
+                Op::List,
+                Op::Find,
+                Op::Search,
+                Op::Write,
+                Op::Edit,
+                Op::Delete,
+            ] {
+                push_rule(
+                    &mut document,
+                    operation,
+                    directory,
+                    PathMatch::Recursive,
+                    Vec::new(),
+                )?;
+            }
         }
         for (root, packages) in [
             (plugin_root.clone(), readable_packages.clone()),

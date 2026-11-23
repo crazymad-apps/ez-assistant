@@ -29,6 +29,7 @@ mod v0_32_1;
 mod v0_32_2;
 mod v0_33_0;
 mod v0_33_1;
+mod v0_33_2;
 
 #[cfg(test)]
 use std::fs;
@@ -47,7 +48,7 @@ use thiserror::Error;
 use super::{BUSY_TIMEOUT, DATA_DIRECTORY, DATABASE_FILE};
 
 const BASELINE: &str = "0.25.1";
-const DATABASE_SCHEMA_VERSION: &str = "0.33.1";
+const DATABASE_SCHEMA_VERSION: &str = "0.33.2";
 const LEDGER: &str = "CREATE TABLE IF NOT EXISTS schema_migrations (
     version TEXT PRIMARY KEY NOT NULL,
     applied_at_ms INTEGER NOT NULL CHECK(typeof(applied_at_ms) = 'integer' AND applied_at_ms >= 0)
@@ -157,6 +158,10 @@ fn product_manifest() -> Vec<Migration> {
     entries.push(v0_33_0::message_cards_entry());
     entries.push(v0_33_1::entry());
     entries.push(v0_33_1::sidebar_order::entry());
+    entries.push(v0_33_2::entry());
+    entries.push(v0_33_2::executions_entry());
+    entries.push(v0_33_2::scheduled_sessions_entry());
+    entries.push(v0_33_2::schedule_delivery_entry());
     entries
 }
 

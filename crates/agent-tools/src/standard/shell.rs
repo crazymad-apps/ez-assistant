@@ -3,7 +3,7 @@
 //! resolve 阶段只做纯计算，不解析 Shell AST，也不启动进程；真正的 Shell launcher、
 //! 环境过滤、超时和进程树清理由注入的 [`ShellTool`] 实现负责。
 
-use std::{num::NonZeroU64, sync::Arc, time::Duration};
+use std::{marker::PhantomData, num::NonZeroU64, sync::Arc, time::Duration};
 
 use agent_types::ToolName;
 use schemars::JsonSchema;
@@ -13,8 +13,9 @@ use serde_json::json;
 use crate::{
     SessionPathResolver, ToolResolution,
     capability::shell::{
+        BackgroundShellLauncher, BackgroundShellRequest, BackgroundShellStart,
         ShellAuthorizationFacts, ShellOutcome, ShellOutputChannel, ShellOutputSink,
-        ShellProcessMode, ShellRequest, ShellTool, ShellToolError,
+        ShellProcessMode, ShellRequest, ShellTool, ShellToolError, StartBackgroundShell,
     },
     tool::{
         Tool, ToolContext, ToolError, ToolExecuteFuture, ToolInputDefaults, ToolOutputChannel,
@@ -92,25 +93,55 @@ impl ShellExecToolConfig {
 }
 
 /// `shell`：执行一条完整命令。
-pub struct ShellExecTool {
+pub struct ShellExecTool<M = LegacyShellMode> {
     shell: Arc<dyn ShellTool>,
     resolver: SessionPathResolver,
     config: ShellExecToolConfig,
+    allow_legacy_detached: bool,
+    mode: PhantomData<fn() -> M>,
 }
 
 /// 模型可见输入。可选项的默认值会同时出现在工具 Schema 中。
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ShellInput {
+pub struct ShellInput<M = LegacyShellMode> {
     /// 完整命令；可以包含管道、重定向等平台 Shell 语法。
     pub command: String,
     /// 绝对路径或相对 session_workdir 的工作目录。
     pub workdir: Option<String>,
     /// 执行超时（毫秒）。
     pub timeout_ms: Option<NonZeroU64>,
-    /// 进程树生命周期；managed 在返回前收敛可管理进程树；detached 仅在主 Shell 退出且 stdout/stderr
-    /// 于 deadline 内 EOF 后交接，交接前超时或取消仍清理进程树。省略时使用 managed。
-    pub process_mode: Option<ShellProcessMode>,
+    /// 进程树生命周期。省略时使用 managed，在返回前收敛可管理进程树。
+    pub process_mode: Option<M>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LegacyShellMode {
+    Managed,
+    /// 主 Shell 退出且 stdout/stderr 于 deadline 内 EOF 后交接；交接前超时或取消清理进程树。
+    Detached,
+}
+
+impl From<LegacyShellMode> for ShellProcessMode {
+    fn from(mode: LegacyShellMode) -> Self {
+        match mode {
+            LegacyShellMode::Managed => Self::Managed,
+            LegacyShellMode::Detached => Self::Detached,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedShellMode {
+    Managed,
+}
+
+impl From<ManagedShellMode> for ShellProcessMode {
+    fn from(_: ManagedShellMode) -> Self {
+        Self::Managed
+    }
 }
 
 /// resolve 后冻结的 Shell 请求；执行和授权读取同一份有效值。
@@ -139,17 +170,57 @@ impl ShellExecTool {
             shell,
             resolver,
             config,
+            allow_legacy_detached: true,
+            mode: PhantomData,
         }
     }
+}
 
+impl ShellExecTool<ManagedShellMode> {
+    pub fn managed(
+        shell: Arc<dyn ShellTool>,
+        resolver: SessionPathResolver,
+        config: ShellExecToolConfig,
+    ) -> Self {
+        Self {
+            shell,
+            resolver,
+            config,
+            allow_legacy_detached: false,
+            mode: PhantomData,
+        }
+    }
+}
+
+impl<M> ShellExecTool<M> {
     fn default_timeout_ms(&self) -> NonZeroU64 {
         NonZeroU64::new(self.config.default_timeout.as_millis() as u64)
             .expect("validated non-zero timeout")
     }
+
+    fn workdir(
+        &self,
+        command: &str,
+        workdir: Option<String>,
+    ) -> Result<crate::AbsolutePath, ToolError> {
+        if command.trim().is_empty() {
+            return Err(ToolError::invalid_input("command must not be empty"));
+        }
+        match workdir {
+            Some(workdir) => self
+                .resolver
+                .resolve(&workdir)
+                .map_err(|error| ToolError::invalid_input(error.to_string())),
+            None => Ok(self.resolver.session_workdir().clone()),
+        }
+    }
 }
 
-impl Tool for ShellExecTool {
-    type Input = ShellInput;
+impl<M> Tool for ShellExecTool<M>
+where
+    M: Into<ShellProcessMode> + JsonSchema + serde::de::DeserializeOwned + 'static,
+{
+    type Input = ShellInput<M>;
     type ResolvedInput = ResolvedShellInput;
     type Output = ShellOutcome;
 
@@ -158,6 +229,12 @@ impl Tool for ShellExecTool {
     }
 
     fn description(&self) -> String {
+        if !self.allow_legacy_detached {
+            return format!(
+                "Execute a managed shell command with closed stdin, retaining at most {} bytes of stdout and stderr. The process tree is settled before returning. Use dedicated tools for file operations.",
+                self.config.max_output_bytes
+            );
+        }
         format!(
             "Execute a complete shell command and return stdout and stderr separately, retaining \
              at most {} bytes in total. stdin is closed. process_mode defaults to managed; use \
@@ -181,16 +258,8 @@ impl Tool for ShellExecTool {
         &self,
         input: Self::Input,
     ) -> Result<ToolResolution<Self::ResolvedInput>, ToolError> {
-        if input.command.trim().is_empty() {
-            return Err(ToolError::invalid_input("command must not be empty"));
-        }
-        let workdir = match input.workdir {
-            Some(workdir) => self
-                .resolver
-                .resolve(&workdir)
-                .map_err(|error| ToolError::invalid_input(error.to_string()))?,
-            None => self.resolver.session_workdir().clone(),
-        };
+        let workdir = self.workdir(&input.command, input.workdir)?;
+        let process_mode = input.process_mode.map(Into::into).unwrap_or_default();
         let timeout_ms = input
             .timeout_ms
             .unwrap_or_else(|| self.default_timeout_ms());
@@ -207,7 +276,7 @@ impl Tool for ShellExecTool {
             workdir: workdir.clone(),
             timeout_ms,
             max_output_bytes: self.config.max_output_bytes,
-            process_mode: input.process_mode.unwrap_or_default(),
+            process_mode,
         };
         let command = resolved.command.clone();
         let process_mode = resolved.process_mode;
@@ -221,7 +290,8 @@ impl Tool for ShellExecTool {
             ShellAuthorizationFacts {
                 command,
                 workdir,
-                timeout,
+                timeout: Some(timeout),
+                wait: None,
                 process_mode,
             },
             semantic_arguments,
@@ -264,6 +334,177 @@ impl Tool for ShellExecTool {
     }
 }
 
+/// 正式主会话的 Shell 入口。前台执行复用同一解析、超时和输出实现。
+pub struct BackgroundShellExecTool {
+    managed: ShellExecTool<ManagedShellMode>,
+    launcher: Arc<dyn BackgroundShellLauncher>,
+}
+
+impl BackgroundShellExecTool {
+    pub fn new(
+        managed: ShellExecTool<ManagedShellMode>,
+        launcher: Arc<dyn BackgroundShellLauncher>,
+    ) -> Self {
+        Self { managed, launcher }
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BackgroundCapableShellInput {
+    pub command: String,
+    pub workdir: Option<String>,
+    /// managed 使用工具的默认超时，background 省略时没有总运行时限。
+    pub timeout_ms: Option<NonZeroU64>,
+    /// 仅 background 接受，默认 1000 ms，最大 10000 ms，0 表示交接后立即返回。
+    pub wait_ms: Option<u64>,
+    /// 省略时使用 managed。
+    pub process_mode: Option<BackgroundCapableShellMode>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundCapableShellMode {
+    Managed,
+    Background,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum ResolvedBackgroundCapableShellInput {
+    Managed(ResolvedShellInput),
+    Background {
+        command: String,
+        workdir: crate::AbsolutePath,
+        timeout_ms: Option<NonZeroU64>,
+        wait_ms: u64,
+        process_mode: ShellProcessMode,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum BackgroundCapableShellOutcome {
+    Managed(ShellOutcome),
+    Background(BackgroundShellStart),
+}
+
+impl Tool for BackgroundShellExecTool {
+    type Input = BackgroundCapableShellInput;
+    type ResolvedInput = ResolvedBackgroundCapableShellInput;
+    type Output = BackgroundCapableShellOutcome;
+
+    fn name(&self) -> ToolName {
+        self.managed.name()
+    }
+
+    fn description(&self) -> String {
+        format!(
+            "{} Managed is the default (timeout_ms defaults to {}). Set process_mode to background to hand off a long-running command to the Runtime. wait_ms controls only the initial wait (default 1000, max 10000). Omit timeout_ms for no total timeout in background mode. A running result has a background_id and preview; use the background management tools to list, read or stop it. Use a foreground command inside the background shell so it remains supervised.",
+            self.managed.description(),
+            self.managed.default_timeout_ms()
+        )
+    }
+
+    fn input_defaults(&self) -> ToolInputDefaults {
+        ToolInputDefaults::new()
+            .with("workdir", self.managed.resolver.session_workdir())
+            .with("process_mode", ManagedShellMode::Managed)
+    }
+
+    fn resolve(
+        &self,
+        input: Self::Input,
+    ) -> Result<ToolResolution<Self::ResolvedInput>, ToolError> {
+        if !matches!(
+            input.process_mode,
+            Some(BackgroundCapableShellMode::Background)
+        ) {
+            if input.wait_ms.is_some() {
+                return Err(ToolError::invalid_input("wait_ms requires background mode"));
+            }
+            return Ok(self
+                .managed
+                .resolve(ShellInput {
+                    command: input.command,
+                    workdir: input.workdir,
+                    timeout_ms: input.timeout_ms,
+                    process_mode: None,
+                })?
+                .map_input(ResolvedBackgroundCapableShellInput::Managed));
+        }
+        let wait_ms = input.wait_ms.unwrap_or(1_000);
+        if wait_ms > 10_000 {
+            return Err(ToolError::invalid_input("wait_ms must not exceed 10000"));
+        }
+        let workdir = self.managed.workdir(&input.command, input.workdir)?;
+        let process_mode = ShellProcessMode::Background;
+        let semantic = json!({
+            "command": input.command, "workdir": workdir, "process_mode": process_mode,
+        });
+        let facts = ShellAuthorizationFacts {
+            command: input.command.clone(),
+            workdir: workdir.clone(),
+            process_mode,
+            wait: Some(Duration::from_millis(wait_ms)),
+            timeout: input
+                .timeout_ms
+                .map(|value| Duration::from_millis(value.get())),
+        };
+        Ok(ToolResolution::with_facts(
+            ResolvedBackgroundCapableShellInput::Background {
+                command: input.command,
+                workdir,
+                timeout_ms: input.timeout_ms,
+                wait_ms,
+                process_mode,
+            },
+            facts,
+            semantic,
+        ))
+    }
+
+    fn execute<'a>(
+        &'a self,
+        input: Self::ResolvedInput,
+        context: ToolContext,
+    ) -> ToolExecuteFuture<'a, Self::Output> {
+        Box::pin(async move {
+            match input {
+                ResolvedBackgroundCapableShellInput::Managed(input) => self
+                    .managed
+                    .execute(input, context)
+                    .await
+                    .map(BackgroundCapableShellOutcome::Managed),
+                ResolvedBackgroundCapableShellInput::Background {
+                    command,
+                    workdir,
+                    timeout_ms,
+                    wait_ms,
+                    ..
+                } => {
+                    let call_id = context.call_id().cloned().ok_or_else(|| {
+                        ToolError::execution("background shell requires a tool call identity")
+                    })?;
+                    self.launcher
+                        .launch(
+                            call_id,
+                            StartBackgroundShell {
+                                shell: BackgroundShellRequest { command, workdir },
+                                wait: Some(Duration::from_millis(wait_ms)),
+                                timeout: timeout_ms.map(|value| Duration::from_millis(value.get())),
+                            },
+                            context.cancellation,
+                        )
+                        .await
+                        .map(BackgroundCapableShellOutcome::Background)
+                        .map_err(map_shell_error)
+                }
+            }
+        })
+    }
+}
+
 fn map_shell_error(error: ShellToolError) -> ToolError {
     match error {
         ShellToolError::InvalidInput { message } => ToolError::invalid_input(message),
@@ -281,6 +522,7 @@ fn map_shell_error(error: ShellToolError) -> ToolError {
             }),
         ),
         ShellToolError::Io { message } => ToolError::execution(message),
+        ShellToolError::BackgroundOutputClosed => ToolError::execution(error.to_string()),
         ShellToolError::CleanupUnconfirmed { message } => {
             ToolError::execution_with_details(message, json!({"cleanup_unconfirmed": true}))
         }
@@ -395,8 +637,7 @@ mod tests {
             definition.input_schema["properties"]["process_mode"]["description"]
                 .as_str()
                 .expect("process mode description");
-        assert!(process_mode_description.contains("stdout/stderr"));
-        assert!(process_mode_description.contains("超时或取消仍清理进程树"));
+        assert!(process_mode_description.contains("在返回前收敛可管理进程树"));
         assert!(
             definition
                 .description
@@ -426,7 +667,7 @@ mod tests {
             .expect("shell facts");
         assert_eq!(facts.command, "printf hello");
         assert_eq!(facts.workdir, root());
-        assert_eq!(facts.timeout, Duration::from_secs(120));
+        assert_eq!(facts.timeout, Some(Duration::from_secs(120)));
         assert_eq!(facts.process_mode, ShellProcessMode::Managed);
     }
 

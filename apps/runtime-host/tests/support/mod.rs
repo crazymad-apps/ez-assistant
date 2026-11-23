@@ -1427,7 +1427,10 @@ impl Client {
     pub fn wait_for_input_run(&mut self, session_id: &str, input_id: &str) -> Value {
         let deadline = Instant::now() + Duration::from_secs(12);
         loop {
-            let list = self.runtime("list_runs", json!({"session_id":session_id}));
+            let list = self.runtime(
+                "list_runs",
+                json!({"session_id":session_id,"input_id":input_id,"page":{"limit":1}}),
+            );
             if let Some(run) = list["runs"]
                 .as_array()
                 .unwrap()

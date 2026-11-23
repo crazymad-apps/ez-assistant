@@ -1,0 +1,216 @@
+@use "../../../../styles/fields";
+
+.date_trigger, .time_field {
+  @include fields.select-trigger;
+  @include fields.select-field-width;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  color: var(--ez-text);
+
+  > span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+.date_trigger[aria-expanded="true"],
+.time_field:is(:focus-within, [data-open]) { @include fields.focus-border; }
+.date_trigger [data-empty] { color: var(--ez-text-secondary); }
+
+.time_field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) calc(var(--ez-control-height) - 2px);
+  gap: 0;
+  padding: 0;
+
+  &[aria-invalid="true"] { border-color: var(--ez-danger); }
+
+  > input {
+    width: 100%;
+    min-width: 0;
+    height: 100%;
+    min-height: 0;
+    padding: 0 9px;
+    border: 0;
+    outline: 0;
+    box-shadow: none;
+    color: var(--ez-text);
+    background: transparent;
+    font: inherit;
+  }
+
+  > input::placeholder { color: var(--ez-text-secondary); }
+}
+
+.time_trigger {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  place-items: center;
+  border: 0;
+  border-radius: calc(var(--ez-radius-small) - 1px);
+  padding: 0;
+  background: transparent;
+
+  &:hover:not(:disabled), &:focus-visible { background: var(--ez-surface-subtle); }
+  &:focus-visible { outline: none; }
+}
+
+.time_error { color: var(--ez-danger); font-size: var(--ez-font-small); font-weight: 400; }
+
+.date_popover, .time_popover {
+  position: fixed;
+  z-index: var(--ez-z-popover);
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  padding: 9px 10px;
+  overflow: auto;
+  border: 1px solid var(--ez-border-strong);
+  border-radius: var(--ez-radius-medium);
+  background: var(--ez-surface);
+  box-shadow: var(--ez-shadow-popover);
+  color: var(--ez-text);
+  font-size: var(--ez-font-base);
+  font-variant-numeric: tabular-nums;
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity var(--ez-motion-menu-enter) var(--ez-ease-standard),
+    transform var(--ez-motion-menu-enter) var(--ez-ease-standard);
+
+  &[data-position-ready="true"][data-presence="entered"] { opacity: 1; transform: translateY(0); }
+  &[data-presence="exiting"] { transition-duration: var(--ez-motion-menu-exit); }
+
+  @media (prefers-reduced-motion: reduce) { transition: none; }
+}
+
+.date_popover { width: 280px; }
+.time_popover { width: 218px; }
+.calendar_loading { margin: 0; padding: 8px 2px; color: var(--ez-text-secondary); }
+
+.calendar { position: relative; }
+
+.calendar_nav {
+  position: absolute;
+  inset: 0 0 auto;
+  display: flex;
+  justify-content: space-between;
+  pointer-events: none;
+
+  > button {
+    display: grid;
+    width: var(--ez-control-height);
+    place-items: center;
+    padding: 0;
+    pointer-events: auto;
+  }
+}
+
+.calendar_nav > button, .calendar_day {
+  border: 0;
+  border-radius: var(--ez-radius-small);
+  color: var(--ez-text);
+  background: transparent;
+
+  &:hover:not(:disabled) { background: var(--ez-surface-subtle); }
+  &:focus-visible { outline-offset: -2px; }
+}
+
+.calendar_caption {
+  display: flex;
+  min-height: var(--ez-control-height-default);
+  align-items: center;
+  justify-content: center;
+  padding-inline: var(--ez-control-height-default);
+  font-weight: 600;
+  text-align: center;
+}
+
+.calendar_grid {
+  width: 100%;
+  table-layout: fixed;
+  border-spacing: 2px;
+  text-align: center;
+
+  :is(th, td) { padding: 0; }
+  th {
+    height: var(--ez-control-height-small);
+    border-bottom: 1px solid var(--ez-border);
+    color: var(--ez-text-secondary);
+    font-size: var(--ez-font-small);
+    font-weight: 500;
+  }
+}
+
+.calendar_day {
+  position: relative;
+  display: inline-grid;
+  width: 100%;
+  place-items: center;
+  padding: 0;
+}
+
+.calendar_outside .calendar_day { color: var(--ez-text-muted); }
+.calendar_selected .calendar_day {
+  background: var(--ez-primary);
+  color: var(--ez-on-primary);
+  font-weight: 600;
+
+  &:hover:not(:disabled) { background: var(--ez-primary-hover); }
+}
+
+.calendar_today:not(.calendar_selected) .calendar_day::after {
+  position: absolute;
+  inset-block-end: 4px;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--ez-primary);
+  content: "";
+}
+
+.time_options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.time_column {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+
+  > legend { width: 100%; padding: 0 0 5px; color: var(--ez-text-secondary); text-align: center; font-weight: 550; }
+}
+
+.time_list {
+  position: relative;
+  display: grid;
+  max-height: min(10rem, calc(100vh - 116px));
+  gap: 2px;
+  padding: 2px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.time_choice {
+  position: relative;
+  display: grid;
+  min-height: var(--ez-control-height-default);
+  place-items: center;
+  border-radius: var(--ez-radius-small);
+  cursor: pointer;
+
+  > input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: inherit; }
+  &:hover { background: var(--ez-surface-subtle); }
+  &:has(input[type="radio"]:focus-visible) { outline: 2px solid var(--ez-focus); outline-offset: -2px; }
+  &:has(input:checked) { background: var(--ez-primary); color: var(--ez-on-primary); font-weight: 600; }
+}
+
+.time_footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--ez-border);
+}

@@ -1,21 +1,22 @@
 import { useRootStore as useResourceRoot } from "../../../stores/RootStoreContext";
 import {
   useEffect,
-  useLayoutEffect,
-  useRef,
   useState,
   type KeyboardEvent,
   type MouseEvent,
 } from "react";
 import type {
   AttachmentSummary,
+  ConversationInputSourceSnapshot,
   SessionSummary,
   QuotedTextSnapshot,
+  ScheduleResultFile,
   UserMessageSnapshot,
 } from "@ez-assistant/protocol";
 import { Icon } from "../../../components/Icon";
 import { Tooltip } from "../../../components/Tooltip";
 import { PresenceBoundary } from "../../../components/Presence";
+import { ConversationMarkdownContent } from "../../resource-workspace/ConversationMarkdownContent";
 import {
   formatTime,
   runStatusLabel,
@@ -45,6 +46,9 @@ export function UserMessage(props: Readonly<{
   const is_external = source.type === "controller_delivery" || source.type === "proxy_report";
   const [device_source_open, setDeviceSourceOpen] = useState(false);
   const [quote_detail, setQuoteDetail] = useState<QuotedTextSnapshot | null>(null);
+  if (source.type === "schedule_report") {
+    return <ScheduledReport message={props.message} source={source} navigation_highlight={props.navigation_highlight} />;
+  }
   return (
     <article
       className={`${styles.user_message}${is_external ? ` ${styles.external_message}` : ""}`}
@@ -110,7 +114,7 @@ export function UserMessage(props: Readonly<{
         </div>
       )}
       {source.type === "proxy_report" ? (
-        <ProxyReportBody text={props.message.text} />
+        <ReportDisclosure title="查看原始汇报" text={props.message.text} quoteable />
       ) : (
         <div
           className={styles.user_bubble}
@@ -169,65 +173,64 @@ export function UserMessage(props: Readonly<{
   );
 }
 
-function ProxyReportBody(props: Readonly<{ text: string }>) {
-  const viewport_ref = useRef<HTMLDivElement>(null);
-  const [expanded, setExpanded] = useState(false);
-  const [is_overflowing, setIsOverflowing] = useState(false);
+function ScheduledReport(props: Readonly<{
+  message: UserMessageSnapshot;
+  source: Extract<ConversationInputSourceSnapshot, { type: "schedule_report" }>;
+  navigation_highlight?: boolean;
+}>) {
+  const { message, source } = props;
+  const heading = message.text.split("\n", 1)[0];
+  const is_heading = heading?.startsWith("定时任务「") && heading.includes("」 · ");
+  const title = is_heading ? heading : "定时任务结果";
+  const detail = is_heading ? message.text.slice(heading.length).trimStart() : message.text;
+  return <article className={styles.schedule_report} data-message-id={message.message_id}
+    data-navigation-highlight={props.navigation_highlight || undefined} data-source="schedule_report">
+    <ReportDisclosure title={title} text={detail} />
+    {source.files.length > 0 && <ScheduledReportFiles execution_id={source.execution_id} files={source.files} />}
+  </article>;
+}
 
-  useLayoutEffect(() => {
-    if (expanded) {
-      return;
-    }
-    const viewport = viewport_ref.current;
-    if (!viewport) {
-      return;
-    }
-    const measure = () => {
-      setIsOverflowing(viewport.scrollHeight > viewport.clientHeight + 1);
-    };
-    measure();
-    if (typeof ResizeObserver === "undefined") {
-      return;
-    }
-    const observer = new ResizeObserver(measure);
-    observer.observe(viewport);
-    return () => observer.disconnect();
-  }, [expanded, props.text]);
-
+function ScheduledReportFiles(props: Readonly<{ execution_id: string; files: readonly ScheduleResultFile[] }>) {
+  const { files } = useResourceRoot();
+  const [download_error, setDownloadError] = useState(false);
+  const download = (file: ScheduleResultFile) => {
+    setDownloadError(false);
+    void files.downloadScheduleResultFile(props.execution_id, file.file_id, file.name).catch(() => setDownloadError(true));
+  };
   return (
-    <div className={styles.proxy_report_body} data-expanded={expanded}>
-      <div className={styles.proxy_report_viewport} ref={viewport_ref}>
-        <div
-          className={styles.user_bubble}
-          data-quote-content="true"
-          data-quote-role="user"
-          data-quote-root="true"
-        >{props.text}</div>
-      </div>
-      {is_overflowing && (expanded ? (
-        <button
-          aria-expanded="true"
-          className={styles.proxy_report_collapse}
-          onClick={() => setExpanded(false)}
-          type="button"
-        >
-          收起
-          <Icon name="chevron-up" size={14} />
-        </button>
-      ) : (
-        <button
-          aria-expanded="false"
-          aria-label="展开完整会话报告"
-          className={styles.proxy_report_expand}
-          onClick={() => setExpanded(true)}
-          type="button"
-        >
-          <span>展开</span>
-          <Icon name="chevron-down" size={14} />
+    <div className={styles.schedule_report_files}>
+      {props.files.map((file) => (
+        <button key={file.file_id} onClick={() => download(file)} title={file.name} type="button">
+          <Icon name="paperclip" size={13} />
+          <span>{file.title}</span>
         </button>
       ))}
+      {props.files.length > 1 && <button type="button" onClick={() => {
+        setDownloadError(false);
+        void files.downloadScheduleResultBundle(props.execution_id, props.files.map((file) => file.file_id))
+          .catch(() => setDownloadError(true));
+      }}><Icon name="archive" size={13} /><span>下载全部文件</span></button>}
+      {download_error && <span role="alert">文件下载失败。</span>}
     </div>
   );
+}
+
+function ReportDisclosure({ title, text, quoteable }: Readonly<{
+  title: string; text: string; quoteable?: boolean;
+}>) {
+  // 仅在展开时渲染，避免折叠的历史汇报提前加载正文里的图片等资源。
+  const [open, setOpen] = useState(false);
+  return <details className={styles.report_disclosure} onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <summary title={title}>
+      <Icon name="chevron-right" size={14} className={styles.report_chevron} />
+      <Icon name={quoteable ? "message" : "clock"} size={15} />
+      <span>{title}</span>
+    </summary>
+    {open && <div className={styles.report_detail} data-quote-content={quoteable || undefined}
+      data-quote-role={quoteable ? "user" : undefined} data-quote-root={quoteable || undefined}>
+      <ConversationMarkdownContent text={text} />
+    </div>}
+  </details>;
 }
 
 function MessageImage(props: Readonly<{

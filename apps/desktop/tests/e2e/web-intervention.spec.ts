@@ -80,13 +80,15 @@ test("直发同键核实后先显示可靠消息，再介入原队列项", async
 
   await page.getByRole("button", { name: "介入", exact: true }).click();
   await expect(page.getByRole("article").filter({ hasText: "QUEUED_CASE 待发消息" })).toHaveCount(1);
-  await expect.poll(async () => (await view()).runs.find(run => run.input_id === queued_id)?.status).toBe("completed");
+  await expect.poll(async () => (await command("list_runs", { session_id, input_id: queued_id, page: { limit: 1 } })).runs[0]?.status).toBe("completed");
   const after = await view();
   const messages = after.conversation.items.filter(item => item.type === "user");
   expect(messages.map(item => item.text)).toEqual(["C05_STREAM 原轮", "C05_STREAM 介入新轮", "QUEUED_CASE 待发消息"]);
   expect(messages[2].input_id).toBe(queued_id);
-  expect(after.runs.find(run => run.input_id === ordinary.input_id)?.status).toBe("cancelled");
-  expect(after.runs.find(run => run.input_id === messages[1].input_id)?.status).toBe("cancelled");
+  for (const input_id of [ordinary.input_id, messages[1].input_id]) {
+    const runs = await command("list_runs", { session_id, input_id, page: { limit: 1 } });
+    expect(runs.runs[0]?.status).toBe("cancelled");
+  }
   expect(after.queue.items).toHaveLength(0);
   await expect(page.getByRole("article").filter({ hasText: "C05_STREAM 介入新轮" })).toHaveCount(1);
 });

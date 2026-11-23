@@ -32,12 +32,13 @@ tauri-plugin-updater = { path = "vendor/tauri-plugin-updater", version = "=2.12.
 [workspace.package]
 edition = "2024"
 license = "MIT"
-version = "0.33.1"
+version = "0.33.2"
 
 [workspace.metadata.ez-assistant]
-min_compatible_version = "0.33.1"
+min_compatible_version = "0.33.2"
 
 [workspace.dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 sha2 = "0.10.9"
 nix = { version = "=0.28.0", features = ["process", "user"] }
 async-stream = "0.3.6"

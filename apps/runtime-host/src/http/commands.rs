@@ -837,6 +837,80 @@ async fn dispatch_runtime(
             RuntimeCommandResult::ListWorkspaces(runtime.list_workspaces(request).await?),
             false,
         ),
+        RuntimeCommand::ListSchedules(request) => (
+            RuntimeCommandResult::ListSchedules(runtime.list_schedules(request).await?),
+            false,
+        ),
+        RuntimeCommand::GetSchedule(request) => (
+            RuntimeCommandResult::GetSchedule(runtime.get_schedule(request).await?),
+            false,
+        ),
+        RuntimeCommand::CreateSchedule(request) => (
+            RuntimeCommandResult::CreateSchedule(runtime.create_schedule(request).await?),
+            false,
+        ),
+        RuntimeCommand::UpdateSchedule(request) => (
+            RuntimeCommandResult::UpdateSchedule(runtime.update_schedule(request).await?),
+            false,
+        ),
+        RuntimeCommand::SetScheduleEnabled(request) => (
+            RuntimeCommandResult::SetScheduleEnabled(runtime.set_schedule_enabled(request).await?),
+            false,
+        ),
+        RuntimeCommand::PreviewSchedule(request) => (
+            RuntimeCommandResult::PreviewSchedule(runtime.preview_schedule(request)?),
+            false,
+        ),
+        RuntimeCommand::RetryScheduleResult(request) => (
+            RuntimeCommandResult::RetryScheduleResult(
+                runtime.retry_schedule_result(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::GetScheduleBackground(request) => (
+            RuntimeCommandResult::GetScheduleBackground(
+                runtime.get_schedule_background(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::ReadScheduleBackgroundOutput(request) => (
+            RuntimeCommandResult::ReadScheduleBackgroundOutput(
+                runtime.read_schedule_background_output(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::StopScheduleBackground(request) => (
+            RuntimeCommandResult::StopScheduleBackground(
+                runtime.stop_schedule_background(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::DeleteSchedule(request) => (
+            RuntimeCommandResult::DeleteSchedule(runtime.delete_schedule(request).await?),
+            false,
+        ),
+        RuntimeCommand::RunScheduleNow(request) => (
+            RuntimeCommandResult::RunScheduleNow(services.runtime.run_schedule_now(request).await?),
+            false,
+        ),
+        RuntimeCommand::ListScheduleExecutions(request) => (
+            RuntimeCommandResult::ListScheduleExecutions(
+                runtime.list_schedule_executions(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::GetScheduleExecution(request) => (
+            RuntimeCommandResult::GetScheduleExecution(
+                runtime.get_schedule_execution(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::StopScheduleExecution(request) => (
+            RuntimeCommandResult::StopScheduleExecution(
+                runtime.stop_schedule_execution(request).await?,
+            ),
+            false,
+        ),
         RuntimeCommand::RemoveWorkspace(request) => {
             let _gate = state.terminals.source_gate.lock().await;
             let id = request.workspace_id.clone();
@@ -853,6 +927,10 @@ async fn dispatch_runtime(
         ),
         RuntimeCommand::GetAttachment(request) => (
             RuntimeCommandResult::GetAttachment(runtime.get_attachment(request).await?),
+            false,
+        ),
+        RuntimeCommand::ListArtifacts(request) => (
+            RuntimeCommandResult::ListArtifacts(runtime.list_artifacts(request).await?),
             false,
         ),
         RuntimeCommand::ListAttachments(request) => (
@@ -974,6 +1052,20 @@ async fn dispatch_runtime(
         ),
         RuntimeCommand::ListRuns(request) => (
             RuntimeCommandResult::ListRuns(runtime.list_runs(request).await?),
+            false,
+        ),
+        RuntimeCommand::ListBackgroundRuns(request) => (
+            RuntimeCommandResult::ListBackgroundRuns(runtime.list_background_runs(request)?),
+            false,
+        ),
+        RuntimeCommand::ReadBackgroundOutput(request) => (
+            RuntimeCommandResult::ReadBackgroundOutput(
+                runtime.read_background_output(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::StopBackgroundRun(request) => (
+            RuntimeCommandResult::StopBackgroundRun(runtime.stop_background_run(request).await?),
             false,
         ),
         RuntimeCommand::ListChildTasks(request) => (

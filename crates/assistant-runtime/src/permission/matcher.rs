@@ -37,6 +37,12 @@ pub(crate) fn fact_kind(invocation: &ResolvedToolInvocation) -> InvocationFactKi
         || invocation
             .facts::<crate::runtime::McpManagementAuthorizationFacts>()
             .is_some()
+        || invocation
+            .facts::<crate::runtime::BackgroundManagementFacts>()
+            .is_some()
+        || invocation
+            .facts::<crate::runtime::ScheduleManagementFacts>()
+            .is_some()
     {
         InvocationFactKind::General
     } else {
@@ -69,6 +75,12 @@ pub(crate) fn matches_rule_with_paths(
                         .is_some_and(|_| invocation.tool_name().as_str() == matcher.tool_name)
                     || invocation
                         .facts::<DelegationAuthorizationFacts>()
+                        .is_some_and(|_| invocation.tool_name().as_str() == matcher.tool_name)
+                    || invocation
+                        .facts::<crate::runtime::ScheduleManagementFacts>()
+                        .is_some_and(|_| invocation.tool_name().as_str() == matcher.tool_name)
+                    || invocation
+                        .facts::<crate::runtime::BackgroundManagementFacts>()
                         .is_some_and(|_| invocation.tool_name().as_str() == matcher.tool_name)
             }
             PermissionMatcher::File(matcher) => {
@@ -205,6 +217,7 @@ fn process_mode(mode: ShellProcessMode) -> PermissionProcessMode {
     match mode {
         ShellProcessMode::Managed => PermissionProcessMode::Managed,
         ShellProcessMode::Detached => PermissionProcessMode::Detached,
+        ShellProcessMode::Background => PermissionProcessMode::Background,
     }
 }
 

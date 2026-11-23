@@ -73,6 +73,7 @@ mod model_management;
 mod plugin;
 mod recovery;
 mod run;
+mod schedules;
 mod session;
 mod session_history;
 mod session_metadata;
@@ -128,6 +129,8 @@ impl InputIdentity {
 
 #[derive(Default)]
 struct State {
+    schedules: BTreeMap<assistant_protocol::ScheduleId, super::StoredSchedule>,
+    schedule_executions: BTreeMap<assistant_protocol::ScheduleExecutionId, schedules::Execution>,
     sidebar: sidebar::SidebarOrders,
     message_cards: BTreeMap<String, crate::StoredMessageCard>,
     next_card_position: u64,

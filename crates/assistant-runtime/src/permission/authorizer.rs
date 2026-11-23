@@ -339,6 +339,14 @@ impl RuntimeToolAuthorizer {
                 return ToolAuthorization::Allow;
             }
         }
+        let schedule = invocation.facts::<crate::runtime::ScheduleManagementFacts>();
+        if self.variant == AgentVariant::Plan && schedule.is_some_and(|facts| facts.write) {
+            return deny("Plan cannot modify or execute schedules");
+        }
+        let background = invocation.facts::<crate::runtime::BackgroundManagementFacts>();
+        if self.variant == AgentVariant::Plan && background.is_some_and(|facts| facts.write) {
+            return deny("Plan cannot stop background runs");
+        }
         // 授权器按解析后的结构化 facts 判断，未知 facts 默认拒绝；不能退回到工具名或原始
         // JSON 猜测权限，否则新工具可能意外绕过现有策略。
         if fact_kind(invocation) == InvocationFactKind::Unknown {
@@ -435,7 +443,9 @@ impl RuntimeToolAuthorizer {
                     .facts::<FileAuthorizationFacts>()
                     .is_some_and(|facts| {
                         self.workspace_default_allows(facts.operation, &facts.path)
-                    }),
+                    })
+                    || background.is_some_and(|facts| !facts.write)
+                    || schedule.is_some_and(|facts| !facts.write),
             ));
 
         if deny_rule {
@@ -565,6 +575,9 @@ impl RuntimeToolAuthorizer {
 
     // 旧单目标与整批目标共用 Plan 硬边界；规则或一次性审批不得放宽任一位置。
     async fn plan_mutations_are_safe(&self, invocation: &ResolvedToolInvocation) -> bool {
+        if let Some(facts) = invocation.facts::<crate::runtime::BackgroundManagementFacts>() {
+            return !facts.write;
+        }
         if let Some(facts) = invocation.facts::<FileAuthorizationFacts>() {
             return !is_mutation(facts.operation)
                 || self.plan_mutation_is_safe(facts.path.clone()).await;

@@ -80,7 +80,7 @@ export function MarkdownContent({
       localResourceRewritePlugin,
       { allow_relative: allow_relative_local_resources },
     ];
-    return [local_plugin, ...Object.values(defaultRehypePlugins)];
+    return [local_plugin, ...Object.values(defaultRehypePlugins), tableColumnsPlugin];
   }, [allow_relative_local_resources]);
   const url_transform = useMemo<UrlTransform>(() => (url) => {
     if (isSafeHttpUrl(url)) return url;
@@ -261,9 +261,61 @@ function isLocalResourceReference(url: string, allow_relative: boolean): boolean
 type MarkdownNode = Readonly<{
   type?: string;
   tagName?: string;
+  value?: string;
   properties?: Record<string, unknown>;
   children?: MarkdownNode[];
 }>;
+
+const MAX_TABLE_LABEL_LENGTH = 24;
+
+function tableColumnsPlugin() {
+  return (tree: MarkdownNode) => {
+    visitMarkdownNodes(tree, (table) => {
+      if (table.tagName !== "table") return;
+      const rows = table.children?.flatMap((section) =>
+        section.children?.filter((row) => row.tagName === "tr") ?? [],
+      ) ?? [];
+      const [header, ...body] = rows.map((row) =>
+        row.children?.filter((cell) => cell.tagName === "th" || cell.tagName === "td") ?? [],
+      );
+      if (!header || header.length < 2 || !body.length) return;
+
+      header.forEach((heading, column) => {
+        const values = body.flatMap((row) => row[column] ? [row[column]] : []);
+        const cells = [heading, ...values].map((cell) => ({ cell, length: tableCellLength(cell) }));
+        const filled_values = cells.slice(1).filter(({ length }) => length > 0);
+        const short_values = filled_values.filter(({ length }) => length <= MAX_TABLE_LABEL_LENGTH);
+        const has_long_cell = cells.some(({ length }) => length > MAX_TABLE_LABEL_LENGTH);
+        if (heading.properties) {
+          heading.properties.className = [has_long_cell ? styles.table_readable : styles.table_compact];
+        }
+
+        // 长备注也参与自动列宽计算，较短的理想行宽可避免单个例外挤占其他列。
+        const mostly_short = short_values.length > 0 && short_values.length * 4 >= filled_values.length * 3;
+        const long_content_class = mostly_short ? styles.table_note : styles.table_prose;
+        for (const { cell, length } of cells) {
+          const children = cell.children;
+          if (!length || !children?.length) continue;
+          children.splice(0, children.length, {
+            type: "element",
+            tagName: "span",
+            properties: { className: [length <= MAX_TABLE_LABEL_LENGTH ? styles.table_label : long_content_class] },
+            children: [...children],
+          });
+        }
+      });
+    });
+  };
+}
+
+function tableCellLength(cell: MarkdownNode): number {
+  let length = 0;
+  visitMarkdownNodes(cell, (node) => {
+    if (node.tagName === "img" || node.tagName === "br") length += MAX_TABLE_LABEL_LENGTH + 1;
+    if (node.type === "text") length += node.value?.trim().length ?? 0;
+  });
+  return length;
+}
 
 function localResourceRewritePlugin(options: Readonly<{ allow_relative: boolean }>) {
   return (tree: MarkdownNode) => {

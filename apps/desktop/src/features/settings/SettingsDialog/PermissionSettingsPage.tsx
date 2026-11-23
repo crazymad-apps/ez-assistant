@@ -60,8 +60,9 @@ const COMMAND_MATCH_OPTIONS: readonly SelectionOption<PermissionCommandMatch>[] 
 ];
 const PROCESS_MODE_OPTIONS: readonly SelectionOption<PermissionProcessModeDefinition>[] = [
   { value: "managed", label: "工具托管", description: "返回前收敛可管理的进程树" },
-  { value: "detached", label: "完成后交接", description: "仅主 Shell 退出且输出 EOF 后交接；超时或取消仍清理" },
+  { value: "background", label: "后台运行", description: "由 Runtime 持续管理，可查输出和停止" },
 ];
+const LEGACY_DETACHED_OPTION: SelectionOption<PermissionProcessModeDefinition> = { value: "detached", label: "完成后交接（历史规则）" };
 
 type RuleForm = {
   id: string;
@@ -381,7 +382,7 @@ function RuleEditor(props: Readonly<{
               on_open_change={(open) => setOpenPicker(open ? "process_mode" : null)}
               on_select={(value) => update("process_mode", value)}
               open={open_picker === "process_mode"}
-              options={PROCESS_MODE_OPTIONS}
+              options={props.form.process_mode === "detached" ? [...PROCESS_MODE_OPTIONS, LEGACY_DETACHED_OPTION] : PROCESS_MODE_OPTIONS}
               selected={props.form.process_mode}
             />
             <label className={styles.full_field}>命令<input onChange={(event) => update("command", event.currentTarget.value)} placeholder="例如 npm test" value={props.form.command} /></label>

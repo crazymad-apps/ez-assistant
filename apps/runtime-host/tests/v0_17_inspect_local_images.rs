@@ -96,12 +96,7 @@ fn auxiliary_inspector_reads_relative_and_absolute_local_images_without_artifact
     assert!(conversation_text.contains("LOCAL IMAGES VERIFIED"));
     assert!(conversation_text.contains("local inspect answer"));
     let view = client.runtime("get_session_view", json!({"session_id":session_id}));
-    assert!(
-        view["snapshot"]["value"]["attachments"]
-            .as_array()
-            .expect("attachments")
-            .is_empty()
-    );
+    assert!(view["snapshot"]["value"].get("attachments").is_none());
     assert!(
         view["snapshot"]["value"]["file_references"]
             .as_array()

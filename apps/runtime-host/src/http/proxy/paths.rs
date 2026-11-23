@@ -40,6 +40,7 @@ pub(super) fn route(method: &str, path: &str) -> Option<Route> {
                 "host-files",
                 "list" | "select-directory" | "preview" | "download",
             ]
+            | ["schedule-results", _, "files", "download"]
             | [
                 "sessions",
                 _,
@@ -76,7 +77,8 @@ pub(super) fn route(method: &str, path: &str) -> Option<Route> {
                 _,
                 "download" | "preview",
             ]
-            | ["sessions", _, "export.md"],
+            | ["sessions", _, "export.md"]
+            | ["schedule-results", _, "files", _, "download"],
         ) => Some(Route::Media),
         _ => None,
     }

@@ -2,8 +2,8 @@
 
 use assistant_protocol::{
     ConversationItem, ConversationOwner, FeedbackStatus, InputId, InterveneQueuedInputRequest,
-    InterventionNotExecuted, ListAttachmentsRequest, RunId, RunStatus, RuntimeEvent,
-    StopGoalRequest, SubmitInputRequest, SubmitInputResult,
+    InterventionNotExecuted, RunId, RunStatus, RuntimeEvent, StopGoalRequest, SubmitInputRequest,
+    SubmitInputResult,
 };
 use tokio::sync::broadcast;
 
@@ -349,12 +349,7 @@ impl AssistantRuntime {
             .into_iter()
             .find(|run| run.run_id == run_id)
             .ok_or(RuntimeError::SnapshotStale)?;
-        let attachments = self
-            .list_attachments(ListAttachmentsRequest {
-                session_id: session.id().clone(),
-            })
-            .await?
-            .attachments;
+        let attachments = self.session_attachment_summaries(session.id())?;
         let projection = self.projection_context(session, &attachments).await?;
         let user_message = super::super::product::project_conversation_with_history(
             &window.conversation,

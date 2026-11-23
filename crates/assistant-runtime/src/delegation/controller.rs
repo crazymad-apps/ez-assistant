@@ -413,6 +413,7 @@ impl ParentDelegationController {
                 self.infrastructure_policies.clone(),
                 self.session.environment(),
                 Arc::new(RuntimeApprovalResolver {
+                    scheduled: self.session.scheduled.clone(),
                     registry: self.approval_registry.clone(),
                     session_id: self.session.id().clone(),
                     run_id: self.parent_run_id.clone(),

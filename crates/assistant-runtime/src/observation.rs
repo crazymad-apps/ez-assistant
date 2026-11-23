@@ -148,8 +148,9 @@ impl ObservationCoordinator {
         state: &mut ObservationState,
         event: RuntimeEvent,
     ) -> Result<usize, ()> {
-        state.sequence = state.sequence.saturating_add(1);
-        state.observe(&event);
+        if !state.observe(&event) {
+            return Ok(0);
+        }
         let legacy_event = event.clone();
         let envelope = RuntimeEventEnvelope {
             sequence: state.sequence,
@@ -323,23 +324,24 @@ impl ObservationState {
         }
     }
 
-    fn observe(&mut self, event: &RuntimeEvent) {
+    fn observe(&mut self, event: &RuntimeEvent) -> bool {
         use RuntimeEvent::*;
+        let sequence = self.sequence.saturating_add(1);
         let (session_id, application) = match event {
             MessageCardsChanged { owner } => (Some(crate::message_card_owner(owner).0), false),
             RuntimeShuttingDown => (None, true),
             ConfigChanged => {
-                self.configuration = self.sequence;
+                self.configuration = sequence;
                 (None, true)
             }
             McpRegistryChanged => {
-                self.mcp = self.sequence;
+                self.mcp = sequence;
                 (None, true)
             }
             SidebarOrderChanged => (None, true),
             WorkspaceChanged { workspace_id } => {
                 if let Some(scope) = self.workspaces.get_mut(workspace_id) {
-                    scope.sequence = self.sequence;
+                    scope.sequence = sequence;
                 }
                 (None, true)
             }
@@ -384,6 +386,8 @@ impl ObservationState {
             | RunCancelling { session_id, .. }
             | RunFinished { session_id, .. } => (Some(session_id), true),
             PermissionReloaded { session_id, .. }
+            | BackgroundRunChanged { session_id, .. }
+            | BackgroundRunEnded { session_id, .. }
             | StepStarted { session_id, .. }
             | ModelAttemptStarted { session_id, .. }
             | ModelAttemptFailed { session_id, .. }
@@ -403,20 +407,25 @@ impl ObservationState {
             | PluginCatalogChanged
             | CustomAgentCatalogChanged => (None, false),
         };
+        if session_id.is_some_and(crate::runtime::schedule::is_scheduled_session) {
+            return false;
+        }
+        self.sequence = sequence;
         if application {
-            self.application = self.sequence;
+            self.application = sequence;
         }
         if let Some(scope) = session_id.and_then(|id| self.sessions.get_mut(id)) {
-            scope.sequence = self.sequence;
+            scope.sequence = sequence;
             if !matches!(
                 event,
                 RuntimeEvent::TextDelta { .. }
                     | RuntimeEvent::ReasoningDelta { .. }
                     | RuntimeEvent::ToolOutput { .. }
             ) {
-                scope.durable_sequence = self.sequence;
+                scope.durable_sequence = sequence;
             }
         }
+        true
     }
 }
 

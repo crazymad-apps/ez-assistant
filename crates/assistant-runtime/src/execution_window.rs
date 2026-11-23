@@ -37,6 +37,9 @@ impl ExecutionWindow {
     }
 
     fn push_message(&mut self, message: ConversationMessage, trim: bool) -> Result<(), StoreError> {
+        if message.is_host_notice() {
+            return Ok(());
+        }
         self.memory.push(&message).map_err(context_error)?;
         self.artifacts.push(&message);
         match &message {

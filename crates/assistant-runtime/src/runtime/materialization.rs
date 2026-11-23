@@ -99,6 +99,25 @@ impl AssistantRuntime {
     ) -> RuntimeResult<SessionMaterializationResult> {
         let _operation = self.operation_gate.read().await;
         self.ensure_running()?;
+        if manifest
+            .idempotency_key
+            .as_str()
+            .starts_with(super::schedule::MATERIALIZATION_KEY_PREFIX)
+        {
+            return Err(RuntimeError::InvalidRequest {
+                reason: "reserved materialization key",
+            });
+        }
+        self.materialize_session_inner(manifest, staged_attachments, None)
+            .await
+    }
+
+    pub(super) async fn materialize_session_inner(
+        &self,
+        manifest: SessionMaterializationManifest,
+        staged_attachments: Vec<StagedSessionAttachment>,
+        scheduled: Option<Arc<super::schedule::ScheduledSession>>,
+    ) -> RuntimeResult<SessionMaterializationResult> {
         validate_manifest(&manifest, &staged_attachments)?;
         let existing = self
             .store
@@ -169,7 +188,9 @@ impl AssistantRuntime {
             });
         }
 
-        let session_id = {
+        let session_id = if let Some(scheduled) = &scheduled {
+            scheduled.session_id()?
+        } else {
             let sessions =
                 self.sessions
                     .read()
@@ -244,6 +265,13 @@ impl AssistantRuntime {
                 prepared_environment.system_prompt,
                 selected_agent.as_ref(),
             ));
+        let system_prompt = if scheduled.is_some() {
+            let mut parts = system_prompt.parts().to_vec();
+            parts.push("This is an unattended scheduled task. Complete the requested work using available inputs and permissions. If required inputs or permissions are missing, explain the failure in your final report. Write the report in the final assistant message. Use declare_artifact for files to include with the report.".to_owned());
+            agent_model::SystemPromptSnapshot::new(parts)
+        } else {
+            system_prompt
+        };
         let created_at_ms = super::now_ms()?;
         let (agent_shell_kind, agent_shell_environment) = self.initial_agent_shell().await?;
         let new_session = NewStoredSession {
@@ -262,7 +290,8 @@ impl AssistantRuntime {
             approval_mode: manifest.approval_mode,
             role: crate::SessionRole::Standard,
             materialization_key: Some(manifest.idempotency_key.clone()),
-            automatic_title_pending: super::automatic_title_enabled_by_default(),
+            automatic_title_pending: scheduled.is_none()
+                && super::automatic_title_enabled_by_default(),
             created_at_ms,
         };
         let provisional = Arc::new(SessionController::new(stored_session_preview(&new_session)));
@@ -415,6 +444,7 @@ impl AssistantRuntime {
             .store
             .materialize_session(NewStoredSessionMaterialization {
                 session: new_session,
+                schedule_execution_id: scheduled.as_ref().map(|task| task.execution_id.clone()),
                 attachments: uploads,
                 input,
             })
@@ -457,7 +487,9 @@ impl AssistantRuntime {
                 stored.session.session_id.clone(),
             ))
             .await?;
-        let controller = Arc::new(SessionController::new(stored.session));
+        let mut controller = SessionController::new(stored.session);
+        controller.scheduled = scheduled;
+        let controller = Arc::new(controller);
         let goal_snapshot = stored
             .goal
             .map(crate::goal::GoalControl::try_from)

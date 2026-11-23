@@ -39,6 +39,7 @@
 - `UserMessageOrigin` 与 `TranscriptVisibility` 是正交应用元数据：旧 JSON 缺字段时必须分别按
   `User`、`Visible` 读取；`Hidden` 只排除产品转录，不得从规范 Conversation 或模型上下文移除。
   Provider Adapter 不编码这两个字段。
+  宿主通知 `HostNotice` 属于产品历史，构造执行窗口与投影 Provider 请求时排除。
 - `UserPart::FileReferences` 是持久化的用户可见 Part，只保存原始文件名与
   Agent 稳定可读路径；不包含应用层 Attachment ID、文件正文、Base64 或解析结果。
 - `ToolResultContent` 是非空、有序的 `Text`/`Json`/`Image` Part 集合；新写入统一使用

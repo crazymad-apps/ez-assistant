@@ -214,6 +214,10 @@ pub struct ConversationPage {
     pub generation: u64,
     /// 从旧到新排序的产品会话项。
     pub items: Vec<ConversationItem>,
+    /// 本页所显示父 Run 的子任务投影，用于消息树，独立于右栏分页。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<Vec<ChildTaskTreeItemSnapshot>>", optional)]
+    pub child_tasks: Vec<ChildTaskTreeItemSnapshot>,
     /// 用于继续向更早历史加载的不透明 cursor。
     pub previous_cursor: Option<String>,
     pub has_more: bool,
@@ -282,6 +286,10 @@ pub enum ConversationInputSourceSnapshot {
         controller_session_id: SessionId,
         controller_run_id: RunId,
     },
+    ScheduleReport {
+        execution_id: crate::ScheduleExecutionId,
+        files: Vec<crate::ScheduleResultFile>,
+    },
     ProxyReport {
         source_session_id: SessionId,
         source_run_id: RunId,
@@ -323,6 +331,10 @@ pub struct UserMessageSnapshot {
     pub input_id: Option<InputId>,
     pub text: String,
     pub attachment_ids: Vec<AttachmentId>,
+    /// 仅为此条消息投影的附件摘要，供正文和历史编辑直接读取。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<Vec<AttachmentSummary>>", optional)]
+    pub attachments: Vec<AttachmentSummary>,
     /// 用户随本条消息提交的有序冻结引用。
     #[serde(default)]
     pub quotes: Vec<QuotedTextSnapshot>,
@@ -512,6 +524,9 @@ pub enum ToolInputSnapshot {
         command: String,
         working_directory: String,
         timeout_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        wait_ms: Option<u64>,
         process_mode: String,
     },
     Mcp {
@@ -848,14 +863,16 @@ pub struct SessionViewSnapshot {
     pub active_run: Option<RunSnapshot>,
     pub queue: QueueSnapshot,
     pub approvals: ApprovalQueueSnapshot,
-    pub attachments: Vec<AttachmentSummary>,
     #[serde(default)]
     pub file_references: Vec<ConversationFileReference>,
-    /// 只包含明确声明且尚未撤销的交付项；文件可用性由 Host 读取时校验。
-    #[serde(default)]
-    pub artifacts: Vec<crate::SessionArtifact>,
+    /// 仅用于执行协调的最新 Run 和已接纳 Run；历史使用 ListRuns。
     pub runs: Vec<RunSnapshot>,
+    /// 按创建时间最新的 Run 时刻，用于识别过期输入回执。
+    #[serde(default)]
+    #[ts(optional)]
+    pub latest_run_created_at_ms: Option<i64>,
     pub usage: SessionUsageSnapshot,
+    /// 当前可操作及审批中的子任务，历史树随 Conversation Page 投影。
     pub child_tasks: Vec<ChildTaskTreeItemSnapshot>,
     #[serde(default)]
     pub active_skills: Vec<crate::ActiveSkillSnapshot>,
@@ -1327,6 +1344,7 @@ mod tests {
             observed_at_ms: None,
             observed_sequence: 17,
             value: ConversationPage {
+                child_tasks: Vec::new(),
                 owner: ConversationOwner::MainSession {
                     session_id: SessionId::new("session-1").expect("session id"),
                 },

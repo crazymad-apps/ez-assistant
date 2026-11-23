@@ -90,6 +90,7 @@ impl SessionLoader {
     }
 
     pub async fn prepare(&self, id: &SessionId) -> RuntimeResult<Arc<SessionController>> {
+        super::schedule::agent_visibility(id)?;
         let _phase = crate::request_diagnostics::request_phase(
             crate::request_diagnostics::RequestPhase::SessionPreparation,
         );
@@ -217,6 +218,7 @@ impl SessionLoader {
     }
 
     pub async fn load(&self, id: &SessionId) -> RuntimeResult<Arc<SessionController>> {
+        super::schedule::agent_visibility(id)?;
         let _phase = crate::request_diagnostics::request_phase(
             crate::request_diagnostics::RequestPhase::SessionLoad,
         );

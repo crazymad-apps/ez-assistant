@@ -28,5 +28,4 @@
 }
 .icon { display: grid; width: 16px; height: 16px; color: var(--ez-text-muted); place-items: center; }
 .title { overflow: hidden; min-width: 0; white-space: nowrap; text-overflow: ellipsis; font-size: var(--ez-font-base); }
-.empty { margin: 0; color: var(--ez-text-secondary); }
 .status { grid-column: 1 / -1; margin: 0 0 4px 24px; font-size: var(--ez-font-small); overflow-wrap: anywhere; color: var(--ez-text-secondary); }

@@ -1,11 +1,12 @@
-import { useId, type CSSProperties, type ReactNode } from "react";
+import { useId, type CSSProperties, type ReactNode, type Ref } from "react";
 import { Collapse } from "../../../components/Collapse";
 import { InlineIconButton } from "../../../components/InlineIconButton";
 import styles from "./index.module.scss";
 
-export function ContextSection({ action, children, is_open, on_toggle, title }: Readonly<{
+export function ContextSection({ action, children, heading_ref, is_open, on_toggle, title }: Readonly<{
   action?: ReactNode;
   children: ReactNode;
+  heading_ref?: Ref<HTMLButtonElement>;
   is_open: boolean;
   on_toggle: () => void;
   title: string;
@@ -19,6 +20,7 @@ export function ContextSection({ action, children, is_open, on_toggle, title }: 
           aria-expanded={is_open}
           className={styles.section_heading}
           onClick={on_toggle}
+          ref={heading_ref}
           type="button"
         >
           <span>{title}</span>

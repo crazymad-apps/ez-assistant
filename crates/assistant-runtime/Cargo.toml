@@ -17,6 +17,7 @@ agent-tools = { path = "../agent-tools" }
 agent-types = { path = "../agent-types" }
 assistant-protocol = { path = "../assistant-protocol" }
 base64.workspace = true
+chrono.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
 hmac.workspace = true
@@ -34,6 +35,7 @@ toml_edit.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+agent-tools-local = { path = "../agent-tools-local" }
 agent-openai-compatible = { path = "../agent-openai-compatible" }
 agent-testkit = { path = "../agent-testkit" }
 tempfile.workspace = true

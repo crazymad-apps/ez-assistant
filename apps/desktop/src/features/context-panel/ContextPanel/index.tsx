@@ -1,7 +1,6 @@
 import { revealFileLabel } from "../../../platform/fileManager";
-import { SkillListStore } from "../../skills";
 import { observer } from "mobx-react-lite";
-import { useEffect, useState, type KeyboardEvent, type MouseEvent } from "react";
+import { useEffect, useMemo, useState, type KeyboardEvent, type MouseEvent } from "react";
 import type {
   AttachmentSummary,
   SessionResourceLocator,
@@ -9,6 +8,7 @@ import type {
   SystemContextSnapshot,
 } from "@ez-assistant/protocol";
 import { Button } from "../../../components/Button";
+import { EmptyRow } from "../../../components/EmptyRow";
 import { Icon } from "../../../components/Icon";
 import { InlineIconButton } from "../../../components/InlineIconButton";
 import { PresenceBoundary } from "../../../components/Presence";
@@ -27,6 +27,8 @@ import {
 import { SystemContextDialog } from "../SystemContextDialog";
 import { ContextRing, ContextSection } from "./ContextSection";
 import { ContextSectionLayout } from "./ContextSectionLayout";
+import { ContextPageControls } from "./ContextPageControls";
+import { useContextPage, type ContextList } from "./useContextPage";
 import {
   childStatusLabel,
   formatApprovalMode,
@@ -44,11 +46,14 @@ import {
 import styles from "./index.module.scss";
 import { SessionShellSetting } from "./SessionShellSetting";
 import { ArtifactList } from "../../resource-workspace/ArtifactList";
+import { BackgroundRunsSection } from "../BackgroundRunsSection";
+import { BackgroundRunsStore } from "../BackgroundRunsSection/store";
 
-type ContextSectionKey = "session" | "workspace" | "skills" | "attachments" | "artifacts" | "children" | "runs";
+type ContextSectionKey = "session" | "workspace" | "skills" | "attachments" | "artifacts" | "children" | "runs" | "background";
 
 type ContextPanelProps = Readonly<{
   embedded?: boolean;
+  visible?: boolean;
 }>;
 
 export const ContextPanel = observer(function ContextPanel(props: ContextPanelProps) {
@@ -62,13 +67,10 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
   // 窗口占用由 Runtime 根据当前有效上下文计算，不能用旧 step 或累计用量取最大值。
   const context_usage = session_view?.usage.context ?? null;
   const context_prefix = context_usage?.accuracy === "estimated" ? "约 " : "";
-  const [skill_list] = useState(() => new SkillListStore());
-  const skills = sessionSkillRows(session_view, skill_list.snapshot);
   const session_workspace = session_view?.workspace;
   const draft_key = store.navigation.selected_draft_key;
   const new_session_draft = store.new_session_drafts.get(draft_key);
   const draft_workspace = store.projection.workspaceSummary(new_session_draft?.workspace_id);
-  const attachments = session_view?.attachments ?? [];
   const [preview_attachment, setPreviewAttachment] = useState<AttachmentSummary | null>(null);
   const [attachment_menu, setAttachmentMenu] = useState<Readonly<{
     attachment: AttachmentSummary;
@@ -94,16 +96,61 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
     }));
   };
 
-  const skills_open = sectionIsOpen("skills");
-  const workspace_id = session?.workspace_id ?? new_session_draft?.workspace_id;
-  // 目录不随 Session 冻结。可见期间在重新进入、设置/刷新事件和回到窗口时查询。
+  const paging_client = store.runtime_client;
+  const panel_visible = props.visible ?? true;
+  const is_stale = store.projection.is_stale;
+  const background_session_id = new_session_draft ? null : session_id;
+  // 列表和总数归当前会话。单双列切换会重新挂载区块，但沿用同一查询结果。
+  const background = useMemo(() => paging_client && background_session_id
+    ? new BackgroundRunsStore(paging_client, background_session_id)
+    : null, [paging_client, background_session_id]);
+  const background_available = panel_visible && !is_stale;
+
   useEffect(() => {
-    if (!skills_open || (!session_id && !draft_key)) return;
-    const load = () => { void skill_list.load(() => store.listSkills(workspace_id)); };
-    load();
-    window.addEventListener("focus", load);
-    return () => { window.removeEventListener("focus", load); skill_list.dispose(); };
-  }, [skill_list, store, session_id, draft_key, workspace_id, skills_open, application]);
+    if (!background) return;
+    background.attach();
+    const unsubscribe = store.subscribeBackgroundRuns(background.client, background.session_id, (event) => {
+      if (event.type === "background_run_ended") background.ended(event.result.background_id, event.result);
+      else background.changed(event.background_id);
+    });
+    return () => { unsubscribe(); background.dispose(); };
+  }, [background, store]);
+
+  useEffect(() => {
+    if (!background) return;
+    background.setAvailable(background_available);
+    if (!background_available) return;
+    const refresh = () => { void background.load(); };
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, [background, background_available]);
+
+  const generation = session_view?.conversation_generation ?? null;
+  const section_can_read = (section: ContextList) => panel_visible && sectionIsOpen(section)
+    && Boolean(session_view) && store.connection.state === "connected" && !is_stale;
+  const runs = useContextPage("runs", paging_client, session_id, generation, section_can_read("runs"), async (client, session_id, page, signal) => {
+    const { payload } = await client.command({ type: "list_runs", payload: { session_id, page, summary_only: true } }, { signal });
+    return { rows: payload.runs, page: payload.page };
+  });
+  const children = useContextPage("children", paging_client, session_id, generation, section_can_read("children"), async (client, session_id, page, signal) => {
+    const { payload } = await client.command({ type: "list_child_tasks", payload: { session_id, page } }, { signal });
+    return { rows: payload.tasks, page: payload.page };
+  });
+  const attachment_page = useContextPage("attachments", paging_client, session_id, generation, section_can_read("attachments"), async (client, session_id, page, signal) => {
+    const { payload } = await client.command({ type: "list_attachments", payload: { session_id, page } }, { signal });
+    return { rows: payload.attachments, page: payload.page };
+  });
+  const artifacts = useContextPage("artifacts", paging_client, session_id, generation, section_can_read("artifacts"), async (client, session_id, page, signal) => {
+    const { payload } = await client.command({ type: "list_artifacts", payload: { session_id, page } }, { signal });
+    return { rows: payload.artifacts, page: payload.page };
+  });
+  const skills = useContextPage("skills", paging_client, session_id, generation, section_can_read("skills"), async (client, session_id, page, signal) => {
+    const { payload } = await client.command({ type: "list_skills", payload: { session_id, page, include_plugins: true } }, { signal });
+    if (!payload.page) throw new Error("Runtime 未返回技能分页。");
+    if (!payload.snapshot.available) throw new Error("当前技能列表不可用，请重试");
+    return { rows: sessionSkillRows({ active_skills: payload.active_skills ?? [] }, payload.snapshot), page: payload.page, diagnostic_count: payload.diagnostic_count };
+  });
+  const attachments = attachment_page.rows;
 
   const openAttachment = (attachment: AttachmentSummary) => {
     if (!session_id || !isPreviewableResource(attachment.original_name, attachment.media_type)) {
@@ -241,16 +288,17 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
       </header>}
       <ContextSectionLayout>
         {session_view && <ContextSection
-          action={session_view.artifacts?.length ? (
+          action={artifacts.rows.length ? (
             <Tooltip content="刷新产物状态">
-              <InlineIconButton icon="refresh" label="刷新产物状态" onClick={() => setArtifactRefresh((value) => value + 1)} />
+              <InlineIconButton icon="refresh" label="刷新产物状态" onClick={() => { artifacts.refresh(); setArtifactRefresh((value) => value + 1); }} />
             </Tooltip>
           ) : undefined}
           is_open={sectionIsOpen("artifacts")}
           on_toggle={() => toggleSection("artifacts")}
           title="产物"
         >
-          <ArtifactList key={session_view.session.session_id} session_id={session_view.session.session_id} artifacts={session_view.artifacts ?? []} refresh_key={artifact_refresh} />
+          <ArtifactList key={session_view.session.session_id} session_id={session_view.session.session_id} artifacts={artifacts.rows} refresh_key={artifact_refresh} />
+          <ContextPageControls label="产物" page={artifacts} />
         </ContextSection>}
         <ContextSection is_open={sectionIsOpen("session")} on_toggle={() => toggleSection("session")} title="会话">
           {session ? (
@@ -266,7 +314,7 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
               <div><dt>执行方式</dt><dd>{formatVariant(session.current_variant)} · {formatApprovalMode(session.approval_mode)}</dd></div>
               <div><dt>消息</dt><dd>{session.message_count}</dd></div>
             </dl>
-          ) : <p className={styles.empty_row}>尚未选择会话</p>}
+          ) : <EmptyRow>尚未选择会话</EmptyRow>}
           {session_view && <SessionShellSetting key={session_view.session.session_id} view={session_view} />}
           {context_usage && (
             <div className={styles.context_usage}>
@@ -354,7 +402,7 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
                 </>
               ) : (
                 <>
-                  <p className={styles.empty_row}>未绑定项目</p>
+                  <EmptyRow>未绑定项目</EmptyRow>
                   <WorkspaceDirectoryRow
                     label="会话私有目录"
                     on_copy={() => void store.copySessionResourcePath(session.session_id, SESSION_PRIVATE_ROOT)}
@@ -367,7 +415,7 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
                 </>
               )}
             </>
-          ) : <p className={styles.empty_row}>尚未选择会话</p>}
+          ) : <EmptyRow>尚未选择会话</EmptyRow>}
         </ContextSection>
         <ContextSection
           is_open={sectionIsOpen("skills")}
@@ -376,28 +424,29 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
         >
           {session_view || new_session_draft ? (
             <div className={styles.skill_context}>
-              {skills.length > 0 ? (
+              {skills.rows.length > 0 ? (
                 <div className={styles.skill_list}>
-                  {skills.map((skill) => (
+                  {skills.rows.map((skill) => (
                     <div key={skill.name}>
                       <strong title={skill.plugin_name ? `${skill.plugin_name} · ${skill.name}` : skill.name}>{skill.plugin_name ? `${skill.plugin_name} · ${skill.name}` : skill.name}</strong>
                       <span>{skill.status_label}</span>
                     </div>
                   ))}
                 </div>
-              ) : <p className={styles.empty_row}>{skill_list.error ?? (skill_list.loading ? "正在读取技能" : "当前没有可用技能")}</p>}
-              {(skill_list.snapshot?.diagnostics.length ?? 0) > 0 && (
+              ) : <EmptyRow>{skills.loading ? "正在读取技能" : "当前没有可用技能"}</EmptyRow>}
+              {skills.diagnostics > 0 && (
                 <Button className={styles.skill_diagnostics} onClick={() => store.settings.open("skills")} size="small" variant="text">
-                  查看 {skill_list.snapshot?.diagnostics.length} 项技能诊断
+                  查看 {skills.diagnostics} 项技能诊断
                 </Button>
               )}
             </div>
-          ) : <p className={styles.empty_row}>尚未选择会话</p>}
+          ) : <EmptyRow>尚未选择会话</EmptyRow>}
+          <ContextPageControls label="技能" page={skills} />
         </ContextSection>
         <ContextSection
           is_open={sectionIsOpen("attachments")}
           on_toggle={() => toggleSection("attachments")}
-          title={`会话附件 · ${attachments.length}`}
+          title={`会话附件 · ${attachment_page.total}`}
         >
           {attachments.length > 0 ? (
             <div className={styles.attachment_rows}>
@@ -417,39 +466,50 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
                 </button>
               ))}
             </div>
-          ) : <p className={styles.empty_row}>暂无会话附件</p>}
+          ) : <EmptyRow>{attachment_page.loading ? "正在读取会话附件" : "暂无会话附件"}</EmptyRow>}
+          <ContextPageControls label="会话附件" page={attachment_page} />
         </ContextSection>
-        {session_id && session_view && session_view.child_tasks.length > 0 && (
+        {session_id && session_view && (
           <ContextSection
             is_open={sectionIsOpen("children")}
             on_toggle={() => toggleSection("children")}
-            title={`子任务 · ${session_view.child_tasks.length}`}
+            title={`子任务 · ${children.total}`}
           >
             <div className={styles.child_task_rows}>
-              {session_view.child_tasks.map((item) => (
+              {children.rows.map((task) => (
                 <button
-                  data-selected={store.navigation.selected_child_task_id === item.task.child_task_id}
-                  key={item.task.child_task_id}
-                  onClick={() => void store.openChildTask(session_id, item.task.child_task_id)}
-                  title={item.task.title}
+                  data-selected={store.navigation.selected_child_task_id === task.child_task_id}
+                  key={task.child_task_id}
+                  onClick={() => void store.openChildTask(session_id, task.child_task_id)}
+                  title={task.title}
                   type="button"
                 >
-                  <i data-status={item.task.status} />
-                  <span>{item.task.title}</span>
-                  <small>{item.pending_approval_count > 0 ? "待审批" : childStatusLabel(item.task.status)}</small>
+                  <i data-status={task.status} />
+                  <span>{task.title}</span>
+                  <small>{session_view.approvals.items.some((approval) => approval.child_task_id === task.child_task_id) ? "待审批" : childStatusLabel(task.status)}</small>
                 </button>
               ))}
             </div>
+            {children.rows.length === 0 && <EmptyRow>{children.loading ? "正在读取子任务" : "暂无子任务"}</EmptyRow>}
+            <ContextPageControls label="子任务" page={children} />
           </ContextSection>
         )}
+        {background && <BackgroundRunsSection
+          key={JSON.stringify([store.navigation.target_device, background.session_id])}
+          is_stale={is_stale}
+          is_open={sectionIsOpen("background")}
+          on_toggle={() => toggleSection("background")}
+          runs={background}
+          visible={panel_visible}
+        />}
         <ContextSection
           is_open={sectionIsOpen("runs")}
           on_toggle={() => toggleSection("runs")}
-          title={`运行记录 · ${session_view?.runs.length ?? 0}`}
+          title={`运行记录 · ${runs.total}`}
         >
-          {session_view && session_view.runs.length > 0 ? (
+          {runs.rows.length > 0 ? (
             <div className={styles.run_rows}>
-              {[...session_view.runs].reverse().map((run) => (
+              {runs.rows.map((run) => (
                 <button
                   disabled={locating_run?.run_id === run.run_id}
                   key={run.run_id}
@@ -465,7 +525,8 @@ export const ContextPanel = observer(function ContextPanel(props: ContextPanelPr
                 </button>
               ))}
             </div>
-          ) : <p className={styles.empty_row}>还没有运行记录</p>}
+          ) : <EmptyRow>还没有运行记录</EmptyRow>}
+          <ContextPageControls label="运行记录" page={runs} />
         </ContextSection>
       </ContextSectionLayout>
       {attachment_menu && (

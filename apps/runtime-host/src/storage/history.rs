@@ -430,6 +430,13 @@ impl StorageEngine {
         let owner = match target {
             ConversationStorageTarget::SessionMetadata { session_id } => {
                 return match purpose {
+                    AppendPurpose::ScheduleReport { message_id, .. }
+                        if matches!(messages, [ConversationMessage::User(user)]
+                            if user.origin == agent_types::UserMessageOrigin::HostNotice
+                                && user.id.as_str() == message_id.as_str()) =>
+                    {
+                        Ok(StoredHistoryFacts::default())
+                    }
                     AppendPurpose::MessageFeedback { change } => Ok(StoredHistoryFacts {
                         feedback: vec![change.clone()],
                         ..Default::default()

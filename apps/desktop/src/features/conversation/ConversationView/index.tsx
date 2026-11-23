@@ -106,6 +106,7 @@ export const ConversationView = observer(function ConversationView({ navigation_
   const [preview_attachment, setPreviewAttachment] = useState<AttachmentSummary | null>(null);
   const [attachment_menu, setAttachmentMenu] = useState<Readonly<{
     attachment: AttachmentSummary;
+    siblings: readonly AttachmentSummary[];
     location: ResourceMenuLocation;
   }> | null>(null);
   const [summary_expanded, setSummaryExpanded] = useState(false);
@@ -145,15 +146,11 @@ export const ConversationView = observer(function ConversationView({ navigation_
   const switch_target = editor.switchTarget;
   const child_task_items = session_id
     ? mergeChildTaskItems(
-        session_view?.child_tasks ?? [],
+        [...(history?.child_tasks ?? []), ...(session_view?.child_tasks ?? [])],
         store.live_execution.childTasksForSession(session_id),
       )
     : [];
-  const attachment_by_id = useMemo(() => new Map(
-    (session_view?.attachments ?? []).map((attachment) => [attachment.attachment_id, attachment]),
-  ), [session_view?.attachments]);
-
-  const openAttachment = useCallback((attachment: AttachmentSummary) => {
+  const openAttachment = useCallback((attachment: AttachmentSummary, siblings: readonly AttachmentSummary[]) => {
     if (!session_id || !isPreviewableResource(attachment.original_name, attachment.media_type)) {
       setPreviewAttachment(attachment);
       return;
@@ -161,10 +158,10 @@ export const ConversationView = observer(function ConversationView({ navigation_
     store.resource_workspace.openAttachment(
       `session:${session_id}`,
       attachment,
-      session_view?.attachments ?? [attachment],
+      siblings,
     );
     if (!store.navigation.effective_right_sidebar_open) store.toggleRightSidebar();
-  }, [session_id, session_view?.attachments, store]);
+  }, [session_id, store]);
 
   const runAttachmentAction = useCallback((request: Promise<void>, fallback: string) => {
     void request.catch((failure: unknown) => {
@@ -523,10 +520,7 @@ export const ConversationView = observer(function ConversationView({ navigation_
       : row.type === "user"
       ? (
           <UserMessage
-            attachments={(row.message.attachment_ids ?? []).flatMap((id) => {
-              const attachment = attachment_by_id.get(id);
-              return attachment ? [attachment] : [];
-            })}
+            attachments={row.message.attachments ?? []}
             key={row.message.message_id}
             editing={edit_target === row.message.message_id}
             edit={show_edit ? {
@@ -536,8 +530,8 @@ export const ConversationView = observer(function ConversationView({ navigation_
             } : undefined}
             navigation_highlight={located?.scope === navigation_scope && located.id === row.message.message_id}
             message={row.message}
-            on_attachment_click={openAttachment}
-            on_attachment_menu={(attachment, location) => setAttachmentMenu({ attachment, location })}
+            on_attachment_click={(attachment) => openAttachment(attachment, row.message.attachments ?? [attachment])}
+            on_attachment_menu={(attachment, location) => setAttachmentMenu({ attachment, location, siblings: row.message.attachments ?? [attachment] })}
             on_quote_locate={(quote) => session_id
               ? store.locateTextQuoteSource(session_id, quote)
               : Promise.resolve(false)}
@@ -724,7 +718,7 @@ export const ConversationView = observer(function ConversationView({ navigation_
                 attachment_menu.attachment.media_type,
               ),
               label: "在资源栏打开",
-              on_select: () => openAttachment(attachment_menu.attachment),
+              on_select: () => openAttachment(attachment_menu.attachment, attachment_menu.siblings),
             },
             {label:"下载文件",on_select:()=>runAttachmentAction(store.files.downloadAttachment(attachment_menu.attachment.session_id, attachment_menu.attachment.attachment_id, attachment_menu.attachment.original_name),"下载失败。")},
             ...(store.files.native_host ? [

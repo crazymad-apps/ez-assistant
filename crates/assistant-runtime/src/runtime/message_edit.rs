@@ -289,6 +289,7 @@ impl AssistantRuntime {
             &config,
             &self.config_registry,
             RunCompilationResources {
+                background: self.background_services(),
                 plugin: self.plugin.clone(),
                 attachments: self.attachments.clone(),
                 shell,
@@ -305,6 +306,7 @@ impl AssistantRuntime {
                 output_dispatcher: self.output_dispatcher.clone(),
                 mcp_registry: self.mcp_service.registry.clone(),
                 mcp_management: self.mcp_management(),
+                schedule_runtime: self.scheduler.runtime(),
                 mcp_image_materializer: self.mcp_service.image_materializer.clone(),
             },
             RunAuthorizationInput {

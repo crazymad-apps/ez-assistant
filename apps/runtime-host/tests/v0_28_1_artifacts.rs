@@ -56,8 +56,8 @@ async fn provider(Json(body): Json<Value>) -> impl axum::response::IntoResponse 
     )
 }
 
-fn view(client: &mut Client, session: &str) -> Value {
-    client.runtime("get_session_view", json!({"session_id":session}))["snapshot"]["value"].clone()
+fn artifact_page(client: &mut Client, session: &str) -> Value {
+    client.runtime("list_artifacts", json!({"session_id":session}))
 }
 fn submit(client: &mut Client, session: &str, input: Value) {
     let run = client.submit_started_input(json!({"session_id":session,"message":format!("ARTIFACT {input}"),"variant":"build","mode":"normal","attachment_ids":[],"quotes":[]}))["run"].clone();
@@ -133,7 +133,7 @@ fn artifacts_survive_restart_and_only_explicit_available_files_are_delivered() {
         &session,
         json!({"action":"declare","path":"final.txt","title":"最终报告"}),
     );
-    let initial = view(&mut client, &session);
+    let initial = artifact_page(&mut client, &session);
     assert_eq!(
         initial["artifacts"].as_array().unwrap().len(),
         1,
@@ -141,7 +141,7 @@ fn artifacts_survive_restart_and_only_explicit_available_files_are_delivered() {
     );
     let locator = initial["artifacts"][0]["locator"].clone();
     assert!(initial["artifacts"][0]["source_run_id"].is_string());
-    assert_eq!(view(&mut client, &other)["artifacts"], json!([]));
+    assert_eq!(artifact_page(&mut client, &other)["artifacts"], json!([]));
     assert_eq!(
         file_request(&host, &session, "stat", &locator)
             .json::<Value>()
@@ -165,7 +165,7 @@ fn artifacts_survive_restart_and_only_explicit_available_files_are_delivered() {
         &session,
         json!({"action":"withdraw","path":"final.txt"}),
     );
-    assert_eq!(view(&mut client, &session)["artifacts"], json!([]));
+    assert_eq!(artifact_page(&mut client, &session)["artifacts"], json!([]));
     assert_eq!(
         fs::read_to_string(workspace_path.join("final.txt")).unwrap(),
         "FINAL DELIVERY"
@@ -181,14 +181,14 @@ fn artifacts_survive_restart_and_only_explicit_available_files_are_delivered() {
         json!({"action":"declare","path":"./final.txt","title":"更新后的报告"}),
     );
     assert_eq!(
-        view(&mut client, &session)["artifacts"]
+        artifact_page(&mut client, &session)["artifacts"]
             .as_array()
             .unwrap()
             .len(),
         1
     );
     assert_eq!(
-        view(&mut client, &session)["artifacts"][0]["title"],
+        artifact_page(&mut client, &session)["artifacts"][0]["title"],
         "更新后的报告"
     );
     for path in ["missing.txt", "../outside.txt", "."] {
@@ -198,7 +198,7 @@ fn artifacts_survive_restart_and_only_explicit_available_files_are_delivered() {
             json!({"action":"declare","path":path,"title":"不可交付"}),
         );
         assert_eq!(
-            view(&mut client, &session)["artifacts"]
+            artifact_page(&mut client, &session)["artifacts"]
                 .as_array()
                 .unwrap()
                 .len(),
@@ -217,18 +217,18 @@ fn artifacts_survive_restart_and_only_explicit_available_files_are_delivered() {
         json!({"action":"declare","path":"escape.txt","title":"越界"}),
     );
     assert_eq!(
-        view(&mut client, &session)["artifacts"]
+        artifact_page(&mut client, &session)["artifacts"]
             .as_array()
             .unwrap()
             .len(),
         1
     );
-    let expected = view(&mut client, &session)["artifacts"].clone();
+    let expected = artifact_page(&mut client, &session)["artifacts"].clone();
     drop(client);
     host.kill();
     let host = HostProcess::start(&runtime_home);
     let mut client = host.connect();
-    assert_eq!(view(&mut client, &session)["artifacts"], expected);
+    assert_eq!(artifact_page(&mut client, &session)["artifacts"], expected);
     fs::remove_file(workspace_path.join("final.txt")).unwrap();
     assert!(
         !file_request(&host, &session, "stat", &locator)
@@ -241,7 +241,7 @@ fn artifacts_survive_restart_and_only_explicit_available_files_are_delivered() {
             .is_success()
     );
     assert_eq!(
-        view(&mut client, &session)["artifacts"],
+        artifact_page(&mut client, &session)["artifacts"],
         expected,
         "missing file retains its delivery identity"
     );
@@ -255,11 +255,14 @@ fn artifacts_survive_restart_and_only_explicit_available_files_are_delivered() {
         &session,
         json!({"action":"withdraw","path":"final.txt"}),
     );
-    assert_eq!(view(&mut client, &session)["artifacts"], json!([]));
+    assert_eq!(artifact_page(&mut client, &session)["artifacts"], json!([]));
     assert!(workspace_path.join("helper.py").exists());
     assert!(workspace_path.join("cache.tmp").exists());
     drop(client);
     host.kill();
     let host = HostProcess::start(&runtime_home);
-    assert_eq!(view(&mut host.connect(), &session)["artifacts"], json!([]));
+    assert_eq!(
+        artifact_page(&mut host.connect(), &session)["artifacts"],
+        json!([])
+    );
 }

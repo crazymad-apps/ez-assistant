@@ -913,7 +913,8 @@ describe("ComposerDock", () => {
     let loseResponse: (error: Error) => void = () => {};
     const command = vi.fn()
       .mockImplementationOnce(() => new Promise((_, reject) => { loseResponse = reject; }))
-      .mockResolvedValueOnce({ payload: { snapshot: { value: sessionView({ queue }) } } });
+      .mockResolvedValueOnce({ payload: { snapshot: { value: sessionView({ queue }) } } })
+      .mockResolvedValueOnce({ payload: { runs: [] } });
     vi.spyOn(RuntimeLifecycleCoordinator.prototype, "client", "get").mockReturnValue({
       command, instance_id: "instance-1", target_device: null, address: "http://localhost", login_context: "tester",
     } as unknown as RuntimeClient);
@@ -929,6 +930,7 @@ describe("ComposerDock", () => {
     expect(command.mock.calls.map(call => call[0])).toEqual([
       { type: "intervene_queued_input", payload: { session_id: "session-1", input_id: "waiting" } },
       { type: "get_session_view", payload: { session_id: "session-1" } },
+      { type: "list_runs", payload: { session_id: "session-1", input_id: "waiting", page: { limit: 1 } } },
     ]);
   });
 
@@ -1860,9 +1862,7 @@ function sessionView(overrides: Readonly<{
     active_run: null,
     queue: overrides.queue ?? { revision: 1, state: "automatic", items: [] },
     approvals: { revision: 1, items: [...(overrides.approvals ?? [])], resolving_approval_id: null },
-    attachments: [],
     file_references: [],
-    artifacts: [],
     runs: [],
     usage: {
       accumulated: null,

@@ -89,13 +89,20 @@ pub(crate) struct LocalRuntimeStore {
 impl LocalRuntimeStore {
     #[cfg(test)]
     pub(crate) async fn open(runtime_home: &Path, capacity: usize) -> Result<Self, StoreError> {
-        Self::open_with_progress(runtime_home, capacity, None).await
+        Self::open_with_progress(
+            runtime_home,
+            capacity,
+            None,
+            Arc::new(crate::user_paths::UserPaths::new(runtime_home, Vec::new())),
+        )
+        .await
     }
 
     pub(crate) async fn open_with_progress(
         runtime_home: &Path,
         capacity: usize,
         progress: Option<tokio::sync::watch::Sender<crate::storage::DatabaseStartupProgress>>,
+        paths: Arc<crate::user_paths::UserPaths>,
     ) -> Result<Self, StoreError> {
         if capacity == 0 {
             return Err(StoreError::new(
@@ -109,7 +116,7 @@ impl LocalRuntimeStore {
         let runtime_home = PathBuf::from(runtime_home);
         let worker = thread::Builder::new()
             .name(WORKER_NAME.to_owned())
-            .spawn(move || run_worker(runtime_home, receiver, ready_sender, progress))
+            .spawn(move || run_worker(runtime_home, receiver, ready_sender, progress, paths))
             .map_err(|source| {
                 StoreError::with_source(
                     StoreErrorKind::Unavailable,
@@ -218,6 +225,181 @@ impl LocalRuntimeStore {
 }
 
 impl RuntimeStore for LocalRuntimeStore {
+    fn next_schedule_maintenance(
+        &self,
+        after: Option<String>,
+    ) -> StoreFuture<'_, Option<(String, assistant_runtime::ScheduleMaintenance)>> {
+        Box::pin(async move {
+            self.request(|reply| Command::NextScheduleMaintenance { after, reply })
+                .await
+        })
+    }
+
+    fn mark_schedule_deleting(&self, id: assistant_protocol::ScheduleId) -> StoreFuture<'_, bool> {
+        Box::pin(async move {
+            self.request(|reply| Command::MarkScheduleDeleting { id, reply })
+                .await
+        })
+    }
+
+    fn archive_schedule_result(
+        &self,
+        id: assistant_protocol::ScheduleExecutionId,
+    ) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            self.request(|reply| Command::ArchiveScheduleResult { id, reply })
+                .await
+        })
+    }
+
+    fn commit_schedule_report(
+        &self,
+        commit: assistant_runtime::ScheduleReportCommit,
+    ) -> StoreFuture<'_, Option<assistant_runtime::AcceptedInput>> {
+        Box::pin(async move {
+            self.request(|reply| Command::CommitScheduleReport { commit, reply })
+                .await
+        })
+    }
+
+    fn finish_schedule_result(
+        &self,
+        id: assistant_protocol::ScheduleExecutionId,
+    ) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            self.request(|reply| Command::FinishScheduleResult { id, reply })
+                .await
+        })
+    }
+
+    fn resolve_schedule_file(
+        &self,
+        id: assistant_protocol::ScheduleExecutionId,
+        file_id: String,
+    ) -> StoreFuture<'_, Option<assistant_runtime::ResolvedScheduleFile>> {
+        Box::pin(async move {
+            self.request(|reply| Command::ResolveScheduleFile { id, file_id, reply })
+                .await
+        })
+    }
+
+    fn next_schedule_due(&self) -> StoreFuture<'_, Option<assistant_runtime::StoredSchedule>> {
+        Box::pin(async move {
+            self.request(|reply| Command::NextScheduleDue { reply })
+                .await
+        })
+    }
+
+    fn admit_schedule(
+        &self,
+        command: assistant_runtime::ScheduleAdmission,
+    ) -> StoreFuture<'_, assistant_runtime::ScheduleAdmitted> {
+        Box::pin(async move {
+            self.request(|reply| Command::AdmitSchedule { command, reply })
+                .await
+        })
+    }
+
+    fn settle_schedule_execution(
+        &self,
+        settlement: assistant_runtime::ScheduleSettlement,
+    ) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            self.request(|reply| Command::SettleScheduleExecution { settlement, reply })
+                .await
+        })
+    }
+
+    fn recover_schedule_executions(&self, now: i64, cleanup_verified: bool) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            self.request(|reply| Command::RecoverScheduleExecutions {
+                now,
+                cleanup_verified,
+                reply,
+            })
+            .await
+        })
+    }
+
+    fn get_schedule_execution(
+        &self,
+        id: assistant_protocol::ScheduleExecutionId,
+    ) -> StoreFuture<'_, Option<assistant_protocol::ScheduleExecution>> {
+        Box::pin(async move {
+            self.request(|reply| Command::GetScheduleExecution { id, reply })
+                .await
+        })
+    }
+
+    fn list_schedule_executions(
+        &self,
+        id: assistant_protocol::ScheduleId,
+        offset: u32,
+        limit: u32,
+    ) -> StoreFuture<'_, Option<assistant_protocol::ListScheduleExecutionsResult>> {
+        Box::pin(async move {
+            self.request(|reply| Command::ListScheduleExecutions {
+                id,
+                offset,
+                limit,
+                reply,
+            })
+            .await
+        })
+    }
+
+    fn list_schedules(
+        &self,
+        offset: u32,
+        limit: u32,
+    ) -> StoreFuture<'_, assistant_runtime::StoredSchedulePage> {
+        Box::pin(async move {
+            self.request(|reply| Command::ListSchedules {
+                offset,
+                limit,
+                reply,
+            })
+            .await
+        })
+    }
+
+    fn get_schedule(
+        &self,
+        id: assistant_protocol::ScheduleId,
+    ) -> StoreFuture<'_, Option<assistant_runtime::StoredSchedule>> {
+        Box::pin(async move {
+            self.request(|reply| Command::GetSchedule { id, reply })
+                .await
+        })
+    }
+
+    fn insert_schedule(
+        &self,
+        schedule: assistant_runtime::StoredSchedule,
+    ) -> StoreFuture<'_, bool> {
+        Box::pin(async move {
+            self.request(|reply| Command::InsertSchedule { schedule, reply })
+                .await
+        })
+    }
+
+    fn replace_schedule(
+        &self,
+        schedule: assistant_runtime::StoredSchedule,
+    ) -> StoreFuture<'_, bool> {
+        Box::pin(async move {
+            self.request(|reply| Command::ReplaceSchedule { schedule, reply })
+                .await
+        })
+    }
+
+    fn delete_schedule(&self, id: assistant_protocol::ScheduleId) -> StoreFuture<'_, bool> {
+        Box::pin(async move {
+            self.request(|reply| Command::DeleteSchedule { id, reply })
+                .await
+        })
+    }
+
     fn publish_message_card(
         &self,
         card: assistant_runtime::NewMessageCard,

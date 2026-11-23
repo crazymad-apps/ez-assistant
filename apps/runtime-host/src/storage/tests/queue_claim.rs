@@ -147,7 +147,9 @@ fn upgrade_detaches_only_unstarted_queue_controls_and_removes_successful_backup(
          ALTER TABLE session_resources DROP COLUMN sort_order;
          ALTER TABLE sessions DROP COLUMN pin_order;
          CREATE INDEX session_resources_workspace ON session_resources(workspace_id,session_id);
-         DELETE FROM schema_migrations WHERE migration_key='conversation_usage_snapshots_v1' OR version IN ('0.32.2','0.33.0','0.33.1');
+         DELETE FROM schema_migrations WHERE migration_key='conversation_usage_snapshots_v1' OR version IN ('0.32.2','0.33.0','0.33.1','0.33.2');
+        DROP TABLE schedule_deliveries;        DROP TABLE schedule_executions;
+        DROP TABLE schedules;
         DROP TABLE conversation_usage_snapshots;
         DROP TABLE message_cards;
         UPDATE database_compatibility SET min_compatible_host_version='0.32.1';
@@ -241,7 +243,9 @@ fn queue_upgrade_preserves_an_already_claimed_start_receipt_for_normal_recovery(
          ALTER TABLE session_resources DROP COLUMN sort_order;
          ALTER TABLE sessions DROP COLUMN pin_order;
          CREATE INDEX session_resources_workspace ON session_resources(workspace_id,session_id);
-         DELETE FROM schema_migrations WHERE migration_key='conversation_usage_snapshots_v1' OR version IN ('0.32.2','0.33.0','0.33.1');
+         DELETE FROM schema_migrations WHERE migration_key='conversation_usage_snapshots_v1' OR version IN ('0.32.2','0.33.0','0.33.1','0.33.2');
+        DROP TABLE schedule_deliveries;        DROP TABLE schedule_executions;
+        DROP TABLE schedules;
         DROP TABLE conversation_usage_snapshots;
         DROP TABLE message_cards;
         UPDATE database_compatibility SET min_compatible_host_version='0.32.1';

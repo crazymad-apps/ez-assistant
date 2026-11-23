@@ -689,10 +689,31 @@ super::agent_shell::encode_environment(fork.session.agent_shell_environment.as_r
         if self.inspect_session_deletion(&deletion.session_id)? != deletion.expected_impact {
             return Err(conflict("delete session impact changed"));
         }
-        let source = self.session_directory(&deletion.session_id)?;
+        self.remove_session_staged(&deletion.session_id, &deletion.operation_id)
+    }
+
+    /// 已停止的任务会话可能保留启动中断控制。仅可清理当前计划执行实际绑定的私有会话。
+    pub(super) fn remove_scheduled_session(&mut self, session: SessionId) -> StorageResult<()> {
+        let bound: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schedule_executions WHERE session_id=?1 AND status<>'running')",
+            [session.as_str()], |row| row.get(0),
+        ).map_err(|source| internal_error("scheduled session binding could not be read", source))?;
+        if !bound {
+            return Err(conflict("scheduled session deletion has no stopped owner"));
+        }
+        self.remove_session_staged(&session, "scheduled")
+    }
+
+    fn remove_session_staged(
+        &mut self,
+        session_id: &SessionId,
+        operation_id: &str,
+    ) -> StorageResult<()> {
+        super::filesystem::validate_session_component(session_id)?;
+        let source = self.session_directory(session_id)?;
         let staged = self
             .deletion_staging_directory
-            .join(format!("{}.{}", deletion.session_id, deletion.operation_id));
+            .join(format!("{}.{}", session_id, operation_id));
         if staged.exists() {
             return Err(conflict("delete staging path already exists"));
         }
@@ -713,7 +734,7 @@ super::agent_shell::encode_environment(fork.session.agent_shell_environment.as_r
             let changed = transaction
                 .execute(
                     "DELETE FROM sessions WHERE session_id = ?1",
-                    [deletion.session_id.as_str()],
+                    [session_id.as_str()],
                 )
                 .map_err(|source| database_write_error("session could not be deleted", source))?;
             if changed != 1 {
@@ -733,8 +754,7 @@ super::agent_shell::encode_environment(fork.session.agent_shell_environment.as_r
             let _ = sync_directory(&self.deletion_staging_directory);
             return Err(error);
         }
-        self.unavailable_sessions
-            .remove(deletion.session_id.as_str());
+        self.unavailable_sessions.remove(session_id.as_str());
         if fs::remove_dir_all(&staged).is_ok() {
             let _ = sync_directory(&self.deletion_staging_directory);
         }

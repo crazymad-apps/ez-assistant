@@ -209,6 +209,8 @@ pub(crate) fn router(state: HttpState) -> Router {
 // 外部 HTTP 与组网内部入口共用同一组业务路由，凭据解析只在各自外层完成。
 fn media_routes() -> Router<HttpState> {
     Router::new()
+        .route("/schedule-results/{execution_id}/files/{file_id}/download", get(resources::download_schedule_result_file))
+        .route("/schedule-results/{execution_id}/files/download", post(resources::download_schedule_result_bundle).layer(DefaultBodyLimit::max(32 * 1024)))
         .route("/sessions/{session_id}/attachments/{attachment_id}/download", get(resources::download_attachment))
         .route("/sessions/{session_id}/messages/{message_id}/resources/{resource_ref_id}/download", get(resources::download_tool_file))
         .route("/sessions/{session_id}/child-tasks/{child_task_id}/messages/{message_id}/resources/{resource_ref_id}/download", get(resources::download_child_tool_file))

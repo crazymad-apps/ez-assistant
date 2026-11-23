@@ -57,7 +57,13 @@ fn repeated_forks_keep_children_and_files_after_source_deletion_restart_and_new_
         &["completed"],
     );
     let source_view = view(&mut client, source_id);
-    assert_eq!(source_view["child_tasks"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        source_view["conversation"]["child_tasks"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
     let source_items = source_view["conversation"]["items"].as_array().unwrap();
     let fork_point = source_items
         .iter()
@@ -99,7 +105,12 @@ fn repeated_forks_keep_children_and_files_after_source_deletion_restart_and_new_
             .collect::<Vec<_>>(),
         ids
     );
-    let attachment_id = inherited["attachments"][0]["attachment_id"]
+    let attachment_id = inherited["conversation"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "user")
+        .unwrap()["attachments"][0]["attachment_id"]
         .as_str()
         .unwrap();
     assert_ne!(
@@ -160,7 +171,7 @@ fn repeated_forks_keep_children_and_files_after_source_deletion_restart_and_new_
     let mut client = second_host.connect();
     let recovered = view(&mut client, survivor_id);
     assert_eq!(recovered["conversation"], inherited["conversation"]);
-    assert_eq!(recovered["child_tasks"], inherited["child_tasks"]);
+    assert_eq!(recovered["child_tasks"], json!([]));
     assert_child_owners(&mut client, survivor_id, &recovered);
     assert_attachment(&second_host, survivor_id, attachment_id);
     let new_run = client.submit_started_input(json!({
@@ -175,7 +186,10 @@ fn repeated_forks_keep_children_and_files_after_source_deletion_restart_and_new_
     let continued = view(&mut client, survivor_id);
     assert_eq!(continued["runs"].as_array().unwrap().len(), 1);
     assert_eq!(continued["runs"][0]["run_id"], new_run["run"]["run_id"]);
-    assert_eq!(continued["child_tasks"], inherited["child_tasks"]);
+    assert_eq!(
+        continued["conversation"]["child_tasks"],
+        inherited["conversation"]["child_tasks"]
+    );
     {
         let connection = readonly(&database);
         let counts: (i64,i64) = connection.query_row("SELECT COUNT(*), COALESCE(SUM(queued_message_json IS NOT NULL),0) FROM inputs WHERE session_id=?1", [survivor_id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
@@ -221,7 +235,7 @@ fn view(client: &mut Client, session: &str) -> Value {
 }
 
 fn assert_child_owners(client: &mut Client, session: &str, view: &Value) {
-    for child in view["child_tasks"].as_array().unwrap() {
+    for child in view["conversation"]["child_tasks"].as_array().unwrap() {
         assert_eq!(child["task"]["inherited"], true);
         assert_eq!(child["can_cancel"], false);
         assert_eq!(child["task"]["session_id"], session);

@@ -700,7 +700,7 @@ async fn settle_run_inner(
     // 报告已与源 Run 在同一 Store 事务落库；必须先释放源 Session gate，再进入主控 Session 投影。
     drop(mutation);
     if let Some(report) = accepted_proxy_report {
-        controller.project_proxy_report(report).await?;
+        controller.project_controller_report(report).await?;
     }
     Ok(result)
 }

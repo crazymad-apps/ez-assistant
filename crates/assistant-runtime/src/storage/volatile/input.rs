@@ -187,6 +187,7 @@ impl VolatileRuntimeStore {
                     return Err(conflict("resumed Goal projection is invalid"));
                 }
             }
+            let mut schedule_delivery = None;
             match input
                 .cross_session
                 .as_ref()
@@ -240,6 +241,45 @@ impl VolatileRuntimeStore {
                     {
                         return Err(conflict("controller delivery is not currently accepted"));
                     }
+                }
+                Some(CrossSessionInputBinding::ScheduleReport { execution_id }) => {
+                    let eligible =
+                        state
+                            .schedule_executions
+                            .get(execution_id)
+                            .is_some_and(|execution| {
+                                execution.record.settings.report_to_controller
+                                    && execution.record.delivery.is_none()
+                                    && !matches!(
+                                        execution.record.summary.status,
+                                        assistant_protocol::ScheduleExecutionStatus::Running
+                                            | assistant_protocol::ScheduleExecutionStatus::Skipped
+                                    )
+                                    && state
+                                        .schedules
+                                        .get(&execution.record.summary.schedule_id)
+                                        .is_some_and(|plan| !plan.deleting)
+                            });
+                    if !eligible
+                        || !state
+                            .sessions
+                            .get(&input.session_id)
+                            .is_some_and(|session| {
+                                session.role == SessionRole::Controller
+                                    && session.lifecycle == StoredSessionLifecycle::Active
+                            })
+                    {
+                        return Err(conflict("schedule report is not eligible"));
+                    }
+                    let message_id = assistant_protocol::MessageId::new(input.message.id.as_str())
+                        .map_err(|_| conflict("schedule report message identity is invalid"))?;
+                    schedule_delivery = Some((
+                        execution_id.clone(),
+                        assistant_protocol::ScheduleDelivery {
+                            session_id: input.session_id.clone(),
+                            message_id,
+                        },
+                    ));
                 }
                 Some(CrossSessionInputBinding::ProxyReport { .. }) => {
                     return Err(conflict(
@@ -355,6 +395,14 @@ impl VolatileRuntimeStore {
                 state
                     .mcp_input_selections
                     .insert(selection.selection_id.clone(), selection);
+            }
+            if let Some((execution_id, delivery)) = schedule_delivery {
+                state
+                    .schedule_executions
+                    .get_mut(&execution_id)
+                    .expect("eligible schedule execution")
+                    .record
+                    .delivery = Some(delivery);
             }
             Ok(AcceptedInput::Control {
                 input: Box::new(stored),

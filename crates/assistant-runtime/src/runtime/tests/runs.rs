@@ -67,6 +67,9 @@ async fn terminal_queries_and_duplicate_cancel_read_reliable_history_after_resta
     assert_eq!(
         runtime
             .list_runs(assistant_protocol::ListRunsRequest {
+                summary_only: None,
+                page: None,
+                input_id: None,
                 session_id: session_id.clone()
             })
             .await

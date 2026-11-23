@@ -335,6 +335,9 @@ async fn manual_compaction_replaces_history_without_creating_a_run_and_is_idempo
     assert_eq!(
         runtime
             .list_runs(assistant_protocol::ListRunsRequest {
+                summary_only: None,
+                page: None,
+                input_id: None,
                 session_id: session_id.clone(),
             })
             .await

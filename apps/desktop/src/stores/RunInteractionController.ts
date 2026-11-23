@@ -171,8 +171,12 @@ export class RunInteractionController {
       } else if (!confirming) {
         result = (await client.command({ type: "intervene_queued_input", payload: { session_id, input_id: target.input_id } })).payload;
       } else {
-        const view = (await client.command({ type: "get_session_view", payload: { session_id } })).payload.snapshot.value;
-        const run = view.runs.find(item => item.input_id === target.input_id) ?? null;
+        const [session_snapshot, input_runs] = await Promise.all([
+          client.command({ type: "get_session_view", payload: { session_id } }),
+          client.command({ type: "list_runs", payload: { session_id, input_id: target.input_id, page: { limit: 1 } } }),
+        ]);
+        const view = session_snapshot.payload.snapshot.value;
+        const run = input_runs.payload.runs[0] ?? null;
         const message = view.conversation.items.find(item => item.type === "user" && item.input_id === target.input_id);
         const queued = view.queue.items.some(item => item.type === "message" && item.payload.input_id === target.input_id);
         if (!queued && !run && !message) {
