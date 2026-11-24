@@ -103,8 +103,8 @@ pub(super) fn build_device_mcp_definitions(
     definitions
 }
 
-fn is_valid_mcp_path(path: &str) -> bool {
-    if !path.starts_with('/') || path.len() > MAX_PATH_BYTES {
+pub(super) fn is_safe_http_subpath(path: &str, max_bytes: usize) -> bool {
+    if !path.starts_with('/') || path.len() > max_bytes {
         return false;
     }
     if path
@@ -114,10 +114,16 @@ fn is_valid_mcp_path(path: &str) -> bool {
     {
         return false;
     }
-    !path.split('/').any(|segment| segment == "..")
+    !path
+        .split('/')
+        .any(|segment| segment == ".." || segment == ".")
 }
 
-fn is_private_or_link_local(addr: IpAddr) -> bool {
+fn is_valid_mcp_path(path: &str) -> bool {
+    is_safe_http_subpath(path, MAX_PATH_BYTES)
+}
+
+pub(super) fn is_private_or_link_local(addr: IpAddr) -> bool {
     match addr {
         IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
         IpAddr::V6(v6) => {

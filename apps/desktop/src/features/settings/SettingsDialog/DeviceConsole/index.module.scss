@@ -1,0 +1,332 @@
+@use "../../../../styles/fields";
+
+.tabs {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  padding: 3px;
+  margin-bottom: 14px;
+  border-radius: var(--ez-radius-small);
+  background: var(--ez-surface-muted);
+
+  button {
+    min-height: var(--ez-control-height-small);
+    padding: 0 11px;
+    border: 0;
+    border-radius: 5px;
+    color: var(--ez-text-secondary);
+    background: transparent;
+    font-size: var(--ez-font-small);
+    white-space: nowrap;
+
+    &:hover {
+      color: var(--ez-text);
+    }
+
+    &[aria-selected="true"] {
+      color: var(--ez-text);
+      background: var(--ez-surface);
+      box-shadow: var(--ez-shadow-small);
+      font-weight: 600;
+    }
+  }
+}
+
+.section_grid {
+  display: grid;
+  gap: 14px;
+}
+
+.panel {
+  border: 1px solid var(--ez-border);
+  border-radius: var(--ez-radius-medium);
+  background: var(--ez-surface);
+  overflow: hidden;
+}
+
+.panel_header {
+  display: flex;
+  min-height: 46px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--ez-border);
+
+  h4 {
+    margin: 0;
+    font-size: var(--ez-font-base);
+  }
+
+  button {
+    min-height: var(--ez-control-height-small);
+    padding: 0 10px;
+    border: 1px solid var(--ez-border-strong);
+    border-radius: var(--ez-radius-small);
+    color: var(--ez-text-secondary);
+    background: var(--ez-surface);
+    font-size: var(--ez-font-small);
+
+    &:hover:not(:disabled) {
+      color: var(--ez-text);
+      background: var(--ez-surface-subtle);
+    }
+
+    &:disabled {
+      opacity: 0.48;
+    }
+  }
+}
+
+.panel_body {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+}
+
+.card_grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 10px;
+}
+
+.fleet_card {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--ez-border);
+  border-radius: var(--ez-radius-small);
+  background: var(--ez-surface-subtle);
+}
+
+.fleet_card_top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+
+  strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+.badge {
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--ez-text-muted);
+  background: var(--ez-surface-muted);
+
+  &[data-tone="online"] {
+    color: var(--ez-success-text);
+    background: var(--ez-success-soft);
+  }
+
+  &[data-tone="warn"] {
+    color: var(--ez-warning-text);
+    background: var(--ez-warning-soft);
+  }
+}
+
+.meta_line {
+  color: var(--ez-text-muted);
+  font-size: var(--ez-font-small);
+}
+
+.cap_row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.cap_tag {
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--ez-text-secondary);
+  background: var(--ez-surface);
+  border: 1px solid var(--ez-border);
+}
+
+.form_grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px;
+}
+
+.full_span {
+  grid-column: 1 / -1;
+}
+
+.field {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+
+  > span {
+    color: var(--ez-text-secondary);
+    font-size: var(--ez-font-small);
+    font-weight: 600;
+  }
+
+  input,
+  textarea {
+    width: 100%;
+    min-width: 0;
+    padding: 7px 9px;
+    border: 1px solid var(--ez-border-strong);
+    border-radius: var(--ez-radius-small);
+    outline: 0;
+    color: var(--ez-text);
+    background: var(--ez-surface);
+    font: inherit;
+
+    &:focus {
+      @include fields.focus-border;
+    }
+  }
+
+  input {
+    min-height: var(--ez-control-height);
+    padding: 0 9px;
+  }
+
+  textarea {
+    min-height: 70px;
+    resize: vertical;
+  }
+}
+
+.action_row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.primary_btn {
+  min-height: var(--ez-control-height);
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--ez-radius-small);
+  color: var(--ez-on-primary);
+  background: var(--ez-primary);
+  font-weight: 600;
+
+  &:disabled {
+    opacity: 0.45;
+  }
+}
+
+.secondary_btn {
+  min-height: var(--ez-control-height);
+  padding: 0 11px;
+  border: 1px solid var(--ez-border-strong);
+  border-radius: var(--ez-radius-small);
+  color: var(--ez-text-secondary);
+  background: var(--ez-surface);
+
+  &:hover:not(:disabled) {
+    color: var(--ez-text);
+    background: var(--ez-surface-subtle);
+  }
+
+  &:disabled {
+    opacity: 0.45;
+  }
+}
+
+.danger_btn {
+  min-height: var(--ez-control-height-small);
+  padding: 0 8px;
+  border: 1px solid var(--ez-border);
+  border-radius: var(--ez-radius-small);
+  color: var(--ez-danger);
+  background: transparent;
+  font-size: var(--ez-font-small);
+
+  &:hover:not(:disabled) {
+    background: var(--ez-danger-soft);
+  }
+}
+
+.table_wrap {
+  width: 100%;
+  overflow-x: auto;
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--ez-font-small);
+    text-align: left;
+  }
+
+  th,
+  td {
+    padding: 8px 6px;
+    border-bottom: 1px solid var(--ez-border);
+    vertical-align: middle;
+  }
+
+  th {
+    color: var(--ez-text-muted);
+    font-weight: 600;
+  }
+}
+
+.code_box {
+  margin: 0;
+  padding: 10px;
+  border-radius: var(--ez-radius-small);
+  background: var(--ez-surface-subtle);
+  border: 1px solid var(--ez-border);
+  font-size: 12px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.snapshot_preview {
+  max-width: 100%;
+  max-height: 260px;
+  border-radius: var(--ez-radius-small);
+  border: 1px solid var(--ez-border);
+  object-fit: contain;
+}
+
+.empty_note {
+  margin: 0;
+  color: var(--ez-text-muted);
+  font-size: var(--ez-font-small);
+}
+
+.error_banner {
+  margin: 0;
+  padding: 9px 11px;
+  border-radius: var(--ez-radius-small);
+  color: var(--ez-danger);
+  background: var(--ez-danger-soft);
+  font-size: var(--ez-font-small);
+}
+
+.progress_track {
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--ez-surface-muted);
+  overflow: hidden;
+}
+
+.progress_fill {
+  height: 100%;
+  background: var(--ez-primary);
+  transition: width 150ms ease;
+}
+
+@media (max-width: 640px) {
+  .form_grid {
+    grid-template-columns: 1fr;
+  }
+}

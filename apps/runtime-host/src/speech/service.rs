@@ -3,7 +3,10 @@
 use std::{future::Future, panic::AssertUnwindSafe, path::PathBuf, sync::Arc, time::Duration};
 
 use crate::media_diagnostics::{correlation_id, timestamp_ms};
-use assistant_protocol::{DeviceSpeechServicesSnapshot, SpeechServiceStatusSnapshot};
+use assistant_protocol::{
+    DeviceSpeechServicesSnapshot, SpeechConfigurationSnapshot, SpeechServiceStatusSnapshot,
+    UpdateSpeechConfigurationRequest,
+};
 use assistant_runtime::RuntimeConfigSource;
 use futures_util::FutureExt;
 use thiserror::Error;
@@ -14,7 +17,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    config,
+    config::{self, SpeechConfigError},
     provider::{AsrProvider, AsrRequest, SpeechProviderError, TtsProvider},
 };
 
@@ -80,6 +83,13 @@ struct SynthesizeRequest {
 enum SpeechCommand {
     Reload {
         response: oneshot::Sender<()>,
+    },
+    GetConfiguration {
+        response: oneshot::Sender<Result<SpeechConfigurationSnapshot, SpeechConfigError>>,
+    },
+    UpdateConfiguration {
+        request: UpdateSpeechConfigurationRequest,
+        response: oneshot::Sender<Result<SpeechConfigurationSnapshot, SpeechConfigError>>,
     },
     Recognize {
         request: RecognizeRequest,
@@ -233,6 +243,32 @@ impl SpeechService {
                             self.status.send_replace(compiled.status);
                             let _ = response.send(());
                         }
+                        SpeechCommand::GetConfiguration { response } => {
+                            let current_status = *self.status.borrow();
+                            let result = tokio::select! {
+                                biased;
+                                () = shutdown.cancelled() => break,
+                                result = config::read_configuration(self.source.as_ref(), current_status) => result,
+                            };
+                            let _ = response.send(result);
+                        }
+                        SpeechCommand::UpdateConfiguration { request, response } => {
+                            let result = tokio::select! {
+                                biased;
+                                () = shutdown.cancelled() => break,
+                                result = config::update_configuration(self.source.as_ref(), request) => result,
+                            };
+                            match result {
+                                Ok(outcome) => {
+                                    compiled = outcome.compiled;
+                                    self.status.send_replace(compiled.status);
+                                    let _ = response.send(Ok(outcome.configuration));
+                                }
+                                Err(err) => {
+                                    let _ = response.send(Err(err));
+                                }
+                            }
+                        }
                         SpeechCommand::Recognize { request, mut response, permit } => {
                             let request_id = correlation_id(&request.debug_name);
                             let started_at = std::time::Instant::now();
@@ -275,6 +311,10 @@ impl SpeechService {
             match command {
                 SpeechCommand::Reload { response } => {
                     let _ = response.send(());
+                }
+                SpeechCommand::GetConfiguration { response }
+                | SpeechCommand::UpdateConfiguration { response, .. } => {
+                    let _ = response.send(Err(SpeechConfigError::Unavailable));
                 }
                 SpeechCommand::Recognize { response, .. } => {
                     let _ = response.send(Err(SpeechServiceError::Cancelled));
@@ -333,6 +373,38 @@ impl SpeechServiceHandle {
         {
             let _ = response_rx.await;
         }
+    }
+
+    pub(crate) async fn get_configuration(
+        &self,
+    ) -> Result<SpeechConfigurationSnapshot, SpeechConfigError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.commands
+            .send(SpeechCommand::GetConfiguration {
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| SpeechConfigError::Unavailable)?;
+        response_rx
+            .await
+            .unwrap_or(Err(SpeechConfigError::Unavailable))
+    }
+
+    pub(crate) async fn update_configuration(
+        &self,
+        request: UpdateSpeechConfigurationRequest,
+    ) -> Result<SpeechConfigurationSnapshot, SpeechConfigError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.commands
+            .send(SpeechCommand::UpdateConfiguration {
+                request,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| SpeechConfigError::Unavailable)?;
+        response_rx
+            .await
+            .unwrap_or(Err(SpeechConfigError::Unavailable))
     }
 
     pub(crate) async fn recognize(

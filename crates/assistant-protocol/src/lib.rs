@@ -148,13 +148,17 @@ pub use custom_agent::{
     PreparedCustomAgentSnapshot, SavePersonalAgentRequest,
 };
 pub use device_gateway::{
-    CloseDevicePairingWindowRequest, ConfirmDevicePairingRequest, DeviceCapabilitiesSnapshot,
-    DeviceConnectionSnapshot, DeviceGatewayCommand, DeviceGatewayCommandResult, DeviceGatewayEvent,
+    AsrConfigurationSnapshot, CloseDevicePairingWindowRequest, ConfirmDevicePairingRequest,
+    DeviceCapabilitiesSnapshot, DeviceConnectionSnapshot, DeviceConsoleSnapshot,
+    DeviceGatewayCommand, DeviceGatewayCommandResult, DeviceGatewayEvent,
     DeviceGatewayMutationResult, DeviceGatewaySnapshot, DeviceLifecycleSnapshot,
     DevicePairingModeSnapshot, DevicePairingWindowSnapshot, DeviceSpeechServicesSnapshot,
-    DeviceSummarySnapshot, GetDeviceGatewaySnapshotRequest, OpenDevicePairingWindowRequest,
-    PendingDevicePairingSnapshot, RejectDevicePairingRequest, RenameDeviceRequest,
-    RevokeDeviceRequest, SetDeviceAccessEnabledRequest, SpeechServiceStatusSnapshot,
+    DeviceSummarySnapshot, GetDeviceGatewaySnapshotRequest, GetSpeechConfigurationRequest,
+    OpenDevicePairingWindowRequest, PendingDevicePairingSnapshot, RejectDevicePairingRequest,
+    RenameDeviceRequest, RevokeDeviceRequest, SetDeviceAccessEnabledRequest,
+    SpeechConfigurationSnapshot, SpeechProviderKind, SpeechServiceStatusSnapshot,
+    TtsConfigurationSnapshot, UpdateAsrConfigurationInput, UpdateSpeechConfigurationRequest,
+    UpdateSpeechConfigurationResult, UpdateTtsConfigurationInput,
 };
 pub use error::{ModelFailureKind, RuntimeErrorCode, RuntimeErrorInfo};
 pub use event::{

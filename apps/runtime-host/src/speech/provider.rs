@@ -1,4 +1,4 @@
-//! Provider-neutral ASR 端口与首个 DashScope 整句识别 Adapter。
+//! Provider-neutral ASR/TTS 端口及 DashScope、OpenAI 兼容 Adapter。
 
 use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
@@ -10,6 +10,8 @@ use tokio_util::sync::CancellationToken;
 
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_TTS_PCM_BYTES: usize = 60 * 16_000 * 2;
+const MAX_TTS_WAV_DOWNLOAD_BYTES: usize = MAX_TTS_PCM_BYTES * 6;
+const TARGET_SAMPLE_RATE_HZ: u32 = 16_000;
 
 /// Provider-neutral 的整句 ASR 输入；音频固定为 16 kHz 单声道 PCM16 little-endian。
 pub(super) struct AsrRequest {
@@ -248,6 +250,281 @@ pub(super) enum SpeechProviderError {
     OutputTooLarge,
 }
 
+/// OpenAI 兼容语音识别 Adapter（`/v1/audio/transcriptions`）；发送 16 kHz WAV 并读取 `text`。
+#[derive(Clone)]
+pub(super) struct OpenAiSpeechRecognizer {
+    client: Client,
+    endpoint: Url,
+    model: Arc<str>,
+    credential: Arc<str>,
+}
+
+impl OpenAiSpeechRecognizer {
+    pub(super) fn new(
+        endpoint: String,
+        model: String,
+        credential: String,
+        timeout: Duration,
+    ) -> Result<Self, SpeechProviderError> {
+        let endpoint = resolve_openai_endpoint(&endpoint, "audio/transcriptions")?;
+        let client = Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(|_| SpeechProviderError::Unavailable)?;
+        Ok(Self {
+            client,
+            endpoint,
+            model: Arc::from(model),
+            credential: Arc::from(credential),
+        })
+    }
+}
+
+impl AsrProvider for OpenAiSpeechRecognizer {
+    fn recognize<'a>(&'a self, request: &'a AsrRequest) -> AsrFuture<'a> {
+        Box::pin(async move {
+            let wav = pcm16_mono_wav(&request.pcm_s16le)?;
+            let boundary = format!("ezspeech{}", crate::media_diagnostics::timestamp_ms());
+            let body = build_asr_multipart_body(&boundary, &self.model, &wav);
+            let send = self
+                .client
+                .post(self.endpoint.clone())
+                .bearer_auth(self.credential.as_ref())
+                .header(
+                    reqwest::header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(body)
+                .send();
+            let response = tokio::select! {
+                () = request.cancellation.cancelled() => return Err(SpeechProviderError::Cancelled),
+                response = send => response.map_err(map_transport)?,
+            };
+            let status = response.status();
+            if !status.is_success() {
+                return Err(map_status(status));
+            }
+            let body = bounded_json(response, &request.cancellation).await?;
+            let transcript = body
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(ToOwned::to_owned)
+                .ok_or(SpeechProviderError::InvalidTranscript)?;
+            Ok(AsrResult { transcript })
+        })
+    }
+}
+
+/// OpenAI 兼容语音合成 Adapter（`/v1/audio/speech`）；请求 WAV 并统一重采样为 16 kHz 单声道 PCM16。
+#[derive(Clone)]
+pub(super) struct OpenAiSpeechSynthesizer {
+    client: Client,
+    endpoint: Url,
+    model: Arc<str>,
+    voice: Arc<str>,
+    credential: Arc<str>,
+}
+
+impl OpenAiSpeechSynthesizer {
+    pub(super) fn new(
+        endpoint: String,
+        model: String,
+        voice: String,
+        credential: String,
+        timeout: Duration,
+    ) -> Result<Self, SpeechProviderError> {
+        let endpoint = resolve_openai_endpoint(&endpoint, "audio/speech")?;
+        let client = Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(|_| SpeechProviderError::Unavailable)?;
+        Ok(Self {
+            client,
+            endpoint,
+            model: Arc::from(model),
+            voice: Arc::from(voice),
+            credential: Arc::from(credential),
+        })
+    }
+}
+
+impl TtsProvider for OpenAiSpeechSynthesizer {
+    fn synthesize<'a>(&'a self, text: &'a str, cancellation: CancellationToken) -> TtsFuture<'a> {
+        Box::pin(async move {
+            let payload = json!({
+                "model": self.model.as_ref(),
+                "input": text,
+                "voice": self.voice.as_ref(),
+                "response_format": "wav",
+            });
+            let send = self
+                .client
+                .post(self.endpoint.clone())
+                .bearer_auth(self.credential.as_ref())
+                .json(&payload)
+                .send();
+            let response = tokio::select! {
+                () = cancellation.cancelled() => return Err(SpeechProviderError::Cancelled),
+                response = send => response.map_err(map_transport)?,
+            };
+            let status = response.status();
+            if !status.is_success() {
+                return Err(map_status(status));
+            }
+            let raw = bounded_bytes(response, &cancellation, MAX_TTS_WAV_DOWNLOAD_BYTES).await?;
+            let pcm = wav_bytes_to_pcm16_16k_mono(&raw)?;
+            if pcm.len() > MAX_TTS_PCM_BYTES {
+                return Err(SpeechProviderError::OutputTooLarge);
+            }
+            Ok(TtsResult {
+                pcm_s16le: Arc::from(pcm),
+            })
+        })
+    }
+}
+
+fn resolve_openai_endpoint(raw: &str, suffix: &str) -> Result<Url, SpeechProviderError> {
+    let mut url = Url::parse(raw.trim().trim_end_matches('/'))
+        .map_err(|_| SpeechProviderError::Unavailable)?;
+    if !is_secure_or_loopback(&url) {
+        return Err(SpeechProviderError::Unavailable);
+    }
+    let path = url.path().trim_end_matches('/');
+    let next_path = if path.ends_with(&format!("/{suffix}")) {
+        path.to_owned()
+    } else if path.is_empty() || path == "/" {
+        format!("/v1/{suffix}")
+    } else if path.ends_with("/v1") {
+        format!("{path}/{suffix}")
+    } else {
+        format!("{path}/v1/{suffix}")
+    };
+    url.set_path(&next_path);
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url)
+}
+
+fn build_asr_multipart_body(boundary: &str, model: &str, wav: &[u8]) -> Vec<u8> {
+    let clean_model = model.replace(['\r', '\n', '"'], "");
+    let mut body = Vec::with_capacity(wav.len() + 256);
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"model\"\r\n\r\n");
+    body.extend_from_slice(clean_model.as_bytes());
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n",
+    );
+    body.extend_from_slice(b"Content-Type: audio/wav\r\n\r\n");
+    body.extend_from_slice(wav);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    body
+}
+
+fn wav_bytes_to_pcm16_16k_mono(wav: &[u8]) -> Result<Vec<u8>, SpeechProviderError> {
+    if wav.len() < 12 || &wav[0..4] != b"RIFF" || &wav[8..12] != b"WAVE" {
+        return Err(SpeechProviderError::InvalidAudio);
+    }
+    let mut pos = 12_usize;
+    let mut channels = 0_u16;
+    let mut sample_rate = 0_u32;
+    let mut bits_per_sample = 0_u16;
+    let mut audio_format = 0_u16;
+    let mut found_fmt = false;
+    let mut data_slice: Option<&[u8]> = None;
+
+    while pos.saturating_add(8) <= wav.len() {
+        let id = &wav[pos..pos + 4];
+        let chunk_len =
+            u32::from_le_bytes([wav[pos + 4], wav[pos + 5], wav[pos + 6], wav[pos + 7]]) as usize;
+        pos += 8;
+        let Some(end) = pos.checked_add(chunk_len) else {
+            return Err(SpeechProviderError::InvalidAudio);
+        };
+        if end > wav.len() {
+            return Err(SpeechProviderError::InvalidAudio);
+        }
+        let chunk = &wav[pos..end];
+        if id == b"fmt " {
+            if chunk.len() < 16 {
+                return Err(SpeechProviderError::InvalidAudio);
+            }
+            audio_format = u16::from_le_bytes([chunk[0], chunk[1]]);
+            channels = u16::from_le_bytes([chunk[2], chunk[3]]);
+            sample_rate = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
+            bits_per_sample = u16::from_le_bytes([chunk[14], chunk[15]]);
+            found_fmt = true;
+        } else if id == b"data" {
+            data_slice = Some(chunk);
+            break;
+        }
+        // RIFF chunk 按偶数字节对齐。
+        pos = end.saturating_add(chunk_len % 2);
+    }
+
+    let Some(data) = data_slice else {
+        return Err(SpeechProviderError::InvalidAudio);
+    };
+    if !found_fmt
+        || audio_format != 1
+        || !matches!(channels, 1 | 2)
+        || sample_rate == 0
+        || bits_per_sample != 16
+        || data.is_empty()
+    {
+        return Err(SpeechProviderError::InvalidAudio);
+    }
+    let frame_bytes = usize::from(channels) * 2;
+    let frame_count = data.len() / frame_bytes;
+    if frame_count == 0 {
+        return Err(SpeechProviderError::InvalidAudio);
+    }
+
+    let mut mono = Vec::with_capacity(frame_count);
+    for frame in 0..frame_count {
+        let offset = frame * frame_bytes;
+        let left = i32::from(i16::from_le_bytes([data[offset], data[offset + 1]]));
+        let sample = if channels == 2 {
+            let right = i32::from(i16::from_le_bytes([data[offset + 2], data[offset + 3]]));
+            ((left + right) / 2) as i16
+        } else {
+            left as i16
+        };
+        mono.push(sample);
+    }
+
+    if sample_rate == TARGET_SAMPLE_RATE_HZ {
+        let mut out = Vec::with_capacity(mono.len() * 2);
+        for s in mono {
+            out.extend_from_slice(&s.to_le_bytes());
+        }
+        return Ok(out);
+    }
+
+    let out_len_u64 = (mono.len() as u64).saturating_mul(u64::from(TARGET_SAMPLE_RATE_HZ))
+        / u64::from(sample_rate);
+    let out_len =
+        usize::try_from(out_len_u64.max(1)).map_err(|_| SpeechProviderError::OutputTooLarge)?;
+    if out_len.saturating_mul(2) > MAX_TTS_PCM_BYTES {
+        return Err(SpeechProviderError::OutputTooLarge);
+    }
+    let mut out = Vec::with_capacity(out_len * 2);
+    let step = sample_rate as f64 / f64::from(TARGET_SAMPLE_RATE_HZ);
+    for i in 0..out_len {
+        let pos = i as f64 * step;
+        let idx = (pos.floor() as usize).min(mono.len() - 1);
+        let frac = pos - idx as f64;
+        let s0 = f64::from(mono[idx]);
+        let s1 = f64::from(mono[(idx + 1).min(mono.len() - 1)]);
+        let interpolated = (s0 + frac * (s1 - s0)).round().clamp(-32768.0, 32767.0) as i16;
+        out.extend_from_slice(&interpolated.to_le_bytes());
+    }
+    Ok(out)
+}
+
 fn map_transport(error: reqwest::Error) -> SpeechProviderError {
     if error.is_timeout() {
         SpeechProviderError::Timeout
@@ -484,5 +761,102 @@ mod tests {
             secure_audio_url("https://example.com/audio.pcm"),
             Err(SpeechProviderError::InvalidAudio)
         ));
+    }
+
+    #[tokio::test]
+    async fn openai_asr_and_tts_adapters_round_trip_wav_audio() {
+        let received_header = Arc::new(std::sync::Mutex::new(String::new()));
+        let captured_header = received_header.clone();
+        let tts_wav = wav_with_rate_and_samples(24_000, &[1000_i16; 2400]);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let app = Router::new()
+            .route(
+                "/v1/audio/transcriptions",
+                post(move |headers: axum::http::HeaderMap, body: Bytes| {
+                    let captured = captured_header.clone();
+                    async move {
+                        *captured.lock().unwrap() = headers
+                            .get("content-type")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or_default()
+                            .to_owned();
+                        assert!(body.windows(4).any(|w| w == b"RIFF"));
+                        Json(json!({"text": "  你好小元  "}))
+                    }
+                }),
+            )
+            .route(
+                "/v1/audio/speech",
+                post(move || {
+                    let tts_wav = tts_wav.clone();
+                    async move { Bytes::from(tts_wav) }
+                }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let asr = OpenAiSpeechRecognizer::new(
+            format!("http://{address}/v1"),
+            "whisper-1".to_owned(),
+            "sk-test".to_owned(),
+            Duration::from_secs(2),
+        )
+        .expect("openai asr");
+        let result = asr
+            .recognize(&AsrRequest {
+                pcm_s16le: Arc::from(vec![0_u8; 640]),
+                cancellation: CancellationToken::new(),
+            })
+            .await
+            .expect("asr ok");
+        assert_eq!(result.transcript, "你好小元");
+        assert!(
+            received_header
+                .lock()
+                .unwrap()
+                .starts_with("multipart/form-data; boundary=")
+        );
+
+        let tts = OpenAiSpeechSynthesizer::new(
+            format!("http://{address}"),
+            "tts-1".to_owned(),
+            "alloy".to_owned(),
+            "sk-test".to_owned(),
+            Duration::from_secs(2),
+        )
+        .expect("openai tts");
+        let synthesized = tts
+            .synthesize("测试播报", CancellationToken::new())
+            .await
+            .expect("tts ok");
+        // 2400 samples @ 24kHz -> 1600 samples @ 16kHz -> 3200 bytes.
+        assert_eq!(synthesized.pcm_s16le.len(), 3200);
+
+        server.abort();
+        let _ = server.await;
+    }
+
+    fn wav_with_rate_and_samples(sample_rate: u32, samples: &[i16]) -> Vec<u8> {
+        let data_bytes = (samples.len() * 2) as u32;
+        let mut wav = Vec::with_capacity(44 + data_bytes as usize);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16_u32.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&sample_rate.to_le_bytes());
+        wav.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+        wav.extend_from_slice(&2_u16.to_le_bytes());
+        wav.extend_from_slice(&16_u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_bytes.to_le_bytes());
+        for sample in samples {
+            wav.extend_from_slice(&sample.to_le_bytes());
+        }
+        wav
     }
 }

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { DeviceGatewaySnapshot } from "@ez-assistant/protocol";
+import type { DeviceGatewaySnapshot, SpeechConfigurationSnapshot } from "@ez-assistant/protocol";
 import type { RuntimeClient } from "../../src/runtime-client/RuntimeClient";
 import { DeviceGatewayStore } from "../../src/stores/DeviceGatewayStore";
 
@@ -80,7 +80,89 @@ describe("DeviceGatewayStore", () => {
     expect(device_command).toHaveBeenCalledTimes(1);
     expect(store.stale).toBe(false);
   });
+
+  it("loads and updates Host speech configuration and projects updated gateway status", async () => {
+    const initialConfig = speechConfigSnapshot();
+    const updatedSnapshot: DeviceGatewaySnapshot = {
+      ...gatewaySnapshot(),
+      speech_services: { asr: "ready", tts: "ready" },
+    };
+    const updatedConfig: SpeechConfigurationSnapshot = {
+      ...initialConfig,
+      revision: "rev-2",
+      status: { asr: "ready", tts: "ready" },
+    };
+    const device_command = vi.fn(async (command: { type: string }) => {
+      if (command.type === "get_speech_configuration") {
+        return { type: "get_speech_configuration", payload: initialConfig };
+      }
+      return {
+        type: "update_speech_configuration",
+        payload: { configuration: updatedConfig, snapshot: updatedSnapshot },
+      };
+    });
+    const store = new DeviceGatewayStore({
+      get_client: () => ({ deviceGatewayCommand: device_command }) as unknown as RuntimeClient,
+      refresh_application: async () => undefined,
+    });
+
+    await store.loadSpeechConfiguration();
+    expect(store.speech_config).toEqual(initialConfig);
+
+    const saved = await store.updateSpeechConfiguration({
+      expected_revision: "rev-1",
+      asr: {
+        enabled: true,
+        provider: "openai",
+        endpoint: "https://api.openai.com/v1",
+        model: "gpt-4o-mini-transcribe",
+        timeout_ms: 15000,
+        credential: "sk-test",
+        clear_credential: false,
+      },
+      tts: {
+        enabled: true,
+        provider: "openai",
+        endpoint: "https://api.openai.com/v1",
+        model: "gpt-4o-mini-tts",
+        voice: "alloy",
+        timeout_ms: 15000,
+        credential: null,
+        clear_credential: false,
+      },
+    });
+    expect(saved).toBe(true);
+    expect(store.speech_config).toEqual(updatedConfig);
+    expect(store.snapshot?.speech_services).toEqual({ asr: "ready", tts: "ready" });
+    expect(store.notice_message).toContain("保存");
+  });
 });
+
+function speechConfigSnapshot(): SpeechConfigurationSnapshot {
+  return {
+    revision: "rev-1",
+    asr: {
+      enabled: true,
+      provider: "dashscope",
+      endpoint: "https://dashscope.aliyuncs.com",
+      model: "fun-asr-realtime",
+      timeout_ms: 30000,
+      credential_configured: true,
+      credential_masked: "sk-***1234",
+    },
+    tts: {
+      enabled: true,
+      provider: "dashscope",
+      endpoint: "https://dashscope.aliyuncs.com",
+      model: "cosyvoice-v3-flash",
+      voice: "longxiaochun",
+      timeout_ms: 30000,
+      credential_configured: true,
+      credential_masked: "sk-***1234",
+    },
+    status: { asr: "ready", tts: "ready" },
+  };
+}
 
 function gatewaySnapshot(): DeviceGatewaySnapshot {
   return {

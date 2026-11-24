@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, HashSet};
 
 use assistant_protocol::{
-    DeviceCapabilitiesSnapshot, InputId, OutputPreferenceSnapshot, RunId, RunStatus,
-    SubmitInputResult,
+    DeviceCapabilitiesSnapshot, DeviceSpeechServicesSnapshot, InputId, OutputPreferenceSnapshot,
+    RunId, RunStatus, SubmitInputResult,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -16,6 +16,11 @@ pub(super) const MAX_CONTROL_MESSAGE_BYTES: usize = 64 * 1024;
 pub(super) const PCM_HEADER_BYTES: usize = 16;
 pub(super) const PCM_PAYLOAD_BYTES: usize = 640;
 const PCM_FRAME_BYTES: usize = PCM_HEADER_BYTES + PCM_PAYLOAD_BYTES;
+pub(super) const PCM_FRAME_KIND_VOICE_UPLINK: u8 = 1;
+pub(super) const PCM_FRAME_KIND_RELAY_UPLINK: u8 = 3;
+pub(super) const PCM_FRAME_KIND_RELAY_DOWNLINK: u8 = 4;
+pub(super) const RELAY_UPLINK_MAX_PAYLOAD_BYTES: usize = 32 * 1024;
+pub(super) const RELAY_DOWNLINK_CHUNK_BYTES: usize = 16_000;
 const MAX_MESSAGE_ID_BYTES: usize = 128;
 const MAX_REPLAY_WINDOW: usize = 256;
 
@@ -151,7 +156,7 @@ pub(super) struct PairingDirectCommit {
 /// 设备声明的反向 MCP HTTP 传输协议。
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum DeviceMcpScheme {
+pub(crate) enum DeviceMcpScheme {
     #[default]
     Http,
     Https,
@@ -247,6 +252,27 @@ pub(super) struct AuthChallenge {
     pub(super) server_time_ms: i64,
 }
 
+fn default_console_api_prefix() -> String {
+    "/api/v1".to_owned()
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// 已配对设备声明的控制面板元信息（不含 Host，由连接对端 IP 绑定）。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct DeviceConsoleDeclaration {
+    #[serde(default)]
+    pub(super) scheme: DeviceMcpScheme,
+    pub(super) port: u16,
+    #[serde(default = "default_console_api_prefix")]
+    pub(super) api_prefix: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) ui_path: Option<String>,
+}
+
 /// 设备对认证挑战的签名响应及本连接能力声明。
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -259,6 +285,10 @@ pub(super) struct DeviceHello {
     pub(super) signature: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) mcp_servers: Vec<DeviceMcpServerDeclaration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) console: Option<DeviceConsoleDeclaration>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(super) speech_relay: bool,
 }
 
 /// Host 完成认证和有效能力裁剪后的连接确认。
@@ -269,6 +299,8 @@ pub(super) struct HelloAck {
     pub(super) connection_id: String,
     pub(super) capabilities: DeviceCapabilitiesSnapshot,
     pub(super) output_preference: OutputPreferenceSnapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) speech_services: Option<DeviceSpeechServicesSnapshot>,
 }
 
 /// 在线设备请求切换后续托管输出形态。
@@ -311,6 +343,92 @@ impl PcmFormat {
             && self.channels == 1
             && self.frame_duration_ms == 20
     }
+
+    pub(super) fn is_relay_pcm(&self) -> bool {
+        self.encoding == "pcm_s16le"
+            && self.sample_rate_hz == 16_000
+            && self.channels == 1
+            && (self.frame_duration_ms == 0 || self.frame_duration_ms == 20)
+    }
+}
+
+/// Host 通知已开启 `speech_relay` 的终端当前 ASR/TTS 可用状态变化。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SpeechStatusChanged {
+    pub(super) speech_services: DeviceSpeechServicesSnapshot,
+}
+
+/// 终端开始一次独立于 Agent 对话的语音识别中继请求。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SpeechAsrStart {
+    pub(super) request_id: String,
+    pub(super) stream_id: u32,
+    pub(super) format: PcmFormat,
+}
+
+/// 终端结束一次语音识别中继音频上传并等待识别结果。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SpeechAsrStop {
+    pub(super) request_id: String,
+    pub(super) stream_id: u32,
+    pub(super) last_sequence: u32,
+}
+
+/// 终端取消一次尚未完成的语音识别中继请求。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SpeechAsrCancel {
+    pub(super) request_id: String,
+}
+
+/// Host 返回给终端的语音识别中继结果或失败错误码。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SpeechAsrResult {
+    pub(super) request_id: String,
+    pub(super) ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) error: Option<String>,
+}
+
+/// 终端请求 Host 使用本机 TTS 服务合成短文本 PCM16/16k/mono。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SpeechTtsRequest {
+    pub(super) request_id: String,
+    pub(super) stream_id: u32,
+    pub(super) text: String,
+}
+
+/// Host 通知终端准备接收语音合成中继下行 PCM 分片或返回前置拒绝错误。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SpeechTtsStart {
+    pub(super) request_id: String,
+    pub(super) stream_id: u32,
+    pub(super) ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) format: Option<PcmFormat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) total_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) error: Option<String>,
+}
+
+/// Host 通知终端一次语音合成中继流传输完成或中止。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SpeechTtsEnd {
+    pub(super) request_id: String,
+    pub(super) stream_id: u32,
+    pub(super) ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) error: Option<String>,
 }
 
 /// 开始一段按键说话音频流，并冻结该轮输出偏好。
@@ -427,6 +545,73 @@ impl DownlinkPcmFrame {
         frame[8..12].copy_from_slice(&sequence.to_be_bytes());
         frame[12..14].copy_from_slice(&(PCM_PAYLOAD_BYTES as u16).to_be_bytes());
         frame[PCM_HEADER_BYTES..PCM_HEADER_BYTES + payload.len()].copy_from_slice(payload);
+        Ok(frame)
+    }
+}
+
+/// 从设备上行语音中继二进制消息借用出的变长 PCM 帧视图（kind = 3）。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct RelayUplinkPcmFrame<'a> {
+    pub(super) stream_id: u32,
+    pub(super) sequence: u32,
+    pub(super) payload: &'a [u8],
+}
+
+impl<'a> RelayUplinkPcmFrame<'a> {
+    pub(super) fn decode(frame: &'a [u8]) -> Result<Self, ProtocolError> {
+        if frame.len() <= PCM_HEADER_BYTES {
+            return Err(ProtocolError::InvalidPcmFrame);
+        }
+        if frame[0] != 1
+            || frame[1] != PCM_FRAME_KIND_RELAY_UPLINK
+            || u16::from_be_bytes([frame[2], frame[3]]) != 0
+            || u16::from_be_bytes([frame[14], frame[15]]) != 0
+        {
+            return Err(ProtocolError::InvalidPcmFrame);
+        }
+        let payload_len = usize::from(u16::from_be_bytes([frame[12], frame[13]]));
+        if payload_len == 0
+            || payload_len > RELAY_UPLINK_MAX_PAYLOAD_BYTES
+            || !payload_len.is_multiple_of(2)
+            || frame.len() != PCM_HEADER_BYTES + payload_len
+        {
+            return Err(ProtocolError::InvalidPcmFrame);
+        }
+        let stream_id = u32::from_be_bytes([frame[4], frame[5], frame[6], frame[7]]);
+        if stream_id == 0 {
+            return Err(ProtocolError::InvalidPcmFrame);
+        }
+        Ok(Self {
+            stream_id,
+            sequence: u32::from_be_bytes([frame[8], frame[9], frame[10], frame[11]]),
+            payload: &frame[PCM_HEADER_BYTES..],
+        })
+    }
+}
+
+/// Host 下行语音中继变长 PCM 帧编码器（kind = 4）。
+pub(super) struct RelayDownlinkPcmFrame;
+
+impl RelayDownlinkPcmFrame {
+    pub(super) fn encode(
+        stream_id: u32,
+        sequence: u32,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, ProtocolError> {
+        if stream_id == 0
+            || payload.is_empty()
+            || payload.len() > RELAY_UPLINK_MAX_PAYLOAD_BYTES
+            || !payload.len().is_multiple_of(2)
+        {
+            return Err(ProtocolError::InvalidPcmFrame);
+        }
+        let mut frame = vec![0_u8; PCM_HEADER_BYTES + payload.len()];
+        frame[0] = 1;
+        frame[1] = PCM_FRAME_KIND_RELAY_DOWNLINK;
+        frame[4..8].copy_from_slice(&stream_id.to_be_bytes());
+        frame[8..12].copy_from_slice(&sequence.to_be_bytes());
+        frame[12..14].copy_from_slice(&(payload.len() as u16).to_be_bytes());
+        frame[PCM_HEADER_BYTES..].copy_from_slice(payload);
         Ok(frame)
     }
 }

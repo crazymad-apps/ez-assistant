@@ -155,6 +155,11 @@ export type ArchiveSessionRequest = { session_id: SessionId, };
 export type ArchiveSessionResult = { session: SessionSummary, };
 
 /**
+ * Host ASR 配置的安全读取投影（凭据仅返回是否已配置与脱敏掩码）。
+ */
+export type AsrConfigurationSnapshot = { enabled: boolean, provider: SpeechProviderKind, endpoint: string, model: string, timeout_ms: number, credential_configured: boolean, credential_masked?: string, };
+
+/**
  * 可靠提交的助手消息。
  */
 export type AssistantMessageSnapshot = {
@@ -715,19 +720,26 @@ export type DeviceCapabilitiesSnapshot = { input_text: boolean, input_pcm16_16k_
  *
  * 设备离线时整个字段从设备摘要中消失，不把离线写回持久设备记录。
  */
-export type DeviceConnectionSnapshot = { connected_at_ms: number, capabilities: DeviceCapabilitiesSnapshot, output_preference: OutputPreferenceSnapshot, peer_address?: string, client_version?: string, mcp_server_keys?: Array<McpServerKey>, };
+export type DeviceConnectionSnapshot = { connected_at_ms: number, capabilities: DeviceCapabilitiesSnapshot, output_preference: OutputPreferenceSnapshot, peer_address?: string, client_version?: string, mcp_server_keys?: Array<McpServerKey>, console?: DeviceConsoleSnapshot, speech_relay?: boolean, };
+
+/**
+ * 在线设备在连接握手时声明的 Web/HTTP 控制台安全元数据。
+ *
+ * 主机名严格由 Host 根据当前连接的真实对端 IP 绑定，`direct_url` 仅在声明 `ui_path` 时生成。
+ */
+export type DeviceConsoleSnapshot = { api_prefix: string, ui_path?: string, direct_url?: string, };
 
 /**
  * Desktop 发往 Host 的 Device Gateway 管理命令集合。
  *
  * 这些是 Host 级交互意图，不属于 Runtime Session 命令。
  */
-export type DeviceGatewayCommand = { "type": "get_snapshot", "payload": GetDeviceGatewaySnapshotRequest } | { "type": "set_access_enabled", "payload": SetDeviceAccessEnabledRequest } | { "type": "open_pairing_window", "payload": OpenDevicePairingWindowRequest } | { "type": "close_pairing_window", "payload": CloseDevicePairingWindowRequest } | { "type": "confirm_pairing", "payload": ConfirmDevicePairingRequest } | { "type": "reject_pairing", "payload": RejectDevicePairingRequest } | { "type": "rename_device", "payload": RenameDeviceRequest } | { "type": "revoke_device", "payload": RevokeDeviceRequest };
+export type DeviceGatewayCommand = { "type": "get_snapshot", "payload": GetDeviceGatewaySnapshotRequest } | { "type": "set_access_enabled", "payload": SetDeviceAccessEnabledRequest } | { "type": "open_pairing_window", "payload": OpenDevicePairingWindowRequest } | { "type": "close_pairing_window", "payload": CloseDevicePairingWindowRequest } | { "type": "confirm_pairing", "payload": ConfirmDevicePairingRequest } | { "type": "reject_pairing", "payload": RejectDevicePairingRequest } | { "type": "rename_device", "payload": RenameDeviceRequest } | { "type": "revoke_device", "payload": RevokeDeviceRequest } | { "type": "get_speech_configuration", "payload": GetSpeechConfigurationRequest } | { "type": "update_speech_configuration", "payload": UpdateSpeechConfigurationRequest };
 
 /**
  * 与 [`DeviceGatewayCommand`] 一一对应的 Host 命令结果。
  */
-export type DeviceGatewayCommandResult = { "type": "get_snapshot", "payload": DeviceGatewaySnapshot } | { "type": "set_access_enabled", "payload": DeviceGatewayMutationResult } | { "type": "open_pairing_window", "payload": DeviceGatewayMutationResult } | { "type": "close_pairing_window", "payload": DeviceGatewayMutationResult } | { "type": "confirm_pairing", "payload": DeviceGatewayMutationResult } | { "type": "reject_pairing", "payload": DeviceGatewayMutationResult } | { "type": "rename_device", "payload": DeviceGatewayMutationResult } | { "type": "revoke_device", "payload": DeviceGatewayMutationResult };
+export type DeviceGatewayCommandResult = { "type": "get_snapshot", "payload": DeviceGatewaySnapshot } | { "type": "set_access_enabled", "payload": DeviceGatewayMutationResult } | { "type": "open_pairing_window", "payload": DeviceGatewayMutationResult } | { "type": "close_pairing_window", "payload": DeviceGatewayMutationResult } | { "type": "confirm_pairing", "payload": DeviceGatewayMutationResult } | { "type": "reject_pairing", "payload": DeviceGatewayMutationResult } | { "type": "rename_device", "payload": DeviceGatewayMutationResult } | { "type": "revoke_device", "payload": DeviceGatewayMutationResult } | { "type": "get_speech_configuration", "payload": SpeechConfigurationSnapshot } | { "type": "update_speech_configuration", "payload": UpdateSpeechConfigurationResult };
 
 /**
  * Host Device Gateway 的可丢弃失效通知；完整状态始终重新读取 Gateway 快照。
@@ -1006,6 +1018,11 @@ export type GetSessionViewResult = { snapshot: ObservedSnapshot<SessionViewSnaps
 export type GetSkillDetailRequest = { workspace_id?: WorkspaceId, name: string, };
 
 export type GetSkillDetailResult = { detail?: SkillDetailSnapshot, };
+
+/**
+ * 读取当前 Host 语音配置（ASR / TTS）的请求。
+ */
+export type GetSpeechConfigurationRequest = Record<symbol, never>;
 
 export type GetSubmittedFeedbackRequest = { id: string, };
 
@@ -3155,6 +3172,16 @@ export type SkillSourceSnapshot = "workspace_ez_assistant" | "workspace_agents" 
 export type SkillSummarySnapshot = { name: string, plugin_name?: string, description: string, source: SkillSourceSnapshot, model_invocable: boolean, user_invocable: boolean, enabled: boolean, health: SkillHealthSnapshot, };
 
 /**
+ * Host 语音配置与当前服务健康快照。
+ */
+export type SpeechConfigurationSnapshot = { revision?: string, asr: AsrConfigurationSnapshot, tts: TtsConfigurationSnapshot, status: DeviceSpeechServicesSnapshot, };
+
+/**
+ * Host 语音服务支持的 Provider 类型。
+ */
+export type SpeechProviderKind = "dashscope" | "openai";
+
+/**
  * 单项 Host 语音能力的运行状态。
  */
 export type SpeechServiceStatusSnapshot = "ready" | "degraded" | "unavailable";
@@ -3407,6 +3434,11 @@ export type ToolInputSnapshot = { "type": "general", summary: string, } | { "typ
  */
 export type ToolOutputChannel = "stdout" | "stderr";
 
+/**
+ * Host TTS 配置的安全读取投影（凭据仅返回是否已配置与脱敏掩码）。
+ */
+export type TtsConfigurationSnapshot = { enabled: boolean, provider: SpeechProviderKind, endpoint: string, model: string, voice: string, timeout_ms: number, credential_configured: boolean, credential_masked?: string, };
+
 export type UiAppScope = { "type": "draft" } | { "type": "session", session_id: SessionId, };
 
 export type UiAppSummary = { target: UiAppTarget, entry: PluginUiEntry, };
@@ -3438,6 +3470,11 @@ export type UnavailableOrganizationModel = { selection: ModelSelection, reason: 
 
 export type UninstallPluginRequest = { key: IdempotencyKey, name: string, expected_active_sha256: string, clear_data: boolean, };
 
+/**
+ * 更新 Host ASR 配置的请求参数；凭据留空且 `clear_credential = false` 时保留既有凭据。
+ */
+export type UpdateAsrConfigurationInput = { enabled: boolean, provider: SpeechProviderKind, endpoint: string, model: string, timeout_ms: number, credential?: string | null, clear_credential: boolean, };
+
 export type UpdatePinnedMemoryRequest = { id: string, expected_revision: number, category: string, content: string, attributes: { [key in string]: MemoryAttributeValue }, };
 
 export type UpdateProviderRequest = { source: ModelSelectionSource, provider_instance_id: ProviderInstanceId, connection: ProviderConnection, credential: ProviderCredentialChange, };
@@ -3447,6 +3484,21 @@ export type UpdateScheduleRequest = { schedule_id: ScheduleId, settings: Schedul
  * 编辑器可提交打开编辑时的定义，避免覆盖随后保存的修改。
  */
 expected_settings?: ScheduleSettings, };
+
+/**
+ * 保存 Host 语音配置并立即热重载 `SpeechService` 的请求。
+ */
+export type UpdateSpeechConfigurationRequest = { expected_revision?: string, asr: UpdateAsrConfigurationInput, tts: UpdateTtsConfigurationInput, };
+
+/**
+ * 更新语音配置后返回的最新脱敏配置与 Gateway 状态快照。
+ */
+export type UpdateSpeechConfigurationResult = { configuration: SpeechConfigurationSnapshot, snapshot: DeviceGatewaySnapshot, };
+
+/**
+ * 更新 Host TTS 配置的请求参数；凭据留空且 `clear_credential = false` 时保留既有凭据。
+ */
+export type UpdateTtsConfigurationInput = { enabled: boolean, provider: SpeechProviderKind, endpoint: string, model: string, voice: string, timeout_ms: number, credential?: string | null, clear_credential: boolean, };
 
 /**
  * 用完整表单更新 Workspace 当前元数据；既有 Session 的冻结环境保持不变。

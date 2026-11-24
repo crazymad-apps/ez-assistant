@@ -1,7 +1,7 @@
 //! 单条 WSS 连接的配对或已登记设备认证状态机。
 
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     future::Future,
     net::IpAddr,
     sync::Arc,
@@ -29,6 +29,7 @@ use tokio::{
     sync::mpsc,
     time::{Instant as TokioInstant, MissedTickBehavior, interval, timeout},
 };
+use tokio_util::sync::CancellationToken;
 
 use super::{
     crypto::{
@@ -43,10 +44,13 @@ use super::{
     protocol::{
         ApplicationPing, AuthChallenge, DeviceHello, DownlinkPcmFrame, Envelope, HelloAck,
         InputAccepted, InputSegmentAccepted, InteractionStateChanged, ListenCancel, ListenStart,
-        ListenStop, MessageReplayWindow, OutputPreferenceChanged, PairingBind, PairingBindAck,
-        PairingCommit, PairingComplete, PairingConfirmation, PairingDirectChallenge,
-        PairingDirectCommit, PairingHello, PairingPake, PairingPending, PcmFormat, PlaybackCancel,
-        PlaybackEnd, PlaybackStart, ProtocolError, SetOutputPreference, TextInput, Transcript,
+        ListenStop, MessageReplayWindow, OutputPreferenceChanged, PCM_FRAME_KIND_RELAY_UPLINK,
+        PCM_FRAME_KIND_VOICE_UPLINK, PairingBind, PairingBindAck, PairingCommit, PairingComplete,
+        PairingConfirmation, PairingDirectChallenge, PairingDirectCommit, PairingHello,
+        PairingPake, PairingPending, PcmFormat, PlaybackCancel, PlaybackEnd, PlaybackStart,
+        ProtocolError, RELAY_DOWNLINK_CHUNK_BYTES, RelayDownlinkPcmFrame, RelayUplinkPcmFrame,
+        SetOutputPreference, SpeechAsrCancel, SpeechAsrResult, SpeechAsrStart, SpeechAsrStop,
+        SpeechStatusChanged, SpeechTtsEnd, SpeechTtsRequest, SpeechTtsStart, TextInput, Transcript,
         UplinkPcmFrame, WireError, WirePairingMode, preference_is_supported,
     },
 };
@@ -60,6 +64,10 @@ const PLAYBACK_FRAME_INTERVAL: Duration = Duration::from_millis(20);
 const VOICE_TURN_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const PLAYBACK_SEND_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_QUEUED_PLAYBACKS: usize = 20;
+const MAX_RELAY_REQUEST_ID_BYTES: usize = 128;
+const MAX_RELAY_IN_FLIGHT_ASR: usize = 4;
+const MAX_RELAY_IN_FLIGHT_TTS: usize = 4;
+const MAX_RELAY_TTS_TEXT_CHARS: usize = 120;
 const PAIRING_DECISION_QUEUE_CAPACITY: usize = 1;
 const MAX_DEVICE_NAME_BYTES: usize = 128;
 const MAX_CLIENT_VERSION_BYTES: usize = 128;
@@ -578,6 +586,9 @@ async fn authenticate_device(
         send_wire_error(&mut socket, "unsupported_output_preference", None, true).await?;
         return close(&mut socket, 1008, "unsupported output preference").await;
     }
+    let console_target =
+        super::console::build_device_console_target(Some(peer_ip), hello.console.as_ref());
+    let speech_relay = hello.speech_relay;
     send_payload(
         &mut socket,
         "hello_ack",
@@ -586,6 +597,7 @@ async fn authenticate_device(
             connection_id: connection_id.clone(),
             capabilities,
             output_preference: hello.output_preference,
+            speech_services: speech_relay.then(|| shared.speech.status()),
         },
     )
     .await?;
@@ -609,6 +621,8 @@ async fn authenticate_device(
             Some(peer_ip.to_string()),
             Some(hello.client_version.clone()),
             mcp_server_keys,
+            console_target,
+            speech_relay,
         )
         .await;
     shared.mcp_tasks.spawn({
@@ -633,9 +647,12 @@ async fn authenticate_device(
     let result = authenticated_loop(
         &mut socket,
         &shared,
-        &device_id,
-        &connection_id,
-        capabilities,
+        AuthenticatedLoopConfig {
+            device_id: &device_id,
+            connection_id: &connection_id,
+            capabilities,
+            speech_relay,
+        },
         &mut replay,
         &mut signals,
     )
@@ -653,15 +670,26 @@ async fn authenticate_device(
     result
 }
 
+struct AuthenticatedLoopConfig<'a> {
+    device_id: &'a DeviceId,
+    connection_id: &'a str,
+    capabilities: DeviceCapabilitiesSnapshot,
+    speech_relay: bool,
+}
+
 async fn authenticated_loop(
     socket: &mut WebSocket,
-    shared: &GatewayShared,
-    device_id: &DeviceId,
-    connection_id: &str,
-    capabilities: DeviceCapabilitiesSnapshot,
+    shared: &Arc<GatewayShared>,
+    config: AuthenticatedLoopConfig<'_>,
     replay: &mut MessageReplayWindow,
     commands: &mut mpsc::Receiver<ConnectionCommand>,
 ) -> Result<(), ConnectionError> {
+    let AuthenticatedLoopConfig {
+        device_id,
+        connection_id,
+        capabilities,
+        speech_relay,
+    } = config;
     let mut heartbeat = interval(HEARTBEAT_INTERVAL);
     heartbeat.tick().await;
     let mut playback_clock = interval(PLAYBACK_FRAME_INTERVAL);
@@ -688,6 +716,7 @@ async fn authenticated_loop(
     }
     let mut playback = VecDeque::<ActivePlayback>::new();
     let mut client_inputs = ClientInputWindow::default();
+    let mut relay = RelayState::new();
     loop {
         tokio::select! {
             _ = voice_turn_clock.tick() => {
@@ -739,6 +768,29 @@ async fn authenticated_loop(
                     }
                     ConnectionCommand::StartPlayback { output, response } => {
                         acknowledge_playback_output(&mut playback, output, response);
+                    }
+                    ConnectionCommand::SpeechStatusChanged(speech_services) => {
+                        if speech_relay {
+                            send_payload(
+                                socket,
+                                "speech_status_changed",
+                                &SpeechStatusChanged { speech_services },
+                            )
+                            .await?;
+                        }
+                    }
+                    ConnectionCommand::SpeechAsrResult(result) => {
+                        if relay.in_flight_asr.remove(&result.request_id).is_some() {
+                            send_payload(socket, "speech_asr_result", &result).await?;
+                        }
+                    }
+                    ConnectionCommand::SpeechTtsResult {
+                        request_id,
+                        stream_id,
+                        result,
+                    } => {
+                        deliver_relay_tts_result(socket, &mut relay, request_id, stream_id, result)
+                            .await?;
                     }
                 }
                 synchronize_playback(socket, &mut playback).await?;
@@ -1021,6 +1073,47 @@ async fn authenticated_loop(
                                     send_wire_error(socket, "playback_not_active", Some(envelope.message_id), true).await?;
                                 }
                             }
+                            "speech_asr_start" if speech_relay => {
+                                let request = envelope.payload::<SpeechAsrStart>()?;
+                                handle_relay_asr_start(
+                                    socket,
+                                    shared,
+                                    &mut relay,
+                                    envelope.message_id,
+                                    request,
+                                ).await?;
+                            }
+                            "speech_asr_stop" if speech_relay => {
+                                let request = envelope.payload::<SpeechAsrStop>()?;
+                                handle_relay_asr_stop(
+                                    socket,
+                                    shared,
+                                    device_id,
+                                    connection_id,
+                                    &mut relay,
+                                    request,
+                                ).await?;
+                            }
+                            "speech_asr_cancel" if speech_relay => {
+                                let request = envelope.payload::<SpeechAsrCancel>()?;
+                                handle_relay_asr_cancel(
+                                    socket,
+                                    &mut relay,
+                                    envelope.message_id,
+                                    request,
+                                ).await?;
+                            }
+                            "speech_tts_request" if speech_relay => {
+                                let request = envelope.payload::<SpeechTtsRequest>()?;
+                                handle_relay_tts_request(
+                                    socket,
+                                    shared,
+                                    device_id,
+                                    connection_id,
+                                    &mut relay,
+                                    request,
+                                ).await?;
+                            }
                             _ => {
                                 send_wire_error(
                                     socket,
@@ -1039,30 +1132,395 @@ async fn authenticated_loop(
                     Message::Close(_) => return Err(ConnectionError::Closed),
                     Message::Binary(bytes) => {
                         last_received = Instant::now();
-                        let frame = match UplinkPcmFrame::decode(&bytes) {
-                            Ok(frame) => frame,
-                            Err(_) => {
+                        match bytes.get(1).copied() {
+                            Some(PCM_FRAME_KIND_VOICE_UPLINK) => {
+                                let frame = match UplinkPcmFrame::decode(&bytes) {
+                                    Ok(frame) => frame,
+                                    Err(_) => {
+                                        send_wire_error(socket, "invalid_pcm_frame", None, false).await?;
+                                        return close(socket, 1008, "invalid PCM frame").await;
+                                    }
+                                };
+                                let Some(utterance) = receiving.as_mut() else {
+                                    send_wire_error(socket, "pcm_without_active_stream", None, true).await?;
+                                    continue;
+                                };
+                                if let Err(error) = utterance.push(frame) {
+                                    let code = match error {
+                                        UplinkError::WrongStream => "pcm_stream_mismatch",
+                                        UplinkError::Sequence => "invalid_pcm_sequence",
+                                        UplinkError::TooLarge => "audio_input_too_large",
+                                    };
+                                    send_wire_error(socket, code, None, false).await?;
+                                    return close(socket, 1008, "invalid PCM stream").await;
+                                }
+                            }
+                            Some(PCM_FRAME_KIND_RELAY_UPLINK) if speech_relay => {
+                                let frame = match RelayUplinkPcmFrame::decode(&bytes) {
+                                    Ok(frame) => frame,
+                                    Err(_) => {
+                                        send_wire_error(socket, "invalid_pcm_frame", None, false).await?;
+                                        return close(socket, 1008, "invalid relay PCM frame").await;
+                                    }
+                                };
+                                push_relay_asr_frame(socket, &mut relay, frame).await?;
+                            }
+                            _ => {
                                 send_wire_error(socket, "invalid_pcm_frame", None, false).await?;
                                 return close(socket, 1008, "invalid PCM frame").await;
                             }
-                        };
-                        let Some(utterance) = receiving.as_mut() else {
-                            send_wire_error(socket, "pcm_without_active_stream", None, true).await?;
-                            continue;
-                        };
-                        if let Err(error) = utterance.push(frame) {
-                            let code = match error {
-                                UplinkError::WrongStream => "pcm_stream_mismatch",
-                                UplinkError::Sequence => "invalid_pcm_sequence",
-                                UplinkError::TooLarge => "audio_input_too_large",
-                            };
-                            send_wire_error(socket, code, None, false).await?;
-                            return close(socket, 1008, "invalid PCM stream").await;
                         }
                     }
                 }
             }
         }
+    }
+}
+
+struct RelayConnectionGuard(CancellationToken);
+
+impl Drop for RelayConnectionGuard {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+struct RelayAsrUpload {
+    request_id: String,
+    stream_id: u32,
+    next_sequence: u32,
+    pcm: Vec<u8>,
+}
+
+struct RelayState {
+    active_asr: Option<RelayAsrUpload>,
+    in_flight_asr: HashMap<String, CancellationToken>,
+    in_flight_tts: HashSet<String>,
+    connection_cancel: CancellationToken,
+    _guard: RelayConnectionGuard,
+}
+
+impl RelayState {
+    fn new() -> Self {
+        let connection_cancel = CancellationToken::new();
+        Self {
+            active_asr: None,
+            in_flight_asr: HashMap::new(),
+            in_flight_tts: HashSet::new(),
+            connection_cancel: connection_cancel.clone(),
+            _guard: RelayConnectionGuard(connection_cancel),
+        }
+    }
+}
+
+async fn send_speech_asr_error(
+    socket: &mut WebSocket,
+    request_id: String,
+    code: &str,
+) -> Result<(), ConnectionError> {
+    send_payload(
+        socket,
+        "speech_asr_result",
+        &SpeechAsrResult {
+            request_id,
+            ok: false,
+            text: None,
+            error: Some(code.to_owned()),
+        },
+    )
+    .await
+}
+
+async fn send_speech_tts_error(
+    socket: &mut WebSocket,
+    request_id: String,
+    stream_id: u32,
+    code: &str,
+) -> Result<(), ConnectionError> {
+    send_payload(
+        socket,
+        "speech_tts_start",
+        &SpeechTtsStart {
+            request_id,
+            stream_id,
+            ok: false,
+            format: None,
+            total_bytes: None,
+            error: Some(code.to_owned()),
+        },
+    )
+    .await
+}
+
+async fn handle_relay_asr_start(
+    socket: &mut WebSocket,
+    shared: &GatewayShared,
+    relay: &mut RelayState,
+    message_id: String,
+    request: SpeechAsrStart,
+) -> Result<(), ConnectionError> {
+    if request.request_id.trim().is_empty()
+        || request.request_id.len() > MAX_RELAY_REQUEST_ID_BYTES
+        || request.stream_id == 0
+        || !request.format.is_relay_pcm()
+    {
+        return send_wire_error(socket, "invalid_speech_asr_request", Some(message_id), true).await;
+    }
+    if !shared.speech.asr_available() {
+        return send_speech_asr_error(socket, request.request_id, "asr_unavailable").await;
+    }
+    if relay.active_asr.is_some() || relay.in_flight_asr.contains_key(&request.request_id) {
+        return send_speech_asr_error(socket, request.request_id, "audio_input_busy").await;
+    }
+    if relay.in_flight_asr.len() >= MAX_RELAY_IN_FLIGHT_ASR {
+        return send_speech_asr_error(socket, request.request_id, "busy").await;
+    }
+    relay.active_asr = Some(RelayAsrUpload {
+        request_id: request.request_id,
+        stream_id: request.stream_id,
+        next_sequence: 0,
+        pcm: Vec::new(),
+    });
+    Ok(())
+}
+
+async fn push_relay_asr_frame(
+    socket: &mut WebSocket,
+    relay: &mut RelayState,
+    frame: RelayUplinkPcmFrame<'_>,
+) -> Result<(), ConnectionError> {
+    let Some(upload) = relay.active_asr.as_mut() else {
+        return send_wire_error(socket, "pcm_without_active_stream", None, true).await;
+    };
+    if upload.stream_id != frame.stream_id {
+        let request_id = upload.request_id.clone();
+        relay.active_asr = None;
+        return send_speech_asr_error(socket, request_id, "pcm_stream_mismatch").await;
+    }
+    if upload.next_sequence != frame.sequence {
+        let request_id = upload.request_id.clone();
+        relay.active_asr = None;
+        return send_speech_asr_error(socket, request_id, "invalid_pcm_sequence").await;
+    }
+    if upload.pcm.len().saturating_add(frame.payload.len()) > MAX_UPLINK_PCM_BYTES {
+        let request_id = upload.request_id.clone();
+        relay.active_asr = None;
+        return send_speech_asr_error(socket, request_id, "audio_input_too_large").await;
+    }
+    upload.next_sequence = upload.next_sequence.saturating_add(1);
+    upload.pcm.extend_from_slice(frame.payload);
+    Ok(())
+}
+
+async fn handle_relay_asr_stop(
+    socket: &mut WebSocket,
+    shared: &Arc<GatewayShared>,
+    device_id: &DeviceId,
+    connection_id: &str,
+    relay: &mut RelayState,
+    request: SpeechAsrStop,
+) -> Result<(), ConnectionError> {
+    let Some(active) = relay.active_asr.as_ref() else {
+        return send_speech_asr_error(socket, request.request_id, "audio_stream_not_active").await;
+    };
+    if active.request_id != request.request_id || active.stream_id != request.stream_id {
+        return send_speech_asr_error(socket, request.request_id, "audio_stream_not_active").await;
+    }
+    let Some(upload) = relay.active_asr.take() else {
+        return Ok(());
+    };
+    if upload.pcm.is_empty() || upload.next_sequence != request.last_sequence.saturating_add(1) {
+        return send_speech_asr_error(socket, upload.request_id, "invalid_speech_asr_stop").await;
+    }
+    if relay.in_flight_asr.len() >= MAX_RELAY_IN_FLIGHT_ASR {
+        return send_speech_asr_error(socket, upload.request_id, "busy").await;
+    }
+    let cancel = relay.connection_cancel.child_token();
+    relay
+        .in_flight_asr
+        .insert(upload.request_id.clone(), cancel.clone());
+    shared.recognition_tasks.spawn({
+        let shared = shared.clone();
+        let device_id = device_id.clone();
+        let connection_id = connection_id.to_owned();
+        let request_id = upload.request_id;
+        let pcm = upload.pcm;
+        async move {
+            let debug_name = format!("relay-{device_id}-{request_id}");
+            let result = tokio::spawn({
+                let speech = shared.speech.clone();
+                async move { speech.recognize(pcm, debug_name, cancel).await }
+            })
+            .await;
+            let payload = match result {
+                Ok(Ok(text)) => SpeechAsrResult {
+                    request_id,
+                    ok: true,
+                    text: Some(text),
+                    error: None,
+                },
+                Ok(Err(error)) => SpeechAsrResult {
+                    request_id,
+                    ok: false,
+                    text: None,
+                    error: Some(error.code().to_owned()),
+                },
+                Err(_) => SpeechAsrResult {
+                    request_id,
+                    ok: false,
+                    text: None,
+                    error: Some("provider_failed".to_owned()),
+                },
+            };
+            shared
+                .send_connection_command(
+                    &device_id,
+                    &connection_id,
+                    ConnectionCommand::SpeechAsrResult(payload),
+                )
+                .await;
+        }
+    });
+    Ok(())
+}
+
+async fn handle_relay_asr_cancel(
+    socket: &mut WebSocket,
+    relay: &mut RelayState,
+    message_id: String,
+    request: SpeechAsrCancel,
+) -> Result<(), ConnectionError> {
+    if relay
+        .active_asr
+        .as_ref()
+        .is_some_and(|active| active.request_id == request.request_id)
+    {
+        relay.active_asr = None;
+        return send_speech_asr_error(socket, request.request_id, "cancelled").await;
+    }
+    if let Some(cancel) = relay.in_flight_asr.remove(&request.request_id) {
+        cancel.cancel();
+        return send_speech_asr_error(socket, request.request_id, "cancelled").await;
+    }
+    send_wire_error(socket, "audio_stream_not_active", Some(message_id), true).await
+}
+
+async fn handle_relay_tts_request(
+    socket: &mut WebSocket,
+    shared: &Arc<GatewayShared>,
+    device_id: &DeviceId,
+    connection_id: &str,
+    relay: &mut RelayState,
+    request: SpeechTtsRequest,
+) -> Result<(), ConnectionError> {
+    if request.request_id.trim().is_empty()
+        || request.request_id.len() > MAX_RELAY_REQUEST_ID_BYTES
+        || request.stream_id == 0
+        || request.text.trim().is_empty()
+        || request.text.chars().count() > MAX_RELAY_TTS_TEXT_CHARS
+    {
+        return send_speech_tts_error(
+            socket,
+            request.request_id,
+            request.stream_id,
+            "invalid_input",
+        )
+        .await;
+    }
+    if !shared.speech.tts_available() {
+        return send_speech_tts_error(
+            socket,
+            request.request_id,
+            request.stream_id,
+            "tts_unavailable",
+        )
+        .await;
+    }
+    if relay.in_flight_tts.len() >= MAX_RELAY_IN_FLIGHT_TTS
+        || !relay.in_flight_tts.insert(request.request_id.clone())
+    {
+        return send_speech_tts_error(socket, request.request_id, request.stream_id, "busy").await;
+    }
+    let cancel = relay.connection_cancel.child_token();
+    shared.recognition_tasks.spawn({
+        let shared = shared.clone();
+        let device_id = device_id.clone();
+        let connection_id = connection_id.to_owned();
+        let request_id = request.request_id;
+        let stream_id = request.stream_id;
+        let text = request.text;
+        async move {
+            let debug_name = format!("relay-tts-{device_id}-{request_id}");
+            let result = tokio::spawn({
+                let speech = shared.speech.clone();
+                async move { speech.synthesize(text, debug_name, cancel).await }
+            })
+            .await
+            .unwrap_or(Err(SpeechServiceError::ProviderFailed));
+            shared
+                .send_connection_command(
+                    &device_id,
+                    &connection_id,
+                    ConnectionCommand::SpeechTtsResult {
+                        request_id,
+                        stream_id,
+                        result,
+                    },
+                )
+                .await;
+        }
+    });
+    Ok(())
+}
+
+async fn deliver_relay_tts_result(
+    socket: &mut WebSocket,
+    relay: &mut RelayState,
+    request_id: String,
+    stream_id: u32,
+    result: Result<Arc<[u8]>, SpeechServiceError>,
+) -> Result<(), ConnectionError> {
+    if !relay.in_flight_tts.remove(&request_id) {
+        return Ok(());
+    }
+    match result {
+        Ok(pcm) if !pcm.is_empty() => {
+            send_payload(
+                socket,
+                "speech_tts_start",
+                &SpeechTtsStart {
+                    request_id: request_id.clone(),
+                    stream_id,
+                    ok: true,
+                    format: Some(PcmFormat {
+                        encoding: "pcm_s16le".to_owned(),
+                        sample_rate_hz: 16_000,
+                        channels: 1,
+                        frame_duration_ms: 0,
+                    }),
+                    total_bytes: Some(pcm.len() as u64),
+                    error: None,
+                },
+            )
+            .await?;
+            for (sequence, chunk) in pcm.chunks(RELAY_DOWNLINK_CHUNK_BYTES).enumerate() {
+                let frame = RelayDownlinkPcmFrame::encode(stream_id, sequence as u32, chunk)?;
+                socket.send(Message::Binary(frame.into())).await?;
+            }
+            send_payload(
+                socket,
+                "speech_tts_end",
+                &SpeechTtsEnd {
+                    request_id,
+                    stream_id,
+                    ok: true,
+                    error: None,
+                },
+            )
+            .await
+        }
+        Ok(_) => send_speech_tts_error(socket, request_id, stream_id, "invalid_audio").await,
+        Err(error) => send_speech_tts_error(socket, request_id, stream_id, error.code()).await,
     }
 }
 
@@ -2617,9 +3075,11 @@ mod tests {
 
         use assistant_protocol::{
             ConfirmDevicePairingRequest, DeviceId, DeviceLifecycleSnapshot,
-            DevicePairingModeSnapshot, GetMcpConfigurationRequest, McpServerRuntimeState,
-            McpServerSource, McpTransportKind, RejectDevicePairingRequest, SecretValue,
-            ShutdownRuntimeRequest,
+            DevicePairingModeSnapshot, DeviceSpeechServicesSnapshot, GetMcpConfigurationRequest,
+            McpServerRuntimeState, McpServerSource, McpTransportKind, RejectDevicePairingRequest,
+            SecretValue, ShutdownRuntimeRequest, SpeechProviderKind, SpeechServiceStatusSnapshot,
+            UpdateAsrConfigurationInput, UpdateSpeechConfigurationRequest,
+            UpdateTtsConfigurationInput,
         };
         use assistant_runtime::{AssistantRuntime, RuntimeStore as _};
         use axum::{
@@ -2653,16 +3113,19 @@ mod tests {
                 gateway::{DeviceGatewayHandle, DeviceGatewayService},
                 identity::InstallationIdentity,
                 protocol::{
-                    AuthChallenge, DeviceHello, DeviceMcpScheme, DeviceMcpServerDeclaration,
-                    Envelope, HelloAck, PROTOCOL_MAJOR, PROTOCOL_MINOR, PairingBind,
-                    PairingBindAck, PairingCommit, PairingComplete, PairingConfirmation,
-                    PairingDirectChallenge, PairingDirectCommit, PairingHello, PairingPake,
-                    PairingPending, WireError, WirePairingMode,
+                    AuthChallenge, DeviceConsoleDeclaration, DeviceHello, DeviceMcpScheme,
+                    DeviceMcpServerDeclaration, Envelope, HelloAck, PCM_FRAME_KIND_RELAY_DOWNLINK,
+                    PCM_FRAME_KIND_RELAY_UPLINK, PCM_HEADER_BYTES, PROTOCOL_MAJOR, PROTOCOL_MINOR,
+                    PairingBind, PairingBindAck, PairingCommit, PairingComplete,
+                    PairingConfirmation, PairingDirectChallenge, PairingDirectCommit, PairingHello,
+                    PairingPake, PairingPending, PcmFormat, SpeechAsrResult, SpeechAsrStart,
+                    SpeechAsrStop, SpeechStatusChanged, SpeechTtsEnd, SpeechTtsRequest,
+                    SpeechTtsStart, WireError, WirePairingMode,
                 },
             },
             mcp::{HostMcpConnectionFactory, HostMcpImageMaterializer, LocalMcpConfigSource},
             resources::HostResources,
-            speech::SpeechService,
+            speech::{SpeechService, SpeechServiceHandle},
             storage::LocalRuntimeStore,
         };
 
@@ -2671,14 +3134,17 @@ mod tests {
         struct TestGatewayHarness {
             runtime: Arc<AssistantRuntime>,
             handle: DeviceGatewayHandle,
+            speech: SpeechServiceHandle,
             identity: Arc<InstallationIdentity>,
             addr: SocketAddr,
             server_handle: axum_server::Handle<SocketAddr>,
             server_task: tokio::task::JoinHandle<std::io::Result<()>>,
+            speech_cancel: tokio_util::sync::CancellationToken,
+            speech_task: tokio::task::JoinHandle<Result<(), SpeechServiceError>>,
             mcp_factory: Arc<HostMcpConnectionFactory>,
             store: Arc<LocalRuntimeStore>,
+            shared: Arc<GatewayShared>,
             _gateway_service: DeviceGatewayService,
-            _speech_service: SpeechService,
             _directory: tempfile::TempDir,
         }
 
@@ -2724,11 +3190,13 @@ mod tests {
                 let config_source =
                     Arc::new(LocalConfigSource::new(directory.path().join("config.toml")));
                 let (speech_service, speech) = SpeechService::new(config_source);
+                let speech_cancel = tokio_util::sync::CancellationToken::new();
+                let speech_task = tokio::spawn(speech_service.run_until(speech_cancel.clone()));
                 let (gateway_service, handle) = DeviceGatewayService::new(
                     directory.path().to_path_buf(),
                     runtime.clone(),
                     dispatcher.as_ref(),
-                    speech,
+                    speech.clone(),
                 );
                 let identity = Arc::new(
                     InstallationIdentity::load_or_create(directory.path()).expect("identity"),
@@ -2757,17 +3225,21 @@ mod tests {
                         .await
                 });
 
+                let shared = handle.test_shared();
                 Self {
                     runtime,
                     handle,
+                    speech,
                     identity,
                     addr,
                     server_handle,
                     server_task,
+                    speech_cancel,
+                    speech_task,
                     mcp_factory,
                     store,
+                    shared,
                     _gateway_service: gateway_service,
-                    _speech_service: speech_service,
                     _directory: directory,
                 }
             }
@@ -2801,6 +3273,8 @@ mod tests {
             async fn shutdown(self) {
                 self.server_handle.shutdown();
                 let _ = self.server_task.await;
+                self.speech_cancel.cancel();
+                let _ = self.speech_task.await;
                 let _ = self.runtime.shutdown(ShutdownRuntimeRequest {}).await;
                 let _ = self.mcp_factory.shutdown().await;
                 let _ = self.store.shutdown().await;
@@ -3419,6 +3893,8 @@ mod tests {
                             ("X-Speaker-Role".to_owned(), "owner".to_owned()),
                         ]),
                     }],
+                    console: None,
+                    speech_relay: false,
                 },
             )
             .await;
@@ -3556,6 +4032,279 @@ mod tests {
 
             mcp_server.abort();
             let _ = mcp_server.await;
+            harness.shutdown().await;
+        }
+
+        fn build_test_wav_pcm16_16k_mono(samples: &[i16]) -> Vec<u8> {
+            let data_bytes = (samples.len() * 2) as u32;
+            let mut wav = Vec::with_capacity(44 + data_bytes as usize);
+            wav.extend_from_slice(b"RIFF");
+            wav.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+            wav.extend_from_slice(b"WAVE");
+            wav.extend_from_slice(b"fmt ");
+            wav.extend_from_slice(&16_u32.to_le_bytes());
+            wav.extend_from_slice(&1_u16.to_le_bytes());
+            wav.extend_from_slice(&1_u16.to_le_bytes());
+            wav.extend_from_slice(&16_000_u32.to_le_bytes());
+            wav.extend_from_slice(&32_000_u32.to_le_bytes());
+            wav.extend_from_slice(&2_u16.to_le_bytes());
+            wav.extend_from_slice(&16_u16.to_le_bytes());
+            wav.extend_from_slice(b"data");
+            wav.extend_from_slice(&data_bytes.to_le_bytes());
+            for &sample in samples {
+                wav.extend_from_slice(&sample.to_le_bytes());
+            }
+            wav
+        }
+
+        fn encode_relay_uplink_frame(stream_id: u32, sequence: u32, payload: &[u8]) -> Vec<u8> {
+            let mut frame = vec![0_u8; PCM_HEADER_BYTES + payload.len()];
+            frame[0] = 1;
+            frame[1] = PCM_FRAME_KIND_RELAY_UPLINK;
+            frame[4..8].copy_from_slice(&stream_id.to_be_bytes());
+            frame[8..12].copy_from_slice(&sequence.to_be_bytes());
+            frame[12..14].copy_from_slice(&(payload.len() as u16).to_be_bytes());
+            frame[PCM_HEADER_BYTES..].copy_from_slice(payload);
+            frame
+        }
+
+        #[tokio::test]
+        async fn wss_authenticated_console_and_speech_relay_round_trip() {
+            let tts_samples = [321_i16, -654, 987, -111];
+            let tts_wav = build_test_wav_pcm16_16k_mono(&tts_samples);
+            let speech_router = Router::new()
+                .route(
+                    "/v1/audio/transcriptions",
+                    post(|| async { AxumJson(json!({ "text": "打开客厅灯" })) }),
+                )
+                .route(
+                    "/v1/audio/speech",
+                    post({
+                        let tts_wav = tts_wav.clone();
+                        move || {
+                            let body = tts_wav.clone();
+                            async move {
+                                HttpResponse::builder()
+                                    .header("content-type", "audio/wav")
+                                    .body(Body::from(body))
+                                    .expect("wav response")
+                            }
+                        }
+                    }),
+                );
+            let speech_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind speech mock");
+            let speech_port = speech_listener.local_addr().expect("speech addr").port();
+            let speech_server = tokio::spawn(async move {
+                axum::serve(speech_listener, speech_router)
+                    .await
+                    .expect("serve speech mock");
+            });
+
+            let harness = TestGatewayHarness::start().await;
+            let initial_cfg = harness
+                .speech
+                .get_configuration()
+                .await
+                .expect("read initial config");
+            let updated_cfg = harness
+                .speech
+                .update_configuration(UpdateSpeechConfigurationRequest {
+                    expected_revision: initial_cfg.revision,
+                    asr: UpdateAsrConfigurationInput {
+                        enabled: true,
+                        provider: SpeechProviderKind::Openai,
+                        endpoint: format!("http://127.0.0.1:{speech_port}/v1"),
+                        model: "gpt-4o-mini-transcribe".to_owned(),
+                        timeout_ms: 10_000,
+                        credential: Some(SecretValue::new("sk-asr-test".to_owned())),
+                        clear_credential: false,
+                    },
+                    tts: UpdateTtsConfigurationInput {
+                        enabled: true,
+                        provider: SpeechProviderKind::Openai,
+                        endpoint: format!("http://127.0.0.1:{speech_port}/v1"),
+                        model: "gpt-4o-mini-tts".to_owned(),
+                        voice: "alloy".to_owned(),
+                        timeout_ms: 10_000,
+                        credential: Some(SecretValue::new("sk-tts-test".to_owned())),
+                        clear_credential: false,
+                    },
+                })
+                .await
+                .expect("update speech config");
+            assert_eq!(updated_cfg.status.asr, SpeechServiceStatusSnapshot::Ready);
+            assert_eq!(updated_cfg.status.tts, SpeechServiceStatusSnapshot::Ready);
+
+            let signing_key = SigningKey::from_bytes(&[9_u8; 32]);
+            let (mut ws, paired_id) =
+                pair_direct_confirm(&harness, "pair-relay-1", &signing_key, false).await;
+            let device_id = paired_id.expect("paired device id");
+            let _ = ws.close(None).await;
+
+            let (mut ws, challenge) = harness.connect_ws().await;
+            let device_nonce = "dev-auth-relay-1";
+            let caps = text_capabilities();
+            let transcript = auth_transcript(
+                &challenge.connection_id,
+                &challenge.nonce,
+                device_id.as_str(),
+                device_nonce,
+                caps,
+                OutputPreferenceSnapshot::Text,
+            );
+            let sig = signing_key.sign(&transcript).to_bytes();
+            send_json(
+                &mut ws,
+                "m-hello-relay",
+                "hello",
+                &DeviceHello {
+                    device_id: device_id.to_string(),
+                    device_nonce: device_nonce.to_owned(),
+                    capabilities: caps,
+                    output_preference: OutputPreferenceSnapshot::Text,
+                    client_version: "esp-pika-gateway/0.4.0".to_owned(),
+                    signature: encode_base64(&sig),
+                    mcp_servers: Vec::new(),
+                    console: Some(DeviceConsoleDeclaration {
+                        scheme: DeviceMcpScheme::Http,
+                        port: 8000,
+                        api_prefix: "/api/v1".to_owned(),
+                        ui_path: Some("/ui/".to_owned()),
+                    }),
+                    speech_relay: true,
+                },
+            )
+            .await;
+
+            let ack_env = recv_envelope(&mut ws).await.expect("hello_ack");
+            assert_eq!(ack_env.message_type, "hello_ack");
+            let ack: HelloAck = decode_payload(ack_env);
+            let ack_speech = ack.speech_services.expect("speech services in hello_ack");
+            assert_eq!(ack_speech.asr, SpeechServiceStatusSnapshot::Ready);
+            assert_eq!(ack_speech.tts, SpeechServiceStatusSnapshot::Ready);
+
+            let snapshot = harness.handle.snapshot().await.expect("snapshot");
+            let conn = snapshot.devices[0]
+                .connection
+                .as_ref()
+                .expect("online connection");
+            assert!(conn.speech_relay);
+            let console_snap = conn.console.as_ref().expect("console snapshot");
+            assert_eq!(console_snap.api_prefix, "/api/v1");
+            assert_eq!(console_snap.ui_path.as_deref(), Some("/ui/"));
+            assert_eq!(
+                console_snap.direct_url.as_deref(),
+                Some("http://127.0.0.1:8000/ui/")
+            );
+            assert!(harness.handle.console_target(&device_id).await.is_some());
+
+            harness
+                .shared
+                .broadcast_speech_status(DeviceSpeechServicesSnapshot {
+                    asr: SpeechServiceStatusSnapshot::Degraded,
+                    tts: SpeechServiceStatusSnapshot::Ready,
+                })
+                .await;
+            let status_env = recv_envelope(&mut ws).await.expect("speech_status_changed");
+            assert_eq!(status_env.message_type, "speech_status_changed");
+            let status_payload: SpeechStatusChanged = decode_payload(status_env);
+            assert_eq!(
+                status_payload.speech_services.asr,
+                SpeechServiceStatusSnapshot::Degraded
+            );
+
+            send_json(
+                &mut ws,
+                "m-asr-start",
+                "speech_asr_start",
+                &SpeechAsrStart {
+                    request_id: "asr-req-1".to_owned(),
+                    stream_id: 101,
+                    format: PcmFormat {
+                        encoding: "pcm_s16le".to_owned(),
+                        sample_rate_hz: 16_000,
+                        channels: 1,
+                        frame_duration_ms: 0,
+                    },
+                },
+            )
+            .await;
+            let uplink_pcm = vec![12_u8; 640];
+            ws.send(WsMessage::Binary(
+                encode_relay_uplink_frame(101, 0, &uplink_pcm).into(),
+            ))
+            .await
+            .expect("send binary kind=3");
+            send_json(
+                &mut ws,
+                "m-asr-stop",
+                "speech_asr_stop",
+                &SpeechAsrStop {
+                    request_id: "asr-req-1".to_owned(),
+                    stream_id: 101,
+                    last_sequence: 0,
+                },
+            )
+            .await;
+            let asr_env = recv_envelope(&mut ws).await.expect("speech_asr_result");
+            assert_eq!(asr_env.message_type, "speech_asr_result");
+            let asr_res: SpeechAsrResult = decode_payload(asr_env);
+            assert!(asr_res.ok);
+            assert_eq!(asr_res.text.as_deref(), Some("打开客厅灯"));
+
+            send_json(
+                &mut ws,
+                "m-tts-req",
+                "speech_tts_request",
+                &SpeechTtsRequest {
+                    request_id: "tts-req-1".to_owned(),
+                    stream_id: 202,
+                    text: "客厅灯已打开".to_owned(),
+                },
+            )
+            .await;
+            let tts_start_env = recv_envelope(&mut ws).await.expect("speech_tts_start");
+            assert_eq!(tts_start_env.message_type, "speech_tts_start");
+            let tts_start: SpeechTtsStart = decode_payload(tts_start_env);
+            assert!(tts_start.ok);
+            assert_eq!(tts_start.total_bytes, Some((tts_samples.len() * 2) as u64));
+
+            let mut received_pcm = Vec::new();
+            let tts_end_env = loop {
+                let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+                    .await
+                    .expect("tts recv")
+                    .expect("tts frame")
+                    .expect("ws ok");
+                match msg {
+                    WsMessage::Binary(frame) => {
+                        assert_eq!(frame[0], 1);
+                        assert_eq!(frame[1], PCM_FRAME_KIND_RELAY_DOWNLINK);
+                        assert_eq!(
+                            u32::from_be_bytes([frame[4], frame[5], frame[6], frame[7]]),
+                            202
+                        );
+                        received_pcm.extend_from_slice(&frame[PCM_HEADER_BYTES..]);
+                    }
+                    WsMessage::Text(text) => {
+                        break Envelope::decode(&text).expect("decode tts end");
+                    }
+                    other => panic!("unexpected TTS ws frame: {other:?}"),
+                }
+            };
+            assert_eq!(tts_end_env.message_type, "speech_tts_end");
+            let tts_end: SpeechTtsEnd = decode_payload(tts_end_env);
+            assert!(tts_end.ok);
+            let mut expected_pcm = Vec::new();
+            for s in tts_samples {
+                expected_pcm.extend_from_slice(&s.to_le_bytes());
+            }
+            assert_eq!(received_pcm, expected_pcm);
+
+            speech_server.abort();
+            let _ = speech_server.await;
             harness.shutdown().await;
         }
     }

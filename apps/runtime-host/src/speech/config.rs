@@ -1,18 +1,60 @@
-//! 从 Runtime Home 的同一份安全配置文档编译 Host 私有语音能力。
+//! 从 Runtime Home 的同一份安全配置文档编译、读取与 CAS 更新 Host 私有语音能力。
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use assistant_protocol::{DeviceSpeechServicesSnapshot, SpeechServiceStatusSnapshot};
-use assistant_runtime::{ConfigSourceLoad, RuntimeConfigSource};
-use serde::Deserialize;
+use assistant_protocol::{
+    AsrConfigurationSnapshot, DeviceSpeechServicesSnapshot, RuntimeErrorCode, RuntimeErrorInfo,
+    SpeechConfigurationSnapshot, SpeechProviderKind, SpeechServiceStatusSnapshot,
+    TtsConfigurationSnapshot, UpdateAsrConfigurationInput, UpdateSpeechConfigurationRequest,
+    UpdateTtsConfigurationInput,
+};
+use assistant_runtime::{ConfigSourceLoad, ConfigSourceReplace, RuntimeConfigSource};
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use toml_edit::{DocumentMut, Item, Table};
 
 use super::provider::{
-    AsrProvider, DashScopeSpeechRecognizer, DashScopeSpeechSynthesizer, TtsProvider,
+    AsrProvider, DashScopeSpeechRecognizer, DashScopeSpeechSynthesizer, OpenAiSpeechRecognizer,
+    OpenAiSpeechSynthesizer, TtsProvider,
 };
 
 const DEFAULT_DASHSCOPE_ENDPOINT: &str = "https://dashscope.aliyuncs.com";
+const DEFAULT_OPENAI_ENDPOINT: &str = "https://api.openai.com/v1";
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 const MAX_TIMEOUT_MS: u64 = 120_000;
+const MAX_TEXT_BYTES: usize = 512;
+
+/// 读取或更新 `config.toml` 中语音配置段时的稳定错误分类。
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub(crate) enum SpeechConfigError {
+    #[error("{0}")]
+    Invalid(&'static str),
+    #[error("语音配置在编辑期间已被其他操作修改，请刷新后重试。")]
+    Conflict,
+    #[error("语音配置文件当前不可用。")]
+    Unavailable,
+}
+
+impl SpeechConfigError {
+    pub(crate) fn to_protocol_info(&self) -> RuntimeErrorInfo {
+        match self {
+            Self::Invalid(message) => {
+                RuntimeErrorInfo::new(RuntimeErrorCode::InvalidRequest, *message)
+            }
+            Self::Conflict => {
+                RuntimeErrorInfo::new(RuntimeErrorCode::ConfigurationConflict, self.to_string())
+            }
+            Self::Unavailable => {
+                RuntimeErrorInfo::new(RuntimeErrorCode::ConfigurationUnavailable, self.to_string())
+            }
+        }
+    }
+}
+
+pub(super) struct SpeechConfigUpdateOutcome {
+    pub(super) compiled: CompiledSpeechConfig,
+    pub(super) configuration: SpeechConfigurationSnapshot,
+}
 
 /// 从用户配置成功编译出的 Host 私有语音依赖。
 ///
@@ -55,29 +97,29 @@ struct RawSpeechConfig {
     debug_audio_directory: Option<PathBuf>,
 }
 
-/// `[speech.asr]` 的首版 Provider 配置。
-#[derive(Deserialize)]
+/// `[speech.asr]` 的 Provider 配置。
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RawAsrConfig {
     provider: String,
     model: String,
     credential: String,
-    #[serde(default = "default_endpoint")]
-    endpoint: String,
+    #[serde(default)]
+    endpoint: Option<String>,
     #[serde(default = "default_timeout_ms")]
     timeout_ms: u64,
 }
 
-/// `[speech.tts]` 的首版 Provider 配置。
-#[derive(Deserialize)]
+/// `[speech.tts]` 的 Provider 配置。
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RawTtsConfig {
     provider: String,
     model: String,
     voice: String,
     credential: String,
-    #[serde(default = "default_endpoint")]
-    endpoint: String,
+    #[serde(default)]
+    endpoint: Option<String>,
     #[serde(default = "default_timeout_ms")]
     timeout_ms: u64,
 }
@@ -86,7 +128,11 @@ pub(super) async fn load(source: &dyn RuntimeConfigSource) -> CompiledSpeechConf
     let ConfigSourceLoad::Document(document) = source.load().await else {
         return CompiledSpeechConfig::unavailable();
     };
-    let Ok(document) = toml::from_str::<SpeechDocument>(document.contents()) else {
+    compile_document_contents(document.contents())
+}
+
+fn compile_document_contents(contents: &str) -> CompiledSpeechConfig {
+    let Ok(document) = toml::from_str::<SpeechDocument>(contents) else {
         return CompiledSpeechConfig::unavailable();
     };
     let Some(speech) = document.speech else {
@@ -132,42 +178,450 @@ pub(super) async fn load(source: &dyn RuntimeConfigSource) -> CompiledSpeechConf
     }
 }
 
+pub(super) async fn read_configuration(
+    source: &dyn RuntimeConfigSource,
+    status: DeviceSpeechServicesSnapshot,
+) -> Result<SpeechConfigurationSnapshot, SpeechConfigError> {
+    match source.load().await {
+        ConfigSourceLoad::Missing => Ok(project_configuration(None, None, None, status)),
+        ConfigSourceLoad::Document(doc) => {
+            let revision = doc.revision().to_owned();
+            let parsed = toml::from_str::<SpeechDocument>(doc.contents()).ok();
+            let speech = parsed.and_then(|d| d.speech);
+            let raw_asr = speech
+                .as_ref()
+                .and_then(|s| s.asr.clone())
+                .and_then(|v| v.try_into::<RawAsrConfig>().ok());
+            let raw_tts = speech
+                .as_ref()
+                .and_then(|s| s.tts.clone())
+                .and_then(|v| v.try_into::<RawTtsConfig>().ok());
+            Ok(project_configuration(
+                Some(revision),
+                raw_asr.as_ref(),
+                raw_tts.as_ref(),
+                status,
+            ))
+        }
+        ConfigSourceLoad::Unavailable(_) => Err(SpeechConfigError::Unavailable),
+    }
+}
+
+pub(super) async fn update_configuration(
+    source: &dyn RuntimeConfigSource,
+    request: UpdateSpeechConfigurationRequest,
+) -> Result<SpeechConfigUpdateOutcome, SpeechConfigError> {
+    let (mut document, current_revision) = match source.load().await {
+        ConfigSourceLoad::Missing => (
+            "schema_version = 1\n"
+                .parse::<DocumentMut>()
+                .expect("static TOML"),
+            None,
+        ),
+        ConfigSourceLoad::Document(doc) => (
+            doc.contents()
+                .parse::<DocumentMut>()
+                .map_err(|_| SpeechConfigError::Invalid("现有配置文件不是合法 TOML。"))?,
+            Some(doc.revision().to_owned()),
+        ),
+        ConfigSourceLoad::Unavailable(_) => return Err(SpeechConfigError::Unavailable),
+    };
+
+    if request.expected_revision != current_revision {
+        return Err(SpeechConfigError::Conflict);
+    }
+
+    let existing_parsed = toml::from_str::<SpeechDocument>(&document.to_string()).ok();
+    let existing_speech = existing_parsed.and_then(|d| d.speech);
+    let existing_asr = existing_speech
+        .as_ref()
+        .and_then(|s| s.asr.clone())
+        .and_then(|v| v.try_into::<RawAsrConfig>().ok());
+    let existing_tts = existing_speech
+        .as_ref()
+        .and_then(|s| s.tts.clone())
+        .and_then(|v| v.try_into::<RawTtsConfig>().ok());
+
+    let next_asr = build_next_asr(&request.asr, existing_asr.as_ref())?;
+    let next_tts = build_next_tts(&request.tts, existing_tts.as_ref())?;
+
+    if next_asr.is_none() && next_tts.is_none() {
+        if let Some(speech_table) = document.get_mut("speech").and_then(Item::as_table_mut) {
+            speech_table.remove("asr");
+            speech_table.remove("tts");
+            if speech_table.is_empty() {
+                document.remove("speech");
+            }
+        }
+    } else {
+        if !document.contains_key("speech") {
+            let mut tbl = Table::new();
+            tbl.set_implicit(true);
+            document["speech"] = Item::Table(tbl);
+        }
+        let speech_table = document
+            .get_mut("speech")
+            .and_then(Item::as_table_mut)
+            .ok_or(SpeechConfigError::Invalid(
+                "[speech] 配置节点必须是 TOML 表。",
+            ))?;
+
+        match &next_asr {
+            Some(asr) => {
+                let section = toml::to_string(asr)
+                    .map_err(|_| SpeechConfigError::Unavailable)?
+                    .parse::<DocumentMut>()
+                    .map_err(|_| SpeechConfigError::Unavailable)?;
+                speech_table["asr"] = Item::Table(section.as_table().clone());
+            }
+            None => {
+                speech_table.remove("asr");
+            }
+        }
+        match &next_tts {
+            Some(tts) => {
+                let section = toml::to_string(tts)
+                    .map_err(|_| SpeechConfigError::Unavailable)?
+                    .parse::<DocumentMut>()
+                    .map_err(|_| SpeechConfigError::Unavailable)?;
+                speech_table["tts"] = Item::Table(section.as_table().clone());
+            }
+            None => {
+                speech_table.remove("tts");
+            }
+        }
+    }
+
+    let next_text = document.to_string();
+    match source.replace(current_revision, next_text).await {
+        ConfigSourceReplace::Applied(saved_doc) => {
+            let compiled = compile_document_contents(saved_doc.contents());
+            let configuration = project_configuration(
+                Some(saved_doc.revision().to_owned()),
+                next_asr.as_ref(),
+                next_tts.as_ref(),
+                compiled.status,
+            );
+            Ok(SpeechConfigUpdateOutcome {
+                compiled,
+                configuration,
+            })
+        }
+        ConfigSourceReplace::Conflict(_) => Err(SpeechConfigError::Conflict),
+        ConfigSourceReplace::Unavailable(_) => Err(SpeechConfigError::Unavailable),
+    }
+}
+
+fn build_next_asr(
+    input: &UpdateAsrConfigurationInput,
+    existing: Option<&RawAsrConfig>,
+) -> Result<Option<RawAsrConfig>, SpeechConfigError> {
+    if !input.enabled {
+        return Ok(None);
+    }
+    let endpoint = normalize_endpoint(&input.endpoint, input.provider)?;
+    let model = normalize_required_text(&input.model, "请填写语音识别（ASR）模型名称。")?;
+    if !valid_timeout(input.timeout_ms) {
+        return Err(SpeechConfigError::Invalid(
+            "ASR 超时时间必须在 1 到 120000 毫秒之间。",
+        ));
+    }
+    let credential = resolve_next_credential(
+        input.credential.as_ref().map(|s| s.expose()),
+        input.clear_credential,
+        existing.map(|c| c.credential.as_str()),
+        "启用语音识别（ASR）时必须填写或保留 API Key 凭据。",
+    )?;
+    let raw = RawAsrConfig {
+        provider: provider_str(input.provider).to_owned(),
+        model,
+        credential,
+        endpoint: Some(endpoint),
+        timeout_ms: input.timeout_ms,
+    };
+    if compile_asr_ref(&raw).is_none() {
+        return Err(SpeechConfigError::Invalid(
+            "语音识别（ASR）配置无法通过 Provider 校验。",
+        ));
+    }
+    Ok(Some(raw))
+}
+
+fn build_next_tts(
+    input: &UpdateTtsConfigurationInput,
+    existing: Option<&RawTtsConfig>,
+) -> Result<Option<RawTtsConfig>, SpeechConfigError> {
+    if !input.enabled {
+        return Ok(None);
+    }
+    let endpoint = normalize_endpoint(&input.endpoint, input.provider)?;
+    let model = normalize_required_text(&input.model, "请填写语音播放（TTS）模型名称。")?;
+    let voice = normalize_required_text(&input.voice, "请填写语音播放（TTS）音色名称。")?;
+    if !valid_timeout(input.timeout_ms) {
+        return Err(SpeechConfigError::Invalid(
+            "TTS 超时时间必须在 1 到 120000 毫秒之间。",
+        ));
+    }
+    let credential = resolve_next_credential(
+        input.credential.as_ref().map(|s| s.expose()),
+        input.clear_credential,
+        existing.map(|c| c.credential.as_str()),
+        "启用语音播放（TTS）时必须填写或保留 API Key 凭据。",
+    )?;
+    let raw = RawTtsConfig {
+        provider: provider_str(input.provider).to_owned(),
+        model,
+        voice,
+        credential,
+        endpoint: Some(endpoint),
+        timeout_ms: input.timeout_ms,
+    };
+    if compile_tts_ref(&raw).is_none() {
+        return Err(SpeechConfigError::Invalid(
+            "语音播放（TTS）配置无法通过 Provider 校验。",
+        ));
+    }
+    Ok(Some(raw))
+}
+
+fn project_configuration(
+    revision: Option<String>,
+    asr: Option<&RawAsrConfig>,
+    tts: Option<&RawTtsConfig>,
+    status: DeviceSpeechServicesSnapshot,
+) -> SpeechConfigurationSnapshot {
+    let asr_snapshot = match asr {
+        Some(cfg) => {
+            let provider =
+                parse_provider_kind(&cfg.provider).unwrap_or(SpeechProviderKind::Dashscope);
+            let default_ep = default_endpoint_for(provider);
+            AsrConfigurationSnapshot {
+                enabled: true,
+                provider,
+                endpoint: cfg
+                    .endpoint
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or(default_ep)
+                    .to_owned(),
+                model: cfg.model.clone(),
+                timeout_ms: cfg.timeout_ms,
+                credential_configured: !cfg.credential.trim().is_empty(),
+                credential_masked: mask_secret(&cfg.credential),
+            }
+        }
+        None => AsrConfigurationSnapshot {
+            enabled: false,
+            provider: SpeechProviderKind::Dashscope,
+            endpoint: DEFAULT_DASHSCOPE_ENDPOINT.to_owned(),
+            model: String::new(),
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+            credential_configured: false,
+            credential_masked: None,
+        },
+    };
+    let tts_snapshot = match tts {
+        Some(cfg) => {
+            let provider =
+                parse_provider_kind(&cfg.provider).unwrap_or(SpeechProviderKind::Dashscope);
+            let default_ep = default_endpoint_for(provider);
+            TtsConfigurationSnapshot {
+                enabled: true,
+                provider,
+                endpoint: cfg
+                    .endpoint
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or(default_ep)
+                    .to_owned(),
+                model: cfg.model.clone(),
+                voice: cfg.voice.clone(),
+                timeout_ms: cfg.timeout_ms,
+                credential_configured: !cfg.credential.trim().is_empty(),
+                credential_masked: mask_secret(&cfg.credential),
+            }
+        }
+        None => TtsConfigurationSnapshot {
+            enabled: false,
+            provider: SpeechProviderKind::Dashscope,
+            endpoint: DEFAULT_DASHSCOPE_ENDPOINT.to_owned(),
+            model: String::new(),
+            voice: String::new(),
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+            credential_configured: false,
+            credential_masked: None,
+        },
+    };
+    SpeechConfigurationSnapshot {
+        revision,
+        asr: asr_snapshot,
+        tts: tts_snapshot,
+        status,
+    }
+}
+
 fn compile_asr(raw: RawAsrConfig) -> Option<Arc<dyn AsrProvider>> {
-    if raw.provider != "dashscope"
-        || !valid_text(&raw.model)
-        || !valid_text(&raw.credential)
-        || !valid_timeout(raw.timeout_ms)
-    {
+    compile_asr_ref(&raw)
+}
+
+fn compile_asr_ref(raw: &RawAsrConfig) -> Option<Arc<dyn AsrProvider>> {
+    let provider = parse_provider_kind(&raw.provider)?;
+    if !valid_text(&raw.model) || !valid_text(&raw.credential) || !valid_timeout(raw.timeout_ms) {
         return None;
     }
-    DashScopeSpeechRecognizer::new(
-        raw.endpoint,
-        raw.model,
-        raw.credential,
-        Duration::from_millis(raw.timeout_ms),
-    )
-    .ok()
-    .map(|provider| Arc::new(provider) as Arc<dyn AsrProvider>)
+    let endpoint = raw
+        .endpoint
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| default_endpoint_for(provider))
+        .to_owned();
+    let timeout = Duration::from_millis(raw.timeout_ms);
+    match provider {
+        SpeechProviderKind::Dashscope => DashScopeSpeechRecognizer::new(
+            endpoint,
+            raw.model.clone(),
+            raw.credential.clone(),
+            timeout,
+        )
+        .ok()
+        .map(|p| Arc::new(p) as Arc<dyn AsrProvider>),
+        SpeechProviderKind::Openai => OpenAiSpeechRecognizer::new(
+            endpoint,
+            raw.model.clone(),
+            raw.credential.clone(),
+            timeout,
+        )
+        .ok()
+        .map(|p| Arc::new(p) as Arc<dyn AsrProvider>),
+    }
 }
 
 fn compile_tts(raw: RawTtsConfig) -> Option<Arc<dyn TtsProvider>> {
-    if raw.provider != "dashscope"
-        || !valid_text(&raw.model)
+    compile_tts_ref(&raw)
+}
+
+fn compile_tts_ref(raw: &RawTtsConfig) -> Option<Arc<dyn TtsProvider>> {
+    let provider = parse_provider_kind(&raw.provider)?;
+    if !valid_text(&raw.model)
         || !valid_text(&raw.voice)
         || !valid_text(&raw.credential)
         || !valid_timeout(raw.timeout_ms)
     {
         return None;
     }
-    DashScopeSpeechSynthesizer::new(
-        raw.endpoint,
-        raw.model,
-        raw.voice,
-        raw.credential,
-        Duration::from_millis(raw.timeout_ms),
-    )
-    .ok()
-    .map(|provider| Arc::new(provider) as Arc<dyn TtsProvider>)
+    let endpoint = raw
+        .endpoint
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| default_endpoint_for(provider))
+        .to_owned();
+    let timeout = Duration::from_millis(raw.timeout_ms);
+    match provider {
+        SpeechProviderKind::Dashscope => DashScopeSpeechSynthesizer::new(
+            endpoint,
+            raw.model.clone(),
+            raw.voice.clone(),
+            raw.credential.clone(),
+            timeout,
+        )
+        .ok()
+        .map(|p| Arc::new(p) as Arc<dyn TtsProvider>),
+        SpeechProviderKind::Openai => OpenAiSpeechSynthesizer::new(
+            endpoint,
+            raw.model.clone(),
+            raw.voice.clone(),
+            raw.credential.clone(),
+            timeout,
+        )
+        .ok()
+        .map(|p| Arc::new(p) as Arc<dyn TtsProvider>),
+    }
+}
+
+fn parse_provider_kind(raw: &str) -> Option<SpeechProviderKind> {
+    match raw {
+        "dashscope" => Some(SpeechProviderKind::Dashscope),
+        "openai" => Some(SpeechProviderKind::Openai),
+        _ => None,
+    }
+}
+
+const fn provider_str(kind: SpeechProviderKind) -> &'static str {
+    match kind {
+        SpeechProviderKind::Dashscope => "dashscope",
+        SpeechProviderKind::Openai => "openai",
+    }
+}
+
+const fn default_endpoint_for(kind: SpeechProviderKind) -> &'static str {
+    match kind {
+        SpeechProviderKind::Dashscope => DEFAULT_DASHSCOPE_ENDPOINT,
+        SpeechProviderKind::Openai => DEFAULT_OPENAI_ENDPOINT,
+    }
+}
+
+fn normalize_endpoint(
+    raw: &str,
+    provider: SpeechProviderKind,
+) -> Result<String, SpeechConfigError> {
+    let trimmed = raw.trim();
+    let candidate = if trimmed.is_empty() {
+        default_endpoint_for(provider)
+    } else {
+        trimmed
+    };
+    if candidate.len() > MAX_TEXT_BYTES || !valid_endpoint(candidate) {
+        return Err(SpeechConfigError::Invalid(
+            "语音服务端点必须是 HTTPS 地址，或本机 127.0.0.1 / localhost HTTP 地址。",
+        ));
+    }
+    Ok(candidate.to_owned())
+}
+
+fn normalize_required_text(raw: &str, message: &'static str) -> Result<String, SpeechConfigError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > MAX_TEXT_BYTES || trimmed.contains(['\r', '\n']) {
+        return Err(SpeechConfigError::Invalid(message));
+    }
+    Ok(trimmed.to_owned())
+}
+
+fn resolve_next_credential(
+    supplied: Option<&str>,
+    clear_credential: bool,
+    existing: Option<&str>,
+    missing_message: &'static str,
+) -> Result<String, SpeechConfigError> {
+    let trimmed_supplied = supplied.map(str::trim).filter(|s| !s.is_empty());
+    if let Some(secret) = trimmed_supplied {
+        if secret.len() > MAX_TEXT_BYTES || secret.contains(['\r', '\n']) {
+            return Err(SpeechConfigError::Invalid("API Key 凭据格式无效或过长。"));
+        }
+        return Ok(secret.to_owned());
+    }
+    if clear_credential {
+        return Err(SpeechConfigError::Invalid(missing_message));
+    }
+    let Some(prev) = existing.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Err(SpeechConfigError::Invalid(missing_message));
+    };
+    Ok(prev.to_owned())
+}
+
+fn mask_secret(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let chars: Vec<char> = trimmed.chars().collect();
+    if chars.len() <= 8 {
+        return Some("****".to_owned());
+    }
+    let prefix: String = chars[..3].iter().collect();
+    let suffix: String = chars[chars.len() - 4..].iter().collect();
+    Some(format!("{prefix}****{suffix}"))
 }
 
 fn valid_text(value: &str) -> bool {
@@ -178,7 +632,6 @@ fn valid_timeout(value: u64) -> bool {
     value > 0 && value <= MAX_TIMEOUT_MS
 }
 
-#[cfg(test)]
 fn valid_endpoint(value: &str) -> bool {
     reqwest::Url::parse(value).is_ok_and(|url| {
         url.scheme() == "https"
@@ -195,10 +648,6 @@ fn debug_audio_directory(value: Option<PathBuf>) -> Option<PathBuf> {
     } else {
         None
     }
-}
-
-fn default_endpoint() -> String {
-    DEFAULT_DASHSCOPE_ENDPOINT.to_owned()
 }
 
 const fn default_timeout_ms() -> u64 {
@@ -322,5 +771,137 @@ timeout_ms = 30000
             );
             assert_eq!(compiled.status.tts, SpeechServiceStatusSnapshot::Ready);
         }
+    }
+
+    #[tokio::test]
+    async fn update_and_read_configuration_preserves_other_toml_sections_and_existing_secrets() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "# keep comment\nschema_version = 1\ndefault_model = \"deepseek\"\n\n[models.deepseek]\nmodel = \"deepseek-chat\"\n",
+        )
+        .expect("seed config");
+        let source = crate::config_source::LocalConfigSource::new(path.clone());
+
+        let initial = read_configuration(&source, DeviceSpeechServicesSnapshot::default())
+            .await
+            .expect("read initial");
+        assert!(!initial.asr.enabled);
+        assert!(!initial.tts.enabled);
+        assert!(initial.revision.is_some());
+
+        let first = update_configuration(
+            &source,
+            UpdateSpeechConfigurationRequest {
+                expected_revision: initial.revision.clone(),
+                asr: UpdateAsrConfigurationInput {
+                    enabled: true,
+                    provider: SpeechProviderKind::Openai,
+                    endpoint: "https://api.openai.com/v1".to_owned(),
+                    model: "whisper-1".to_owned(),
+                    timeout_ms: 25_000,
+                    credential: Some(assistant_protocol::SecretValue::new(
+                        "sk-initial-asr-secret-9876".to_owned(),
+                    )),
+                    clear_credential: false,
+                },
+                tts: UpdateTtsConfigurationInput {
+                    enabled: true,
+                    provider: SpeechProviderKind::Dashscope,
+                    endpoint: "https://dashscope.aliyuncs.com".to_owned(),
+                    model: "cosyvoice-v2".to_owned(),
+                    voice: "longxiaochun_v2".to_owned(),
+                    timeout_ms: 30_000,
+                    credential: Some(assistant_protocol::SecretValue::new(
+                        "sk-tts-123456".to_owned(),
+                    )),
+                    clear_credential: false,
+                },
+            },
+        )
+        .await
+        .expect("first update");
+        assert_eq!(
+            first.compiled.status.asr,
+            SpeechServiceStatusSnapshot::Ready
+        );
+        assert_eq!(
+            first.compiled.status.tts,
+            SpeechServiceStatusSnapshot::Ready
+        );
+        assert_eq!(
+            first.configuration.asr.credential_masked.as_deref(),
+            Some("sk-****9876")
+        );
+
+        // 留空凭据更新其他字段，必须保留已有密钥且保留原有模型配置。
+        let second = update_configuration(
+            &source,
+            UpdateSpeechConfigurationRequest {
+                expected_revision: first.configuration.revision.clone(),
+                asr: UpdateAsrConfigurationInput {
+                    enabled: true,
+                    provider: SpeechProviderKind::Openai,
+                    endpoint: "https://api.openai.com/v1".to_owned(),
+                    model: "gpt-4o-mini-transcribe".to_owned(),
+                    timeout_ms: 20_000,
+                    credential: None,
+                    clear_credential: false,
+                },
+                tts: UpdateTtsConfigurationInput {
+                    enabled: false,
+                    provider: SpeechProviderKind::Dashscope,
+                    endpoint: String::new(),
+                    model: String::new(),
+                    voice: String::new(),
+                    timeout_ms: 30_000,
+                    credential: None,
+                    clear_credential: false,
+                },
+            },
+        )
+        .await
+        .expect("second update");
+        assert!(second.compiled.asr.is_some());
+        assert!(second.compiled.tts.is_none());
+        assert_eq!(
+            second.configuration.asr.credential_masked.as_deref(),
+            Some("sk-****9876")
+        );
+
+        let contents = std::fs::read_to_string(&path).expect("read written config");
+        assert!(contents.contains("# keep comment"));
+        assert!(contents.contains("[models.deepseek]"));
+        assert!(!contents.contains("[speech.tts]"));
+
+        // 过期 revision 必须触发冲突。
+        let conflict = update_configuration(
+            &source,
+            UpdateSpeechConfigurationRequest {
+                expected_revision: initial.revision,
+                asr: UpdateAsrConfigurationInput {
+                    enabled: false,
+                    provider: SpeechProviderKind::Dashscope,
+                    endpoint: String::new(),
+                    model: String::new(),
+                    timeout_ms: 30_000,
+                    credential: None,
+                    clear_credential: false,
+                },
+                tts: UpdateTtsConfigurationInput {
+                    enabled: false,
+                    provider: SpeechProviderKind::Dashscope,
+                    endpoint: String::new(),
+                    model: String::new(),
+                    voice: String::new(),
+                    timeout_ms: 30_000,
+                    credential: None,
+                    clear_credential: false,
+                },
+            },
+        )
+        .await;
+        assert!(matches!(conflict, Err(SpeechConfigError::Conflict)));
     }
 }

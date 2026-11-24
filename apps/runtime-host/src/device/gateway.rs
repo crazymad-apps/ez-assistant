@@ -18,8 +18,9 @@ use std::{
 use assistant_protocol::{
     ConfirmDevicePairingRequest, DeviceCapabilitiesSnapshot, DeviceConnectionSnapshot,
     DeviceGatewayEvent, DeviceGatewaySnapshot, DeviceLifecycleSnapshot, DevicePairingModeSnapshot,
-    DevicePairingWindowSnapshot, DeviceSummarySnapshot, McpServerKey, OutputPreferenceSnapshot,
-    PendingDevicePairingSnapshot, RejectDevicePairingRequest, RuntimeErrorCode, RuntimeErrorInfo,
+    DevicePairingWindowSnapshot, DeviceSpeechServicesSnapshot, DeviceSummarySnapshot, McpServerKey,
+    OutputPreferenceSnapshot, PendingDevicePairingSnapshot, RejectDevicePairingRequest,
+    RuntimeErrorCode, RuntimeErrorInfo,
 };
 use assistant_runtime::{
     AssistantRuntime, ChannelOutput, ChannelOutputDispatchError, ChannelSpeechSegment,
@@ -38,8 +39,9 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use super::identity::{IdentityError, InstallationIdentity};
 use super::{
+    console::DeviceConsoleTarget,
     dispatcher::DeviceChannelOutputDispatcher,
-    protocol::{InteractionStateChanged, TextOutput, preference_is_supported},
+    protocol::{InteractionStateChanged, SpeechAsrResult, TextOutput, preference_is_supported},
 };
 use crate::speech::{SpeechServiceError, SpeechServiceHandle};
 
@@ -151,6 +153,8 @@ struct ActiveConnection {
     peer_address: Option<String>,
     client_version: Option<String>,
     mcp_server_keys: Vec<McpServerKey>,
+    console: Option<DeviceConsoleTarget>,
+    speech_relay: bool,
     command: mpsc::Sender<ConnectionCommand>,
 }
 
@@ -165,6 +169,13 @@ pub(super) enum ConnectionCommand {
     StartPlayback {
         output: PlaybackOutput,
         response: oneshot::Sender<bool>,
+    },
+    SpeechStatusChanged(DeviceSpeechServicesSnapshot),
+    SpeechAsrResult(SpeechAsrResult),
+    SpeechTtsResult {
+        request_id: String,
+        stream_id: u32,
+        result: Result<Arc<[u8]>, SpeechServiceError>,
     },
 }
 
@@ -318,6 +329,10 @@ impl DeviceGatewayService {
                 }
                 changed = self.speech_status.changed(), if speech_status_open => {
                     speech_status_open = changed.is_ok();
+                    if speech_status_open {
+                        let latest = *self.speech_status.borrow_and_update();
+                        self.shared.broadcast_speech_status(latest).await;
+                    }
                     self.shared.notify_changed();
                 }
                 result = wait_server(&mut active), if active.is_some() => {
@@ -678,6 +693,8 @@ impl DeviceGatewayHandle {
                         peer_address: connection.peer_address.clone(),
                         client_version: connection.client_version.clone(),
                         mcp_server_keys: connection.mcp_server_keys.clone(),
+                        console: connection.console.as_ref().map(super::console::to_snapshot),
+                        speech_relay: connection.speech_relay,
                     }
                 }),
                 device_id: device.device_id,
@@ -759,6 +776,19 @@ impl DeviceGatewayHandle {
 
     pub(crate) fn notify_changed(&self) {
         self.shared.notify_changed();
+    }
+
+    pub(crate) async fn console_target(
+        &self,
+        device_id: &assistant_protocol::DeviceId,
+    ) -> Option<DeviceConsoleTarget> {
+        self.shared
+            .state
+            .lock()
+            .await
+            .connections
+            .get(device_id)
+            .and_then(|connection| connection.console.clone())
     }
 
     #[cfg(test)]
@@ -894,7 +924,7 @@ impl GatewayShared {
 
     #[expect(
         clippy::too_many_arguments,
-        reason = "connection registration records identity, capabilities, metadata, and MCP keys atomically"
+        reason = "connection registration records identity, capabilities, metadata, console target, and MCP keys atomically"
     )]
     pub(super) async fn register_connection(
         &self,
@@ -905,6 +935,8 @@ impl GatewayShared {
         peer_address: Option<String>,
         client_version: Option<String>,
         mcp_server_keys: Vec<McpServerKey>,
+        console: Option<DeviceConsoleTarget>,
+        speech_relay: bool,
     ) -> mpsc::Receiver<ConnectionCommand> {
         let (command_tx, command_rx) = mpsc::channel(CONNECTION_COMMAND_CAPACITY);
         let previous = self.state.lock().await.connections.insert(
@@ -917,6 +949,8 @@ impl GatewayShared {
                 peer_address,
                 client_version,
                 mcp_server_keys,
+                console,
+                speech_relay,
                 command: command_tx,
             },
         );
@@ -925,6 +959,40 @@ impl GatewayShared {
         }
         self.notify_changed();
         command_rx
+    }
+
+    pub(super) async fn broadcast_speech_status(&self, status: DeviceSpeechServicesSnapshot) {
+        let senders = {
+            let state = self.state.lock().await;
+            state
+                .connections
+                .values()
+                .filter(|connection| connection.speech_relay)
+                .map(|connection| connection.command.clone())
+                .collect::<Vec<_>>()
+        };
+        for sender in senders {
+            let _ = sender.try_send(ConnectionCommand::SpeechStatusChanged(status));
+        }
+    }
+
+    pub(super) async fn send_connection_command(
+        &self,
+        device_id: &assistant_protocol::DeviceId,
+        connection_id: &str,
+        command: ConnectionCommand,
+    ) {
+        let sender = {
+            let state = self.state.lock().await;
+            state
+                .connections
+                .get(device_id)
+                .filter(|connection| connection.connection_id == connection_id)
+                .map(|connection| connection.command.clone())
+        };
+        if let Some(sender) = sender {
+            let _ = sender.send(command).await;
+        }
     }
 
     pub(super) async fn is_current_connection(
