@@ -158,6 +158,7 @@ impl AssistantRuntime {
             self.mcp_service.config_store.as_ref(),
             self.plugin.as_ref(),
             &self.mcp_service.builtin_definitions,
+            &self.mcp_service.device_definitions,
             self.mcp_service.registry.as_ref(),
             self.config_registry.as_ref(),
             self.approval_registry.as_ref(),
@@ -167,6 +168,186 @@ impl AssistantRuntime {
             None,
         )
         .await
+    }
+
+    /// 已配对智能终端建立认证连接后，同步该终端声明的受管 MCP 服务并单目标刷新连接。
+    /// 仅作用于受影响 `server_key`，绝不触发全量 `bootstrap_mcp()`。
+    pub async fn sync_device_mcp_servers(
+        &self,
+        device_id: &assistant_protocol::DeviceId,
+        definitions: Vec<crate::ManagedMcpServerDefinition>,
+    ) -> RuntimeResult<()> {
+        if !self.mcp_service.management_available() || self.root_cancellation.is_cancelled() {
+            return Ok(());
+        }
+        let mut previous = std::collections::BTreeMap::new();
+        let mut changed_digest_keys = Vec::new();
+        let mut affected_keys = std::collections::BTreeSet::new();
+        let mut map_changed = false;
+        {
+            let mut guard = self.mcp_service.device_definitions.write().map_err(|_| {
+                RuntimeError::InternalStateUnavailable {
+                    component: "device MCP definitions",
+                }
+            })?;
+            if let Some(old_defs) = guard.get(device_id) {
+                for def in old_defs {
+                    affected_keys.insert(def.server_key.clone());
+                    previous.insert(def.server_key.clone(), def.clone());
+                }
+            }
+            for def in &definitions {
+                affected_keys.insert(def.server_key.clone());
+                match previous.get(&def.server_key) {
+                    Some(prev) => {
+                        if prev.definition_digest != def.definition_digest {
+                            changed_digest_keys.push(def.server_key.clone());
+                            map_changed = true;
+                        } else if prev.source_enabled != def.source_enabled
+                            || prev.source_available != def.source_available
+                        {
+                            map_changed = true;
+                        }
+                    }
+                    None => map_changed = true,
+                }
+            }
+            if previous.len() != definitions.len() {
+                map_changed = true;
+            }
+            if definitions.is_empty() {
+                if guard.remove(device_id).is_some() {
+                    map_changed = true;
+                }
+            } else {
+                guard.insert(device_id.clone(), definitions);
+            }
+        }
+        let source = assistant_protocol::McpServerSource::Device(device_id.to_string());
+        for key in &changed_digest_keys {
+            if self
+                .mcp_service
+                .registry
+                .retire_server_if_source(key, &source)
+                .await?
+            {
+                let _ = self.event_sender.publish_batch_transition(|| {
+                    let approvals = self.approval_registry.invalidate_pending_mcp_server(key)?;
+                    Ok((
+                        (),
+                        approvals
+                            .into_iter()
+                            .map(
+                                |approval| assistant_protocol::RuntimeEvent::ApprovalCancelled {
+                                    session_id: approval.session_id,
+                                    run_id: approval.run_id,
+                                    child_task_id: approval.child_task_id,
+                                    approval_id: approval.approval_id,
+                                },
+                            )
+                            .collect(),
+                    ))
+                });
+            }
+        }
+        if map_changed {
+            let _ = self
+                .event_sender
+                .send(assistant_protocol::RuntimeEvent::McpRegistryChanged);
+        }
+        for key in affected_keys {
+            if self.root_cancellation.is_cancelled() {
+                break;
+            }
+            let _ = self.refresh_mcp_registry(Some(&key)).await;
+        }
+        Ok(())
+    }
+
+    /// 终端断开或 Gateway 停用时将该终端的受管 MCP 标记为离线并退役其活动连接，保留用户覆盖配置。
+    pub async fn mark_device_mcp_offline(
+        &self,
+        device_id: &assistant_protocol::DeviceId,
+    ) -> RuntimeResult<()> {
+        if !self.mcp_service.management_available() || self.root_cancellation.is_cancelled() {
+            return Ok(());
+        }
+        let mut affected_keys = Vec::new();
+        let mut changed = false;
+        {
+            let mut guard = self.mcp_service.device_definitions.write().map_err(|_| {
+                RuntimeError::InternalStateUnavailable {
+                    component: "device MCP definitions",
+                }
+            })?;
+            if let Some(defs) = guard.get_mut(device_id) {
+                for def in defs.iter_mut() {
+                    affected_keys.push(def.server_key.clone());
+                    if def.source_enabled {
+                        def.source_enabled = false;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if changed {
+            let _ = self
+                .event_sender
+                .send(assistant_protocol::RuntimeEvent::McpRegistryChanged);
+        }
+        for key in affected_keys {
+            if self.root_cancellation.is_cancelled() {
+                break;
+            }
+            let _ = self.refresh_mcp_registry(Some(&key)).await;
+        }
+        Ok(())
+    }
+
+    /// 解除终端配对时彻底移除该终端的动态 MCP 声明、清理 `mcp.json` 中残留的受管覆盖并退役连接。
+    pub async fn remove_device_mcp_servers(
+        &self,
+        device_id: &assistant_protocol::DeviceId,
+    ) -> RuntimeResult<()> {
+        if !self.mcp_service.management_available() || self.root_cancellation.is_cancelled() {
+            return Ok(());
+        }
+        let removed_keys: Vec<assistant_protocol::McpServerKey> = {
+            let mut guard = self.mcp_service.device_definitions.write().map_err(|_| {
+                RuntimeError::InternalStateUnavailable {
+                    component: "device MCP definitions",
+                }
+            })?;
+            guard
+                .remove(device_id)
+                .map(|defs| defs.into_iter().map(|def| def.server_key).collect())
+                .unwrap_or_default()
+        };
+        let mut keys_to_refresh = removed_keys.clone();
+        if let Ok(projections) = self.mcp_service.registry.projections() {
+            let target_source = assistant_protocol::McpServerSource::Device(device_id.to_string());
+            for (key, projection) in projections {
+                if projection.source == target_source && !keys_to_refresh.contains(&key) {
+                    keys_to_refresh.push(key);
+                }
+            }
+        }
+        self.mcp_service
+            .config_store
+            .remove_managed_device_overrides(device_id, &keys_to_refresh)
+            .await?;
+        if !keys_to_refresh.is_empty() {
+            let _ = self
+                .event_sender
+                .send(assistant_protocol::RuntimeEvent::McpRegistryChanged);
+        }
+        for key in keys_to_refresh {
+            if self.root_cancellation.is_cancelled() {
+                break;
+            }
+            let _ = self.refresh_mcp_registry(Some(&key)).await;
+        }
+        Ok(())
     }
 
     pub async fn test_mcp_server(
@@ -239,16 +420,24 @@ impl AssistantRuntime {
                 self.mcp_service.config_store.resolve_draft(draft).await?,
             ),
             (None, Some(draft)) => {
-                let discovery =
-                    discover_mcp(&self.plugin, &self.mcp_service.builtin_definitions).await?;
+                let discovery = discover_mcp(
+                    &self.plugin,
+                    &self.mcp_service.builtin_definitions,
+                    &self.mcp_service.device_definitions,
+                )
+                .await?;
                 let definition = find_definition(
                     &discovery.definitions,
                     &draft.target,
                     &draft.expected_definition_digest,
                 )?;
                 let _lease = definition_lease(self.plugin.as_ref(), definition).await?;
-                let fresh =
-                    discover_mcp(&self.plugin, &self.mcp_service.builtin_definitions).await?;
+                let fresh = discover_mcp(
+                    &self.plugin,
+                    &self.mcp_service.builtin_definitions,
+                    &self.mcp_service.device_definitions,
+                )
+                .await?;
                 let definition = find_definition(
                     &fresh.definitions,
                     &draft.target,
@@ -359,14 +548,24 @@ impl AssistantRuntime {
         }
         if let Some(draft) = &request.managed {
             // 测试候选已关闭；不能把旧文件／参数的成功当作当前草稿已验证。
-            let fresh = discover_mcp(&self.plugin, &self.mcp_service.builtin_definitions).await?;
+            let fresh = discover_mcp(
+                &self.plugin,
+                &self.mcp_service.builtin_definitions,
+                &self.mcp_service.device_definitions,
+            )
+            .await?;
             let definition = find_definition(
                 &fresh.definitions,
                 &draft.target,
                 &draft.expected_definition_digest,
             )?;
             let _lease = definition_lease(self.plugin.as_ref(), definition).await?;
-            let fresh = discover_mcp(&self.plugin, &self.mcp_service.builtin_definitions).await?;
+            let fresh = discover_mcp(
+                &self.plugin,
+                &self.mcp_service.builtin_definitions,
+                &self.mcp_service.device_definitions,
+            )
+            .await?;
             let definition = find_definition(
                 &fresh.definitions,
                 &draft.target,
@@ -430,6 +629,12 @@ pub(super) async fn refresh_mcp_registry_with(
     config_store: &crate::mcp::McpConfigStore,
     plugin: &crate::plugin::PluginManager,
     builtin_definitions: &[crate::ManagedMcpServerDefinition],
+    device_definitions: &std::sync::RwLock<
+        std::collections::BTreeMap<
+            assistant_protocol::DeviceId,
+            Vec<crate::ManagedMcpServerDefinition>,
+        >,
+    >,
     registry: &crate::mcp::McpRegistry,
     config_registry: &crate::config::ConfigRegistry,
     approval_registry: &crate::permission::ApprovalRegistry,
@@ -438,7 +643,7 @@ pub(super) async fn refresh_mcp_registry_with(
     target: Option<&assistant_protocol::McpServerKey>,
     expected: Option<&assistant_protocol::RefreshMcpServerRequest>,
 ) -> RuntimeResult<McpRefreshControlResultSnapshot> {
-    let discovery = discover_mcp(plugin, builtin_definitions).await?;
+    let discovery = discover_mcp(plugin, builtin_definitions, device_definitions).await?;
     let (frozen, mut candidate) = config_store
         .resolve_managed(
             &discovery.definitions,
@@ -478,7 +683,7 @@ pub(super) async fn refresh_mcp_registry_with(
                     }
                 }
                 let file_gate = config_store.gate.clone().lock_owned().await;
-                let fresh = discover_mcp(plugin, builtin_definitions).await?;
+                let fresh = discover_mcp(plugin, builtin_definitions, device_definitions).await?;
                 let (current, _) = config_store
                     .resolve_managed_locked(
                         &fresh.definitions,
@@ -680,7 +885,8 @@ async fn definition_lease(
                 )
                 .await?,
         )),
-        assistant_protocol::McpServerSource::Builtin => Ok(None),
+        assistant_protocol::McpServerSource::Builtin
+        | assistant_protocol::McpServerSource::Device(_) => Ok(None),
         assistant_protocol::McpServerSource::User => Err(RuntimeError::McpConfigInvalid),
     }
 }
@@ -784,6 +990,14 @@ pub(super) struct McpManagement {
     operation_gate: std::sync::Arc<tokio::sync::RwLock<()>>,
     available: bool,
     builtin_definitions: std::sync::Arc<[crate::ManagedMcpServerDefinition]>,
+    device_definitions: std::sync::Arc<
+        std::sync::RwLock<
+            std::collections::BTreeMap<
+                assistant_protocol::DeviceId,
+                Vec<crate::ManagedMcpServerDefinition>,
+            >,
+        >,
+    >,
 }
 
 impl AssistantRuntime {
@@ -800,6 +1014,7 @@ impl AssistantRuntime {
             operation_gate: self.operation_gate.clone(),
             available: self.mcp_service.management_available(),
             builtin_definitions: self.mcp_service.builtin_definitions.clone(),
+            device_definitions: self.mcp_service.device_definitions.clone(),
         }
     }
 }
@@ -807,6 +1022,17 @@ impl AssistantRuntime {
 impl McpManagement {
     pub(super) fn builtin_definitions(&self) -> &[crate::ManagedMcpServerDefinition] {
         &self.builtin_definitions
+    }
+
+    pub(super) fn device_definitions(
+        &self,
+    ) -> &std::sync::RwLock<
+        std::collections::BTreeMap<
+            assistant_protocol::DeviceId,
+            Vec<crate::ManagedMcpServerDefinition>,
+        >,
+    > {
+        &self.device_definitions
     }
 
     pub(super) fn available(&self) -> bool {
@@ -831,7 +1057,12 @@ impl McpManagement {
         self.ensure_available()?;
 
         let runtime = self.registry.projections()?;
-        let definitions = discover_mcp(&self.plugin, &self.builtin_definitions).await?;
+        let definitions = discover_mcp(
+            &self.plugin,
+            &self.builtin_definitions,
+            &self.device_definitions,
+        )
+        .await?;
         let (mut snapshot, _) = self
             .config_store
             .resolve_managed(
@@ -853,11 +1084,21 @@ impl McpManagement {
         self.ensure_available()?;
 
         if let Some((target, digest)) = managed_mutation_target(&request.mutation) {
-            let discovery = discover_mcp(&self.plugin, &self.builtin_definitions).await?;
+            let discovery = discover_mcp(
+                &self.plugin,
+                &self.builtin_definitions,
+                &self.device_definitions,
+            )
+            .await?;
             let definition = find_definition(&discovery.definitions, target, digest)?;
             // 直接文件修改持包配置租约；参数修改另走原插件命令，禁止读租约升级。
             let _lease = definition_lease(self.plugin.as_ref(), definition).await?;
-            let fresh = discover_mcp(&self.plugin, &self.builtin_definitions).await?;
+            let fresh = discover_mcp(
+                &self.plugin,
+                &self.builtin_definitions,
+                &self.device_definitions,
+            )
+            .await?;
             let definition = find_definition(&fresh.definitions, target, digest)?;
             commit_managed_configuration(
                 self.tasks.as_ref(),
@@ -922,6 +1163,7 @@ impl McpManagement {
             self.config_store.as_ref(),
             self.plugin.as_ref(),
             &self.builtin_definitions,
+            &self.device_definitions,
             self.registry.as_ref(),
             self.config_registry.as_ref(),
             self.approval_registry.as_ref(),
@@ -958,6 +1200,7 @@ impl McpManagement {
                         self.config_store.as_ref(),
                         self.plugin.as_ref(),
                         &self.builtin_definitions,
+                        &self.device_definitions,
                         self.registry.as_ref(),
                         self.config_registry.as_ref(),
                         self.approval_registry.as_ref(),
@@ -977,12 +1220,21 @@ impl McpManagement {
 #[path = "mcp/management_tools.rs"]
 pub(super) mod management_tools;
 
-/// 一次命令的来源事实归并，不新增目录缓存；相同内置定义用于查询、写前校验、测试及刷新。
+/// 一次命令的来源事实归并，不新增目录缓存；相同内置与终端定义用于查询、写前校验、测试及刷新。
 async fn discover_mcp(
     plugin: &crate::plugin::PluginManager,
     builtin: &[crate::ManagedMcpServerDefinition],
+    device: &std::sync::RwLock<
+        std::collections::BTreeMap<
+            assistant_protocol::DeviceId,
+            Vec<crate::ManagedMcpServerDefinition>,
+        >,
+    >,
 ) -> RuntimeResult<crate::plugin::PluginMcpDiscovery> {
     let mut discovery = plugin.mcp_candidates().await?;
     discovery.definitions.extend_from_slice(builtin);
+    discovery
+        .definitions
+        .extend(crate::mcp::device_definitions_snapshot(device)?);
     Ok(discovery)
 }

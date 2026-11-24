@@ -98,7 +98,8 @@ macro_rules! define_identifier {
 
 define_identifier!(
     /// 用户配置的服务商连接实例；与厂商类型不同。
-    ProviderInstanceId, "provider instance id"
+    ProviderInstanceId,
+    "provider instance id"
 );
 
 define_identifier!(

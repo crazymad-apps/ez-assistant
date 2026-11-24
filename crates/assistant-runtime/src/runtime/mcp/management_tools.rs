@@ -19,6 +19,7 @@ use crate::{RuntimeError, RuntimeResult, session::SessionController};
 enum Source {
     User,
     Plugin(String),
+    Device(String),
     Builtin,
 }
 
@@ -37,7 +38,10 @@ impl Target {
             Source::Plugin(name) if !name.is_empty() && name.len() <= 128 => {
                 McpServerSource::Plugin(name.clone())
             }
-            _ => return Err(ToolError::invalid_input("invalid plugin name")),
+            Source::Device(id) if !id.is_empty() && id.len() <= 128 => {
+                McpServerSource::Device(id.clone())
+            }
+            _ => return Err(ToolError::invalid_input("invalid MCP source identifier")),
         };
         Ok(McpServerTarget {
             source,

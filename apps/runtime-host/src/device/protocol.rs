@@ -1,6 +1,6 @@
 //! Device wire 1.0 的有界 JSON envelope、能力与控制 payload。
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use assistant_protocol::{
     DeviceCapabilitiesSnapshot, InputId, OutputPreferenceSnapshot, RunId, RunStatus,
@@ -103,7 +103,16 @@ impl Envelope {
     }
 }
 
-/// 设备发起配对时提交的临时候选身份和 PAKE 首包。
+/// 设备在 `pairing_hello` 中声明的配对模式；缺省保持旧版 SPAKE2。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum WirePairingMode {
+    #[default]
+    Spake2,
+    DirectConfirm,
+}
+
+/// 设备发起配对时提交的临时候选身份及 PAKE 或 Ed25519 公钥。
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct PairingHello {
@@ -111,7 +120,58 @@ pub(super) struct PairingHello {
     pub(super) display_name: String,
     pub(super) device_nonce: String,
     pub(super) capabilities: DeviceCapabilitiesSnapshot,
-    pub(super) pake_share: String,
+    #[serde(default)]
+    pub(super) pairing_mode: WirePairingMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) pake_share: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) public_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) client_version: Option<String>,
+}
+
+/// 桌面端点击确认免码配对后，Host 下发的挑战与分配设备 ID。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PairingDirectChallenge {
+    pub(super) pairing_request_id: String,
+    pub(super) host_nonce: String,
+    pub(super) device_id: String,
+}
+
+/// 免码配对中设备使用其长期私钥对绑定 transcript 作出的最终签名确认。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PairingDirectCommit {
+    pub(super) pairing_request_id: String,
+    pub(super) device_id: String,
+    pub(super) signature: String,
+}
+
+/// 设备声明的反向 MCP HTTP 传输协议。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum DeviceMcpScheme {
+    #[default]
+    Http,
+    Https,
+}
+
+/// 已配对设备在认证 `hello` 中声明的自托管 Streamable HTTP MCP 端点元数据（不含 Host，由连接对端 IP 绑定）。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct DeviceMcpServerDeclaration {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) id: Option<String>,
+    pub(super) display_name: String,
+    #[serde(default)]
+    pub(super) description: String,
+    #[serde(default)]
+    pub(super) scheme: DeviceMcpScheme,
+    pub(super) port: u16,
+    pub(super) path: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(super) headers: BTreeMap<String, String>,
 }
 
 /// Host 已接管配对候选并等待 Desktop 确认的通知。
@@ -197,6 +257,8 @@ pub(super) struct DeviceHello {
     pub(super) output_preference: OutputPreferenceSnapshot,
     pub(super) client_version: String,
     pub(super) signature: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) mcp_servers: Vec<DeviceMcpServerDeclaration>,
 }
 
 /// Host 完成认证和有效能力裁剪后的连接确认。

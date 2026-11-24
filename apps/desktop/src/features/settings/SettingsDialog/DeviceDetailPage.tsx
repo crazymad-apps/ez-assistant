@@ -26,6 +26,11 @@ export function DeviceDetailPage(props: DeviceDetailPageProps) {
         {connection ? <DetailRow label="输入能力" value={inputCapabilities(connection.capabilities)} /> : null}
         {connection ? <DetailRow label="输出能力" value={outputCapabilities(connection.capabilities)} /> : null}
         {connection ? <DetailRow label="交互能力" value={interactionCapabilities(connection.capabilities)} /> : null}
+        {connection?.peer_address ? <DetailRow label="连接地址" value={connection.peer_address} /> : null}
+        {connection?.client_version ? <DetailRow label="客户端版本" value={connection.client_version} /> : null}
+        {connection && connection.mcp_server_keys && connection.mcp_server_keys.length > 0 ? (
+          <DetailRow label="自动配置 MCP" value={connection.mcp_server_keys.join("、")} />
+        ) : null}
       </dl>
       {!connection ? <p className={styles.device_detail_note}>设备重新在线后，会显示本次连接协商出的能力与输出偏好。</p> : null}
     </SettingsPageContainer>

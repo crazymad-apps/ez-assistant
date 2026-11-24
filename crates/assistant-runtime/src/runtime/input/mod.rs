@@ -692,18 +692,32 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                         message.parts.extend(shell_context.parts.iter().cloned());
                     }
                 }
-                if let (Some(message), Some(disclosure)) = (&mut message, &disclosure_context) {
-                    let needs_disclosure = match session.lock_state() {
-                        Ok(state) => state.journal.as_ref().is_some_and(|journal| {
-                            crate::mcp::needs_initial_disclosure(&journal.snapshot(), disclosure)
-                        }),
+                if let Some(message) = &mut message {
+                    let resolved_disclosure = match session.lock_state() {
+                        Ok(state) => state
+                            .journal
+                            .as_ref()
+                            .map(|journal| {
+                                crate::mcp::resolve_directory_disclosure(
+                                    &journal.snapshot(),
+                                    disclosure_context.as_ref(),
+                                )
+                            })
+                            .transpose(),
                         Err(_) => {
                             fault_driver(&session);
                             return;
                         }
                     };
-                    if needs_disclosure {
-                        message.parts.extend(disclosure.parts.iter().cloned());
+                    match resolved_disclosure {
+                        Ok(Some(Some(disclosure))) => {
+                            message.parts.extend(disclosure.parts.iter().cloned());
+                        }
+                        Ok(Some(None)) | Ok(None) => {}
+                        Err(_) => {
+                            fault_driver(&session);
+                            return;
+                        }
                     }
                 }
                 if next.1.stored.agent_shell_target.is_some()

@@ -8,15 +8,18 @@ use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use assistant_protocol::{
     ConfirmDevicePairingRequest, DeviceCapabilitiesSnapshot, DeviceConnectionSnapshot,
-    DeviceGatewayEvent, DeviceGatewaySnapshot, DeviceLifecycleSnapshot,
-    DevicePairingWindowSnapshot, DeviceSummarySnapshot, OutputPreferenceSnapshot,
-    PendingDevicePairingSnapshot, RuntimeErrorCode, RuntimeErrorInfo,
+    DeviceGatewayEvent, DeviceGatewaySnapshot, DeviceLifecycleSnapshot, DevicePairingModeSnapshot,
+    DevicePairingWindowSnapshot, DeviceSummarySnapshot, McpServerKey, OutputPreferenceSnapshot,
+    PendingDevicePairingSnapshot, RejectDevicePairingRequest, RuntimeErrorCode, RuntimeErrorInfo,
 };
 use assistant_runtime::{
     AssistantRuntime, ChannelOutput, ChannelOutputDispatchError, ChannelSpeechSegment,
@@ -41,7 +44,7 @@ use super::{
 use crate::speech::{SpeechServiceError, SpeechServiceHandle};
 
 const PAIRING_WINDOW_DURATION: Duration = Duration::from_secs(5 * 60);
-const MAX_PAIRING_ATTEMPTS: u8 = 5;
+pub(super) const MAX_PAIRING_ATTEMPTS: u8 = 5;
 const LIFECYCLE_QUEUE_CAPACITY: usize = 16;
 const CONNECTION_COMMAND_CAPACITY: usize = 32;
 const GATEWAY_EVENT_CAPACITY: usize = 32;
@@ -81,7 +84,10 @@ pub(super) struct GatewayShared {
             Arc<Mutex<Option<super::connection::VoiceTurnAggregation>>>,
         >,
     >,
+    mcp_locks: Mutex<HashMap<assistant_protocol::DeviceId, Arc<Mutex<()>>>>,
     pub(super) recognition_tasks: TaskTracker,
+    pub(super) mcp_tasks: TaskTracker,
+    next_pending_token: AtomicU64,
     events: broadcast::Sender<DeviceGatewayEvent>,
 }
 
@@ -95,19 +101,43 @@ struct GatewayState {
     connections: HashMap<assistant_protocol::DeviceId, ActiveConnection>,
 }
 
-/// 等待 Desktop 输入配对码的候选设备及其一次性决策通道。
+/// 等待 Desktop 确认（输入配对码或一键确认）的候选设备及其一次性决策通道。
 pub(super) struct PendingPairing {
     pub(super) display_name: String,
     pub(super) capabilities: DeviceCapabilitiesSnapshot,
     pub(super) expires_at_ms: i64,
     pub(super) remaining_attempts: u8,
+    pub(super) mode: DevicePairingModeSnapshot,
+    pub(super) peer_address: Option<String>,
+    pub(super) key_fingerprint: Option<String>,
+    pub(super) client_version: Option<String>,
+    pub(super) token: u64,
     pub(super) decision: mpsc::Sender<PairingDecision>,
 }
 
-/// Desktop 对候选设备作出的配对确认，不代表设备身份已经持久化。
-pub(super) struct PairingDecision {
-    pub(super) pairing_code: String,
-    pub(super) display_name: Option<String>,
+/// 注册待确认配对候选时的元数据输入。
+pub(super) struct PendingPairingRegistration {
+    pub(super) request_id: String,
+    pub(super) display_name: String,
+    pub(super) capabilities: DeviceCapabilitiesSnapshot,
+    pub(super) mode: DevicePairingModeSnapshot,
+    pub(super) remaining_attempts: u8,
+    pub(super) peer_address: Option<String>,
+    pub(super) key_fingerprint: Option<String>,
+    pub(super) client_version: Option<String>,
+    pub(super) decision: mpsc::Sender<PairingDecision>,
+}
+
+/// Desktop 对候选设备作出的配对确认或拒绝，不代表设备身份已经持久化。
+pub(super) enum PairingDecision {
+    ApproveSpake2 {
+        pairing_code: String,
+        display_name: Option<String>,
+    },
+    ApproveDirect {
+        display_name: Option<String>,
+    },
+    Reject,
 }
 
 /// 一台已认证设备的当前唯一在线连接。
@@ -118,6 +148,9 @@ struct ActiveConnection {
     connected_at_ms: i64,
     capabilities: DeviceCapabilitiesSnapshot,
     output_preference: OutputPreferenceSnapshot,
+    peer_address: Option<String>,
+    client_version: Option<String>,
+    mcp_server_keys: Vec<McpServerKey>,
     command: mpsc::Sender<ConnectionCommand>,
 }
 
@@ -194,7 +227,10 @@ impl DeviceGatewayService {
             speech,
             events: event_tx,
             voice_turns: Mutex::new(HashMap::new()),
+            mcp_locks: Mutex::new(HashMap::new()),
             recognition_tasks: TaskTracker::new(),
+            mcp_tasks: TaskTracker::new(),
+            next_pending_token: AtomicU64::new(1),
             state: Mutex::new(GatewayState {
                 enabled: false,
                 available: false,
@@ -303,6 +339,7 @@ impl DeviceGatewayService {
 
     async fn start_gateway(&self) -> Result<ActiveGateway, DeviceGatewayError> {
         self.shared.recognition_tasks.reopen();
+        self.shared.mcp_tasks.reopen();
         let runtime_home = self.runtime_home.clone();
         let identity = tokio::task::spawn_blocking(move || {
             InstallationIdentity::load_or_create(&runtime_home)
@@ -350,8 +387,11 @@ impl DeviceGatewayService {
             state.identity = Some(identity);
         }
         self.shared.notify_changed();
-        let server_task =
-            tokio::spawn(async move { server.serve(router.into_make_service()).await });
+        let server_task = tokio::spawn(async move {
+            server
+                .serve(router.into_make_service_with_connect_info::<SocketAddr>())
+                .await
+        });
         Ok(ActiveGateway {
             server_handle,
             server_task,
@@ -362,7 +402,7 @@ impl DeviceGatewayService {
     }
 
     async fn stop_gateway(&self, active: ActiveGateway) {
-        self.disconnect_all().await;
+        let disconnected = self.disconnect_all().await;
         let _ = active.mdns.unregister(&active.service_fullname);
         let _ = active.mdns.shutdown();
         active
@@ -370,13 +410,15 @@ impl DeviceGatewayService {
             .graceful_shutdown(Some(Duration::from_secs(5)));
         let _ = active.server_task.await;
         self.stop_recognition_tasks().await;
+        self.stop_mcp_tasks(disconnected).await;
     }
 
     async fn cleanup_stopped_gateway(&self, active: ActiveGateway) {
-        self.disconnect_all().await;
+        let disconnected = self.disconnect_all().await;
         let _ = active.mdns.unregister(&active.service_fullname);
         let _ = active.mdns.shutdown();
         self.stop_recognition_tasks().await;
+        self.stop_mcp_tasks(disconnected).await;
     }
 
     async fn refresh_discovery(
@@ -421,6 +463,7 @@ impl DeviceGatewayService {
                 identity.certificate_fingerprint.clone(),
             ),
             ("pairing_available", pairing_available.to_string()),
+            ("pairing_modes", "direct_confirm,spake2".to_owned()),
         ];
         let hostname = format!("{}.local.", identity.installation_id);
         let service = ServiceInfo::new(
@@ -439,17 +482,36 @@ impl DeviceGatewayService {
         Ok(fullname)
     }
 
-    async fn disconnect_all(&self) {
-        let connections = {
+    async fn disconnect_all(&self) -> Vec<assistant_protocol::DeviceId> {
+        let disconnected = {
             let mut state = self.shared.state.lock().await;
             state
                 .connections
                 .drain()
-                .map(|(_, connection)| connection.command)
+                .map(|(device_id, connection)| (device_id, connection.command))
                 .collect::<Vec<_>>()
         };
-        for connection in connections {
+        let mut device_ids = Vec::with_capacity(disconnected.len());
+        for (device_id, connection) in disconnected {
             let _ = connection.try_send(ConnectionCommand::GatewayDisabled);
+            device_ids.push(device_id);
+        }
+        device_ids
+    }
+
+    async fn stop_mcp_tasks(&self, disconnected: Vec<assistant_protocol::DeviceId>) {
+        self.shared.mcp_tasks.close();
+        self.shared.mcp_tasks.wait().await;
+        for device_id in disconnected {
+            let lock = self.shared.mcp_lock(&device_id).await;
+            let _guard = lock.lock().await;
+            if !self.shared.is_device_connected(&device_id).await {
+                let _ = self
+                    .shared
+                    .runtime
+                    .mark_device_mcp_offline(&device_id)
+                    .await;
+            }
         }
     }
 
@@ -536,14 +598,39 @@ impl DeviceGatewayHandle {
             if pending.remaining_attempts == 0 {
                 return Err(DeviceGatewayError::PairingAttemptsExhausted);
             }
-            pending.remaining_attempts -= 1;
-            (
-                pending.decision.clone(),
-                PairingDecision {
-                    pairing_code: request.pairing_code.expose().to_owned(),
-                    display_name: request.display_name,
-                },
-            )
+            let payload = match pending.mode {
+                DevicePairingModeSnapshot::Spake2 => {
+                    let pairing_code = request
+                        .pairing_code
+                        .as_ref()
+                        .map(|code| code.expose().trim().to_owned())
+                        .unwrap_or_default();
+                    if pairing_code.len() != 6
+                        || !pairing_code.bytes().all(|byte| byte.is_ascii_digit())
+                    {
+                        return Err(DeviceGatewayError::InvalidPairingCode);
+                    }
+                    pending.remaining_attempts -= 1;
+                    PairingDecision::ApproveSpake2 {
+                        pairing_code,
+                        display_name: request.display_name,
+                    }
+                }
+                DevicePairingModeSnapshot::DirectConfirm => {
+                    if request
+                        .pairing_code
+                        .as_ref()
+                        .is_some_and(|code| !code.expose().trim().is_empty())
+                    {
+                        return Err(DeviceGatewayError::InvalidPairingCode);
+                    }
+                    pending.remaining_attempts = 0;
+                    PairingDecision::ApproveDirect {
+                        display_name: request.display_name,
+                    }
+                }
+            };
+            (pending.decision.clone(), payload)
         };
         self.shared.notify_changed();
         decision
@@ -551,6 +638,24 @@ impl DeviceGatewayHandle {
             .send(decision.1)
             .await
             .map_err(|_| DeviceGatewayError::PairingDisconnected)
+    }
+
+    pub(crate) async fn reject_pairing(
+        &self,
+        request: RejectDevicePairingRequest,
+    ) -> Result<(), DeviceGatewayError> {
+        let decision = {
+            let mut state = self.shared.state.lock().await;
+            prune_expired(&mut state, now_ms()?);
+            let pending = state
+                .pending_pairings
+                .remove(&request.pairing_request_id)
+                .ok_or(DeviceGatewayError::PairingNotFound)?;
+            pending.decision
+        };
+        self.shared.notify_changed();
+        let _ = decision.try_send(PairingDecision::Reject);
+        Ok(())
     }
 
     pub(crate) async fn snapshot(&self) -> Result<DeviceGatewaySnapshot, DeviceGatewayError> {
@@ -570,6 +675,9 @@ impl DeviceGatewayHandle {
                         connected_at_ms: connection.connected_at_ms,
                         capabilities: connection.capabilities,
                         output_preference: connection.output_preference,
+                        peer_address: connection.peer_address.clone(),
+                        client_version: connection.client_version.clone(),
+                        mcp_server_keys: connection.mcp_server_keys.clone(),
                     }
                 }),
                 device_id: device.device_id,
@@ -594,6 +702,10 @@ impl DeviceGatewayHandle {
                     capabilities: pending.capabilities,
                     expires_at_ms: pending.expires_at_ms,
                     remaining_attempts: pending.remaining_attempts,
+                    mode: pending.mode,
+                    peer_address: pending.peer_address.clone(),
+                    key_fingerprint: pending.key_fingerprint.clone(),
+                    client_version: pending.client_version.clone(),
                 },
             )
             .collect::<Vec<_>>();
@@ -632,6 +744,13 @@ impl DeviceGatewayHandle {
         {
             aggregation.cancel();
         }
+        let mcp_lock = self.shared.mcp_lock(device_id).await;
+        let _guard = mcp_lock.lock().await;
+        let _ = self
+            .shared
+            .runtime
+            .remove_device_mcp_servers(device_id)
+            .await;
     }
 
     pub(crate) fn subscribe_events(&self) -> broadcast::Receiver<DeviceGatewayEvent> {
@@ -640,6 +759,19 @@ impl DeviceGatewayHandle {
 
     pub(crate) fn notify_changed(&self) {
         self.shared.notify_changed();
+    }
+
+    #[cfg(test)]
+    pub(super) async fn seed_test_identity(&self, identity: Arc<InstallationIdentity>) {
+        let mut state = self.shared.state.lock().await;
+        state.enabled = true;
+        state.available = true;
+        state.identity = Some(identity);
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_shared(&self) -> Arc<GatewayShared> {
+        self.shared.clone()
     }
 }
 
@@ -677,61 +809,102 @@ impl GatewayShared {
                 .is_some_and(|expires_at| expires_at > now)
     }
 
+    pub(super) async fn mcp_lock(
+        &self,
+        device_id: &assistant_protocol::DeviceId,
+    ) -> Arc<Mutex<()>> {
+        self.mcp_locks
+            .lock()
+            .await
+            .entry(device_id.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
     pub(super) async fn register_pending(
         &self,
-        request_id: String,
-        display_name: String,
-        capabilities: DeviceCapabilitiesSnapshot,
-        decision: mpsc::Sender<PairingDecision>,
-    ) -> Result<i64, DeviceGatewayError> {
+        registration: PendingPairingRegistration,
+    ) -> Result<(i64, u64), DeviceGatewayError> {
         let now = now_ms()?;
+        let token = self.next_pending_token.fetch_add(1, Ordering::Relaxed);
         let mut state = self.state.lock().await;
         prune_expired(&mut state, now);
         let window_expires = state
             .pairing_window_expires_at_ms
             .filter(|expires_at| *expires_at > now)
             .ok_or(DeviceGatewayError::PairingNotOpen)?;
-        let pending = state
+        let request_id = registration.request_id.clone();
+        let reuse_existing = state
             .pending_pairings
-            .entry(request_id)
-            .or_insert_with(|| PendingPairing {
-                display_name: display_name.clone(),
-                capabilities,
-                expires_at_ms: window_expires,
-                remaining_attempts: MAX_PAIRING_ATTEMPTS,
-                decision: decision.clone(),
+            .get(&request_id)
+            .is_some_and(|existing| {
+                existing.mode == DevicePairingModeSnapshot::Spake2
+                    && registration.mode == DevicePairingModeSnapshot::Spake2
             });
-        if pending.remaining_attempts == 0 {
-            return Err(DeviceGatewayError::PairingAttemptsExhausted);
-        }
-        pending.display_name = display_name;
-        pending.capabilities = capabilities;
-        pending.decision = decision;
-        let expires_at_ms = pending.expires_at_ms;
+        let expires_at_ms = if reuse_existing {
+            let pending = state
+                .pending_pairings
+                .get_mut(&request_id)
+                .expect("checked existing entry");
+            if pending.remaining_attempts == 0 {
+                return Err(DeviceGatewayError::PairingAttemptsExhausted);
+            }
+            pending.display_name = registration.display_name;
+            pending.capabilities = registration.capabilities;
+            pending.peer_address = registration.peer_address;
+            pending.client_version = registration.client_version;
+            pending.token = token;
+            pending.decision = registration.decision;
+            pending.expires_at_ms
+        } else {
+            state.pending_pairings.insert(
+                request_id,
+                PendingPairing {
+                    display_name: registration.display_name,
+                    capabilities: registration.capabilities,
+                    expires_at_ms: window_expires,
+                    remaining_attempts: registration.remaining_attempts,
+                    mode: registration.mode,
+                    peer_address: registration.peer_address,
+                    key_fingerprint: registration.key_fingerprint,
+                    client_version: registration.client_version,
+                    token,
+                    decision: registration.decision,
+                },
+            );
+            window_expires
+        };
         drop(state);
         self.notify_changed();
-        Ok(expires_at_ms)
+        Ok((expires_at_ms, token))
     }
 
-    pub(super) async fn remove_pending(&self, request_id: &str) {
-        if self
-            .state
-            .lock()
-            .await
+    pub(super) async fn remove_pending_if_token(&self, request_id: &str, token: u64) {
+        let mut state = self.state.lock().await;
+        let should_remove = state
             .pending_pairings
-            .remove(request_id)
-            .is_some()
-        {
+            .get(request_id)
+            .is_some_and(|pending| pending.token == token);
+        if should_remove {
+            state.pending_pairings.remove(request_id);
+            drop(state);
             self.notify_changed();
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "connection registration records identity, capabilities, metadata, and MCP keys atomically"
+    )]
     pub(super) async fn register_connection(
         &self,
         device_id: assistant_protocol::DeviceId,
         connection_id: String,
         capabilities: DeviceCapabilitiesSnapshot,
         output_preference: OutputPreferenceSnapshot,
+        peer_address: Option<String>,
+        client_version: Option<String>,
+        mcp_server_keys: Vec<McpServerKey>,
     ) -> mpsc::Receiver<ConnectionCommand> {
         let (command_tx, command_rx) = mpsc::channel(CONNECTION_COMMAND_CAPACITY);
         let previous = self.state.lock().await.connections.insert(
@@ -741,6 +914,9 @@ impl GatewayShared {
                 connected_at_ms: now_ms().unwrap_or_default(),
                 capabilities,
                 output_preference,
+                peer_address,
+                client_version,
+                mcp_server_keys,
                 command: command_tx,
             },
         );
@@ -749,6 +925,26 @@ impl GatewayShared {
         }
         self.notify_changed();
         command_rx
+    }
+
+    pub(super) async fn is_current_connection(
+        &self,
+        device_id: &assistant_protocol::DeviceId,
+        connection_id: &str,
+    ) -> bool {
+        self.state
+            .lock()
+            .await
+            .connections
+            .get(device_id)
+            .is_some_and(|connection| connection.connection_id == connection_id)
+    }
+
+    pub(super) async fn is_device_connected(
+        &self,
+        device_id: &assistant_protocol::DeviceId,
+    ) -> bool {
+        self.state.lock().await.connections.contains_key(device_id)
     }
 
     pub(super) async fn update_preference(
@@ -778,7 +974,7 @@ impl GatewayShared {
         &self,
         device_id: &assistant_protocol::DeviceId,
         connection_id: &str,
-    ) {
+    ) -> bool {
         let mut state = self.state.lock().await;
         if state
             .connections
@@ -788,6 +984,9 @@ impl GatewayShared {
             state.connections.remove(device_id);
             drop(state);
             self.notify_changed();
+            true
+        } else {
+            false
         }
     }
 
@@ -1128,6 +1327,8 @@ pub(crate) enum DeviceGatewayError {
     PairingNotFound,
     #[error("device pairing attempts are exhausted")]
     PairingAttemptsExhausted,
+    #[error("device pairing code is invalid")]
+    InvalidPairingCode,
     #[error("device pairing connection ended")]
     PairingDisconnected,
     #[error("system clock is unavailable")]
@@ -1162,6 +1363,10 @@ impl DeviceGatewayError {
             Self::PairingAttemptsExhausted => RuntimeErrorInfo::new(
                 RuntimeErrorCode::OperationNotAllowed,
                 "device pairing attempts are exhausted",
+            ),
+            Self::InvalidPairingCode => RuntimeErrorInfo::new(
+                RuntimeErrorCode::InvalidRequest,
+                "device pairing code is invalid",
             ),
             Self::PairingDisconnected => RuntimeErrorInfo::new(
                 RuntimeErrorCode::Conflict,

@@ -48,7 +48,10 @@ describe("DeviceGatewayStore", () => {
 
   it("validates pairing codes locally and coalesces invalidation refreshes", async () => {
     vi.useFakeTimers();
-    const device_command = vi.fn(async () => ({ type: "get_snapshot", payload: gatewaySnapshot() }));
+    const snapshot = gatewaySnapshot();
+    const device_command = vi.fn(async (command: { type: string }) => command.type === "get_snapshot"
+      ? { type: "get_snapshot", payload: snapshot }
+      : { type: command.type, payload: { snapshot } });
     const store = new DeviceGatewayStore({
       get_client: () => ({ deviceGatewayCommand: device_command }) as unknown as RuntimeClient,
       refresh_application: async () => undefined,
@@ -58,6 +61,19 @@ describe("DeviceGatewayStore", () => {
     expect(device_command).not.toHaveBeenCalled();
     expect(store.error_message).toContain("6 位配对码");
 
+    expect(await store.confirmPairing("pairing-direct", null, "书房终端")).toBe(true);
+    expect(device_command).toHaveBeenCalledWith({
+      type: "confirm_pairing",
+      payload: { pairing_request_id: "pairing-direct", pairing_code: null, display_name: "书房终端" },
+    });
+
+    expect(await store.rejectPairing("pairing-direct")).toBe(true);
+    expect(device_command).toHaveBeenCalledWith({
+      type: "reject_pairing",
+      payload: { pairing_request_id: "pairing-direct" },
+    });
+
+    device_command.mockClear();
     store.scheduleRefresh();
     store.scheduleRefresh();
     await vi.advanceTimersByTimeAsync(80);

@@ -604,3 +604,88 @@ async fn explicitly_disabled_invalid_user_entry_does_not_shadow_plugin() {
         &definition.source
     );
 }
+
+#[tokio::test]
+async fn device_managed_source_precedence_overrides_and_cleanup() {
+    let device_id = assistant_protocol::DeviceId::new("device-TestABC123").unwrap();
+    let key = crate::device_mcp_server_key(&device_id, Some("esp-pika")).unwrap();
+    assert_eq!(
+        crate::device_mcp_server_key(&device_id, Some("esp-pika")).unwrap(),
+        key
+    );
+
+    let user = Arc::new(Source(Mutex::new(Some(
+        json!({
+            "mcpServers": { "other": { "command": "ok" } },
+            "managedServers": {
+                "device": {
+                    key.as_str(): { "headers": { "X-Custom": "override-val" } },
+                    "device-offline-deadbeef": { "enabled": false }
+                }
+            }
+        })
+        .to_string(),
+    ))));
+    let store = McpConfigStore::new(user.clone());
+    let device_def = ManagedMcpServerDefinition {
+        source: McpServerSource::Device(device_id.to_string()),
+        server_key: key.clone(),
+        definition_digest: "digest-1".to_owned(),
+        source_enabled: true,
+        source_available: true,
+        ready: true,
+        raw: json!({
+            "displayName": "ESP-Pika",
+            "url": "http://192.168.1.25:8080/mcp",
+            "headers": { "X-Agent-ID": "ez-assistant" }
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+        parameter_bindings: BTreeMap::new(),
+        parameters: Vec::new(),
+        plugin_settings_revision: None,
+        plugin_sha256: None,
+        configuration: None,
+    };
+    let mut builtin_def = definition(Arc::new(Source::default()));
+    builtin_def.source = McpServerSource::Builtin;
+    builtin_def.server_key = key.clone();
+    builtin_def.configuration = None;
+
+    let (snapshot, candidate) = store
+        .resolve_managed(
+            &[builtin_def.clone(), device_def.clone()],
+            &[],
+            &BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+    // 离线设备在 managedServers.device 留存的覆盖不触发孤儿诊断；且 Device 优先于 Builtin。
+    assert!(
+        snapshot.diagnostics.is_empty(),
+        "{:?}",
+        snapshot.diagnostics
+    );
+    assert_eq!(candidate.servers[&key].source(), &device_def.source);
+    let device_snapshot = snapshot
+        .servers
+        .iter()
+        .find(|s| s.source == device_def.source)
+        .unwrap();
+    assert!(device_snapshot.header_keys.contains(&"X-Custom".to_owned()));
+
+    // 删除该设备覆盖只清除匹配设备 key，保留其他用户服务。
+    store
+        .remove_managed_device_overrides(&device_id, std::slice::from_ref(&key))
+        .await
+        .unwrap();
+    let stored: Value = serde_json::from_str(&user.text().unwrap()).unwrap();
+    assert!(stored["mcpServers"]["other"].is_object());
+    assert!(
+        stored["managedServers"]["device"]
+            .get(key.as_str())
+            .is_none()
+    );
+    assert!(stored["managedServers"]["device"]["device-offline-deadbeef"].is_object());
+}

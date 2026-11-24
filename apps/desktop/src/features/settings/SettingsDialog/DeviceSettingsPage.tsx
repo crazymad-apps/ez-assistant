@@ -216,32 +216,66 @@ const PendingPairing = observer(function PendingPairing(props: Readonly<{
 }>) {
   const [code, setCode] = useState("");
   const pending_action = props.gateway.pending_action === `pairing:${props.pending.pairing_request_id}`;
+  const is_direct = props.pending.mode === "direct_confirm";
+  const subtitle = is_direct
+    ? [
+        capabilityLabel(props.pending.capabilities),
+        props.pending.peer_address,
+        props.pending.key_fingerprint ? `指纹 ${props.pending.key_fingerprint}` : null,
+      ]
+        .filter(Boolean)
+        .join(" · ")
+    : `${capabilityLabel(props.pending.capabilities)} · 还可尝试 ${props.pending.remaining_attempts} 次`;
+
   return (
-    <article>
+    <article data-mode={props.pending.mode}>
       <span className={styles.device_icon}><Icon name="device" size={18} /></span>
       <div>
         <strong>{props.pending.display_name}</strong>
-        <small>{capabilityLabel(props.pending.capabilities)} · 还可尝试 {props.pending.remaining_attempts} 次</small>
+        <small>{subtitle}</small>
       </div>
-      <label>
-        <input
-          aria-label={`${props.pending.display_name} 配对码`}
-          autoComplete="one-time-code"
-          disabled={pending_action}
-          inputMode="numeric"
-          maxLength={6}
-          onChange={(event) => setCode(event.currentTarget.value.replace(/\D/g, "").slice(0, 6))}
-          placeholder="配对码"
-          value={code}
-        />
-      </label>
-      <button
-        disabled={pending_action || code.length !== 6}
-        onClick={() => void props.gateway.confirmPairing(props.pending.pairing_request_id, code, null)}
-        type="button"
-      >
-        {pending_action ? "配对中…" : "确认配对"}
-      </button>
+      {is_direct ? (
+        <div className={styles.pending_device_actions}>
+          <button
+            className={styles.pending_device_confirm}
+            disabled={pending_action}
+            onClick={() => void props.gateway.confirmPairing(props.pending.pairing_request_id, null, null)}
+            type="button"
+          >
+            {pending_action ? "配对中…" : "确认配对"}
+          </button>
+          <button
+            className={styles.pending_device_reject}
+            disabled={pending_action}
+            onClick={() => void props.gateway.rejectPairing(props.pending.pairing_request_id)}
+            type="button"
+          >
+            拒绝
+          </button>
+        </div>
+      ) : (
+        <>
+          <label>
+            <input
+              aria-label={`${props.pending.display_name} 配对码`}
+              autoComplete="one-time-code"
+              disabled={pending_action}
+              inputMode="numeric"
+              maxLength={6}
+              onChange={(event) => setCode(event.currentTarget.value.replace(/\D/g, "").slice(0, 6))}
+              placeholder="配对码"
+              value={code}
+            />
+          </label>
+          <button
+            disabled={pending_action || code.length !== 6}
+            onClick={() => void props.gateway.confirmPairing(props.pending.pairing_request_id, code, null)}
+            type="button"
+          >
+            {pending_action ? "配对中…" : "确认配对"}
+          </button>
+        </>
+      )}
     </article>
   );
 });

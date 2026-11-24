@@ -16,6 +16,7 @@ pub(super) fn with_source(
     let source = match source {
         McpServerSource::User => "用户添加".to_owned(),
         McpServerSource::Plugin(name) => format!("插件 · {name}"),
+        McpServerSource::Device(id) => format!("智能终端 · {id}"),
         McpServerSource::Builtin => "内置资源".to_owned(),
     };
     McpConnectionError::new(error.kind(), format!("来源：{source}；{}", error.message()))
@@ -103,6 +104,10 @@ mod tests {
             (
                 McpServerSource::Plugin("general-assistant".into()),
                 "插件 · general-assistant",
+            ),
+            (
+                McpServerSource::Device("device-abc".into()),
+                "智能终端 · device-abc",
             ),
             (McpServerSource::Builtin, "内置资源"),
         ] {

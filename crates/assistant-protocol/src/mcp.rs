@@ -20,7 +20,7 @@ pub enum McpTransportKind {
     StreamableHttp,
 }
 
-/// 配置所有权来源；排序同时定义同名启用项的优先级：用户、插件标识升序、内置。
+/// 配置所有权来源；排序同时定义同名启用项的优先级：用户、插件标识升序、智能终端标识升序、内置。
 /// 运行与权限仍沿用 server_key，来源仅决定采用哪份配置。
 #[derive(Clone, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
@@ -29,6 +29,7 @@ pub enum McpServerSource {
     #[default]
     User,
     Plugin(String),
+    Device(String),
     Builtin,
 }
 
