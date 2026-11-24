@@ -128,6 +128,7 @@ pub enum AgentVariant {
 #[serde(rename_all = "snake_case")]
 pub enum PermissionScope {
     Global,
+    Controller,
     Workspace,
     Session,
 }

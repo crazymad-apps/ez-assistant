@@ -34,6 +34,15 @@ pub struct PersonaSnapshot {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
+pub struct ControllerPromptSnapshot {
+    pub enabled: bool,
+    pub content: String,
+    pub revision: u64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct PinnedMemorySnapshot {
     pub id: String,
     pub category: String,

@@ -1,5 +1,6 @@
 import { action, makeObservable, observable, observableRef, runInAction } from "mobx";
 import type {
+  ControllerPromptSnapshot,
   MemoryCapabilities,
   PersonaSnapshot,
   PinnedMemoryCollectionSnapshot,
@@ -15,6 +16,8 @@ export class MemorySettingsStore {
   loading = false;
   pending_action: string | null = null;
   persona: PersonaSnapshot | null = null;
+  controller_prompt: ControllerPromptSnapshot | null = null;
+  controller_prompt_max_bytes = 0;
   collection: PinnedMemoryCollectionSnapshot | null = null;
   capabilities: MemoryCapabilities | null = null;
   error_message: string | null = null;
@@ -26,6 +29,8 @@ export class MemorySettingsStore {
       loading: observable,
       pending_action: observable,
       persona: observableRef,
+      controller_prompt: observableRef,
+      controller_prompt_max_bytes: observable,
       collection: observableRef,
       capabilities: observableRef,
       error_message: observable,
@@ -33,6 +38,7 @@ export class MemorySettingsStore {
       conflict_message: observable,
       load: action,
       savePersona: action,
+      saveControllerPrompt: action,
       createPinnedMemory: action,
       updatePinnedMemory: action,
       deletePinnedMemory: action,
@@ -59,13 +65,16 @@ export class MemorySettingsStore {
     this.loading = true;
     this.clearMessages();
     try {
-      const [persona_result, pinned_result] = await Promise.all([
+      const [persona_result, controller_result, pinned_result] = await Promise.all([
         client.command({ type: "get_persona", payload: {} }),
+        client.command({ type: "get_controller_prompt", payload: {} }),
         client.command({ type: "list_pinned_memories", payload: {} }),
       ]);
       runInAction(() => {
         this.persona = persona_result.payload.persona;
         this.capabilities = persona_result.payload.capabilities;
+        this.controller_prompt = controller_result.payload.prompt;
+        this.controller_prompt_max_bytes = controller_result.payload.max_bytes;
         this.collection = pinned_result.payload.collection;
       });
     } catch (error: unknown) {
@@ -97,6 +106,27 @@ export class MemorySettingsStore {
         return;
       }
       this.notice_message = "Persona 已保存，只会影响之后新建的会话。";
+    });
+  }
+
+  async saveControllerPrompt(enabled: boolean, content: string): Promise<boolean> {
+    const client = this.requireClient();
+    if (!client || !this.controller_prompt) return false;
+    return this.runAction("controller_prompt:save", async () => {
+      const result = await client.command({
+        type: "set_controller_prompt",
+        payload: {
+          enabled,
+          content,
+          expected_revision: this.controller_prompt?.revision ?? 0,
+        },
+      });
+      this.controller_prompt = result.payload.prompt;
+      if (!result.payload.applied) {
+        this.conflict_message = "助理会话提示词已在其他位置更新。你的草稿仍保留，请核对最新内容后再次保存。";
+        return;
+      }
+      this.notice_message = "助理会话提示词已保存，下一轮对话立即生效。";
     });
   }
 

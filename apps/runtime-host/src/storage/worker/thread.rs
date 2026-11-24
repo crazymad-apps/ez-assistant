@@ -177,6 +177,9 @@ pub(super) fn run_worker(
             Command::InvalidateServerHistoryBindings { key, reply } => {
                 let _ = reply.send(engine.invalidate_server_history_bindings(key));
             }
+            Command::InvalidateControllerServerHistoryBindings { key, reply } => {
+                let _ = reply.send(engine.invalidate_controller_server_history_bindings(key));
+            }
             Command::GetModelFixedConfig { selection, reply } => {
                 let _ = reply.send(engine.get_model_fixed_config(selection));
             }
@@ -279,6 +282,12 @@ pub(super) fn run_worker(
             }
             Command::SetPersona { mutation, reply } => {
                 let _ = reply.send(engine.set_persona(mutation));
+            }
+            Command::GetControllerPrompt { reply } => {
+                let _ = reply.send(engine.get_controller_prompt());
+            }
+            Command::SetControllerPrompt { mutation, reply } => {
+                let _ = reply.send(engine.set_controller_prompt(mutation));
             }
             Command::ListPinnedMemories { reply } => {
                 let _ = reply.send(engine.list_pinned_memories());
@@ -540,6 +549,25 @@ pub(super) fn run_worker(
                     &expected_revision,
                     &content,
                 ));
+            }
+            Command::ListPermissionGrants {
+                include_exhausted,
+                reply,
+            } => {
+                let _ = reply.send(engine.list_permission_grants(include_exhausted));
+            }
+            Command::CreatePermissionGrant { grant, reply } => {
+                let _ = reply.send(engine.create_permission_grant(grant));
+            }
+            Command::ConsumePermissionGrant {
+                grant_id,
+                now_ms,
+                reply,
+            } => {
+                let _ = reply.send(engine.consume_permission_grant(&grant_id, now_ms));
+            }
+            Command::RevokePermissionGrant { grant_id, reply } => {
+                let _ = reply.send(engine.revoke_permission_grant(&grant_id));
             }
             Command::Shutdown { reply } => {
                 let _ = reply.send(Ok(()));

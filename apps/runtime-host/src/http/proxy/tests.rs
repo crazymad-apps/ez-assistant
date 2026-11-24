@@ -80,6 +80,24 @@ fn command_gate_rejects_global_management_and_allows_scoped_permissions() {
         "runtime",
         json!({"type":"get_permission_document","payload":{"scope":{"type":"global"}}})
     )));
+    assert!(!allowed::allowed(&request(
+        "runtime",
+        json!({"type":"get_permission_document","payload":{"scope":{"type":"controller"}}})
+    )));
+    assert!(!allowed::allowed(&request(
+        "runtime",
+        json!({"type":"replace_permission_document","payload":{"scope":{"type":"controller"},"expected_revision":{"type":"missing"},"document":{"schema_version":1,"rules":[]}}})
+    )));
+    for denied in [
+        json!({"type":"get_controller_prompt","payload":{}}),
+        json!({"type":"set_controller_prompt","payload":{"expected_revision":0,"enabled":true,"content":"brief"}}),
+        json!({"type":"reload_controller_permissions","payload":{}}),
+        json!({"type":"list_permission_grants","payload":{"include_exhausted":false}}),
+        json!({"type":"create_permission_grant","payload":{"scope":"controller","variants":["build"],"matcher":{"type":"general","payload":{"tool_name":"speak"}},"max_uses":1,"note":""}}),
+        json!({"type":"revoke_permission_grant","payload":{"grant_id":"grant-1"}}),
+    ] {
+        assert!(!allowed::allowed(&request("runtime", denied)));
+    }
     assert!(allowed::allowed(&request(
         "runtime",
         json!({"type":"get_permission_document","payload":{"scope":{"type":"session","payload":{"session_id":"test"}}}})

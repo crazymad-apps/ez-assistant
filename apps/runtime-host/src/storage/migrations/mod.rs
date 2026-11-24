@@ -162,6 +162,7 @@ fn product_manifest() -> Vec<Migration> {
     entries.push(v0_33_2::executions_entry());
     entries.push(v0_33_2::scheduled_sessions_entry());
     entries.push(v0_33_2::schedule_delivery_entry());
+    entries.push(v0_33_2::controller_settings::entry());
     entries
 }
 

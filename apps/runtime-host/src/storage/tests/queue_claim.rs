@@ -152,6 +152,8 @@ fn upgrade_detaches_only_unstarted_queue_controls_and_removes_successful_backup(
         DROP TABLE schedules;
         DROP TABLE conversation_usage_snapshots;
         DROP TABLE message_cards;
+        DROP TABLE controller_permission_grants;
+        DROP TABLE controller_prompt;
         UPDATE database_compatibility SET min_compatible_host_version='0.32.1';
         ALTER TABLE sessions DROP COLUMN model_source;
         ALTER TABLE model_settings DROP COLUMN vision_model_source;
@@ -248,6 +250,8 @@ fn queue_upgrade_preserves_an_already_claimed_start_receipt_for_normal_recovery(
         DROP TABLE schedules;
         DROP TABLE conversation_usage_snapshots;
         DROP TABLE message_cards;
+        DROP TABLE controller_permission_grants;
+        DROP TABLE controller_prompt;
         UPDATE database_compatibility SET min_compatible_host_version='0.32.1';
         ALTER TABLE sessions DROP COLUMN model_source;
         ALTER TABLE model_settings DROP COLUMN vision_model_source;

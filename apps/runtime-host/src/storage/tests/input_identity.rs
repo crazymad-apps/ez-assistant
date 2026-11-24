@@ -650,7 +650,10 @@ fn v1_request_keys_transfer_only_at_publish_and_survive_restart_and_retry() {
          ALTER TABLE session_resources DROP COLUMN sort_order;
          ALTER TABLE sessions DROP COLUMN pin_order;
          CREATE INDEX session_resources_workspace ON session_resources(workspace_id,session_id);
-         DROP TABLE schedule_deliveries;         DROP TABLE schedule_executions;
+         DROP TABLE controller_permission_grants;
+         DROP TABLE controller_prompt;
+         DROP TABLE schedule_deliveries;
+         DROP TABLE schedule_executions;
          DROP TABLE schedules;
          DELETE FROM schema_migrations WHERE version IN ('0.33.1','0.33.2');
          UPDATE database_compatibility SET min_compatible_host_version='0.33.0';

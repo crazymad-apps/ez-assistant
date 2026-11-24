@@ -13,6 +13,7 @@ use super::{
 pub(crate) fn scope_from_protocol(scope: protocol::PermissionDocumentScope) -> PermissionFileScope {
     match scope {
         protocol::PermissionDocumentScope::Global => PermissionFileScope::Global,
+        protocol::PermissionDocumentScope::Controller => PermissionFileScope::Controller,
         protocol::PermissionDocumentScope::Workspace { workspace_id } => {
             PermissionFileScope::Workspace(workspace_id)
         }
@@ -25,6 +26,7 @@ pub(crate) fn scope_from_protocol(scope: protocol::PermissionDocumentScope) -> P
 pub(crate) fn scope_to_protocol(scope: &PermissionFileScope) -> protocol::PermissionDocumentScope {
     match scope {
         PermissionFileScope::Global => protocol::PermissionDocumentScope::Global,
+        PermissionFileScope::Controller => protocol::PermissionDocumentScope::Controller,
         PermissionFileScope::Workspace(workspace_id) => {
             protocol::PermissionDocumentScope::Workspace {
                 workspace_id: workspace_id.clone(),
@@ -98,83 +100,87 @@ fn rule_from_protocol(rule: protocol::PermissionRuleDefinition) -> PermissionRul
             protocol::PermissionRuleEffect::Ask => PermissionEffect::Ask,
         },
         variants: rule.variants,
-        matcher: match rule.matcher {
-            protocol::PermissionRuleMatcher::General(matcher) => {
-                PermissionMatcher::General(GeneralPermissionMatcher {
-                    tool_name: matcher.tool_name,
-                })
-            }
-            protocol::PermissionRuleMatcher::File(matcher) => {
-                PermissionMatcher::File(FilePermissionMatcher {
-                    excluded_paths: Vec::new(),
-                    operation: match matcher.operation {
-                        protocol::PermissionFileOperationDefinition::Read => {
-                            PermissionFileOperation::Read
-                        }
-                        protocol::PermissionFileOperationDefinition::List => {
-                            PermissionFileOperation::List
-                        }
-                        protocol::PermissionFileOperationDefinition::Find => {
-                            PermissionFileOperation::Find
-                        }
-                        protocol::PermissionFileOperationDefinition::Search => {
-                            PermissionFileOperation::Search
-                        }
-                        protocol::PermissionFileOperationDefinition::Write => {
-                            PermissionFileOperation::Write
-                        }
-                        protocol::PermissionFileOperationDefinition::Edit => {
-                            PermissionFileOperation::Edit
-                        }
-                        protocol::PermissionFileOperationDefinition::Delete => {
-                            PermissionFileOperation::Delete
-                        }
-                    },
-                    path: matcher.path,
-                    path_match: match matcher.path_match {
-                        protocol::PermissionPathMatch::Exact => PathMatch::Exact,
-                        protocol::PermissionPathMatch::Recursive => PathMatch::Recursive,
-                    },
-                })
-            }
-            protocol::PermissionRuleMatcher::Shell(matcher) => {
-                PermissionMatcher::Shell(ShellPermissionMatcher {
-                    command: matcher.command,
-                    command_match: match matcher.command_match {
-                        protocol::PermissionCommandMatch::Exact => CommandMatch::Exact,
-                        protocol::PermissionCommandMatch::Prefix => CommandMatch::Prefix,
-                    },
-                    working_directory: matcher.working_directory,
-                    process_mode: match matcher.process_mode {
-                        protocol::PermissionProcessModeDefinition::Managed => {
-                            PermissionProcessMode::Managed
-                        }
-                        protocol::PermissionProcessModeDefinition::Detached => {
-                            PermissionProcessMode::Detached
-                        }
-                        protocol::PermissionProcessModeDefinition::Background => {
-                            PermissionProcessMode::Background
-                        }
-                    },
-                })
-            }
-            protocol::PermissionRuleMatcher::Mcp(matcher) => {
-                PermissionMatcher::Mcp(McpPermissionMatcher {
-                    server: match matcher.server {
-                        protocol::PermissionMcpServerMatch::Any => McpPermissionServerMatch::Any,
-                        protocol::PermissionMcpServerMatch::Exact { server_key } => {
-                            McpPermissionServerMatch::Exact { value: server_key }
-                        }
-                    },
-                    tool: match matcher.tool {
-                        protocol::PermissionMcpToolMatch::Any => McpPermissionToolMatch::Any,
-                        protocol::PermissionMcpToolMatch::Exact { tool_name } => {
-                            McpPermissionToolMatch::Exact { value: tool_name }
-                        }
-                    },
-                })
-            }
-        },
+        matcher: matcher_from_protocol(rule.matcher),
+    }
+}
+
+pub(crate) fn matcher_from_protocol(matcher: protocol::PermissionRuleMatcher) -> PermissionMatcher {
+    match matcher {
+        protocol::PermissionRuleMatcher::General(matcher) => {
+            PermissionMatcher::General(GeneralPermissionMatcher {
+                tool_name: matcher.tool_name,
+            })
+        }
+        protocol::PermissionRuleMatcher::File(matcher) => {
+            PermissionMatcher::File(FilePermissionMatcher {
+                excluded_paths: Vec::new(),
+                operation: match matcher.operation {
+                    protocol::PermissionFileOperationDefinition::Read => {
+                        PermissionFileOperation::Read
+                    }
+                    protocol::PermissionFileOperationDefinition::List => {
+                        PermissionFileOperation::List
+                    }
+                    protocol::PermissionFileOperationDefinition::Find => {
+                        PermissionFileOperation::Find
+                    }
+                    protocol::PermissionFileOperationDefinition::Search => {
+                        PermissionFileOperation::Search
+                    }
+                    protocol::PermissionFileOperationDefinition::Write => {
+                        PermissionFileOperation::Write
+                    }
+                    protocol::PermissionFileOperationDefinition::Edit => {
+                        PermissionFileOperation::Edit
+                    }
+                    protocol::PermissionFileOperationDefinition::Delete => {
+                        PermissionFileOperation::Delete
+                    }
+                },
+                path: matcher.path,
+                path_match: match matcher.path_match {
+                    protocol::PermissionPathMatch::Exact => PathMatch::Exact,
+                    protocol::PermissionPathMatch::Recursive => PathMatch::Recursive,
+                },
+            })
+        }
+        protocol::PermissionRuleMatcher::Shell(matcher) => {
+            PermissionMatcher::Shell(ShellPermissionMatcher {
+                command: matcher.command,
+                command_match: match matcher.command_match {
+                    protocol::PermissionCommandMatch::Exact => CommandMatch::Exact,
+                    protocol::PermissionCommandMatch::Prefix => CommandMatch::Prefix,
+                },
+                working_directory: matcher.working_directory,
+                process_mode: match matcher.process_mode {
+                    protocol::PermissionProcessModeDefinition::Managed => {
+                        PermissionProcessMode::Managed
+                    }
+                    protocol::PermissionProcessModeDefinition::Detached => {
+                        PermissionProcessMode::Detached
+                    }
+                    protocol::PermissionProcessModeDefinition::Background => {
+                        PermissionProcessMode::Background
+                    }
+                },
+            })
+        }
+        protocol::PermissionRuleMatcher::Mcp(matcher) => {
+            PermissionMatcher::Mcp(McpPermissionMatcher {
+                server: match matcher.server {
+                    protocol::PermissionMcpServerMatch::Any => McpPermissionServerMatch::Any,
+                    protocol::PermissionMcpServerMatch::Exact { server_key } => {
+                        McpPermissionServerMatch::Exact { value: server_key }
+                    }
+                },
+                tool: match matcher.tool {
+                    protocol::PermissionMcpToolMatch::Any => McpPermissionToolMatch::Any,
+                    protocol::PermissionMcpToolMatch::Exact { tool_name } => {
+                        McpPermissionToolMatch::Exact { value: tool_name }
+                    }
+                },
+            })
+        }
     }
 }
 
@@ -187,85 +193,89 @@ fn rule_to_protocol(rule: &PermissionRule) -> protocol::PermissionRuleDefinition
             PermissionEffect::Ask => protocol::PermissionRuleEffect::Ask,
         },
         variants: rule.variants.clone(),
-        matcher: match &rule.matcher {
-            PermissionMatcher::General(matcher) => {
-                protocol::PermissionRuleMatcher::General(protocol::PermissionGeneralMatcher {
-                    tool_name: matcher.tool_name.clone(),
-                })
-            }
-            PermissionMatcher::File(matcher) => {
-                protocol::PermissionRuleMatcher::File(protocol::PermissionFileMatcher {
-                    operation: match matcher.operation {
-                        PermissionFileOperation::Read => {
-                            protocol::PermissionFileOperationDefinition::Read
+        matcher: matcher_to_protocol(&rule.matcher),
+    }
+}
+
+pub(crate) fn matcher_to_protocol(matcher: &PermissionMatcher) -> protocol::PermissionRuleMatcher {
+    match matcher {
+        PermissionMatcher::General(matcher) => {
+            protocol::PermissionRuleMatcher::General(protocol::PermissionGeneralMatcher {
+                tool_name: matcher.tool_name.clone(),
+            })
+        }
+        PermissionMatcher::File(matcher) => {
+            protocol::PermissionRuleMatcher::File(protocol::PermissionFileMatcher {
+                operation: match matcher.operation {
+                    PermissionFileOperation::Read => {
+                        protocol::PermissionFileOperationDefinition::Read
+                    }
+                    PermissionFileOperation::List => {
+                        protocol::PermissionFileOperationDefinition::List
+                    }
+                    PermissionFileOperation::Find => {
+                        protocol::PermissionFileOperationDefinition::Find
+                    }
+                    PermissionFileOperation::Search => {
+                        protocol::PermissionFileOperationDefinition::Search
+                    }
+                    PermissionFileOperation::Write => {
+                        protocol::PermissionFileOperationDefinition::Write
+                    }
+                    PermissionFileOperation::Edit => {
+                        protocol::PermissionFileOperationDefinition::Edit
+                    }
+                    PermissionFileOperation::Delete => {
+                        protocol::PermissionFileOperationDefinition::Delete
+                    }
+                },
+                path: matcher.path.clone(),
+                path_match: match matcher.path_match {
+                    PathMatch::Exact => protocol::PermissionPathMatch::Exact,
+                    PathMatch::Recursive => protocol::PermissionPathMatch::Recursive,
+                },
+            })
+        }
+        PermissionMatcher::Shell(matcher) => {
+            protocol::PermissionRuleMatcher::Shell(protocol::PermissionShellMatcher {
+                command: matcher.command.clone(),
+                command_match: match matcher.command_match {
+                    CommandMatch::Exact => protocol::PermissionCommandMatch::Exact,
+                    CommandMatch::Prefix => protocol::PermissionCommandMatch::Prefix,
+                },
+                working_directory: matcher.working_directory.clone(),
+                process_mode: match matcher.process_mode {
+                    PermissionProcessMode::Managed => {
+                        protocol::PermissionProcessModeDefinition::Managed
+                    }
+                    PermissionProcessMode::Detached => {
+                        protocol::PermissionProcessModeDefinition::Detached
+                    }
+                    PermissionProcessMode::Background => {
+                        protocol::PermissionProcessModeDefinition::Background
+                    }
+                },
+            })
+        }
+        PermissionMatcher::Mcp(matcher) => {
+            protocol::PermissionRuleMatcher::Mcp(protocol::PermissionMcpMatcher {
+                server: match &matcher.server {
+                    McpPermissionServerMatch::Any => protocol::PermissionMcpServerMatch::Any,
+                    McpPermissionServerMatch::Exact { value } => {
+                        protocol::PermissionMcpServerMatch::Exact {
+                            server_key: value.clone(),
                         }
-                        PermissionFileOperation::List => {
-                            protocol::PermissionFileOperationDefinition::List
+                    }
+                },
+                tool: match &matcher.tool {
+                    McpPermissionToolMatch::Any => protocol::PermissionMcpToolMatch::Any,
+                    McpPermissionToolMatch::Exact { value } => {
+                        protocol::PermissionMcpToolMatch::Exact {
+                            tool_name: value.clone(),
                         }
-                        PermissionFileOperation::Find => {
-                            protocol::PermissionFileOperationDefinition::Find
-                        }
-                        PermissionFileOperation::Search => {
-                            protocol::PermissionFileOperationDefinition::Search
-                        }
-                        PermissionFileOperation::Write => {
-                            protocol::PermissionFileOperationDefinition::Write
-                        }
-                        PermissionFileOperation::Edit => {
-                            protocol::PermissionFileOperationDefinition::Edit
-                        }
-                        PermissionFileOperation::Delete => {
-                            protocol::PermissionFileOperationDefinition::Delete
-                        }
-                    },
-                    path: matcher.path.clone(),
-                    path_match: match matcher.path_match {
-                        PathMatch::Exact => protocol::PermissionPathMatch::Exact,
-                        PathMatch::Recursive => protocol::PermissionPathMatch::Recursive,
-                    },
-                })
-            }
-            PermissionMatcher::Shell(matcher) => {
-                protocol::PermissionRuleMatcher::Shell(protocol::PermissionShellMatcher {
-                    command: matcher.command.clone(),
-                    command_match: match matcher.command_match {
-                        CommandMatch::Exact => protocol::PermissionCommandMatch::Exact,
-                        CommandMatch::Prefix => protocol::PermissionCommandMatch::Prefix,
-                    },
-                    working_directory: matcher.working_directory.clone(),
-                    process_mode: match matcher.process_mode {
-                        PermissionProcessMode::Managed => {
-                            protocol::PermissionProcessModeDefinition::Managed
-                        }
-                        PermissionProcessMode::Detached => {
-                            protocol::PermissionProcessModeDefinition::Detached
-                        }
-                        PermissionProcessMode::Background => {
-                            protocol::PermissionProcessModeDefinition::Background
-                        }
-                    },
-                })
-            }
-            PermissionMatcher::Mcp(matcher) => {
-                protocol::PermissionRuleMatcher::Mcp(protocol::PermissionMcpMatcher {
-                    server: match &matcher.server {
-                        McpPermissionServerMatch::Any => protocol::PermissionMcpServerMatch::Any,
-                        McpPermissionServerMatch::Exact { value } => {
-                            protocol::PermissionMcpServerMatch::Exact {
-                                server_key: value.clone(),
-                            }
-                        }
-                    },
-                    tool: match &matcher.tool {
-                        McpPermissionToolMatch::Any => protocol::PermissionMcpToolMatch::Any,
-                        McpPermissionToolMatch::Exact { value } => {
-                            protocol::PermissionMcpToolMatch::Exact {
-                                tool_name: value.clone(),
-                            }
-                        }
-                    },
-                })
-            }
-        },
+                    }
+                },
+            })
+        }
     }
 }

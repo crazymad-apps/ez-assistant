@@ -294,7 +294,9 @@ impl AssistantRuntime {
                     break;
                 }
                 let decision = match scope {
-                    PermissionFileScope::Session(_) => ApprovalDecision::AllowSession,
+                    PermissionFileScope::Session(_) | PermissionFileScope::Controller => {
+                        ApprovalDecision::AllowSession
+                    }
                     PermissionFileScope::Workspace(_) => ApprovalDecision::AllowWorkspace,
                     PermissionFileScope::Global => break,
                 };
@@ -338,6 +340,19 @@ impl AssistantRuntime {
                         .values()
                         .filter(|session| {
                             session.environment().workspace_id.as_ref() == Some(workspace_id)
+                        })
+                        .map(|session| session.id().clone())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            PermissionFileScope::Controller => self
+                .sessions
+                .read()
+                .map(|sessions| {
+                    sessions
+                        .values()
+                        .filter(|session| {
+                            session.role().ok() == Some(crate::SessionRole::Controller)
                         })
                         .map(|session| session.id().clone())
                         .collect()

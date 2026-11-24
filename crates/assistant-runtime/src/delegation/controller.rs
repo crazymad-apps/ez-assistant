@@ -33,8 +33,8 @@ use crate::{
     mcp::McpRegistry,
     observation::ObservationCoordinator,
     permission::{
-        ApprovalRegistry, PermissionCoordinator, RunAuthorizationScope, RuntimeApprovalResolver,
-        RuntimeToolAuthorizer,
+        ApprovalRegistry, PermissionCoordinator, PermissionGrantCoordinator, RunAuthorizationScope,
+        RuntimeApprovalResolver, RuntimeToolAuthorizer,
     },
     run::RuntimeRecorder,
     session::SessionController,
@@ -57,7 +57,9 @@ pub(crate) struct ParentDelegationController {
     registry: Arc<ChildTaskRegistry>,
     workspace_factory: Arc<dyn ChildTaskWorkspaceFactory>,
     permission_coordinator: Arc<PermissionCoordinator>,
+    permission_grants: Arc<PermissionGrantCoordinator>,
     approval_registry: Arc<ApprovalRegistry>,
+    channel_source: Option<crate::InputChannelSource>,
     infrastructure_policies: Vec<Arc<dyn ToolPolicy>>,
     default_rules: Option<Arc<dyn crate::PermissionRuleSource>>,
     events: ObservationCoordinator,
@@ -87,7 +89,9 @@ pub(crate) struct ParentDelegationResources {
     pub(crate) registry: Arc<ChildTaskRegistry>,
     pub(crate) workspace_factory: Arc<dyn ChildTaskWorkspaceFactory>,
     pub(crate) permission_coordinator: Arc<PermissionCoordinator>,
+    pub(crate) permission_grants: Arc<PermissionGrantCoordinator>,
     pub(crate) approval_registry: Arc<ApprovalRegistry>,
+    pub(crate) channel_source: Option<crate::InputChannelSource>,
     pub(crate) infrastructure_policies: Vec<Arc<dyn ToolPolicy>>,
     pub(crate) default_rules: Option<Arc<dyn crate::PermissionRuleSource>>,
     pub(crate) events: ObservationCoordinator,
@@ -121,7 +125,9 @@ impl ParentDelegationController {
             registry: resources.registry,
             workspace_factory: resources.workspace_factory,
             permission_coordinator: resources.permission_coordinator,
+            permission_grants: resources.permission_grants,
             approval_registry: resources.approval_registry,
+            channel_source: resources.channel_source,
             infrastructure_policies: resources.infrastructure_policies,
             default_rules: resources.default_rules,
             events: resources.events,
@@ -406,6 +412,8 @@ impl ParentDelegationController {
             RuntimeToolAuthorizer::new(
                 RunAuthorizationScope {
                     variant: self.variant,
+                    session_role: self.session.role().map_err(internal_tool_error)?,
+                    channel_source: self.channel_source.clone(),
                 },
                 self.session.clone(),
                 self.session.permission_scopes(),
@@ -427,6 +435,7 @@ impl ParentDelegationController {
             .map(|authorizer| {
                 authorizer
                     .with_default_rules(self.default_rules.clone())
+                    .with_permission_grants(Some(self.permission_grants.clone()))
                     .with_mcp_registry(self.mcp_registry.clone())
             })
             .and_then(|authorizer| authorizer.with_additional_private_root(workspace.path()))

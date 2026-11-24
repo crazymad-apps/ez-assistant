@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   AgentShellSettings,
   PermissionDocumentSnapshot,
+  PermissionGrantSnapshot,
   RuntimeCommand,
 } from "@ez-assistant/protocol";
 import type { RuntimeClient } from "../../src/runtime-client/RuntimeClient";
@@ -136,16 +137,34 @@ describe("SettingsStore model catalog", () => {
 });
 
 describe("SettingsStore permission management", () => {
-  it("loads the session, workspace, and global permission documents for the active context", async () => {
+  it("loads session, workspace, global, controller permission documents and controller grants", async () => {
     const commands: RuntimeCommand[] = [];
+    const grant: PermissionGrantSnapshot = {
+      grant_id: "grant-1",
+      scope: "controller",
+      variants: ["build"],
+      matcher: { type: "general", payload: { tool_name: "speak" } },
+      max_uses: 1,
+      remaining_uses: 1,
+      note: "one shot",
+      created_at_ms: 100,
+    };
     const client = {
       command: async (command: RuntimeCommand) => {
         commands.push(command);
-        if (command.type !== "get_permission_document") throw new Error("unexpected command");
-        return {
-          type: command.type,
-          payload: { document: permissionDocument(command.payload.scope) },
-        };
+        if (command.type === "get_permission_document") {
+          return {
+            type: command.type,
+            payload: { document: permissionDocument(command.payload.scope) },
+          };
+        }
+        if (command.type === "list_permission_grants") {
+          return {
+            type: command.type,
+            payload: { grants: [grant] },
+          };
+        }
+        throw new Error("unexpected command");
       },
     } as unknown as RuntimeClient;
     const store = permissionStore(client);
@@ -156,12 +175,158 @@ describe("SettingsStore permission management", () => {
       "get_permission_document",
       "get_permission_document",
       "get_permission_document",
+      "get_permission_document",
+      "list_permission_grants",
     ]);
     expect(store.permission_documents.map((document) => document.scope.type)).toEqual([
       "session",
       "workspace",
       "global",
+      "controller",
     ]);
+    expect(store.permission_grants).toEqual([grant]);
+  });
+
+  it("creates, silently refreshes, and revokes controller permission grants", async () => {
+    const grant: PermissionGrantSnapshot = {
+      grant_id: "grant-1",
+      scope: "controller",
+      variants: ["build"],
+      matcher: { type: "general", payload: { tool_name: "speak" } },
+      max_uses: 2,
+      remaining_uses: 2,
+      expires_at_ms: 3_600_100,
+      note: "allow twice",
+      created_at_ms: 100,
+    };
+    const updated_grant = { ...grant, remaining_uses: 1 };
+    const calls: RuntimeCommand[] = [];
+    let active_grants = [grant];
+    const client = {
+      command: async (command: RuntimeCommand) => {
+        calls.push(command);
+        if (command.type === "get_permission_document") {
+          return {
+            type: command.type,
+            payload: { document: permissionDocument(command.payload.scope) },
+          };
+        }
+        if (command.type === "create_permission_grant") {
+          return { type: command.type, payload: { grant } };
+        }
+        if (command.type === "list_permission_grants") {
+          return { type: command.type, payload: { grants: active_grants } };
+        }
+        if (command.type === "revoke_permission_grant") {
+          active_grants = [];
+          return { type: command.type, payload: { revoked: true, grant_id: command.payload.grant_id } };
+        }
+        throw new Error("unexpected command");
+      },
+    } as unknown as RuntimeClient;
+    const store = permissionStore(client);
+
+    await store.loadPermissions();
+    const created = await store.createPermissionGrant({
+      variants: ["build"],
+      matcher: grant.matcher,
+      max_uses: 2,
+      ttl_seconds: 3600,
+      note: "allow twice",
+    });
+    expect(created).toBe(true);
+    expect(store.notice_message).toBe("一次性预授权已添加。");
+
+    active_grants = [updated_grant];
+    await store.refreshPermissionGrants();
+    expect(store.permission_grants).toEqual([updated_grant]);
+
+    const revoked = await store.revokePermissionGrant("grant-1");
+    expect(revoked).toBe(true);
+    expect(store.permission_grants).toEqual([]);
+    expect(store.notice_message).toBe("预授权已撤销。");
+    expect(calls.map((c) => c.type)).toContain("create_permission_grant");
+    expect(calls.map((c) => c.type)).toContain("revoke_permission_grant");
+  });
+
+  it("reloads controller permissions without requiring a selected session", async () => {
+    const calls: RuntimeCommand[] = [];
+    const client = {
+      command: async (command: RuntimeCommand) => {
+        calls.push(command);
+        if (command.type === "reload_controller_permissions") {
+          return {
+            type: command.type,
+            payload: {
+              applied: true,
+              file: { scope: "controller", status: "ready" },
+              diagnostics: [],
+            },
+          };
+        }
+        if (command.type === "get_permission_document") {
+          return {
+            type: command.type,
+            payload: { document: permissionDocument(command.payload.scope) },
+          };
+        }
+        if (command.type === "list_permission_grants") {
+          return { type: command.type, payload: { grants: [] } };
+        }
+        throw new Error(`unexpected command ${command.type}`);
+      },
+    } as unknown as RuntimeClient;
+    const store = new SettingsStore({
+      get_client: () => client,
+      get_permission_context: () => ({ session_id: null, workspace_id: null }),
+      refresh_application: async () => undefined,
+    });
+
+    expect(await store.reloadPermissions("controller")).toBe(true);
+    expect(calls.map((command) => command.type)).toEqual([
+      "reload_controller_permissions",
+      "get_permission_document",
+      "get_permission_document",
+      "list_permission_grants",
+    ]);
+    expect(store.notice_message).toBe("权限规则已重新加载。");
+    expect(store.error_message).toBeNull();
+  });
+
+  it("does not resurrect immediately consumed grants after createPermissionGrant", async () => {
+    const created_grant: PermissionGrantSnapshot = {
+      grant_id: "grant-consumed",
+      scope: "controller",
+      variants: ["build"],
+      matcher: { type: "general", payload: { tool_name: "speak" } },
+      max_uses: 1,
+      remaining_uses: 1,
+      note: "",
+      created_at_ms: 100,
+    };
+    const client = {
+      command: async (command: RuntimeCommand) => {
+        if (command.type === "create_permission_grant") {
+          return { type: command.type, payload: { grant: created_grant } };
+        }
+        if (command.type === "list_permission_grants") {
+          return { type: command.type, payload: { grants: [] } };
+        }
+        throw new Error("unexpected command");
+      },
+    } as unknown as RuntimeClient;
+    const store = permissionStore(client);
+    store.permission_grants = [created_grant];
+
+    expect(
+      await store.createPermissionGrant({
+        variants: ["build"],
+        matcher: created_grant.matcher,
+        max_uses: 1,
+        note: "",
+      }),
+    ).toBe(true);
+    expect(store.permission_grants).toEqual([]);
   });
 
   it("sends the observed revision and keeps a CAS conflict visible for recovery", async () => {

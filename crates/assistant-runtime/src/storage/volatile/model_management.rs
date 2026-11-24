@@ -118,6 +118,29 @@ impl VolatileRuntimeStore {
         })
     }
 
+    pub(super) fn invalidate_controller_server_history_bindings(
+        &self,
+        key: String,
+    ) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            if key.is_empty() {
+                return Err(StoreError::new(
+                    StoreErrorKind::InvalidData,
+                    "history binding is empty",
+                ));
+            }
+            for session in self
+                .lock()?
+                .sessions
+                .values_mut()
+                .filter(|session| session.role == crate::SessionRole::Controller)
+            {
+                session.server_history_key = Some(key.clone());
+            }
+            Ok(())
+        })
+    }
+
     pub(super) fn get_model_fixed_config(
         &self,
         selection: assistant_protocol::ModelSelection,

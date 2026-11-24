@@ -4,7 +4,8 @@ use assistant_protocol::{ChildTaskId, InputId, RunId, SessionId};
 use assistant_runtime::{
     AcceptedInput, AcceptedStoredSessionCommand, ApprovalModeChange, ArchiveChange, ChildTaskStart,
     ChildToolExecutionStart, CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
-    ContextReplacementResult, ConversationMessageLocationRequest, ConversationNavigationRequest,
+    ContextReplacementResult, ControllerPromptMutation, ControllerPromptSnapshot,
+    ConversationMessageLocationRequest, ConversationNavigationRequest,
     ConversationRawWindowRequest, ConversationRewrite, ConversationSearchPage,
     ConversationSearchRequest, ConversationWindowRequest, DeviceNameChange, DeviceRevocation,
     DeviceRevocationResult, GoalClear, GoalHeldInputResume, GoalHeldInputResumeResult, GoalStop,
@@ -21,8 +22,8 @@ use assistant_runtime::{
     SessionTitleGenerationCommitResult, SkillNameState, SkillNameStateChange, StoreError,
     StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
     StoredConversationMessageLocation, StoredConversationNavigation, StoredConversationRawWindow,
-    StoredConversationWindow, StoredMessageFeedback, StoredPinnedMemory, StoredRun,
-    StoredRunContinuation, StoredRunContinuationResult, StoredRunSettlement,
+    StoredConversationWindow, StoredMessageFeedback, StoredPermissionGrant, StoredPinnedMemory,
+    StoredRun, StoredRunContinuation, StoredRunContinuationResult, StoredRunSettlement,
     StoredRunSettlementResult, StoredSession, StoredSessionCommand, StoredSessionFork,
     StoredSessionMaterialization, StoredSessionUsage, StoredTerminalRunInputReconciliation,
     StoredWorkPlan, StoredWorkspace, ToolExecutionStart, UserMessageCommit, VariantChange,
@@ -211,6 +212,10 @@ pub(super) enum Command {
         key: String,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
+    InvalidateControllerServerHistoryBindings {
+        key: String,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
     GetModelFixedConfig {
         selection: assistant_protocol::ModelSelection,
         reply: oneshot::Sender<Result<Option<assistant_protocol::ModelFixedConfig>, StoreError>>,
@@ -327,6 +332,13 @@ pub(super) enum Command {
     SetPersona {
         mutation: PersonaMutation,
         reply: oneshot::Sender<Result<PersonaSnapshot, StoreError>>,
+    },
+    GetControllerPrompt {
+        reply: oneshot::Sender<Result<ControllerPromptSnapshot, StoreError>>,
+    },
+    SetControllerPrompt {
+        mutation: ControllerPromptMutation,
+        reply: oneshot::Sender<Result<ControllerPromptSnapshot, StoreError>>,
     },
     ListPinnedMemories {
         reply: oneshot::Sender<Result<Vec<StoredPinnedMemory>, StoreError>>,
@@ -612,6 +624,23 @@ pub(super) enum Command {
         expected_revision: PermissionFileRevision,
         content: Vec<u8>,
         reply: oneshot::Sender<Result<PermissionFileRevision, StoreError>>,
+    },
+    ListPermissionGrants {
+        include_exhausted: bool,
+        reply: oneshot::Sender<Result<Vec<StoredPermissionGrant>, StoreError>>,
+    },
+    CreatePermissionGrant {
+        grant: StoredPermissionGrant,
+        reply: oneshot::Sender<Result<StoredPermissionGrant, StoreError>>,
+    },
+    ConsumePermissionGrant {
+        grant_id: String,
+        now_ms: i64,
+        reply: oneshot::Sender<Result<Option<StoredPermissionGrant>, StoreError>>,
+    },
+    RevokePermissionGrant {
+        grant_id: String,
+        reply: oneshot::Sender<Result<bool, StoreError>>,
     },
     Shutdown {
         reply: oneshot::Sender<Result<(), StoreError>>,

@@ -11,19 +11,24 @@ use std::{
 };
 
 use crate::platform;
-use assistant_protocol::PermissionDiagnosticCode;
+use assistant_protocol::{AgentVariant, PermissionDiagnosticCode, PermissionScope};
 use assistant_runtime::{
     FilePermissionMatcher, GeneralPermissionMatcher, PathMatch, PermissionDocument,
     PermissionEffect, PermissionFileLoad, PermissionFileOperation, PermissionFileRevision,
     PermissionFileScope, PermissionMatcher, PermissionRule, PermissionSourceDiagnostic, StoreError,
-    StoreErrorKind,
+    StoreErrorKind, StoredPermissionGrant,
 };
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 
-use super::{StorageEngine, StorageResult, internal_error, sync_directory};
+use super::{
+    StorageEngine, StorageResult, conflict, database_write_error, internal_error, invalid_data,
+    invalid_data_with_source, sync_directory,
+};
 use crate::config_source::prepare_private_directory;
 
 const PERMISSION_FILE: &str = "permissions.json";
+const CONTROLLER_PERMISSION_FILE: &str = "controller-permissions.json";
 const MAX_PERMISSION_FILE_BYTES: u64 = 1024 * 1024;
 const DEFAULT_WORKSPACE_RULE_PREFIX: &str = "default-workspace-";
 const DEFAULT_SESSION_PRIVATE_RULE_PREFIX: &str = "default-session-private-";
@@ -159,6 +164,9 @@ impl StorageEngine {
     fn permission_file_path(&self, scope: &PermissionFileScope) -> StorageResult<PathBuf> {
         match scope {
             PermissionFileScope::Global => Ok(self.runtime_home.join(PERMISSION_FILE)),
+            PermissionFileScope::Controller => {
+                Ok(self.runtime_home.join(CONTROLLER_PERMISSION_FILE))
+            }
             PermissionFileScope::Workspace(workspace_id) => {
                 let workspace = self.get_workspace(workspace_id)?;
                 Ok(Path::new(&workspace.agent_directory).join(PERMISSION_FILE))
@@ -169,6 +177,253 @@ impl StorageEngine {
             }
         }
     }
+
+    pub(super) fn list_permission_grants(
+        &self,
+        include_exhausted: bool,
+    ) -> StorageResult<Vec<StoredPermissionGrant>> {
+        let sql = if include_exhausted {
+            "SELECT grant_id, scope, variants_json, matcher_json, max_uses, remaining_uses,
+                    expires_at_ms, note, created_at_ms, consumed_at_ms
+             FROM controller_permission_grants
+             ORDER BY created_at_ms ASC, grant_id ASC"
+        } else {
+            "SELECT grant_id, scope, variants_json, matcher_json, max_uses, remaining_uses,
+                    expires_at_ms, note, created_at_ms, consumed_at_ms
+             FROM controller_permission_grants
+             WHERE remaining_uses > 0
+             ORDER BY created_at_ms ASC, grant_id ASC"
+        };
+        let mut statement = self.connection.prepare(sql).map_err(|source| {
+            invalid_data_with_source("permission grants are unavailable", source)
+        })?;
+        let rows = statement
+            .query_map([], decode_permission_grant)
+            .map_err(|source| {
+                invalid_data_with_source("permission grants are unavailable", source)
+            })?;
+        rows.map(|row| {
+            row.map_err(|source| invalid_data_with_source("permission grant is invalid", source))
+        })
+        .collect()
+    }
+
+    pub(super) fn create_permission_grant(
+        &mut self,
+        grant: StoredPermissionGrant,
+    ) -> StorageResult<StoredPermissionGrant> {
+        if grant.scope != PermissionScope::Controller
+            || grant.max_uses == 0
+            || grant.remaining_uses > grant.max_uses
+            || grant.created_at_ms < 0
+            || grant.expires_at_ms.is_some_and(|exp| exp < 0)
+            || grant.consumed_at_ms.is_some_and(|consumed| consumed < 0)
+        {
+            return Err(StoreError::new(
+                StoreErrorKind::InvalidInput,
+                "controller permission grant fields are out of bounds",
+            ));
+        }
+        let variants_json = serde_json::to_string(&grant.variants).map_err(|source| {
+            StoreError::with_source(
+                StoreErrorKind::InvalidInput,
+                "permission grant variants could not be encoded",
+                source,
+            )
+        })?;
+        let matcher_json = serde_json::to_string(&grant.matcher).map_err(|source| {
+            StoreError::with_source(
+                StoreErrorKind::InvalidInput,
+                "permission grant matcher could not be encoded",
+                source,
+            )
+        })?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|source| {
+                database_write_error("permission grant transaction could not be started", source)
+            })?;
+        transaction
+            .execute(
+                "INSERT INTO controller_permission_grants (
+                    grant_id, scope, variants_json, matcher_json, max_uses, remaining_uses,
+                    expires_at_ms, note, created_at_ms, consumed_at_ms
+                 ) VALUES (?1, 'controller', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    grant.grant_id,
+                    variants_json,
+                    matcher_json,
+                    i64::from(grant.max_uses),
+                    i64::from(grant.remaining_uses),
+                    grant.expires_at_ms,
+                    grant.note,
+                    grant.created_at_ms,
+                    grant.consumed_at_ms,
+                ],
+            )
+            .map_err(|source| {
+                database_write_error("controller permission grant could not be created", source)
+            })?;
+        transaction.commit().map_err(|source| {
+            database_write_error("controller permission grant could not be committed", source)
+        })?;
+        Ok(grant)
+    }
+
+    pub(super) fn consume_permission_grant(
+        &mut self,
+        grant_id: &str,
+        now_ms: i64,
+    ) -> StorageResult<Option<StoredPermissionGrant>> {
+        if now_ms < 0 {
+            return Err(StoreError::new(
+                StoreErrorKind::InvalidInput,
+                "permission grant timestamp must be non-negative",
+            ));
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|source| {
+                database_write_error("permission grant consume transaction failed", source)
+            })?;
+        let changed = transaction
+            .execute(
+                "UPDATE controller_permission_grants
+                 SET remaining_uses = remaining_uses - 1,
+                     consumed_at_ms = CASE WHEN remaining_uses = 1 THEN ?2 ELSE consumed_at_ms END
+                 WHERE grant_id = ?1
+                   AND remaining_uses > 0
+                   AND (expires_at_ms IS NULL OR expires_at_ms > ?2)",
+                params![grant_id, now_ms],
+            )
+            .map_err(|source| {
+                database_write_error("controller permission grant could not be consumed", source)
+            })?;
+        if changed == 0 {
+            transaction.commit().map_err(|source| {
+                database_write_error("controller permission grant commit failed", source)
+            })?;
+            return Ok(None);
+        }
+        if changed != 1 {
+            return Err(conflict("unexpected grant rows modified"));
+        }
+        let updated = transaction
+            .query_row(
+                "SELECT grant_id, scope, variants_json, matcher_json, max_uses, remaining_uses,
+                        expires_at_ms, note, created_at_ms, consumed_at_ms
+                 FROM controller_permission_grants
+                 WHERE grant_id = ?1",
+                [grant_id],
+                decode_permission_grant,
+            )
+            .optional()
+            .map_err(|source| {
+                invalid_data_with_source("updated permission grant is invalid", source)
+            })?
+            .ok_or_else(|| invalid_data("consumed permission grant disappeared"))?;
+        transaction.commit().map_err(|source| {
+            database_write_error("controller permission grant consume commit failed", source)
+        })?;
+        Ok(Some(updated))
+    }
+
+    pub(super) fn revoke_permission_grant(&mut self, grant_id: &str) -> StorageResult<bool> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|source| {
+                database_write_error("permission grant revoke transaction failed", source)
+            })?;
+        let changed = transaction
+            .execute(
+                "DELETE FROM controller_permission_grants WHERE grant_id = ?1",
+                [grant_id],
+            )
+            .map_err(|source| {
+                database_write_error("controller permission grant could not be revoked", source)
+            })?;
+        transaction.commit().map_err(|source| {
+            database_write_error("controller permission grant revoke commit failed", source)
+        })?;
+        Ok(changed > 0)
+    }
+}
+
+fn decode_permission_grant(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredPermissionGrant> {
+    let grant_id: String = row.get(0)?;
+    let scope_raw: String = row.get(1)?;
+    let scope = match scope_raw.as_str() {
+        "controller" => PermissionScope::Controller,
+        _ => {
+            return Err(to_grant_decode_error(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid permission grant scope",
+            )));
+        }
+    };
+    let variants_json: String = row.get(2)?;
+    let variants =
+        serde_json::from_str::<Vec<AgentVariant>>(&variants_json).map_err(to_grant_decode_error)?;
+    let matcher_json: String = row.get(3)?;
+    let matcher =
+        serde_json::from_str::<PermissionMatcher>(&matcher_json).map_err(to_grant_decode_error)?;
+    let max_uses_i64: i64 = row.get(4)?;
+    let max_uses = u32::try_from(max_uses_i64).map_err(to_grant_decode_error)?;
+    if max_uses == 0 {
+        return Err(to_grant_decode_error(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "permission grant max_uses must be positive",
+        )));
+    }
+    let remaining_uses_i64: i64 = row.get(5)?;
+    let remaining_uses = u32::try_from(remaining_uses_i64).map_err(to_grant_decode_error)?;
+    if remaining_uses > max_uses {
+        return Err(to_grant_decode_error(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "permission grant remaining_uses exceeds max_uses",
+        )));
+    }
+    let expires_at_ms: Option<i64> = row.get(6)?;
+    if expires_at_ms.is_some_and(|exp| exp < 0) {
+        return Err(to_grant_decode_error(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "permission grant expires_at_ms must be non-negative",
+        )));
+    }
+    let note: String = row.get(7)?;
+    let created_at_ms: i64 = row.get(8)?;
+    if created_at_ms < 0 {
+        return Err(to_grant_decode_error(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "permission grant created_at_ms must be non-negative",
+        )));
+    }
+    let consumed_at_ms: Option<i64> = row.get(9)?;
+    if consumed_at_ms.is_some_and(|consumed| consumed < 0) {
+        return Err(to_grant_decode_error(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "permission grant consumed_at_ms must be non-negative",
+        )));
+    }
+    Ok(StoredPermissionGrant {
+        grant_id,
+        scope,
+        variants,
+        matcher,
+        max_uses,
+        remaining_uses,
+        expires_at_ms,
+        note,
+        created_at_ms,
+        consumed_at_ms,
+    })
+}
+
+fn to_grant_decode_error(error: impl std::error::Error + Send + Sync + 'static) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
 }
 
 fn rebase_path(root: &Path, suffix: &Path) -> PathBuf {

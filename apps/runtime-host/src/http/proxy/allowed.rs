@@ -118,10 +118,14 @@ pub(super) fn allowed(request: &CommandRequest) -> bool {
                 | SessionCommand::SkillRefresh
                 | SessionCommand::McpRefresh { .. }
         ),
-        GetPermissionDocument(request) => !matches!(request.scope, PermissionDocumentScope::Global),
-        ReplacePermissionDocument(request) => {
-            !matches!(request.scope, PermissionDocumentScope::Global)
-        }
+        GetPermissionDocument(request) => !matches!(
+            request.scope,
+            PermissionDocumentScope::Global | PermissionDocumentScope::Controller
+        ),
+        ReplacePermissionDocument(request) => !matches!(
+            request.scope,
+            PermissionDocumentScope::Global | PermissionDocumentScope::Controller
+        ),
         _ => false,
     }
 }

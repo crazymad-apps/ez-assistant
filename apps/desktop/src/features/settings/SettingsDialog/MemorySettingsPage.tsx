@@ -22,11 +22,15 @@ export const MemorySettingsPage = observer(function MemorySettingsPage(props: Pr
   const [persona_enabled, setPersonaEnabled] = useState(false);
   const [persona_content, setPersonaContent] = useState("");
   const [persona_dirty, setPersonaDirty] = useState(false);
+  const [controller_enabled, setControllerEnabled] = useState(false);
+  const [controller_content, setControllerContent] = useState("");
+  const [controller_dirty, setControllerDirty] = useState(false);
   const [memory_draft, setMemoryDraft] = useState<MemoryDraft | null>(null);
   const [deleting_memory, setDeletingMemory] = useState<PinnedMemorySnapshot | null>(null);
   const [query, setQuery] = useState("");
   const collection = memory_store.collection;
   const persona = memory_store.persona;
+  const controller_prompt = memory_store.controller_prompt;
 
   useEffect(() => {
     if (!persona || persona_dirty) return;
@@ -35,9 +39,15 @@ export const MemorySettingsPage = observer(function MemorySettingsPage(props: Pr
   }, [persona, persona_dirty]);
 
   useEffect(() => {
-    onDirtyChange(persona_dirty || memory_draft !== null);
+    if (!controller_prompt || controller_dirty) return;
+    setControllerEnabled(controller_prompt.enabled);
+    setControllerContent(controller_prompt.content);
+  }, [controller_dirty, controller_prompt]);
+
+  useEffect(() => {
+    onDirtyChange(persona_dirty || controller_dirty || memory_draft !== null);
     return () => onDirtyChange(false);
-  }, [memory_draft, onDirtyChange, persona_dirty]);
+  }, [controller_dirty, memory_draft, onDirtyChange, persona_dirty]);
 
   const filtered_memories = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
@@ -51,6 +61,11 @@ export const MemorySettingsPage = observer(function MemorySettingsPage(props: Pr
   async function savePersona() {
     const saved = await memory_store.savePersona(persona_enabled, persona_content);
     if (saved) setPersonaDirty(false);
+  }
+
+  async function saveControllerPrompt() {
+    const saved = await memory_store.saveControllerPrompt(controller_enabled, controller_content);
+    if (saved) setControllerDirty(false);
   }
 
   async function savePinnedMemory() {
@@ -74,6 +89,8 @@ export const MemorySettingsPage = observer(function MemorySettingsPage(props: Pr
 
   const persona_bytes = new TextEncoder().encode(persona_content).length;
   const persona_limit = memory_store.capabilities?.max_persona_bytes ?? 0;
+  const controller_bytes = new TextEncoder().encode(controller_content).length;
+  const controller_limit = memory_store.controller_prompt_max_bytes;
 
   return (
     <SettingsPageContainer
@@ -121,6 +138,51 @@ export const MemorySettingsPage = observer(function MemorySettingsPage(props: Pr
             onClick={() => void savePersona()}
             type="button"
           >保存 Persona</button>
+        </div>
+      </article>
+
+      <article className={styles.memory_persona}>
+        <div className={styles.memory_section_header}>
+          <div>
+            <h4>助理会话提示词</h4>
+            <p>仅作用于助理会话（如语音回复简洁度与风格约束）。修改立即对下一轮对话生效，不清空历史。</p>
+          </div>
+          <label className={styles.memory_toggle}>
+            <input
+              aria-label="启用助理会话提示词"
+              checked={controller_enabled}
+              onChange={(event) => {
+                setControllerEnabled(event.currentTarget.checked);
+                setControllerDirty(true);
+              }}
+              type="checkbox"
+            />
+            启用
+          </label>
+        </div>
+        <textarea
+          aria-label="助理会话提示词内容"
+          maxLength={controller_limit || undefined}
+          onChange={(event) => {
+            setControllerContent(event.currentTarget.value);
+            setControllerDirty(true);
+          }}
+          placeholder="例如：用口语、1-2 句简短回答，不要输出 Markdown 列表或表格。"
+          value={controller_content}
+        />
+        <div className={styles.memory_persona_footer}>
+          <span>{controller_bytes}{controller_limit ? ` / ${controller_limit}` : ""} 字节</span>
+          <button
+            className={styles.primary_button}
+            disabled={
+              !controller_prompt
+              || !controller_dirty
+              || memory_store.pending_action === "controller_prompt:save"
+              || (controller_limit > 0 && controller_bytes > controller_limit)
+            }
+            onClick={() => void saveControllerPrompt()}
+            type="button"
+          >保存助理提示词</button>
         </div>
       </article>
 

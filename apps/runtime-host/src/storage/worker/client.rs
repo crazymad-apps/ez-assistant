@@ -10,7 +10,8 @@ use assistant_protocol::{ChildTaskId, InputId, RunId, SessionId};
 use assistant_runtime::{
     AcceptedInput, AcceptedStoredSessionCommand, ApprovalModeChange, ArchiveChange, ChildTaskStart,
     ChildToolExecutionStart, CompletedChildToolExchange, CompletedToolExchange, ContextReplacement,
-    ContextReplacementResult, ConversationMessageLocationRequest, ConversationNavigationRequest,
+    ContextReplacementResult, ControllerPromptMutation, ControllerPromptSnapshot,
+    ConversationMessageLocationRequest, ConversationNavigationRequest,
     ConversationRawWindowRequest, ConversationRewrite, ConversationSearchPage,
     ConversationSearchRequest, ConversationWindowRequest, DeviceNameChange, DeviceRevocation,
     DeviceRevocationResult, GoalClear, GoalHeldInputResume, GoalHeldInputResumeResult, GoalStop,
@@ -28,8 +29,8 @@ use assistant_runtime::{
     SessionTitleGenerationCommitResult, SkillNameState, SkillNameStateChange, StoreError,
     StoreErrorKind, StoreFuture, StoredAttachment, StoredChildTask, StoredChildTaskSettlement,
     StoredConversationMessageLocation, StoredConversationNavigation, StoredConversationRawWindow,
-    StoredConversationWindow, StoredMessageFeedback, StoredPinnedMemory, StoredRun,
-    StoredRunContinuation, StoredRunContinuationResult, StoredRunSettlement,
+    StoredConversationWindow, StoredMessageFeedback, StoredPermissionGrant, StoredPinnedMemory,
+    StoredRun, StoredRunContinuation, StoredRunContinuationResult, StoredRunSettlement,
     StoredRunSettlementResult, StoredSession, StoredSessionCommand, StoredSessionFork,
     StoredSessionMaterialization, StoredSessionUsage, StoredTerminalRunInputReconciliation,
     StoredWorkPlan, StoredWorkspace, ToolExecutionStart, UserMessageCommit, VariantChange,
@@ -626,6 +627,13 @@ impl RuntimeStore for LocalRuntimeStore {
         })
     }
 
+    fn invalidate_controller_server_history_bindings(&self, key: String) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            self.request(|reply| Command::InvalidateControllerServerHistoryBindings { key, reply })
+                .await
+        })
+    }
+
     fn get_model_fixed_config(
         &self,
         selection: assistant_protocol::ModelSelection,
@@ -860,6 +868,70 @@ impl RuntimeStore for LocalRuntimeStore {
     fn set_persona(&self, mutation: PersonaMutation) -> StoreFuture<'_, PersonaSnapshot> {
         Box::pin(async move {
             self.request(|reply| Command::SetPersona { mutation, reply })
+                .await
+        })
+    }
+
+    fn get_controller_prompt(&self) -> StoreFuture<'_, ControllerPromptSnapshot> {
+        Box::pin(async move {
+            self.request(|reply| Command::GetControllerPrompt { reply })
+                .await
+        })
+    }
+
+    fn set_controller_prompt(
+        &self,
+        mutation: ControllerPromptMutation,
+    ) -> StoreFuture<'_, ControllerPromptSnapshot> {
+        Box::pin(async move {
+            self.request(|reply| Command::SetControllerPrompt { mutation, reply })
+                .await
+        })
+    }
+
+    fn list_permission_grants(
+        &self,
+        include_exhausted: bool,
+    ) -> StoreFuture<'_, Vec<StoredPermissionGrant>> {
+        Box::pin(async move {
+            self.request(|reply| Command::ListPermissionGrants {
+                include_exhausted,
+                reply,
+            })
+            .await
+        })
+    }
+
+    fn create_permission_grant(
+        &self,
+        grant: StoredPermissionGrant,
+    ) -> StoreFuture<'_, StoredPermissionGrant> {
+        Box::pin(async move {
+            self.request(|reply| Command::CreatePermissionGrant { grant, reply })
+                .await
+        })
+    }
+
+    fn consume_permission_grant(
+        &self,
+        grant_id: &str,
+        consumed_at_ms: i64,
+    ) -> StoreFuture<'_, Option<StoredPermissionGrant>> {
+        let grant_id = grant_id.to_owned();
+        Box::pin(async move {
+            self.request(|reply| Command::ConsumePermissionGrant {
+                grant_id,
+                now_ms: consumed_at_ms,
+                reply,
+            })
+            .await
+        })
+    }
+
+    fn revoke_permission_grant(&self, grant_id: &str) -> StoreFuture<'_, bool> {
+        let grant_id = grant_id.to_owned();
+        Box::pin(async move {
+            self.request(|reply| Command::RevokePermissionGrant { grant_id, reply })
                 .await
         })
     }

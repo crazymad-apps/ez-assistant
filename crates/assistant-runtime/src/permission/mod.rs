@@ -7,6 +7,7 @@ mod approval;
 mod authorizer;
 mod defaults;
 mod document;
+mod grants;
 mod matcher;
 mod projection;
 mod registry;
@@ -28,10 +29,13 @@ pub use document::{
     PermissionDocumentError, PermissionEffect, PermissionFileOperation, PermissionMatcher,
     PermissionProcessMode, PermissionRule, ShellPermissionMatcher,
 };
+pub(crate) use grants::PermissionGrantCoordinator;
+pub use grants::StoredPermissionGrant;
 pub use matcher::file_matcher_matches;
 pub(crate) use matcher::{is_exact_allow_rule, matches_rule};
 pub(crate) use projection::{
-    document_from_protocol, revision_from_protocol, scope_from_protocol, snapshot_from_load,
+    document_from_protocol, matcher_from_protocol, matcher_to_protocol, revision_from_protocol,
+    scope_from_protocol, snapshot_from_load,
 };
 pub(crate) use registry::PermissionCoordinator;
 
@@ -39,6 +43,7 @@ pub(crate) use registry::PermissionCoordinator;
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum PermissionFileScope {
     Global,
+    Controller,
     Workspace(WorkspaceId),
     Session(SessionId),
 }
@@ -47,6 +52,7 @@ impl PermissionFileScope {
     pub fn level(&self) -> PermissionScope {
         match self {
             Self::Global => PermissionScope::Global,
+            Self::Controller => PermissionScope::Controller,
             Self::Workspace(_) => PermissionScope::Workspace,
             Self::Session(_) => PermissionScope::Session,
         }
