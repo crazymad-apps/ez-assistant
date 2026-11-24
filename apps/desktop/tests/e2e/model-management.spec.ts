@@ -50,6 +50,7 @@ test("Web uses provider model settings, persists edits, and resets to current on
   await page.screenshot({ path: test.info().outputPath("model-cascade.png") });
   await dialog.getByRole("button", { name: "默认模型", exact: true }).click();
   await dialog.getByRole("button", { name: "添加服务商", exact: true }).click();
+  await dialog.getByRole("button", { name: "高级设置", exact: true }).click();
   await dialog.getByLabel("服务商名称", { exact: true }).fill("删除验证服务商");
   await dialog.getByLabel("服务地址", { exact: true }).fill(endpoint);
   await dialog.getByLabel("API Key", { exact: true }).fill("e2e-placeholder-not-a-real-secret");

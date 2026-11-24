@@ -124,12 +124,12 @@ for (const milestone of ["m0", "m1"] as const) test(`personal Responses history 
     await open();
     const dialog = page.getByRole("dialog", { name: "设置", exact: true });
     await dialog.getByRole("button", { name: "添加服务商", exact: true }).click();
+    await dialog.getByRole("button", { name: "高级设置", exact: true }).click();
     await dialog.getByLabel("服务商名称", { exact: true }).fill("F06 fixture");
     await dialog.getByLabel("服务地址", { exact: true }).fill(`http://127.0.0.1:${address.port}/v1`);
     await dialog.getByLabel("API Key", { exact: true }).fill("fixture-only-secret");
     const toggle = dialog.getByRole("checkbox", { name: "使用服务端历史续接" });
     await expect(toggle).toBeDisabled();
-    await dialog.getByRole("button", { name: "接口选项", exact: true }).click();
     await dialog.getByRole("button", { name: "续接能力", exact: true }).click();
     await page.getByRole("option", { name: "明确支持", exact: true }).click();
     await expect(toggle).toBeEnabled();

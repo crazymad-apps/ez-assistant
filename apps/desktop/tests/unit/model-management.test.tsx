@@ -414,19 +414,45 @@ describe('provider and fixed model settings', () => {
     expect(store.settings.listProviderModels).toHaveBeenCalledOnce();
   });
 
-  it('supports quick provider presets, smart endpoint auto-fill, and draft connection testing', async () => {
+  it('folds advanced defaults behind LobeHub split-pane presets, supports search, and tests drafts', async () => {
     const store = modelStore();
     const test_spy = vi.spyOn(store.settings, 'testProviderConnection').mockResolvedValue({
       model_count: 2,
       sample_model_ids: ['deepseek-chat', 'deepseek-reasoner'],
       elapsed_ms: 85,
     });
-    show(store);
+    render(
+      <AppMessageProvider><RootStoreProvider store={store}>
+        <SettingsDialog />
+      </RootStoreProvider></AppMessageProvider>,
+    );
+    expect(document.querySelector('[data-provider-icon="custom"]')).not.toBeNull();
+
     fireEvent.click(screen.getByRole('button', { name: '添加服务商' }));
-    fireEvent.click(screen.getByRole('button', { name: /DeepSeek/ }));
-    expect(screen.getByLabelText('服务商名称')).toHaveValue('DeepSeek');
-    expect(screen.getByLabelText('服务地址')).toHaveValue('https://api.deepseek.com/v1');
+    expect(screen.queryByLabelText('服务商名称')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('服务地址')).not.toBeInTheDocument();
+    expect(screen.getByText('https://api.deepseek.com/v1')).toBeVisible();
+    expect(document.querySelectorAll('[data-provider-icon="deepseek"]').length).toBeGreaterThanOrEqual(2);
+
+    const search = screen.getByLabelText('搜索服务商');
+    fireEvent.change(search, { target: { value: 'openrouter' } });
+    expect(screen.getByRole('button', { name: 'OpenRouter' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: '讯飞星火' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'OpenRouter' }));
+    expect(screen.getByText('https://openrouter.ai/api/v1')).toBeVisible();
     expect(document.activeElement).toBe(screen.getByLabelText('API Key'));
+
+    fireEvent.change(search, { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: '自定义 OpenAI 兼容' }));
+    expect(await screen.findByLabelText('服务商名称')).toBeVisible();
+    expect(screen.getByLabelText('服务地址')).toHaveValue('');
+
+    fireEvent.click(screen.getByRole('button', { name: 'DeepSeek' }));
+    expect(screen.getByRole('button', { name: '高级设置' })).toHaveAttribute('aria-expanded', 'false');
+    await waitFor(() => expect(screen.queryByLabelText('服务地址')).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: '高级设置' }));
+    expect(await screen.findByLabelText('服务地址')).toHaveValue('https://api.deepseek.com/v1');
 
     fireEvent.click(screen.getByRole('button', { name: '服务商类型' }));
     fireEvent.click(screen.getByRole('option', { name: '智谱' }));
@@ -452,7 +478,7 @@ describe('provider and fixed model settings', () => {
     expect(screen.getByText(/deepseek-chat、deepseek-reasoner/)).toBeVisible();
   });
 
-  it('automatically refreshes online models after creating a new provider', async () => {
+  it('automatically refreshes online models after creating a new provider from the preset list', async () => {
     const store = modelStore();
     const created = {
       ...modelProvider,
@@ -480,7 +506,7 @@ describe('provider and fixed model settings', () => {
 
     show(store);
     fireEvent.click(screen.getByRole('button', { name: '添加服务商' }));
-    fireEvent.click(screen.getByRole('button', { name: /DeepSeek/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'DeepSeek' }));
     fireEvent.change(screen.getByLabelText('API Key'), { target: { value: 'sk-live' } });
     fireEvent.click(screen.getByRole('button', { name: '保存服务商' }));
 

@@ -1,5 +1,6 @@
 import { ModelStatusTags } from './ModelStatusTags';
 import { Button } from '../../../components/Button';
+import { ProviderIcon, inferModelProviderIcon } from '../../../components/ProviderIcon';
 import { observer } from 'mobx-react-lite';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
@@ -161,7 +162,12 @@ export const ProviderSettingsPage = observer(function ProviderSettingsPage(
 
   return (
     <SettingsPageContainer
-      title={props.provider.connection.display_name}
+      title={
+        <span className={styles.provider_detail_title}>
+          <ProviderIcon name={inferModelProviderIcon(props.provider.connection)} size={20} />
+          <span>{props.provider.connection.display_name}</span>
+        </span>
+      }
       on_back={props.onBack}
       actions={
         !read_only && (

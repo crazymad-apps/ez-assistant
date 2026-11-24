@@ -38,12 +38,12 @@ test("manual model origin survives online changes and controls deletion and tags
     const dialog = page.getByRole("dialog", { name: "设置", exact: true });
     await dialog.getByRole("button", { name: "模型", exact: true }).click();
     await dialog.getByRole("button", { name: "添加服务商", exact: true }).click();
+    await dialog.getByRole("button", { name: "高级设置", exact: true }).click();
     await dialog.getByRole("button", { name: "服务商类型", exact: true }).click();
     await page.getByRole("option", { name: "DeepSeek", exact: true }).click();
     await dialog.getByLabel("服务商名称", { exact: true }).fill("手动模型验证");
     await dialog.getByLabel("服务地址", { exact: true }).fill(`http://127.0.0.1:${address.port}/v1`);
     await dialog.getByLabel("API Key", { exact: true }).fill("artificial-manual-key");
-    await dialog.getByRole("button", { name: "接口选项", exact: true }).click();
     await dialog.getByRole("button", { name: "接口协议", exact: true }).click();
     await page.getByRole("option", { name: "Chat Completions", exact: true }).click();
     await dialog.getByRole("button", { name: "保存服务商", exact: true }).click();
