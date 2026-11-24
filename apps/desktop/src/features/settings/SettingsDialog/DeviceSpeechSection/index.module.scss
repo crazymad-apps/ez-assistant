@@ -348,3 +348,16 @@
     grid-template-columns: 1fr;
   }
 }
+
+.provider_trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+
+  > span:last-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}

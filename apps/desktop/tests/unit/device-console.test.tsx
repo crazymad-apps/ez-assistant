@@ -220,6 +220,14 @@ describe("DeviceSpeechSection and DeviceConsole UI", () => {
     await screen.findByText(/仅需填写阿里云百炼 API Key/);
     expect(container.querySelector("select")).toBeNull();
     expect(screen.queryByText(/deepseek/i)).toBeNull();
+    expect(container.querySelectorAll('[data-provider-icon="bailian"]')).toHaveLength(2);
+
+    // 切换 TTS 为阶跃星辰验证新预置与音色直选、再切回硅基流动试听闭环测试
+    fireEvent.click(screen.getByRole("button", { name: "TTS 服务提供商" }));
+    fireEvent.click(await screen.findByRole("option", { name: /阶跃星辰/ }));
+    expect(container.querySelector('[data-provider-icon="stepfun"]')).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "TTS 预置音色" }));
+    fireEvent.click(await screen.findByRole("option", { name: /温柔女声/ }));
 
     // 切换 TTS 为硅基流动并挑选预置音色、试听合成音频，再用该音频闭环测试 ASR
     fireEvent.click(screen.getByRole("button", { name: "TTS 服务提供商" }));
@@ -233,7 +241,11 @@ describe("DeviceSpeechSection and DeviceConsole UI", () => {
     fireEvent.click(screen.getByRole("button", { name: "用 TTS 音频闭环测试" }));
     await screen.findByText(/闭环识别测试通过/);
 
-    // 切换 ASR 为 OpenAI 并展开高级设置确认 Endpoint 与默认模型自动预填
+    // 切换 ASR 为 Fireworks 验证多 ASR 预置，再切换 OpenAI 展开高级设置
+    fireEvent.click(screen.getByRole("button", { name: "ASR 服务提供商" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Fireworks AI/ }));
+    expect(container.querySelector('[data-provider-icon="fireworks"]')).not.toBeNull();
+
     fireEvent.click(screen.getByRole("button", { name: "ASR 服务提供商" }));
     fireEvent.click(await screen.findByRole("option", { name: /^OpenAI/ }));
 

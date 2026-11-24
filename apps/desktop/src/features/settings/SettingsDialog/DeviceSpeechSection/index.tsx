@@ -9,17 +9,16 @@ import type {
 } from "@ez-assistant/protocol";
 import { CollapsibleSection } from "../../../../components/CollapsibleSection";
 import { InlineIconButton } from "../../../../components/InlineIconButton";
+import { ProviderIcon } from "../../../../components/ProviderIcon";
 import { SelectionPopover, type SelectionOption } from "../../../../components/SelectionPopover";
 import { useRootStore } from "../../../../stores/RootStoreContext";
 import { base64ToWavBlob, BrowserWavRecorder, bytesToBase64 } from "../DeviceConsole/wavRecorder";
 import shellStyles from "../index.module.scss";
 import {
   ASR_PRESETS,
-  ASR_PRESET_OPTIONS,
   CUSTOM_MODEL_SENTINEL,
   CUSTOM_VOICE_SENTINEL,
   TTS_PRESETS,
-  TTS_PRESET_OPTIONS,
   defaultVoiceForModel,
   detectAsrPreset,
   detectTtsPreset,
@@ -248,6 +247,20 @@ export const DeviceSpeechSection = observer(function DeviceSpeechSection() {
   const effectiveReuseAsr = sameCloudProvider && tts.reuse_asr_credential;
   const asrTestBusy = asrTest.kind === "testing";
   const ttsTestBusy = ttsTest.kind === "testing";
+
+  const asrProviderOptions: ReadonlyArray<SelectionOption<AsrPresetId>> = Object.values(ASR_PRESETS).map((item) => ({
+    value: item.id,
+    label: item.label,
+    description: item.description,
+    icon: <ProviderIcon name={item.icon} size={18} />,
+  }));
+
+  const ttsProviderOptions: ReadonlyArray<SelectionOption<TtsPresetId>> = Object.values(TTS_PRESETS).map((item) => ({
+    value: item.id,
+    label: item.label,
+    description: item.description,
+    icon: <ProviderIcon name={item.icon} size={18} />,
+  }));
 
   const asrModelOptions: ReadonlyArray<SelectionOption<string>> = [
     ...asrMeta.models,
@@ -496,8 +509,14 @@ export const DeviceSpeechSection = observer(function DeviceSpeechSection() {
                 on_open_change={setAsrProviderOpen}
                 on_select={handleAsrPresetChange}
                 open={asrProviderOpen}
-                options={ASR_PRESET_OPTIONS}
+                options={asrProviderOptions}
                 selected={asr.preset}
+                trigger_content={
+                  <span className={styles.provider_trigger}>
+                    <ProviderIcon name={asrMeta.icon} size={16} />
+                    <span>{asrMeta.label}</span>
+                  </span>
+                }
                 trigger_variant="field"
               />
               <p className={styles.preset_hint}>{asrMeta.hint}</p>
@@ -690,8 +709,14 @@ export const DeviceSpeechSection = observer(function DeviceSpeechSection() {
                 on_open_change={setTtsProviderOpen}
                 on_select={handleTtsPresetChange}
                 open={ttsProviderOpen}
-                options={TTS_PRESET_OPTIONS}
+                options={ttsProviderOptions}
                 selected={tts.preset}
+                trigger_content={
+                  <span className={styles.provider_trigger}>
+                    <ProviderIcon name={ttsMeta.icon} size={16} />
+                    <span>{ttsMeta.label}</span>
+                  </span>
+                }
                 trigger_variant="field"
               />
             </div>
