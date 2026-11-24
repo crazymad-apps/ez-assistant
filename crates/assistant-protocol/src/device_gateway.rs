@@ -239,7 +239,11 @@ pub struct RevokeDeviceRequest {
 pub enum SpeechProviderKind {
     #[default]
     Dashscope,
+    Siliconflow,
+    Zhipu,
+    Minimax,
     Openai,
+    Groq,
 }
 
 /// Host ASR 配置的安全读取投影（凭据仅返回是否已配置与脱敏掩码）。
@@ -321,6 +325,8 @@ pub struct UpdateTtsConfigurationInput {
     pub credential: Option<SecretValue>,
     #[serde(default)]
     pub clear_credential: bool,
+    #[serde(default)]
+    pub reuse_asr_credential: bool,
 }
 
 /// 保存 Host 语音配置并立即热重载 `SpeechService` 的请求。
@@ -342,6 +348,42 @@ pub struct UpdateSpeechConfigurationResult {
     pub snapshot: DeviceGatewaySnapshot,
 }
 
+/// 使用草稿或已保存凭据直接验证 ASR 转写效果的请求（音频为 Base64 WAV）。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct TestAsrConfigurationRequest {
+    pub asr: UpdateAsrConfigurationInput,
+    pub audio_wav_base64: String,
+}
+
+/// ASR 测试结果。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct TestAsrConfigurationResult {
+    pub transcript: String,
+    pub elapsed_ms: u64,
+}
+
+/// 使用草稿或已保存凭据直接验证 TTS 合成与试听效果的请求。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct TestTtsConfigurationRequest {
+    pub tts: UpdateTtsConfigurationInput,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "string | null")]
+    pub fallback_asr_credential: Option<SecretValue>,
+    pub text: String,
+}
+
+/// TTS 测试结果（返回可直接在桌面端播放的 16 kHz Mono Base64 WAV）。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct TestTtsConfigurationResult {
+    pub audio_wav_base64: String,
+    pub elapsed_ms: u64,
+    pub duration_ms: u64,
+}
+
 /// Desktop 发往 Host 的 Device Gateway 管理命令集合。
 ///
 /// 这些是 Host 级交互意图，不属于 Runtime Session 命令。
@@ -359,6 +401,8 @@ pub enum DeviceGatewayCommand {
     RevokeDevice(RevokeDeviceRequest),
     GetSpeechConfiguration(GetSpeechConfigurationRequest),
     UpdateSpeechConfiguration(UpdateSpeechConfigurationRequest),
+    TestAsrConfiguration(TestAsrConfigurationRequest),
+    TestTtsConfiguration(TestTtsConfigurationRequest),
 }
 
 /// Gateway 写操作完成后返回的最新组合快照。
@@ -383,6 +427,8 @@ pub enum DeviceGatewayCommandResult {
     RevokeDevice(DeviceGatewayMutationResult),
     GetSpeechConfiguration(SpeechConfigurationSnapshot),
     UpdateSpeechConfiguration(UpdateSpeechConfigurationResult),
+    TestAsrConfiguration(TestAsrConfigurationResult),
+    TestTtsConfiguration(TestTtsConfigurationResult),
 }
 
 #[cfg(test)]
@@ -473,6 +519,7 @@ mod tests {
                     timeout_ms: 30_000,
                     credential: Some(SecretValue::new("sk-secret-tts-token".to_owned())),
                     clear_credential: false,
+                    reuse_asr_credential: false,
                 },
             });
         let debug = format!("{command:?}");
@@ -496,6 +543,69 @@ mod tests {
             serde_json::from_value::<DeviceGatewayCommand>(get_wire)
                 .expect("deserialize get speech"),
             get_cmd
+        );
+
+        for (kind, wire_name) in [
+            (SpeechProviderKind::Dashscope, "dashscope"),
+            (SpeechProviderKind::Siliconflow, "siliconflow"),
+            (SpeechProviderKind::Zhipu, "zhipu"),
+            (SpeechProviderKind::Minimax, "minimax"),
+            (SpeechProviderKind::Openai, "openai"),
+            (SpeechProviderKind::Groq, "groq"),
+        ] {
+            let encoded = serde_json::to_value(kind).expect("serialize speech provider");
+            assert_eq!(encoded, serde_json::json!(wire_name));
+            assert_eq!(
+                serde_json::from_value::<SpeechProviderKind>(encoded).expect("decode provider"),
+                kind
+            );
+        }
+
+        let test_asr = DeviceGatewayCommand::TestAsrConfiguration(TestAsrConfigurationRequest {
+            asr: UpdateAsrConfigurationInput {
+                enabled: false,
+                provider: SpeechProviderKind::Siliconflow,
+                endpoint: "https://api.siliconflow.cn/v1".to_owned(),
+                model: "FunAudioLLM/SenseVoiceSmall".to_owned(),
+                timeout_ms: 30_000,
+                credential: Some(SecretValue::new("sk-asr-draft-secret".to_owned())),
+                clear_credential: false,
+            },
+            audio_wav_base64: "UklGRg==".to_owned(),
+        });
+        let asr_debug = format!("{test_asr:?}");
+        assert!(asr_debug.contains("<redacted>"));
+        assert!(!asr_debug.contains("sk-asr-draft-secret"));
+        let asr_wire = serde_json::to_value(&test_asr).expect("serialize test asr");
+        assert_eq!(asr_wire["type"], "test_asr_configuration");
+        assert_eq!(
+            serde_json::from_value::<DeviceGatewayCommand>(asr_wire).expect("deserialize test asr"),
+            test_asr
+        );
+
+        let test_tts = DeviceGatewayCommand::TestTtsConfiguration(TestTtsConfigurationRequest {
+            tts: UpdateTtsConfigurationInput {
+                enabled: false,
+                provider: SpeechProviderKind::Minimax,
+                endpoint: "https://api.minimaxi.com/v1/t2a_v2".to_owned(),
+                model: "speech-2.8-turbo".to_owned(),
+                voice: "female-shaonv".to_owned(),
+                timeout_ms: 30_000,
+                credential: None,
+                clear_credential: false,
+                reuse_asr_credential: true,
+            },
+            fallback_asr_credential: Some(SecretValue::new("sk-fallback-tts-secret".to_owned())),
+            text: "你好，这是语音合成测试。".to_owned(),
+        });
+        let tts_debug = format!("{test_tts:?}");
+        assert!(tts_debug.contains("<redacted>"));
+        assert!(!tts_debug.contains("sk-fallback-tts-secret"));
+        let tts_wire = serde_json::to_value(&test_tts).expect("serialize test tts");
+        assert_eq!(tts_wire["type"], "test_tts_configuration");
+        assert_eq!(
+            serde_json::from_value::<DeviceGatewayCommand>(tts_wire).expect("deserialize test tts"),
+            test_tts
         );
     }
 }

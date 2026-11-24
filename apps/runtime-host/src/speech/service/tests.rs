@@ -668,3 +668,126 @@ fn per_user_providers_share_the_existing_host_speech_slots() {
     drop(permits);
     assert!(b.asr_slots.clone().try_acquire_owned().is_ok());
 }
+
+#[tokio::test]
+async fn test_asr_and_tts_draft_endpoints_round_trip_and_reuse_saved_credentials() {
+    use assistant_protocol::{
+        SecretValue, SpeechProviderKind, TestAsrConfigurationRequest, TestTtsConfigurationRequest,
+        UpdateAsrConfigurationInput, UpdateTtsConfigurationInput,
+    };
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let address = listener.local_addr().expect("address");
+    let app = Router::new()
+        .route(
+            "/v1/audio/transcriptions",
+            post(|headers: axum::http::HeaderMap| async move {
+                let auth = headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default();
+                assert_eq!(auth, "Bearer sk-saved-asr-key");
+                Json(json!({"text": "草稿测试识别"}))
+            }),
+        )
+        .route(
+            "/v1/audio/speech",
+            post(
+                |headers: axum::http::HeaderMap, Json(body): Json<serde_json::Value>| async move {
+                    let auth = headers
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default();
+                    assert_eq!(auth, "Bearer sk-saved-asr-key");
+                    assert_eq!(body["voice"], "FunAudioLLM/CosyVoice2-0.5B:claire");
+                    Bytes::from(pcm16_mono_wav(&[120_u8; 640]).unwrap())
+                },
+            ),
+        );
+    let provider_server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+    let source = Arc::new(StaticSource(format!(
+        r#"
+[speech.asr]
+provider = "siliconflow"
+model = "FunAudioLLM/SenseVoiceSmall"
+credential = "sk-saved-asr-key"
+endpoint = "http://{address}/v1"
+timeout_ms = 5000
+"#
+    )));
+    let (service, handle) = SpeechService::new(source);
+    let mut status = handle.status.clone();
+    let shutdown = CancellationToken::new();
+    let service_task = tokio::spawn(service.run_until(shutdown.clone()));
+    status.changed().await.expect("initial status");
+
+    let wav_b64 = BASE64.encode(pcm16_mono_wav(&[0_u8; 640]).unwrap());
+    let asr_out = handle
+        .test_asr(TestAsrConfigurationRequest {
+            asr: UpdateAsrConfigurationInput {
+                enabled: false,
+                provider: SpeechProviderKind::Siliconflow,
+                endpoint: format!("http://{address}/v1"),
+                model: "FunAudioLLM/SenseVoiceSmall".to_owned(),
+                timeout_ms: 5000,
+                credential: None,
+                clear_credential: false,
+            },
+            audio_wav_base64: wav_b64,
+        })
+        .await
+        .expect("test_asr ok");
+    assert_eq!(asr_out.transcript, "草稿测试识别");
+
+    let tts_out = handle
+        .test_tts(TestTtsConfigurationRequest {
+            tts: UpdateTtsConfigurationInput {
+                enabled: false,
+                provider: SpeechProviderKind::Siliconflow,
+                endpoint: format!("http://{address}/v1"),
+                model: "FunAudioLLM/CosyVoice2-0.5B".to_owned(),
+                voice: "claire".to_owned(),
+                timeout_ms: 5000,
+                credential: None,
+                clear_credential: false,
+                reuse_asr_credential: true,
+            },
+            fallback_asr_credential: None,
+            text: String::new(),
+        })
+        .await
+        .expect("test_tts ok");
+    let decoded_wav = BASE64
+        .decode(tts_out.audio_wav_base64)
+        .expect("valid b64 wav");
+    assert_eq!(&decoded_wav[0..4], b"RIFF");
+    assert_eq!(tts_out.duration_ms, 20);
+
+    // 验证显式传入 fallback_asr_credential 优先级高于已保存空白。
+    let err = handle
+        .test_tts(TestTtsConfigurationRequest {
+            tts: UpdateTtsConfigurationInput {
+                enabled: false,
+                provider: SpeechProviderKind::Groq,
+                endpoint: String::new(),
+                model: "tts-1".to_owned(),
+                voice: "alloy".to_owned(),
+                timeout_ms: 5000,
+                credential: Some(SecretValue::new("sk-groq".to_owned())),
+                clear_credential: false,
+                reuse_asr_credential: false,
+            },
+            fallback_asr_credential: None,
+            text: "hello".to_owned(),
+        })
+        .await;
+    assert!(err.is_err());
+
+    shutdown.cancel();
+    service_task.await.expect("join").expect("shutdown");
+    provider_server.abort();
+    let _ = provider_server.await;
+}

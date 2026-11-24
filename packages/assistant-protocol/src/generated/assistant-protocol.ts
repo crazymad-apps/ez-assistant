@@ -734,12 +734,12 @@ export type DeviceConsoleSnapshot = { api_prefix: string, ui_path?: string, dire
  *
  * 这些是 Host 级交互意图，不属于 Runtime Session 命令。
  */
-export type DeviceGatewayCommand = { "type": "get_snapshot", "payload": GetDeviceGatewaySnapshotRequest } | { "type": "set_access_enabled", "payload": SetDeviceAccessEnabledRequest } | { "type": "open_pairing_window", "payload": OpenDevicePairingWindowRequest } | { "type": "close_pairing_window", "payload": CloseDevicePairingWindowRequest } | { "type": "confirm_pairing", "payload": ConfirmDevicePairingRequest } | { "type": "reject_pairing", "payload": RejectDevicePairingRequest } | { "type": "rename_device", "payload": RenameDeviceRequest } | { "type": "revoke_device", "payload": RevokeDeviceRequest } | { "type": "get_speech_configuration", "payload": GetSpeechConfigurationRequest } | { "type": "update_speech_configuration", "payload": UpdateSpeechConfigurationRequest };
+export type DeviceGatewayCommand = { "type": "get_snapshot", "payload": GetDeviceGatewaySnapshotRequest } | { "type": "set_access_enabled", "payload": SetDeviceAccessEnabledRequest } | { "type": "open_pairing_window", "payload": OpenDevicePairingWindowRequest } | { "type": "close_pairing_window", "payload": CloseDevicePairingWindowRequest } | { "type": "confirm_pairing", "payload": ConfirmDevicePairingRequest } | { "type": "reject_pairing", "payload": RejectDevicePairingRequest } | { "type": "rename_device", "payload": RenameDeviceRequest } | { "type": "revoke_device", "payload": RevokeDeviceRequest } | { "type": "get_speech_configuration", "payload": GetSpeechConfigurationRequest } | { "type": "update_speech_configuration", "payload": UpdateSpeechConfigurationRequest } | { "type": "test_asr_configuration", "payload": TestAsrConfigurationRequest } | { "type": "test_tts_configuration", "payload": TestTtsConfigurationRequest };
 
 /**
  * 与 [`DeviceGatewayCommand`] 一一对应的 Host 命令结果。
  */
-export type DeviceGatewayCommandResult = { "type": "get_snapshot", "payload": DeviceGatewaySnapshot } | { "type": "set_access_enabled", "payload": DeviceGatewayMutationResult } | { "type": "open_pairing_window", "payload": DeviceGatewayMutationResult } | { "type": "close_pairing_window", "payload": DeviceGatewayMutationResult } | { "type": "confirm_pairing", "payload": DeviceGatewayMutationResult } | { "type": "reject_pairing", "payload": DeviceGatewayMutationResult } | { "type": "rename_device", "payload": DeviceGatewayMutationResult } | { "type": "revoke_device", "payload": DeviceGatewayMutationResult } | { "type": "get_speech_configuration", "payload": SpeechConfigurationSnapshot } | { "type": "update_speech_configuration", "payload": UpdateSpeechConfigurationResult };
+export type DeviceGatewayCommandResult = { "type": "get_snapshot", "payload": DeviceGatewaySnapshot } | { "type": "set_access_enabled", "payload": DeviceGatewayMutationResult } | { "type": "open_pairing_window", "payload": DeviceGatewayMutationResult } | { "type": "close_pairing_window", "payload": DeviceGatewayMutationResult } | { "type": "confirm_pairing", "payload": DeviceGatewayMutationResult } | { "type": "reject_pairing", "payload": DeviceGatewayMutationResult } | { "type": "rename_device", "payload": DeviceGatewayMutationResult } | { "type": "revoke_device", "payload": DeviceGatewayMutationResult } | { "type": "get_speech_configuration", "payload": SpeechConfigurationSnapshot } | { "type": "update_speech_configuration", "payload": UpdateSpeechConfigurationResult } | { "type": "test_asr_configuration", "payload": TestAsrConfigurationResult } | { "type": "test_tts_configuration", "payload": TestTtsConfigurationResult };
 
 /**
  * Host Device Gateway 的可丢弃失效通知；完整状态始终重新读取 Gateway 快照。
@@ -3179,7 +3179,7 @@ export type SpeechConfigurationSnapshot = { revision?: string, asr: AsrConfigura
 /**
  * Host 语音服务支持的 Provider 类型。
  */
-export type SpeechProviderKind = "dashscope" | "openai";
+export type SpeechProviderKind = "dashscope" | "siliconflow" | "zhipu" | "minimax" | "openai" | "groq";
 
 /**
  * 单项 Host 语音能力的运行状态。
@@ -3284,6 +3284,16 @@ export type SubmittedFeedbackSummary = { id: string, title: string, target_kind:
 
 export type SystemContextSnapshot = { session_id: SessionId, session_created_at_ms: number | null, workspace?: SessionWorkspaceSnapshot, parts: Array<string>, };
 
+/**
+ * 使用草稿或已保存凭据直接验证 ASR 转写效果的请求（音频为 Base64 WAV）。
+ */
+export type TestAsrConfigurationRequest = { asr: UpdateAsrConfigurationInput, audio_wav_base64: string, };
+
+/**
+ * ASR 测试结果。
+ */
+export type TestAsrConfigurationResult = { transcript: string, elapsed_ms: number, };
+
 export type TestMcpServerRequest = { test_id: IdempotencyKey, server?: McpServerDraft,
 /**
  * 与 server 二选一；受管草稿无启动字段。
@@ -3295,6 +3305,16 @@ export type TestMcpServerResult = { outcome: McpConnectionTestOutcome, stage: Mc
  * 成功时可携带非阻断警告；调用方应根据 outcome 而非该字段是否存在判断成功。
  */
 diagnostic?: McpDiagnosticSnapshot, };
+
+/**
+ * 使用草稿或已保存凭据直接验证 TTS 合成与试听效果的请求。
+ */
+export type TestTtsConfigurationRequest = { tts: UpdateTtsConfigurationInput, fallback_asr_credential?: string | null, text: string, };
+
+/**
+ * TTS 测试结果（返回可直接在桌面端播放的 16 kHz Mono Base64 WAV）。
+ */
+export type TestTtsConfigurationResult = { audio_wav_base64: string, elapsed_ms: number, duration_ms: number, };
 
 /**
  * Session WorkPlan 中一个待办项的不透明稳定标识。
@@ -3498,7 +3518,7 @@ export type UpdateSpeechConfigurationResult = { configuration: SpeechConfigurati
 /**
  * 更新 Host TTS 配置的请求参数；凭据留空且 `clear_credential = false` 时保留既有凭据。
  */
-export type UpdateTtsConfigurationInput = { enabled: boolean, provider: SpeechProviderKind, endpoint: string, model: string, voice: string, timeout_ms: number, credential?: string | null, clear_credential: boolean, };
+export type UpdateTtsConfigurationInput = { enabled: boolean, provider: SpeechProviderKind, endpoint: string, model: string, voice: string, timeout_ms: number, credential?: string | null, clear_credential: boolean, reuse_asr_credential: boolean, };
 
 /**
  * 用完整表单更新 Workspace 当前元数据；既有 Session 的冻结环境保持不变。

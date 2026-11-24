@@ -14,12 +14,16 @@ use thiserror::Error;
 use toml_edit::{DocumentMut, Item, Table};
 
 use super::provider::{
-    AsrProvider, DashScopeSpeechRecognizer, DashScopeSpeechSynthesizer, OpenAiSpeechRecognizer,
-    OpenAiSpeechSynthesizer, TtsProvider,
+    AsrProvider, DashScopeSpeechRecognizer, DashScopeSpeechSynthesizer, MiniMaxSpeechSynthesizer,
+    OpenAiSpeechRecognizer, OpenAiSpeechSynthesizer, TtsProvider,
 };
 
 const DEFAULT_DASHSCOPE_ENDPOINT: &str = "https://dashscope.aliyuncs.com";
+const DEFAULT_SILICONFLOW_ENDPOINT: &str = "https://api.siliconflow.cn/v1";
+const DEFAULT_ZHIPU_ENDPOINT: &str = "https://open.bigmodel.cn/api/paas/v4";
+const DEFAULT_MINIMAX_ENDPOINT: &str = "https://api.minimaxi.com/v1/t2a_v2";
 const DEFAULT_OPENAI_ENDPOINT: &str = "https://api.openai.com/v1";
+const DEFAULT_GROQ_ENDPOINT: &str = "https://api.groq.com/openai/v1";
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 const MAX_TIMEOUT_MS: u64 = 120_000;
 const MAX_TEXT_BYTES: usize = 512;
@@ -243,7 +247,24 @@ pub(super) async fn update_configuration(
         .and_then(|v| v.try_into::<RawTtsConfig>().ok());
 
     let next_asr = build_next_asr(&request.asr, existing_asr.as_ref())?;
-    let next_tts = build_next_tts(&request.tts, existing_tts.as_ref())?;
+    let reuse_asr_secret = request
+        .asr
+        .credential
+        .as_ref()
+        .map(|s| s.expose().trim())
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .or_else(|| next_asr.as_ref().map(|a| a.credential.clone()))
+        .or_else(|| {
+            (!request.asr.clear_credential)
+                .then(|| existing_asr.as_ref().map(|a| a.credential.clone()))
+                .flatten()
+        });
+    let next_tts = build_next_tts(
+        &request.tts,
+        existing_tts.as_ref(),
+        reuse_asr_secret.as_deref(),
+    )?;
 
     if next_asr.is_none() && next_tts.is_none() {
         if let Some(speech_table) = document.get_mut("speech").and_then(Item::as_table_mut) {
@@ -319,6 +340,18 @@ fn build_next_asr(
     if !input.enabled {
         return Ok(None);
     }
+    Ok(Some(validate_and_build_asr(input, existing)?))
+}
+
+fn validate_and_build_asr(
+    input: &UpdateAsrConfigurationInput,
+    existing: Option<&RawAsrConfig>,
+) -> Result<RawAsrConfig, SpeechConfigError> {
+    if input.provider == SpeechProviderKind::Minimax {
+        return Err(SpeechConfigError::Invalid(
+            "MiniMax 暂仅支持语音播放（TTS），语音识别请选择阿里云百炼、硅基流动、智谱、OpenAI 或 Groq。",
+        ));
+    }
     let endpoint = normalize_endpoint(&input.endpoint, input.provider)?;
     let model = normalize_required_text(&input.model, "请填写语音识别（ASR）模型名称。")?;
     if !valid_timeout(input.timeout_ms) {
@@ -330,7 +363,7 @@ fn build_next_asr(
         input.credential.as_ref().map(|s| s.expose()),
         input.clear_credential,
         existing.map(|c| c.credential.as_str()),
-        "启用语音识别（ASR）时必须填写或保留 API Key 凭据。",
+        "请填写或保留语音识别（ASR）API Key 凭据。",
     )?;
     let raw = RawAsrConfig {
         provider: provider_str(input.provider).to_owned(),
@@ -344,29 +377,48 @@ fn build_next_asr(
             "语音识别（ASR）配置无法通过 Provider 校验。",
         ));
     }
-    Ok(Some(raw))
+    Ok(raw)
 }
 
 fn build_next_tts(
     input: &UpdateTtsConfigurationInput,
     existing: Option<&RawTtsConfig>,
+    reuse_asr_credential: Option<&str>,
 ) -> Result<Option<RawTtsConfig>, SpeechConfigError> {
     if !input.enabled {
         return Ok(None);
     }
+    Ok(Some(validate_and_build_tts(
+        input,
+        existing,
+        reuse_asr_credential,
+    )?))
+}
+
+fn validate_and_build_tts(
+    input: &UpdateTtsConfigurationInput,
+    existing: Option<&RawTtsConfig>,
+    reuse_asr_credential: Option<&str>,
+) -> Result<RawTtsConfig, SpeechConfigError> {
+    if input.provider == SpeechProviderKind::Groq {
+        return Err(SpeechConfigError::Invalid(
+            "Groq 暂仅支持语音识别（ASR），语音播放请选择阿里云百炼、硅基流动、智谱、MiniMax 或 OpenAI。",
+        ));
+    }
     let endpoint = normalize_endpoint(&input.endpoint, input.provider)?;
     let model = normalize_required_text(&input.model, "请填写语音播放（TTS）模型名称。")?;
-    let voice = normalize_required_text(&input.voice, "请填写语音播放（TTS）音色名称。")?;
+    let voice = normalize_required_text(&input.voice, "请填写或选择语音播放（TTS）音色。")?;
     if !valid_timeout(input.timeout_ms) {
         return Err(SpeechConfigError::Invalid(
             "TTS 超时时间必须在 1 到 120000 毫秒之间。",
         ));
     }
-    let credential = resolve_next_credential(
+    let credential = resolve_next_tts_credential(
         input.credential.as_ref().map(|s| s.expose()),
         input.clear_credential,
+        input.reuse_asr_credential,
         existing.map(|c| c.credential.as_str()),
-        "启用语音播放（TTS）时必须填写或保留 API Key 凭据。",
+        reuse_asr_credential,
     )?;
     let raw = RawTtsConfig {
         provider: provider_str(input.provider).to_owned(),
@@ -381,7 +433,55 @@ fn build_next_tts(
             "语音播放（TTS）配置无法通过 Provider 校验。",
         ));
     }
-    Ok(Some(raw))
+    Ok(raw)
+}
+
+pub(super) async fn compile_asr_draft(
+    source: &dyn RuntimeConfigSource,
+    input: &UpdateAsrConfigurationInput,
+) -> Result<(Arc<dyn AsrProvider>, Duration), SpeechConfigError> {
+    let existing_asr = load_existing_sections(source).await.0;
+    let raw = validate_and_build_asr(input, existing_asr.as_ref())?;
+    let timeout = Duration::from_millis(raw.timeout_ms);
+    let provider =
+        compile_asr_ref(&raw).ok_or(SpeechConfigError::Invalid("语音识别（ASR）配置无效。"))?;
+    Ok((provider, timeout))
+}
+
+pub(super) async fn compile_tts_draft(
+    source: &dyn RuntimeConfigSource,
+    input: &UpdateTtsConfigurationInput,
+    fallback_asr_credential: Option<&str>,
+) -> Result<(Arc<dyn TtsProvider>, Duration), SpeechConfigError> {
+    let (existing_asr, existing_tts) = load_existing_sections(source).await;
+    let resolved_asr = fallback_asr_credential
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .or_else(|| existing_asr.map(|a| a.credential));
+    let raw = validate_and_build_tts(input, existing_tts.as_ref(), resolved_asr.as_deref())?;
+    let timeout = Duration::from_millis(raw.timeout_ms);
+    let provider =
+        compile_tts_ref(&raw).ok_or(SpeechConfigError::Invalid("语音播放（TTS）配置无效。"))?;
+    Ok((provider, timeout))
+}
+
+async fn load_existing_sections(
+    source: &dyn RuntimeConfigSource,
+) -> (Option<RawAsrConfig>, Option<RawTtsConfig>) {
+    let ConfigSourceLoad::Document(doc) = source.load().await else {
+        return (None, None);
+    };
+    let parsed = toml::from_str::<SpeechDocument>(doc.contents()).ok();
+    let speech = parsed.and_then(|d| d.speech);
+    let existing_asr = speech
+        .as_ref()
+        .and_then(|s| s.asr.clone())
+        .and_then(|v| v.try_into::<RawAsrConfig>().ok());
+    let existing_tts = speech
+        .and_then(|s| s.tts)
+        .and_then(|v| v.try_into::<RawTtsConfig>().ok());
+    (existing_asr, existing_tts)
 }
 
 fn project_configuration(
@@ -486,7 +586,10 @@ fn compile_asr_ref(raw: &RawAsrConfig) -> Option<Arc<dyn AsrProvider>> {
         )
         .ok()
         .map(|p| Arc::new(p) as Arc<dyn AsrProvider>),
-        SpeechProviderKind::Openai => OpenAiSpeechRecognizer::new(
+        SpeechProviderKind::Siliconflow
+        | SpeechProviderKind::Zhipu
+        | SpeechProviderKind::Openai
+        | SpeechProviderKind::Groq => OpenAiSpeechRecognizer::new(
             endpoint,
             raw.model.clone(),
             raw.credential.clone(),
@@ -494,6 +597,7 @@ fn compile_asr_ref(raw: &RawAsrConfig) -> Option<Arc<dyn AsrProvider>> {
         )
         .ok()
         .map(|p| Arc::new(p) as Arc<dyn AsrProvider>),
+        SpeechProviderKind::Minimax => None,
     }
 }
 
@@ -518,32 +622,53 @@ fn compile_tts_ref(raw: &RawTtsConfig) -> Option<Arc<dyn TtsProvider>> {
         .unwrap_or_else(|| default_endpoint_for(provider))
         .to_owned();
     let timeout = Duration::from_millis(raw.timeout_ms);
+    let voice = if provider == SpeechProviderKind::Siliconflow && !raw.voice.contains(':') {
+        format!("{}:{}", raw.model, raw.voice)
+    } else {
+        raw.voice.clone()
+    };
     match provider {
         SpeechProviderKind::Dashscope => DashScopeSpeechSynthesizer::new(
             endpoint,
             raw.model.clone(),
-            raw.voice.clone(),
+            voice,
             raw.credential.clone(),
             timeout,
         )
         .ok()
         .map(|p| Arc::new(p) as Arc<dyn TtsProvider>),
-        SpeechProviderKind::Openai => OpenAiSpeechSynthesizer::new(
+        SpeechProviderKind::Siliconflow
+        | SpeechProviderKind::Zhipu
+        | SpeechProviderKind::Openai => OpenAiSpeechSynthesizer::new(
             endpoint,
             raw.model.clone(),
-            raw.voice.clone(),
+            voice,
             raw.credential.clone(),
             timeout,
         )
         .ok()
         .map(|p| Arc::new(p) as Arc<dyn TtsProvider>),
+        SpeechProviderKind::Minimax => MiniMaxSpeechSynthesizer::new(
+            endpoint,
+            raw.model.clone(),
+            voice,
+            raw.credential.clone(),
+            timeout,
+        )
+        .ok()
+        .map(|p| Arc::new(p) as Arc<dyn TtsProvider>),
+        SpeechProviderKind::Groq => None,
     }
 }
 
 fn parse_provider_kind(raw: &str) -> Option<SpeechProviderKind> {
     match raw {
         "dashscope" => Some(SpeechProviderKind::Dashscope),
+        "siliconflow" => Some(SpeechProviderKind::Siliconflow),
+        "zhipu" => Some(SpeechProviderKind::Zhipu),
+        "minimax" => Some(SpeechProviderKind::Minimax),
         "openai" => Some(SpeechProviderKind::Openai),
+        "groq" => Some(SpeechProviderKind::Groq),
         _ => None,
     }
 }
@@ -551,14 +676,22 @@ fn parse_provider_kind(raw: &str) -> Option<SpeechProviderKind> {
 const fn provider_str(kind: SpeechProviderKind) -> &'static str {
     match kind {
         SpeechProviderKind::Dashscope => "dashscope",
+        SpeechProviderKind::Siliconflow => "siliconflow",
+        SpeechProviderKind::Zhipu => "zhipu",
+        SpeechProviderKind::Minimax => "minimax",
         SpeechProviderKind::Openai => "openai",
+        SpeechProviderKind::Groq => "groq",
     }
 }
 
 const fn default_endpoint_for(kind: SpeechProviderKind) -> &'static str {
     match kind {
         SpeechProviderKind::Dashscope => DEFAULT_DASHSCOPE_ENDPOINT,
+        SpeechProviderKind::Siliconflow => DEFAULT_SILICONFLOW_ENDPOINT,
+        SpeechProviderKind::Zhipu => DEFAULT_ZHIPU_ENDPOINT,
+        SpeechProviderKind::Minimax => DEFAULT_MINIMAX_ENDPOINT,
         SpeechProviderKind::Openai => DEFAULT_OPENAI_ENDPOINT,
+        SpeechProviderKind::Groq => DEFAULT_GROQ_ENDPOINT,
     }
 }
 
@@ -606,6 +739,44 @@ fn resolve_next_credential(
     }
     let Some(prev) = existing.map(str::trim).filter(|s| !s.is_empty()) else {
         return Err(SpeechConfigError::Invalid(missing_message));
+    };
+    Ok(prev.to_owned())
+}
+
+fn resolve_next_tts_credential(
+    supplied: Option<&str>,
+    clear_credential: bool,
+    reuse_asr_credential: bool,
+    existing_tts: Option<&str>,
+    asr_credential: Option<&str>,
+) -> Result<String, SpeechConfigError> {
+    let trimmed_supplied = supplied.map(str::trim).filter(|s| !s.is_empty());
+    if let Some(secret) = trimmed_supplied {
+        if secret.len() > MAX_TEXT_BYTES || secret.contains(['\r', '\n']) {
+            return Err(SpeechConfigError::Invalid("API Key 凭据格式无效或过长。"));
+        }
+        return Ok(secret.to_owned());
+    }
+    if clear_credential {
+        return Err(SpeechConfigError::Invalid(
+            "启用语音播放（TTS）时必须填写或保留 API Key 凭据。",
+        ));
+    }
+    if reuse_asr_credential {
+        let Some(reused) = asr_credential.map(str::trim).filter(|s| !s.is_empty()) else {
+            return Err(SpeechConfigError::Invalid(
+                "启用复用语音识别 API Key 时，请先在语音识别中填写或保存 API Key。",
+            ));
+        };
+        if reused.len() > MAX_TEXT_BYTES || reused.contains(['\r', '\n']) {
+            return Err(SpeechConfigError::Invalid("API Key 凭据格式无效或过长。"));
+        }
+        return Ok(reused.to_owned());
+    }
+    let Some(prev) = existing_tts.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Err(SpeechConfigError::Invalid(
+            "请填写或保留语音播放（TTS）API Key 凭据。",
+        ));
     };
     Ok(prev.to_owned())
 }
@@ -817,6 +988,7 @@ timeout_ms = 30000
                         "sk-tts-123456".to_owned(),
                     )),
                     clear_credential: false,
+                    reuse_asr_credential: false,
                 },
             },
         )
@@ -858,6 +1030,7 @@ timeout_ms = 30000
                     timeout_ms: 30_000,
                     credential: None,
                     clear_credential: false,
+                    reuse_asr_credential: false,
                 },
             },
         )
@@ -898,10 +1071,74 @@ timeout_ms = 30000
                     timeout_ms: 30_000,
                     credential: None,
                     clear_credential: false,
+                    reuse_asr_credential: false,
                 },
             },
         )
         .await;
         assert!(matches!(conflict, Err(SpeechConfigError::Conflict)));
+
+        // reuse_asr_credential 允许从已保存 ASR 凭据直接开通同厂商 TTS，且不支持组合会明确报错。
+        let reused = update_configuration(
+            &source,
+            UpdateSpeechConfigurationRequest {
+                expected_revision: second.configuration.revision.clone(),
+                asr: UpdateAsrConfigurationInput {
+                    enabled: true,
+                    provider: SpeechProviderKind::Siliconflow,
+                    endpoint: "https://api.siliconflow.cn/v1".to_owned(),
+                    model: "FunAudioLLM/SenseVoiceSmall".to_owned(),
+                    timeout_ms: 30_000,
+                    credential: Some(assistant_protocol::SecretValue::new(
+                        "sk-sf-asr-1234".to_owned(),
+                    )),
+                    clear_credential: false,
+                },
+                tts: UpdateTtsConfigurationInput {
+                    enabled: true,
+                    provider: SpeechProviderKind::Siliconflow,
+                    endpoint: String::new(),
+                    model: "FunAudioLLM/CosyVoice2-0.5B".to_owned(),
+                    voice: "claire".to_owned(),
+                    timeout_ms: 30_000,
+                    credential: None,
+                    clear_credential: false,
+                    reuse_asr_credential: true,
+                },
+            },
+        )
+        .await
+        .expect("reuse asr secret");
+        assert_eq!(
+            reused.configuration.tts.endpoint,
+            DEFAULT_SILICONFLOW_ENDPOINT
+        );
+        assert_eq!(reused.configuration.tts.voice, "claire");
+        assert_eq!(
+            reused.configuration.tts.credential_masked.as_deref(),
+            Some("sk-****1234")
+        );
+        assert_eq!(
+            reused.compiled.status.tts,
+            SpeechServiceStatusSnapshot::Ready
+        );
+
+        let minimax_asr_err = compile_asr_draft(
+            &source,
+            &UpdateAsrConfigurationInput {
+                enabled: false,
+                provider: SpeechProviderKind::Minimax,
+                endpoint: String::new(),
+                model: "whisper-1".to_owned(),
+                timeout_ms: 30_000,
+                credential: Some(assistant_protocol::SecretValue::new("sk-mm".to_owned())),
+                clear_credential: false,
+            },
+        )
+        .await;
+        assert!(matches!(
+            minimax_asr_err,
+            Err(SpeechConfigError::Invalid(_))
+        ));
     }
 }

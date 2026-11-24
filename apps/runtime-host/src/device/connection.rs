@@ -4130,6 +4130,7 @@ mod tests {
                         timeout_ms: 10_000,
                         credential: Some(SecretValue::new("sk-tts-test".to_owned())),
                         clear_credential: false,
+                        reuse_asr_credential: false,
                     },
                 })
                 .await

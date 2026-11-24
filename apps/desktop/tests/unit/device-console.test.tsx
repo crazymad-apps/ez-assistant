@@ -96,8 +96,8 @@ function createConsoleMockClient() {
     }
     if (command.type === "update_speech_configuration") {
       const req = command.payload as {
-        asr: { provider: "dashscope" | "openai"; endpoint: string; model: string; enabled: boolean; timeout_ms: number };
-        tts: { provider: "dashscope" | "openai"; endpoint: string; model: string; voice: string; enabled: boolean; timeout_ms: number };
+        asr: { provider: SpeechConfigurationSnapshot["asr"]["provider"]; endpoint: string; model: string; enabled: boolean; timeout_ms: number };
+        tts: { provider: SpeechConfigurationSnapshot["tts"]["provider"]; endpoint: string; model: string; voice: string; enabled: boolean; timeout_ms: number };
       };
       speechConfig = {
         revision: "rev-2",
@@ -116,6 +116,25 @@ function createConsoleMockClient() {
       return {
         type: "update_speech_configuration",
         payload: { configuration: speechConfig, snapshot },
+      };
+    }
+    if (command.type === "test_tts_configuration") {
+      return {
+        type: "test_tts_configuration",
+        payload: {
+          audio_wav_base64: "UklGRg==",
+          elapsed_ms: 42,
+          duration_ms: 1500,
+        },
+      };
+    }
+    if (command.type === "test_asr_configuration") {
+      return {
+        type: "test_asr_configuration",
+        payload: {
+          transcript: "闭环识别测试通过",
+          elapsed_ms: 35,
+        },
       };
     }
     return { type: command.type, payload: { snapshot } };
@@ -185,9 +204,11 @@ function createStoreWithClient(client: RuntimeClient): RootStore {
 }
 
 describe("DeviceSpeechSection and DeviceConsole UI", () => {
-  it("edits ASR and TTS speech settings without native select elements or DeepSeek UI", async () => {
+  it("edits ASR and TTS speech settings with presets, voice picker, and live tests without select or DeepSeek UI", async () => {
     const mock = createConsoleMockClient();
     const store = createStoreWithClient(mock.client);
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:tts-preview");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
     const { container } = render(
       <RootStoreProvider store={store}>
         <AppMessageProvider>
@@ -196,16 +217,32 @@ describe("DeviceSpeechSection and DeviceConsole UI", () => {
       </RootStoreProvider>,
     );
 
-    await screen.findByDisplayValue("fun-asr-realtime");
+    await screen.findByText(/仅需填写阿里云百炼 API Key/);
     expect(container.querySelector("select")).toBeNull();
     expect(screen.queryByText(/deepseek/i)).toBeNull();
 
-    const asrProviderButton = screen.getByRole("button", { name: "ASR 服务提供商" });
-    fireEvent.click(asrProviderButton);
-    fireEvent.click(await screen.findByRole("option", { name: "OpenAI 兼容接口" }));
+    // 切换 TTS 为硅基流动并挑选预置音色、试听合成音频，再用该音频闭环测试 ASR
+    fireEvent.click(screen.getByRole("button", { name: "TTS 服务提供商" }));
+    fireEvent.click(await screen.findByRole("option", { name: /硅基流动/ }));
+    fireEvent.click(screen.getByRole("button", { name: "TTS 预置音色" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Anna/ }));
+
+    fireEvent.click(screen.getByRole("button", { name: "试听音色" }));
+    await screen.findByText(/合成成功 · 耗时 42 ms/);
+
+    fireEvent.click(screen.getByRole("button", { name: "用 TTS 音频闭环测试" }));
+    await screen.findByText(/闭环识别测试通过/);
+
+    // 切换 ASR 为 OpenAI 并展开高级设置确认 Endpoint 与默认模型自动预填
+    fireEvent.click(screen.getByRole("button", { name: "ASR 服务提供商" }));
+    fireEvent.click(await screen.findByRole("option", { name: /^OpenAI/ }));
+
+    const advancedButtons = screen.getAllByRole("button", { name: "高级设置" });
+    fireEvent.click(advancedButtons[0]);
 
     await waitFor(() => {
       expect(screen.getByLabelText("ASR 接口地址")).toHaveValue("https://api.openai.com/v1");
+      expect(screen.getByLabelText("ASR 模型名称")).toHaveValue("gpt-4o-mini-transcribe");
     });
 
     fireEvent.click(screen.getByRole("button", { name: "保存并应用" }));
@@ -219,6 +256,14 @@ describe("DeviceSpeechSection and DeviceConsole UI", () => {
             asr: expect.objectContaining({
               provider: "openai",
               endpoint: "https://api.openai.com/v1",
+              model: "gpt-4o-mini-transcribe",
+            }),
+            tts: expect.objectContaining({
+              provider: "siliconflow",
+              endpoint: "https://api.siliconflow.cn/v1",
+              model: "FunAudioLLM/CosyVoice2-0.5B",
+              voice: "anna",
+              reuse_asr_credential: false,
             }),
           }),
         }),

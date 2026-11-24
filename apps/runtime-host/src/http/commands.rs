@@ -342,6 +342,14 @@ async fn dispatch_device_gateway(
                 snapshot,
             })
         }
+        DeviceGatewayCommand::TestAsrConfiguration(request) => {
+            let result = services.speech.test_asr(request).await?;
+            DeviceGatewayCommandResult::TestAsrConfiguration(result)
+        }
+        DeviceGatewayCommand::TestTtsConfiguration(request) => {
+            let result = services.speech.test_tts(request).await?;
+            DeviceGatewayCommandResult::TestTtsConfiguration(result)
+        }
     };
     Ok((HostCommandResult::DeviceGateway(result), false))
 }

@@ -157,8 +157,9 @@ pub use device_gateway::{
     OpenDevicePairingWindowRequest, PendingDevicePairingSnapshot, RejectDevicePairingRequest,
     RenameDeviceRequest, RevokeDeviceRequest, SetDeviceAccessEnabledRequest,
     SpeechConfigurationSnapshot, SpeechProviderKind, SpeechServiceStatusSnapshot,
-    TtsConfigurationSnapshot, UpdateAsrConfigurationInput, UpdateSpeechConfigurationRequest,
-    UpdateSpeechConfigurationResult, UpdateTtsConfigurationInput,
+    TestAsrConfigurationRequest, TestAsrConfigurationResult, TestTtsConfigurationRequest,
+    TestTtsConfigurationResult, TtsConfigurationSnapshot, UpdateAsrConfigurationInput,
+    UpdateSpeechConfigurationRequest, UpdateSpeechConfigurationResult, UpdateTtsConfigurationInput,
 };
 pub use error::{ModelFailureKind, RuntimeErrorCode, RuntimeErrorInfo};
 pub use event::{

@@ -3,6 +3,10 @@ import type {
   DeviceGatewaySnapshot,
   DeviceId,
   SpeechConfigurationSnapshot,
+  TestAsrConfigurationRequest,
+  TestAsrConfigurationResult,
+  TestTtsConfigurationRequest,
+  TestTtsConfigurationResult,
   UpdateSpeechConfigurationRequest,
 } from "@ez-assistant/protocol";
 import type { RuntimeClient } from "../runtime-client/RuntimeClient";
@@ -39,6 +43,8 @@ export class DeviceGatewayStore {
       load: action,
       loadSpeechConfiguration: action,
       updateSpeechConfiguration: action,
+      testAsrConfiguration: action,
+      testTtsConfiguration: action,
       scheduleRefresh: action,
       markStale: action,
       setAccessEnabled: action,
@@ -309,9 +315,37 @@ export class DeviceGatewayStore {
     }
   }
 
+  async testAsrConfiguration(payload: TestAsrConfigurationRequest): Promise<TestAsrConfigurationResult> {
+    const client = this.dependencies.get_client();
+    if (!client) {
+      throw new Error("运行时尚未连接。");
+    }
+    const result = await client.deviceGatewayCommand({ type: "test_asr_configuration", payload });
+    if (result.type !== "test_asr_configuration") {
+      throw new Error("Host 返回了不匹配的语音识别测试结果。");
+    }
+    return result.payload;
+  }
+
+  async testTtsConfiguration(payload: TestTtsConfigurationRequest): Promise<TestTtsConfigurationResult> {
+    const client = this.dependencies.get_client();
+    if (!client) {
+      throw new Error("运行时尚未连接。");
+    }
+    const result = await client.deviceGatewayCommand({ type: "test_tts_configuration", payload });
+    if (result.type !== "test_tts_configuration") {
+      throw new Error("Host 返回了不匹配的语音合成测试结果。");
+    }
+    return result.payload;
+  }
+
   async #runGatewayAction<TType extends Exclude<
     import("@ez-assistant/protocol").DeviceGatewayCommand["type"],
-    "get_snapshot" | "get_speech_configuration" | "update_speech_configuration"
+    | "get_snapshot"
+    | "get_speech_configuration"
+    | "update_speech_configuration"
+    | "test_asr_configuration"
+    | "test_tts_configuration"
   >>(
     action_name: string,
     command: Extract<import("@ez-assistant/protocol").DeviceGatewayCommand, { type: TType }>,
@@ -327,6 +361,8 @@ export class DeviceGatewayStore {
         result.type === "get_snapshot"
         || result.type === "get_speech_configuration"
         || result.type === "update_speech_configuration"
+        || result.type === "test_asr_configuration"
+        || result.type === "test_tts_configuration"
       ) {
         throw new Error("Host 返回了不匹配的设备 mutation 结果。");
       }
