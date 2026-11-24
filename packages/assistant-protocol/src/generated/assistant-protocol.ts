@@ -3179,7 +3179,7 @@ export type SpeechConfigurationSnapshot = { revision?: string, asr: AsrConfigura
 /**
  * Host 语音服务支持的 Provider 类型。
  */
-export type SpeechProviderKind = "dashscope" | "siliconflow" | "zhipu" | "minimax" | "openai" | "groq";
+export type SpeechProviderKind = "dashscope" | "deepseek" | "siliconflow" | "zhipu" | "minimax" | "openai" | "groq";
 
 /**
  * 单项 Host 语音能力的运行状态。

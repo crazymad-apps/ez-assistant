@@ -791,3 +791,110 @@ timeout_ms = 5000
     provider_server.abort();
     let _ = provider_server.await;
 }
+
+#[tokio::test]
+async fn test_deepseek_asr_and_tts_draft_endpoints_round_trip() {
+    use assistant_protocol::{
+        SpeechProviderKind, TestAsrConfigurationRequest, TestTtsConfigurationRequest,
+        UpdateAsrConfigurationInput, UpdateTtsConfigurationInput,
+    };
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let address = listener.local_addr().expect("address");
+    let app = Router::new()
+        .route(
+            "/v1/tools/asr",
+            post(|headers: axum::http::HeaderMap| async move {
+                let auth = headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default();
+                assert_eq!(auth, "Bearer sk-saved-deepseek-key");
+                Json(
+                    json!({"request_id": "req_ds", "text": "深度求索测试转写", "duration_ms": 900}),
+                )
+            }),
+        )
+        .route(
+            "/v1/tools/tts",
+            post(
+                |headers: axum::http::HeaderMap, Json(body): Json<serde_json::Value>| async move {
+                    let auth = headers
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default();
+                    assert_eq!(auth, "Bearer sk-saved-deepseek-key");
+                    assert_eq!(body["voice_id"], "tide");
+                    assert_eq!(body["format"], "wav");
+                    assert_eq!(body["filter_markdown"], true);
+                    Bytes::from(pcm16_mono_wav(&[120_u8; 640]).unwrap())
+                },
+            ),
+        );
+    let provider_server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+    let source = Arc::new(StaticSource(format!(
+        r#"
+[speech.asr]
+provider = "deepseek"
+model = "deepseek-asr"
+credential = "sk-saved-deepseek-key"
+endpoint = "http://{address}/v1"
+timeout_ms = 5000
+"#
+    )));
+    let (service, handle) = SpeechService::new(source);
+    let mut status = handle.status.clone();
+    let shutdown = CancellationToken::new();
+    let service_task = tokio::spawn(service.run_until(shutdown.clone()));
+    status.changed().await.expect("initial status");
+
+    let wav_b64 = BASE64.encode(pcm16_mono_wav(&[0_u8; 640]).unwrap());
+    let asr_out = handle
+        .test_asr(TestAsrConfigurationRequest {
+            asr: UpdateAsrConfigurationInput {
+                enabled: false,
+                provider: SpeechProviderKind::Deepseek,
+                endpoint: format!("http://{address}/v1"),
+                model: "deepseek-asr".to_owned(),
+                timeout_ms: 5000,
+                credential: None,
+                clear_credential: false,
+            },
+            audio_wav_base64: wav_b64,
+        })
+        .await
+        .expect("deepseek test_asr ok");
+    assert_eq!(asr_out.transcript, "深度求索测试转写");
+
+    let tts_out = handle
+        .test_tts(TestTtsConfigurationRequest {
+            tts: UpdateTtsConfigurationInput {
+                enabled: false,
+                provider: SpeechProviderKind::Deepseek,
+                endpoint: format!("http://{address}/v1"),
+                model: "deepseek-tts".to_owned(),
+                voice: "tide".to_owned(),
+                timeout_ms: 5000,
+                credential: None,
+                clear_credential: false,
+                reuse_asr_credential: true,
+            },
+            fallback_asr_credential: None,
+            text: "你好 DeepSeek".to_owned(),
+        })
+        .await
+        .expect("deepseek test_tts ok");
+    let decoded_wav = BASE64
+        .decode(tts_out.audio_wav_base64)
+        .expect("valid b64 wav");
+    assert_eq!(&decoded_wav[0..4], b"RIFF");
+    assert_eq!(tts_out.duration_ms, 20);
+
+    shutdown.cancel();
+    service_task.await.expect("join").expect("shutdown");
+    provider_server.abort();
+    let _ = provider_server.await;
+}

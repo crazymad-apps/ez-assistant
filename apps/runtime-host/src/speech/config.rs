@@ -14,11 +14,13 @@ use thiserror::Error;
 use toml_edit::{DocumentMut, Item, Table};
 
 use super::provider::{
-    AsrProvider, DashScopeSpeechRecognizer, DashScopeSpeechSynthesizer, MiniMaxSpeechSynthesizer,
-    OpenAiSpeechRecognizer, OpenAiSpeechSynthesizer, TtsProvider,
+    AsrProvider, DashScopeSpeechRecognizer, DashScopeSpeechSynthesizer, DeepSeekSpeechRecognizer,
+    DeepSeekSpeechSynthesizer, MiniMaxSpeechSynthesizer, OpenAiSpeechRecognizer,
+    OpenAiSpeechSynthesizer, TtsProvider,
 };
 
 const DEFAULT_DASHSCOPE_ENDPOINT: &str = "https://dashscope.aliyuncs.com";
+const DEFAULT_DEEPSEEK_ENDPOINT: &str = "https://api.deepseek.com/v1";
 const DEFAULT_SILICONFLOW_ENDPOINT: &str = "https://api.siliconflow.cn/v1";
 const DEFAULT_ZHIPU_ENDPOINT: &str = "https://open.bigmodel.cn/api/paas/v4";
 const DEFAULT_MINIMAX_ENDPOINT: &str = "https://api.minimaxi.com/v1/t2a_v2";
@@ -349,7 +351,7 @@ fn validate_and_build_asr(
 ) -> Result<RawAsrConfig, SpeechConfigError> {
     if input.provider == SpeechProviderKind::Minimax {
         return Err(SpeechConfigError::Invalid(
-            "MiniMax 暂仅支持语音播放（TTS），语音识别请选择阿里云百炼、硅基流动、智谱、OpenAI 或 Groq。",
+            "MiniMax 暂仅支持语音播放（TTS），语音识别请选择阿里云百炼、DeepSeek、硅基流动、智谱、OpenAI 或 Groq。",
         ));
     }
     let endpoint = normalize_endpoint(&input.endpoint, input.provider)?;
@@ -402,7 +404,7 @@ fn validate_and_build_tts(
 ) -> Result<RawTtsConfig, SpeechConfigError> {
     if input.provider == SpeechProviderKind::Groq {
         return Err(SpeechConfigError::Invalid(
-            "Groq 暂仅支持语音识别（ASR），语音播放请选择阿里云百炼、硅基流动、智谱、MiniMax 或 OpenAI。",
+            "Groq 暂仅支持语音识别（ASR），语音播放请选择阿里云百炼、DeepSeek、硅基流动、智谱、MiniMax 或 OpenAI。",
         ));
     }
     let endpoint = normalize_endpoint(&input.endpoint, input.provider)?;
@@ -586,6 +588,11 @@ fn compile_asr_ref(raw: &RawAsrConfig) -> Option<Arc<dyn AsrProvider>> {
         )
         .ok()
         .map(|p| Arc::new(p) as Arc<dyn AsrProvider>),
+        SpeechProviderKind::Deepseek => {
+            DeepSeekSpeechRecognizer::new(endpoint, raw.credential.clone(), timeout)
+                .ok()
+                .map(|p| Arc::new(p) as Arc<dyn AsrProvider>)
+        }
         SpeechProviderKind::Siliconflow
         | SpeechProviderKind::Zhipu
         | SpeechProviderKind::Openai
@@ -637,6 +644,11 @@ fn compile_tts_ref(raw: &RawTtsConfig) -> Option<Arc<dyn TtsProvider>> {
         )
         .ok()
         .map(|p| Arc::new(p) as Arc<dyn TtsProvider>),
+        SpeechProviderKind::Deepseek => {
+            DeepSeekSpeechSynthesizer::new(endpoint, voice, raw.credential.clone(), timeout)
+                .ok()
+                .map(|p| Arc::new(p) as Arc<dyn TtsProvider>)
+        }
         SpeechProviderKind::Siliconflow
         | SpeechProviderKind::Zhipu
         | SpeechProviderKind::Openai => OpenAiSpeechSynthesizer::new(
@@ -664,6 +676,7 @@ fn compile_tts_ref(raw: &RawTtsConfig) -> Option<Arc<dyn TtsProvider>> {
 fn parse_provider_kind(raw: &str) -> Option<SpeechProviderKind> {
     match raw {
         "dashscope" => Some(SpeechProviderKind::Dashscope),
+        "deepseek" => Some(SpeechProviderKind::Deepseek),
         "siliconflow" => Some(SpeechProviderKind::Siliconflow),
         "zhipu" => Some(SpeechProviderKind::Zhipu),
         "minimax" => Some(SpeechProviderKind::Minimax),
@@ -676,6 +689,7 @@ fn parse_provider_kind(raw: &str) -> Option<SpeechProviderKind> {
 const fn provider_str(kind: SpeechProviderKind) -> &'static str {
     match kind {
         SpeechProviderKind::Dashscope => "dashscope",
+        SpeechProviderKind::Deepseek => "deepseek",
         SpeechProviderKind::Siliconflow => "siliconflow",
         SpeechProviderKind::Zhipu => "zhipu",
         SpeechProviderKind::Minimax => "minimax",
@@ -687,6 +701,7 @@ const fn provider_str(kind: SpeechProviderKind) -> &'static str {
 const fn default_endpoint_for(kind: SpeechProviderKind) -> &'static str {
     match kind {
         SpeechProviderKind::Dashscope => DEFAULT_DASHSCOPE_ENDPOINT,
+        SpeechProviderKind::Deepseek => DEFAULT_DEEPSEEK_ENDPOINT,
         SpeechProviderKind::Siliconflow => DEFAULT_SILICONFLOW_ENDPOINT,
         SpeechProviderKind::Zhipu => DEFAULT_ZHIPU_ENDPOINT,
         SpeechProviderKind::Minimax => DEFAULT_MINIMAX_ENDPOINT,
@@ -1140,5 +1155,61 @@ timeout_ms = 30000
             minimax_asr_err,
             Err(SpeechConfigError::Invalid(_))
         ));
+
+        let deepseek_saved = update_configuration(
+            &source,
+            UpdateSpeechConfigurationRequest {
+                expected_revision: reused.configuration.revision,
+                asr: UpdateAsrConfigurationInput {
+                    enabled: true,
+                    provider: SpeechProviderKind::Deepseek,
+                    endpoint: String::new(),
+                    model: "deepseek-asr".to_owned(),
+                    timeout_ms: 30_000,
+                    credential: Some(assistant_protocol::SecretValue::new(
+                        "sk-deepseek-key".to_owned(),
+                    )),
+                    clear_credential: false,
+                },
+                tts: UpdateTtsConfigurationInput {
+                    enabled: true,
+                    provider: SpeechProviderKind::Deepseek,
+                    endpoint: String::new(),
+                    model: "deepseek-tts".to_owned(),
+                    voice: "tide".to_owned(),
+                    timeout_ms: 30_000,
+                    credential: None,
+                    clear_credential: false,
+                    reuse_asr_credential: true,
+                },
+            },
+        )
+        .await
+        .expect("save deepseek speech config");
+        assert_eq!(
+            deepseek_saved.configuration.asr.provider,
+            SpeechProviderKind::Deepseek
+        );
+        assert_eq!(
+            deepseek_saved.configuration.asr.endpoint,
+            DEFAULT_DEEPSEEK_ENDPOINT
+        );
+        assert_eq!(
+            deepseek_saved.configuration.tts.provider,
+            SpeechProviderKind::Deepseek
+        );
+        assert_eq!(
+            deepseek_saved.configuration.tts.endpoint,
+            DEFAULT_DEEPSEEK_ENDPOINT
+        );
+        assert_eq!(deepseek_saved.configuration.tts.voice, "tide");
+        assert_eq!(
+            deepseek_saved.compiled.status.asr,
+            SpeechServiceStatusSnapshot::Ready
+        );
+        assert_eq!(
+            deepseek_saved.compiled.status.tts,
+            SpeechServiceStatusSnapshot::Ready
+        );
     }
 }

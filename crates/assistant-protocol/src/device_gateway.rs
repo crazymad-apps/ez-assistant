@@ -239,6 +239,7 @@ pub struct RevokeDeviceRequest {
 pub enum SpeechProviderKind {
     #[default]
     Dashscope,
+    Deepseek,
     Siliconflow,
     Zhipu,
     Minimax,
@@ -547,6 +548,7 @@ mod tests {
 
         for (kind, wire_name) in [
             (SpeechProviderKind::Dashscope, "dashscope"),
+            (SpeechProviderKind::Deepseek, "deepseek"),
             (SpeechProviderKind::Siliconflow, "siliconflow"),
             (SpeechProviderKind::Zhipu, "zhipu"),
             (SpeechProviderKind::Minimax, "minimax"),

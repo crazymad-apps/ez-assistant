@@ -1,4 +1,4 @@
-//! Provider-neutral ASR/TTS 端口及 DashScope、OpenAI 兼容 Adapter。
+//! Provider-neutral ASR/TTS 端口及 DashScope、DeepSeek、OpenAI 兼容、MiniMax Adapter。
 
 use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
@@ -431,6 +431,141 @@ impl TtsProvider for OpenAiSpeechSynthesizer {
     }
 }
 
+/// DeepSeek 官方语音识别 Adapter（`/v1/tools/asr`）；发送 16 kHz WAV 并读取 `text`。
+#[derive(Clone)]
+pub(super) struct DeepSeekSpeechRecognizer {
+    client: Client,
+    endpoint: Url,
+    credential: Arc<str>,
+}
+
+impl DeepSeekSpeechRecognizer {
+    pub(super) fn new(
+        endpoint: String,
+        credential: String,
+        timeout: Duration,
+    ) -> Result<Self, SpeechProviderError> {
+        let endpoint = resolve_deepseek_endpoint(&endpoint, "tools/asr")?;
+        let client = Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(|_| SpeechProviderError::Unavailable)?;
+        Ok(Self {
+            client,
+            endpoint,
+            credential: Arc::from(credential),
+        })
+    }
+}
+
+impl AsrProvider for DeepSeekSpeechRecognizer {
+    fn recognize<'a>(&'a self, request: &'a AsrRequest) -> AsrFuture<'a> {
+        Box::pin(async move {
+            let wav = pcm16_mono_wav(&request.pcm_s16le)?;
+            let boundary = format!("ezspeech{}", crate::media_diagnostics::timestamp_ms());
+            let body = build_deepseek_asr_multipart_body(&boundary, &wav);
+            let send = self
+                .client
+                .post(self.endpoint.clone())
+                .bearer_auth(self.credential.as_ref())
+                .header(
+                    reqwest::header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(body)
+                .send();
+            let response = tokio::select! {
+                () = request.cancellation.cancelled() => return Err(SpeechProviderError::Cancelled),
+                response = send => response.map_err(map_transport)?,
+            };
+            let status = response.status();
+            if !status.is_success() {
+                return Err(map_status(status));
+            }
+            let body = bounded_json(response, &request.cancellation).await?;
+            let transcript = body
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(ToOwned::to_owned)
+                .ok_or(SpeechProviderError::InvalidTranscript)?;
+            Ok(AsrResult { transcript })
+        })
+    }
+}
+
+/// DeepSeek 官方语音合成 Adapter（`/v1/tools/tts`）；请求 WAV 并统一重采样为 16 kHz 单声道 PCM16。
+#[derive(Clone)]
+pub(super) struct DeepSeekSpeechSynthesizer {
+    client: Client,
+    endpoint: Url,
+    voice: Arc<str>,
+    credential: Arc<str>,
+}
+
+impl DeepSeekSpeechSynthesizer {
+    pub(super) fn new(
+        endpoint: String,
+        voice: String,
+        credential: String,
+        timeout: Duration,
+    ) -> Result<Self, SpeechProviderError> {
+        let endpoint = resolve_deepseek_endpoint(&endpoint, "tools/tts")?;
+        let client = Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(|_| SpeechProviderError::Unavailable)?;
+        let normalized_voice = voice.trim();
+        let voice = if normalized_voice.is_empty() {
+            "stella"
+        } else {
+            normalized_voice
+        };
+        Ok(Self {
+            client,
+            endpoint,
+            voice: Arc::from(voice),
+            credential: Arc::from(credential),
+        })
+    }
+}
+
+impl TtsProvider for DeepSeekSpeechSynthesizer {
+    fn synthesize<'a>(&'a self, text: &'a str, cancellation: CancellationToken) -> TtsFuture<'a> {
+        Box::pin(async move {
+            let payload = json!({
+                "text": text,
+                "voice_id": self.voice.as_ref(),
+                "format": "wav",
+                "filter_markdown": true,
+            });
+            let send = self
+                .client
+                .post(self.endpoint.clone())
+                .bearer_auth(self.credential.as_ref())
+                .json(&payload)
+                .send();
+            let response = tokio::select! {
+                () = cancellation.cancelled() => return Err(SpeechProviderError::Cancelled),
+                response = send => response.map_err(map_transport)?,
+            };
+            let status = response.status();
+            if !status.is_success() {
+                return Err(map_status(status));
+            }
+            let raw = bounded_bytes(response, &cancellation, MAX_TTS_WAV_DOWNLOAD_BYTES).await?;
+            let pcm = wav_bytes_to_pcm16_16k_mono(&raw)?;
+            if pcm.len() > MAX_TTS_PCM_BYTES {
+                return Err(SpeechProviderError::OutputTooLarge);
+            }
+            Ok(TtsResult {
+                pcm_s16le: Arc::from(pcm),
+            })
+        })
+    }
+}
+
 /// MiniMax T2A v2 语音合成 Adapter（单 API Key Bearer 鉴权，直出 16 kHz Mono PCM16）。
 #[derive(Clone)]
 pub(super) struct MiniMaxSpeechSynthesizer {
@@ -563,6 +698,10 @@ fn resolve_openai_endpoint(raw: &str, suffix: &str) -> Result<Url, SpeechProvide
     Ok(url)
 }
 
+fn resolve_deepseek_endpoint(raw: &str, suffix: &str) -> Result<Url, SpeechProviderError> {
+    resolve_openai_endpoint(raw, suffix)
+}
+
 fn resolve_minimax_endpoint(raw: &str) -> Result<Url, SpeechProviderError> {
     let mut url = Url::parse(raw.trim().trim_end_matches('/'))
         .map_err(|_| SpeechProviderError::Unavailable)?;
@@ -648,6 +787,18 @@ fn build_asr_multipart_body(boundary: &str, model: &str, wav: &[u8]) -> Vec<u8> 
     body
 }
 
+fn build_deepseek_asr_multipart_body(boundary: &str, wav: &[u8]) -> Vec<u8> {
+    let mut body = Vec::with_capacity(wav.len() + 192);
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n",
+    );
+    body.extend_from_slice(b"Content-Type: audio/wav\r\n\r\n");
+    body.extend_from_slice(wav);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    body
+}
+
 pub(super) fn wav_bytes_to_pcm16_16k_mono(wav: &[u8]) -> Result<Vec<u8>, SpeechProviderError> {
     if wav.len() < 12 || &wav[0..4] != b"RIFF" || &wav[8..12] != b"WAVE" {
         return Err(SpeechProviderError::InvalidAudio);
@@ -662,9 +813,19 @@ pub(super) fn wav_bytes_to_pcm16_16k_mono(wav: &[u8]) -> Result<Vec<u8>, SpeechP
 
     while pos.saturating_add(8) <= wav.len() {
         let id = &wav[pos..pos + 4];
-        let chunk_len =
-            u32::from_le_bytes([wav[pos + 4], wav[pos + 5], wav[pos + 6], wav[pos + 7]]) as usize;
+        let chunk_len_u32 =
+            u32::from_le_bytes([wav[pos + 4], wav[pos + 5], wav[pos + 6], wav[pos + 7]]);
         pos += 8;
+        if id == b"data"
+            && (chunk_len_u32 == u32::MAX
+                || chunk_len_u32 == 0x7FFF_FFFF
+                || (chunk_len_u32 == 0 && pos < wav.len()))
+        {
+            // 流式 HTTP WAV 响应的 `data` chunk 长度常为未知占位值，直接取到末尾。
+            data_slice = Some(&wav[pos..]);
+            break;
+        }
+        let chunk_len = chunk_len_u32 as usize;
         let Some(end) = pos.checked_add(chunk_len) else {
             return Err(SpeechProviderError::InvalidAudio);
         };
@@ -1249,6 +1410,125 @@ mod tests {
         assert!(matches!(
             tts.synthesize("bad", CancellationToken::new()).await,
             Err(SpeechProviderError::ProviderFailed)
+        ));
+
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn deepseek_asr_transcribes_wav_multipart_and_maps_auth_error() {
+        let status_mode = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let route_mode = status_mode.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let app = Router::new().route(
+            "/v1/tools/asr",
+            post(move |headers: axum::http::HeaderMap, body: Bytes| {
+                let route_mode = route_mode.clone();
+                async move {
+                    let auth = headers
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default();
+                    assert_eq!(auth, "Bearer sk-deepseek-asr");
+                    if route_mode.load(std::sync::atomic::Ordering::SeqCst) == 1 {
+                        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized"})));
+                    }
+                    let body_text = String::from_utf8_lossy(&body);
+                    assert!(body_text.contains("name=\"file\""));
+                    assert!(body.windows(4).any(|w| w == b"RIFF"));
+                    (
+                        StatusCode::OK,
+                        Json(json!({"request_id": "req_1", "text": "  你好深度求索  ", "duration_ms": 1200})),
+                    )
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let provider = DeepSeekSpeechRecognizer::new(
+            format!("http://{address}/v1"),
+            "sk-deepseek-asr".to_owned(),
+            Duration::from_secs(2),
+        )
+        .expect("deepseek asr");
+        let request = AsrRequest {
+            pcm_s16le: Arc::from(vec![0_u8; 640]),
+            cancellation: CancellationToken::new(),
+        };
+        let ok = provider.recognize(&request).await.expect("ASR result");
+        assert_eq!(ok.transcript, "你好深度求索");
+
+        status_mode.store(1, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(
+            provider.recognize(&request).await,
+            Err(SpeechProviderError::Authentication)
+        ));
+
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn deepseek_tts_synthesizes_24khz_and_streaming_wav_to_16khz_pcm() {
+        let status_mode = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let route_mode = status_mode.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let app = Router::new().route(
+            "/v1/tools/tts",
+            post(
+                move |headers: axum::http::HeaderMap, Json(payload): Json<Value>| {
+                    let route_mode = route_mode.clone();
+                    async move {
+                        let auth = headers
+                            .get("authorization")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or_default();
+                        assert_eq!(auth, "Bearer sk-deepseek-tts");
+                        assert_eq!(payload["voice_id"], "tide");
+                        assert_eq!(payload["format"], "wav");
+                        assert_eq!(payload["filter_markdown"], true);
+                        if route_mode.load(std::sync::atomic::Ordering::SeqCst) == 1 {
+                            return (
+                                StatusCode::UNAUTHORIZED,
+                                Bytes::from_static(b"unauthorized"),
+                            );
+                        }
+                        let samples = vec![420_i16; 240];
+                        let mut wav = wav_with_rate_and_samples(24_000, &samples);
+                        // 模拟流式 HTTP WAV 响应的 unknown data chunk 长度哨兵。
+                        wav[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+                        wav[40..44].copy_from_slice(&u32::MAX.to_le_bytes());
+                        (StatusCode::OK, Bytes::from(wav))
+                    }
+                },
+            ),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let tts = DeepSeekSpeechSynthesizer::new(
+            format!("http://{address}/v1"),
+            "tide".to_owned(),
+            "sk-deepseek-tts".to_owned(),
+            Duration::from_secs(2),
+        )
+        .expect("deepseek tts");
+        let ok = tts
+            .synthesize("**你好** DeepSeek", CancellationToken::new())
+            .await
+            .expect("tts result");
+        assert_eq!(ok.pcm_s16le.len(), 320);
+
+        status_mode.store(1, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(
+            tts.synthesize("auth fail", CancellationToken::new()).await,
+            Err(SpeechProviderError::Authentication)
         ));
 
         server.abort();

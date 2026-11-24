@@ -204,7 +204,7 @@ function createStoreWithClient(client: RuntimeClient): RootStore {
 }
 
 describe("DeviceSpeechSection and DeviceConsole UI", () => {
-  it("edits ASR and TTS speech settings with presets, voice picker, and live tests without select or DeepSeek UI", async () => {
+  it("edits ASR and TTS speech settings with presets including DeepSeek, voice picker, and live tests without select", async () => {
     const mock = createConsoleMockClient();
     const store = createStoreWithClient(mock.client);
     vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:tts-preview");
@@ -219,8 +219,17 @@ describe("DeviceSpeechSection and DeviceConsole UI", () => {
 
     await screen.findByText(/仅需填写阿里云百炼 API Key/);
     expect(container.querySelector("select")).toBeNull();
-    expect(screen.queryByText(/deepseek/i)).toBeNull();
     expect(container.querySelectorAll('[data-provider-icon="bailian"]')).toHaveLength(2);
+
+    // 切换 ASR 与 TTS 为 DeepSeek 验证官方语音预置、图标、双端复用提示与 Tide 音色选择
+    fireEvent.click(screen.getByRole("button", { name: "ASR 服务提供商" }));
+    fireEvent.click(await screen.findByRole("option", { name: /^DeepSeek/ }));
+    fireEvent.click(screen.getByRole("button", { name: "TTS 服务提供商" }));
+    fireEvent.click(await screen.findByRole("option", { name: /^DeepSeek/ }));
+    expect(container.querySelectorAll('[data-provider-icon="deepseek"]')).toHaveLength(2);
+    await screen.findByText(/仅需填写 DeepSeek API Key（sk-...）/);
+    fireEvent.click(screen.getByRole("button", { name: "TTS 预置音色" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Tide · 沉稳男声/ }));
 
     // 切换 TTS 为阶跃星辰验证新预置与音色直选、再切回硅基流动试听闭环测试
     fireEvent.click(screen.getByRole("button", { name: "TTS 服务提供商" }));

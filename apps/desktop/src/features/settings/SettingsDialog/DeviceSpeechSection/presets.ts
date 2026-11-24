@@ -4,6 +4,7 @@ import type { SelectionOption } from "../../../../components/SelectionPopover";
 
 export type AsrPresetId =
   | "dashscope"
+  | "deepseek"
   | "siliconflow"
   | "zhipu"
   | "stepfun"
@@ -15,6 +16,7 @@ export type AsrPresetId =
 
 export type TtsPresetId =
   | "dashscope"
+  | "deepseek"
   | "siliconflow"
   | "zhipu"
   | "minimax"
@@ -67,6 +69,23 @@ export const ASR_PRESETS: Readonly<Record<AsrPresetId, AsrPresetMeta>> = {
       { value: "qwen3-asr-flash", label: "qwen3-asr-flash", description: "千问3 语音识别（推荐）" },
       { value: "paraformer-v2", label: "paraformer-v2", description: "百炼 Paraformer 识别" },
       { value: "fun-asr-realtime", label: "fun-asr-realtime", description: "旧版实时兼容型号" },
+    ],
+  },
+  deepseek: {
+    id: "deepseek",
+    icon: "deepseek",
+    label: "DeepSeek",
+    description: "国内直连 · 官方语音转写 (/v1/tools/asr)",
+    hint: "仅需填写 DeepSeek API Key（sk-...），自动识别中英日韩等 21 种语言。",
+    provider: "deepseek",
+    endpoint: "https://api.deepseek.com/v1",
+    default_model: "deepseek-asr",
+    models: [
+      {
+        value: "deepseek-asr",
+        label: "deepseek-asr",
+        description: "DeepSeek 官方语音转写（默认）",
+      },
     ],
   },
   siliconflow: {
@@ -200,6 +219,24 @@ export const TTS_PRESETS: Readonly<Record<TtsPresetId, TtsPresetMeta>> = {
       { value: "qwen3-tts-flash", label: "qwen3-tts-flash", description: "千问3 TTS（音色自然，推荐）" },
       { value: "cosyvoice-v3-flash", label: "cosyvoice-v3-flash", description: "CosyVoice V3" },
       { value: "cosyvoice-v2", label: "cosyvoice-v2", description: "CosyVoice V2" },
+    ],
+  },
+  deepseek: {
+    id: "deepseek",
+    icon: "deepseek",
+    label: "DeepSeek",
+    description: "国内直连 · 官方语音合成 (/v1/tools/tts)",
+    hint: "仅需填写 DeepSeek API Key（可复用上方语音识别凭据），内置 Stella 女声 / Tide 男声。",
+    provider: "deepseek",
+    endpoint: "https://api.deepseek.com/v1",
+    default_model: "deepseek-tts",
+    default_voice: "stella",
+    models: [
+      {
+        value: "deepseek-tts",
+        label: "deepseek-tts",
+        description: "DeepSeek 官方语音合成（默认）",
+      },
     ],
   },
   siliconflow: {
@@ -398,12 +435,18 @@ const STEPFUN_VOICES: ReadonlyArray<SelectionOption<string>> = [
   { value: "huolinvsheng", label: "活力女声 (huolinvsheng)" },
 ];
 
+const DEEPSEEK_VOICES: ReadonlyArray<SelectionOption<string>> = [
+  { value: "stella", label: "Stella · 自然女声（默认）", description: "支持多语种自然播报" },
+  { value: "tide", label: "Tide · 沉稳男声", description: "自然流畅男声" },
+];
+
 export function ttsPresetVoices(preset_id: TtsPresetId, model: string): ReadonlyArray<SelectionOption<string>> {
   if (preset_id === "dashscope") {
     return model.trim().toLowerCase().startsWith("qwen")
       ? DASHSCOPE_QWEN_VOICES
       : DASHSCOPE_COSYVOICE_VOICES;
   }
+  if (preset_id === "deepseek") return DEEPSEEK_VOICES;
   if (preset_id === "siliconflow") return SILICONFLOW_VOICES;
   if (preset_id === "zhipu") return ZHIPU_VOICES;
   if (preset_id === "minimax") return MINIMAX_VOICES;
@@ -418,6 +461,7 @@ export function defaultVoiceForModel(preset_id: TtsPresetId, model: string): str
 
 export function detectAsrPreset(provider: SpeechProviderKind, endpoint: string): AsrPresetId {
   if (provider === "dashscope") return "dashscope";
+  if (provider === "deepseek") return "deepseek";
   if (provider === "siliconflow") return "siliconflow";
   if (provider === "zhipu") return "zhipu";
   if (provider === "groq") return "groq";
@@ -431,6 +475,7 @@ export function detectAsrPreset(provider: SpeechProviderKind, endpoint: string):
 
 export function detectTtsPreset(provider: SpeechProviderKind, endpoint: string): TtsPresetId {
   if (provider === "dashscope") return "dashscope";
+  if (provider === "deepseek") return "deepseek";
   if (provider === "siliconflow") return "siliconflow";
   if (provider === "zhipu") return "zhipu";
   if (provider === "minimax") return "minimax";
