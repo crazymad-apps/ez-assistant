@@ -11,7 +11,8 @@ use assistant_protocol::{
     ListFixedModelConfigsRequest, ModelConfigOrigin, ModelConfigurationDetail,
     ModelConfigurationSource, ModelFixedConfig, ModelSelection, ModelSettings, ProviderConnection,
     ProviderCredentialChange, ProviderInstanceId, ProviderModelCatalogSnapshot, ProviderSummary,
-    RuntimeEvent, SaveModelFixedConfigRequest, SecretValue, UpdateProviderRequest,
+    RuntimeEvent, SaveModelFixedConfigRequest, SecretValue, TestProviderConnectionRequest,
+    TestProviderConnectionResult, UpdateProviderRequest,
 };
 use std::{
     sync::{Arc, RwLockReadGuard, RwLockWriteGuard},

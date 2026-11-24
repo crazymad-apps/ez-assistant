@@ -107,3 +107,84 @@ export const provider_defaults: Record<ProviderType, Pick<ProviderConnection, "d
   vllm: { discovery_format: "vllm", protocol_preference: "chat_completions" },
   local: { discovery_format: "openai", protocol_preference: "chat_completions" },
 };
+
+export const provider_default_endpoints: Record<ProviderType, string> = {
+  openai: "https://api.openai.com/v1",
+  deepseek: "https://api.deepseek.com/v1",
+  dashscope_api: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  dashscope_plan: "https://coding.dashscope.aliyuncs.com/v1",
+  moonshot: "https://api.moonshot.cn/v1",
+  zhipu: "https://open.bigmodel.cn/api/paas/v4",
+  vllm: "http://127.0.0.1:8000/v1",
+  local: "http://127.0.0.1:11434/v1",
+  opencode: "",
+  sub2api: "",
+};
+
+export type ProviderQuickPreset = Readonly<{
+  id: string;
+  label: string;
+  display_name: string;
+  provider_type: ProviderType;
+  endpoint: string;
+  hint: string;
+}>;
+
+export const provider_quick_presets: readonly ProviderQuickPreset[] = [
+  {
+    id: "deepseek",
+    label: "DeepSeek",
+    display_name: "DeepSeek",
+    provider_type: "deepseek",
+    endpoint: provider_default_endpoints.deepseek,
+    hint: "官方 API · 填写 Key 即用",
+  },
+  {
+    id: "dashscope_api",
+    label: "百炼 API",
+    display_name: "百炼 API",
+    provider_type: "dashscope_api",
+    endpoint: provider_default_endpoints.dashscope_api,
+    hint: "阿里云百炼按量 Key",
+  },
+  {
+    id: "dashscope_plan",
+    label: "百炼套餐",
+    display_name: "百炼套餐",
+    provider_type: "dashscope_plan",
+    endpoint: provider_default_endpoints.dashscope_plan,
+    hint: "Coding Plan（sk-sp- 开头）",
+  },
+  {
+    id: "moonshot",
+    label: "Kimi / Moonshot",
+    display_name: "Kimi / Moonshot",
+    provider_type: "moonshot",
+    endpoint: provider_default_endpoints.moonshot,
+    hint: "月之暗面官方 API",
+  },
+  {
+    id: "zhipu",
+    label: "智谱 GLM",
+    display_name: "智谱 GLM",
+    provider_type: "zhipu",
+    endpoint: provider_default_endpoints.zhipu,
+    hint: "BigModel v4 官方接口",
+  },
+  {
+    id: "openai",
+    label: "OpenAI",
+    display_name: "OpenAI",
+    provider_type: "openai",
+    endpoint: provider_default_endpoints.openai,
+    hint: "OpenAI 官方接口",
+  },
+  {
+    id: "local",
+    label: "Ollama / 本地",
+    display_name: "Ollama 本地模型",
+    provider_type: "local",
+    endpoint: provider_default_endpoints.local,
+    hint: "本机 11434 兼容服务",
+  },
+];

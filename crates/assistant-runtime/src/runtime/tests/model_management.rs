@@ -1470,3 +1470,69 @@ async fn optional_output_limit_and_default_streaming_reach_the_real_run_request(
         serde_json::to_string(&runtime.conversation_snapshot(&session_id).await.unwrap()).unwrap();
     assert!(transcript.contains("upstream default output"));
 }
+
+#[tokio::test]
+async fn test_provider_connection_validates_draft_and_existing_credentials() {
+    let factory = Arc::new(DiscoveryFactory::default());
+    let runtime = fixture(factory.clone());
+
+    let draft = runtime
+        .test_provider_connection(assistant_protocol::TestProviderConnectionRequest {
+            provider_instance_id: None,
+            connection: connection(),
+            credential: ProviderCredentialChange::Replace(assistant_protocol::SecretValue::new(
+                "sk-draft-test".into(),
+            )),
+        })
+        .await
+        .expect("draft test ok");
+    assert_eq!(draft.model_count, 1);
+    assert_eq!(draft.sample_model_ids, vec!["org/model"]);
+    // 草稿测试不得持久化服务商记录。
+    assert!(runtime.list_providers().unwrap().is_empty());
+
+    // 验证已保存服务商支持以 Unchanged 复用已存凭据。
+    let saved = create(&runtime).await;
+    let reused = runtime
+        .test_provider_connection(assistant_protocol::TestProviderConnectionRequest {
+            provider_instance_id: Some(saved.provider_instance_id),
+            connection: connection(),
+            credential: ProviderCredentialChange::Unchanged,
+        })
+        .await
+        .expect("existing secret test ok");
+    assert_eq!(reused.model_count, 1);
+
+    // 百炼 API 与 sk-sp- 套餐密钥必须被前置拦截，不触发联网。
+    let mut dashscope_conn = connection();
+    dashscope_conn.provider_type = ProviderType::DashscopeApi;
+    dashscope_conn.discovery_format = ModelDiscoveryFormat::DashScope;
+    let fetches_before = factory.fetches.load(Ordering::SeqCst);
+    let plan_err = runtime
+        .test_provider_connection(assistant_protocol::TestProviderConnectionRequest {
+            provider_instance_id: None,
+            connection: dashscope_conn,
+            credential: ProviderCredentialChange::Replace(assistant_protocol::SecretValue::new(
+                "sk-sp-wrong".into(),
+            )),
+        })
+        .await;
+    assert!(plan_err.is_err());
+    assert_eq!(factory.fetches.load(Ordering::SeqCst), fetches_before);
+
+    // 服务离线时应映射为 ModelDiscoveryFailed。
+    factory.offline.store(true, Ordering::SeqCst);
+    let offline_err = runtime
+        .test_provider_connection(assistant_protocol::TestProviderConnectionRequest {
+            provider_instance_id: None,
+            connection: connection(),
+            credential: ProviderCredentialChange::Replace(assistant_protocol::SecretValue::new(
+                "sk-offline".into(),
+            )),
+        })
+        .await;
+    assert!(matches!(
+        offline_err,
+        Err(RuntimeError::ModelDiscoveryFailed { .. })
+    ));
+}

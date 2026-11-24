@@ -20,6 +20,7 @@ import styles from './index.module.scss';
 export const ProviderSettingsPage = observer(function ProviderSettingsPage(
   props: Readonly<{
     provider: ProviderSummary;
+    auto_refresh?: boolean;
     onBack: () => void;
     onEdit: () => void;
     onDelete: () => void;
@@ -51,6 +52,7 @@ export const ProviderSettingsPage = observer(function ProviderSettingsPage(
 
   const online_request = useRef<AbortController | null>(null);
   const fixed_request = useRef<AbortController | null>(null);
+  const auto_refreshed = useRef(false);
   const busy = settings.pending_action !== null;
   const provider_id = props.provider.provider_instance_id;
   const source = props.provider.source;
@@ -104,13 +106,18 @@ export const ProviderSettingsPage = observer(function ProviderSettingsPage(
     }
   }, [provider_id, settings, source]);
   useEffect(() => {
-    void loadCatalog();
+    if (props.auto_refresh && !read_only && !auto_refreshed.current) {
+      auto_refreshed.current = true;
+      void refreshCatalog();
+    } else {
+      void loadCatalog();
+    }
     void loadFixed();
     return () => {
       online_request.current?.abort();
       fixed_request.current?.abort();
     };
-  }, [loadCatalog, loadFixed]);
+  }, [loadCatalog, loadFixed, props.auto_refresh, read_only, refreshCatalog]);
   async function loadUsage() {
     usage_request.current?.abort();
     const request = new AbortController();
@@ -141,6 +148,17 @@ export const ProviderSettingsPage = observer(function ProviderSettingsPage(
   const offline_fixed = fixed.filter(
     (record) => !online_ids.has(record.selection.model_id) && matches(record.selection.model_id),
   );
+  const can_set_default = !settings.model_settings.management || settings.model_settings.management.allow_member_selection;
+  const default_model = settings.model_settings.default_model;
+
+  function isDefaultSelection(selection: ModelSelection): boolean {
+    return (
+      default_model?.source === selection.source
+      && default_model.provider_instance_id === selection.provider_instance_id
+      && default_model.model_id === selection.model_id
+    );
+  }
+
   return (
     <SettingsPageContainer
       title={props.provider.connection.display_name}
@@ -223,27 +241,42 @@ export const ProviderSettingsPage = observer(function ProviderSettingsPage(
         </p>
       )}
       <div className={styles.model_rows}>
-        {visible.map((model) => (
-          <ModelRow
-            key={model.model_id}
-            model_id={model.model_id}
-            display_name={model.display_name}
-            label={`配置模型 ${model.model_id}`}
-            onSelect={() => props.onModel({ source: props.provider.source, provider_instance_id: provider_id, model_id: model.model_id })}
-          >
-            <ModelStatusTags
-              origin={fixed_origins.get(model.model_id) ?? 'online'}
-              customized={fixed_origins.has(model.model_id)}
-              configuration={model.configuration}
-            />
-          </ModelRow>
-        ))}
+        {visible.map((model) => {
+          const selection: ModelSelection = {
+            source: props.provider.source,
+            provider_instance_id: provider_id,
+            model_id: model.model_id,
+          };
+          return (
+            <ModelRow
+              key={model.model_id}
+              model_id={model.model_id}
+              display_name={model.display_name}
+              label={`配置模型 ${model.model_id}`}
+              can_set_default={can_set_default}
+              is_default={isDefaultSelection(selection)}
+              busy={busy}
+              onSelect={() => props.onModel(selection)}
+              onSetDefault={() => void settings.setDefaultModel(selection)}
+            >
+              <ModelStatusTags
+                origin={fixed_origins.get(model.model_id) ?? 'online'}
+                customized={fixed_origins.has(model.model_id)}
+                configuration={model.configuration}
+              />
+            </ModelRow>
+          );
+        })}
         {offline_fixed.map((record) => (
           <ModelRow
             key={record.selection.model_id}
             model_id={record.selection.model_id}
             label={`编辑固定配置 ${record.selection.model_id}`}
+            can_set_default={can_set_default}
+            is_default={isDefaultSelection(record.selection)}
+            busy={busy}
             onSelect={() => props.onModel(record.selection)}
+            onSetDefault={() => void settings.setDefaultModel(record.selection)}
           >
             <ModelStatusTags origin={record.origin} customized offline={!loading} />
           </ModelRow>
@@ -301,17 +334,40 @@ function ModelRow(
     model_id: string;
     display_name?: string | null;
     label: string;
+    can_set_default: boolean;
+    is_default: boolean;
+    busy: boolean;
     onSelect: () => void;
+    onSetDefault: () => void;
     children: ReactNode;
   }>,
 ) {
   return (
-    <button type="button" aria-label={props.label} onClick={props.onSelect}>
-      <span>
-        <strong>{props.display_name ?? props.model_id}</strong>
-        {props.display_name && props.display_name !== props.model_id && <small>{props.model_id}</small>}
-      </span>
-      {props.children}
-    </button>
+    <div className={styles.model_row_item}>
+      <button type="button" className={styles.model_row_main} aria-label={props.label} onClick={props.onSelect}>
+        <span>
+          <strong>{props.display_name ?? props.model_id}</strong>
+          {props.display_name && props.display_name !== props.model_id && <small>{props.model_id}</small>}
+        </span>
+        {props.children}
+      </button>
+      {props.can_set_default && (
+        props.is_default ? (
+          <span className={`${styles.model_tag} ${styles.model_row_default_action}`} data-tone="accent">
+            当前默认
+          </span>
+        ) : (
+          <Button
+            className={styles.model_row_default_action}
+            type="button"
+            disabled={props.busy}
+            aria-label={`设为默认 ${props.model_id}`}
+            onClick={props.onSetDefault}
+          >
+            设为默认
+          </Button>
+        )
+      )}
+    </div>
   );
 }
