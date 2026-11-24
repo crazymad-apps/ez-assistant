@@ -101,10 +101,24 @@ mod tests {
 
     #[test]
     fn all_presets_have_valid_native_colors_and_explicit_modes() {
+        let catalog: BTreeMap<String, serde_json::Value> =
+            serde_json::from_str(THEME_PRESETS).expect("valid preset catalog");
+        assert_eq!(catalog.len(), 15);
         for (id, mode, color) in [
             ("default_light", Theme::Light, Color(255, 255, 255, 255)),
-            ("monokai", Theme::Dark, Color(39, 40, 34, 255)),
+            ("paper_warm", Theme::Light, Color(250, 248, 245, 255)),
+            ("github_light", Theme::Light, Color(255, 255, 255, 255)),
+            ("catppuccin_latte", Theme::Light, Color(239, 241, 245, 255)),
+            ("rose_pine_dawn", Theme::Light, Color(250, 244, 237, 255)),
             ("solarized_light", Theme::Light, Color(253, 246, 227, 255)),
+            ("default_dark", Theme::Dark, Color(20, 21, 24, 255)),
+            ("github_dark_dimmed", Theme::Dark, Color(34, 39, 46, 255)),
+            ("catppuccin_mocha", Theme::Dark, Color(30, 30, 46, 255)),
+            ("tokyo_night", Theme::Dark, Color(26, 27, 38, 255)),
+            ("nord", Theme::Dark, Color(46, 52, 64, 255)),
+            ("one_dark_pro", Theme::Dark, Color(40, 44, 52, 255)),
+            ("dracula", Theme::Dark, Color(40, 42, 54, 255)),
+            ("monokai", Theme::Dark, Color(39, 40, 34, 255)),
             ("solarized_dark", Theme::Dark, Color(0, 43, 54, 255)),
         ] {
             let value = preset(id).expect("preset");

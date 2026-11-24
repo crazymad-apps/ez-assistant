@@ -1,6 +1,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { ApprovalMode, ModelSelection } from "@ez-assistant/protocol";
 import { parseResourceSnapshot, type ResourceWorkspaceSnapshot } from "../features/resource-workspace/resourceWorkspaceSnapshot";
+import type { AppearancePreferences } from "../styles/appearanceOptions";
 import { DEFAULT_THEME_ID, isThemeId, type ThemeId } from "../styles/themePresets";
 
 export type DesktopPreferences = {
@@ -22,6 +23,7 @@ export type DesktopCloseBehavior = "hide_to_tray" | "quit_desktop";
 const defaults: DesktopPreferences = { left_sidebar_open: true, right_sidebar_open: true, left_sidebar_width: 286, right_sidebar_width: 380, expanded_workspace_ids: null, close_behavior: "quit_desktop", default_approval_mode: "auto", last_model_selection: null };
 const WEB_KEY = "ez-assistant:view";
 const WEB_THEME_KEY = "ez-assistant:theme";
+const WEB_APPEARANCE_KEY = "ez-assistant:appearance";
 
 export type DesktopThemePreference = {
   readonly theme_id: ThemeId;
@@ -48,6 +50,22 @@ export function saveDesktopTheme(theme_id: ThemeId): void | Promise<void> {
 
 export async function applyDesktopTheme(theme_id: ThemeId): Promise<void> {
   if (isTauri()) await invoke<void>("apply_desktop_theme", { themeId: theme_id });
+}
+
+export function loadDesktopAppearance(): unknown | Promise<unknown> {
+  if (isTauri()) return invoke<unknown>("load_desktop_appearance");
+  const value = localStorage.getItem(WEB_APPEARANCE_KEY);
+  if (!value) return null;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+export function saveDesktopAppearance(appearance: AppearancePreferences): void | Promise<void> {
+  if (isTauri()) return invoke<void>("save_desktop_appearance", { appearance });
+  localStorage.setItem(WEB_APPEARANCE_KEY, JSON.stringify(appearance));
 }
 
 export function viewingSnapshot(value: ResourceWorkspaceSnapshot | null | undefined, native: boolean, local = native): ResourceWorkspaceSnapshot | null {

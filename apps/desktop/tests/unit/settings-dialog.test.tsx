@@ -50,7 +50,7 @@ describe('SettingsDialog model management', () => {
     const view = renderDialog(store, appearance);
     const user = userEvent.setup();
     expect(screen.getByRole('group', { name: '配色方案' })).toBeVisible();
-    expect(screen.getAllByRole('radio')).toHaveLength(4);
+    expect(within(screen.getByRole('group', { name: '配色方案' })).getAllByRole('radio')).toHaveLength(15);
     expect(screen.getByText('仅此浏览器的当前站点')).toBeVisible();
     const monokai = screen.getByRole('radio', { name: 'Monokai' });
     await user.click(monokai);
@@ -82,6 +82,61 @@ describe('SettingsDialog model management', () => {
     await waitFor(() => expect(screen.queryByRole('button', { name: '重试窗口外观' })).not.toBeInTheDocument());
     expect(save).toHaveBeenCalledTimes(1);
     appearance.dispose(); store.dispose();
+  });
+
+  it('updates appearance mode, accent swatches, typography presets, display toggles, and resets defaults', async () => {
+    const save = vi.fn();
+    const saveAppearance = vi.fn();
+    const appearance = new AppearanceStore(
+      {
+        load: () => ({ theme_id: 'default_light', recovered_unknown: false }),
+        save,
+        loadAppearance: () => null,
+        saveAppearance,
+      },
+      { apply: applyDocumentTheme, applyNative: async () => undefined },
+    );
+    await appearance.initialize();
+    const store = settingsStore();
+    store.settings.page = 'appearance';
+    renderDialog(store, appearance);
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole('button', { name: '深色' }));
+    expect(document.documentElement.dataset.theme).toBe('default_dark');
+    expect(document.documentElement.dataset.colorMode).toBe('dark');
+
+    await user.click(screen.getByRole('radio', { name: '活力橙' }));
+    expect(document.documentElement.dataset.accent).toBe('orange');
+    expect(document.documentElement.style.getPropertyValue('--ez-primary')).toBe('#f97316');
+
+    await user.click(screen.getByRole('radio', { name: '自定义强调色' }));
+    const hexInput = await screen.findByLabelText('自定义强调色十六进制');
+    await user.clear(hexInput);
+    await user.type(hexInput, '#22c55e');
+    expect(document.documentElement.style.getPropertyValue('--ez-primary')).toBe('#22c55e');
+
+    await user.click(screen.getByRole('button', { name: '全局字体大小' }));
+    await user.click(await screen.findByRole('option', { name: /较大 \(15px\)/ }));
+    expect(document.documentElement.style.getPropertyValue('--ez-font-base')).toBe('15px');
+
+    await user.click(screen.getByRole('button', { name: '正文行高' }));
+    await user.click(await screen.findByRole('option', { name: /超宽 \(1.95\)/ }));
+    expect(document.documentElement.style.getPropertyValue('--ez-prose-line-height')).toBe('1.95');
+
+    await user.click(screen.getByRole('button', { name: '宽屏' }));
+    expect(document.documentElement.style.getPropertyValue('--conversation-content-max-width')).toBe('1040px');
+
+    await user.click(screen.getByRole('switch', { name: '代码字体连字' }));
+    expect(document.documentElement.dataset.codeLigatures).toBe('false');
+
+    await user.click(screen.getByRole('button', { name: '恢复默认' }));
+    expect(appearance.preferences.accent_preset).toBe('theme');
+    expect(appearance.preferences.font_size).toBe('md');
+    expect(saveAppearance).toHaveBeenCalled();
+
+    appearance.dispose();
+    store.dispose();
   });
 
   it('shows organization model status and refresh alongside personal editing controls', async () => {

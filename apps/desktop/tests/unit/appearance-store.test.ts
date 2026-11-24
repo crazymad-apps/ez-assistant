@@ -317,4 +317,55 @@ describe('appearance projection and exit boundary', () => {
     expect(save).not.toHaveBeenCalled();
     store.dispose();
   });
+
+  it('derives contrast-safe accent tokens, custom fonts, and system color mode changes', async () => {
+    const media_listeners: Array<(event: MediaQueryListEvent) => void> = [];
+    const match_media = vi.fn(() => ({
+      matches: false,
+      media: '(prefers-color-scheme: dark)',
+      onchange: null,
+      addEventListener: (_: string, listener: (event: MediaQueryListEvent) => void) => {
+        media_listeners.push(listener);
+      },
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+    vi.stubGlobal('matchMedia', match_media);
+
+    try {
+      const save = vi.fn();
+      const saveAppearance = vi.fn();
+      const store = new AppearanceStore(
+        {
+          load: () => preference('default_light'),
+          save,
+          loadAppearance: () => null,
+          saveAppearance,
+        },
+        { apply: applyDocumentTheme, applyNative: async () => undefined },
+      );
+      await store.initialize();
+      expect(store.theme_id).toBe('default_light');
+
+      store.updatePreferences({
+        accent_preset: 'amber',
+        ui_font: 'custom',
+        custom_ui_font: 'MiSans"; malicious: 1',
+      });
+      expect(document.documentElement.style.getPropertyValue('--ez-on-primary')).toBe('#141518');
+      expect(document.documentElement.style.getPropertyValue('--ez-font-ui')).toContain('"MiSans malicious 1"');
+
+      media_listeners[0]?.({ matches: true } as MediaQueryListEvent);
+      expect(store.theme_id).toBe('default_dark');
+
+      store.resetAppearance();
+      expect(store.preferences.accent_preset).toBe('theme');
+      expect(saveAppearance).toHaveBeenCalled();
+      store.dispose();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });

@@ -54,8 +54,9 @@
 .fallback {
   margin: 0;
   color: inherit;
-  font: inherit;
-  line-height: 1.72;
+  font-family: var(--ez-font-prose, inherit);
+  font-size: inherit;
+  line-height: var(--ez-prose-line-height, 1.72);
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }

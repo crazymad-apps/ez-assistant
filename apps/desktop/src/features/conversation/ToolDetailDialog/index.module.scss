@@ -96,7 +96,7 @@
   border-radius: var(--ez-radius-small);
   color: var(--ez-terminal-foreground);
   background: var(--ez-terminal-background);
-  font-family: "SFMono-Regular", Consolas, monospace;
+  font-family: var(--ez-font-mono, "SFMono-Regular", Consolas, monospace);
   font-size: var(--ez-font-base);
   white-space: pre-wrap;
 }
@@ -233,7 +233,7 @@
   border-radius: var(--ez-radius-small);
   color: var(--ez-text-secondary);
   background: var(--ez-surface-muted);
-  font-family: "SFMono-Regular", Consolas, monospace;
+  font-family: var(--ez-font-mono, "SFMono-Regular", Consolas, monospace);
   font-size: var(--ez-font-small);
   white-space: pre-wrap;
   overflow-wrap: anywhere;

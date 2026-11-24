@@ -165,7 +165,7 @@ fn theme_damaged_document_is_not_replaced_with_defaults() {
 #[test]
 fn theme_catalog_has_matching_native_defaults_and_valid_startup_metadata() {
     let presets: BTreeMap<String, serde_json::Value> = serde_json::from_str(THEME_PRESETS).unwrap();
-    assert_eq!(presets.len(), 4);
+    assert_eq!(presets.len(), 15);
     assert!(presets.contains_key(DEFAULT_THEME_ID));
     for (id, preset) in presets {
         assert!(is_theme_id(&id).unwrap());
@@ -177,4 +177,35 @@ fn theme_catalog_has_matching_native_defaults_and_valid_startup_metadata() {
         assert!(color.starts_with('#') && color.len() == 7);
         assert!(u32::from_str_radix(&color[1..], 16).is_ok());
     }
+}
+
+#[test]
+fn appearance_preferences_round_trip_and_survive_layout_and_theme_writes() {
+    let directory = directory();
+    let path = directory.path();
+    assert_eq!(load_appearance_from_directory(path).unwrap(), None);
+
+    let payload = serde_json::json!({
+        "mode": "dark",
+        "accent_preset": "orange",
+        "font_size": "lg",
+        "line_height": "loose"
+    });
+    save_appearance_to_directory(path, payload.clone()).unwrap();
+    save_theme_to_directory(path, "default_dark").unwrap();
+    save_to_directory(
+        path,
+        DesktopPreferences {
+            left_sidebar_width: 320,
+            ..DesktopPreferences::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(load_appearance_from_directory(path).unwrap(), Some(payload));
+    assert_eq!(
+        load_theme_from_directory(path).unwrap().theme_id,
+        "default_dark"
+    );
+    assert!(save_appearance_to_directory(path, serde_json::json!("not-an-object")).is_err());
 }

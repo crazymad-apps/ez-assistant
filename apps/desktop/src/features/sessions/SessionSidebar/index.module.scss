@@ -397,6 +397,10 @@
   white-space: nowrap;
 }
 
+:global(html[data-show-sidebar-time="false"]) .session_time {
+  display: none;
+}
+
 .session_row[data-has-actions="true"]:hover .session_time,
 .session_row[data-has-actions="true"]:focus-within .session_time,
 .session_row[data-has-actions="true"]:not([data-variant="pinned"]):hover .loading_ring,

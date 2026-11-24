@@ -3,8 +3,9 @@
   min-width: 0;
   max-width: 100%;
   color: inherit;
-  font: inherit;
-  line-height: 1.72;
+  font-family: var(--ez-font-prose, inherit);
+  font-size: inherit;
+  line-height: var(--ez-prose-line-height, 1.72);
   overflow-wrap: anywhere;
 
   > * { min-width: 0; max-width: 100%; }
@@ -57,8 +58,9 @@
     border-radius: 4px;
     color: var(--ez-text-secondary);
     background: var(--ez-surface-muted);
-    font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    font-family: var(--ez-font-mono, "SFMono-Regular", Consolas, "Liberation Mono", monospace);
     font-size: var(--ez-font-small);
+    font-variant-ligatures: var(--ez-code-ligatures, contextual);
   }
 
   :global([data-streamdown="inline-code"]) {
@@ -95,8 +97,9 @@
     padding: 0 42px 0 12px;
     border-bottom: 1px solid var(--ez-border);
     color: var(--ez-text-muted);
-    font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    font-family: var(--ez-font-mono, "SFMono-Regular", Consolas, "Liberation Mono", monospace);
     font-size: var(--ez-font-small);
+    font-variant-ligatures: var(--ez-code-ligatures, contextual);
   }
 
   :global([data-streamdown="code-block-actions"]) {
