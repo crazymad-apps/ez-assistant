@@ -17,8 +17,33 @@ export type AccentPresetId =
 
 export type FontSizeScale = "xs" | "sm" | "md" | "lg" | "xl";
 export type LineHeightPreset = "compact" | "normal" | "relaxed" | "loose";
-export type UiFontId = "system" | "pingfang" | "harmony" | "lxgw" | "serif" | "rounded" | "mono" | "custom";
-export type ProseFontId = "inherit" | "sans" | "serif" | "lxgw" | "mono" | "custom";
+export type UiFontId =
+  | "system"
+  | "alimama_fangyuan"
+  | "alimama_dongfangdakai"
+  | "alimama_daoliti"
+  | "alimama_shuheiti"
+  | "alimama_agile"
+  | "pingfang"
+  | "harmony"
+  | "lxgw"
+  | "serif"
+  | "rounded"
+  | "mono"
+  | "custom";
+
+export type ProseFontId =
+  | "inherit"
+  | "alimama_fangyuan"
+  | "alimama_dongfangdakai"
+  | "alimama_daoliti"
+  | "alimama_shuheiti"
+  | "alimama_agile"
+  | "sans"
+  | "serif"
+  | "lxgw"
+  | "mono"
+  | "custom";
 export type CodeFontId = "system" | "jetbrains_mono" | "fira_code" | "maple_mono" | "cascadia_code" | "custom";
 export type ContentWidthPreset = "narrow" | "default" | "wide" | "full";
 export type DensityPreset = "compact" | "default" | "spacious";
@@ -119,6 +144,11 @@ const SYSTEM_UI_STACK = 'Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont
 const SYSTEM_MONO_STACK = '"SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace';
 const SERIF_STACK = '"Songti SC", "Source Han Serif SC", "Noto Serif SC", Georgia, "Times New Roman", serif';
 const LXGW_STACK = '"LXGW WenKai", "Kaiti SC", "STKaiti", KaiTi, sans-serif';
+const ALIMAMA_FANGYUAN_STACK = `"Alimama FangYuanTi VF", ${SYSTEM_UI_STACK}`;
+const ALIMAMA_DONGFANGDAKAI_STACK = '"Alimama DongFangDaKai", "Kaiti SC", "STKaiti", KaiTi, serif';
+const ALIMAMA_DAOLITI_STACK = `"Alimama DaoLiTi", ${SERIF_STACK}`;
+const ALIMAMA_SHUHEITI_STACK = `"Alimama ShuHeiTi", ${SYSTEM_UI_STACK}`;
+const ALIMAMA_AGILE_STACK = `"Alimama Agile VF", "Alimama FangYuanTi VF", ${SYSTEM_UI_STACK}`;
 
 export const UI_FONT_OPTIONS: ReadonlyArray<Readonly<{
   value: UiFontId;
@@ -127,6 +157,11 @@ export const UI_FONT_OPTIONS: ReadonlyArray<Readonly<{
   stack: string;
 }>> = Object.freeze([
   { value: "system", label: "默认（系统无衬线）", description: "随系统自动选择 Inter / 苹方 / 微软雅黑", stack: SYSTEM_UI_STACK },
+  { value: "alimama_fangyuan", label: "阿里妈妈方圆体 VF", description: "内置全字库 · 双轴可变圆润几何无衬线", stack: ALIMAMA_FANGYUAN_STACK },
+  { value: "alimama_dongfangdakai", label: "阿里妈妈东方大楷", description: "内置全字库 · 颜体楷书算法硬朗楷韵", stack: ALIMAMA_DONGFANGDAKAI_STACK },
+  { value: "alimama_daoliti", label: "阿里妈妈刀隶体", description: "内置全字库 · 锋芒隶书古风字体", stack: ALIMAMA_DAOLITI_STACK },
+  { value: "alimama_shuheiti", label: "阿里妈妈数黑体", description: "内置全字库 · 醒目厚重工业风标题黑体", stack: ALIMAMA_SHUHEITI_STACK },
+  { value: "alimama_agile", label: "阿里妈妈灵动体 VF", description: "内置 · 西文数字可变几何无衬线（中文自动衔接）", stack: ALIMAMA_AGILE_STACK },
   { value: "pingfang", label: "苹方 · SF Pro", description: "macOS / iOS 原生现代几何黑体", stack: '"SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif' },
   { value: "harmony", label: "思源 · 鸿蒙黑体", description: "HarmonyOS Sans / Source Han Sans SC", stack: '"HarmonyOS Sans SC", "Source Han Sans SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif' },
   { value: "lxgw", label: "霞鹜文楷 / 楷体", description: "温和人文手写楷体质感", stack: LXGW_STACK },
@@ -143,6 +178,11 @@ export const PROSE_FONT_OPTIONS: ReadonlyArray<Readonly<{
   stack: string | null;
 }>> = Object.freeze([
   { value: "inherit", label: "默认（界面字体）", description: "与当前界面字体保持一致", stack: null },
+  { value: "alimama_fangyuan", label: "阿里妈妈方圆体 VF", description: "内置全字库 · 圆润舒适的长文阅读", stack: ALIMAMA_FANGYUAN_STACK },
+  { value: "alimama_dongfangdakai", label: "阿里妈妈东方大楷", description: "内置全字库 · 楷书书卷阅读风貌", stack: ALIMAMA_DONGFANGDAKAI_STACK },
+  { value: "alimama_daoliti", label: "阿里妈妈刀隶体", description: "内置全字库 · 奇峻隶书古风排版", stack: ALIMAMA_DAOLITI_STACK },
+  { value: "alimama_shuheiti", label: "阿里妈妈数黑体", description: "内置全字库 · 高对比厚黑强调阅读", stack: ALIMAMA_SHUHEITI_STACK },
+  { value: "alimama_agile", label: "阿里妈妈灵动体 VF", description: "内置 · 西文数字灵动排版（中文自动衔接）", stack: ALIMAMA_AGILE_STACK },
   { value: "sans", label: "现代无衬线", description: "清晰利落的技术与对话排版", stack: SYSTEM_UI_STACK },
   { value: "serif", label: "书卷衬线（宋体 / Georgia）", description: "适合深度阅读与长篇文档", stack: SERIF_STACK },
   { value: "lxgw", label: "霞鹜文楷 · 楷体", description: "柔和温润、接近纸质手写笔记", stack: LXGW_STACK },
@@ -279,9 +319,43 @@ export function normalizeAppearancePreferences(
     accent_preset,
     custom_accent_hex,
     font_size: oneOf(record.font_size, ["xs", "sm", "md", "lg", "xl"] as const, DEFAULT_APPEARANCE_PREFERENCES.font_size),
-    ui_font: oneOf(record.ui_font, ["system", "pingfang", "harmony", "lxgw", "serif", "rounded", "mono", "custom"] as const, DEFAULT_APPEARANCE_PREFERENCES.ui_font),
+    ui_font: oneOf(
+      record.ui_font,
+      [
+        "system",
+        "alimama_fangyuan",
+        "alimama_dongfangdakai",
+        "alimama_daoliti",
+        "alimama_shuheiti",
+        "alimama_agile",
+        "pingfang",
+        "harmony",
+        "lxgw",
+        "serif",
+        "rounded",
+        "mono",
+        "custom",
+      ] as const,
+      DEFAULT_APPEARANCE_PREFERENCES.ui_font,
+    ),
     custom_ui_font: typeof record.custom_ui_font === "string" ? sanitizeCustomFontName(record.custom_ui_font) : "",
-    prose_font: oneOf(record.prose_font, ["inherit", "sans", "serif", "lxgw", "mono", "custom"] as const, DEFAULT_APPEARANCE_PREFERENCES.prose_font),
+    prose_font: oneOf(
+      record.prose_font,
+      [
+        "inherit",
+        "alimama_fangyuan",
+        "alimama_dongfangdakai",
+        "alimama_daoliti",
+        "alimama_shuheiti",
+        "alimama_agile",
+        "sans",
+        "serif",
+        "lxgw",
+        "mono",
+        "custom",
+      ] as const,
+      DEFAULT_APPEARANCE_PREFERENCES.prose_font,
+    ),
     custom_prose_font: typeof record.custom_prose_font === "string" ? sanitizeCustomFontName(record.custom_prose_font) : "",
     line_height: oneOf(record.line_height, ["compact", "normal", "relaxed", "loose"] as const, DEFAULT_APPEARANCE_PREFERENCES.line_height),
     code_font: oneOf(record.code_font, ["system", "jetbrains_mono", "fira_code", "maple_mono", "cascadia_code", "custom"] as const, DEFAULT_APPEARANCE_PREFERENCES.code_font),

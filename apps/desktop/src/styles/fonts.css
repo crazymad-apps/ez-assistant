@@ -1,0 +1,33 @@
+/* 内置阿里妈妈免费商用字体（全字库 WOFF2），随应用同源打包加载，受 CSP 'self' 保护。 */
+
+@font-face {
+  font-family: "Alimama FangYuanTi VF";
+  src: url("@fontpkg/alimama-fang-yuan-ti-vf/AlimamaFangYuanTiVF-Thin.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Alimama DaoLiTi";
+  src: url("@fontpkg/alimama-dao-li-ti/AlimamaDaoLiTi.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Alimama ShuHeiTi";
+  src: url("@fontpkg/alimama-shu-hei-ti/AlimamaShuHeiTi-Bold.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Alimama Agile VF";
+  src: url("@fontpkg/alimama-agile-vf/AlimamaAgileVF-Thin.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}

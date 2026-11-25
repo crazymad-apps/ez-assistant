@@ -363,6 +363,16 @@ describe('appearance projection and exit boundary', () => {
       store.resetAppearance();
       expect(store.preferences.accent_preset).toBe('theme');
       expect(saveAppearance).toHaveBeenCalled();
+
+      for (const [ui_font, prose_font, ui_family, prose_family] of [
+        ['alimama_fangyuan', 'alimama_dongfangdakai', '"Alimama FangYuanTi VF"', '"Alimama DongFangDaKai"'],
+        ['alimama_daoliti', 'alimama_shuheiti', '"Alimama DaoLiTi"', '"Alimama ShuHeiTi"'],
+        ['alimama_agile', 'alimama_fangyuan', '"Alimama Agile VF"', '"Alimama FangYuanTi VF"'],
+      ] as const) {
+        store.updatePreferences({ ui_font, prose_font });
+        expect(document.documentElement.style.getPropertyValue('--ez-font-ui')).toContain(ui_family);
+        expect(document.documentElement.style.getPropertyValue('--ez-font-prose')).toContain(prose_family);
+      }
       store.dispose();
     } finally {
       vi.unstubAllGlobals();

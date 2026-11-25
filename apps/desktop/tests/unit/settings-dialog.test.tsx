@@ -124,6 +124,14 @@ describe('SettingsDialog model management', () => {
     await user.click(await screen.findByRole('option', { name: /超宽 \(1.95\)/ }));
     expect(document.documentElement.style.getPropertyValue('--ez-prose-line-height')).toBe('1.95');
 
+    await user.click(screen.getByRole('button', { name: '界面字体' }));
+    await user.click(await screen.findByRole('option', { name: /阿里妈妈方圆体 VF/ }));
+    expect(document.documentElement.style.getPropertyValue('--ez-font-ui')).toContain('"Alimama FangYuanTi VF"');
+
+    await user.click(screen.getByRole('button', { name: '正文字体' }));
+    await user.click(await screen.findByRole('option', { name: /阿里妈妈东方大楷/ }));
+    expect(document.documentElement.style.getPropertyValue('--ez-font-prose')).toContain('"Alimama DongFangDaKai"');
+
     await user.click(screen.getByRole('button', { name: '宽屏' }));
     expect(document.documentElement.style.getPropertyValue('--conversation-content-max-width')).toBe('1040px');
 
