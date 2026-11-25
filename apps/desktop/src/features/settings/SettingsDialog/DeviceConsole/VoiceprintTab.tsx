@@ -445,17 +445,16 @@ export const VoiceprintTab = observer(function VoiceprintTab(props: VoiceprintTa
           {isNative ? (
             <div className={styles.capture_box}>
               <div className={styles.action_row}>
-                <strong>用 {props.device_name ?? "Mosaico"} 本机麦克风录制（推荐 · 3 句引导）</strong>
+                <strong>{props.device_name ?? "Mosaico"} 本机录制</strong>
                 <span className={styles.badge} data-tone={deviceSamples.length >= 3 ? "online" : "warn"}>
-                  已采集 {deviceSamples.length}/3 句
+                  {deviceSamples.length}/3 句
                 </span>
               </div>
-              <p className={styles.meta_line}>
-                使用终端自身麦克风录 1～3 句不同日常语句可消除麦克风通道差异，大幅提升声纹免唤醒准确率。
-                {deviceSamples.length < 3
-                  ? ` 下一句建议朗读：「${GUIDED_SENTENCES[deviceSamples.length]}」`
-                  : " 已集齐 3 句样本，请点击下方「声纹注册 (Enroll)」。"}
-              </p>
+              {deviceSamples.length < 3 ? (
+                <p className={styles.meta_line}>
+                  建议朗读：「{GUIDED_SENTENCES[deviceSamples.length]}」
+                </p>
+              ) : null}
               <div className={styles.action_row}>
                 <button
                   className={styles.primary_btn}

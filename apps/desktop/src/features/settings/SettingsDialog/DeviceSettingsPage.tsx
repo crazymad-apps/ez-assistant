@@ -243,6 +243,7 @@ export const DeviceSettingsPage = observer(function DeviceSettingsPage() {
           device_name={device.display_name}
           key={`wake-${device.device_id}`}
           on_open_voiceprint={() => openDeviceDetail(device.device_id, "voice")}
+          standalone_spacing
         />
       ))}
 

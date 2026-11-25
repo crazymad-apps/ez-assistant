@@ -494,17 +494,18 @@ describe("DeviceSpeechSection and DeviceConsole UI", () => {
       </RootStoreProvider>,
     );
 
-    await screen.findByText(/语音唤醒与模式 · Mosaico-5BF0/);
+    await screen.findByText(/语音唤醒 · Mosaico-5BF0/);
     expect(container.querySelector("select")).toBeNull();
     expect(screen.getByLabelText("唤醒词")).toHaveValue("你好小元");
 
     // Trying voiceprint_direct with 0 speakers shows guardrail alert
-    fireEvent.click(screen.getByRole("radio", { name: /声纹免唤醒/ }));
-    await screen.findByText(/请先为至少 1 位成员录入声纹/);
+    fireEvent.click(screen.getByRole("radio", { name: "声纹免唤醒" }));
+    await screen.findByText(/请先录入声纹后再开启声纹唤醒/);
 
     // Edit wake word to 小元同学 -> auto pinyin xiao yuan tong xue -> save
     fireEvent.change(screen.getByLabelText("唤醒词"), { target: { value: "小元同学" } });
-    expect(screen.getByText("xiao yuan tong xue")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "微调拼音" }));
+    expect(screen.getByLabelText("唤醒词拼音")).toHaveValue("xiao yuan tong xue");
     fireEvent.click(screen.getByRole("button", { name: "保存唤醒设置" }));
 
     await waitFor(() => {
@@ -518,9 +519,9 @@ describe("DeviceSpeechSection and DeviceConsole UI", () => {
       );
     });
 
-    // Click "立即录入声纹" jumps straight to VoiceprintTab with Mosaico capture
-    fireEvent.click(screen.getByRole("button", { name: "立即录入声纹" }));
-    await screen.findByText(/用 Mosaico-5BF0 本机麦克风录制/);
+    // Click "录入声纹" jumps straight to VoiceprintTab with Mosaico capture
+    fireEvent.click(screen.getByRole("button", { name: "录入声纹" }));
+    await screen.findByText(/Mosaico-5BF0 本机录制/);
     fireEvent.click(screen.getByRole("button", { name: "用 Mosaico 录第 1 句" }));
     await screen.findByText(/第 1\/3 句采集完成/);
 
