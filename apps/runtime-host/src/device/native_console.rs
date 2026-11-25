@@ -254,9 +254,24 @@ impl NativeConsoleStore {
         Ok((true, Some(build_sync_request(&doc))))
     }
 
-    pub(super) async fn build_full_sync(&self) -> Option<VoiceprintSyncRequest> {
-        let doc = self.doc.lock().await;
-        if doc.vp_version == 0 && doc.speakers.is_empty() {
+    /// 设备完成 `hello` 上线后对齐端侧声纹版本：
+    /// - 若终端上报了更高的旧版 `vp_version`（例如曾连过其他网关/主机），先抬高本机版本下限，
+    ///   保证后续首次声纹注册（`device_vp_version + 1`）或本次全量下发一定能被终端 `ApplySync` 接受；
+    /// - 若双方版本已一致则不下发，避免终端每次重连重复擦写加密 NVS Flash。
+    pub(super) async fn prepare_initial_sync(
+        &self,
+        device_vp_version: u64,
+    ) -> Option<VoiceprintSyncRequest> {
+        let mut doc = self.doc.lock().await;
+        if doc.vp_version < device_vp_version {
+            doc.vp_version = device_vp_version;
+            let _ = save_document(&self.path, &doc);
+            if doc.speakers.is_empty() {
+                return None;
+            }
+            return Some(build_sync_request(&doc));
+        }
+        if doc.vp_version == device_vp_version {
             return None;
         }
         Some(build_sync_request(&doc))
@@ -1700,5 +1715,46 @@ mod tests {
         assert!(matched);
         assert_eq!(best.expect("best").speaker_id, "spk_owner");
         assert!(score > 0.99);
+    }
+
+    #[tokio::test]
+    async fn prepare_initial_sync_raises_floor_above_device_version_and_skips_redundant_writes() {
+        let dir = tempdir().expect("tempdir");
+        let store = NativeConsoleStore::load_or_default(dir.path());
+        // Fresh host sees device with pre-existing NVS vp_version=4 -> raises floor without empty flash write
+        assert!(store.prepare_initial_sync(4).await.is_none());
+        assert_eq!(store.vp_version().await, 4);
+
+        // Next enroll gets vp_version=5 (> 4) so device ApplySync accepts it immediately
+        let emb = extract_fbank_embedding_192(&synth_sine_pcm(260.0, 1200)).expect("emb");
+        let (_, sync) = store
+            .enroll_speaker(
+                NativeSpeakerRecord {
+                    speaker_id: "spk_new".to_owned(),
+                    display_name: "New".to_owned(),
+                    uid: "u_2".to_owned(),
+                    agent_id: "ez-assistant".to_owned(),
+                    group_id: "home-default".to_owned(),
+                    role: 1,
+                    tts_voice: String::new(),
+                    prompt: String::new(),
+                    embedding: Vec::new(),
+                    version: 0,
+                },
+                emb,
+            )
+            .await
+            .expect("enroll");
+        assert_eq!(sync.vp_version, 5);
+
+        // Reconnect at matching version skips redundant NVS sync
+        assert!(store.prepare_initial_sync(5).await.is_none());
+        // Reconnect at stale device version pushes full sync at v5
+        let catchup = store
+            .prepare_initial_sync(4)
+            .await
+            .expect("catchup sync");
+        assert_eq!(catchup.vp_version, 5);
+        assert_eq!(catchup.upserts.len(), 1);
     }
 }

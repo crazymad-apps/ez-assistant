@@ -593,6 +593,7 @@ async fn authenticate_device(
     let console_target =
         super::console::build_device_console_target(Some(peer_ip), hello.console.as_ref());
     let hardware = hello.hardware.clone();
+    let initial_device_vp = hardware.as_ref().map_or(0, |hw| hw.vp_version);
     let hardware_enabled = hardware.is_some();
     let speech_relay = hello.speech_relay;
     send_payload(
@@ -646,7 +647,10 @@ async fn authenticate_device(
         )
         .await;
     if hardware_enabled
-        && let Some(initial_sync) = shared.native_console.build_full_sync().await
+        && let Some(initial_sync) = shared
+            .native_console
+            .prepare_initial_sync(initial_device_vp)
+            .await
     {
         let _ = send_payload(&mut socket, "voiceprint_sync", &initial_sync).await;
     }
