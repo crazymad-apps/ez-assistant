@@ -189,6 +189,7 @@ struct ActiveConnection {
     mcp_server_keys: Vec<McpServerKey>,
     console: Option<DeviceConsoleTarget>,
     hardware: Option<DeviceHardwareDeclaration>,
+    active_speaker_role: i32,
     speech_relay: bool,
     command: mpsc::Sender<ConnectionCommand>,
 }
@@ -217,6 +218,10 @@ pub(super) enum ConnectionCommand {
         response: oneshot::Sender<DeviceCommandResult>,
     },
     SyncVoiceprints(VoiceprintSyncRequest),
+    SyncWakeConfig {
+        request: super::protocol::WakeConfigSyncRequest,
+        response: Option<oneshot::Sender<super::protocol::WakeConfigAck>>,
+    },
 }
 
 /// 为一个播报片段预留设备播放队列容量的请求。
@@ -1326,6 +1331,7 @@ impl GatewayShared {
                 mcp_server_keys,
                 console,
                 hardware,
+                active_speaker_role: 1,
                 speech_relay,
                 command: command_tx,
             },
@@ -1411,6 +1417,107 @@ impl GatewayShared {
         {
             hw.vp_version = vp_version;
         }
+    }
+
+    pub(super) async fn update_hardware_wake_config(
+        &self,
+        device_id: &assistant_protocol::DeviceId,
+        connection_id: &str,
+        config: super::protocol::DeviceWakeConfig,
+    ) {
+        let mut state = self.state.lock().await;
+        if let Some(connection) = state.connections.get_mut(device_id)
+            && connection.connection_id == connection_id
+            && let Some(hw) = connection.hardware.as_mut()
+        {
+            hw.wake_config = Some(config);
+        }
+    }
+
+    pub(super) async fn set_active_speaker_role(
+        &self,
+        device_id: &assistant_protocol::DeviceId,
+        connection_id: &str,
+        speaker_role: i32,
+    ) {
+        let mut state = self.state.lock().await;
+        if let Some(connection) = state.connections.get_mut(device_id)
+            && connection.connection_id == connection_id
+        {
+            connection.active_speaker_role = speaker_role.clamp(1, 3);
+        }
+    }
+
+    pub(super) async fn active_speaker_role(
+        &self,
+        device_id: &assistant_protocol::DeviceId,
+    ) -> i32 {
+        self.state
+            .lock()
+            .await
+            .connections
+            .get(device_id)
+            .map_or(1, |connection| connection.active_speaker_role)
+    }
+
+    pub(super) async fn sync_wake_config(
+        &self,
+        device_id: &assistant_protocol::DeviceId,
+        request: super::protocol::WakeConfigSyncRequest,
+        timeout_duration: Duration,
+    ) -> Result<super::protocol::WakeConfigAck, String> {
+        let sender = {
+            let state = self.state.lock().await;
+            state
+                .connections
+                .get(device_id)
+                .filter(|connection| connection.hardware.is_some())
+                .map(|connection| connection.command.clone())
+        }
+        .ok_or_else(|| "目标直连终端当前离线。".to_owned())?;
+
+        let (tx, rx) = oneshot::channel();
+        sender
+            .send(ConnectionCommand::SyncWakeConfig {
+                request,
+                response: Some(tx),
+            })
+            .await
+            .map_err(|_| "向终端发送唤醒配置失败，连接可能已断开。".to_owned())?;
+
+        match tokio::time::timeout(timeout_duration, rx).await {
+            Ok(Ok(ack)) => Ok(ack),
+            Ok(Err(_)) => Err("终端连接已中断，未收到唤醒配置回执。".to_owned()),
+            Err(_) => Err("等待终端应用唤醒配置超时。".to_owned()),
+        }
+    }
+
+    pub(super) async fn broadcast_wake_config_sync(
+        &self,
+        request: super::protocol::WakeConfigSyncRequest,
+    ) -> usize {
+        let senders = {
+            let state = self.state.lock().await;
+            state
+                .connections
+                .values()
+                .filter(|connection| connection.hardware.is_some())
+                .map(|connection| connection.command.clone())
+                .collect::<Vec<_>>()
+        };
+        let mut count = 0;
+        for sender in senders {
+            if sender
+                .try_send(ConnectionCommand::SyncWakeConfig {
+                    request: request.clone(),
+                    response: None,
+                })
+                .is_ok()
+            {
+                count += 1;
+            }
+        }
+        count
     }
 
     pub(super) async fn execute_device_command(

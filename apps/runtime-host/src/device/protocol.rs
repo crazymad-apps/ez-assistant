@@ -273,8 +273,97 @@ pub(super) struct DeviceConsoleDeclaration {
     pub(super) ui_path: Option<String>,
 }
 
+/// 直连终端的语音唤醒工作模式。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum WakeMode {
+    /// 默认唤醒词模式（如“你好小元”）。
+    #[default]
+    WakeWord,
+    /// 唤醒词 + 已录入声纹双验证模式。
+    WakeWordPlusVp,
+    /// 录入声纹后的免唤醒词声纹直唤模式。
+    VoiceprintDirect,
+}
+
+fn default_wake_word() -> String {
+    super::multinet_pinyin::DEFAULT_WAKE_WORD.to_owned()
+}
+
+fn default_wake_pinyin() -> String {
+    super::multinet_pinyin::DEFAULT_WAKE_PINYIN.to_owned()
+}
+
+fn default_vp_threshold() -> f32 {
+    0.78
+}
+
+fn default_min_speech_ms() -> u32 {
+    700
+}
+
+fn default_cooldown_ms() -> u32 {
+    1500
+}
+
+/// 直连终端的唤醒词与声纹唤醒模式配置。
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct DeviceWakeConfig {
+    #[serde(default)]
+    pub(super) mode: WakeMode,
+    #[serde(default = "default_wake_word")]
+    pub(super) wake_word: String,
+    #[serde(default = "default_wake_pinyin")]
+    pub(super) wake_pinyin: String,
+    #[serde(default = "default_vp_threshold")]
+    pub(super) vp_threshold: f32,
+    #[serde(default = "default_min_speech_ms")]
+    pub(super) min_speech_ms: u32,
+    #[serde(default = "default_cooldown_ms")]
+    pub(super) cooldown_ms: u32,
+    #[serde(default)]
+    pub(super) vp_wake_chime: bool,
+}
+
+impl Default for DeviceWakeConfig {
+    fn default() -> Self {
+        Self {
+            mode: WakeMode::WakeWord,
+            wake_word: default_wake_word(),
+            wake_pinyin: default_wake_pinyin(),
+            vp_threshold: default_vp_threshold(),
+            min_speech_ms: default_min_speech_ms(),
+            cooldown_ms: default_cooldown_ms(),
+            vp_wake_chime: false,
+        }
+    }
+}
+
+/// Host 经 WSS 向直连终端下发唤醒词与唤醒模式热更新请求。
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct WakeConfigSyncRequest {
+    pub(super) sync_id: String,
+    pub(super) config: DeviceWakeConfig,
+    #[serde(default)]
+    pub(super) enrolled_speaker_count: u32,
+}
+
+/// 直连终端应用唤醒词/模式热更新后的回执。
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct WakeConfigAck {
+    pub(super) sync_id: String,
+    pub(super) ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) active_config: Option<DeviceWakeConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) error: Option<String>,
+}
+
 /// 已配对直连终端在 `hello` 中声明的本地硬件档案与可执行能力列表。
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct DeviceHardwareDeclaration {
     #[serde(default)]
@@ -289,6 +378,10 @@ pub(super) struct DeviceHardwareDeclaration {
     pub(super) group_id: String,
     #[serde(default)]
     pub(super) vp_version: u64,
+    #[serde(default)]
+    pub(super) multinet_ready: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) wake_config: Option<DeviceWakeConfig>,
     #[serde(default)]
     pub(super) capabilities: Vec<String>,
 }
@@ -535,6 +628,8 @@ pub(super) struct ListenStart {
     pub(super) speaker_role: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) speaker_score: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) wake_source: Option<String>,
 }
 
 /// 设备已发送一段音频的最后序号，请求 Host 完成接管和识别。

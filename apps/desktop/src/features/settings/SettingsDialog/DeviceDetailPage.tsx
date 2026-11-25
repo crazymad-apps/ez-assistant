@@ -8,10 +8,11 @@ import consoleStyles from "./DeviceConsole/index.module.scss";
 import { SettingsPageContainer } from "./SettingsPageContainer";
 import styles from "./index.module.scss";
 
-type ConsoleTabKey = "overview" | "fleet" | "macs" | "acls" | "voice";
+export type ConsoleTabKey = "overview" | "fleet" | "macs" | "acls" | "voice";
 
 type DeviceDetailPageProps = Readonly<{
   device: DeviceSummarySnapshot;
+  initial_tab?: ConsoleTabKey;
   on_back: () => void;
 }>;
 
@@ -36,7 +37,7 @@ export function DeviceDetailPage(props: DeviceDetailPageProps) {
   const consoleMeta = connection?.console ?? null;
   const isNativeConsole = consoleMeta?.mode === "native";
   const consoleTabs = isNativeConsole ? NATIVE_CONSOLE_TABS : PROXY_CONSOLE_TABS;
-  const [activeTab, setActiveTab] = useState<ConsoleTabKey>("overview");
+  const [activeTab, setActiveTab] = useState<ConsoleTabKey>(props.initial_tab ?? "overview");
   const [copiedDirectUrl, setCopiedDirectUrl] = useState(false);
 
   const currentTab: ConsoleTabKey =
@@ -133,7 +134,12 @@ export function DeviceDetailPage(props: DeviceDetailPageProps) {
       ) : null}
 
       {currentTab === "voice" && consoleMeta ? (
-        <VoiceprintTab api_prefix={consoleMeta.api_prefix} device_id={props.device.device_id} />
+        <VoiceprintTab
+          api_prefix={consoleMeta.api_prefix}
+          device_id={props.device.device_id}
+          device_name={props.device.display_name}
+          mode={consoleMeta.mode}
+        />
       ) : null}
     </SettingsPageContainer>
   );

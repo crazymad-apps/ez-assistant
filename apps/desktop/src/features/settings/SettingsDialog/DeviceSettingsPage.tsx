@@ -10,7 +10,8 @@ import type {
 } from "@ez-assistant/protocol";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { SessionActionDialog } from "../../sessions/SessionActionDialog";
-import { DeviceDetailPage } from "./DeviceDetailPage";
+import { DeviceDetailPage, type ConsoleTabKey } from "./DeviceDetailPage";
+import { WakeSettingsCard } from "./DeviceConsole/WakeSettingsCard";
 import { DeviceSpeechSection } from "./DeviceSpeechSection";
 import { SettingsPageContainer } from "./SettingsPageContainer";
 import styles from "./index.module.scss";
@@ -23,6 +24,7 @@ export const DeviceSettingsPage = observer(function DeviceSettingsPage() {
   const [editing_name, setEditingName] = useState("");
   const [revoking_device, setRevokingDevice] = useState<DeviceSummarySnapshot | null>(null);
   const [detail_device_id, setDetailDeviceId] = useState<string | null>(null);
+  const [detail_tab, setDetailTab] = useState<ConsoleTabKey>("overview");
 
   useEffect(() => {
     void gateway.load();
@@ -32,9 +34,26 @@ export const DeviceSettingsPage = observer(function DeviceSettingsPage() {
   const paired_devices = snapshot?.devices.filter((device) => device.lifecycle === "paired") ?? [];
   const discovered_devices = snapshot?.discovered_devices ?? [];
   const detail_device = paired_devices.find((device) => device.device_id === detail_device_id) ?? null;
+  const online_native_devices = paired_devices.filter(
+    (device) => device.connection?.console?.mode === "native",
+  );
+
+  function openDeviceDetail(device_id: string, tab: ConsoleTabKey = "overview") {
+    setDetailTab(tab);
+    setDetailDeviceId(device_id);
+  }
 
   if (detail_device) {
-    return <DeviceDetailPage device={detail_device} on_back={() => setDetailDeviceId(null)} />;
+    return (
+      <DeviceDetailPage
+        device={detail_device}
+        initial_tab={detail_tab}
+        on_back={() => {
+          setDetailDeviceId(null);
+          setDetailTab("overview");
+        }}
+      />
+    );
   }
 
   async function saveName(device: DeviceSummarySnapshot) {
@@ -168,7 +187,7 @@ export const DeviceSettingsPage = observer(function DeviceSettingsPage() {
                     <button
                       aria-label={`查看 ${device.display_name} 详情`}
                       className={styles.paired_device_name_button}
-                      onClick={() => setDetailDeviceId(device.device_id)}
+                      onClick={() => openDeviceDetail(device.device_id, "overview")}
                       type="button"
                     >
                       {device.display_name}
@@ -176,6 +195,15 @@ export const DeviceSettingsPage = observer(function DeviceSettingsPage() {
                   ) : null}
                 </div>
                 <div className={styles.paired_device_actions}>
+                  {editing_device !== device.device_id ? (
+                    <button
+                      disabled={gateway.pending_action !== null}
+                      onClick={() => openDeviceDetail(device.device_id, "overview")}
+                      type="button"
+                    >
+                      管理
+                    </button>
+                  ) : null}
                   {editing_device === device.device_id ? (
                     <>
                       <button disabled={gateway.pending_action !== null} onClick={() => setEditingDevice(null)} type="button">取消</button>
@@ -207,6 +235,16 @@ export const DeviceSettingsPage = observer(function DeviceSettingsPage() {
           </div>
         ) : <p className={styles.device_empty}>尚未配对智能终端。</p>}
       </section>
+
+      {online_native_devices.map((device) => (
+        <WakeSettingsCard
+          api_prefix={device.connection?.console?.api_prefix ?? "/api/v1"}
+          device_id={device.device_id}
+          device_name={device.display_name}
+          key={`wake-${device.device_id}`}
+          on_open_voiceprint={() => openDeviceDetail(device.device_id, "voice")}
+        />
+      ))}
 
       <DeviceSpeechSection />
 

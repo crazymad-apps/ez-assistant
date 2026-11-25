@@ -30,9 +30,10 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     gateway::GatewayShared,
+    multinet_pinyin,
     protocol::{
-        DeviceCommandRequest, DeviceHardwareDeclaration, VoiceprintSyncRequest,
-        VoiceprintSyncTemplate,
+        DeviceCommandRequest, DeviceHardwareDeclaration, DeviceWakeConfig, VoiceprintSyncRequest,
+        VoiceprintSyncTemplate, WakeConfigSyncRequest, WakeMode,
     },
 };
 use crate::{
@@ -67,7 +68,7 @@ pub(super) struct NativeAclRule {
     pub(super) allow: bool,
 }
 
-/// 直连终端的持久化说话人档案与 192 维声纹模板。
+/// 直连终端的持久化说话人档案与 192 维声纹模板（支持多模板平均质心 + 子模板匹配）。
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(super) struct NativeSpeakerRecord {
     pub(super) speaker_id: String,
@@ -80,6 +81,8 @@ pub(super) struct NativeSpeakerRecord {
     pub(super) prompt: String,
     #[serde(default)]
     pub(super) embedding: Vec<f32>,
+    #[serde(default)]
+    pub(super) templates: Vec<Vec<f32>>,
     pub(super) version: u64,
 }
 
@@ -87,6 +90,8 @@ pub(super) struct NativeSpeakerRecord {
 struct NativeConsoleDocument {
     schema_version: u32,
     vp_version: u64,
+    #[serde(default)]
+    wake: DeviceWakeConfig,
     #[serde(default)]
     acls: BTreeMap<String, NativeAclRule>,
     #[serde(default)]
@@ -112,6 +117,7 @@ impl Default for NativeConsoleDocument {
         Self {
             schema_version: 1,
             vp_version: 0,
+            wake: DeviceWakeConfig::default(),
             acls,
             speakers: BTreeMap::new(),
         }
@@ -199,6 +205,61 @@ impl NativeConsoleStore {
         self.doc.lock().await.speakers.values().cloned().collect()
     }
 
+    pub(super) async fn wake_config(&self) -> (DeviceWakeConfig, u32) {
+        let doc = self.doc.lock().await;
+        let enrolled = enrolled_count_locked(&doc);
+        let mut cfg = doc.wake.clone();
+        if enrolled == 0 && cfg.mode != WakeMode::WakeWord {
+            cfg.mode = WakeMode::WakeWord;
+        }
+        (cfg, enrolled)
+    }
+
+    pub(super) async fn build_wake_sync(&self) -> WakeConfigSyncRequest {
+        let (config, enrolled_speaker_count) = self.wake_config().await;
+        WakeConfigSyncRequest {
+            sync_id: format!("wake-{}", random_hex_short()),
+            config,
+            enrolled_speaker_count,
+        }
+    }
+
+    pub(super) async fn update_wake_config(
+        &self,
+        mut next: DeviceWakeConfig,
+    ) -> Result<(DeviceWakeConfig, DeviceWakeConfig, u32), String> {
+        let mut doc = self.doc.lock().await;
+        let enrolled = enrolled_count_locked(&doc);
+        if next.mode != WakeMode::WakeWord && enrolled == 0 {
+            return Err("请先录入至少 1 位说话人声纹，再开启声纹唤醒模式。".to_owned());
+        }
+        next.wake_word = {
+            let trimmed = next.wake_word.trim();
+            if trimmed.is_empty() {
+                multinet_pinyin::DEFAULT_WAKE_WORD.to_owned()
+            } else if trimmed.chars().count() > 24 {
+                return Err("唤醒词展示文本不能超过 24 个字符。".to_owned());
+            } else {
+                trimmed.to_owned()
+            }
+        };
+        next.wake_pinyin = multinet_pinyin::normalize_and_validate_pinyin(&next.wake_pinyin)?;
+        next.vp_threshold = next.vp_threshold.clamp(0.55, 0.95);
+        next.min_speech_ms = next.min_speech_ms.clamp(400, 1500);
+        next.cooldown_ms = next.cooldown_ms.clamp(500, 5000);
+
+        let previous = doc.wake.clone();
+        doc.wake = next.clone();
+        save_document(&self.path, &doc)?;
+        Ok((next, previous, enrolled))
+    }
+
+    pub(super) async fn restore_wake_config(&self, previous: DeviceWakeConfig) {
+        let mut doc = self.doc.lock().await;
+        doc.wake = previous;
+        let _ = save_document(&self.path, &doc);
+    }
+
     pub(super) async fn upsert_speaker_metadata(
         &self,
         mut record: NativeSpeakerRecord,
@@ -207,6 +268,9 @@ impl NativeConsoleStore {
         if let Some(existing) = doc.speakers.get(&record.speaker_id) {
             if record.embedding.is_empty() {
                 record.embedding = existing.embedding.clone();
+            }
+            if record.templates.is_empty() {
+                record.templates = existing.templates.clone();
             }
         }
         doc.vp_version = doc.vp_version.saturating_add(1);
@@ -218,11 +282,39 @@ impl NativeConsoleStore {
         Ok((record, sync))
     }
 
+    #[cfg(test)]
     pub(super) async fn enroll_speaker(
         &self,
-        mut record: NativeSpeakerRecord,
+        record: NativeSpeakerRecord,
         embedding: Vec<f32>,
     ) -> Result<(NativeSpeakerRecord, VoiceprintSyncRequest), String> {
+        self.enroll_speaker_multi(record, vec![embedding]).await
+    }
+
+    pub(super) async fn enroll_speaker_multi(
+        &self,
+        mut record: NativeSpeakerRecord,
+        raw_embeddings: Vec<Vec<f32>>,
+    ) -> Result<(NativeSpeakerRecord, VoiceprintSyncRequest), String> {
+        let mut normalized: Vec<Vec<f32>> = Vec::new();
+        for mut emb in raw_embeddings.into_iter().take(3) {
+            if emb.len() != EMBEDDING_DIM || emb.iter().any(|v| !v.is_finite()) {
+                continue;
+            }
+            l2_normalize(&mut emb);
+            normalized.push(emb);
+        }
+        if normalized.is_empty() {
+            return Err("未提取到有效的 192 维声纹特征。".to_owned());
+        }
+        let mut centroid = vec![0.0_f32; EMBEDDING_DIM];
+        for emb in &normalized {
+            for (slot, &v) in centroid.iter_mut().zip(emb.iter()) {
+                *slot += v;
+            }
+        }
+        l2_normalize(&mut centroid);
+
         let mut doc = self.doc.lock().await;
         if record.prompt.is_empty()
             && let Some(existing) = doc.speakers.get(&record.speaker_id)
@@ -232,7 +324,8 @@ impl NativeConsoleStore {
         }
         doc.vp_version = doc.vp_version.saturating_add(1);
         record.version = doc.vp_version;
-        record.embedding = embedding;
+        record.embedding = centroid;
+        record.templates = normalized;
         doc.speakers
             .insert(record.speaker_id.clone(), record.clone());
         save_document(&self.path, &doc)?;
@@ -243,15 +336,26 @@ impl NativeConsoleStore {
     pub(super) async fn delete_speaker(
         &self,
         speaker_id: &str,
-    ) -> Result<(bool, Option<VoiceprintSyncRequest>), String> {
+    ) -> Result<(bool, Option<VoiceprintSyncRequest>, Option<WakeConfigSyncRequest>), String> {
         let mut doc = self.doc.lock().await;
         let removed = doc.speakers.remove(speaker_id).is_some();
         if !removed {
-            return Ok((false, None));
+            return Ok((false, None, None));
         }
         doc.vp_version = doc.vp_version.saturating_add(1);
+        let remaining_enrolled = enrolled_count_locked(&doc);
+        let fallback_wake = if remaining_enrolled == 0 && doc.wake.mode != WakeMode::WakeWord {
+            doc.wake.mode = WakeMode::WakeWord;
+            Some(WakeConfigSyncRequest {
+                sync_id: format!("wake-{}", random_hex_short()),
+                config: doc.wake.clone(),
+                enrolled_speaker_count: 0,
+            })
+        } else {
+            None
+        };
         save_document(&self.path, &doc)?;
-        Ok((true, Some(build_sync_request(&doc))))
+        Ok((true, Some(build_sync_request(&doc)), fallback_wake))
     }
 
     /// 设备完成 `hello` 上线后对齐端侧声纹版本：
@@ -285,18 +389,30 @@ impl NativeConsoleStore {
         let mut best_score = 0.0_f32;
         let mut best: Option<NativeSpeakerRecord> = None;
         for speaker in doc.speakers.values() {
-            if speaker.embedding.len() != query.len() {
-                continue;
+            let mut speaker_best = 0.0_f32;
+            if speaker.embedding.len() == query.len() {
+                speaker_best = speaker_best.max(cosine_similarity(query, &speaker.embedding));
             }
-            let score = cosine_similarity(query, &speaker.embedding);
-            if score > best_score {
-                best_score = score;
+            for tpl in &speaker.templates {
+                if tpl.len() == query.len() {
+                    speaker_best = speaker_best.max(cosine_similarity(query, tpl));
+                }
+            }
+            if speaker_best > best_score {
+                best_score = speaker_best;
                 best = Some(speaker.clone());
             }
         }
         let matched = best.is_some() && best_score >= 0.65;
         (matched, best, best_score)
     }
+}
+
+fn enrolled_count_locked(doc: &NativeConsoleDocument) -> u32 {
+    doc.speakers
+        .values()
+        .filter(|s| s.embedding.len() == EMBEDDING_DIM)
+        .count() as u32
 }
 
 pub(super) fn native_console_snapshot() -> DeviceConsoleSnapshot {
@@ -309,18 +425,39 @@ pub(super) fn native_console_snapshot() -> DeviceConsoleSnapshot {
 }
 
 fn build_sync_request(doc: &NativeConsoleDocument) -> VoiceprintSyncRequest {
-    let upserts = doc
-        .speakers
-        .values()
-        .filter(|speaker| speaker.embedding.len() == EMBEDDING_DIM)
-        .map(|speaker| VoiceprintSyncTemplate {
+    let mut upserts = Vec::new();
+    for speaker in doc.speakers.values() {
+        if speaker.embedding.len() != EMBEDDING_DIM {
+            continue;
+        }
+        upserts.push(VoiceprintSyncTemplate {
             speaker_id: speaker.speaker_id.clone(),
             display_name: speaker.display_name.clone(),
             role: speaker.role,
             embedding: speaker.embedding.clone(),
             version: speaker.version,
-        })
-        .collect::<Vec<_>>();
+        });
+        if speaker.templates.len() >= 2 {
+            // 同步最多 2 条额外子模板（`speaker_id#2`, `speaker_id#3`），兼顾跨句子召回与 NVS 体积。
+            let mut extra_indices = vec![0usize];
+            let last = speaker.templates.len() - 1;
+            if last != 0 {
+                extra_indices.push(last);
+            }
+            for (slot_idx, &tpl_idx) in extra_indices.iter().take(2).enumerate() {
+                let tpl = &speaker.templates[tpl_idx];
+                if tpl.len() == EMBEDDING_DIM {
+                    upserts.push(VoiceprintSyncTemplate {
+                        speaker_id: format!("{}#{}", speaker.speaker_id, slot_idx + 2),
+                        display_name: speaker.display_name.clone(),
+                        role: speaker.role,
+                        embedding: tpl.clone(),
+                        version: speaker.version,
+                    });
+                }
+            }
+        }
+    }
     VoiceprintSyncRequest {
         group_id: "home-default".to_owned(),
         vp_version: doc.vp_version,
@@ -476,6 +613,14 @@ pub(crate) async fn handle_native_console_request(
         };
     }
 
+    if subpath == "wake" {
+        return match method {
+            Method::GET => handle_get_wake(shared, &hardware).await,
+            Method::PUT | Method::POST => handle_update_wake(shared, device_id, body).await,
+            _ => StatusCode::METHOD_NOT_ALLOWED.into_response(),
+        };
+    }
+
     if subpath == "speakers" && method == Method::GET {
         let speakers = shared
             .native_console
@@ -495,16 +640,31 @@ pub(crate) async fn handle_native_console_request(
         return match method {
             Method::PUT | Method::POST => handle_upsert_speaker(shared, speaker_id, body).await,
             Method::DELETE => match shared.native_console.delete_speaker(&speaker_id).await {
-                Ok((deleted, maybe_sync)) => {
+                Ok((deleted, maybe_sync, maybe_wake_fallback)) => {
                     if let Some(sync) = maybe_sync {
                         shared.broadcast_voiceprint_sync(sync).await;
                     }
-                    (StatusCode::OK, Json(json!({ "deleted": deleted }))).into_response()
+                    let auto_fallback_wake_word = maybe_wake_fallback.is_some();
+                    if let Some(wake_sync) = maybe_wake_fallback {
+                        shared.broadcast_wake_config_sync(wake_sync).await;
+                    }
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "deleted": deleted,
+                            "auto_fallback_wake_word": auto_fallback_wake_word,
+                        })),
+                    )
+                        .into_response()
                 }
                 Err(msg) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &msg),
             },
             _ => StatusCode::METHOD_NOT_ALLOWED.into_response(),
         };
+    }
+
+    if subpath == "voice/capture_embedding" && method == Method::POST {
+        return handle_voice_capture_embedding(shared, device_id, body).await;
     }
 
     if subpath == "voice/enroll" && method == Method::POST {
@@ -789,6 +949,7 @@ async fn handle_upsert_speaker(
         tts_voice: payload.tts_voice.trim().to_owned(),
         prompt: payload.prompt.trim().to_owned(),
         embedding: Vec::new(),
+        templates: Vec::new(),
         version: 0,
     };
     match shared.native_console.upsert_speaker_metadata(record).await {
@@ -797,6 +958,199 @@ async fn handle_upsert_speaker(
             (StatusCode::OK, Json(json!({ "speaker": speaker_to_json(saved) }))).into_response()
         }
         Err(msg) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &msg),
+    }
+}
+
+async fn handle_get_wake(
+    shared: &Arc<GatewayShared>,
+    hardware: &DeviceHardwareDeclaration,
+) -> Response {
+    let (wake, enrolled_speaker_count) = shared.native_console.wake_config().await;
+    (
+        StatusCode::OK,
+        Json(json!({
+            "wake": wake,
+            "enrolled_speaker_count": enrolled_speaker_count,
+            "multinet_ready": hardware.multinet_ready,
+            "device_wake_config": hardware.wake_config,
+        })),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+struct UpdateWakePayload {
+    #[serde(default)]
+    mode: Option<WakeMode>,
+    #[serde(default)]
+    wake_word: Option<String>,
+    #[serde(default)]
+    wake_pinyin: Option<String>,
+    #[serde(default)]
+    vp_threshold: Option<f32>,
+    #[serde(default)]
+    min_speech_ms: Option<u32>,
+    #[serde(default)]
+    cooldown_ms: Option<u32>,
+    #[serde(default)]
+    vp_wake_chime: Option<bool>,
+}
+
+async fn handle_update_wake(
+    shared: &Arc<GatewayShared>,
+    device_id: &DeviceId,
+    body: Bytes,
+) -> Response {
+    let payload: UpdateWakePayload = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => return json_error(StatusCode::BAD_REQUEST, "唤醒配置 JSON 格式无效。"),
+    };
+    let (mut next, _) = shared.native_console.wake_config().await;
+    if let Some(mode) = payload.mode {
+        next.mode = mode;
+    }
+    if let Some(word) = payload.wake_word {
+        next.wake_word = word;
+    }
+    if let Some(pinyin) = payload.wake_pinyin {
+        next.wake_pinyin = pinyin;
+    }
+    if let Some(th) = payload.vp_threshold {
+        next.vp_threshold = th;
+    }
+    if let Some(ms) = payload.min_speech_ms {
+        next.min_speech_ms = ms;
+    }
+    if let Some(ms) = payload.cooldown_ms {
+        next.cooldown_ms = ms;
+    }
+    if let Some(chime) = payload.vp_wake_chime {
+        next.vp_wake_chime = chime;
+    }
+
+    let (saved, previous, enrolled) = match shared.native_console.update_wake_config(next).await {
+        Ok(v) => v,
+        Err(msg) => return json_error(StatusCode::BAD_REQUEST, &msg),
+    };
+
+    let sync_req = WakeConfigSyncRequest {
+        sync_id: format!("wake-{}", random_hex_short()),
+        config: saved.clone(),
+        enrolled_speaker_count: enrolled,
+    };
+    match shared
+        .sync_wake_config(device_id, sync_req, Duration::from_secs(4))
+        .await
+    {
+        Ok(ack) if ack.ok => (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "synced": true,
+                "wake": saved,
+                "enrolled_speaker_count": enrolled,
+                "device_wake_config": ack.active_config,
+            })),
+        )
+            .into_response(),
+        Ok(ack) => {
+            shared.native_console.restore_wake_config(previous).await;
+            let err = ack
+                .error
+                .unwrap_or_else(|| "终端 MultiNet7 拒绝应用该唤醒词拼音。".to_owned());
+            json_error(StatusCode::BAD_REQUEST, &err)
+        }
+        Err(msg) => (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "synced": false,
+                "sync_warning": msg,
+                "wake": saved,
+                "enrolled_speaker_count": enrolled,
+            })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct CaptureEmbeddingPayload {
+    #[serde(default = "default_capture_duration_ms")]
+    duration_ms: u32,
+    #[serde(default)]
+    step: u32,
+    #[serde(default)]
+    total: u32,
+}
+
+fn default_capture_duration_ms() -> u32 {
+    3000
+}
+
+async fn handle_voice_capture_embedding(
+    shared: &Arc<GatewayShared>,
+    device_id: &DeviceId,
+    body: Bytes,
+) -> Response {
+    let payload: CaptureEmbeddingPayload = if body.is_empty() {
+        CaptureEmbeddingPayload {
+            duration_ms: default_capture_duration_ms(),
+            step: 1,
+            total: 3,
+        }
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(v) => v,
+            Err(_) => return json_error(StatusCode::BAD_REQUEST, "声纹采集请求格式无效。"),
+        }
+    };
+    let duration_ms = payload.duration_ms.clamp(1200, 4500);
+    let params_json = json!({
+        "duration_ms": duration_ms,
+        "step": payload.step.clamp(1, 5),
+        "total": payload.total.clamp(1, 5),
+    })
+    .to_string();
+    let req = DeviceCommandRequest {
+        command_id: format!("vpcap-{}", random_hex_short()),
+        capability: "device.voiceprint_capture".to_owned(),
+        action: "capture".to_owned(),
+        params_json,
+        timeout_ms: duration_ms.saturating_add(4500),
+    };
+    match shared
+        .execute_device_command(
+            device_id,
+            req,
+            Duration::from_millis(u64::from(duration_ms.saturating_add(5000))),
+        )
+        .await
+    {
+        Ok(res) if res.ok => {
+            let parsed: Value = serde_json::from_str(&res.result_json)
+                .unwrap_or_else(|_| json!({ "raw": res.result_json }));
+            let emb_len = parsed
+                .get("embedding")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            if emb_len != EMBEDDING_DIM {
+                return json_error(
+                    StatusCode::BAD_GATEWAY,
+                    "终端返回的声纹特征维度异常，请重新录制。",
+                );
+            }
+            (StatusCode::OK, Json(parsed)).into_response()
+        }
+        Ok(res) => {
+            let msg = if res.error_message.is_empty() {
+                "终端声纹录制失败，请靠近 Mosaico 重新说一句完整的话。".to_owned()
+            } else {
+                res.error_message
+            };
+            json_error(StatusCode::BAD_REQUEST, &msg)
+        }
+        Err(msg) => json_error(StatusCode::BAD_GATEWAY, &msg),
     }
 }
 
@@ -817,7 +1171,14 @@ struct VoiceEnrollPayload {
     tts_voice: String,
     #[serde(default)]
     prompt: String,
+    #[serde(default)]
     audio_base64: String,
+    #[serde(default)]
+    audio_samples_base64: Vec<String>,
+    #[serde(default)]
+    embedding: Vec<f32>,
+    #[serde(default)]
+    embeddings: Vec<Vec<f32>>,
 }
 
 async fn handle_voice_enroll(shared: &Arc<GatewayShared>, body: Bytes) -> Response {
@@ -829,16 +1190,53 @@ async fn handle_voice_enroll(shared: &Arc<GatewayShared>, body: Bytes) -> Respon
     if speaker_id.is_empty() {
         return json_error(StatusCode::BAD_REQUEST, "speaker_id 不能为空。");
     }
-    let (_, samples) = match decode_audio_base64_to_pcm16(&payload.audio_base64) {
-        Ok(v) => v,
-        Err(msg) => return json_error(StatusCode::BAD_REQUEST, &msg),
-    };
-    let Some(embedding) = extract_fbank_embedding_192(&samples) else {
+
+    let mut extracted_embeddings: Vec<Vec<f32>> = Vec::new();
+    if !payload.embeddings.is_empty() {
+        for emb in payload.embeddings.into_iter().take(3) {
+            if emb.len() == EMBEDDING_DIM && emb.iter().all(|v| v.is_finite()) {
+                extracted_embeddings.push(emb);
+            }
+        }
+    } else if payload.embedding.len() == EMBEDDING_DIM
+        && payload.embedding.iter().all(|v| v.is_finite())
+    {
+        extracted_embeddings.push(payload.embedding);
+    } else if !payload.audio_samples_base64.is_empty() {
+        for sample_b64 in payload.audio_samples_base64.iter().take(3) {
+            let (_, samples) = match decode_audio_base64_to_pcm16(sample_b64) {
+                Ok(v) => v,
+                Err(msg) => return json_error(StatusCode::BAD_REQUEST, &msg),
+            };
+            let Some(emb) = extract_fbank_embedding_192(&samples) else {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "存在过短的音频样本，请确保每条录音包含至少 0.5 秒以上有效语音。",
+                );
+            };
+            extracted_embeddings.push(emb);
+        }
+    } else if !payload.audio_base64.trim().is_empty() {
+        let (_, samples) = match decode_audio_base64_to_pcm16(&payload.audio_base64) {
+            Ok(v) => v,
+            Err(msg) => return json_error(StatusCode::BAD_REQUEST, &msg),
+        };
+        let Some(emb) = extract_fbank_embedding_192(&samples) else {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "音频样本过短，请录制至少 0.5 秒以上有效语音。",
+            );
+        };
+        extracted_embeddings.push(emb);
+    }
+
+    if extracted_embeddings.is_empty() {
         return json_error(
             StatusCode::BAD_REQUEST,
-            "音频样本过短，请录制至少 0.5 秒以上有效语音。",
+            "请提供有效音频样本或 Mosaico 采集的 192 维声纹特征。",
         );
-    };
+    }
+
     let display_name = if payload.display_name.trim().is_empty() {
         speaker_id.clone()
     } else {
@@ -854,9 +1252,15 @@ async fn handle_voice_enroll(shared: &Arc<GatewayShared>, body: Bytes) -> Respon
         tts_voice: payload.tts_voice.trim().to_owned(),
         prompt: payload.prompt.trim().to_owned(),
         embedding: Vec::new(),
+        templates: Vec::new(),
         version: 0,
     };
-    match shared.native_console.enroll_speaker(record, embedding).await {
+    let template_count = extracted_embeddings.len();
+    match shared
+        .native_console
+        .enroll_speaker_multi(record, extracted_embeddings)
+        .await
+    {
         Ok((saved, sync)) => {
             let synced_devices = shared.broadcast_voiceprint_sync(sync).await;
             (
@@ -868,6 +1272,7 @@ async fn handle_voice_enroll(shared: &Arc<GatewayShared>, body: Bytes) -> Respon
                     "role": saved.role,
                     "version": saved.version,
                     "embedding_dim": EMBEDDING_DIM,
+                    "template_count": template_count,
                     "synced_devices": synced_devices,
                 })),
             )
@@ -879,7 +1284,10 @@ async fn handle_voice_enroll(shared: &Arc<GatewayShared>, body: Bytes) -> Respon
 
 #[derive(Deserialize)]
 struct VoiceIdentifyPayload {
+    #[serde(default)]
     audio_base64: String,
+    #[serde(default)]
+    embedding: Vec<f32>,
 }
 
 async fn handle_voice_identify(shared: &Arc<GatewayShared>, body: Bytes) -> Response {
@@ -887,12 +1295,21 @@ async fn handle_voice_identify(shared: &Arc<GatewayShared>, body: Bytes) -> Resp
         Ok(v) => v,
         Err(_) => return json_error(StatusCode::BAD_REQUEST, "声纹识别请求格式无效。"),
     };
-    let (_, samples) = match decode_audio_base64_to_pcm16(&payload.audio_base64) {
-        Ok(v) => v,
-        Err(msg) => return json_error(StatusCode::BAD_REQUEST, &msg),
-    };
-    let Some(query) = extract_fbank_embedding_192(&samples) else {
-        return json_error(StatusCode::BAD_REQUEST, "音频样本过短，无法提取声纹特征。");
+    let query = if payload.embedding.len() == EMBEDDING_DIM
+        && payload.embedding.iter().all(|v| v.is_finite())
+    {
+        let mut q = payload.embedding;
+        l2_normalize(&mut q);
+        q
+    } else {
+        let (_, samples) = match decode_audio_base64_to_pcm16(&payload.audio_base64) {
+            Ok(v) => v,
+            Err(msg) => return json_error(StatusCode::BAD_REQUEST, &msg),
+        };
+        let Some(q) = extract_fbank_embedding_192(&samples) else {
+            return json_error(StatusCode::BAD_REQUEST, "音频样本过短，无法提取声纹特征。");
+        };
+        q
     };
     let (matched, best, confidence) = shared.native_console.identify_embedding(&query).await;
     let tier = if confidence >= 0.85 {
@@ -959,6 +1376,8 @@ async fn handle_voice_transcribe(speech: &SpeechServiceHandle, body: Bytes) -> R
 }
 
 fn speaker_to_json(speaker: NativeSpeakerRecord) -> Value {
+    let has_vp = speaker.embedding.len() == EMBEDDING_DIM;
+    let template_count = speaker.templates.len().max(usize::from(has_vp));
     json!({
         "speaker_id": speaker.speaker_id,
         "display_name": speaker.display_name,
@@ -969,7 +1388,8 @@ fn speaker_to_json(speaker: NativeSpeakerRecord) -> Value {
         "tts_voice": speaker.tts_voice,
         "prompt": speaker.prompt,
         "version": speaker.version,
-        "has_voiceprint": speaker.embedding.len() == EMBEDDING_DIM,
+        "has_voiceprint": has_vp,
+        "template_count": template_count,
     })
 }
 
@@ -1053,10 +1473,17 @@ pub(super) async fn handle_mcp_http_request(
                 .cloned()
                 .unwrap_or_else(|| json!({}));
 
-            // AGENTS.md §4.4：Agent 调用任何硬件工具前强制校验 ACL。
+            // AGENTS.md §4.4：Agent 调用任何硬件工具前强制校验 ACL（使用当前活跃说话人声纹角色）。
+            let speaker_role = shared.active_speaker_role(&device_id).await;
             if let Err(reason) = shared
                 .native_console
-                .check_access("ez-assistant", 1, &hardware, device_id.as_str(), tool_name)
+                .check_access(
+                    "ez-assistant",
+                    speaker_role,
+                    &hardware,
+                    device_id.as_str(),
+                    tool_name,
+                )
                 .await
             {
                 return rpc_result(
@@ -1639,6 +2066,8 @@ mod tests {
             zone: "desk".to_owned(),
             group_id: "home-default".to_owned(),
             vp_version: 0,
+            multinet_ready: true,
+            wake_config: None,
             capabilities: vec!["device.display_show".to_owned(), "device.actuator_set".to_owned()],
         };
 
@@ -1701,6 +2130,7 @@ mod tests {
                     tts_voice: "stella".to_owned(),
                     prompt: "请称呼我主人".to_owned(),
                     embedding: Vec::new(),
+                    templates: Vec::new(),
                     version: 0,
                 },
                 emb.clone(),
@@ -1739,6 +2169,7 @@ mod tests {
                     tts_voice: String::new(),
                     prompt: String::new(),
                     embedding: Vec::new(),
+                    templates: Vec::new(),
                     version: 0,
                 },
                 emb,
@@ -1756,5 +2187,92 @@ mod tests {
             .expect("catchup sync");
         assert_eq!(catchup.vp_version, 5);
         assert_eq!(catchup.upserts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn wake_config_enforces_voiceprint_guardrail_multi_template_and_auto_fallback() {
+        let dir = tempdir().expect("tempdir");
+        let store = NativeConsoleStore::load_or_default(dir.path());
+
+        let (initial, count) = store.wake_config().await;
+        assert_eq!(count, 0);
+        assert_eq!(initial.mode, WakeMode::WakeWord);
+        assert_eq!(initial.wake_word, "你好小元");
+        assert_eq!(initial.wake_pinyin, "ni hao xiao yuan");
+
+        // Cannot enable voiceprint_direct without enrolled speakers
+        let err = store
+            .update_wake_config(DeviceWakeConfig {
+                mode: WakeMode::VoiceprintDirect,
+                ..DeviceWakeConfig::default()
+            })
+            .await
+            .expect_err("must require enrolled speaker");
+        assert!(err.contains("声纹"));
+
+        // Invalid MultiNet7 syllable is rejected
+        assert!(
+            store
+                .update_wake_config(DeviceWakeConfig {
+                    wake_word: "测试".to_owned(),
+                    wake_pinyin: "ce xyz".to_owned(),
+                    ..DeviceWakeConfig::default()
+                })
+                .await
+                .is_err()
+        );
+
+        // Multi-template enroll (3 samples) -> emits centroid + #2 + #3
+        let e1 = extract_fbank_embedding_192(&synth_sine_pcm(180.0, 1200)).expect("e1");
+        let e2 = extract_fbank_embedding_192(&synth_sine_pcm(205.0, 1200)).expect("e2");
+        let e3 = extract_fbank_embedding_192(&synth_sine_pcm(230.0, 1200)).expect("e3");
+        let (_, vp_sync) = store
+            .enroll_speaker_multi(
+                NativeSpeakerRecord {
+                    speaker_id: "spk_owner".to_owned(),
+                    display_name: "Owner".to_owned(),
+                    uid: "u_1".to_owned(),
+                    agent_id: "ez-assistant".to_owned(),
+                    group_id: "home-default".to_owned(),
+                    role: 1,
+                    tts_voice: String::new(),
+                    prompt: String::new(),
+                    embedding: Vec::new(),
+                    templates: Vec::new(),
+                    version: 0,
+                },
+                vec![e1.clone(), e2, e3],
+            )
+            .await
+            .expect("multi enroll");
+        assert_eq!(vp_sync.upserts.len(), 3);
+        assert_eq!(vp_sync.upserts[0].speaker_id, "spk_owner");
+        assert_eq!(vp_sync.upserts[1].speaker_id, "spk_owner#2");
+        assert_eq!(vp_sync.upserts[2].speaker_id, "spk_owner#3");
+
+        // Now switching to voiceprint_direct + custom wake word succeeds
+        let (saved, _, enrolled) = store
+            .update_wake_config(DeviceWakeConfig {
+                mode: WakeMode::VoiceprintDirect,
+                wake_word: "小元同学".to_owned(),
+                wake_pinyin: "Xiao Yuan Tong Xue".to_owned(),
+                vp_threshold: 0.80,
+                ..DeviceWakeConfig::default()
+            })
+            .await
+            .expect("enable voiceprint_direct");
+        assert_eq!(enrolled, 1);
+        assert_eq!(saved.mode, WakeMode::VoiceprintDirect);
+        assert_eq!(saved.wake_pinyin, "xiao yuan tong xue");
+
+        // Deleting the last speaker automatically falls back to wake_word mode
+        let (deleted, _, fallback) = store.delete_speaker("spk_owner").await.expect("delete");
+        assert!(deleted);
+        let fallback_sync = fallback.expect("must auto fallback to wake_word");
+        assert_eq!(fallback_sync.config.mode, WakeMode::WakeWord);
+        assert_eq!(fallback_sync.enrolled_speaker_count, 0);
+        let (after_cfg, after_cnt) = store.wake_config().await;
+        assert_eq!(after_cnt, 0);
+        assert_eq!(after_cfg.mode, WakeMode::WakeWord);
     }
 }

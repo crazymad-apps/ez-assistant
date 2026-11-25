@@ -52,7 +52,7 @@ use super::{
         RelayDownlinkPcmFrame, RelayUplinkPcmFrame, SetOutputPreference, SpeechAsrCancel,
         SpeechAsrResult, SpeechAsrStart, SpeechAsrStop, SpeechStatusChanged, SpeechTtsEnd,
         SpeechTtsRequest, SpeechTtsStart, TextInput, Transcript, UplinkPcmFrame, VoiceprintSyncAck,
-        WireError, WirePairingMode, preference_is_supported,
+        WakeConfigAck, WireError, WirePairingMode, preference_is_supported,
     },
 };
 use crate::media_diagnostics::{correlation_id, timestamp_ms};
@@ -646,13 +646,16 @@ async fn authenticate_device(
             speech_relay,
         )
         .await;
-    if hardware_enabled
-        && let Some(initial_sync) = shared
+    if hardware_enabled {
+        if let Some(initial_sync) = shared
             .native_console
             .prepare_initial_sync(initial_device_vp)
             .await
-    {
-        let _ = send_payload(&mut socket, "voiceprint_sync", &initial_sync).await;
+        {
+            let _ = send_payload(&mut socket, "voiceprint_sync", &initial_sync).await;
+        }
+        let initial_wake = shared.native_console.build_wake_sync().await;
+        let _ = send_payload(&mut socket, "wake_config_sync", &initial_wake).await;
     }
     shared.mcp_tasks.spawn({
         let shared = shared.clone();
@@ -754,6 +757,7 @@ async fn authenticated_loop(
     let mut relay = RelayState::new();
     let mut pending_commands: HashMap<String, oneshot::Sender<DeviceCommandResult>> =
         HashMap::new();
+    let mut pending_wake_syncs: HashMap<String, oneshot::Sender<WakeConfigAck>> = HashMap::new();
     loop {
         tokio::select! {
             _ = voice_turn_clock.tick() => {
@@ -859,6 +863,30 @@ async fn authenticated_loop(
                     ConnectionCommand::SyncVoiceprints(sync) => {
                         if hardware_enabled {
                             send_payload(socket, "voiceprint_sync", &sync).await?;
+                        }
+                    }
+                    ConnectionCommand::SyncWakeConfig { request, response } => {
+                        if hardware_enabled {
+                            if let Some(tx) = response {
+                                if pending_wake_syncs.len() >= 16 {
+                                    let _ = tx.send(WakeConfigAck {
+                                        sync_id: request.sync_id,
+                                        ok: false,
+                                        active_config: None,
+                                        error: Some("终端并发唤醒配置更新队列已满".to_owned()),
+                                    });
+                                    continue;
+                                }
+                                pending_wake_syncs.insert(request.sync_id.clone(), tx);
+                            }
+                            send_payload(socket, "wake_config_sync", &request).await?;
+                        } else if let Some(tx) = response {
+                            let _ = tx.send(WakeConfigAck {
+                                sync_id: request.sync_id,
+                                ok: false,
+                                active_config: None,
+                                error: Some("终端不支持直连唤醒配置".to_owned()),
+                            });
                         }
                     }
                 }
@@ -999,7 +1027,20 @@ async fn authenticated_loop(
                                     aggregation.pause_commit();
                                 }
                                 let client_input_id = request.client_input_id.clone();
-                                eprintln!("event=voice_capture_started ts_ms={} device={} input={} stream_id={}", timestamp_ms(), correlation_id(device_id.as_str()), correlation_id(&client_input_id), request.stream_id);
+                                if let Some(role) = request.speaker_role {
+                                    shared
+                                        .set_active_speaker_role(device_id, connection_id, role)
+                                        .await;
+                                }
+                                eprintln!(
+                                    "event=voice_capture_started ts_ms={} device={} input={} stream_id={} wake_source={} speaker={}",
+                                    timestamp_ms(),
+                                    correlation_id(device_id.as_str()),
+                                    correlation_id(&client_input_id),
+                                    request.stream_id,
+                                    request.wake_source.as_deref().unwrap_or("unspecified"),
+                                    request.speaker_id.as_deref().unwrap_or("anonymous"),
+                                );
                                 receiving = Some(UplinkUtterance::new(request));
                                 send_payload(socket, "state_changed", &InteractionStateChanged {
                                     run_id: None,
@@ -1199,6 +1240,19 @@ async fn authenticated_loop(
                                             ack.vp_version,
                                         )
                                         .await;
+                                }
+                            }
+                            "wake_config_ack" if hardware_enabled => {
+                                let ack = envelope.payload::<WakeConfigAck>()?;
+                                if ack.ok
+                                    && let Some(cfg) = ack.active_config.clone()
+                                {
+                                    shared
+                                        .update_hardware_wake_config(device_id, connection_id, cfg)
+                                        .await;
+                                }
+                                if let Some(tx) = pending_wake_syncs.remove(&ack.sync_id) {
+                                    let _ = tx.send(ack);
                                 }
                             }
                             _ => {
@@ -2819,6 +2873,7 @@ mod tests {
             speaker_id: None,
             speaker_role: None,
             speaker_score: None,
+            wake_source: None,
         });
         let payload = [0_u8; super::super::protocol::PCM_PAYLOAD_BYTES];
         utterance
@@ -4632,6 +4687,8 @@ mod tests {
                         zone: "desk".to_owned(),
                         group_id: "home-default".to_owned(),
                         vp_version: 0,
+                        multinet_ready: true,
+                        wake_config: None,
                         capabilities: vec![
                             "device.display_show".to_owned(),
                             "device.audio_set_volume".to_owned(),
@@ -4678,10 +4735,11 @@ mod tests {
             .await
             .expect("native loopback MCP should connect and list 4 tools");
 
-            // Spawn simulated Mosaico loop answering WSS device_command & voiceprint_sync
+            // Spawn simulated Mosaico loop answering WSS device_command, wake_config_sync & voiceprint_sync
             let ws_task = tokio::spawn(async move {
                 let mut saw_cmd = false;
                 let mut saw_vp = false;
+                let mut saw_wake_sync = false;
                 while let Some(env) = recv_envelope(&mut ws).await {
                     match env.message_type.as_str() {
                         "device_command" => {
@@ -4708,6 +4766,28 @@ mod tests {
                             )
                             .await;
                         }
+                        "wake_config_sync" => {
+                            let sync: crate::device::protocol::WakeConfigSyncRequest =
+                                decode_payload(env);
+                            if sync.config.mode == crate::device::protocol::WakeMode::VoiceprintDirect {
+                                saw_wake_sync = true;
+                            }
+                            send_json(
+                                &mut ws,
+                                &format!("wake-ack-{}", sync.sync_id),
+                                "wake_config_ack",
+                                &WakeConfigAck {
+                                    sync_id: sync.sync_id,
+                                    ok: true,
+                                    active_config: Some(sync.config),
+                                    error: None,
+                                },
+                            )
+                            .await;
+                            if saw_vp && saw_wake_sync {
+                                break;
+                            }
+                        }
                         "voiceprint_sync" => {
                             let sync: crate::device::protocol::VoiceprintSyncRequest =
                                 decode_payload(env);
@@ -4724,13 +4804,12 @@ mod tests {
                                 },
                             )
                             .await;
-                            break;
                         }
                         _ => {}
                     }
                 }
                 let _ = ws.close(None).await;
-                (saw_cmd, saw_vp)
+                (saw_cmd, saw_vp, saw_wake_sync)
             });
 
             // 1. GET /api/v1/devices triggers live status_read over WSS
@@ -4884,9 +4963,36 @@ mod tests {
                 .await;
             assert_eq!(enroll_res.status(), axum::http::StatusCode::OK);
 
-            let (saw_cmd, saw_vp) = ws_task.await.expect("ws task");
+            // 4. PUT /api/v1/wake switches to voiceprint_direct + custom wake word over WSS
+            let wake_body = serde_json::to_vec(&json!({
+                "mode": "voiceprint_direct",
+                "wake_word": "小元同学",
+                "wake_pinyin": "xiao yuan tong xue",
+                "vp_threshold": 0.78
+            }))
+            .expect("wake body");
+            let wake_res = harness
+                .handle
+                .handle_native_console(
+                    &device_id,
+                    "api/v1/wake",
+                    axum::http::Method::PUT,
+                    axum::body::Bytes::from(wake_body),
+                    &harness.speech,
+                )
+                .await;
+            assert_eq!(wake_res.status(), axum::http::StatusCode::OK);
+            let wake_bytes = axum::body::to_bytes(wake_res.into_body(), 1024 * 1024)
+                .await
+                .expect("wake bytes");
+            let wake_json: Value = serde_json::from_slice(&wake_bytes).expect("wake json");
+            assert_eq!(wake_json["synced"], true);
+            assert_eq!(wake_json["wake"]["mode"], "voiceprint_direct");
+
+            let (saw_cmd, saw_vp, saw_wake_sync) = ws_task.await.expect("ws task");
             assert!(saw_cmd);
             assert!(saw_vp);
+            assert!(saw_wake_sync);
             mcp_server.abort();
             let _ = mcp_server.await;
             harness.shutdown().await;
