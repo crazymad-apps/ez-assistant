@@ -54,6 +54,7 @@ function createConsoleMockClient() {
           client_version: "esp-pika-gateway/0.4.0",
           console: {
             api_prefix: "/api/v1",
+            mode: "proxy",
             ui_path: "/ui/",
             direct_url: "http://192.168.1.33:8000/ui/",
           },
@@ -368,6 +369,43 @@ describe("DeviceSpeechSection and DeviceConsole UI", () => {
       </RootStoreProvider>,
     );
     expect(screen.queryByRole("tab", { name: "声纹与语音" })).toBeNull();
+    store.dispose();
+  });
+
+  it("renders native direct-connect console tabs without MAC whitelist or external console URL", async () => {
+    const mock = createConsoleMockClient();
+    const store = createStoreWithClient(mock.client);
+    const nativeDevice = {
+      ...mock.snapshot.devices[0],
+      device_id: "mosaico-1",
+      display_name: "Mosaico-5BF0",
+      connection: {
+        ...mock.snapshot.devices[0].connection!,
+        client_version: "0.4.0-direct",
+        console: {
+          api_prefix: "/api/v1",
+          mode: "native" as const,
+        },
+        speech_relay: false,
+      },
+    };
+    render(
+      <RootStoreProvider store={store}>
+        <AppMessageProvider>
+          <DeviceDetailPage device={nativeDevice} on_back={() => undefined} />
+        </AppMessageProvider>
+      </RootStoreProvider>,
+    );
+
+    expect(screen.getByRole("tab", { name: "概览" })).toBeVisible();
+    expect(screen.getByRole("tab", { name: "设备控制与状态" })).toBeVisible();
+    expect(screen.getByRole("tab", { name: "ACL 权限矩阵" })).toBeVisible();
+    expect(screen.getByRole("tab", { name: "声纹与语音" })).toBeVisible();
+    expect(screen.queryByRole("tab", { name: "MAC 白名单" })).toBeNull();
+    expect(screen.queryByText("原始控制台")).toBeNull();
+
+    fireEvent.click(screen.getByRole("tab", { name: "设备控制与状态" }));
+    await screen.findByText(/直连硬件状态与实时遥测/);
     store.dispose();
   });
 });

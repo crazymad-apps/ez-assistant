@@ -186,6 +186,7 @@ export const VoiceprintTab = observer(function VoiceprintTab(props: VoiceprintTa
             group_id: groupId.trim(),
             role: Number(role),
             tts_voice: ttsVoice.trim(),
+            prompt: prompt.trim(),
             audio_base64: sample.base64,
           },
         },

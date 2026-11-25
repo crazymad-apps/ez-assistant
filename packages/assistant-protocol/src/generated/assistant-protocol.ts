@@ -728,11 +728,16 @@ export type DeviceCapabilitiesSnapshot = { input_text: boolean, input_pcm16_16k_
 export type DeviceConnectionSnapshot = { connected_at_ms: number, capabilities: DeviceCapabilitiesSnapshot, output_preference: OutputPreferenceSnapshot, peer_address?: string, client_version?: string, mcp_server_keys?: Array<McpServerKey>, console?: DeviceConsoleSnapshot, speech_relay?: boolean, };
 
 /**
+ * 终端控制面板后端模式：`proxy` 反向代理外部网关，`native` 由 Host 经 WSS 直连终端本地提供。
+ */
+export type DeviceConsoleModeSnapshot = "proxy" | "native";
+
+/**
  * 在线设备在连接握手时声明的 Web/HTTP 控制台安全元数据。
  *
  * 主机名严格由 Host 根据当前连接的真实对端 IP 绑定，`direct_url` 仅在声明 `ui_path` 时生成。
  */
-export type DeviceConsoleSnapshot = { api_prefix: string, ui_path?: string, direct_url?: string, };
+export type DeviceConsoleSnapshot = { api_prefix: string, mode: DeviceConsoleModeSnapshot, ui_path?: string, direct_url?: string, };
 
 /**
  * Desktop 发往 Host 的 Device Gateway 管理命令集合。

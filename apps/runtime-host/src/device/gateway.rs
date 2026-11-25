@@ -26,7 +26,7 @@ use assistant_runtime::{
     AssistantRuntime, ChannelOutput, ChannelOutputDispatchError, ChannelSpeechSegment,
     DeviceDeliveryPreference, DeviceLifecycle, OutputPreference, ResolvedChannelDelivery,
 };
-use axum::{Router, routing::get};
+use axum::{Router, routing::{get, post}};
 use axum_server::{Handle as ServerHandle, tls_rustls::RustlsConfig};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use thiserror::Error;
@@ -41,7 +41,12 @@ use super::identity::{IdentityError, InstallationIdentity};
 use super::{
     console::DeviceConsoleTarget,
     dispatcher::DeviceChannelOutputDispatcher,
-    protocol::{InteractionStateChanged, SpeechAsrResult, TextOutput, preference_is_supported},
+    native_console::NativeConsoleStore,
+    protocol::{
+        DeviceCommandRequest, DeviceCommandResult, DeviceHardwareDeclaration,
+        InteractionStateChanged, SpeechAsrResult, TextOutput, VoiceprintSyncRequest,
+        preference_is_supported,
+    },
 };
 use crate::speech::{SpeechServiceError, SpeechServiceHandle};
 
@@ -81,6 +86,7 @@ pub(crate) struct DeviceGatewayService {
 pub(super) struct GatewayShared {
     pub(super) runtime: Arc<AssistantRuntime>,
     pub(super) speech: SpeechServiceHandle,
+    pub(super) native_console: Arc<NativeConsoleStore>,
     state: Mutex<GatewayState>,
     voice_turns: Mutex<
         HashMap<
@@ -100,6 +106,8 @@ struct GatewayState {
     enabled: bool,
     available: bool,
     active_port: Option<u16>,
+    active_mcp_port: Option<u16>,
+    active_mcp_token: Option<String>,
     identity: Option<Arc<InstallationIdentity>>,
     pairing_window_expires_at_ms: Option<i64>,
     pending_pairings: HashMap<String, PendingPairing>,
@@ -180,6 +188,7 @@ struct ActiveConnection {
     client_version: Option<String>,
     mcp_server_keys: Vec<McpServerKey>,
     console: Option<DeviceConsoleTarget>,
+    hardware: Option<DeviceHardwareDeclaration>,
     speech_relay: bool,
     command: mpsc::Sender<ConnectionCommand>,
 }
@@ -203,6 +212,11 @@ pub(super) enum ConnectionCommand {
         stream_id: u32,
         result: Result<Arc<[u8]>, SpeechServiceError>,
     },
+    ExecuteDeviceCommand {
+        request: DeviceCommandRequest,
+        response: oneshot::Sender<DeviceCommandResult>,
+    },
+    SyncVoiceprints(VoiceprintSyncRequest),
 }
 
 /// 为一个播报片段预留设备播放队列容量的请求。
@@ -245,6 +259,8 @@ enum LifecycleCommand {
 struct ActiveGateway {
     server_handle: ServerHandle<SocketAddr>,
     server_task: JoinHandle<Result<(), std::io::Error>>,
+    mcp_server_handle: ServerHandle<SocketAddr>,
+    mcp_server_task: JoinHandle<Result<(), std::io::Error>>,
     mdns: ServiceDaemon,
     service_fullname: String,
     port: u16,
@@ -259,9 +275,11 @@ impl DeviceGatewayService {
     ) -> (Self, DeviceGatewayHandle) {
         let (lifecycle_tx, lifecycle_rx) = mpsc::channel(LIFECYCLE_QUEUE_CAPACITY);
         let (event_tx, _) = broadcast::channel(GATEWAY_EVENT_CAPACITY);
+        let native_console = Arc::new(NativeConsoleStore::load_or_default(&runtime_home));
         let shared = Arc::new(GatewayShared {
             runtime,
             speech,
+            native_console,
             events: event_tx,
             voice_turns: Mutex::new(HashMap::new()),
             mcp_locks: Mutex::new(HashMap::new()),
@@ -272,6 +290,8 @@ impl DeviceGatewayService {
                 enabled: false,
                 available: false,
                 active_port: None,
+                active_mcp_port: None,
+                active_mcp_token: None,
                 identity: None,
                 pairing_window_expires_at_ms: None,
                 pending_pairings: HashMap::new(),
@@ -447,11 +467,36 @@ impl DeviceGatewayService {
                 return Err(error);
             }
         };
+        let mcp_listener =
+            std::net::TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+                .map_err(DeviceGatewayError::Bind)?;
+        mcp_listener
+            .set_nonblocking(true)
+            .map_err(DeviceGatewayError::Bind)?;
+        let mcp_port = mcp_listener
+            .local_addr()
+            .map_err(DeviceGatewayError::Bind)?
+            .port();
+        let mcp_token = super::crypto::random_token(32).map_err(|_| {
+            DeviceGatewayError::Listener("failed to generate loopback MCP token".to_owned())
+        })?;
+        let mcp_router = Router::new()
+            .route(
+                "/mcp/{device_id}",
+                post(super::native_console::handle_mcp_http_request),
+            )
+            .with_state(self.shared.clone());
+        let mcp_server_handle = ServerHandle::new();
+        let mcp_server = axum_server::from_tcp(mcp_listener)
+            .map_err(DeviceGatewayError::Bind)?
+            .handle(mcp_server_handle.clone());
         {
             let mut state = self.shared.state.lock().await;
             state.enabled = true;
             state.available = true;
             state.active_port = Some(port);
+            state.active_mcp_port = Some(mcp_port);
+            state.active_mcp_token = Some(mcp_token);
             state.identity = Some(identity);
         }
         self.shared.notify_changed();
@@ -460,9 +505,16 @@ impl DeviceGatewayService {
                 .serve(router.into_make_service_with_connect_info::<SocketAddr>())
                 .await
         });
+        let mcp_server_task = tokio::spawn(async move {
+            mcp_server
+                .serve(mcp_router.into_make_service())
+                .await
+        });
         Ok(ActiveGateway {
             server_handle,
             server_task,
+            mcp_server_handle,
+            mcp_server_task,
             mdns,
             service_fullname,
             port,
@@ -476,7 +528,11 @@ impl DeviceGatewayService {
         active
             .server_handle
             .graceful_shutdown(Some(Duration::from_secs(5)));
+        active
+            .mcp_server_handle
+            .graceful_shutdown(Some(Duration::from_secs(2)));
         let _ = active.server_task.await;
+        let _ = active.mcp_server_task.await;
         self.stop_recognition_tasks().await;
         self.stop_mcp_tasks(disconnected).await;
     }
@@ -485,6 +541,10 @@ impl DeviceGatewayService {
         let disconnected = self.disconnect_all().await;
         let _ = active.mdns.unregister(&active.service_fullname);
         let _ = active.mdns.shutdown();
+        active
+            .mcp_server_handle
+            .graceful_shutdown(Some(Duration::from_secs(2)));
+        let _ = active.mcp_server_task.await;
         self.stop_recognition_tasks().await;
         self.stop_mcp_tasks(disconnected).await;
     }
@@ -607,6 +667,8 @@ impl DeviceGatewayService {
         state.enabled = false;
         state.available = false;
         state.active_port = None;
+        state.active_mcp_port = None;
+        state.active_mcp_token = None;
         state.pairing_window_expires_at_ms = None;
         state.pending_pairings.clear();
         state.targeted_auto_approves.clear();
@@ -874,7 +936,16 @@ impl DeviceGatewayHandle {
                         peer_address: connection.peer_address.clone(),
                         client_version: connection.client_version.clone(),
                         mcp_server_keys: connection.mcp_server_keys.clone(),
-                        console: connection.console.as_ref().map(super::console::to_snapshot),
+                        console: connection
+                            .console
+                            .as_ref()
+                            .map(super::console::to_snapshot)
+                            .or_else(|| {
+                                connection
+                                    .hardware
+                                    .as_ref()
+                                    .map(|_| super::native_console::native_console_snapshot())
+                            }),
                         speech_relay: connection.speech_relay,
                     }
                 }),
@@ -993,6 +1064,38 @@ impl DeviceGatewayHandle {
             .and_then(|connection| connection.console.clone())
     }
 
+    pub(crate) async fn has_native_console(
+        &self,
+        device_id: &assistant_protocol::DeviceId,
+    ) -> bool {
+        self.shared
+            .state
+            .lock()
+            .await
+            .connections
+            .get(device_id)
+            .is_some_and(|connection| connection.console.is_none() && connection.hardware.is_some())
+    }
+
+    pub(crate) async fn handle_native_console(
+        &self,
+        device_id: &assistant_protocol::DeviceId,
+        relative_path: &str,
+        method: axum::http::Method,
+        body: axum::body::Bytes,
+        speech: &SpeechServiceHandle,
+    ) -> axum::response::Response {
+        super::native_console::handle_native_console_request(
+            &self.shared,
+            device_id,
+            relative_path,
+            method,
+            body,
+            speech,
+        )
+        .await
+    }
+
     #[cfg(test)]
     pub(super) async fn seed_test_identity(&self, identity: Arc<InstallationIdentity>, port: u16) {
         let mut state = self.shared.state.lock().await;
@@ -1000,6 +1103,13 @@ impl DeviceGatewayHandle {
         state.available = true;
         state.active_port = Some(port);
         state.identity = Some(identity);
+    }
+
+    #[cfg(test)]
+    pub(super) async fn seed_test_mcp_endpoint(&self, port: u16, token: String) {
+        let mut state = self.shared.state.lock().await;
+        state.active_mcp_port = Some(port);
+        state.active_mcp_token = Some(token);
     }
 
     #[cfg(test)]
@@ -1188,7 +1298,7 @@ impl GatewayShared {
 
     #[expect(
         clippy::too_many_arguments,
-        reason = "connection registration records identity, capabilities, metadata, console target, and MCP keys atomically"
+        reason = "connection registration records identity, capabilities, metadata, console target, hardware profile, and MCP keys atomically"
     )]
     pub(super) async fn register_connection(
         &self,
@@ -1200,6 +1310,7 @@ impl GatewayShared {
         client_version: Option<String>,
         mcp_server_keys: Vec<McpServerKey>,
         console: Option<DeviceConsoleTarget>,
+        hardware: Option<DeviceHardwareDeclaration>,
         speech_relay: bool,
     ) -> mpsc::Receiver<ConnectionCommand> {
         let (command_tx, command_rx) = mpsc::channel(CONNECTION_COMMAND_CAPACITY);
@@ -1214,6 +1325,7 @@ impl GatewayShared {
                 client_version,
                 mcp_server_keys,
                 console,
+                hardware,
                 speech_relay,
                 command: command_tx,
             },
@@ -1231,13 +1343,128 @@ impl GatewayShared {
             state
                 .connections
                 .values()
-                .filter(|connection| connection.speech_relay)
                 .map(|connection| connection.command.clone())
                 .collect::<Vec<_>>()
         };
         for sender in senders {
             let _ = sender.try_send(ConnectionCommand::SpeechStatusChanged(status));
         }
+    }
+
+    pub(super) async fn update_capabilities(
+        &self,
+        device_id: &assistant_protocol::DeviceId,
+        connection_id: &str,
+        capabilities: DeviceCapabilitiesSnapshot,
+    ) {
+        let changed = {
+            let mut state = self.state.lock().await;
+            if let Some(connection) = state.connections.get_mut(device_id)
+                && connection.connection_id == connection_id
+                && connection.capabilities != capabilities
+            {
+                connection.capabilities = capabilities;
+                true
+            } else {
+                false
+            }
+        };
+        if changed {
+            self.notify_changed();
+        }
+    }
+
+    pub(super) async fn active_mcp_endpoint(&self) -> Option<(u16, String)> {
+        let state = self.state.lock().await;
+        match (state.active_mcp_port, state.active_mcp_token.as_ref()) {
+            (Some(port), Some(token)) => Some((port, token.clone())),
+            _ => None,
+        }
+    }
+
+    pub(super) async fn active_mcp_token(&self) -> Option<String> {
+        self.state.lock().await.active_mcp_token.clone()
+    }
+
+    pub(super) async fn native_hardware(
+        &self,
+        device_id: &assistant_protocol::DeviceId,
+    ) -> Option<DeviceHardwareDeclaration> {
+        self.state
+            .lock()
+            .await
+            .connections
+            .get(device_id)
+            .and_then(|connection| connection.hardware.clone())
+    }
+
+    pub(super) async fn update_hardware_vp_version(
+        &self,
+        device_id: &assistant_protocol::DeviceId,
+        connection_id: &str,
+        vp_version: u64,
+    ) {
+        let mut state = self.state.lock().await;
+        if let Some(connection) = state.connections.get_mut(device_id)
+            && connection.connection_id == connection_id
+            && let Some(hw) = connection.hardware.as_mut()
+        {
+            hw.vp_version = vp_version;
+        }
+    }
+
+    pub(super) async fn execute_device_command(
+        &self,
+        device_id: &assistant_protocol::DeviceId,
+        request: DeviceCommandRequest,
+        timeout_duration: Duration,
+    ) -> Result<DeviceCommandResult, String> {
+        let sender = {
+            let state = self.state.lock().await;
+            state
+                .connections
+                .get(device_id)
+                .filter(|connection| connection.hardware.is_some())
+                .map(|connection| connection.command.clone())
+        }
+        .ok_or_else(|| "目标直连终端当前离线。".to_owned())?;
+
+        let (tx, rx) = oneshot::channel();
+        sender
+            .send(ConnectionCommand::ExecuteDeviceCommand {
+                request,
+                response: tx,
+            })
+            .await
+            .map_err(|_| "向终端发送指令失败，连接可能已断开。".to_owned())?;
+
+        match tokio::time::timeout(timeout_duration, rx).await {
+            Ok(Ok(result)) => Ok(result),
+            Ok(Err(_)) => Err("终端连接已中断，未收到指令执行回执。".to_owned()),
+            Err(_) => Err("等待终端执行指令超时。".to_owned()),
+        }
+    }
+
+    pub(super) async fn broadcast_voiceprint_sync(&self, request: VoiceprintSyncRequest) -> usize {
+        let senders = {
+            let state = self.state.lock().await;
+            state
+                .connections
+                .values()
+                .filter(|connection| connection.hardware.is_some())
+                .map(|connection| connection.command.clone())
+                .collect::<Vec<_>>()
+        };
+        let mut count = 0;
+        for sender in senders {
+            if sender
+                .try_send(ConnectionCommand::SyncVoiceprints(request.clone()))
+                .is_ok()
+            {
+                count += 1;
+            }
+        }
+        count
     }
 
     pub(super) async fn send_connection_command(

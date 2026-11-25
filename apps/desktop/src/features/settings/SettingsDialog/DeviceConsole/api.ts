@@ -10,6 +10,9 @@ export type FleetDeviceItem = Readonly<{
   online: boolean;
   rssi: string;
   volume: string;
+  battery_pct: string;
+  temperature_c: string;
+  free_int: string;
   capabilities: ReadonlyArray<string>;
 }>;
 
@@ -107,6 +110,18 @@ export function parseFleetDevices(payload: unknown): FleetDeviceItem[] {
       online: pickBool(shadow, false, "online"),
       rssi: shadow.rssi !== undefined && shadow.rssi !== null ? String(shadow.rssi) : "-",
       volume: shadow.volume !== undefined && shadow.volume !== null ? String(shadow.volume) : "-",
+      battery_pct:
+        shadow.battery_pct !== undefined && shadow.battery_pct !== null
+          ? `${String(shadow.battery_pct)}%`
+          : "",
+      temperature_c:
+        shadow.temperature_c !== undefined && shadow.temperature_c !== null
+          ? `${String(shadow.temperature_c)}°C`
+          : "",
+      free_int:
+        shadow.free_int !== undefined && shadow.free_int !== null
+          ? `${Math.round(Number(shadow.free_int) / 1024)}KB`
+          : "",
       capabilities,
     };
   });

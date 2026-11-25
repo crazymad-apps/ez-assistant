@@ -275,7 +275,7 @@ impl TtsProvider for DashScopeSpeechSynthesizer {
 ///
 /// 上层会再次映射为 SpeechService 错误，任何服务端响应正文都不外泄。
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
-pub(super) enum SpeechProviderError {
+pub(crate) enum SpeechProviderError {
     #[error("speech service is unavailable")]
     Unavailable,
     #[error("speech provider authentication failed")]
@@ -799,7 +799,7 @@ fn build_deepseek_asr_multipart_body(boundary: &str, wav: &[u8]) -> Vec<u8> {
     body
 }
 
-pub(super) fn wav_bytes_to_pcm16_16k_mono(wav: &[u8]) -> Result<Vec<u8>, SpeechProviderError> {
+pub(crate) fn wav_bytes_to_pcm16_16k_mono(wav: &[u8]) -> Result<Vec<u8>, SpeechProviderError> {
     if wav.len() < 12 || &wav[0..4] != b"RIFF" || &wav[8..12] != b"WAVE" {
         return Err(SpeechProviderError::InvalidAudio);
     }

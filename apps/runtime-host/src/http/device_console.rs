@@ -42,18 +42,24 @@ pub(super) async fn proxy(
     let Ok(device_id) = DeviceId::new(device_id) else {
         return HttpError::invalid_request("设备 ID 无效。").into_response();
     };
-    let Some(target) = services.device_gateway.console_target(&device_id).await else {
-        return (StatusCode::NOT_FOUND, "device console unavailable").into_response();
-    };
-    proxy_to_target(
-        &target,
-        &relative_path,
-        raw_query.as_deref(),
-        method,
-        &req_headers,
-        body,
-    )
-    .await
+    if let Some(target) = services.device_gateway.console_target(&device_id).await {
+        return proxy_to_target(
+            &target,
+            &relative_path,
+            raw_query.as_deref(),
+            method,
+            &req_headers,
+            body,
+        )
+        .await;
+    }
+    if services.device_gateway.has_native_console(&device_id).await {
+        return services
+            .device_gateway
+            .handle_native_console(&device_id, &relative_path, method, body, &services.speech)
+            .await;
+    }
+    (StatusCode::NOT_FOUND, "device console unavailable").into_response()
 }
 
 async fn proxy_to_target(

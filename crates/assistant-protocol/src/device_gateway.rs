@@ -39,6 +39,16 @@ pub enum DevicePairingModeSnapshot {
     DirectConfirm,
 }
 
+/// 终端控制面板后端模式：`proxy` 反向代理外部网关，`native` 由 Host 经 WSS 直连终端本地提供。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceConsoleModeSnapshot {
+    #[default]
+    Proxy,
+    Native,
+}
+
 /// 在线设备在连接握手时声明的 Web/HTTP 控制台安全元数据。
 ///
 /// 主机名严格由 Host 根据当前连接的真实对端 IP 绑定，`direct_url` 仅在声明 `ui_path` 时生成。
@@ -46,6 +56,8 @@ pub enum DevicePairingModeSnapshot {
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct DeviceConsoleSnapshot {
     pub api_prefix: String,
+    #[serde(default)]
+    pub mode: DeviceConsoleModeSnapshot,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub ui_path: Option<String>,

@@ -103,6 +103,60 @@ pub(super) fn build_device_mcp_definitions(
     definitions
 }
 
+/// 为直连硬件终端构造指向 Host 私有回环 MCP 桥接（`127.0.0.1` + 随机 Bearer 令牌）的受管定义。
+pub(super) fn build_native_device_mcp_definition(
+    device_id: &DeviceId,
+    device_display_name: &str,
+    mcp_port: u16,
+    mcp_token: &str,
+) -> Option<ManagedMcpServerDefinition> {
+    if mcp_port == 0 || mcp_token.is_empty() {
+        return None;
+    }
+    let server_key = device_mcp_server_key(device_id, Some("hardware"))?;
+    let url = format!("http://127.0.0.1:{mcp_port}/mcp/{}", device_id.as_str());
+    let display_name = sanitize_display_name("", device_display_name);
+    let description = sanitize_description(
+        &format!("直连控制 {device_display_name} 的屏幕表情、音量、传感器与端侧声纹（经 WSS + ACL 校验）"),
+        device_display_name,
+    );
+    let auth_value = format!("Bearer {mcp_token}");
+    let headers = vec![("Authorization".to_owned(), auth_value.clone())];
+    let mut headers_map = Map::new();
+    headers_map.insert("Authorization".to_owned(), Value::String(auth_value));
+
+    let mut raw = Map::new();
+    raw.insert("enabled".to_owned(), Value::Bool(true));
+    raw.insert("displayName".to_owned(), Value::String(display_name.clone()));
+    raw.insert("description".to_owned(), Value::String(description.clone()));
+    raw.insert("url".to_owned(), Value::String(url.clone()));
+    raw.insert("headers".to_owned(), Value::Object(headers_map));
+
+    let definition_digest = compute_definition_digest(
+        device_id,
+        server_key.as_str(),
+        &url,
+        &display_name,
+        &description,
+        &headers,
+    );
+
+    Some(ManagedMcpServerDefinition {
+        source: McpServerSource::Device(device_id.to_string()),
+        server_key,
+        definition_digest,
+        source_enabled: true,
+        source_available: true,
+        ready: true,
+        raw,
+        parameter_bindings: BTreeMap::new(),
+        parameters: Vec::new(),
+        plugin_settings_revision: None,
+        plugin_sha256: None,
+        configuration: None,
+    })
+}
+
 pub(super) fn is_safe_http_subpath(path: &str, max_bytes: usize) -> bool {
     if !path.starts_with('/') || path.len() > max_bytes {
         return false;
