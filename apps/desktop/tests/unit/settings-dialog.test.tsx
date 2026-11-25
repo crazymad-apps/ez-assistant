@@ -761,6 +761,7 @@ describe('SettingsDialog model management', () => {
           },
         },
       ],
+      discovered_devices: [],
       devices: [],
       speech_services: { asr: 'unavailable', tts: 'unavailable' },
     };
@@ -798,6 +799,7 @@ describe('SettingsDialog model management', () => {
       installation_id: 'installation-1',
       certificate_fingerprint: 'fingerprint',
       pending_pairings: [],
+      discovered_devices: [],
       devices: [
         {
           device_id: 'device-1',
@@ -880,6 +882,7 @@ describe('SettingsDialog model management', () => {
           },
         },
       ],
+      discovered_devices: [],
       devices: [],
       speech_services: { asr: 'unavailable', tts: 'unavailable' },
     };
@@ -897,6 +900,44 @@ describe('SettingsDialog model management', () => {
     expect(confirm).toHaveBeenCalledWith('pairing-direct', null, null);
     fireEvent.click(screen.getByRole('button', { name: '拒绝' }));
     expect(reject).toHaveBeenCalledWith('pairing-direct');
+  });
+
+  it('shows nearby auto-discovered Mosaico devices and connects in one click even when access switch is off', () => {
+    const store = settingsStore();
+    store.settings.page = 'devices';
+    store.device_gateway.stale = false;
+    store.device_gateway.snapshot = {
+      enabled: false,
+      available: false,
+      installation_id: '',
+      certificate_fingerprint: '',
+      pending_pairings: [],
+      discovered_devices: [
+        {
+          discovery_id: 'Mosaico-5BF0._ez-device._tcp.local.',
+          display_name: 'Mosaico-5BF0',
+          model: 'esp32s31-mosaico',
+          peer_address: '192.168.110.88',
+          control_port: 8765,
+          key_fingerprint: '1A2B-3C4D',
+        },
+      ],
+      devices: [],
+      speech_services: { asr: 'unavailable', tts: 'unavailable' },
+    };
+    vi.spyOn(store.device_gateway, 'load').mockResolvedValue();
+    const connect = vi.spyOn(store.device_gateway, 'connectDiscoveredDevice').mockResolvedValue(true);
+    renderDialog(store);
+
+    expect(screen.getByText('Mosaico-5BF0')).toBeVisible();
+    expect(screen.getByText(/esp32s31-mosaico/)).toBeVisible();
+    expect(screen.getByText(/192\.168\.110\.88/)).toBeVisible();
+    expect(screen.getByText(/指纹 1A2B-3C4D/)).toBeVisible();
+
+    const connectBtn = screen.getByRole('button', { name: '连接' });
+    expect(connectBtn).toBeEnabled();
+    fireEvent.click(connectBtn);
+    expect(connect).toHaveBeenCalledWith('Mosaico-5BF0._ez-device._tcp.local.');
   });
 
   it('labels device-sourced MCP servers as 智能终端 and 终端已离线 when offline', () => {

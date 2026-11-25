@@ -121,6 +121,24 @@ pub struct PendingDevicePairingSnapshot {
     pub client_version: Option<String>,
 }
 
+/// 局域网中通过 `_ez-device._tcp.local.` mDNS 发现的待配对智能终端。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct DiscoveredDeviceSnapshot {
+    pub discovery_id: String,
+    pub display_name: String,
+    pub model: String,
+    pub peer_address: String,
+    pub control_port: u16,
+    pub key_fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub firmware_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub mac_address: Option<String>,
+}
+
 /// 当前允许附近设备发起配对的限时窗口。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
@@ -164,6 +182,8 @@ pub struct DeviceGatewaySnapshot {
     #[ts(optional)]
     pub pairing_window: Option<DevicePairingWindowSnapshot>,
     pub pending_pairings: Vec<PendingDevicePairingSnapshot>,
+    #[serde(default)]
+    pub discovered_devices: Vec<DiscoveredDeviceSnapshot>,
     pub devices: Vec<DeviceSummarySnapshot>,
     #[serde(default)]
     pub speech_services: DeviceSpeechServicesSnapshot,
@@ -215,6 +235,16 @@ pub struct ConfirmDevicePairingRequest {
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct RejectDevicePairingRequest {
     pub pairing_request_id: String,
+}
+
+/// 一键连接局域网中发现的智能终端：自动开启接入、授权目标密钥指纹并向终端下发连接指令。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ConnectDiscoveredDeviceRequest {
+    pub discovery_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub display_name: Option<String>,
 }
 
 /// 修改已配对设备显示名称的请求。
@@ -398,6 +428,7 @@ pub enum DeviceGatewayCommand {
     ClosePairingWindow(CloseDevicePairingWindowRequest),
     ConfirmPairing(ConfirmDevicePairingRequest),
     RejectPairing(RejectDevicePairingRequest),
+    ConnectDiscoveredDevice(ConnectDiscoveredDeviceRequest),
     RenameDevice(RenameDeviceRequest),
     RevokeDevice(RevokeDeviceRequest),
     GetSpeechConfiguration(GetSpeechConfigurationRequest),
@@ -424,6 +455,7 @@ pub enum DeviceGatewayCommandResult {
     ClosePairingWindow(DeviceGatewayMutationResult),
     ConfirmPairing(DeviceGatewayMutationResult),
     RejectPairing(DeviceGatewayMutationResult),
+    ConnectDiscoveredDevice(DeviceGatewayMutationResult),
     RenameDevice(DeviceGatewayMutationResult),
     RevokeDevice(DeviceGatewayMutationResult),
     GetSpeechConfiguration(SpeechConfigurationSnapshot),

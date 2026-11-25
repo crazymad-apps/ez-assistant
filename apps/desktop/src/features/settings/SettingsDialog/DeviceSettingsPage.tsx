@@ -5,6 +5,7 @@ import { PresenceBoundary } from "../../../components/Presence";
 import type {
   DeviceCapabilitiesSnapshot,
   DeviceSummarySnapshot,
+  DiscoveredDeviceSnapshot,
   PendingDevicePairingSnapshot,
 } from "@ez-assistant/protocol";
 import { useRootStore } from "../../../stores/RootStoreContext";
@@ -29,6 +30,7 @@ export const DeviceSettingsPage = observer(function DeviceSettingsPage() {
   }, [gateway]);
 
   const paired_devices = snapshot?.devices.filter((device) => device.lifecycle === "paired") ?? [];
+  const discovered_devices = snapshot?.discovered_devices ?? [];
   const detail_device = paired_devices.find((device) => device.device_id === detail_device_id) ?? null;
 
   if (detail_device) {
@@ -112,6 +114,26 @@ export const DeviceSettingsPage = observer(function DeviceSettingsPage() {
             </div>
           ) : <p className={styles.device_empty}>正在等待终端发起配对…</p>
         ) : <p className={styles.device_empty}>点击“添加设备”后，附近未配对终端才能申请接入。</p>}
+      </section>
+
+      <section className={styles.device_section}>
+        <header>
+          <h4>附近可连接的设备</h4>
+          <span className={styles.device_count}>{discovered_devices.length}</span>
+        </header>
+        {discovered_devices.length > 0 ? (
+          <div className={styles.discovered_device_list}>
+            {discovered_devices.map((device) => (
+              <DiscoveredDeviceRow
+                device={device}
+                gateway={gateway}
+                key={device.discovery_id}
+              />
+            ))}
+          </div>
+        ) : (
+          <p className={styles.device_empty}>Mosaico 终端开机连上同一 Wi-Fi 后会自动出现在这里。</p>
+        )}
       </section>
 
       <section className={styles.device_section}>
@@ -290,3 +312,36 @@ function capabilityLabel(capabilities?: DeviceCapabilitiesSnapshot): string {
   ].filter(Boolean);
   return values.length > 0 ? values.join(" · ") : "未声明交互能力";
 }
+
+const DiscoveredDeviceRow = observer(function DiscoveredDeviceRow(props: Readonly<{
+  gateway: ReturnType<typeof useRootStore>["device_gateway"];
+  device: DiscoveredDeviceSnapshot;
+}>) {
+  const connecting = props.gateway.pending_action === `connect:${props.device.discovery_id}`;
+  const busy = props.gateway.pending_action !== null || props.gateway.stale;
+  const subtitle = [
+    props.device.model,
+    props.device.peer_address,
+    `指纹 ${props.device.key_fingerprint}`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  return (
+    <article>
+      <span className={styles.device_icon}><Icon name="device" size={18} /></span>
+      <div>
+        <strong>{props.device.display_name}</strong>
+        <small>{subtitle}</small>
+      </div>
+      <button
+        className={styles.pending_device_confirm}
+        disabled={busy}
+        onClick={() => void props.gateway.connectDiscoveredDevice(props.device.discovery_id)}
+        type="button"
+      >
+        {connecting ? "连接中…" : "连接"}
+      </button>
+    </article>
+  );
+});

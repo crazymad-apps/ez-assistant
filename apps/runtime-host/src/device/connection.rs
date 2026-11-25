@@ -516,6 +516,7 @@ async fn finalize_paired_device(
     public_key: &[u8],
     decision_display_name: Option<String>,
 ) -> Result<(), ConnectionError> {
+    let fingerprint = public_key_fingerprint(public_key);
     let public_key =
         DevicePublicKey::from_slice(public_key).ok_or(ConnectionError::InvalidMessage)?;
     let display_name = decision_display_name.unwrap_or_else(|| hello.display_name.clone());
@@ -528,6 +529,8 @@ async fn finalize_paired_device(
             paired_at_ms: now_ms()?,
         })
         .await?;
+    shared.remove_discovered_by_fingerprint(&fingerprint).await;
+    shared.notify_changed();
     send_payload(
         socket,
         "pairing_complete",
@@ -3074,12 +3077,12 @@ mod tests {
         use std::net::SocketAddr;
 
         use assistant_protocol::{
-            ConfirmDevicePairingRequest, DeviceId, DeviceLifecycleSnapshot,
-            DevicePairingModeSnapshot, DeviceSpeechServicesSnapshot, GetMcpConfigurationRequest,
-            McpServerRuntimeState, McpServerSource, McpTransportKind, RejectDevicePairingRequest,
-            SecretValue, ShutdownRuntimeRequest, SpeechProviderKind, SpeechServiceStatusSnapshot,
-            UpdateAsrConfigurationInput, UpdateSpeechConfigurationRequest,
-            UpdateTtsConfigurationInput,
+            ConfirmDevicePairingRequest, ConnectDiscoveredDeviceRequest, DeviceId,
+            DeviceLifecycleSnapshot, DevicePairingModeSnapshot, DeviceSpeechServicesSnapshot,
+            GetMcpConfigurationRequest, McpServerRuntimeState, McpServerSource, McpTransportKind,
+            RejectDevicePairingRequest, SecretValue, ShutdownRuntimeRequest, SpeechProviderKind,
+            SpeechServiceStatusSnapshot, UpdateAsrConfigurationInput,
+            UpdateSpeechConfigurationRequest, UpdateTtsConfigurationInput,
         };
         use assistant_runtime::{AssistantRuntime, RuntimeStore as _};
         use axum::{
@@ -3201,11 +3204,10 @@ mod tests {
                 let identity = Arc::new(
                     InstallationIdentity::load_or_create(directory.path()).expect("identity"),
                 );
-                handle.seed_test_identity(identity.clone()).await;
-
                 let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind WSS");
                 listener.set_nonblocking(true).expect("nonblocking WSS");
                 let addr = listener.local_addr().expect("WSS addr");
+                handle.seed_test_identity(identity.clone(), addr.port()).await;
                 let tls = RustlsConfig::from_pem(
                     identity.certificate_pem.clone(),
                     identity.private_key_pem.clone(),
@@ -4306,6 +4308,169 @@ mod tests {
 
             speech_server.abort();
             let _ = speech_server.await;
+            harness.shutdown().await;
+        }
+
+        #[tokio::test]
+        async fn wss_connect_discovered_device_nudges_http_and_auto_approves_matching_key_only() {
+            let harness = TestGatewayHarness::start().await;
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<Value>(4);
+            let mock_device_app = Router::new().route(
+                "/ez/connect",
+                post({
+                    let tx = tx.clone();
+                    move |AxumJson(body): AxumJson<Value>| {
+                        let tx = tx.clone();
+                        async move {
+                            let _ = tx.send(body).await;
+                            axum::Json(json!({ "ok": true }))
+                        }
+                    }
+                }),
+            );
+            let dev_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind mock device http");
+            let dev_addr = dev_listener.local_addr().expect("mock device addr");
+            let dev_server = tokio::spawn(async move {
+                let _ = axum::serve(dev_listener, mock_device_app).await;
+            });
+
+            let target_key = SigningKey::from_bytes(&[71_u8; 32]);
+            let target_pub = target_key.verifying_key().to_bytes();
+            let target_fp = public_key_fingerprint(&target_pub);
+            let discovery_id = "Mosaico-5BF0._ez-device._tcp.local.";
+            harness
+                .handle
+                .seed_test_discovered_device(
+                    discovery_id,
+                    "Mosaico-5BF0",
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                    dev_addr.port(),
+                    &target_fp,
+                )
+                .await;
+
+            let initial = harness.handle.snapshot().await.expect("initial snapshot");
+            assert_eq!(initial.discovered_devices.len(), 1);
+            assert_eq!(initial.discovered_devices[0].key_fingerprint, target_fp);
+
+            harness
+                .handle
+                .connect_discovered_device(ConnectDiscoveredDeviceRequest {
+                    discovery_id: discovery_id.to_owned(),
+                    display_name: Some("书房 Mosaico".to_owned()),
+                })
+                .await
+                .expect("connect discovered device");
+
+            let nudge = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+                .await
+                .expect("nudge timeout")
+                .expect("nudge body");
+            assert_eq!(nudge["port"].as_u64(), Some(u64::from(harness.addr.port())));
+            assert_eq!(nudge["path"].as_str(), Some("/device"));
+            assert_eq!(
+                nudge["installation_id"].as_str(),
+                Some(harness.identity.installation_id.as_str())
+            );
+            assert_eq!(
+                nudge["certificate_fingerprint"].as_str(),
+                Some(harness.identity.certificate_fingerprint.as_str())
+            );
+
+            // A different key connecting while targeted slot is active must NOT auto-approve.
+            let rogue_key = SigningKey::from_bytes(&[72_u8; 32]);
+            let (mut rogue_ws, _) = harness.connect_ws().await;
+            send_json(
+                &mut rogue_ws,
+                "m-rogue-pair",
+                "pairing_hello",
+                &PairingHello {
+                    pairing_request_id: "req-rogue".to_owned(),
+                    display_name: "Rogue".to_owned(),
+                    device_nonce: "rogue-nonce".to_owned(),
+                    capabilities: text_capabilities(),
+                    pairing_mode: WirePairingMode::DirectConfirm,
+                    pake_share: None,
+                    public_key: Some(encode_base64(rogue_key.verifying_key().as_bytes())),
+                    client_version: None,
+                },
+            )
+            .await;
+            assert_eq!(
+                recv_envelope(&mut rogue_ws).await.expect("pending").message_type,
+                "pairing_pending"
+            );
+            let rogue_snapshot = harness.handle.snapshot().await.expect("rogue snapshot");
+            assert_eq!(rogue_snapshot.pending_pairings.len(), 1);
+            let _ = rogue_ws.close(None).await;
+
+            // Now the targeted Mosaico connects and auto-approves without manual confirm_pairing!
+            let (mut ws, _) = harness.connect_ws().await;
+            let req_id = "req-mosaico-auto";
+            let dev_nonce = "dev-nonce-auto";
+            send_json(
+                &mut ws,
+                "m-auto-pair",
+                "pairing_hello",
+                &PairingHello {
+                    pairing_request_id: req_id.to_owned(),
+                    display_name: "Mosaico-5BF0".to_owned(),
+                    device_nonce: dev_nonce.to_owned(),
+                    capabilities: text_capabilities(),
+                    pairing_mode: WirePairingMode::DirectConfirm,
+                    pake_share: None,
+                    public_key: Some(encode_base64(&target_pub)),
+                    client_version: Some("esp-pika-mosaico/0.3.0".to_owned()),
+                },
+            )
+            .await;
+            assert_eq!(
+                recv_envelope(&mut ws).await.expect("pending").message_type,
+                "pairing_pending"
+            );
+            let challenge_env = recv_envelope(&mut ws)
+                .await
+                .expect("auto pairing_direct_challenge");
+            assert_eq!(challenge_env.message_type, "pairing_direct_challenge");
+            let challenge: PairingDirectChallenge = decode_payload(challenge_env);
+            let ad = pairing_associated_data(
+                req_id,
+                &harness.identity.installation_id,
+                &harness.identity.certificate_fingerprint,
+                dev_nonce,
+                &challenge.host_nonce,
+                text_capabilities(),
+            );
+            let bind_transcript = pairing_bind_transcript(&ad, &target_pub);
+            let commit_transcript =
+                pairing_commit_transcript(&bind_transcript, &challenge.device_id);
+            let sig = target_key.sign(&commit_transcript).to_bytes();
+            send_json(
+                &mut ws,
+                "m-auto-commit",
+                "pairing_direct_commit",
+                &PairingDirectCommit {
+                    pairing_request_id: req_id.to_owned(),
+                    device_id: challenge.device_id.clone(),
+                    signature: encode_base64(&sig),
+                },
+            )
+            .await;
+            let complete_env = recv_envelope(&mut ws).await.expect("pairing_complete");
+            assert_eq!(complete_env.message_type, "pairing_complete");
+            let complete: PairingComplete = decode_payload(complete_env);
+            assert_eq!(complete.display_name, "书房 Mosaico");
+            let _ = ws.close(None).await;
+
+            let after = harness.handle.snapshot().await.expect("after snapshot");
+            assert!(after.discovered_devices.is_empty());
+            assert_eq!(after.devices.len(), 1);
+            assert_eq!(after.devices[0].display_name, "书房 Mosaico");
+
+            dev_server.abort();
+            let _ = dev_server.await;
             harness.shutdown().await;
         }
     }

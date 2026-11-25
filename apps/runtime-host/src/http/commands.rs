@@ -283,6 +283,20 @@ async fn dispatch_device_gateway(
                     .map_err(|error| error.to_protocol_info())?,
             })
         }
+        DeviceGatewayCommand::ConnectDiscoveredDevice(request) => {
+            services
+                .device_gateway
+                .connect_discovered_device(request)
+                .await
+                .map_err(|error| error.to_protocol_info())?;
+            DeviceGatewayCommandResult::ConnectDiscoveredDevice(DeviceGatewayMutationResult {
+                snapshot: services
+                    .device_gateway
+                    .snapshot()
+                    .await
+                    .map_err(|error| error.to_protocol_info())?,
+            })
+        }
         DeviceGatewayCommand::RenameDevice(request) => {
             services
                 .runtime

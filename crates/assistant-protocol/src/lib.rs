@@ -149,17 +149,18 @@ pub use custom_agent::{
 };
 pub use device_gateway::{
     AsrConfigurationSnapshot, CloseDevicePairingWindowRequest, ConfirmDevicePairingRequest,
-    DeviceCapabilitiesSnapshot, DeviceConnectionSnapshot, DeviceConsoleSnapshot,
-    DeviceGatewayCommand, DeviceGatewayCommandResult, DeviceGatewayEvent,
+    ConnectDiscoveredDeviceRequest, DeviceCapabilitiesSnapshot, DeviceConnectionSnapshot,
+    DeviceConsoleSnapshot, DeviceGatewayCommand, DeviceGatewayCommandResult, DeviceGatewayEvent,
     DeviceGatewayMutationResult, DeviceGatewaySnapshot, DeviceLifecycleSnapshot,
     DevicePairingModeSnapshot, DevicePairingWindowSnapshot, DeviceSpeechServicesSnapshot,
-    DeviceSummarySnapshot, GetDeviceGatewaySnapshotRequest, GetSpeechConfigurationRequest,
-    OpenDevicePairingWindowRequest, PendingDevicePairingSnapshot, RejectDevicePairingRequest,
-    RenameDeviceRequest, RevokeDeviceRequest, SetDeviceAccessEnabledRequest,
-    SpeechConfigurationSnapshot, SpeechProviderKind, SpeechServiceStatusSnapshot,
-    TestAsrConfigurationRequest, TestAsrConfigurationResult, TestTtsConfigurationRequest,
-    TestTtsConfigurationResult, TtsConfigurationSnapshot, UpdateAsrConfigurationInput,
-    UpdateSpeechConfigurationRequest, UpdateSpeechConfigurationResult, UpdateTtsConfigurationInput,
+    DeviceSummarySnapshot, DiscoveredDeviceSnapshot, GetDeviceGatewaySnapshotRequest,
+    GetSpeechConfigurationRequest, OpenDevicePairingWindowRequest, PendingDevicePairingSnapshot,
+    RejectDevicePairingRequest, RenameDeviceRequest, RevokeDeviceRequest,
+    SetDeviceAccessEnabledRequest, SpeechConfigurationSnapshot, SpeechProviderKind,
+    SpeechServiceStatusSnapshot, TestAsrConfigurationRequest, TestAsrConfigurationResult,
+    TestTtsConfigurationRequest, TestTtsConfigurationResult, TtsConfigurationSnapshot,
+    UpdateAsrConfigurationInput, UpdateSpeechConfigurationRequest,
+    UpdateSpeechConfigurationResult, UpdateTtsConfigurationInput,
 };
 pub use error::{ModelFailureKind, RuntimeErrorCode, RuntimeErrorInfo};
 pub use event::{

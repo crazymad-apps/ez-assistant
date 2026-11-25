@@ -52,6 +52,7 @@ export class DeviceGatewayStore {
       closePairingWindow: action,
       confirmPairing: action,
       rejectPairing: action,
+      connectDiscoveredDevice: action,
       renameDevice: action,
       revokeDevice: action,
       setOutputHosting: action,
@@ -163,6 +164,21 @@ export class DeviceGatewayStore {
         payload: { pairing_request_id },
       },
       "已拒绝该终端的配对请求。",
+    );
+  }
+
+  async connectDiscoveredDevice(
+    discovery_id: string,
+    display_name?: string | null,
+  ): Promise<boolean> {
+    const trimmed_name = display_name?.trim();
+    return this.#runGatewayAction(
+      `connect:${discovery_id}`,
+      {
+        type: "connect_discovered_device",
+        payload: trimmed_name ? { discovery_id, display_name: trimmed_name } : { discovery_id },
+      },
+      "正在连接设备，完成后将自动上线。",
     );
   }
 

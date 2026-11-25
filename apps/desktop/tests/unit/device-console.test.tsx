@@ -29,6 +29,7 @@ function createConsoleMockClient() {
     installation_id: "inst-1",
     certificate_fingerprint: "fp-1",
     pending_pairings: [],
+    discovered_devices: [],
     devices: [
       {
         device_id: "gw-1",

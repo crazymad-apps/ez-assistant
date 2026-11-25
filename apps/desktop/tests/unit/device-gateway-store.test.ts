@@ -188,6 +188,44 @@ describe("DeviceGatewayStore", () => {
     expect(ttsRes.duration_ms).toBe(1200);
     expect(ttsRes.elapsed_ms).toBe(85);
   });
+
+  it("connects a discovered local device via connect_discovered_device command", async () => {
+    const discoveredSnapshot: DeviceGatewaySnapshot = {
+      ...gatewaySnapshot(),
+      discovered_devices: [
+        {
+          discovery_id: "Mosaico-5BF0._ez-device._tcp.local.",
+          display_name: "Mosaico-5BF0",
+          model: "esp32s31-mosaico",
+          peer_address: "192.168.110.88",
+          control_port: 8765,
+          key_fingerprint: "1A2B-3C4D",
+        },
+      ],
+    };
+    const device_command = vi.fn(async (command: { type: string }) => command.type === "get_snapshot"
+      ? { type: "get_snapshot", payload: discoveredSnapshot }
+      : { type: "connect_discovered_device", payload: { snapshot: gatewaySnapshot() } });
+    const store = new DeviceGatewayStore({
+      get_client: () => ({ deviceGatewayCommand: device_command }) as unknown as RuntimeClient,
+      refresh_application: async () => undefined,
+    });
+
+    await store.load();
+    expect(store.snapshot?.discovered_devices).toHaveLength(1);
+
+    const ok = await store.connectDiscoveredDevice("Mosaico-5BF0._ez-device._tcp.local.", "  书房 Mosaico  ");
+    expect(ok).toBe(true);
+    expect(device_command).toHaveBeenCalledWith({
+      type: "connect_discovered_device",
+      payload: {
+        discovery_id: "Mosaico-5BF0._ez-device._tcp.local.",
+        display_name: "书房 Mosaico",
+      },
+    });
+    expect(store.snapshot?.discovered_devices).toEqual([]);
+    expect(store.notice_message).toContain("正在连接设备");
+  });
 });
 
 function speechConfigSnapshot(): SpeechConfigurationSnapshot {
@@ -224,6 +262,7 @@ function gatewaySnapshot(): DeviceGatewaySnapshot {
     certificate_fingerprint: "fingerprint",
     pairing_window: { expires_at_ms: 1_000 },
     pending_pairings: [],
+    discovered_devices: [],
     devices: [{
       device_id: "device-1",
       display_name: "客厅终端",

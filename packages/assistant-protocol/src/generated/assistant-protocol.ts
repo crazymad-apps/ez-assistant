@@ -442,6 +442,11 @@ issues: Array<ConfigurationIssue>, };
 export type ConfirmDevicePairingRequest = { pairing_request_id: string, pairing_code?: string | null, display_name: string | null, };
 
 /**
+ * 一键连接局域网中发现的智能终端：自动开启接入、授权目标密钥指纹并向终端下发连接指令。
+ */
+export type ConnectDiscoveredDeviceRequest = { discovery_id: string, display_name?: string, };
+
+/**
  * 一次连接验证的脱敏失败。
  */
 export type ConnectionValidationFailure = {
@@ -734,12 +739,12 @@ export type DeviceConsoleSnapshot = { api_prefix: string, ui_path?: string, dire
  *
  * 这些是 Host 级交互意图，不属于 Runtime Session 命令。
  */
-export type DeviceGatewayCommand = { "type": "get_snapshot", "payload": GetDeviceGatewaySnapshotRequest } | { "type": "set_access_enabled", "payload": SetDeviceAccessEnabledRequest } | { "type": "open_pairing_window", "payload": OpenDevicePairingWindowRequest } | { "type": "close_pairing_window", "payload": CloseDevicePairingWindowRequest } | { "type": "confirm_pairing", "payload": ConfirmDevicePairingRequest } | { "type": "reject_pairing", "payload": RejectDevicePairingRequest } | { "type": "rename_device", "payload": RenameDeviceRequest } | { "type": "revoke_device", "payload": RevokeDeviceRequest } | { "type": "get_speech_configuration", "payload": GetSpeechConfigurationRequest } | { "type": "update_speech_configuration", "payload": UpdateSpeechConfigurationRequest } | { "type": "test_asr_configuration", "payload": TestAsrConfigurationRequest } | { "type": "test_tts_configuration", "payload": TestTtsConfigurationRequest };
+export type DeviceGatewayCommand = { "type": "get_snapshot", "payload": GetDeviceGatewaySnapshotRequest } | { "type": "set_access_enabled", "payload": SetDeviceAccessEnabledRequest } | { "type": "open_pairing_window", "payload": OpenDevicePairingWindowRequest } | { "type": "close_pairing_window", "payload": CloseDevicePairingWindowRequest } | { "type": "confirm_pairing", "payload": ConfirmDevicePairingRequest } | { "type": "reject_pairing", "payload": RejectDevicePairingRequest } | { "type": "connect_discovered_device", "payload": ConnectDiscoveredDeviceRequest } | { "type": "rename_device", "payload": RenameDeviceRequest } | { "type": "revoke_device", "payload": RevokeDeviceRequest } | { "type": "get_speech_configuration", "payload": GetSpeechConfigurationRequest } | { "type": "update_speech_configuration", "payload": UpdateSpeechConfigurationRequest } | { "type": "test_asr_configuration", "payload": TestAsrConfigurationRequest } | { "type": "test_tts_configuration", "payload": TestTtsConfigurationRequest };
 
 /**
  * 与 [`DeviceGatewayCommand`] 一一对应的 Host 命令结果。
  */
-export type DeviceGatewayCommandResult = { "type": "get_snapshot", "payload": DeviceGatewaySnapshot } | { "type": "set_access_enabled", "payload": DeviceGatewayMutationResult } | { "type": "open_pairing_window", "payload": DeviceGatewayMutationResult } | { "type": "close_pairing_window", "payload": DeviceGatewayMutationResult } | { "type": "confirm_pairing", "payload": DeviceGatewayMutationResult } | { "type": "reject_pairing", "payload": DeviceGatewayMutationResult } | { "type": "rename_device", "payload": DeviceGatewayMutationResult } | { "type": "revoke_device", "payload": DeviceGatewayMutationResult } | { "type": "get_speech_configuration", "payload": SpeechConfigurationSnapshot } | { "type": "update_speech_configuration", "payload": UpdateSpeechConfigurationResult } | { "type": "test_asr_configuration", "payload": TestAsrConfigurationResult } | { "type": "test_tts_configuration", "payload": TestTtsConfigurationResult };
+export type DeviceGatewayCommandResult = { "type": "get_snapshot", "payload": DeviceGatewaySnapshot } | { "type": "set_access_enabled", "payload": DeviceGatewayMutationResult } | { "type": "open_pairing_window", "payload": DeviceGatewayMutationResult } | { "type": "close_pairing_window", "payload": DeviceGatewayMutationResult } | { "type": "confirm_pairing", "payload": DeviceGatewayMutationResult } | { "type": "reject_pairing", "payload": DeviceGatewayMutationResult } | { "type": "connect_discovered_device", "payload": DeviceGatewayMutationResult } | { "type": "rename_device", "payload": DeviceGatewayMutationResult } | { "type": "revoke_device", "payload": DeviceGatewayMutationResult } | { "type": "get_speech_configuration", "payload": SpeechConfigurationSnapshot } | { "type": "update_speech_configuration", "payload": UpdateSpeechConfigurationResult } | { "type": "test_asr_configuration", "payload": TestAsrConfigurationResult } | { "type": "test_tts_configuration", "payload": TestTtsConfigurationResult };
 
 /**
  * Host Device Gateway 的可丢弃失效通知；完整状态始终重新读取 Gateway 快照。
@@ -756,7 +761,7 @@ export type DeviceGatewayMutationResult = { snapshot: DeviceGatewaySnapshot, };
  *
  * Gateway 事件只负责通知失效；客户端收到事件后应重新读取本快照。
  */
-export type DeviceGatewaySnapshot = { enabled: boolean, available: boolean, installation_id: string, certificate_fingerprint: string, pairing_window?: DevicePairingWindowSnapshot, pending_pairings: Array<PendingDevicePairingSnapshot>, devices: Array<DeviceSummarySnapshot>, speech_services: DeviceSpeechServicesSnapshot, };
+export type DeviceGatewaySnapshot = { enabled: boolean, available: boolean, installation_id: string, certificate_fingerprint: string, pairing_window?: DevicePairingWindowSnapshot, pending_pairings: Array<PendingDevicePairingSnapshot>, discovered_devices: Array<DiscoveredDeviceSnapshot>, devices: Array<DeviceSummarySnapshot>, speech_services: DeviceSpeechServicesSnapshot, };
 
 /**
  * Runtime 已登记设备的不透明稳定标识。
@@ -787,6 +792,11 @@ export type DeviceSpeechServicesSnapshot = { asr: SpeechServiceStatusSnapshot, t
  * Desktop 管理页使用的设备摘要，由 Runtime 登记事实和 Host 在线状态组合而成。
  */
 export type DeviceSummarySnapshot = { device_id: DeviceId, display_name: string, lifecycle: DeviceLifecycleSnapshot, paired_at_ms: number, updated_at_ms: number, revoked_at_ms: number | null, connection?: DeviceConnectionSnapshot, };
+
+/**
+ * 局域网中通过 `_ez-device._tcp.local.` mDNS 发现的待配对智能终端。
+ */
+export type DiscoveredDeviceSnapshot = { discovery_id: string, display_name: string, model: string, peer_address: string, control_port: number, key_fingerprint: string, firmware_version?: string, mac_address?: string, };
 
 /**
  * 单个在线目录条目；目录中存在不等于已获得运行必需的全部参数或账号调用权限。
