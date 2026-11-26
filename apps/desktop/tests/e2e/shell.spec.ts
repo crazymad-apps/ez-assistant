@@ -549,10 +549,8 @@ async function expectDeviceGatewayManagement(page: Page): Promise<void> {
   await access.click();
   await expect(access).toHaveAttribute("aria-checked", "true");
 
-  await settings.getByRole("button", { name: "添加设备", exact: true }).click();
-  await expect(settings.getByText("正在等待终端发起配对…", { exact: true })).toBeVisible();
-  await settings.getByRole("button", { name: "结束添加", exact: true }).click();
-  await expect(settings.getByText("点击“添加设备”后，附近未配对终端才能申请接入。", { exact: true }))
+  await expect(settings.getByRole("button", { name: "添加设备", exact: true })).toHaveCount(0);
+  await expect(settings.getByText("Mosaico 终端开机连上同一 Wi-Fi 后会自动出现在这里。", { exact: true }))
     .toBeVisible();
 
   await access.click();
