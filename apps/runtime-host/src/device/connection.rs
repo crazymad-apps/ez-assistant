@@ -840,6 +840,9 @@ async fn authenticated_loop(
                     ConnectionCommand::StartPlayback { output, response } => {
                         acknowledge_playback_output(&mut playback, output, response);
                     }
+                    ConnectionCommand::InterruptPlayback { reason } => {
+                        cancel_playback(socket, &mut playback, &reason).await?;
+                    }
                     ConnectionCommand::SpeechStatusChanged(speech_services) => {
                         let asr_ready =
                             speech_services.asr != SpeechServiceStatusSnapshot::Unavailable;
@@ -994,6 +997,9 @@ async fn authenticated_loop(
                                     continue;
                                 }
                                 cancel_playback(socket, &mut playback, "interrupted_by_input").await?;
+                                shared
+                                    .interrupt_playbacks(Some(device_id), "interrupted_by_input")
+                                    .await;
                                 if !client_inputs.remember(
                                     &request.client_input_id,
                                     input_fingerprint(b"text", request.text.as_bytes(), request.output_preference),
@@ -1042,6 +1048,9 @@ async fn authenticated_loop(
                                     continue;
                                 }
                                 cancel_playback(socket, &mut playback, "interrupted_by_input").await?;
+                                shared
+                                    .interrupt_playbacks(Some(device_id), "interrupted_by_input")
+                                    .await;
                                 if voice_turn.lock().await.is_none() {
                                     if let Err(error) = cancel_active_controller_run(shared.runtime.as_ref()).await {
                                         let (code, recoverable) = input_error(&error);
@@ -1210,12 +1219,16 @@ async fn authenticated_loop(
                                     send_wire_error(socket, "unsupported_playback_cancel", Some(envelope.message_id), true).await?;
                                     continue;
                                 }
+                                let wildcard = request.stream_id == 0 && request.output_id.is_empty();
                                 let matches = playback.front().is_some_and(|active| {
                                     active.output_id == request.output_id
                                         && active.stream_id() == Some(request.stream_id)
                                 });
-                                if matches {
+                                if matches || wildcard {
                                     cancel_playback(socket, &mut playback, "cancelled").await?;
+                                    // Stop the active controller run too so long-text `speak` stops
+                                    // generating and queueing subsequent TTS segments.
+                                    let _ = cancel_active_controller_run(shared.runtime.as_ref()).await;
                                 } else {
                                     send_wire_error(socket, "playback_not_active", Some(envelope.message_id), true).await?;
                                 }
@@ -2931,6 +2944,29 @@ mod tests {
         assert!(effective.input_pcm16_16k_mono);
         assert!(effective.output_pcm16_16k_mono);
         assert!(effective.playback_cancel);
+    }
+
+    #[test]
+    fn playback_queue_cancellation_cancels_active_and_queued_long_reply_segments() {
+        let mut queue = VecDeque::new();
+        let token1 = CancellationToken::new();
+        let token2 = CancellationToken::new();
+        let token3 = CancellationToken::new();
+        assert!(reserve_playback(&mut queue, "run-1-s1".to_owned(), token1.clone()));
+        assert!(reserve_playback(&mut queue, "run-1-s2".to_owned(), token2.clone()));
+        assert!(reserve_playback(&mut queue, "run-1-s3".to_owned(), token3.clone()));
+        queue
+            .front_mut()
+            .expect("front")
+            .start(42, Arc::from(vec![0_u8; 640]));
+
+        for active in queue.drain(..) {
+            active.cancellation.cancel();
+        }
+        assert!(queue.is_empty());
+        assert!(token1.is_cancelled());
+        assert!(token2.is_cancelled());
+        assert!(token3.is_cancelled());
     }
 
     #[test]

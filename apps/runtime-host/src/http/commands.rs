@@ -1137,17 +1137,21 @@ async fn dispatch_runtime(
             })),
             false,
         ),
-        RuntimeCommand::SubmitInput(request) => (
-            RuntimeCommandResult::SubmitInput(
-                runtime
-                    .submit_session_input(assistant_runtime::SubmitSessionInputRequest {
-                        input: request,
-                        source: assistant_runtime::InputChannelSource::desktop_text(),
-                    })
-                    .await?,
-            ),
-            false,
-        ),
+        RuntimeCommand::SubmitInput(request) => {
+            let session_id = request.session_id.clone();
+            let result = runtime
+                .submit_session_input(assistant_runtime::SubmitSessionInputRequest {
+                    input: request,
+                    source: assistant_runtime::InputChannelSource::desktop_text(),
+                })
+                .await?;
+            // 新内容进入主控会话后立即打断在线终端仍在播报的旧长文本 TTS。
+            services
+                .device_gateway
+                .interrupt_controller_playbacks_if_session(&session_id, "interrupted_by_input")
+                .await;
+            (RuntimeCommandResult::SubmitInput(result), false)
+        }
         RuntimeCommand::ClearWorkPlan(request) => (
             RuntimeCommandResult::ClearWorkPlan(runtime.clear_work_plan(request).await?),
             false,
@@ -1286,10 +1290,15 @@ async fn dispatch_runtime(
             ),
             false,
         ),
-        RuntimeCommand::CancelRun(request) => (
-            RuntimeCommandResult::CancelRun(runtime.cancel_run(request).await?),
-            false,
-        ),
+        RuntimeCommand::CancelRun(request) => {
+            let session_id = request.session_id.clone();
+            let result = runtime.cancel_run(request).await?;
+            services
+                .device_gateway
+                .interrupt_controller_playbacks_if_session(&session_id, "cancelled")
+                .await;
+            (RuntimeCommandResult::CancelRun(result), false)
+        }
         RuntimeCommand::ShutdownRuntime(request) => (
             RuntimeCommandResult::ShutdownRuntime(runtime.shutdown(request).await?),
             true,

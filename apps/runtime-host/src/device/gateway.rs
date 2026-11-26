@@ -217,6 +217,9 @@ pub(super) enum ConnectionCommand {
         output: PlaybackOutput,
         response: oneshot::Sender<bool>,
     },
+    InterruptPlayback {
+        reason: String,
+    },
     SpeechStatusChanged(DeviceSpeechServicesSnapshot),
     SpeechAsrResult(SpeechAsrResult),
     SpeechTtsResult {
@@ -1142,6 +1145,21 @@ impl DeviceGatewayHandle {
         self.shared.notify_changed();
     }
 
+    /// 当主控会话收到桌面端新输入或取消指令时，立即打断在线终端正在播报的旧长文本 TTS。
+    pub(crate) async fn interrupt_controller_playbacks_if_session(
+        &self,
+        session_id: &assistant_protocol::SessionId,
+        reason: &str,
+    ) -> usize {
+        let Ok(controller) = self.shared.runtime.controller_summary().await else {
+            return 0;
+        };
+        if controller.session_id != *session_id {
+            return 0;
+        }
+        self.shared.interrupt_playbacks(None, reason).await
+    }
+
     pub(crate) async fn console_target(
         &self,
         device_id: &assistant_protocol::DeviceId,
@@ -1450,6 +1468,35 @@ impl GatewayShared {
         for sender in senders {
             let _ = sender.try_send(ConnectionCommand::SpeechStatusChanged(status));
         }
+    }
+
+    /// 向在线终端连接发送打断播报指令，清空当前及排队的旧 TTS 片段（可选排除发起打断的终端自身）。
+    pub(super) async fn interrupt_playbacks(
+        &self,
+        exclude_device: Option<&assistant_protocol::DeviceId>,
+        reason: &str,
+    ) -> usize {
+        let senders = {
+            let state = self.state.lock().await;
+            state
+                .connections
+                .iter()
+                .filter(|(id, _)| exclude_device.is_none_or(|excluded| excluded != *id))
+                .map(|(_, connection)| connection.command.clone())
+                .collect::<Vec<_>>()
+        };
+        let mut interrupted = 0;
+        for sender in senders {
+            if sender
+                .try_send(ConnectionCommand::InterruptPlayback {
+                    reason: reason.to_owned(),
+                })
+                .is_ok()
+            {
+                interrupted += 1;
+            }
+        }
+        interrupted
     }
 
     pub(super) async fn update_capabilities(
