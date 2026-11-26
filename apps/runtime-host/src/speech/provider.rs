@@ -896,18 +896,71 @@ pub(crate) fn wav_bytes_to_pcm16_16k_mono(wav: &[u8]) -> Result<Vec<u8>, SpeechP
     if out_len.saturating_mul(2) > MAX_TTS_PCM_BYTES {
         return Err(SpeechProviderError::OutputTooLarge);
     }
-    let mut out = Vec::with_capacity(out_len * 2);
-    let step = sample_rate as f64 / f64::from(TARGET_SAMPLE_RATE_HZ);
-    for i in 0..out_len {
-        let pos = i as f64 * step;
-        let idx = (pos.floor() as usize).min(mono.len() - 1);
-        let frac = pos - idx as f64;
-        let s0 = f64::from(mono[idx]);
-        let s1 = f64::from(mono[(idx + 1).min(mono.len() - 1)]);
-        let interpolated = (s0 + frac * (s1 - s0)).round().clamp(-32768.0, 32767.0) as i16;
-        out.extend_from_slice(&interpolated.to_le_bytes());
+    let resampled = resample_pcm16_windowed_sinc(&mono, sample_rate, TARGET_SAMPLE_RATE_HZ, out_len);
+    let mut out = Vec::with_capacity(resampled.len() * 2);
+    for sample in resampled {
+        out.extend_from_slice(&sample.to_le_bytes());
     }
     Ok(out)
+}
+
+/// Blackman-windowed sinc FIR resampler with anti-aliasing low-pass filtering.
+///
+/// Prevents high-frequency fold-back aliasing noise when downsampling 24/32/44.1/48 kHz
+/// neural TTS WAV streams to the Device Protocol 1.0 16 kHz PCM16 transport rate.
+fn resample_pcm16_windowed_sinc(
+    input: &[i16],
+    in_rate: u32,
+    out_rate: u32,
+    out_len: usize,
+) -> Vec<i16> {
+    let step = f64::from(in_rate) / f64::from(out_rate);
+    let cutoff = if in_rate > out_rate {
+        0.90 / step
+    } else {
+        0.90
+    };
+    let half_width = if in_rate > out_rate {
+        ((12.0 * step).ceil() as isize).clamp(12, 48)
+    } else {
+        12_isize
+    };
+    let half_width_f = half_width as f64;
+    let max_idx = (input.len() - 1) as isize;
+
+    let mut out = Vec::with_capacity(out_len);
+    for i in 0..out_len {
+        let center = i as f64 * step;
+        let center_floor = center.floor() as isize;
+        let start = center_floor - half_width;
+        let end = center_floor + half_width;
+
+        let mut acc = 0.0_f64;
+        let mut weight_sum = 0.0_f64;
+        for j in start..=end {
+            let x = j as f64 - center;
+            let u = x / half_width_f;
+            if u.abs() >= 1.0 {
+                continue;
+            }
+            let window = 0.42
+                + 0.50 * (std::f64::consts::PI * u).cos()
+                + 0.08 * (2.0 * std::f64::consts::PI * u).cos();
+            let t = std::f64::consts::PI * cutoff * x;
+            let sinc = if t.abs() < 1e-9 { 1.0 } else { t.sin() / t };
+            let weight = sinc * window;
+            let sample = input[j.clamp(0, max_idx) as usize];
+            acc += f64::from(sample) * weight;
+            weight_sum += weight;
+        }
+        let sample = if weight_sum.abs() > 1e-12 {
+            (acc / weight_sum).round().clamp(-32768.0, 32767.0) as i16
+        } else {
+            0
+        };
+        out.push(sample);
+    }
+    out
 }
 
 fn map_transport(error: reqwest::Error) -> SpeechProviderError {
@@ -1533,6 +1586,50 @@ mod tests {
 
         server.abort();
         let _ = server.await;
+    }
+
+    #[test]
+    fn resampler_attenuates_above_nyquist_tones_and_preserves_passband() {
+        let sr_in = 24_000_u32;
+        let n = 4800_usize; // 200ms @ 24kHz
+        let make_sine = |freq_hz: f64| -> Vec<i16> {
+            (0..n)
+                .map(|i| {
+                    let t = i as f64 / f64::from(sr_in);
+                    ((2.0 * std::f64::consts::PI * freq_hz * t).sin() * 20_000.0).round() as i16
+                })
+                .collect()
+        };
+        let rms_mid = |pcm: &[u8]| -> f64 {
+            let samples: Vec<i16> = pcm
+                .chunks_exact(2)
+                .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            let slice = &samples[200..samples.len() - 200];
+            let sum_sq: f64 = slice.iter().map(|&s| f64::from(s) * f64::from(s)).sum();
+            (sum_sq / slice.len() as f64).sqrt()
+        };
+
+        // In-band 1 kHz tone should retain > 95% amplitude.
+        let in_band_pcm =
+            wav_bytes_to_pcm16_16k_mono(&wav_with_rate_and_samples(sr_in, &make_sine(1_000.0)))
+                .expect("1kHz resample");
+        let in_band_rms = rms_mid(&in_band_pcm);
+        assert!(
+            in_band_rms > 13_500.0,
+            "expected 1kHz RMS > 13500, got {in_band_rms}"
+        );
+
+        // Out-of-band 10 kHz tone (> 8 kHz Nyquist of 16 kHz output) must be attenuated > 40 dB.
+        let alias_pcm =
+            wav_bytes_to_pcm16_16k_mono(&wav_with_rate_and_samples(sr_in, &make_sine(10_000.0)))
+                .expect("10kHz resample");
+        let alias_rms = rms_mid(&alias_pcm);
+        let attenuation_db = 20.0 * (in_band_rms / alias_rms.max(1e-6)).log10();
+        assert!(
+            attenuation_db > 40.0,
+            "expected >40 dB anti-aliasing attenuation at 10kHz, got {attenuation_db:.1} dB (rms={alias_rms:.1})"
+        );
     }
 
     fn wav_with_rate_and_samples(sample_rate: u32, samples: &[i16]) -> Vec<u8> {

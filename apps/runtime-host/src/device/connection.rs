@@ -62,6 +62,9 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(25);
 const PLAYBACK_FRAME_INTERVAL: Duration = Duration::from_millis(20);
+const PLAYBACK_TICK_INTERVAL: Duration = Duration::from_millis(10);
+const PLAYBACK_INITIAL_BURST_FRAMES: u32 = 10;
+const PLAYBACK_MAX_CATCHUP_PER_TICK: usize = 6;
 const VOICE_TURN_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const PLAYBACK_SEND_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_QUEUED_PLAYBACKS: usize = 20;
@@ -751,8 +754,8 @@ async fn authenticated_loop(
     } = config;
     let mut heartbeat = interval(HEARTBEAT_INTERVAL);
     heartbeat.tick().await;
-    let mut playback_clock = interval(PLAYBACK_FRAME_INTERVAL);
-    playback_clock.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut playback_clock = interval(PLAYBACK_TICK_INTERVAL);
+    playback_clock.set_missed_tick_behavior(MissedTickBehavior::Skip);
     playback_clock.tick().await;
     let mut voice_turn_clock = interval(VOICE_TURN_POLL_INTERVAL);
     voice_turn_clock.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -1843,18 +1846,39 @@ async fn cancel_playback(
     Ok(())
 }
 
+fn playback_due_sequence_target(elapsed: Duration) -> u32 {
+    let elapsed_frames =
+        u32::try_from(elapsed.as_millis() / PLAYBACK_FRAME_INTERVAL.as_millis()).unwrap_or(u32::MAX);
+    PLAYBACK_INITIAL_BURST_FRAMES.saturating_add(elapsed_frames)
+}
+
+async fn pump_due_playback_frames(
+    socket: &mut WebSocket,
+    playback: &mut VecDeque<ActivePlayback>,
+    max_frames: usize,
+) -> Result<(), ConnectionError> {
+    for _ in 0..max_frames {
+        let Some(active) = playback.front() else {
+            break;
+        };
+        let Some(stream) = active.stream.as_ref() else {
+            break;
+        };
+        let target_sequence = playback_due_sequence_target(stream.started_at.elapsed());
+        if stream.sequence >= target_sequence {
+            break;
+        }
+        send_next_playback_frame(socket, playback).await?;
+    }
+    Ok(())
+}
+
 async fn advance_playback(
     socket: &mut WebSocket,
     playback: &mut VecDeque<ActivePlayback>,
 ) -> Result<(), ConnectionError> {
     synchronize_playback(socket, playback).await?;
-    if playback
-        .front()
-        .is_some_and(|active| active.stream.is_some())
-    {
-        send_next_playback_frame(socket, playback).await?;
-    }
-    Ok(())
+    pump_due_playback_frames(socket, playback, PLAYBACK_MAX_CATCHUP_PER_TICK).await
 }
 
 async fn synchronize_playback(
@@ -1903,6 +1927,7 @@ async fn synchronize_playback(
             );
             active.start(stream_id, output.pcm);
         }
+        pump_due_playback_frames(socket, playback, PLAYBACK_INITIAL_BURST_FRAMES as usize).await?;
     }
     Ok(())
 }
@@ -3234,6 +3259,22 @@ mod tests {
         acknowledge_playback_output(&mut playback, output(), tx);
         assert_eq!(rx.try_recv(), Ok(false));
         assert!(playback.is_empty());
+    }
+
+    #[test]
+    fn playback_schedule_maintains_initial_jitter_cushion_without_cumulative_drift() {
+        assert_eq!(
+            playback_due_sequence_target(Duration::ZERO),
+            PLAYBACK_INITIAL_BURST_FRAMES
+        );
+        assert_eq!(
+            playback_due_sequence_target(Duration::from_millis(20)),
+            PLAYBACK_INITIAL_BURST_FRAMES + 1
+        );
+        assert_eq!(
+            playback_due_sequence_target(Duration::from_millis(1_000)),
+            PLAYBACK_INITIAL_BURST_FRAMES + 50
+        );
     }
 
     mod wss_integration {
