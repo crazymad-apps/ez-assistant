@@ -3681,6 +3681,33 @@ fn paired_device_and_controller_hosting_survive_restart_and_revoke_atomically() 
         reopened.load_inputs().expect("load historical source")[0].channel_source,
         Some(InputChannelSource::Device(_))
     ));
+
+    // 同一物理密钥在撤销后被用户重新配对时，原地重新激活原设备身份，同时保留历史记录引用。
+    let repaired = reopened
+        .register_paired_device(NewPairedDevice {
+            device_id: device_id.clone(),
+            display_name: "重连书房终端".to_owned(),
+            public_key: DevicePublicKey::new([3; 32]),
+            paired_at_ms: 5_000,
+        })
+        .expect("reactivate revoked device with same key");
+    assert_eq!(repaired.device_id, device_id);
+    assert_eq!(repaired.display_name, "重连书房终端");
+    assert_eq!(repaired.lifecycle, DeviceLifecycle::Paired);
+    assert_eq!(repaired.revoked_at_ms, None);
+    assert_eq!(repaired.paired_at_ms, 5_000);
+    assert_eq!(
+        reopened
+            .register_paired_device(NewPairedDevice {
+                device_id: DeviceId::new("device-other-same-key").expect("device id"),
+                display_name: "冲突终端".to_owned(),
+                public_key: DevicePublicKey::new([3; 32]),
+                paired_at_ms: 5_100,
+            })
+            .expect_err("active paired public key must stay unique")
+            .kind(),
+        StoreErrorKind::Conflict
+    );
 }
 
 #[test]

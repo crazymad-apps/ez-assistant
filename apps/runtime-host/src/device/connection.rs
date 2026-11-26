@@ -410,8 +410,7 @@ async fn complete_spake2_pairing(
     keys.verify_binding_mac(b"device-bind", &bind_transcript, &binding_mac)?;
     verify_ed25519(&public_key, &bind_transcript, &signature)?;
 
-    let device_id = DeviceId::new(format!("device-{}", random_token(18)?))
-        .map_err(|_| ConnectionError::InvalidMessage)?;
+    let device_id = resolve_pairing_device_id(shared, &public_key)?;
     let commit_transcript = pairing_commit_transcript(&bind_transcript, device_id.as_str());
     let host_proof = keys.binding_mac(b"host-bind-ack", &commit_transcript);
     send_payload(
@@ -457,8 +456,7 @@ async fn complete_direct_pairing(
 ) -> Result<(), ConnectionError> {
     let identity = shared.installation_identity().await?;
     let host_nonce = random_token(32)?;
-    let device_id = DeviceId::new(format!("device-{}", random_token(18)?))
-        .map_err(|_| ConnectionError::InvalidMessage)?;
+    let device_id = resolve_pairing_device_id(shared, public_key)?;
     let associated_data = pairing_associated_data(
         &hello.pairing_request_id,
         &identity.installation_id,
@@ -509,6 +507,21 @@ async fn complete_direct_pairing(
     .await
 }
 
+fn resolve_pairing_device_id(
+    shared: &GatewayShared,
+    public_key: &[u8],
+) -> Result<DeviceId, ConnectionError> {
+    if let Ok(existing_devices) = shared.runtime.registered_devices()
+        && let Some(existing) = existing_devices
+            .into_iter()
+            .find(|device| device.public_key.as_bytes() == public_key)
+    {
+        return Ok(existing.device_id);
+    }
+    DeviceId::new(format!("device-{}", random_token(18)?))
+        .map_err(|_| ConnectionError::InvalidMessage)
+}
+
 async fn finalize_paired_device(
     socket: &mut WebSocket,
     shared: &GatewayShared,
@@ -521,7 +534,7 @@ async fn finalize_paired_device(
     let public_key =
         DevicePublicKey::from_slice(public_key).ok_or(ConnectionError::InvalidMessage)?;
     let display_name = decision_display_name.unwrap_or_else(|| hello.display_name.clone());
-    let stored = shared
+    let stored = match shared
         .runtime
         .register_paired_device(NewPairedDevice {
             device_id,
@@ -529,7 +542,15 @@ async fn finalize_paired_device(
             public_key,
             paired_at_ms: now_ms()?,
         })
-        .await?;
+        .await
+    {
+        Ok(stored) => stored,
+        Err(error) => {
+            let _ = send_wire_error(socket, "pairing_failed", None, false).await;
+            let _ = close(socket, 1008, "pairing failed").await;
+            return Err(error.into());
+        }
+    };
     shared.remove_discovered_by_fingerprint(&fingerprint).await;
     shared.notify_changed();
     send_payload(
@@ -4615,6 +4636,175 @@ mod tests {
 
             dev_server.abort();
             let _ = dev_server.await;
+            harness.shutdown().await;
+        }
+
+        #[tokio::test]
+        async fn wss_connect_discovered_device_approves_existing_pending_and_allows_repair_after_revoke() {
+            let harness = TestGatewayHarness::start().await;
+            let device_key = SigningKey::from_bytes(&[73_u8; 32]);
+            let device_pub = device_key.verifying_key().to_bytes();
+            let device_fp = public_key_fingerprint(&device_pub);
+            let discovery_id = "Mosaico-Repair._ez-device._tcp.local.";
+
+            // 1. 先登记并撤销该硬件密钥对应的旧设备身份（模拟用户曾点击「解除配对」）。
+            let original_id = DeviceId::new("device-mosaico-revoked-01").expect("device id");
+            harness
+                .runtime
+                .register_paired_device(NewPairedDevice {
+                    device_id: original_id.clone(),
+                    display_name: "Mosaico-5BF0".to_owned(),
+                    public_key: DevicePublicKey::new(device_pub),
+                    paired_at_ms: 1_000,
+                })
+                .await
+                .expect("seed initial paired device");
+            harness
+                .runtime
+                .revoke_paired_device(original_id.clone())
+                .await
+                .expect("revoke initial device");
+
+            // 2. 打开配对窗口，终端先连入并停在 pending_pairings（与截图场景一致）。
+            harness
+                .handle
+                .open_pairing_window()
+                .await
+                .expect("open pairing window");
+            harness
+                .handle
+                .seed_test_discovered_device(
+                    discovery_id,
+                    "Mosaico-5BF0",
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                    8765,
+                    &device_fp,
+                )
+                .await;
+
+            let (mut ws, _) = harness.connect_ws().await;
+            let req_id = "req-mosaico-repair";
+            let dev_nonce = "dev-nonce-repair";
+            send_json(
+                &mut ws,
+                "m-repair-pair",
+                "pairing_hello",
+                &PairingHello {
+                    pairing_request_id: req_id.to_owned(),
+                    display_name: "Mosaico-5BF0".to_owned(),
+                    device_nonce: dev_nonce.to_owned(),
+                    capabilities: text_capabilities(),
+                    pairing_mode: WirePairingMode::DirectConfirm,
+                    pake_share: None,
+                    public_key: Some(encode_base64(&device_pub)),
+                    client_version: Some("esp-pika-mosaico/0.5.0-direct".to_owned()),
+                },
+            )
+            .await;
+            assert_eq!(
+                recv_envelope(&mut ws).await.expect("pending").message_type,
+                "pairing_pending"
+            );
+            let pending_snapshot = harness.handle.snapshot().await.expect("pending snapshot");
+            assert_eq!(pending_snapshot.pending_pairings.len(), 1);
+
+            // 3. 点击「连接」应直接批准现有 pending_pairings，并原地重新激活原 device_id！
+            harness
+                .handle
+                .connect_discovered_device(ConnectDiscoveredDeviceRequest {
+                    discovery_id: discovery_id.to_owned(),
+                    display_name: None,
+                })
+                .await
+                .expect("connect discovered approves existing pending");
+
+            let challenge_env = recv_envelope(&mut ws)
+                .await
+                .expect("pairing_direct_challenge");
+            assert_eq!(challenge_env.message_type, "pairing_direct_challenge");
+            let challenge: PairingDirectChallenge = decode_payload(challenge_env);
+            assert_eq!(challenge.device_id, original_id.as_str());
+
+            let ad = pairing_associated_data(
+                req_id,
+                &harness.identity.installation_id,
+                &harness.identity.certificate_fingerprint,
+                dev_nonce,
+                &challenge.host_nonce,
+                text_capabilities(),
+            );
+            let bind_transcript = pairing_bind_transcript(&ad, &device_pub);
+            let commit_transcript =
+                pairing_commit_transcript(&bind_transcript, &challenge.device_id);
+            let sig = device_key.sign(&commit_transcript).to_bytes();
+            send_json(
+                &mut ws,
+                "m-repair-commit",
+                "pairing_direct_commit",
+                &PairingDirectCommit {
+                    pairing_request_id: req_id.to_owned(),
+                    device_id: challenge.device_id.clone(),
+                    signature: encode_base64(&sig),
+                },
+            )
+            .await;
+            let complete_env = recv_envelope(&mut ws).await.expect("pairing_complete");
+            assert_eq!(complete_env.message_type, "pairing_complete");
+            let complete: PairingComplete = decode_payload(complete_env);
+            assert_eq!(complete.device_id, original_id.as_str());
+            let _ = ws.close(None).await;
+
+            // 4. 快照中该设备已恢复 Paired，且能重新认证上线。
+            let after = harness.handle.snapshot().await.expect("after snapshot");
+            assert!(after.discovered_devices.is_empty());
+            assert!(after.pending_pairings.is_empty());
+            let device = after
+                .devices
+                .iter()
+                .find(|item| item.device_id == original_id)
+                .expect("reactivated device present");
+            assert_eq!(
+                device.lifecycle,
+                assistant_protocol::DeviceLifecycleSnapshot::Paired
+            );
+
+            let (mut auth_ws, auth_challenge) = harness.connect_ws().await;
+            let auth_nonce = "dev-auth-nonce-repair";
+            let auth_t = auth_transcript(
+                &auth_challenge.connection_id,
+                &auth_challenge.nonce,
+                original_id.as_str(),
+                auth_nonce,
+                text_capabilities(),
+                OutputPreferenceSnapshot::Text,
+            );
+            let auth_sig = device_key.sign(&auth_t).to_bytes();
+            send_json(
+                &mut auth_ws,
+                "m-repair-auth",
+                "hello",
+                &DeviceHello {
+                    device_id: original_id.to_string(),
+                    device_nonce: auth_nonce.to_owned(),
+                    capabilities: text_capabilities(),
+                    output_preference: OutputPreferenceSnapshot::Text,
+                    client_version: "esp-pika-mosaico/0.5.0-direct".to_owned(),
+                    signature: encode_base64(&auth_sig),
+                    mcp_servers: Vec::new(),
+                    console: None,
+                    hardware: None,
+                    speech_relay: false,
+                },
+            )
+            .await;
+            assert_eq!(
+                recv_envelope(&mut auth_ws)
+                    .await
+                    .expect("hello_ack")
+                    .message_type,
+                "hello_ack"
+            );
+            let _ = auth_ws.close(None).await;
             harness.shutdown().await;
         }
 

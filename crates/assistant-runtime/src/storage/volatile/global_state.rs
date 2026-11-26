@@ -399,10 +399,20 @@ impl VolatileRuntimeStore {
                 return Err(conflict("device display name is empty"));
             }
             let mut state = self.lock()?;
-            if let Some(existing) = state.devices.get(&device.device_id) {
+            if let Some(existing) = state.devices.get_mut(&device.device_id) {
                 if existing.lifecycle == DeviceLifecycle::Paired
                     && existing.public_key == device.public_key
                 {
+                    return Ok(existing.clone());
+                }
+                if existing.lifecycle == DeviceLifecycle::Revoked
+                    && existing.public_key == device.public_key
+                {
+                    existing.display_name = device.display_name;
+                    existing.lifecycle = DeviceLifecycle::Paired;
+                    existing.paired_at_ms = device.paired_at_ms;
+                    existing.updated_at_ms = device.paired_at_ms;
+                    existing.revoked_at_ms = None;
                     return Ok(existing.clone());
                 }
                 return Err(conflict("device identity already exists"));
