@@ -138,6 +138,87 @@ describe("DeviceGatewayStore", () => {
     expect(store.notice_message).toContain("保存");
   });
 
+  it("saves, activates, and deletes saved ASR and TTS profiles", async () => {
+    const initialConfig = speechConfigSnapshot();
+    const afterSave: SpeechConfigurationSnapshot = {
+      ...initialConfig,
+      revision: "rev-2",
+      asr_profiles: [
+        ...initialConfig.asr_profiles,
+        {
+          id: "asr-2",
+          name: "DeepSeek 备用",
+          provider: "deepseek",
+          endpoint: "https://api.deepseek.com/v1",
+          model: "deepseek-asr",
+          timeout_ms: 25000,
+          credential_configured: true,
+          credential_masked: "sk-****9999",
+        },
+      ],
+      active_asr_id: "asr-2",
+    };
+    const afterDisable: SpeechConfigurationSnapshot = {
+      ...afterSave,
+      revision: "rev-3",
+      active_asr_id: undefined,
+      asr: { ...afterSave.asr, enabled: false },
+    };
+    const afterDelete: SpeechConfigurationSnapshot = {
+      ...afterDisable,
+      revision: "rev-4",
+      asr_profiles: initialConfig.asr_profiles,
+    };
+    const device_command = vi.fn(async (command: { type: string }) => {
+      if (command.type === "get_speech_configuration") {
+        return { type: "get_speech_configuration", payload: initialConfig };
+      }
+      if (command.type === "save_asr_profile") {
+        return { type: "save_asr_profile", payload: { configuration: afterSave, snapshot: gatewaySnapshot() } };
+      }
+      if (command.type === "set_active_speech_profile") {
+        return { type: "set_active_speech_profile", payload: { configuration: afterDisable, snapshot: gatewaySnapshot() } };
+      }
+      if (command.type === "delete_speech_profile") {
+        return { type: "delete_speech_profile", payload: { configuration: afterDelete, snapshot: gatewaySnapshot() } };
+      }
+      return { type: command.type, payload: { snapshot: gatewaySnapshot() } };
+    });
+    const store = new DeviceGatewayStore({
+      get_client: () => ({ deviceGatewayCommand: device_command }) as unknown as RuntimeClient,
+      refresh_application: async () => undefined,
+    });
+
+    await store.loadSpeechConfiguration();
+    expect(await store.saveAsrProfile({
+      expected_revision: "rev-1",
+      name: "DeepSeek 备用",
+      provider: "deepseek",
+      endpoint: "https://api.deepseek.com/v1",
+      model: "deepseek-asr",
+      timeout_ms: 25000,
+      credential: "sk-deepseek-9999",
+      clear_credential: false,
+      activate: true,
+    })).toBe(true);
+    expect(store.speech_config?.asr_profiles).toHaveLength(2);
+    expect(store.speech_config?.active_asr_id).toBe("asr-2");
+
+    expect(await store.setActiveSpeechProfile("asr", null)).toBe(true);
+    expect(device_command).toHaveBeenLastCalledWith({
+      type: "set_active_speech_profile",
+      payload: { expected_revision: "rev-2", capability: "asr", profile_id: undefined },
+    });
+    expect(store.speech_config?.active_asr_id).toBeUndefined();
+
+    expect(await store.deleteSpeechProfile("asr", "asr-2")).toBe(true);
+    expect(device_command).toHaveBeenLastCalledWith({
+      type: "delete_speech_profile",
+      payload: { expected_revision: "rev-3", capability: "asr", profile_id: "asr-2" },
+    });
+    expect(store.speech_config?.asr_profiles).toHaveLength(1);
+  });
+
   it("invokes testAsrConfiguration and testTtsConfiguration via DeviceGatewayCommand", async () => {
     const device_command = vi.fn(async (command: { type: string }) => {
       if (command.type === "test_asr_configuration") {
@@ -250,6 +331,33 @@ function speechConfigSnapshot(): SpeechConfigurationSnapshot {
       credential_configured: true,
       credential_masked: "sk-***1234",
     },
+    asr_profiles: [
+      {
+        id: "asr-default",
+        name: "阿里云百炼 · fun-asr-realtime",
+        provider: "dashscope",
+        endpoint: "https://dashscope.aliyuncs.com",
+        model: "fun-asr-realtime",
+        timeout_ms: 30000,
+        credential_configured: true,
+        credential_masked: "sk-***1234",
+      },
+    ],
+    active_asr_id: "asr-default",
+    tts_profiles: [
+      {
+        id: "tts-default",
+        name: "阿里云百炼 · longxiaochun",
+        provider: "dashscope",
+        endpoint: "https://dashscope.aliyuncs.com",
+        model: "cosyvoice-v3-flash",
+        voice: "longxiaochun",
+        timeout_ms: 30000,
+        credential_configured: true,
+        credential_masked: "sk-***1234",
+      },
+    ],
+    active_tts_id: "tts-default",
     status: { asr: "ready", tts: "ready" },
   };
 }

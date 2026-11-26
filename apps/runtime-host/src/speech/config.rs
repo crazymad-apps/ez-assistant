@@ -3,15 +3,17 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use assistant_protocol::{
-    AsrConfigurationSnapshot, DeviceSpeechServicesSnapshot, RuntimeErrorCode, RuntimeErrorInfo,
+    AsrConfigurationSnapshot, AsrProfileSnapshot, DeleteSpeechProfileRequest,
+    DeviceSpeechServicesSnapshot, RuntimeErrorCode, RuntimeErrorInfo, SaveAsrProfileRequest,
+    SaveTtsProfileRequest, SetActiveSpeechProfileRequest, SpeechCapabilityKind,
     SpeechConfigurationSnapshot, SpeechProviderKind, SpeechServiceStatusSnapshot,
-    TtsConfigurationSnapshot, UpdateAsrConfigurationInput, UpdateSpeechConfigurationRequest,
-    UpdateTtsConfigurationInput,
+    TtsConfigurationSnapshot, TtsProfileSnapshot, UpdateAsrConfigurationInput,
+    UpdateSpeechConfigurationRequest, UpdateTtsConfigurationInput,
 };
 use assistant_runtime::{ConfigSourceLoad, ConfigSourceReplace, RuntimeConfigSource};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use toml_edit::{DocumentMut, Item, Table};
+use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
 
 use super::provider::{
     AsrProvider, DashScopeSpeechRecognizer, DashScopeSpeechSynthesizer, DeepSeekSpeechRecognizer,
@@ -29,6 +31,10 @@ const DEFAULT_GROQ_ENDPOINT: &str = "https://api.groq.com/openai/v1";
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 const MAX_TIMEOUT_MS: u64 = 120_000;
 const MAX_TEXT_BYTES: usize = 512;
+const MAX_PROFILE_NAME_BYTES: usize = 128;
+const MAX_SPEECH_PROFILES: usize = 32;
+const LEGACY_ASR_PROFILE_ID: &str = "asr-default";
+const LEGACY_TTS_PROFILE_ID: &str = "tts-default";
 
 /// 读取或更新 `config.toml` 中语音配置段时的稳定错误分类。
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
@@ -100,11 +106,15 @@ struct RawSpeechConfig {
     // 先隔离原始表，单能力字段缺失/类型错误不能令另一能力一起反序列化失败。
     asr: Option<toml::Value>,
     tts: Option<toml::Value>,
+    active_asr_id: Option<String>,
+    active_tts_id: Option<String>,
+    asr_profiles: Option<Vec<toml::Value>>,
+    tts_profiles: Option<Vec<toml::Value>>,
     debug_audio_directory: Option<PathBuf>,
 }
 
-/// `[speech.asr]` 的 Provider 配置。
-#[derive(Deserialize, Serialize)]
+/// `[speech.asr]` 的旧版单槽 Provider 配置（向后兼容自动迁移）。
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RawAsrConfig {
     provider: String,
@@ -116,8 +126,8 @@ struct RawAsrConfig {
     timeout_ms: u64,
 }
 
-/// `[speech.tts]` 的 Provider 配置。
-#[derive(Deserialize, Serialize)]
+/// `[speech.tts]` 的旧版单槽 Provider 配置（向后兼容自动迁移）。
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RawTtsConfig {
     provider: String,
@@ -128,6 +138,188 @@ struct RawTtsConfig {
     endpoint: Option<String>,
     #[serde(default = "default_timeout_ms")]
     timeout_ms: u64,
+}
+
+/// `[[speech.asr_profiles]]` 已保存 ASR 配置条目。
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawAsrProfile {
+    id: String,
+    name: String,
+    provider: String,
+    model: String,
+    credential: String,
+    #[serde(default)]
+    endpoint: Option<String>,
+    #[serde(default = "default_timeout_ms")]
+    timeout_ms: u64,
+}
+
+impl RawAsrProfile {
+    fn to_raw_config(&self) -> RawAsrConfig {
+        RawAsrConfig {
+            provider: self.provider.clone(),
+            model: self.model.clone(),
+            credential: self.credential.clone(),
+            endpoint: self.endpoint.clone(),
+            timeout_ms: self.timeout_ms,
+        }
+    }
+}
+
+/// `[[speech.tts_profiles]]` 已保存 TTS 配置条目。
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawTtsProfile {
+    id: String,
+    name: String,
+    provider: String,
+    model: String,
+    voice: String,
+    credential: String,
+    #[serde(default)]
+    endpoint: Option<String>,
+    #[serde(default = "default_timeout_ms")]
+    timeout_ms: u64,
+}
+
+impl RawTtsProfile {
+    fn to_raw_config(&self) -> RawTtsConfig {
+        RawTtsConfig {
+            provider: self.provider.clone(),
+            model: self.model.clone(),
+            voice: self.voice.clone(),
+            credential: self.credential.clone(),
+            endpoint: self.endpoint.clone(),
+            timeout_ms: self.timeout_ms,
+        }
+    }
+}
+
+#[derive(Default)]
+struct ResolvedSpeechState {
+    asr_profiles: Vec<RawAsrProfile>,
+    active_asr_id: Option<String>,
+    tts_profiles: Vec<RawTtsProfile>,
+    active_tts_id: Option<String>,
+    debug_audio_directory: Option<PathBuf>,
+}
+
+impl ResolvedSpeechState {
+    fn active_asr(&self) -> Option<&RawAsrProfile> {
+        let id = self.active_asr_id.as_deref()?;
+        self.find_asr(id)
+    }
+
+    fn active_tts(&self) -> Option<&RawTtsProfile> {
+        let id = self.active_tts_id.as_deref()?;
+        self.find_tts(id)
+    }
+
+    fn find_asr(&self, id: &str) -> Option<&RawAsrProfile> {
+        self.asr_profiles.iter().find(|profile| profile.id == id)
+    }
+
+    fn find_tts(&self, id: &str) -> Option<&RawTtsProfile> {
+        self.tts_profiles.iter().find(|profile| profile.id == id)
+    }
+}
+
+fn resolve_speech_state(speech: Option<RawSpeechConfig>) -> ResolvedSpeechState {
+    let Some(speech) = speech else {
+        return ResolvedSpeechState::default();
+    };
+
+    let (asr_profiles, active_asr_id) = match speech.asr_profiles {
+        Some(raw_list) => {
+            let mut profiles: Vec<RawAsrProfile> = Vec::new();
+            for item in raw_list {
+                let Ok(profile) = item.try_into::<RawAsrProfile>() else {
+                    continue;
+                };
+                if profile.id.trim().is_empty()
+                    || profiles.iter().any(|existing| existing.id == profile.id)
+                {
+                    continue;
+                }
+                profiles.push(profile);
+            }
+            let active = speech
+                .active_asr_id
+                .filter(|id| profiles.iter().any(|profile| profile.id == *id));
+            (profiles, active)
+        }
+        None => match speech
+            .asr
+            .and_then(|raw| raw.try_into::<RawAsrConfig>().ok())
+        {
+            Some(legacy) => {
+                let provider = parse_provider_kind(&legacy.provider)
+                    .unwrap_or(SpeechProviderKind::Dashscope);
+                let profile = RawAsrProfile {
+                    id: LEGACY_ASR_PROFILE_ID.to_owned(),
+                    name: default_asr_profile_name(provider, &legacy.model),
+                    provider: legacy.provider,
+                    model: legacy.model,
+                    credential: legacy.credential,
+                    endpoint: legacy.endpoint,
+                    timeout_ms: legacy.timeout_ms,
+                };
+                (vec![profile], Some(LEGACY_ASR_PROFILE_ID.to_owned()))
+            }
+            None => (Vec::new(), None),
+        },
+    };
+
+    let (tts_profiles, active_tts_id) = match speech.tts_profiles {
+        Some(raw_list) => {
+            let mut profiles: Vec<RawTtsProfile> = Vec::new();
+            for item in raw_list {
+                let Ok(profile) = item.try_into::<RawTtsProfile>() else {
+                    continue;
+                };
+                if profile.id.trim().is_empty()
+                    || profiles.iter().any(|existing| existing.id == profile.id)
+                {
+                    continue;
+                }
+                profiles.push(profile);
+            }
+            let active = speech
+                .active_tts_id
+                .filter(|id| profiles.iter().any(|profile| profile.id == *id));
+            (profiles, active)
+        }
+        None => match speech
+            .tts
+            .and_then(|raw| raw.try_into::<RawTtsConfig>().ok())
+        {
+            Some(legacy) => {
+                let provider = parse_provider_kind(&legacy.provider)
+                    .unwrap_or(SpeechProviderKind::Dashscope);
+                let profile = RawTtsProfile {
+                    id: LEGACY_TTS_PROFILE_ID.to_owned(),
+                    name: default_tts_profile_name(provider, &legacy.voice, &legacy.model),
+                    provider: legacy.provider,
+                    model: legacy.model,
+                    voice: legacy.voice,
+                    credential: legacy.credential,
+                    endpoint: legacy.endpoint,
+                    timeout_ms: legacy.timeout_ms,
+                };
+                (vec![profile], Some(LEGACY_TTS_PROFILE_ID.to_owned()))
+            }
+            None => (Vec::new(), None),
+        },
+    };
+
+    ResolvedSpeechState {
+        asr_profiles,
+        active_asr_id,
+        tts_profiles,
+        active_tts_id,
+        debug_audio_directory: speech.debug_audio_directory,
+    }
 }
 
 pub(super) async fn load(source: &dyn RuntimeConfigSource) -> CompiledSpeechConfig {
@@ -141,28 +333,21 @@ fn compile_document_contents(contents: &str) -> CompiledSpeechConfig {
     let Ok(document) = toml::from_str::<SpeechDocument>(contents) else {
         return CompiledSpeechConfig::unavailable();
     };
-    let Some(speech) = document.speech else {
-        return CompiledSpeechConfig::unavailable();
-    };
-
-    let raw_asr = speech
-        .asr
-        .and_then(|raw| raw.try_into::<RawAsrConfig>().ok());
-    let raw_tts = speech
-        .tts
-        .and_then(|raw| raw.try_into::<RawTtsConfig>().ok());
+    let state = resolve_speech_state(document.speech);
+    let active_asr = state.active_asr().map(RawAsrProfile::to_raw_config);
+    let active_tts = state.active_tts().map(RawTtsProfile::to_raw_config);
     let asr_timeout = Duration::from_millis(
-        raw_asr
+        active_asr
             .as_ref()
             .map_or(DEFAULT_TIMEOUT_MS, |raw| raw.timeout_ms),
     );
     let tts_timeout = Duration::from_millis(
-        raw_tts
+        active_tts
             .as_ref()
             .map_or(DEFAULT_TIMEOUT_MS, |raw| raw.timeout_ms),
     );
-    let asr = raw_asr.and_then(compile_asr);
-    let tts = raw_tts.and_then(compile_tts);
+    let asr = active_asr.and_then(compile_asr);
+    let tts = active_tts.and_then(compile_tts);
     CompiledSpeechConfig {
         status: DeviceSpeechServicesSnapshot {
             asr: if asr.is_some() {
@@ -178,7 +363,7 @@ fn compile_document_contents(contents: &str) -> CompiledSpeechConfig {
         },
         asr,
         tts,
-        debug_audio_directory: debug_audio_directory(speech.debug_audio_directory),
+        debug_audio_directory: debug_audio_directory(state.debug_audio_directory),
         asr_timeout,
         tts_timeout,
     }
@@ -189,35 +374,26 @@ pub(super) async fn read_configuration(
     status: DeviceSpeechServicesSnapshot,
 ) -> Result<SpeechConfigurationSnapshot, SpeechConfigError> {
     match source.load().await {
-        ConfigSourceLoad::Missing => Ok(project_configuration(None, None, None, status)),
+        ConfigSourceLoad::Missing => Ok(project_configuration(
+            None,
+            &ResolvedSpeechState::default(),
+            status,
+        )),
         ConfigSourceLoad::Document(doc) => {
             let revision = doc.revision().to_owned();
             let parsed = toml::from_str::<SpeechDocument>(doc.contents()).ok();
-            let speech = parsed.and_then(|d| d.speech);
-            let raw_asr = speech
-                .as_ref()
-                .and_then(|s| s.asr.clone())
-                .and_then(|v| v.try_into::<RawAsrConfig>().ok());
-            let raw_tts = speech
-                .as_ref()
-                .and_then(|s| s.tts.clone())
-                .and_then(|v| v.try_into::<RawTtsConfig>().ok());
-            Ok(project_configuration(
-                Some(revision),
-                raw_asr.as_ref(),
-                raw_tts.as_ref(),
-                status,
-            ))
+            let state = resolve_speech_state(parsed.and_then(|d| d.speech));
+            Ok(project_configuration(Some(revision), &state, status))
         }
         ConfigSourceLoad::Unavailable(_) => Err(SpeechConfigError::Unavailable),
     }
 }
 
-pub(super) async fn update_configuration(
+async fn load_editable_document(
     source: &dyn RuntimeConfigSource,
-    request: UpdateSpeechConfigurationRequest,
-) -> Result<SpeechConfigUpdateOutcome, SpeechConfigError> {
-    let (mut document, current_revision) = match source.load().await {
+    expected_revision: Option<&str>,
+) -> Result<(DocumentMut, Option<String>, ResolvedSpeechState), SpeechConfigError> {
+    let (document, current_revision) = match source.load().await {
         ConfigSourceLoad::Missing => (
             "schema_version = 1\n"
                 .parse::<DocumentMut>()
@@ -233,20 +409,137 @@ pub(super) async fn update_configuration(
         ConfigSourceLoad::Unavailable(_) => return Err(SpeechConfigError::Unavailable),
     };
 
-    if request.expected_revision != current_revision {
+    if expected_revision != current_revision.as_deref() {
         return Err(SpeechConfigError::Conflict);
     }
 
     let existing_parsed = toml::from_str::<SpeechDocument>(&document.to_string()).ok();
-    let existing_speech = existing_parsed.and_then(|d| d.speech);
-    let existing_asr = existing_speech
-        .as_ref()
-        .and_then(|s| s.asr.clone())
-        .and_then(|v| v.try_into::<RawAsrConfig>().ok());
-    let existing_tts = existing_speech
-        .as_ref()
-        .and_then(|s| s.tts.clone())
-        .and_then(|v| v.try_into::<RawTtsConfig>().ok());
+    let state = resolve_speech_state(existing_parsed.and_then(|d| d.speech));
+    Ok((document, current_revision, state))
+}
+
+async fn persist_speech_state(
+    source: &dyn RuntimeConfigSource,
+    mut document: DocumentMut,
+    current_revision: Option<String>,
+    state: &ResolvedSpeechState,
+) -> Result<SpeechConfigUpdateOutcome, SpeechConfigError> {
+    write_speech_state(&mut document, state)?;
+    let next_text = document.to_string();
+    match source.replace(current_revision, next_text).await {
+        ConfigSourceReplace::Applied(saved_doc) => {
+            let compiled = compile_document_contents(saved_doc.contents());
+            let configuration = project_configuration(
+                Some(saved_doc.revision().to_owned()),
+                state,
+                compiled.status,
+            );
+            Ok(SpeechConfigUpdateOutcome {
+                compiled,
+                configuration,
+            })
+        }
+        ConfigSourceReplace::Conflict(_) => Err(SpeechConfigError::Conflict),
+        ConfigSourceReplace::Unavailable(_) => Err(SpeechConfigError::Unavailable),
+    }
+}
+
+fn write_speech_state(
+    document: &mut DocumentMut,
+    state: &ResolvedSpeechState,
+) -> Result<(), SpeechConfigError> {
+    if state.asr_profiles.is_empty() && state.tts_profiles.is_empty() {
+        if let Some(speech_table) = document.get_mut("speech").and_then(Item::as_table_mut) {
+            speech_table.remove("asr");
+            speech_table.remove("tts");
+            speech_table.remove("active_asr_id");
+            speech_table.remove("active_tts_id");
+            speech_table.remove("asr_profiles");
+            speech_table.remove("tts_profiles");
+            if speech_table.is_empty() {
+                document.remove("speech");
+            }
+        }
+        return Ok(());
+    }
+
+    if !document.contains_key("speech") {
+        let mut tbl = Table::new();
+        tbl.set_implicit(false);
+        document["speech"] = Item::Table(tbl);
+    }
+    let speech_table = document
+        .get_mut("speech")
+        .and_then(Item::as_table_mut)
+        .ok_or(SpeechConfigError::Invalid(
+            "[speech] 配置节点必须是 TOML 表。",
+        ))?;
+
+    // 统一迁移到多配置列表，移除旧版单槽表避免密钥重复残留。
+    speech_table.remove("asr");
+    speech_table.remove("tts");
+
+    match &state.active_asr_id {
+        Some(id) => {
+            speech_table["active_asr_id"] = value(id.as_str());
+        }
+        None => {
+            speech_table.remove("active_asr_id");
+        }
+    }
+    match &state.active_tts_id {
+        Some(id) => {
+            speech_table["active_tts_id"] = value(id.as_str());
+        }
+        None => {
+            speech_table.remove("active_tts_id");
+        }
+    }
+
+    if state.asr_profiles.is_empty() {
+        speech_table.remove("asr_profiles");
+    } else {
+        let mut array = ArrayOfTables::new();
+        for profile in &state.asr_profiles {
+            let section = toml::to_string(profile)
+                .map_err(|_| SpeechConfigError::Unavailable)?
+                .parse::<DocumentMut>()
+                .map_err(|_| SpeechConfigError::Unavailable)?;
+            array.push(section.as_table().clone());
+        }
+        speech_table["asr_profiles"] = Item::ArrayOfTables(array);
+    }
+
+    if state.tts_profiles.is_empty() {
+        speech_table.remove("tts_profiles");
+    } else {
+        let mut array = ArrayOfTables::new();
+        for profile in &state.tts_profiles {
+            let section = toml::to_string(profile)
+                .map_err(|_| SpeechConfigError::Unavailable)?
+                .parse::<DocumentMut>()
+                .map_err(|_| SpeechConfigError::Unavailable)?;
+            array.push(section.as_table().clone());
+        }
+        speech_table["tts_profiles"] = Item::ArrayOfTables(array);
+    }
+
+    let has_scalar_keys = state.active_asr_id.is_some()
+        || state.active_tts_id.is_some()
+        || speech_table.contains_key("debug_audio_directory");
+    speech_table.set_implicit(!has_scalar_keys);
+    Ok(())
+}
+
+pub(super) async fn update_configuration(
+    source: &dyn RuntimeConfigSource,
+    request: UpdateSpeechConfigurationRequest,
+) -> Result<SpeechConfigUpdateOutcome, SpeechConfigError> {
+    let (document, current_revision, mut state) =
+        load_editable_document(source, request.expected_revision.as_deref()).await?;
+
+    let existing_asr = state.active_asr().map(RawAsrProfile::to_raw_config);
+    let existing_tts = state.active_tts().map(RawTtsProfile::to_raw_config);
 
     let next_asr = build_next_asr(&request.asr, existing_asr.as_ref())?;
     let reuse_asr_secret = request
@@ -268,71 +561,324 @@ pub(super) async fn update_configuration(
         reuse_asr_secret.as_deref(),
     )?;
 
-    if next_asr.is_none() && next_tts.is_none() {
-        if let Some(speech_table) = document.get_mut("speech").and_then(Item::as_table_mut) {
-            speech_table.remove("asr");
-            speech_table.remove("tts");
-            if speech_table.is_empty() {
-                document.remove("speech");
+    match next_asr {
+        Some(raw) => {
+            let provider = parse_provider_kind(&raw.provider).unwrap_or(SpeechProviderKind::Dashscope);
+            let default_name = default_asr_profile_name(provider, &raw.model);
+            if let Some(active_id) = state.active_asr_id.clone()
+                && let Some(profile) = state.asr_profiles.iter_mut().find(|p| p.id == active_id)
+            {
+                profile.provider = raw.provider;
+                profile.model = raw.model;
+                profile.credential = raw.credential;
+                profile.endpoint = raw.endpoint;
+                profile.timeout_ms = raw.timeout_ms;
+                if profile.name.trim().is_empty() {
+                    profile.name = default_name;
+                }
+            } else {
+                let id = if state.find_asr(LEGACY_ASR_PROFILE_ID).is_none() {
+                    LEGACY_ASR_PROFILE_ID.to_owned()
+                } else {
+                    generate_profile_id("asr", |candidate| state.find_asr(candidate).is_some())?
+                };
+                state.asr_profiles.push(RawAsrProfile {
+                    id: id.clone(),
+                    name: default_name,
+                    provider: raw.provider,
+                    model: raw.model,
+                    credential: raw.credential,
+                    endpoint: raw.endpoint,
+                    timeout_ms: raw.timeout_ms,
+                });
+                state.active_asr_id = Some(id);
             }
         }
+        None => {
+            state.active_asr_id = None;
+        }
+    }
+
+    match next_tts {
+        Some(raw) => {
+            let provider = parse_provider_kind(&raw.provider).unwrap_or(SpeechProviderKind::Dashscope);
+            let default_name = default_tts_profile_name(provider, &raw.voice, &raw.model);
+            if let Some(active_id) = state.active_tts_id.clone()
+                && let Some(profile) = state.tts_profiles.iter_mut().find(|p| p.id == active_id)
+            {
+                profile.provider = raw.provider;
+                profile.model = raw.model;
+                profile.voice = raw.voice;
+                profile.credential = raw.credential;
+                profile.endpoint = raw.endpoint;
+                profile.timeout_ms = raw.timeout_ms;
+                if profile.name.trim().is_empty() {
+                    profile.name = default_name;
+                }
+            } else {
+                let id = if state.find_tts(LEGACY_TTS_PROFILE_ID).is_none() {
+                    LEGACY_TTS_PROFILE_ID.to_owned()
+                } else {
+                    generate_profile_id("tts", |candidate| state.find_tts(candidate).is_some())?
+                };
+                state.tts_profiles.push(RawTtsProfile {
+                    id: id.clone(),
+                    name: default_name,
+                    provider: raw.provider,
+                    model: raw.model,
+                    voice: raw.voice,
+                    credential: raw.credential,
+                    endpoint: raw.endpoint,
+                    timeout_ms: raw.timeout_ms,
+                });
+                state.active_tts_id = Some(id);
+            }
+        }
+        None => {
+            state.active_tts_id = None;
+        }
+    }
+
+    persist_speech_state(source, document, current_revision, &state).await
+}
+
+pub(super) async fn save_asr_profile(
+    source: &dyn RuntimeConfigSource,
+    request: SaveAsrProfileRequest,
+) -> Result<SpeechConfigUpdateOutcome, SpeechConfigError> {
+    let (document, current_revision, mut state) =
+        load_editable_document(source, request.expected_revision.as_deref()).await?;
+
+    let input = UpdateAsrConfigurationInput {
+        enabled: true,
+        provider: request.provider,
+        endpoint: request.endpoint,
+        model: request.model,
+        timeout_ms: request.timeout_ms,
+        credential: request.credential,
+        clear_credential: request.clear_credential,
+    };
+
+    let target_id = if let Some(raw_id) = request.id {
+        let id = raw_id.trim().to_owned();
+        let Some(pos) = state.asr_profiles.iter().position(|p| p.id == id) else {
+            return Err(SpeechConfigError::Invalid(
+                "未找到要编辑的语音识别（ASR）配置，请刷新后重试。",
+            ));
+        };
+        let existing = state.asr_profiles[pos].to_raw_config();
+        let built = validate_and_build_asr(&input, Some(&existing))?;
+        let name = normalize_profile_name(
+            &request.name,
+            || default_asr_profile_name(request.provider, &built.model),
+        )?;
+        state.asr_profiles[pos] = RawAsrProfile {
+            id: id.clone(),
+            name,
+            provider: built.provider,
+            model: built.model,
+            credential: built.credential,
+            endpoint: built.endpoint,
+            timeout_ms: built.timeout_ms,
+        };
+        id
     } else {
-        if !document.contains_key("speech") {
-            let mut tbl = Table::new();
-            tbl.set_implicit(true);
-            document["speech"] = Item::Table(tbl);
+        if state.asr_profiles.len() >= MAX_SPEECH_PROFILES {
+            return Err(SpeechConfigError::Invalid(
+                "已保存的语音识别（ASR）配置数量已达上限。",
+            ));
         }
-        let speech_table = document
-            .get_mut("speech")
-            .and_then(Item::as_table_mut)
-            .ok_or(SpeechConfigError::Invalid(
-                "[speech] 配置节点必须是 TOML 表。",
-            ))?;
+        let built = validate_and_build_asr(&input, None)?;
+        let id = generate_profile_id("asr", |candidate| state.find_asr(candidate).is_some())?;
+        let name = normalize_profile_name(
+            &request.name,
+            || default_asr_profile_name(request.provider, &built.model),
+        )?;
+        state.asr_profiles.push(RawAsrProfile {
+            id: id.clone(),
+            name,
+            provider: built.provider,
+            model: built.model,
+            credential: built.credential,
+            endpoint: built.endpoint,
+            timeout_ms: built.timeout_ms,
+        });
+        id
+    };
 
-        match &next_asr {
-            Some(asr) => {
-                let section = toml::to_string(asr)
-                    .map_err(|_| SpeechConfigError::Unavailable)?
-                    .parse::<DocumentMut>()
-                    .map_err(|_| SpeechConfigError::Unavailable)?;
-                speech_table["asr"] = Item::Table(section.as_table().clone());
+    if request.activate {
+        state.active_asr_id = Some(target_id);
+    }
+
+    persist_speech_state(source, document, current_revision, &state).await
+}
+
+pub(super) async fn save_tts_profile(
+    source: &dyn RuntimeConfigSource,
+    request: SaveTtsProfileRequest,
+) -> Result<SpeechConfigUpdateOutcome, SpeechConfigError> {
+    let (document, current_revision, mut state) =
+        load_editable_document(source, request.expected_revision.as_deref()).await?;
+
+    let reuse_asr_secret = match request
+        .reuse_asr_profile_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(asr_id) => {
+            let Some(profile) = state.find_asr(asr_id) else {
+                return Err(SpeechConfigError::Invalid(
+                    "所选语音识别（ASR）配置不存在，无法复用其 API Key。",
+                ));
+            };
+            Some(profile.credential.clone())
+        }
+        None => None,
+    };
+
+    let input = UpdateTtsConfigurationInput {
+        enabled: true,
+        provider: request.provider,
+        endpoint: request.endpoint,
+        model: request.model,
+        voice: request.voice,
+        timeout_ms: request.timeout_ms,
+        credential: request.credential,
+        clear_credential: request.clear_credential,
+        reuse_asr_credential: reuse_asr_secret.is_some(),
+    };
+
+    let target_id = if let Some(raw_id) = request.id {
+        let id = raw_id.trim().to_owned();
+        let Some(pos) = state.tts_profiles.iter().position(|p| p.id == id) else {
+            return Err(SpeechConfigError::Invalid(
+                "未找到要编辑的语音合成（TTS）配置，请刷新后重试。",
+            ));
+        };
+        let existing = state.tts_profiles[pos].to_raw_config();
+        let built = validate_and_build_tts(&input, Some(&existing), reuse_asr_secret.as_deref())?;
+        let name = normalize_profile_name(
+            &request.name,
+            || default_tts_profile_name(request.provider, &built.voice, &built.model),
+        )?;
+        state.tts_profiles[pos] = RawTtsProfile {
+            id: id.clone(),
+            name,
+            provider: built.provider,
+            model: built.model,
+            voice: built.voice,
+            credential: built.credential,
+            endpoint: built.endpoint,
+            timeout_ms: built.timeout_ms,
+        };
+        id
+    } else {
+        if state.tts_profiles.len() >= MAX_SPEECH_PROFILES {
+            return Err(SpeechConfigError::Invalid(
+                "已保存的语音合成（TTS）配置数量已达上限。",
+            ));
+        }
+        let built = validate_and_build_tts(&input, None, reuse_asr_secret.as_deref())?;
+        let id = generate_profile_id("tts", |candidate| state.find_tts(candidate).is_some())?;
+        let name = normalize_profile_name(
+            &request.name,
+            || default_tts_profile_name(request.provider, &built.voice, &built.model),
+        )?;
+        state.tts_profiles.push(RawTtsProfile {
+            id: id.clone(),
+            name,
+            provider: built.provider,
+            model: built.model,
+            voice: built.voice,
+            credential: built.credential,
+            endpoint: built.endpoint,
+            timeout_ms: built.timeout_ms,
+        });
+        id
+    };
+
+    if request.activate {
+        state.active_tts_id = Some(target_id);
+    }
+
+    persist_speech_state(source, document, current_revision, &state).await
+}
+
+pub(super) async fn set_active_profile(
+    source: &dyn RuntimeConfigSource,
+    request: SetActiveSpeechProfileRequest,
+) -> Result<SpeechConfigUpdateOutcome, SpeechConfigError> {
+    let (document, current_revision, mut state) =
+        load_editable_document(source, request.expected_revision.as_deref()).await?;
+
+    let target_id = request
+        .profile_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+
+    match request.capability {
+        SpeechCapabilityKind::Asr => {
+            if let Some(id) = &target_id
+                && state.find_asr(id).is_none()
+            {
+                return Err(SpeechConfigError::Invalid(
+                    "未找到要启用的语音识别（ASR）配置。",
+                ));
             }
-            None => {
-                speech_table.remove("asr");
+            state.active_asr_id = target_id;
+        }
+        SpeechCapabilityKind::Tts => {
+            if let Some(id) = &target_id
+                && state.find_tts(id).is_none()
+            {
+                return Err(SpeechConfigError::Invalid(
+                    "未找到要启用的语音合成（TTS）配置。",
+                ));
+            }
+            state.active_tts_id = target_id;
+        }
+    }
+
+    persist_speech_state(source, document, current_revision, &state).await
+}
+
+pub(super) async fn delete_profile(
+    source: &dyn RuntimeConfigSource,
+    request: DeleteSpeechProfileRequest,
+) -> Result<SpeechConfigUpdateOutcome, SpeechConfigError> {
+    let (document, current_revision, mut state) =
+        load_editable_document(source, request.expected_revision.as_deref()).await?;
+
+    let id = request.profile_id.trim();
+    match request.capability {
+        SpeechCapabilityKind::Asr => {
+            let Some(pos) = state.asr_profiles.iter().position(|p| p.id == id) else {
+                return Err(SpeechConfigError::Invalid(
+                    "未找到要删除的语音识别（ASR）配置，请刷新后重试。",
+                ));
+            };
+            state.asr_profiles.remove(pos);
+            if state.active_asr_id.as_deref() == Some(id) {
+                state.active_asr_id = None;
             }
         }
-        match &next_tts {
-            Some(tts) => {
-                let section = toml::to_string(tts)
-                    .map_err(|_| SpeechConfigError::Unavailable)?
-                    .parse::<DocumentMut>()
-                    .map_err(|_| SpeechConfigError::Unavailable)?;
-                speech_table["tts"] = Item::Table(section.as_table().clone());
-            }
-            None => {
-                speech_table.remove("tts");
+        SpeechCapabilityKind::Tts => {
+            let Some(pos) = state.tts_profiles.iter().position(|p| p.id == id) else {
+                return Err(SpeechConfigError::Invalid(
+                    "未找到要删除的语音合成（TTS）配置，请刷新后重试。",
+                ));
+            };
+            state.tts_profiles.remove(pos);
+            if state.active_tts_id.as_deref() == Some(id) {
+                state.active_tts_id = None;
             }
         }
     }
 
-    let next_text = document.to_string();
-    match source.replace(current_revision, next_text).await {
-        ConfigSourceReplace::Applied(saved_doc) => {
-            let compiled = compile_document_contents(saved_doc.contents());
-            let configuration = project_configuration(
-                Some(saved_doc.revision().to_owned()),
-                next_asr.as_ref(),
-                next_tts.as_ref(),
-                compiled.status,
-            );
-            Ok(SpeechConfigUpdateOutcome {
-                compiled,
-                configuration,
-            })
-        }
-        ConfigSourceReplace::Conflict(_) => Err(SpeechConfigError::Conflict),
-        ConfigSourceReplace::Unavailable(_) => Err(SpeechConfigError::Unavailable),
-    }
+    persist_speech_state(source, document, current_revision, &state).await
 }
 
 fn build_next_asr(
@@ -441,8 +987,13 @@ fn validate_and_build_tts(
 pub(super) async fn compile_asr_draft(
     source: &dyn RuntimeConfigSource,
     input: &UpdateAsrConfigurationInput,
+    profile_id: Option<&str>,
 ) -> Result<(Arc<dyn AsrProvider>, Duration), SpeechConfigError> {
-    let existing_asr = load_existing_sections(source).await.0;
+    let state = load_resolved_state(source).await;
+    let existing_asr = match profile_id.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(id) => state.find_asr(id).map(RawAsrProfile::to_raw_config),
+        None => state.active_asr().map(RawAsrProfile::to_raw_config),
+    };
     let raw = validate_and_build_asr(input, existing_asr.as_ref())?;
     let timeout = Duration::from_millis(raw.timeout_ms);
     let provider =
@@ -453,14 +1004,27 @@ pub(super) async fn compile_asr_draft(
 pub(super) async fn compile_tts_draft(
     source: &dyn RuntimeConfigSource,
     input: &UpdateTtsConfigurationInput,
+    profile_id: Option<&str>,
+    reuse_asr_profile_id: Option<&str>,
     fallback_asr_credential: Option<&str>,
 ) -> Result<(Arc<dyn TtsProvider>, Duration), SpeechConfigError> {
-    let (existing_asr, existing_tts) = load_existing_sections(source).await;
+    let state = load_resolved_state(source).await;
+    let existing_tts = match profile_id.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(id) => state.find_tts(id).map(RawTtsProfile::to_raw_config),
+        None => state.active_tts().map(RawTtsProfile::to_raw_config),
+    };
     let resolved_asr = fallback_asr_credential
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
-        .or_else(|| existing_asr.map(|a| a.credential));
+        .or_else(|| {
+            reuse_asr_profile_id
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .and_then(|id| state.find_asr(id))
+                .map(|profile| profile.credential.clone())
+        })
+        .or_else(|| state.active_asr().map(|profile| profile.credential.clone()));
     let raw = validate_and_build_tts(input, existing_tts.as_ref(), resolved_asr.as_deref())?;
     let timeout = Duration::from_millis(raw.timeout_ms);
     let provider =
@@ -468,50 +1032,89 @@ pub(super) async fn compile_tts_draft(
     Ok((provider, timeout))
 }
 
-async fn load_existing_sections(
-    source: &dyn RuntimeConfigSource,
-) -> (Option<RawAsrConfig>, Option<RawTtsConfig>) {
+async fn load_resolved_state(source: &dyn RuntimeConfigSource) -> ResolvedSpeechState {
     let ConfigSourceLoad::Document(doc) = source.load().await else {
-        return (None, None);
+        return ResolvedSpeechState::default();
     };
     let parsed = toml::from_str::<SpeechDocument>(doc.contents()).ok();
-    let speech = parsed.and_then(|d| d.speech);
-    let existing_asr = speech
-        .as_ref()
-        .and_then(|s| s.asr.clone())
-        .and_then(|v| v.try_into::<RawAsrConfig>().ok());
-    let existing_tts = speech
-        .and_then(|s| s.tts)
-        .and_then(|v| v.try_into::<RawTtsConfig>().ok());
-    (existing_asr, existing_tts)
+    resolve_speech_state(parsed.and_then(|d| d.speech))
+}
+
+fn project_asr_profile(cfg: &RawAsrProfile) -> AsrProfileSnapshot {
+    let provider = parse_provider_kind(&cfg.provider).unwrap_or(SpeechProviderKind::Dashscope);
+    let default_ep = default_endpoint_for(provider);
+    AsrProfileSnapshot {
+        id: cfg.id.clone(),
+        name: if cfg.name.trim().is_empty() {
+            default_asr_profile_name(provider, &cfg.model)
+        } else {
+            cfg.name.clone()
+        },
+        provider,
+        endpoint: cfg
+            .endpoint
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(default_ep)
+            .to_owned(),
+        model: cfg.model.clone(),
+        timeout_ms: cfg.timeout_ms,
+        credential_configured: !cfg.credential.trim().is_empty(),
+        credential_masked: mask_secret(&cfg.credential),
+    }
+}
+
+fn project_tts_profile(cfg: &RawTtsProfile) -> TtsProfileSnapshot {
+    let provider = parse_provider_kind(&cfg.provider).unwrap_or(SpeechProviderKind::Dashscope);
+    let default_ep = default_endpoint_for(provider);
+    TtsProfileSnapshot {
+        id: cfg.id.clone(),
+        name: if cfg.name.trim().is_empty() {
+            default_tts_profile_name(provider, &cfg.voice, &cfg.model)
+        } else {
+            cfg.name.clone()
+        },
+        provider,
+        endpoint: cfg
+            .endpoint
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(default_ep)
+            .to_owned(),
+        model: cfg.model.clone(),
+        voice: cfg.voice.clone(),
+        timeout_ms: cfg.timeout_ms,
+        credential_configured: !cfg.credential.trim().is_empty(),
+        credential_masked: mask_secret(&cfg.credential),
+    }
 }
 
 fn project_configuration(
     revision: Option<String>,
-    asr: Option<&RawAsrConfig>,
-    tts: Option<&RawTtsConfig>,
+    state: &ResolvedSpeechState,
     status: DeviceSpeechServicesSnapshot,
 ) -> SpeechConfigurationSnapshot {
-    let asr_snapshot = match asr {
-        Some(cfg) => {
-            let provider =
-                parse_provider_kind(&cfg.provider).unwrap_or(SpeechProviderKind::Dashscope);
-            let default_ep = default_endpoint_for(provider);
-            AsrConfigurationSnapshot {
-                enabled: true,
-                provider,
-                endpoint: cfg
-                    .endpoint
-                    .as_deref()
-                    .filter(|s| !s.trim().is_empty())
-                    .unwrap_or(default_ep)
-                    .to_owned(),
-                model: cfg.model.clone(),
-                timeout_ms: cfg.timeout_ms,
-                credential_configured: !cfg.credential.trim().is_empty(),
-                credential_masked: mask_secret(&cfg.credential),
-            }
-        }
+    let asr_profiles: Vec<AsrProfileSnapshot> = state
+        .asr_profiles
+        .iter()
+        .map(project_asr_profile)
+        .collect();
+    let tts_profiles: Vec<TtsProfileSnapshot> = state
+        .tts_profiles
+        .iter()
+        .map(project_tts_profile)
+        .collect();
+
+    let asr_snapshot = match state.active_asr().map(project_asr_profile) {
+        Some(active) => AsrConfigurationSnapshot {
+            enabled: true,
+            provider: active.provider,
+            endpoint: active.endpoint,
+            model: active.model,
+            timeout_ms: active.timeout_ms,
+            credential_configured: active.credential_configured,
+            credential_masked: active.credential_masked,
+        },
         None => AsrConfigurationSnapshot {
             enabled: false,
             provider: SpeechProviderKind::Dashscope,
@@ -522,27 +1125,17 @@ fn project_configuration(
             credential_masked: None,
         },
     };
-    let tts_snapshot = match tts {
-        Some(cfg) => {
-            let provider =
-                parse_provider_kind(&cfg.provider).unwrap_or(SpeechProviderKind::Dashscope);
-            let default_ep = default_endpoint_for(provider);
-            TtsConfigurationSnapshot {
-                enabled: true,
-                provider,
-                endpoint: cfg
-                    .endpoint
-                    .as_deref()
-                    .filter(|s| !s.trim().is_empty())
-                    .unwrap_or(default_ep)
-                    .to_owned(),
-                model: cfg.model.clone(),
-                voice: cfg.voice.clone(),
-                timeout_ms: cfg.timeout_ms,
-                credential_configured: !cfg.credential.trim().is_empty(),
-                credential_masked: mask_secret(&cfg.credential),
-            }
-        }
+    let tts_snapshot = match state.active_tts().map(project_tts_profile) {
+        Some(active) => TtsConfigurationSnapshot {
+            enabled: true,
+            provider: active.provider,
+            endpoint: active.endpoint,
+            model: active.model,
+            voice: active.voice,
+            timeout_ms: active.timeout_ms,
+            credential_configured: active.credential_configured,
+            credential_masked: active.credential_masked,
+        },
         None => TtsConfigurationSnapshot {
             enabled: false,
             provider: SpeechProviderKind::Dashscope,
@@ -558,7 +1151,75 @@ fn project_configuration(
         revision,
         asr: asr_snapshot,
         tts: tts_snapshot,
+        asr_profiles,
+        active_asr_id: state.active_asr_id.clone(),
+        tts_profiles,
+        active_tts_id: state.active_tts_id.clone(),
         status,
+    }
+}
+
+fn generate_profile_id(
+    prefix: &str,
+    exists: impl Fn(&str) -> bool,
+) -> Result<String, SpeechConfigError> {
+    for _ in 0..8 {
+        let mut bytes = [0u8; 8];
+        getrandom::fill(&mut bytes).map_err(|_| SpeechConfigError::Unavailable)?;
+        let suffix = u64::from_be_bytes(bytes);
+        let candidate = format!("{prefix}-{suffix:016x}");
+        if !exists(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    Err(SpeechConfigError::Unavailable)
+}
+
+fn normalize_profile_name(
+    raw: &str,
+    fallback: impl FnOnce() -> String,
+) -> Result<String, SpeechConfigError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(fallback());
+    }
+    if trimmed.len() > MAX_PROFILE_NAME_BYTES || trimmed.contains(['\r', '\n']) {
+        return Err(SpeechConfigError::Invalid("配置名称过长或包含非法换行符。"));
+    }
+    Ok(trimmed.to_owned())
+}
+
+const fn provider_display_name(kind: SpeechProviderKind) -> &'static str {
+    match kind {
+        SpeechProviderKind::Dashscope => "阿里云百炼",
+        SpeechProviderKind::Deepseek => "DeepSeek",
+        SpeechProviderKind::Siliconflow => "硅基流动",
+        SpeechProviderKind::Zhipu => "智谱 BigModel",
+        SpeechProviderKind::Minimax => "MiniMax",
+        SpeechProviderKind::Openai => "OpenAI",
+        SpeechProviderKind::Groq => "Groq",
+    }
+}
+
+fn default_asr_profile_name(provider: SpeechProviderKind, model: &str) -> String {
+    let model = model.trim();
+    if model.is_empty() {
+        provider_display_name(provider).to_owned()
+    } else {
+        format!("{} · {model}", provider_display_name(provider))
+    }
+}
+
+fn default_tts_profile_name(provider: SpeechProviderKind, voice: &str, model: &str) -> String {
+    let label = if !voice.trim().is_empty() {
+        voice.trim()
+    } else {
+        model.trim()
+    };
+    if label.is_empty() {
+        provider_display_name(provider).to_owned()
+    } else {
+        format!("{} · {label}", provider_display_name(provider))
     }
 }
 
@@ -1149,6 +1810,7 @@ timeout_ms = 30000
                 credential: Some(assistant_protocol::SecretValue::new("sk-mm".to_owned())),
                 clear_credential: false,
             },
+            None,
         )
         .await;
         assert!(matches!(
@@ -1211,5 +1873,224 @@ timeout_ms = 30000
             deepseek_saved.compiled.status.tts,
             SpeechServiceStatusSnapshot::Ready
         );
+    }
+
+    #[tokio::test]
+    async fn speech_profiles_migrate_legacy_and_support_full_list_crud_lifecycle() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+schema_version = 1
+
+[speech.asr]
+provider = "dashscope"
+model = "qwen3-asr-flash"
+credential = "sk-legacy-asr-1111"
+endpoint = "https://dashscope.aliyuncs.com"
+timeout_ms = 30000
+
+[speech.tts]
+provider = "dashscope"
+model = "cosyvoice-v2"
+voice = "longxiaochun_v2"
+credential = "sk-legacy-tts-2222"
+endpoint = "https://dashscope.aliyuncs.com"
+timeout_ms = 30000
+"#,
+        )
+        .expect("seed legacy config");
+        let source = crate::config_source::LocalConfigSource::new(path.clone());
+
+        // 1. Legacy config automatically projects into 1-item lists with active IDs
+        let initial = read_configuration(&source, DeviceSpeechServicesSnapshot::default())
+            .await
+            .expect("read legacy");
+        assert_eq!(initial.asr_profiles.len(), 1);
+        assert_eq!(initial.tts_profiles.len(), 1);
+        assert_eq!(initial.active_asr_id.as_deref(), Some(LEGACY_ASR_PROFILE_ID));
+        assert_eq!(initial.active_tts_id.as_deref(), Some(LEGACY_TTS_PROFILE_ID));
+        assert_eq!(
+            initial.asr_profiles[0].credential_masked.as_deref(),
+            Some("sk-****1111")
+        );
+
+        // 2. Add a second ASR profile (inactive) -> migrates legacy seamlessly without overwriting it
+        let added_asr = save_asr_profile(
+            &source,
+            SaveAsrProfileRequest {
+                expected_revision: initial.revision.clone(),
+                id: None,
+                name: "DeepSeek 备用识别".to_owned(),
+                provider: SpeechProviderKind::Deepseek,
+                endpoint: String::new(),
+                model: "deepseek-asr".to_owned(),
+                timeout_ms: 25_000,
+                credential: Some(assistant_protocol::SecretValue::new(
+                    "sk-deepseek-asr-3333".to_owned(),
+                )),
+                clear_credential: false,
+                activate: false,
+            },
+        )
+        .await
+        .expect("add second asr");
+        assert_eq!(added_asr.configuration.asr_profiles.len(), 2);
+        assert_eq!(
+            added_asr.configuration.active_asr_id.as_deref(),
+            Some(LEGACY_ASR_PROFILE_ID)
+        );
+        let ds_asr_id = added_asr.configuration.asr_profiles[1].id.clone();
+        assert_eq!(
+            added_asr.configuration.asr_profiles[1].name,
+            "DeepSeek 备用识别"
+        );
+        // Legacy [speech.asr] removed after migration
+        let migrated_toml = std::fs::read_to_string(&path).expect("read migrated");
+        assert!(!migrated_toml.contains("[speech.asr]"));
+        assert!(migrated_toml.contains("[[speech.asr_profiles]]"));
+        assert!(migrated_toml.contains("[[speech.tts_profiles]]"));
+
+        // 3. Add a TTS profile reusing the second (inactive) ASR profile's API key and activate it
+        let added_tts = save_tts_profile(
+            &source,
+            SaveTtsProfileRequest {
+                expected_revision: added_asr.configuration.revision.clone(),
+                id: None,
+                name: "DeepSeek 男声".to_owned(),
+                provider: SpeechProviderKind::Deepseek,
+                endpoint: String::new(),
+                model: "deepseek-tts".to_owned(),
+                voice: "tide".to_owned(),
+                timeout_ms: 30_000,
+                credential: None,
+                clear_credential: false,
+                reuse_asr_profile_id: Some(ds_asr_id.clone()),
+                activate: true,
+            },
+        )
+        .await
+        .expect("add second tts reusing ds asr key");
+        assert_eq!(added_tts.configuration.tts_profiles.len(), 2);
+        let ds_tts_id = added_tts.configuration.tts_profiles[1].id.clone();
+        assert_eq!(
+            added_tts.configuration.active_tts_id.as_deref(),
+            Some(ds_tts_id.as_str())
+        );
+        assert_eq!(
+            added_tts.configuration.tts_profiles[1]
+                .credential_masked
+                .as_deref(),
+            Some("sk-****3333")
+        );
+        assert_eq!(added_tts.configuration.tts.provider, SpeechProviderKind::Deepseek);
+
+        // 4. Edit existing ASR profile without re-sending credential -> preserves stored secret
+        let edited_asr = save_asr_profile(
+            &source,
+            SaveAsrProfileRequest {
+                expected_revision: added_tts.configuration.revision.clone(),
+                id: Some(ds_asr_id.clone()),
+                name: "DeepSeek 主力识别".to_owned(),
+                provider: SpeechProviderKind::Deepseek,
+                endpoint: DEFAULT_DEEPSEEK_ENDPOINT.to_owned(),
+                model: "deepseek-asr".to_owned(),
+                timeout_ms: 20_000,
+                credential: None,
+                clear_credential: false,
+                activate: true,
+            },
+        )
+        .await
+        .expect("edit ds asr");
+        assert_eq!(
+            edited_asr.configuration.active_asr_id.as_deref(),
+            Some(ds_asr_id.as_str())
+        );
+        assert_eq!(edited_asr.configuration.asr.provider, SpeechProviderKind::Deepseek);
+        assert_eq!(
+            edited_asr.configuration.asr.credential_masked.as_deref(),
+            Some("sk-****3333")
+        );
+
+        // 5. Test inactive legacy ASR profile by profile_id without sending credential
+        let compiled_inactive = compile_asr_draft(
+            &source,
+            &UpdateAsrConfigurationInput {
+                enabled: false,
+                provider: SpeechProviderKind::Dashscope,
+                endpoint: DEFAULT_DASHSCOPE_ENDPOINT.to_owned(),
+                model: "qwen3-asr-flash".to_owned(),
+                timeout_ms: 30_000,
+                credential: None,
+                clear_credential: false,
+            },
+            Some(LEGACY_ASR_PROFILE_ID),
+        )
+        .await;
+        assert!(compiled_inactive.is_ok());
+
+        // 6. Disable ASR via set_active_profile(None) -> status Unavailable, profiles preserved!
+        let disabled_asr = set_active_profile(
+            &source,
+            SetActiveSpeechProfileRequest {
+                expected_revision: edited_asr.configuration.revision.clone(),
+                capability: SpeechCapabilityKind::Asr,
+                profile_id: None,
+            },
+        )
+        .await
+        .expect("disable asr");
+        assert_eq!(disabled_asr.configuration.asr_profiles.len(), 2);
+        assert_eq!(disabled_asr.configuration.active_asr_id, None);
+        assert!(!disabled_asr.configuration.asr.enabled);
+        assert_eq!(
+            disabled_asr.compiled.status.asr,
+            SpeechServiceStatusSnapshot::Unavailable
+        );
+        assert_eq!(
+            disabled_asr.compiled.status.tts,
+            SpeechServiceStatusSnapshot::Ready
+        );
+
+        // 7. Re-enable legacy ASR profile
+        let reactivated = set_active_profile(
+            &source,
+            SetActiveSpeechProfileRequest {
+                expected_revision: disabled_asr.configuration.revision.clone(),
+                capability: SpeechCapabilityKind::Asr,
+                profile_id: Some(LEGACY_ASR_PROFILE_ID.to_owned()),
+            },
+        )
+        .await
+        .expect("reactivate legacy asr");
+        assert_eq!(
+            reactivated.configuration.active_asr_id.as_deref(),
+            Some(LEGACY_ASR_PROFILE_ID)
+        );
+        assert_eq!(
+            reactivated.compiled.status.asr,
+            SpeechServiceStatusSnapshot::Ready
+        );
+
+        // 8. Delete active TTS profile -> deactivates TTS while keeping legacy TTS profile intact
+        let deleted_tts = delete_profile(
+            &source,
+            DeleteSpeechProfileRequest {
+                expected_revision: reactivated.configuration.revision.clone(),
+                capability: SpeechCapabilityKind::Tts,
+                profile_id: ds_tts_id,
+            },
+        )
+        .await
+        .expect("delete active tts");
+        assert_eq!(deleted_tts.configuration.tts_profiles.len(), 1);
+        assert_eq!(deleted_tts.configuration.active_tts_id, None);
+        assert_eq!(
+            deleted_tts.compiled.status.tts,
+            SpeechServiceStatusSnapshot::Unavailable
+        );
+        assert_eq!(deleted_tts.configuration.tts_profiles[0].id, LEGACY_TTS_PROFILE_ID);
     }
 }

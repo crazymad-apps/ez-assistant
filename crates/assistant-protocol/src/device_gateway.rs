@@ -320,6 +320,48 @@ pub struct TtsConfigurationSnapshot {
     pub credential_masked: Option<String>,
 }
 
+/// 语音能力分类（ASR 或 TTS）。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum SpeechCapabilityKind {
+    Asr,
+    Tts,
+}
+
+/// 已保存的 Host ASR 配置条目（凭据仅返回是否已配置与脱敏掩码）。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct AsrProfileSnapshot {
+    pub id: String,
+    pub name: String,
+    pub provider: SpeechProviderKind,
+    pub endpoint: String,
+    pub model: String,
+    pub timeout_ms: u64,
+    pub credential_configured: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub credential_masked: Option<String>,
+}
+
+/// 已保存的 Host TTS 配置条目（凭据仅返回是否已配置与脱敏掩码）。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct TtsProfileSnapshot {
+    pub id: String,
+    pub name: String,
+    pub provider: SpeechProviderKind,
+    pub endpoint: String,
+    pub model: String,
+    pub voice: String,
+    pub timeout_ms: u64,
+    pub credential_configured: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub credential_masked: Option<String>,
+}
+
 /// Host 语音配置与当前服务健康快照。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
@@ -329,6 +371,16 @@ pub struct SpeechConfigurationSnapshot {
     pub revision: Option<String>,
     pub asr: AsrConfigurationSnapshot,
     pub tts: TtsConfigurationSnapshot,
+    #[serde(default)]
+    pub asr_profiles: Vec<AsrProfileSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub active_asr_id: Option<String>,
+    #[serde(default)]
+    pub tts_profiles: Vec<TtsProfileSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub active_tts_id: Option<String>,
     pub status: DeviceSpeechServicesSnapshot,
 }
 
@@ -336,6 +388,82 @@ pub struct SpeechConfigurationSnapshot {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct GetSpeechConfigurationRequest {}
+
+/// 新增或编辑已保存的 Host ASR 配置条目，并按需设为当前启用项。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SaveAsrProfileRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub expected_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub id: Option<String>,
+    pub name: String,
+    pub provider: SpeechProviderKind,
+    pub endpoint: String,
+    pub model: String,
+    pub timeout_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "string | null")]
+    pub credential: Option<SecretValue>,
+    #[serde(default)]
+    pub clear_credential: bool,
+    #[serde(default)]
+    pub activate: bool,
+}
+
+/// 新增或编辑已保存的 Host TTS 配置条目，并按需设为当前启用项。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SaveTtsProfileRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub expected_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub id: Option<String>,
+    pub name: String,
+    pub provider: SpeechProviderKind,
+    pub endpoint: String,
+    pub model: String,
+    pub voice: String,
+    pub timeout_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "string | null")]
+    pub credential: Option<SecretValue>,
+    #[serde(default)]
+    pub clear_credential: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reuse_asr_profile_id: Option<String>,
+    #[serde(default)]
+    pub activate: bool,
+}
+
+/// 切换当前启用的 ASR/TTS 配置条目；`profile_id = None` 表示停用但保留已保存列表。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SetActiveSpeechProfileRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub expected_revision: Option<String>,
+    pub capability: SpeechCapabilityKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub profile_id: Option<String>,
+}
+
+/// 删除指定已保存的 ASR/TTS 配置条目（若正在使用则同时停用）。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct DeleteSpeechProfileRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub expected_revision: Option<String>,
+    pub capability: SpeechCapabilityKind,
+    pub profile_id: String,
+}
 
 /// 更新 Host ASR 配置的请求参数；凭据留空且 `clear_credential = false` 时保留既有凭据。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -395,6 +523,9 @@ pub struct UpdateSpeechConfigurationResult {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct TestAsrConfigurationRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub profile_id: Option<String>,
     pub asr: UpdateAsrConfigurationInput,
     pub audio_wav_base64: String,
 }
@@ -411,6 +542,12 @@ pub struct TestAsrConfigurationResult {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct TestTtsConfigurationRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub profile_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reuse_asr_profile_id: Option<String>,
     pub tts: UpdateTtsConfigurationInput,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "string | null")]
@@ -445,6 +582,10 @@ pub enum DeviceGatewayCommand {
     RevokeDevice(RevokeDeviceRequest),
     GetSpeechConfiguration(GetSpeechConfigurationRequest),
     UpdateSpeechConfiguration(UpdateSpeechConfigurationRequest),
+    SaveAsrProfile(SaveAsrProfileRequest),
+    SaveTtsProfile(SaveTtsProfileRequest),
+    SetActiveSpeechProfile(SetActiveSpeechProfileRequest),
+    DeleteSpeechProfile(DeleteSpeechProfileRequest),
     TestAsrConfiguration(TestAsrConfigurationRequest),
     TestTtsConfiguration(TestTtsConfigurationRequest),
 }
@@ -472,6 +613,10 @@ pub enum DeviceGatewayCommandResult {
     RevokeDevice(DeviceGatewayMutationResult),
     GetSpeechConfiguration(SpeechConfigurationSnapshot),
     UpdateSpeechConfiguration(UpdateSpeechConfigurationResult),
+    SaveAsrProfile(UpdateSpeechConfigurationResult),
+    SaveTtsProfile(UpdateSpeechConfigurationResult),
+    SetActiveSpeechProfile(UpdateSpeechConfigurationResult),
+    DeleteSpeechProfile(UpdateSpeechConfigurationResult),
     TestAsrConfiguration(TestAsrConfigurationResult),
     TestTtsConfiguration(TestTtsConfigurationResult),
 }
@@ -608,6 +753,7 @@ mod tests {
         }
 
         let test_asr = DeviceGatewayCommand::TestAsrConfiguration(TestAsrConfigurationRequest {
+            profile_id: Some("asr-1".to_owned()),
             asr: UpdateAsrConfigurationInput {
                 enabled: false,
                 provider: SpeechProviderKind::Siliconflow,
@@ -630,6 +776,8 @@ mod tests {
         );
 
         let test_tts = DeviceGatewayCommand::TestTtsConfiguration(TestTtsConfigurationRequest {
+            profile_id: Some("tts-1".to_owned()),
+            reuse_asr_profile_id: Some("asr-1".to_owned()),
             tts: UpdateTtsConfigurationInput {
                 enabled: false,
                 provider: SpeechProviderKind::Minimax,
@@ -652,6 +800,81 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<DeviceGatewayCommand>(tts_wire).expect("deserialize test tts"),
             test_tts
+        );
+
+        let save_asr = DeviceGatewayCommand::SaveAsrProfile(SaveAsrProfileRequest {
+            expected_revision: Some("rev-1".to_owned()),
+            id: None,
+            name: "百炼识别".to_owned(),
+            provider: SpeechProviderKind::Dashscope,
+            endpoint: "https://dashscope.aliyuncs.com".to_owned(),
+            model: "qwen3-asr-flash".to_owned(),
+            timeout_ms: 30_000,
+            credential: Some(SecretValue::new("sk-save-asr-secret".to_owned())),
+            clear_credential: false,
+            activate: true,
+        });
+        let save_asr_debug = format!("{save_asr:?}");
+        assert!(save_asr_debug.contains("<redacted>"));
+        assert!(!save_asr_debug.contains("sk-save-asr-secret"));
+        let save_asr_wire = serde_json::to_value(&save_asr).expect("serialize save asr");
+        assert_eq!(save_asr_wire["type"], "save_asr_profile");
+        assert_eq!(
+            serde_json::from_value::<DeviceGatewayCommand>(save_asr_wire)
+                .expect("deserialize save asr"),
+            save_asr
+        );
+
+        let save_tts = DeviceGatewayCommand::SaveTtsProfile(SaveTtsProfileRequest {
+            expected_revision: Some("rev-2".to_owned()),
+            id: Some("tts-1".to_owned()),
+            name: "百炼女声".to_owned(),
+            provider: SpeechProviderKind::Dashscope,
+            endpoint: "https://dashscope.aliyuncs.com".to_owned(),
+            model: "cosyvoice-v2".to_owned(),
+            voice: "longxiaochun_v2".to_owned(),
+            timeout_ms: 30_000,
+            credential: Some(SecretValue::new("sk-save-tts-secret".to_owned())),
+            clear_credential: false,
+            reuse_asr_profile_id: None,
+            activate: false,
+        });
+        let save_tts_debug = format!("{save_tts:?}");
+        assert!(save_tts_debug.contains("<redacted>"));
+        assert!(!save_tts_debug.contains("sk-save-tts-secret"));
+        let save_tts_wire = serde_json::to_value(&save_tts).expect("serialize save tts");
+        assert_eq!(save_tts_wire["type"], "save_tts_profile");
+        assert_eq!(
+            serde_json::from_value::<DeviceGatewayCommand>(save_tts_wire)
+                .expect("deserialize save tts"),
+            save_tts
+        );
+
+        let set_active =
+            DeviceGatewayCommand::SetActiveSpeechProfile(SetActiveSpeechProfileRequest {
+                expected_revision: Some("rev-3".to_owned()),
+                capability: SpeechCapabilityKind::Tts,
+                profile_id: Some("tts-1".to_owned()),
+            });
+        let set_active_wire = serde_json::to_value(&set_active).expect("serialize set active");
+        assert_eq!(set_active_wire["type"], "set_active_speech_profile");
+        assert_eq!(
+            serde_json::from_value::<DeviceGatewayCommand>(set_active_wire)
+                .expect("deserialize set active"),
+            set_active
+        );
+
+        let delete_profile = DeviceGatewayCommand::DeleteSpeechProfile(DeleteSpeechProfileRequest {
+            expected_revision: Some("rev-4".to_owned()),
+            capability: SpeechCapabilityKind::Asr,
+            profile_id: "asr-1".to_owned(),
+        });
+        let delete_wire = serde_json::to_value(&delete_profile).expect("serialize delete profile");
+        assert_eq!(delete_wire["type"], "delete_speech_profile");
+        assert_eq!(
+            serde_json::from_value::<DeviceGatewayCommand>(delete_wire)
+                .expect("deserialize delete profile"),
+            delete_profile
         );
     }
 }

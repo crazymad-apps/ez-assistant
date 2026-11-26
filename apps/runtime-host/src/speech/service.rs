@@ -4,9 +4,11 @@ use std::{future::Future, panic::AssertUnwindSafe, path::PathBuf, sync::Arc, tim
 
 use crate::media_diagnostics::{correlation_id, timestamp_ms};
 use assistant_protocol::{
-    DeviceSpeechServicesSnapshot, RuntimeErrorCode, RuntimeErrorInfo, SpeechConfigurationSnapshot,
-    SpeechServiceStatusSnapshot, TestAsrConfigurationRequest, TestAsrConfigurationResult,
-    TestTtsConfigurationRequest, TestTtsConfigurationResult, UpdateSpeechConfigurationRequest,
+    DeleteSpeechProfileRequest, DeviceSpeechServicesSnapshot, RuntimeErrorCode, RuntimeErrorInfo,
+    SaveAsrProfileRequest, SaveTtsProfileRequest, SetActiveSpeechProfileRequest,
+    SpeechConfigurationSnapshot, SpeechServiceStatusSnapshot, TestAsrConfigurationRequest,
+    TestAsrConfigurationResult, TestTtsConfigurationRequest, TestTtsConfigurationResult,
+    UpdateSpeechConfigurationRequest,
 };
 use assistant_runtime::RuntimeConfigSource;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -96,6 +98,22 @@ enum SpeechCommand {
     },
     UpdateConfiguration {
         request: UpdateSpeechConfigurationRequest,
+        response: oneshot::Sender<Result<SpeechConfigurationSnapshot, SpeechConfigError>>,
+    },
+    SaveAsrProfile {
+        request: SaveAsrProfileRequest,
+        response: oneshot::Sender<Result<SpeechConfigurationSnapshot, SpeechConfigError>>,
+    },
+    SaveTtsProfile {
+        request: SaveTtsProfileRequest,
+        response: oneshot::Sender<Result<SpeechConfigurationSnapshot, SpeechConfigError>>,
+    },
+    SetActiveProfile {
+        request: SetActiveSpeechProfileRequest,
+        response: oneshot::Sender<Result<SpeechConfigurationSnapshot, SpeechConfigError>>,
+    },
+    DeleteProfile {
+        request: DeleteSpeechProfileRequest,
         response: oneshot::Sender<Result<SpeechConfigurationSnapshot, SpeechConfigError>>,
     },
     TestAsr {
@@ -286,6 +304,74 @@ impl SpeechService {
                                 }
                             }
                         }
+                        SpeechCommand::SaveAsrProfile { request, response } => {
+                            let result = tokio::select! {
+                                biased;
+                                () = shutdown.cancelled() => break,
+                                result = config::save_asr_profile(self.source.as_ref(), request) => result,
+                            };
+                            match result {
+                                Ok(outcome) => {
+                                    compiled = outcome.compiled;
+                                    self.status.send_replace(compiled.status);
+                                    let _ = response.send(Ok(outcome.configuration));
+                                }
+                                Err(err) => {
+                                    let _ = response.send(Err(err));
+                                }
+                            }
+                        }
+                        SpeechCommand::SaveTtsProfile { request, response } => {
+                            let result = tokio::select! {
+                                biased;
+                                () = shutdown.cancelled() => break,
+                                result = config::save_tts_profile(self.source.as_ref(), request) => result,
+                            };
+                            match result {
+                                Ok(outcome) => {
+                                    compiled = outcome.compiled;
+                                    self.status.send_replace(compiled.status);
+                                    let _ = response.send(Ok(outcome.configuration));
+                                }
+                                Err(err) => {
+                                    let _ = response.send(Err(err));
+                                }
+                            }
+                        }
+                        SpeechCommand::SetActiveProfile { request, response } => {
+                            let result = tokio::select! {
+                                biased;
+                                () = shutdown.cancelled() => break,
+                                result = config::set_active_profile(self.source.as_ref(), request) => result,
+                            };
+                            match result {
+                                Ok(outcome) => {
+                                    compiled = outcome.compiled;
+                                    self.status.send_replace(compiled.status);
+                                    let _ = response.send(Ok(outcome.configuration));
+                                }
+                                Err(err) => {
+                                    let _ = response.send(Err(err));
+                                }
+                            }
+                        }
+                        SpeechCommand::DeleteProfile { request, response } => {
+                            let result = tokio::select! {
+                                biased;
+                                () = shutdown.cancelled() => break,
+                                result = config::delete_profile(self.source.as_ref(), request) => result,
+                            };
+                            match result {
+                                Ok(outcome) => {
+                                    compiled = outcome.compiled;
+                                    self.status.send_replace(compiled.status);
+                                    let _ = response.send(Ok(outcome.configuration));
+                                }
+                                Err(err) => {
+                                    let _ = response.send(Err(err));
+                                }
+                            }
+                        }
                         SpeechCommand::TestAsr { request, response } => {
                             let source = self.source.clone();
                             let test_shutdown = shutdown.child_token();
@@ -346,7 +432,11 @@ impl SpeechService {
                     let _ = response.send(());
                 }
                 SpeechCommand::GetConfiguration { response }
-                | SpeechCommand::UpdateConfiguration { response, .. } => {
+                | SpeechCommand::UpdateConfiguration { response, .. }
+                | SpeechCommand::SaveAsrProfile { response, .. }
+                | SpeechCommand::SaveTtsProfile { response, .. }
+                | SpeechCommand::SetActiveProfile { response, .. }
+                | SpeechCommand::DeleteProfile { response, .. } => {
                     let _ = response.send(Err(SpeechConfigError::Unavailable));
                 }
                 SpeechCommand::TestAsr { response, .. } => {
@@ -437,6 +527,74 @@ impl SpeechServiceHandle {
         let (response_tx, response_rx) = oneshot::channel();
         self.commands
             .send(SpeechCommand::UpdateConfiguration {
+                request,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| SpeechConfigError::Unavailable)?;
+        response_rx
+            .await
+            .unwrap_or(Err(SpeechConfigError::Unavailable))
+    }
+
+    pub(crate) async fn save_asr_profile(
+        &self,
+        request: SaveAsrProfileRequest,
+    ) -> Result<SpeechConfigurationSnapshot, SpeechConfigError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.commands
+            .send(SpeechCommand::SaveAsrProfile {
+                request,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| SpeechConfigError::Unavailable)?;
+        response_rx
+            .await
+            .unwrap_or(Err(SpeechConfigError::Unavailable))
+    }
+
+    pub(crate) async fn save_tts_profile(
+        &self,
+        request: SaveTtsProfileRequest,
+    ) -> Result<SpeechConfigurationSnapshot, SpeechConfigError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.commands
+            .send(SpeechCommand::SaveTtsProfile {
+                request,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| SpeechConfigError::Unavailable)?;
+        response_rx
+            .await
+            .unwrap_or(Err(SpeechConfigError::Unavailable))
+    }
+
+    pub(crate) async fn set_active_profile(
+        &self,
+        request: SetActiveSpeechProfileRequest,
+    ) -> Result<SpeechConfigurationSnapshot, SpeechConfigError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.commands
+            .send(SpeechCommand::SetActiveProfile {
+                request,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| SpeechConfigError::Unavailable)?;
+        response_rx
+            .await
+            .unwrap_or(Err(SpeechConfigError::Unavailable))
+    }
+
+    pub(crate) async fn delete_profile(
+        &self,
+        request: DeleteSpeechProfileRequest,
+    ) -> Result<SpeechConfigurationSnapshot, SpeechConfigError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.commands
+            .send(SpeechCommand::DeleteProfile {
                 request,
                 response: response_tx,
             })
@@ -663,9 +821,10 @@ async fn run_test_asr(
         ));
     }
 
-    let (provider, timeout) = config::compile_asr_draft(source, &request.asr)
-        .await
-        .map_err(|err| err.to_protocol_info())?;
+    let (provider, timeout) =
+        config::compile_asr_draft(source, &request.asr, request.profile_id.as_deref())
+            .await
+            .map_err(|err| err.to_protocol_info())?;
     let started_at = std::time::Instant::now();
     let provider_request = AsrRequest {
         pcm_s16le: Arc::from(pcm),
@@ -706,6 +865,8 @@ async fn run_test_tts(
     let (provider, timeout) = config::compile_tts_draft(
         source,
         &request.tts,
+        request.profile_id.as_deref(),
+        request.reuse_asr_profile_id.as_deref(),
         request
             .fallback_asr_credential
             .as_ref()

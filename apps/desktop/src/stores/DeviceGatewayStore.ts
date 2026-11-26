@@ -2,6 +2,9 @@ import { action, makeObservable, observable, observableRef, runInAction } from "
 import type {
   DeviceGatewaySnapshot,
   DeviceId,
+  SaveAsrProfileRequest,
+  SaveTtsProfileRequest,
+  SpeechCapabilityKind,
   SpeechConfigurationSnapshot,
   TestAsrConfigurationRequest,
   TestAsrConfigurationResult,
@@ -43,6 +46,10 @@ export class DeviceGatewayStore {
       load: action,
       loadSpeechConfiguration: action,
       updateSpeechConfiguration: action,
+      saveAsrProfile: action,
+      saveTtsProfile: action,
+      setActiveSpeechProfile: action,
+      deleteSpeechProfile: action,
       testAsrConfiguration: action,
       testTtsConfiguration: action,
       scheduleRefresh: action,
@@ -303,20 +310,106 @@ export class DeviceGatewayStore {
   }
 
   async updateSpeechConfiguration(payload: UpdateSpeechConfigurationRequest): Promise<boolean> {
+    return this.#runSpeechMutation(
+      "speech",
+      { type: "update_speech_configuration", payload },
+      "语音服务配置已保存并热加载。",
+    );
+  }
+
+  async saveAsrProfile(payload: SaveAsrProfileRequest): Promise<boolean> {
+    return this.#runSpeechMutation(
+      "speech:asr:save",
+      { type: "save_asr_profile", payload },
+      payload.id ? "语音识别配置已更新。" : "语音识别配置已保存。",
+    );
+  }
+
+  async saveTtsProfile(payload: SaveTtsProfileRequest): Promise<boolean> {
+    return this.#runSpeechMutation(
+      "speech:tts:save",
+      { type: "save_tts_profile", payload },
+      payload.id ? "语音合成配置已更新。" : "语音合成配置已保存。",
+    );
+  }
+
+  async setActiveSpeechProfile(
+    capability: SpeechCapabilityKind,
+    profile_id: string | null,
+  ): Promise<boolean> {
+    const notice = capability === "asr"
+      ? (profile_id ? "已切换语音识别配置。" : "已停用语音识别。")
+      : (profile_id ? "已切换语音合成配置。" : "已停用语音合成。");
+    return this.#runSpeechMutation(
+      `speech:${capability}:active`,
+      {
+        type: "set_active_speech_profile",
+        payload: {
+          expected_revision: this.speech_config?.revision ?? undefined,
+          capability,
+          profile_id: profile_id ?? undefined,
+        },
+      },
+      notice,
+    );
+  }
+
+  async deleteSpeechProfile(
+    capability: SpeechCapabilityKind,
+    profile_id: string,
+  ): Promise<boolean> {
+    return this.#runSpeechMutation(
+      `speech:${capability}:delete:${profile_id}`,
+      {
+        type: "delete_speech_profile",
+        payload: {
+          expected_revision: this.speech_config?.revision ?? undefined,
+          capability,
+          profile_id,
+        },
+      },
+      capability === "asr" ? "语音识别配置已删除。" : "语音合成配置已删除。",
+    );
+  }
+
+  async #runSpeechMutation(
+    action_name: string,
+    command: Extract<
+      import("@ez-assistant/protocol").DeviceGatewayCommand,
+      {
+        type:
+          | "update_speech_configuration"
+          | "save_asr_profile"
+          | "save_tts_profile"
+          | "set_active_speech_profile"
+          | "delete_speech_profile";
+      }
+    >,
+    notice: string,
+  ): Promise<boolean> {
     const client = this.dependencies.get_client();
     if (!client || this.pending_action) return false;
-    this.pending_action = "speech";
+    this.pending_action = action_name;
     this.clearMessages();
     try {
-      const result = await client.deviceGatewayCommand({ type: "update_speech_configuration", payload });
-      if (result.type !== "update_speech_configuration") {
+      const result = await client.deviceGatewayCommand(command);
+      if (
+        result.type !== "update_speech_configuration"
+        && result.type !== "save_asr_profile"
+        && result.type !== "save_tts_profile"
+        && result.type !== "set_active_speech_profile"
+        && result.type !== "delete_speech_profile"
+      ) {
+        throw new Error("Host 返回了不匹配的语音更新结果。");
+      }
+      if (result.type !== command.type) {
         throw new Error("Host 返回了不匹配的语音更新结果。");
       }
       runInAction(() => {
         this.speech_config = result.payload.configuration;
         this.snapshot = result.payload.snapshot;
         this.stale = false;
-        this.notice_message = "语音服务配置已保存并热加载。";
+        this.notice_message = notice;
       });
       return true;
     } catch (error: unknown) {
@@ -360,6 +453,10 @@ export class DeviceGatewayStore {
     | "get_snapshot"
     | "get_speech_configuration"
     | "update_speech_configuration"
+    | "save_asr_profile"
+    | "save_tts_profile"
+    | "set_active_speech_profile"
+    | "delete_speech_profile"
     | "test_asr_configuration"
     | "test_tts_configuration"
   >>(
@@ -377,6 +474,10 @@ export class DeviceGatewayStore {
         result.type === "get_snapshot"
         || result.type === "get_speech_configuration"
         || result.type === "update_speech_configuration"
+        || result.type === "save_asr_profile"
+        || result.type === "save_tts_profile"
+        || result.type === "set_active_speech_profile"
+        || result.type === "delete_speech_profile"
         || result.type === "test_asr_configuration"
         || result.type === "test_tts_configuration"
       ) {
