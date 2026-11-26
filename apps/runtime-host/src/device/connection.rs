@@ -26,7 +26,7 @@ use axum::{
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::{Notify, mpsc, oneshot},
     time::{Instant as TokioInstant, MissedTickBehavior, interval, timeout},
 };
 use tokio_util::sync::CancellationToken;
@@ -80,7 +80,7 @@ const MAX_CLIENT_INPUT_ID_BYTES: usize = 256;
 const MAX_TEXT_INPUT_BYTES: usize = 48 * 1024;
 const MAX_UPLINK_PCM_BYTES: usize = 60 * 16_000 * 2;
 const MAX_CLIENT_INPUT_FINGERPRINTS: usize = 1_024;
-const VOICE_TURN_COMMIT_DELAY: Duration = Duration::from_secs(2);
+const RECONNECT_VOICE_TURN_COMMIT_DELAY: Duration = Duration::from_secs(2);
 const MAX_VOICE_TURN_SEGMENTS: usize = 16;
 const SPAKE2_P256_SHARE_BYTES: usize = 65;
 const ED25519_PUBLIC_KEY_BYTES: usize = 32;
@@ -763,6 +763,7 @@ async fn authenticated_loop(
     let mut last_received = Instant::now();
     let mut receiving: Option<UplinkUtterance> = None;
     let voice_turn = shared.voice_turn(device_id).await;
+    let voice_turn_notify = Arc::new(Notify::new());
     {
         let mut aggregation = voice_turn.lock().await;
         if aggregation
@@ -773,7 +774,9 @@ async fn authenticated_loop(
         } else if let Some(aggregation) = aggregation.as_mut() {
             // Give a reconnected terminal time to retransmit a segment whose
             // ownership acknowledgement may have been lost with the old WSS.
-            aggregation.schedule_commit();
+            let reconnect_delay =
+                RECONNECT_VOICE_TURN_COMMIT_DELAY.max(shared.native_console.turn_commit_delay());
+            aggregation.schedule_commit(reconnect_delay);
         }
     }
     let mut playback = VecDeque::<ActivePlayback>::new();
@@ -784,6 +787,9 @@ async fn authenticated_loop(
     let mut pending_wake_syncs: HashMap<String, oneshot::Sender<WakeConfigAck>> = HashMap::new();
     loop {
         tokio::select! {
+            _ = voice_turn_notify.notified() => {
+                process_voice_turn(socket, shared, device_id, capabilities, &voice_turn).await?;
+            }
             _ = voice_turn_clock.tick() => {
                 process_voice_turn(socket, shared, device_id, capabilities, &voice_turn).await?;
             }
@@ -1088,7 +1094,10 @@ async fn authenticated_loop(
                                         return Err(ConnectionError::InvalidMessage);
                                     };
                                     let mut aggregation = voice_turn.lock().await;
-                                    resume_or_clear_voice_turn(&mut aggregation);
+                                    resume_or_clear_voice_turn(
+                                        &mut aggregation,
+                                        shared.native_console.turn_commit_delay(),
+                                    );
                                     drop(aggregation);
                                     send_payload(socket, "state_changed", &InteractionStateChanged {
                                         run_id: None,
@@ -1134,7 +1143,7 @@ async fn authenticated_loop(
                                     send_wire_error(socket, "voice_turn_limit_reached", Some(envelope.message_id), true).await?;
                                     continue;
                                 };
-                                aggregation.schedule_commit();
+                                aggregation.schedule_commit(shared.native_console.turn_commit_delay());
                                 let logical_client_input_id =
                                     aggregation.logical_client_input_id.clone();
                                 let recognition = match admission {
@@ -1152,6 +1161,7 @@ async fn authenticated_loop(
                                         ordinal,
                                         cancellation,
                                         voice_turn.clone(),
+                                        voice_turn_notify.clone(),
                                         logical_client_input_id,
                                     );
                                 }
@@ -1171,7 +1181,10 @@ async fn authenticated_loop(
                                 if receiving.as_ref().is_some_and(|active| active.stream_id == request.stream_id) {
                                     if let Some(cancelled) = receiving.take() {
                                         let mut aggregation = voice_turn.lock().await;
-                                        resume_or_clear_voice_turn(&mut aggregation);
+                                        resume_or_clear_voice_turn(
+                                            &mut aggregation,
+                                            shared.native_console.turn_commit_delay(),
+                                        );
                                         drop(aggregation);
                                         send_payload(socket, "state_changed", &InteractionStateChanged {
                                             run_id: None,
@@ -2183,8 +2196,8 @@ impl VoiceTurnAggregation {
         self.commit_deadline = None;
     }
 
-    fn schedule_commit(&mut self) {
-        self.commit_deadline = Some(TokioInstant::now() + VOICE_TURN_COMMIT_DELAY);
+    fn schedule_commit(&mut self, delay: Duration) {
+        self.commit_deadline = Some(TokioInstant::now() + delay);
     }
 
     fn ready_to_commit(&self) -> bool {
@@ -2234,14 +2247,17 @@ impl VoiceTurnAggregation {
 ///
 /// 空聚合没有任何可提交事实，直接清除；已有分段则重新启动 commit deadline。该转换只修改
 /// Gateway 的易失聚合状态，不提交 Runtime Input，也不取消已经运行的 ASR。
-fn resume_or_clear_voice_turn(aggregation: &mut Option<VoiceTurnAggregation>) {
+fn resume_or_clear_voice_turn(
+    aggregation: &mut Option<VoiceTurnAggregation>,
+    delay: Duration,
+) {
     if aggregation
         .as_ref()
         .is_some_and(VoiceTurnAggregation::is_empty)
     {
         *aggregation = None;
     } else if let Some(aggregation) = aggregation.as_mut() {
-        aggregation.schedule_commit();
+        aggregation.schedule_commit(delay);
     }
 }
 
@@ -2445,6 +2461,7 @@ fn spawn_segment_recognition(
     ordinal: usize,
     cancellation: tokio_util::sync::CancellationToken,
     voice_turn: Arc<tokio::sync::Mutex<Option<VoiceTurnAggregation>>>,
+    voice_turn_notify: Arc<Notify>,
     logical_client_input_id: String,
 ) {
     let failed_outcome = RecognitionOutcome {
@@ -2465,6 +2482,7 @@ fn spawn_segment_recognition(
         recognition,
         failed_outcome,
         voice_turn,
+        Some(voice_turn_notify),
         logical_client_input_id,
     );
 }
@@ -2479,6 +2497,7 @@ fn spawn_owned_recognition(
     recognition: impl Future<Output = RecognitionOutcome> + Send + 'static,
     failed_outcome: RecognitionOutcome,
     voice_turn: Arc<tokio::sync::Mutex<Option<VoiceTurnAggregation>>>,
+    voice_turn_notify: Option<Arc<Notify>>,
     logical_client_input_id: String,
 ) {
     tasks.spawn(async move {
@@ -2486,12 +2505,19 @@ fn spawn_owned_recognition(
             Ok(outcome) => outcome,
             Err(_) => failed_outcome,
         };
-        settle_recognition_outcome(&voice_turn, &logical_client_input_id, outcome).await;
+        settle_recognition_outcome(
+            &voice_turn,
+            voice_turn_notify.as_deref(),
+            &logical_client_input_id,
+            outcome,
+        )
+        .await;
     });
 }
 
 async fn settle_recognition_outcome(
     voice_turn: &Arc<tokio::sync::Mutex<Option<VoiceTurnAggregation>>>,
+    voice_turn_notify: Option<&Notify>,
     logical_client_input_id: &str,
     outcome: RecognitionOutcome,
 ) {
@@ -2500,6 +2526,9 @@ async fn settle_recognition_outcome(
         && logical_client_input_id == active.logical_client_input_id
     {
         active.complete_segment(outcome);
+        if let Some(notify) = voice_turn_notify {
+            notify.notify_one();
+        }
     }
 }
 
@@ -2982,7 +3011,7 @@ mod tests {
         else {
             panic!("second segment must be new");
         };
-        aggregation.schedule_commit();
+        aggregation.schedule_commit(Duration::from_secs(2));
         aggregation.commit_deadline = Some(TokioInstant::now());
 
         aggregation.complete_segment(RecognitionOutcome {
@@ -3010,6 +3039,44 @@ mod tests {
     }
 
     #[test]
+    fn voice_turn_zero_commit_delay_is_ready_immediately_and_nonzero_delay_waits() {
+        let mut instant_turn =
+            VoiceTurnAggregation::new("instant".to_owned(), OutputPreferenceSnapshot::Audio);
+        let SegmentAdmission::New { ordinal, .. } = instant_turn
+            .admit_segment("seg-1".to_owned(), [5; 32], 1)
+            .expect("segment")
+        else {
+            panic!("segment must be new");
+        };
+        instant_turn.schedule_commit(Duration::ZERO);
+        assert!(!instant_turn.ready_to_commit());
+        instant_turn.complete_segment(RecognitionOutcome {
+            ordinal,
+            stream_id: 1,
+            client_input_id: "seg-1".to_owned(),
+            result: Ok("立刻提交".to_owned()),
+        });
+        assert!(instant_turn.ready_to_commit());
+
+        let mut buffered_turn =
+            VoiceTurnAggregation::new("buffered".to_owned(), OutputPreferenceSnapshot::Audio);
+        let SegmentAdmission::New { ordinal, .. } = buffered_turn
+            .admit_segment("seg-2".to_owned(), [6; 32], 2)
+            .expect("segment")
+        else {
+            panic!("segment must be new");
+        };
+        buffered_turn.schedule_commit(Duration::from_secs(5));
+        buffered_turn.complete_segment(RecognitionOutcome {
+            ordinal,
+            stream_id: 2,
+            client_input_id: "seg-2".to_owned(),
+            result: Ok("等待合并".to_owned()),
+        });
+        assert!(!buffered_turn.ready_to_commit());
+    }
+
+    #[test]
     fn voice_turn_pause_cancels_the_pending_commit_and_empty_segments_are_omitted() {
         let mut aggregation =
             VoiceTurnAggregation::new("logical-input".to_owned(), OutputPreferenceSnapshot::Text);
@@ -3019,7 +3086,7 @@ mod tests {
         else {
             panic!("empty segment must be new");
         };
-        aggregation.schedule_commit();
+        aggregation.schedule_commit(Duration::from_secs(2));
         aggregation.pause_commit();
         aggregation.complete_segment(RecognitionOutcome {
             ordinal: empty,
@@ -3038,7 +3105,7 @@ mod tests {
             "empty".to_owned(),
             OutputPreferenceSnapshot::Text,
         ));
-        resume_or_clear_voice_turn(&mut empty);
+        resume_or_clear_voice_turn(&mut empty, Duration::from_secs(2));
         assert!(empty.is_none());
 
         let mut existing =
@@ -3049,7 +3116,7 @@ mod tests {
         ));
         existing.pause_commit();
         let mut existing = Some(existing);
-        resume_or_clear_voice_turn(&mut existing);
+        resume_or_clear_voice_turn(&mut existing, Duration::from_secs(2));
         assert!(
             existing
                 .as_ref()
@@ -3095,6 +3162,7 @@ mod tests {
                 result: Err(SpeechServiceError::Unavailable),
             },
             voice_turn.clone(),
+            None,
             "logical-input".to_owned(),
         );
         spawn_owned_recognition(
@@ -3107,6 +3175,7 @@ mod tests {
                 result: Err(SpeechServiceError::Unavailable),
             },
             voice_turn.clone(),
+            None,
             "logical-input".to_owned(),
         );
 

@@ -480,6 +480,35 @@
   padding-left: 86px;
 }
 
+.ms_input_wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.ms_input {
+  width: 82px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--ez-border-strong);
+  border-radius: var(--ez-radius-small);
+  outline: 0;
+  color: var(--ez-text);
+  background: var(--ez-surface);
+  font: inherit;
+  font-size: var(--ez-font-small);
+
+  &:focus {
+    @include fields.focus-border;
+  }
+}
+
+.ms_unit {
+  color: var(--ez-text-muted);
+  font-size: var(--ez-font-small);
+}
+
 .capture_box {
   display: grid;
   gap: 8px;

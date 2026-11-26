@@ -44,6 +44,29 @@ const SENSITIVITY_OPTIONS: ReadonlyArray<Readonly<{
   { label: "灵敏", threshold: 0.70 },
 ];
 
+const SPEECH_END_SILENCE_PRESETS: ReadonlyArray<Readonly<{
+  label: string;
+  ms: number;
+}>> = [
+  { label: "极速 0.35s", ms: 350 },
+  { label: "标准 0.5s", ms: 500 },
+  { label: "从容 1.0s", ms: 1000 },
+];
+
+const TURN_COMMIT_DELAY_PRESETS: ReadonlyArray<Readonly<{
+  label: string;
+  ms: number;
+}>> = [
+  { label: "立即 0s", ms: 0 },
+  { label: "短缓冲 0.5s", ms: 500 },
+  { label: "多段合并 2.0s", ms: 2000 },
+];
+
+function clampInt(value: number, min: number, max: number, fallback: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+
 export const WakeSettingsCard = observer(function WakeSettingsCard(props: WakeSettingsCardProps) {
   const { device_gateway: gateway } = useRootStore();
   const [loading, setLoading] = useState(false);
@@ -57,6 +80,8 @@ export const WakeSettingsCard = observer(function WakeSettingsCard(props: WakeSe
   const [manualPinyin, setManualPinyin] = useState(false);
   const [vpThreshold, setVpThreshold] = useState(0.78);
   const [vpWakeChime, setVpWakeChime] = useState(false);
+  const [speechEndSilenceMs, setSpeechEndSilenceMs] = useState(500);
+  const [turnCommitDelayMs, setTurnCommitDelayMs] = useState(0);
   const [enrolledCount, setEnrolledCount] = useState(0);
   const [unknownChars, setUnknownChars] = useState<string[]>([]);
 
@@ -74,6 +99,8 @@ export const WakeSettingsCard = observer(function WakeSettingsCard(props: WakeSe
       setWakePinyin(snap.wake.wake_pinyin);
       setVpThreshold(snap.wake.vp_threshold);
       setVpWakeChime(snap.wake.vp_wake_chime);
+      setSpeechEndSilenceMs(clampInt(snap.wake.speech_end_silence_ms, 250, 2500, 500));
+      setTurnCommitDelayMs(clampInt(snap.wake.turn_commit_delay_ms, 0, 5000, 0));
       setEnrolledCount(snap.enrolled_speaker_count);
       setUnknownChars([]);
     } catch (err: unknown) {
@@ -134,12 +161,16 @@ export const WakeSettingsCard = observer(function WakeSettingsCard(props: WakeSe
 
     setSaving(true);
     try {
+      const nextEndSilenceMs = clampInt(speechEndSilenceMs, 250, 2500, 500);
+      const nextTurnCommitDelayMs = clampInt(turnCommitDelayMs, 0, 5000, 0);
       const body: Partial<DeviceWakeConfig> = {
         mode,
         wake_word: wakeWord.trim() || DEFAULT_WAKE_WORD,
         wake_pinyin: pinyinCheck.normalized,
         vp_threshold: vpThreshold,
         vp_wake_chime: vpWakeChime,
+        speech_end_silence_ms: nextEndSilenceMs,
+        turn_commit_delay_ms: nextTurnCommitDelayMs,
       };
       const res = await gateway.consoleJson<Record<string, unknown>>(
         props.device_id,
@@ -150,6 +181,8 @@ export const WakeSettingsCard = observer(function WakeSettingsCard(props: WakeSe
         },
       );
       setWakePinyin(pinyinCheck.normalized);
+      setSpeechEndSilenceMs(nextEndSilenceMs);
+      setTurnCommitDelayMs(nextTurnCommitDelayMs);
       setNotice(res.synced === true ? "已同步生效。" : "已保存，终端上线后同步。");
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "保存唤醒设置失败。");
@@ -330,6 +363,106 @@ export const WakeSettingsCard = observer(function WakeSettingsCard(props: WakeSe
             </div>
           </div>
         ) : null}
+
+        <div className={styles.setting_row}>
+          <label
+            className={styles.setting_label}
+            htmlFor={`speech-end-silence-${props.device_id}`}
+          >
+            判停延迟
+          </label>
+          <div className={styles.setting_control_col}>
+            <div className={styles.action_row}>
+              <div className={styles.segmented_group}>
+                {SPEECH_END_SILENCE_PRESETS.map((opt) => (
+                  <button
+                    className={styles.segmented_btn}
+                    data-selected={speechEndSilenceMs === opt.ms ? "true" : "false"}
+                    key={opt.ms}
+                    onClick={() => {
+                      setSpeechEndSilenceMs(opt.ms);
+                      setNotice(null);
+                    }}
+                    type="button"
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+              <div className={styles.ms_input_wrap}>
+                <input
+                  aria-label="说完判停延迟（毫秒）"
+                  className={styles.ms_input}
+                  id={`speech-end-silence-${props.device_id}`}
+                  max={2500}
+                  min={250}
+                  onChange={(event) => {
+                    const next = Number(event.currentTarget.value);
+                    setSpeechEndSilenceMs(Number.isFinite(next) ? next : 500);
+                    setNotice(null);
+                  }}
+                  step={50}
+                  type="number"
+                  value={speechEndSilenceMs}
+                />
+                <span className={styles.ms_unit}>ms</span>
+              </div>
+            </div>
+            <p className={styles.empty_note}>
+              说完话停顿超过该时间即结束收音并送识别（范围 250–2500 ms）。
+            </p>
+          </div>
+        </div>
+
+        <div className={styles.setting_row}>
+          <label
+            className={styles.setting_label}
+            htmlFor={`turn-commit-delay-${props.device_id}`}
+          >
+            入会话延迟
+          </label>
+          <div className={styles.setting_control_col}>
+            <div className={styles.action_row}>
+              <div className={styles.segmented_group}>
+                {TURN_COMMIT_DELAY_PRESETS.map((opt) => (
+                  <button
+                    className={styles.segmented_btn}
+                    data-selected={turnCommitDelayMs === opt.ms ? "true" : "false"}
+                    key={opt.ms}
+                    onClick={() => {
+                      setTurnCommitDelayMs(opt.ms);
+                      setNotice(null);
+                    }}
+                    type="button"
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+              <div className={styles.ms_input_wrap}>
+                <input
+                  aria-label="识别后入会话延迟（毫秒）"
+                  className={styles.ms_input}
+                  id={`turn-commit-delay-${props.device_id}`}
+                  max={5000}
+                  min={0}
+                  onChange={(event) => {
+                    const next = Number(event.currentTarget.value);
+                    setTurnCommitDelayMs(Number.isFinite(next) ? next : 0);
+                    setNotice(null);
+                  }}
+                  step={100}
+                  type="number"
+                  value={turnCommitDelayMs}
+                />
+                <span className={styles.ms_unit}>ms</span>
+              </div>
+            </div>
+            <p className={styles.empty_note}>
+              识别完成后等待多久注入主控会话：0 ms 为识别完立即入会话，调大可把停顿后的多句合并为一条（范围 0–5000 ms）。
+            </p>
+          </div>
+        </div>
 
         <div className={styles.wake_footer}>
           <button

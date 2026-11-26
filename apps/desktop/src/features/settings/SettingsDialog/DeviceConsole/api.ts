@@ -45,6 +45,8 @@ export type DeviceWakeConfig = Readonly<{
   min_speech_ms: number;
   cooldown_ms: number;
   vp_wake_chime: boolean;
+  speech_end_silence_ms: number;
+  turn_commit_delay_ms: number;
 }>;
 
 export type DeviceWakeSnapshot = Readonly<{
@@ -217,6 +219,18 @@ export function parseWakeSnapshot(payload: unknown): DeviceWakeSnapshot {
       min_speech_ms: pickNumber(rawWake, 700, "min_speech_ms", "minSpeechMs"),
       cooldown_ms: pickNumber(rawWake, 1500, "cooldown_ms", "cooldownMs"),
       vp_wake_chime: pickBool(rawWake, false, "vp_wake_chime", "vpWakeChime"),
+      speech_end_silence_ms: pickNumber(
+        rawWake,
+        500,
+        "speech_end_silence_ms",
+        "speechEndSilenceMs",
+      ),
+      turn_commit_delay_ms: pickNumber(
+        rawWake,
+        0,
+        "turn_commit_delay_ms",
+        "turnCommitDelayMs",
+      ),
     },
     enrolled_speaker_count: pickNumber(root, 0, "enrolled_speaker_count", "enrolledSpeakerCount"),
     multinet_ready: pickBool(root, true, "multinet_ready", "multinetReady"),
