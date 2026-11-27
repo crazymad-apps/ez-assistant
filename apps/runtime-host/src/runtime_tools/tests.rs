@@ -15,6 +15,19 @@ fn app_and_portable_layouts_follow_the_executable_after_relocation() {
         Some(bin)
     );
     assert!(directory_for(&home.path().join("unbundled/ez-assistant-runtime")).is_none());
+
+    #[cfg(target_os = "linux")]
+    {
+        let prefix = home.path().join("linux-deb-prefix");
+        let deb_bin = prefix.join("usr/bin");
+        let deb_tools = prefix.join("usr/lib/EZ Assistant").join(BIN);
+        std::fs::create_dir_all(&deb_bin).unwrap();
+        std::fs::create_dir_all(&deb_tools).unwrap();
+        assert_eq!(
+            directory_for(&deb_bin.join("ez-assistant-runtime")),
+            Some(deb_tools)
+        );
+    }
 }
 
 #[test]
