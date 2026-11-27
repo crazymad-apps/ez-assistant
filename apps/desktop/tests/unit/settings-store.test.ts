@@ -109,6 +109,39 @@ describe("SettingsStore connection validation", () => {
     expect(store.error_message).toBe("API Key 无效或无权访问该模型，请检查凭据。");
     expect(store.notice_message).toBeNull();
   });
+
+  it("tests provider connection drafts and maps discovery failures into friendly Chinese messages", async () => {
+    const client = {
+      command: vi.fn()
+        .mockResolvedValueOnce({
+          type: "test_provider_connection",
+          payload: { model_count: 3, sample_model_ids: ["deepseek-chat", "deepseek-reasoner"], elapsed_ms: 42 },
+        })
+        .mockRejectedValueOnce(Object.assign(new Error("request timed out"), { code: "timeout" }))
+        .mockRejectedValueOnce(Object.assign(new Error("HTTP 401 unauthorized"), { code: "model_unavailable" })),
+    } as unknown as RuntimeClient;
+    const store = permissionStore(client);
+
+    const ok = await store.testProviderConnection({
+      connection: modelProvider.connection,
+      credential: { mode: "replace", value: "sk-test" },
+    });
+    expect(ok?.model_count).toBe(3);
+    expect(store.notice_message).toBe("连接测试成功，发现 3 个模型（示例：deepseek-chat、deepseek-reasoner）。");
+    expect(store.error_message).toBeNull();
+
+    expect(await store.testProviderConnection({
+      connection: modelProvider.connection,
+      credential: { mode: "replace", value: "sk-test" },
+    })).toBeNull();
+    expect(store.error_message).toBe("服务商连接测试超时，请检查网络或服务地址后重试。");
+
+    expect(await store.testProviderConnection({
+      connection: modelProvider.connection,
+      credential: { mode: "replace", value: "sk-bad" },
+    })).toBeNull();
+    expect(store.error_message).toBe("API Key 无效或无权访问该服务商，请检查凭据。");
+  });
 });
 
 describe("SettingsStore model catalog", () => {

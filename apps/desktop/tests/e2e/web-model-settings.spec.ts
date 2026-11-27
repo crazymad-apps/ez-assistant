@@ -64,6 +64,7 @@ test("model settings apply provider rules, field templates and wire effort mappi
     }
     async function add(label: string, name: string) {
       await dialog.getByRole("button", { name: "添加服务商", exact: true }).click();
+      await dialog.getByRole("button", { name: "高级设置", exact: true }).click();
       await select("服务商类型", label);
       await dialog.getByLabel("服务商名称", { exact: true }).fill(name);
       await dialog.getByLabel("服务地址", { exact: true }).fill(`http://127.0.0.1:${address.port}/v1`);
@@ -90,7 +91,6 @@ test("model settings apply provider rules, field templates and wire effort mappi
     await expect(key_input).toHaveCSS("padding-right", "36px");
     await dialog.screenshot({ path: test.info().outputPath("provider-key-eye.png") });
 
-    await dialog.getByRole("button", { name: "接口选项", exact: true }).click();
     await expect(dialog.getByLabel("模型列表接口", { exact: true })).toHaveValue("");
     await expect(dialog.getByRole("button", { name: "列表格式", exact: true })).toHaveCount(0);
     await dialog.getByLabel("模型列表接口", { exact: true }).fill("/custom/models");
@@ -176,7 +176,6 @@ test("model settings apply provider rules, field templates and wire effort mappi
     await dialog.getByRole("button", { name: "返回", exact: true }).click();
     await add("百炼套餐", "套餐映射验证");
     await dialog.getByLabel("服务地址", { exact: true }).fill(`http://127.0.0.1:${address.port}/compatible-mode/v1`);
-    await dialog.getByRole("button", { name: "接口选项", exact: true }).click();
     await expect(dialog.getByLabel("模型列表接口", { exact: true })).toHaveValue("");
     await dialog.getByRole("button", { name: "保存服务商", exact: true }).click();
     await dialog.getByRole("button", { name: "刷新在线模型", exact: true }).click();
@@ -373,7 +372,6 @@ test("model settings apply provider rules, field templates and wire effort mappi
     }
     await dialog.getByRole("button", { name: "返回", exact: true }).click();
     await add("OpenAI", "自定义路径验证");
-    await dialog.getByRole("button", { name: "接口选项", exact: true }).click();
     await expect(dialog.getByLabel("模型列表接口", { exact: true })).toHaveValue("");
     await dialog.getByLabel("模型列表接口", { exact: true }).fill("/custom/models");
     await dialog.getByRole("button", { name: "保存服务商", exact: true }).click();

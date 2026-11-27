@@ -515,6 +515,12 @@ async fn dispatch_runtime(
             RuntimeCommandResult::UpdateProvider(runtime.update_provider(request).await?),
             false,
         ),
+        RuntimeCommand::TestProviderConnection(request) => (
+            RuntimeCommandResult::TestProviderConnection(
+                runtime.test_provider_connection(request).await?,
+            ),
+            false,
+        ),
         RuntimeCommand::GetProviderUsage(request)
         | RuntimeCommand::DeleteProvider(request)
         | RuntimeCommand::RefreshProviderModels(request)

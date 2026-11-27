@@ -109,6 +109,48 @@ impl AssistantRuntime {
         })?;
         Ok(catalog_snapshot(&refreshed))
     }
+
+    /// 在不落库的情况下使用表单连接配置与凭据验证服务商在线发现连通性。
+    pub async fn test_provider_connection(
+        &self,
+        request: TestProviderConnectionRequest,
+    ) -> RuntimeResult<TestProviderConnectionResult> {
+        self.ensure_model_editable()?;
+        self.ensure_running()?;
+        validate_connection(&request.connection)?;
+        let previous = match &request.provider_instance_id {
+            Some(id) => self.provider(id)?.api_key.clone(),
+            None => SecretValue::new(String::new()),
+        };
+        let api_key = credential(previous, request.credential)?;
+        validate_provider_credential(&request.connection, &api_key)?;
+        let started_at = std::time::Instant::now();
+        let mut models = self
+            .model_factory
+            .discover_models(ModelDiscoveryRequest {
+                format: request.connection.discovery_format,
+                models_path: &request.connection.models_path,
+                endpoint: &request.connection.endpoint,
+                api_key: api_key.expose(),
+                connect_timeout: MODEL_CATALOG_CONNECT_TIMEOUT,
+                request_timeout: MODEL_CATALOG_REQUEST_TIMEOUT,
+            })
+            .await
+            .map_err(|source| RuntimeError::ModelDiscoveryFailed { source })?;
+        normalize_model_catalog(&mut models)?;
+        let elapsed_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let model_count = u32::try_from(models.len()).unwrap_or(u32::MAX);
+        let sample_model_ids = models
+            .into_iter()
+            .take(5)
+            .map(|model| model.model_id)
+            .collect();
+        Ok(TestProviderConnectionResult {
+            model_count,
+            sample_model_ids,
+            elapsed_ms,
+        })
+    }
 }
 
 fn catalog_snapshot(provider: &StoredProvider) -> ProviderModelCatalogSnapshot {

@@ -20,7 +20,8 @@ use crate::{
     MemoryCapabilities, MessageFeedback, MessageId, PermissionDiagnostic, PermissionDocumentDraft,
     PermissionDocumentRevision, PermissionDocumentScope, PermissionDocumentSnapshot,
     PermissionFileSummary, PersonaSnapshot, PinnedMemoryCollectionSnapshot, PinnedMemorySnapshot,
-    PrioritizeQueuedInputRequest, PrioritizeQueuedInputResult, ReasoningEffortKey,
+    PrioritizeQueuedInputRequest, PrioritizeQueuedInputResult, ProviderConnection,
+    ProviderCredentialChange, ProviderInstanceId, ReasoningEffortKey,
     RejectApprovalAndStopRunRequest, RejectApprovalAndStopRunResult, ResumeQueuedInputRequest,
     ResumeQueuedInputResult, RevokePermissionGrantRequest, RevokePermissionGrantResult, RunId,
     RunSnapshot, RuntimeLifecycle, SearchConversationHistoryRequest,
@@ -266,6 +267,26 @@ pub struct ValidateModelConnectionResult {
     pub selection: crate::ModelSelection,
     /// 成功或结构化失败。
     pub outcome: ConnectionValidationOutcome,
+}
+
+/// 在保存服务商前（或使用已保存密钥编辑时）测试服务商地址与凭据是否可用。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct TestProviderConnectionRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub provider_instance_id: Option<ProviderInstanceId>,
+    pub connection: ProviderConnection,
+    pub credential: ProviderCredentialChange,
+}
+
+/// 服务商连接测试结果（返回发现的模型数量与前几个示例模型 ID）。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct TestProviderConnectionResult {
+    pub model_count: u32,
+    pub sample_model_ids: Vec<String>,
+    pub elapsed_ms: u64,
 }
 
 /// 登记或恢复一个本机 Workspace。
@@ -1451,6 +1472,7 @@ pub enum RuntimeCommand {
     ListProviders(crate::ListProvidersRequest),
     CreateProvider(crate::CreateProviderRequest),
     UpdateProvider(crate::UpdateProviderRequest),
+    TestProviderConnection(TestProviderConnectionRequest),
     DeleteProvider(crate::ProviderRequest),
     GetProviderUsage(crate::ProviderRequest),
     ListProviderModels(crate::ProviderRequest),
@@ -1703,6 +1725,7 @@ pub enum RuntimeCommandResult {
     ListProviders(Vec<crate::ProviderSummary>),
     CreateProvider(crate::ProviderSummary),
     UpdateProvider(crate::ProviderSummary),
+    TestProviderConnection(TestProviderConnectionResult),
     DeleteProvider(crate::ProviderUsage),
     GetProviderUsage(crate::ProviderUsage),
     ListProviderModels(crate::ProviderModelCatalogSnapshot),
@@ -2076,6 +2099,33 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<RuntimeCommand>(value).expect("deserialize command"),
             command
+        );
+
+        let test_provider = RuntimeCommand::TestProviderConnection(TestProviderConnectionRequest {
+            provider_instance_id: None,
+            connection: ProviderConnection {
+                display_name: "DeepSeek".to_owned(),
+                provider_type: crate::ProviderType::Deepseek,
+                endpoint: "https://api.deepseek.com/v1".to_owned(),
+                protocol_preference: crate::ProviderProtocolPreference::Auto,
+                models_path: String::new(),
+                discovery_format: crate::ModelDiscoveryFormat::OpenAi,
+                server_history_enabled: false,
+                server_history_support_override: None,
+            },
+            credential: ProviderCredentialChange::Replace(SecretValue::new(
+                "sk-provider-secret".to_owned(),
+            )),
+        });
+        let redacted = format!("{test_provider:?}");
+        assert!(!redacted.contains("sk-provider-secret"));
+        let wire =
+            serde_json::to_value(&test_provider).expect("serialize test_provider_connection");
+        assert_eq!(wire["type"], "test_provider_connection");
+        assert_eq!(
+            serde_json::from_value::<RuntimeCommand>(wire)
+                .expect("decode test_provider_connection"),
+            test_provider
         );
     }
 

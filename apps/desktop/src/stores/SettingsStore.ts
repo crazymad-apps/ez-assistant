@@ -28,6 +28,8 @@ import type {
   SessionId,
   SkillDetailSnapshot,
   SkillManagementSnapshot,
+  TestProviderConnectionRequest,
+  TestProviderConnectionResult,
   ValidateModelConnectionResult,
   WorkspaceId,
 } from '@ez-assistant/protocol';
@@ -823,6 +825,32 @@ export class SettingsStore {
     return applied ? validation : null;
   }
 
+  async testProviderConnection(
+    request: TestProviderConnectionRequest,
+  ): Promise<TestProviderConnectionResult | null> {
+    const client = this.requireClient();
+    if (!client) return null;
+    let test_result: TestProviderConnectionResult | null = null;
+    const applied = await this.runAction('provider:test', async () => {
+      try {
+        const result = await client.command({ type: 'test_provider_connection', payload: request });
+        if (client !== this.dependencies.get_client()) throw new Error('运行时连接已切换，请重试。');
+        test_result = result.payload;
+        const preview = result.payload.sample_model_ids.slice(0, 3).join('、');
+        const suffix = preview ? `（示例：${preview}）` : '';
+        this.showNotice(
+          result.payload.model_count > 0
+            ? `连接测试成功，发现 ${result.payload.model_count} 个模型${suffix}。`
+            : '连接已建立，但未返回可用模型，请检查模型列表接口或权限。',
+        );
+      } catch (error: unknown) {
+        if (client !== this.dependencies.get_client()) throw error;
+        throw new Error(displayDiscoveryError(error), { cause: error });
+      }
+    });
+    return applied ? test_result : null;
+  }
+
   private invalidateModelRead(): void {
     this.#model_read += 1;
     runInAction(() => {
@@ -884,6 +912,29 @@ function samePermissionScope(left: PermissionDocumentScope, right: PermissionDoc
 
 function displayError(error: unknown): string {
   return error instanceof Error ? error.message : '操作失败，请重试。';
+}
+
+function displayDiscoveryError(error: unknown): string {
+  const code = typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string'
+    ? error.code
+    : null;
+  const raw = error instanceof Error ? error.message : '';
+  if (code === 'timeout' || /timed?\s*out/i.test(raw)) {
+    return '服务商连接测试超时，请检查网络或服务地址后重试。';
+  }
+  if (/401|403|unauthoriz|forbidden|invalid api.?key|authentication/i.test(raw)) {
+    return 'API Key 无效或无权访问该服务商，请检查凭据。';
+  }
+  if (code === 'invalid_request') {
+    return raw ? `请求配置有误：${raw}` : '请检查服务地址和 API Key 后重试。';
+  }
+  if (code === 'model_unavailable') {
+    return '无法连接到该模型服务商或模型列表接口不可用，请检查服务地址与网络。';
+  }
+  if (code === 'resource_too_large') {
+    return '服务商返回的模型列表过大，无法完整解析。';
+  }
+  return raw || '连接测试失败，请检查服务地址、API Key 和网络状态。';
 }
 
 function displayConnectionFailure(failure: ConnectionValidationFailure): string {

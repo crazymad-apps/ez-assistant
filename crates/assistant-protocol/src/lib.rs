@@ -135,10 +135,10 @@ pub use command::{
     SetSessionReasoningEffortResult, SetSessionVariantRequest, SetSessionVariantResult,
     SetSkillEnabledRequest, SetSkillEnabledResult, ShutdownRuntimeRequest, ShutdownRuntimeResult,
     StopGoalRequest, StopGoalResult, SubmitInputMode, SubmitInputRequest, SubmitInputResult,
-    UpdatePinnedMemoryRequest, UpdateWorkspaceRequest, UpdateWorkspaceResult,
-    UploadAttachmentResult, UserMessageEditBlockedReason, UserMessageEditPreparation,
-    UserMessageMcpEdit, UserMessageSkillEdit, ValidateModelConnectionRequest,
-    ValidateModelConnectionResult,
+    TestProviderConnectionRequest, TestProviderConnectionResult, UpdatePinnedMemoryRequest,
+    UpdateWorkspaceRequest, UpdateWorkspaceResult, UploadAttachmentResult,
+    UserMessageEditBlockedReason, UserMessageEditPreparation, UserMessageMcpEdit,
+    UserMessageSkillEdit, ValidateModelConnectionRequest, ValidateModelConnectionResult,
 };
 pub use config::{
     ConfigurationIssue, ConfigurationIssueCode, ConfigurationState, ConfigurationStatus,

@@ -523,10 +523,10 @@ test('企业与个人模型同名时按来源执行，组织切换后恢复独�
 
     await openSettings();
     await button('添加服务商').click();
+    await button('高级设置').click();
     await dialog.getByLabel('服务商名称', { exact: true }).fill(provider_name);
     await dialog.getByLabel('服务地址', { exact: true }).fill(`http://127.0.0.1:${port}/personal/v1`);
     await dialog.getByLabel('API Key', { exact: true }).fill('f02-personal-fixture-key');
-    await button('接口选项').click();
     await button('接口协议').click();
     await page.getByRole('option', { name: 'Chat Completions', exact: true }).click();
     await button('保存服务商').click();

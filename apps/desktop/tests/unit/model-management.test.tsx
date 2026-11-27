@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { runInAction } from 'mobx';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SettingsDialog } from '../../src/features/settings/SettingsDialog';
 import { AppMessageProvider } from '../../src/components/AppMessage';
@@ -411,6 +412,161 @@ describe('provider and fixed model settings', () => {
     fireEvent.click(trigger);
     expect(screen.queryByText('late-model')).not.toBeInTheDocument();
     expect(store.settings.listProviderModels).toHaveBeenCalledOnce();
+  });
+
+  it('folds advanced defaults behind LobeHub split-pane presets, supports search, and tests drafts', async () => {
+    const store = modelStore();
+    const test_spy = vi.spyOn(store.settings, 'testProviderConnection').mockResolvedValue({
+      model_count: 2,
+      sample_model_ids: ['deepseek-chat', 'deepseek-reasoner'],
+      elapsed_ms: 85,
+    });
+    render(
+      <AppMessageProvider><RootStoreProvider store={store}>
+        <SettingsDialog />
+      </RootStoreProvider></AppMessageProvider>,
+    );
+    expect(document.querySelector('[data-provider-icon="custom"]')).not.toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: '添加服务商' }));
+    expect(screen.queryByLabelText('服务商名称')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('服务地址')).not.toBeInTheDocument();
+    expect(screen.getByText('https://api.deepseek.com/v1')).toBeVisible();
+    expect(document.querySelectorAll('[data-provider-icon="deepseek"]').length).toBeGreaterThanOrEqual(2);
+
+    const search = screen.getByLabelText('搜索服务商');
+    fireEvent.change(search, { target: { value: 'openrouter' } });
+    expect(screen.getByRole('button', { name: 'OpenRouter' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: '讯飞星火' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'OpenRouter' }));
+    expect(screen.getByText('https://openrouter.ai/api/v1')).toBeVisible();
+    expect(document.activeElement).toBe(screen.getByLabelText('API Key'));
+
+    fireEvent.change(search, { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: '自定义 OpenAI 兼容' }));
+    expect(await screen.findByLabelText('服务商名称')).toBeVisible();
+    expect(screen.getByLabelText('服务地址')).toHaveValue('');
+
+    fireEvent.click(screen.getByRole('button', { name: 'DeepSeek' }));
+    expect(screen.getByRole('button', { name: '高级设置' })).toHaveAttribute('aria-expanded', 'false');
+    await waitFor(() => expect(screen.queryByLabelText('服务地址')).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: '高级设置' }));
+    expect(await screen.findByLabelText('服务地址')).toHaveValue('https://api.deepseek.com/v1');
+
+    fireEvent.click(screen.getByRole('button', { name: '服务商类型' }));
+    fireEvent.click(screen.getByRole('option', { name: '智谱' }));
+    expect(screen.getByLabelText('服务地址')).toHaveValue('https://open.bigmodel.cn/api/paas/v4');
+
+    fireEvent.change(screen.getByLabelText('服务地址'), { target: { value: 'https://custom.proxy.test/v1' } });
+    fireEvent.click(screen.getByRole('button', { name: '服务商类型' }));
+    fireEvent.click(screen.getByRole('option', { name: 'OpenAI' }));
+    expect(screen.getByLabelText('服务地址')).toHaveValue('https://custom.proxy.test/v1');
+
+    fireEvent.change(screen.getByLabelText('API Key'), { target: { value: 'sk-draft-secret' } });
+    fireEvent.click(screen.getByRole('button', { name: '测试连接' }));
+    await waitFor(() =>
+      expect(test_spy).toHaveBeenCalledWith({
+        connection: expect.objectContaining({
+          provider_type: 'openai',
+          endpoint: 'https://custom.proxy.test/v1',
+        }),
+        credential: { mode: 'replace', value: 'sk-draft-secret' },
+      }),
+    );
+    expect(await screen.findByText(/连接可用（耗时 85 ms），共发现 2 个模型/)).toBeVisible();
+    expect(screen.getByText(/deepseek-chat、deepseek-reasoner/)).toBeVisible();
+  });
+
+  it('automatically refreshes online models after creating a new provider from the preset list', async () => {
+    const store = modelStore();
+    const created = {
+      ...modelProvider,
+      provider_instance_id: 'provider-created',
+      connection: {
+        ...modelProvider.connection,
+        display_name: 'DeepSeek',
+        provider_type: 'deepseek' as const,
+        endpoint: 'https://api.deepseek.com/v1',
+      },
+    };
+    vi.spyOn(store.settings, 'saveProvider').mockImplementation(async () => {
+      runInAction(() => {
+        store.settings.providers = [...store.settings.providers, created];
+      });
+      return created;
+    });
+    vi.mocked(store.settings.refreshProviderModels).mockResolvedValue({
+      provider_instance_id: 'provider-created',
+      models: [discoveredModel('deepseek-chat')],
+      refreshed_at_ms: 99,
+      connection_changed: false,
+      diagnostic: null,
+    });
+
+    show(store);
+    fireEvent.click(screen.getByRole('button', { name: '添加服务商' }));
+    fireEvent.click(screen.getByRole('button', { name: 'DeepSeek' }));
+    fireEvent.change(screen.getByLabelText('API Key'), { target: { value: 'sk-live' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存服务商' }));
+
+    expect(await screen.findByRole('button', { name: '配置模型 deepseek-chat' })).toBeVisible();
+    expect(store.settings.refreshProviderModels).toHaveBeenCalledWith('provider-created', expect.any(AbortSignal));
+    expect(store.settings.loadProviderModelCatalog).not.toHaveBeenCalledWith(
+      'provider-created',
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('allows setting a model as default in one click and hides the action when policy forbids it', async () => {
+    const store = modelStore();
+    vi.mocked(store.settings.loadProviderModelCatalog).mockResolvedValue({
+      provider_instance_id: modelProvider.provider_instance_id,
+      models: [discoveredModel('gpt-4.1'), discoveredModel('gpt-4.1-mini')],
+      refreshed_at_ms: 10,
+      connection_changed: false,
+      diagnostic: null,
+    });
+    const set_default = vi.spyOn(store.settings, 'setDefaultModel').mockImplementation(async (selection) => {
+      runInAction(() => {
+        store.settings.model_settings = {
+          ...store.settings.model_settings,
+          default_model: selection,
+        };
+      });
+      return true;
+    });
+
+    show(store);
+    fireEvent.click(screen.getByRole('button', { name: /测试服务商 https/ }));
+    fireEvent.click(await screen.findByRole('button', { name: '设为默认 gpt-4.1' }));
+    await waitFor(() =>
+      expect(set_default).toHaveBeenCalledWith({
+        source: 'local',
+        provider_instance_id: 'provider-1',
+        model_id: 'gpt-4.1',
+      }),
+    );
+    expect(await screen.findByText('当前默认')).toBeVisible();
+    expect(screen.getByRole('button', { name: '设为默认 gpt-4.1-mini' })).toBeVisible();
+
+    act(() => {
+      runInAction(() => {
+        store.settings.model_settings = {
+          ...store.settings.model_settings,
+          management: {
+            read_only: true,
+            allow_member_selection: false,
+            unavailable_models: [],
+            unavailable_reason: null,
+            last_success_at_ms: 42,
+            last_refresh_error: null,
+          },
+        };
+      });
+    });
+    await waitFor(() => expect(screen.queryByRole('button', { name: /^设为默认 / })).not.toBeInTheDocument());
   });
 });
 

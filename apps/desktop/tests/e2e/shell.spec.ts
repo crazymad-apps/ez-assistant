@@ -515,6 +515,7 @@ async function expectProviderConnectionForm(page: Page): Promise<void> {
   const settings = page.getByRole("dialog", { name: "设置" });
   await settings.getByRole("button", { name: "模型", exact: true }).click();
   await settings.getByRole("button", { name: "添加服务商" }).click();
+  await settings.getByRole("button", { name: "高级设置", exact: true }).click();
   const provider = settings.getByRole("button", { name: "服务商类型" });
   await provider.click();
   const provider_options = page.getByRole("listbox", { name: "服务商类型" });

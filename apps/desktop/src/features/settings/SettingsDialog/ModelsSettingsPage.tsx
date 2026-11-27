@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ModelSelection, ProviderInstanceId, ProviderRequest } from '@ez-assistant/protocol';
 import { CollapsibleSection } from '../../../components/CollapsibleSection';
 import { Icon } from '../../../components/Icon';
+import { ProviderIcon, inferModelProviderIcon } from '../../../components/ProviderIcon';
 import { useRootStore } from '../../../stores/RootStoreContext';
 import { SessionActionDialog } from '../../sessions/SessionActionDialog';
 import { ModelFixedConfigPage } from './ModelFixedConfigPage';
@@ -18,10 +19,14 @@ import styles from './index.module.scss';
 type ModelPage =
   | { type: 'home' }
   | { type: 'create' }
-  | ({ type: 'provider' | 'edit' | 'add_model' } & ProviderRequest)
+  | ({ type: 'provider'; auto_refresh?: boolean } & ProviderRequest)
+  | ({ type: 'edit' | 'add_model' } & ProviderRequest)
   | { type: 'model'; selection: ModelSelection };
 
-function providerPage(type: 'provider' | 'edit' | 'add_model', provider: ProviderRequest): ModelPage {
+function providerPage<T extends 'provider' | 'edit' | 'add_model'>(
+  type: T,
+  provider: ProviderRequest,
+): { type: T } & ProviderRequest {
   return { type, source: provider.source, provider_instance_id: provider.provider_instance_id };
 }
 
@@ -82,8 +87,9 @@ export const ModelsSettingsPage = observer(function ModelsSettingsPage(
         onDirtyChange={onDirtyChange}
         onBack={() => (provider ? navigate(providerPage('provider', provider)) : home())}
         onSaved={(saved) => {
+          const auto_refresh = page.type === 'create';
           onDirtyChange(false);
-          setPage(providerPage('provider', saved));
+          setPage({ ...providerPage('provider', saved), auto_refresh });
         }}
       />
     );
@@ -92,6 +98,7 @@ export const ModelsSettingsPage = observer(function ModelsSettingsPage(
       <ProviderSettingsPage
         key={provider_key}
         provider={provider}
+        auto_refresh={page.auto_refresh}
         onBack={home}
         onDelete={() => {
           void deleteProvider(provider.provider_instance_id);
@@ -146,7 +153,10 @@ export const ModelsSettingsPage = observer(function ModelsSettingsPage(
             onClick={() => navigate(providerPage('provider', item))}
           >
             <span>
-              <strong>{item.connection.display_name}</strong>
+              <span className={styles.provider_row_identity}>
+                <ProviderIcon name={inferModelProviderIcon(item.connection)} size={20} />
+                <strong>{item.connection.display_name}</strong>
+              </span>
               {item.source !== 'organization' && <small>{item.connection.endpoint}</small>}
             </span>
             <Icon name="chevron-right" size={16} />
