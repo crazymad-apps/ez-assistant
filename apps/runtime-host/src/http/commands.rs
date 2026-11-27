@@ -356,6 +356,74 @@ async fn dispatch_device_gateway(
                 snapshot,
             })
         }
+        DeviceGatewayCommand::SaveAsrProfile(request) => {
+            let configuration = services
+                .speech
+                .save_asr_profile(request)
+                .await
+                .map_err(|error| error.to_protocol_info())?;
+            services.device_gateway.notify_changed();
+            let snapshot = services
+                .device_gateway
+                .snapshot()
+                .await
+                .map_err(|error| error.to_protocol_info())?;
+            DeviceGatewayCommandResult::SaveAsrProfile(UpdateSpeechConfigurationResult {
+                configuration,
+                snapshot,
+            })
+        }
+        DeviceGatewayCommand::SaveTtsProfile(request) => {
+            let configuration = services
+                .speech
+                .save_tts_profile(request)
+                .await
+                .map_err(|error| error.to_protocol_info())?;
+            services.device_gateway.notify_changed();
+            let snapshot = services
+                .device_gateway
+                .snapshot()
+                .await
+                .map_err(|error| error.to_protocol_info())?;
+            DeviceGatewayCommandResult::SaveTtsProfile(UpdateSpeechConfigurationResult {
+                configuration,
+                snapshot,
+            })
+        }
+        DeviceGatewayCommand::SetActiveSpeechProfile(request) => {
+            let configuration = services
+                .speech
+                .set_active_profile(request)
+                .await
+                .map_err(|error| error.to_protocol_info())?;
+            services.device_gateway.notify_changed();
+            let snapshot = services
+                .device_gateway
+                .snapshot()
+                .await
+                .map_err(|error| error.to_protocol_info())?;
+            DeviceGatewayCommandResult::SetActiveSpeechProfile(UpdateSpeechConfigurationResult {
+                configuration,
+                snapshot,
+            })
+        }
+        DeviceGatewayCommand::DeleteSpeechProfile(request) => {
+            let configuration = services
+                .speech
+                .delete_profile(request)
+                .await
+                .map_err(|error| error.to_protocol_info())?;
+            services.device_gateway.notify_changed();
+            let snapshot = services
+                .device_gateway
+                .snapshot()
+                .await
+                .map_err(|error| error.to_protocol_info())?;
+            DeviceGatewayCommandResult::DeleteSpeechProfile(UpdateSpeechConfigurationResult {
+                configuration,
+                snapshot,
+            })
+        }
         DeviceGatewayCommand::TestAsrConfiguration(request) => {
             let result = services.speech.test_asr(request).await?;
             DeviceGatewayCommandResult::TestAsrConfiguration(result)

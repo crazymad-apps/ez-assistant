@@ -727,6 +727,7 @@ timeout_ms = 5000
     let wav_b64 = BASE64.encode(pcm16_mono_wav(&[0_u8; 640]).unwrap());
     let asr_out = handle
         .test_asr(TestAsrConfigurationRequest {
+            profile_id: None,
             asr: UpdateAsrConfigurationInput {
                 enabled: false,
                 provider: SpeechProviderKind::Siliconflow,
@@ -744,6 +745,8 @@ timeout_ms = 5000
 
     let tts_out = handle
         .test_tts(TestTtsConfigurationRequest {
+            profile_id: None,
+            reuse_asr_profile_id: None,
             tts: UpdateTtsConfigurationInput {
                 enabled: false,
                 provider: SpeechProviderKind::Siliconflow,
@@ -769,6 +772,8 @@ timeout_ms = 5000
     // 验证显式传入 fallback_asr_credential 优先级高于已保存空白。
     let err = handle
         .test_tts(TestTtsConfigurationRequest {
+            profile_id: None,
+            reuse_asr_profile_id: None,
             tts: UpdateTtsConfigurationInput {
                 enabled: false,
                 provider: SpeechProviderKind::Groq,
@@ -854,6 +859,7 @@ timeout_ms = 5000
     let wav_b64 = BASE64.encode(pcm16_mono_wav(&[0_u8; 640]).unwrap());
     let asr_out = handle
         .test_asr(TestAsrConfigurationRequest {
+            profile_id: None,
             asr: UpdateAsrConfigurationInput {
                 enabled: false,
                 provider: SpeechProviderKind::Deepseek,
@@ -871,6 +877,8 @@ timeout_ms = 5000
 
     let tts_out = handle
         .test_tts(TestTtsConfigurationRequest {
+            profile_id: None,
+            reuse_asr_profile_id: None,
             tts: UpdateTtsConfigurationInput {
                 enabled: false,
                 provider: SpeechProviderKind::Deepseek,

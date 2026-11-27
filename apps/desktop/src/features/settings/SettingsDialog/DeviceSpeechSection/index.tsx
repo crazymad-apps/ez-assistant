@@ -1,70 +1,55 @@
 import { observer } from "mobx-react-lite";
-import { useEffect, useId, useRef, useState, type ChangeEvent } from "react";
+import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import type {
-  SpeechConfigurationSnapshot,
-  SpeechProviderKind,
+  AsrProfileSnapshot,
+  SpeechCapabilityKind,
   SpeechServiceStatusSnapshot,
-  UpdateAsrConfigurationInput,
-  UpdateTtsConfigurationInput,
+  TtsProfileSnapshot,
 } from "@ez-assistant/protocol";
-import { CollapsibleSection } from "../../../../components/CollapsibleSection";
-import { InlineIconButton } from "../../../../components/InlineIconButton";
+import { Icon } from "../../../../components/Icon";
+import { PresenceBoundary } from "../../../../components/Presence";
 import { ProviderIcon } from "../../../../components/ProviderIcon";
-import { SelectionPopover, type SelectionOption } from "../../../../components/SelectionPopover";
 import { useRootStore } from "../../../../stores/RootStoreContext";
+import { SessionActionDialog } from "../../../sessions/SessionActionDialog";
 import { base64ToWavBlob, BrowserWavRecorder, bytesToBase64 } from "../DeviceConsole/wavRecorder";
 import shellStyles from "../index.module.scss";
+import { AsrProfileEditor } from "./AsrProfileEditor";
 import {
   ASR_PRESETS,
-  CUSTOM_MODEL_SENTINEL,
-  CUSTOM_VOICE_SENTINEL,
   TTS_PRESETS,
-  defaultVoiceForModel,
   detectAsrPreset,
   detectTtsPreset,
-  isSharedSameCloudProvider,
-  ttsPresetVoices,
-  type AsrPresetId,
-  type TtsPresetId,
 } from "./presets";
+import { TtsProfileEditor } from "./TtsProfileEditor";
 import styles from "./index.module.scss";
 
-type AsrDraft = {
-  enabled: boolean;
-  preset: AsrPresetId;
-  provider: SpeechProviderKind;
-  endpoint: string;
-  model: string;
-  timeout_ms: string;
-  credential: string;
-  clear_credential: boolean;
-};
+type AsrEditorState =
+  | null
+  | Readonly<{ mode: "create" }>
+  | Readonly<{ mode: "edit"; profile: AsrProfileSnapshot }>;
 
-type TtsDraft = {
-  enabled: boolean;
-  preset: TtsPresetId;
-  provider: SpeechProviderKind;
-  endpoint: string;
-  model: string;
-  voice: string;
-  custom_voice: boolean;
-  timeout_ms: string;
-  credential: string;
-  clear_credential: boolean;
-  reuse_asr_credential: boolean;
-};
+type TtsEditorState =
+  | null
+  | Readonly<{ mode: "create" }>
+  | Readonly<{ mode: "edit"; profile: TtsProfileSnapshot }>;
 
-type AsrTestState =
+type PendingDelete = Readonly<{
+  capability: SpeechCapabilityKind;
+  id: string;
+  name: string;
+}>;
+
+type QuickAsrTestState =
   | Readonly<{ kind: "idle" }>
   | Readonly<{ kind: "recording" }>
   | Readonly<{ kind: "testing"; source: string }>
   | Readonly<{ kind: "ok"; transcript: string; elapsed_ms: number; source: string }>
   | Readonly<{ kind: "error"; message: string }>;
 
-type TtsTestState =
+type QuickTtsTestState =
   | Readonly<{ kind: "idle" }>
   | Readonly<{ kind: "testing" }>
-  | Readonly<{ kind: "ok"; audio_url: string; wav_base64: string; elapsed_ms: number; duration_ms: number }>
+  | Readonly<{ kind: "ok"; audio_url: string; elapsed_ms: number; duration_ms: number }>
   | Readonly<{ kind: "error"; message: string }>;
 
 function speechStatusLabel(status?: SpeechServiceStatusSnapshot): string {
@@ -74,313 +59,66 @@ function speechStatusLabel(status?: SpeechServiceStatusSnapshot): string {
   return "待同步";
 }
 
-function toAsrDraft(config: SpeechConfigurationSnapshot): AsrDraft {
-  const preset = detectAsrPreset(config.asr.provider, config.asr.endpoint);
-  const meta = ASR_PRESETS[preset];
-  return {
-    enabled: config.asr.enabled,
-    preset,
-    provider: meta.provider,
-    endpoint: config.asr.endpoint || meta.endpoint,
-    model: config.asr.model || meta.default_model,
-    timeout_ms: String(config.asr.timeout_ms),
-    credential: "",
-    clear_credential: false,
-  };
-}
-
-function toTtsDraft(config: SpeechConfigurationSnapshot): TtsDraft {
-  const asrPreset = detectAsrPreset(config.asr.provider, config.asr.endpoint);
-  const preset = detectTtsPreset(config.tts.provider, config.tts.endpoint);
-  const meta = TTS_PRESETS[preset];
-  const model = config.tts.model || meta.default_model;
-  const voice = config.tts.voice || defaultVoiceForModel(preset, model);
-  const knownVoices = ttsPresetVoices(preset, model);
-  const custom_voice = Boolean(voice) && !knownVoices.some((option) => option.value === voice);
-  return {
-    enabled: config.tts.enabled,
-    preset,
-    provider: meta.provider,
-    endpoint: config.tts.endpoint || meta.endpoint,
-    model,
-    voice,
-    custom_voice,
-    timeout_ms: String(config.tts.timeout_ms),
-    credential: "",
-    clear_credential: false,
-    reuse_asr_credential: isSharedSameCloudProvider(asrPreset, preset) && !config.tts.credential_configured,
-  };
-}
-
-function emptyAsrDraft(): AsrDraft {
-  const meta = ASR_PRESETS.dashscope;
-  return {
-    enabled: false,
-    preset: "dashscope",
-    provider: meta.provider,
-    endpoint: meta.endpoint,
-    model: meta.default_model,
-    timeout_ms: "30000",
-    credential: "",
-    clear_credential: false,
-  };
-}
-
-function emptyTtsDraft(): TtsDraft {
-  const meta = TTS_PRESETS.dashscope;
-  return {
-    enabled: false,
-    preset: "dashscope",
-    provider: meta.provider,
-    endpoint: meta.endpoint,
-    model: meta.default_model,
-    voice: meta.default_voice,
-    custom_voice: false,
-    timeout_ms: "30000",
-    credential: "",
-    clear_credential: false,
-    reuse_asr_credential: true,
-  };
-}
-
-function parseTimeoutMs(raw: string): number {
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed < 1) return 30000;
-  return Math.min(120000, Math.round(parsed));
+function shortLabel(label: string): string {
+  return label.split(" (")[0] ?? label;
 }
 
 function errorText(error: unknown, fallback: string): string {
   return error instanceof Error && error.message.trim() ? error.message : fallback;
 }
 
-function toAsrInput(draft: AsrDraft): UpdateAsrConfigurationInput {
-  return {
-    enabled: draft.enabled,
-    provider: draft.provider,
-    endpoint: draft.endpoint.trim(),
-    model: draft.model.trim(),
-    timeout_ms: parseTimeoutMs(draft.timeout_ms),
-    credential: draft.credential.trim() ? draft.credential.trim() : undefined,
-    clear_credential: draft.clear_credential,
-  };
-}
-
-function toTtsInput(draft: TtsDraft, reuseAsr: boolean): UpdateTtsConfigurationInput {
-  return {
-    enabled: draft.enabled,
-    provider: draft.provider,
-    endpoint: draft.endpoint.trim(),
-    model: draft.model.trim(),
-    voice: draft.voice.trim(),
-    timeout_ms: parseTimeoutMs(draft.timeout_ms),
-    credential: !reuseAsr && draft.credential.trim() ? draft.credential.trim() : undefined,
-    clear_credential: !reuseAsr && draft.clear_credential,
-    reuse_asr_credential: reuseAsr,
-  };
-}
-
-export const DeviceSpeechSection = observer(function DeviceSpeechSection() {
-  const store = useRootStore();
-  const gateway = store.device_gateway;
-  const config = gateway.speech_config;
-  const liveStatus = gateway.snapshot?.speech_services;
-
-  const asrSecretId = useId();
-  const ttsSecretId = useId();
+const AsrQuickTestBar = observer(function AsrQuickTestBar(props: Readonly<{
+  profile: AsrProfileSnapshot;
+  loopback_tts: TtsProfileSnapshot | null;
+}>) {
+  const gateway = useRootStore().device_gateway;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const recorderRef = useRef<BrowserWavRecorder | null>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const ttsObjectUrlRef = useRef<string | null>(null);
-  const playRafRef = useRef<number | null>(null);
-
-  const [asr, setAsr] = useState<AsrDraft>(emptyAsrDraft);
-  const [tts, setTts] = useState<TtsDraft>(emptyTtsDraft);
-  const [asrProviderOpen, setAsrProviderOpen] = useState(false);
-  const [asrModelOpen, setAsrModelOpen] = useState(false);
-  const [ttsProviderOpen, setTtsProviderOpen] = useState(false);
-  const [ttsModelOpen, setTtsModelOpen] = useState(false);
-  const [ttsVoiceOpen, setTtsVoiceOpen] = useState(false);
-  const [showAsrSecret, setShowAsrSecret] = useState(false);
-  const [showTtsSecret, setShowTtsSecret] = useState(false);
-  const [ttsPreviewText, setTtsPreviewText] = useState("你好，这是语音合成测试。");
-  const [asrTest, setAsrTest] = useState<AsrTestState>({ kind: "idle" });
-  const [ttsTest, setTtsTest] = useState<TtsTestState>({ kind: "idle" });
-  const [syncedKey, setSyncedKey] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!config) return;
-    const key = [
-      config.revision ?? "none",
-      config.asr.enabled,
-      config.tts.enabled,
-      config.asr.provider,
-      config.tts.provider,
-      config.asr.endpoint,
-      config.tts.endpoint,
-      config.asr.model,
-      config.tts.model,
-      config.tts.voice,
-    ].join(":");
-    if (key !== syncedKey) {
-      setAsr(toAsrDraft(config));
-      setTts(toTtsDraft(config));
-      setSyncedKey(key);
-    }
-  }, [config, syncedKey]);
+  const [state, setState] = useState<QuickAsrTestState>({ kind: "idle" });
 
   useEffect(() => () => {
     recorderRef.current?.dispose();
-    if (playRafRef.current !== null) {
-      cancelAnimationFrame(playRafRef.current);
-      playRafRef.current = null;
-    }
-    if (ttsObjectUrlRef.current) {
-      URL.revokeObjectURL(ttsObjectUrlRef.current);
-      ttsObjectUrlRef.current = null;
-    }
   }, []);
 
-  const busy = gateway.pending_action !== null || gateway.speech_loading;
-  const asrMeta = ASR_PRESETS[asr.preset];
-  const ttsMeta = TTS_PRESETS[tts.preset];
-  const sameCloudProvider = isSharedSameCloudProvider(asr.preset, tts.preset);
-  const effectiveReuseAsr = sameCloudProvider && tts.reuse_asr_credential;
-  const asrTestBusy = asrTest.kind === "testing";
-  const ttsTestBusy = ttsTest.kind === "testing";
+  const busy = gateway.pending_action !== null || state.kind === "testing";
 
-  const asrProviderOptions: ReadonlyArray<SelectionOption<AsrPresetId>> = Object.values(ASR_PRESETS).map((item) => ({
-    value: item.id,
-    label: item.label,
-    description: item.description,
-    icon: <ProviderIcon name={item.icon} size={18} />,
-  }));
-
-  const ttsProviderOptions: ReadonlyArray<SelectionOption<TtsPresetId>> = Object.values(TTS_PRESETS).map((item) => ({
-    value: item.id,
-    label: item.label,
-    description: item.description,
-    icon: <ProviderIcon name={item.icon} size={18} />,
-  }));
-
-  const asrModelOptions: ReadonlyArray<SelectionOption<string>> = [
-    ...asrMeta.models,
-    { value: CUSTOM_MODEL_SENTINEL, label: "自定义模型 ID" },
-  ];
-  const asrModelSelected = asrMeta.models.some((option) => option.value === asr.model)
-    ? asr.model
-    : CUSTOM_MODEL_SENTINEL;
-
-  const ttsModelOptions: ReadonlyArray<SelectionOption<string>> = [
-    ...ttsMeta.models,
-    { value: CUSTOM_MODEL_SENTINEL, label: "自定义模型 ID" },
-  ];
-  const ttsModelSelected = ttsMeta.models.some((option) => option.value === tts.model)
-    ? tts.model
-    : CUSTOM_MODEL_SENTINEL;
-
-  const ttsVoices = ttsPresetVoices(tts.preset, tts.model);
-  const ttsVoiceOptions: ReadonlyArray<SelectionOption<string>> = [
-    ...ttsVoices,
-    { value: CUSTOM_VOICE_SENTINEL, label: "自定义音色 ID" },
-  ];
-  const ttsVoiceSelected = tts.custom_voice || !ttsVoices.some((option) => option.value === tts.voice)
-    ? CUSTOM_VOICE_SENTINEL
-    : tts.voice;
-
-  function handleAsrPresetChange(nextPreset: AsrPresetId) {
-    setAsrProviderOpen(false);
-    const nextMeta = ASR_PRESETS[nextPreset];
-    setAsr((prev) => ({
-      ...prev,
-      preset: nextPreset,
-      provider: nextMeta.provider,
-      endpoint: nextMeta.endpoint,
-      model: nextMeta.default_model,
-      clear_credential: false,
-    }));
-    setAsrTest({ kind: "idle" });
-  }
-
-  function handleTtsPresetChange(nextPreset: TtsPresetId) {
-    setTtsProviderOpen(false);
-    const nextMeta = TTS_PRESETS[nextPreset];
-    const nextReuse = isSharedSameCloudProvider(asr.preset, nextPreset);
-    setTts((prev) => ({
-      ...prev,
-      preset: nextPreset,
-      provider: nextMeta.provider,
-      endpoint: nextMeta.endpoint,
-      model: nextMeta.default_model,
-      voice: nextMeta.default_voice,
-      custom_voice: false,
-      clear_credential: false,
-      reuse_asr_credential: nextReuse ? prev.reuse_asr_credential : false,
-    }));
-    setTtsTest({ kind: "idle" });
-  }
-
-  function handleTtsModelChange(nextModel: string) {
-    setTtsModelOpen(false);
-    if (nextModel === CUSTOM_MODEL_SENTINEL) return;
-    setTts((prev) => {
-      const nextVoices = ttsPresetVoices(prev.preset, nextModel);
-      const stillValid = !prev.custom_voice && nextVoices.some((option) => option.value === prev.voice);
-      const nextVoice = stillValid ? prev.voice : defaultVoiceForModel(prev.preset, nextModel);
-      return {
-        ...prev,
-        model: nextModel,
-        voice: nextVoice,
-        custom_voice: false,
-      };
-    });
-  }
-
-  function handleTtsVoiceChange(nextVoice: string) {
-    setTtsVoiceOpen(false);
-    if (nextVoice === CUSTOM_VOICE_SENTINEL) {
-      setTts((prev) => ({ ...prev, custom_voice: true }));
-      return;
-    }
-    setTts((prev) => ({ ...prev, voice: nextVoice, custom_voice: false }));
-  }
-
-  async function saveConfiguration() {
-    await gateway.updateSpeechConfiguration({
-      expected_revision: config?.revision ?? undefined,
-      asr: toAsrInput(asr),
-      tts: toTtsInput(tts, effectiveReuseAsr),
-    });
-  }
-
-  async function runAsrTestWithWav(wavBase64: string, source: string) {
-    setAsrTest({ kind: "testing", source });
+  async function runWithWav(wavBase64: string, source: string) {
+    setState({ kind: "testing", source });
     try {
       const result = await gateway.testAsrConfiguration({
-        asr: toAsrInput(asr),
+        profile_id: props.profile.id,
+        asr: {
+          enabled: true,
+          provider: props.profile.provider,
+          endpoint: props.profile.endpoint,
+          model: props.profile.model,
+          timeout_ms: props.profile.timeout_ms,
+          clear_credential: false,
+        },
         audio_wav_base64: wavBase64,
       });
-      setAsrTest({
+      setState({
         kind: "ok",
         transcript: result.transcript,
         elapsed_ms: result.elapsed_ms,
         source,
       });
     } catch (error: unknown) {
-      setAsrTest({ kind: "error", message: errorText(error, "语音识别测试失败。") });
+      setState({ kind: "error", message: errorText(error, "语音识别测试失败。") });
     }
   }
 
-  async function toggleMicTest() {
-    if (asrTest.kind === "recording") {
+  async function toggleMic() {
+    if (state.kind === "recording") {
       try {
         const sample = await recorderRef.current?.stop();
         if (!sample) {
-          setAsrTest({ kind: "idle" });
+          setState({ kind: "idle" });
           return;
         }
-        await runAsrTestWithWav(sample.base64, sample.label);
+        await runWithWav(sample.base64, sample.label);
       } catch (error: unknown) {
-        setAsrTest({ kind: "error", message: errorText(error, "无法结束麦克风录音。") });
+        setState({ kind: "error", message: errorText(error, "无法结束麦克风录音。") });
       }
       return;
     }
@@ -388,43 +126,137 @@ export const DeviceSpeechSection = observer(function DeviceSpeechSection() {
       const recorder = recorderRef.current ?? new BrowserWavRecorder();
       recorderRef.current = recorder;
       await recorder.start();
-      setAsrTest({ kind: "recording" });
+      setState({ kind: "recording" });
     } catch (error: unknown) {
-      setAsrTest({ kind: "error", message: errorText(error, "无法启动麦克风录音。") });
+      setState({ kind: "error", message: errorText(error, "无法启动麦克风录音。") });
     }
   }
 
-  async function handleWavFileSelected(event: ChangeEvent<HTMLInputElement>) {
+  async function handleFile(event: ChangeEvent<HTMLInputElement>) {
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = "";
     if (!file) return;
     try {
       const buffer = await file.arrayBuffer();
-      const base64 = bytesToBase64(new Uint8Array(buffer));
-      await runAsrTestWithWav(base64, file.name);
+      await runWithWav(bytesToBase64(new Uint8Array(buffer)), file.name);
     } catch (error: unknown) {
-      setAsrTest({ kind: "error", message: errorText(error, "读取测试音频文件失败。") });
+      setState({ kind: "error", message: errorText(error, "读取测试音频文件失败。") });
     }
   }
 
-  async function runTtsPreview(): Promise<string | null> {
-    setTtsTest({ kind: "testing" });
+  async function runLoopback() {
+    const tts = props.loopback_tts;
+    if (!tts) return;
+    setState({ kind: "testing", source: "TTS 闭环" });
+    try {
+      const synth = await gateway.testTtsConfiguration({
+        profile_id: tts.id,
+        tts: {
+          enabled: true,
+          provider: tts.provider,
+          endpoint: tts.endpoint,
+          model: tts.model,
+          voice: tts.voice,
+          timeout_ms: tts.timeout_ms,
+          clear_credential: false,
+          reuse_asr_credential: false,
+        },
+        text: "你好，这是语音识别闭环测试。",
+      });
+      await runWithWav(synth.audio_wav_base64, "TTS 闭环");
+    } catch (error: unknown) {
+      setState({ kind: "error", message: errorText(error, "TTS 闭环测试失败。") });
+    }
+  }
+
+  return (
+    <div className={styles.quick_test_bar}>
+      <div className={styles.test_actions}>
+        <button
+          className={styles.test_primary_button}
+          disabled={busy}
+          onClick={() => void toggleMic()}
+          type="button"
+        >
+          {state.kind === "recording" ? "停止并识别" : state.kind === "testing" ? "识别中…" : "麦克风测试"}
+        </button>
+        <button
+          disabled={busy || state.kind === "recording"}
+          onClick={() => fileInputRef.current?.click()}
+          type="button"
+        >
+          上传 WAV
+        </button>
+        {props.loopback_tts ? (
+          <button
+            disabled={busy || state.kind === "recording"}
+            onClick={() => void runLoopback()}
+            type="button"
+          >
+            TTS 闭环测试
+          </button>
+        ) : null}
+        <input
+          accept=".wav,audio/wav"
+          aria-label={`上传 ${props.profile.name} 测试 WAV`}
+          className={styles.hidden_file_input}
+          onChange={(event) => void handleFile(event)}
+          ref={fileInputRef}
+          type="file"
+        />
+      </div>
+      {state.kind === "recording" ? (
+        <p className={styles.recording_hint}>正在录音，说完后点击“停止并识别”。</p>
+      ) : null}
+      {state.kind === "ok" ? (
+        <div className={styles.test_result} role="status">
+          <strong>「{state.transcript}」</strong>
+          <span>{state.source} · {state.elapsed_ms} ms</span>
+        </div>
+      ) : null}
+      {state.kind === "error" ? (
+        <p className={styles.test_error} role="alert">{state.message}</p>
+      ) : null}
+    </div>
+  );
+});
+
+const TtsQuickPreviewBar = observer(function TtsQuickPreviewBar(props: Readonly<{
+  profile: TtsProfileSnapshot;
+}>) {
+  const gateway = useRootStore().device_gateway;
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const objectUrlRef = useRef<string | null>(null);
+  const playRafRef = useRef<number | null>(null);
+  const [text, setText] = useState("你好，这是语音合成测试。");
+  const [state, setState] = useState<QuickTtsTestState>({ kind: "idle" });
+
+  async function runPreview(sentence: string) {
+    setState({ kind: "testing" });
     try {
       const result = await gateway.testTtsConfiguration({
-        tts: toTtsInput(tts, effectiveReuseAsr),
-        fallback_asr_credential: effectiveReuseAsr && asr.credential.trim() ? asr.credential.trim() : undefined,
-        text: ttsPreviewText.trim() || "你好，这是语音合成测试。",
+        profile_id: props.profile.id,
+        tts: {
+          enabled: true,
+          provider: props.profile.provider,
+          endpoint: props.profile.endpoint,
+          model: props.profile.model,
+          voice: props.profile.voice,
+          timeout_ms: props.profile.timeout_ms,
+          clear_credential: false,
+          reuse_asr_credential: false,
+        },
+        text: sentence.trim() || "你好，这是语音合成测试。",
       });
       const blob = base64ToWavBlob(result.audio_wav_base64);
       const nextUrl = URL.createObjectURL(blob);
-      if (ttsObjectUrlRef.current) {
-        URL.revokeObjectURL(ttsObjectUrlRef.current);
+      if (objectUrlRef.current) {
+        URL.revokeObjectURL(objectUrlRef.current);
       }
-      ttsObjectUrlRef.current = nextUrl;
-      setTtsTest({
+      objectUrlRef.current = nextUrl;
+      setState({
         kind: "ok",
         audio_url: nextUrl,
-        wav_base64: result.audio_wav_base64,
         elapsed_ms: result.elapsed_ms,
         duration_ms: result.duration_ms,
       });
@@ -435,34 +267,130 @@ export const DeviceSpeechSection = observer(function DeviceSpeechSection() {
         playRafRef.current = null;
         void Promise.resolve(audioRef.current?.play()).catch(() => undefined);
       });
-      return result.audio_wav_base64;
     } catch (error: unknown) {
-      setTtsTest({ kind: "error", message: errorText(error, "语音合成试听失败。") });
-      return null;
+      setState({ kind: "error", message: errorText(error, "语音合成试听失败。") });
     }
   }
 
-  async function runLoopbackAsrTest() {
-    if (ttsTest.kind === "ok") {
-      await runAsrTestWithWav(ttsTest.wav_base64, "TTS 合成音频闭环");
+  useEffect(() => {
+    void runPreview("你好，这是语音合成测试。");
+    return () => {
+      if (playRafRef.current !== null) {
+        cancelAnimationFrame(playRafRef.current);
+        playRafRef.current = null;
+      }
+      if (objectUrlRef.current) {
+        URL.revokeObjectURL(objectUrlRef.current);
+        objectUrlRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.profile.id]);
+
+  const busy = gateway.pending_action !== null || state.kind === "testing";
+
+  return (
+    <div className={styles.quick_test_bar}>
+      <div className={styles.tts_test_row}>
+        <input
+          aria-label={`试听 ${props.profile.name} 文本`}
+          disabled={busy}
+          maxLength={120}
+          onChange={(event) => setText(event.currentTarget.value)}
+          placeholder="输入试听句子..."
+          value={text}
+        />
+        <div className={styles.test_actions}>
+          <button
+            className={styles.test_primary_button}
+            disabled={busy}
+            onClick={() => void runPreview(text)}
+            type="button"
+          >
+            {state.kind === "testing" ? "合成中…" : "试听"}
+          </button>
+        </div>
+      </div>
+      {state.kind === "ok" ? (
+        <div className={styles.test_result} role="status">
+          <span>合成成功 · {state.elapsed_ms} ms · {(state.duration_ms / 1000).toFixed(1)} s</span>
+          <audio controls ref={audioRef} src={state.audio_url} />
+        </div>
+      ) : null}
+      {state.kind === "error" ? (
+        <p className={styles.test_error} role="alert">{state.message}</p>
+      ) : null}
+    </div>
+  );
+});
+
+export const DeviceSpeechSection = observer(function DeviceSpeechSection() {
+  const gateway = useRootStore().device_gateway;
+  const config = gateway.speech_config;
+  const liveStatus = gateway.snapshot?.speech_services;
+
+  const asrProfiles = config?.asr_profiles ?? [];
+  const ttsProfiles = config?.tts_profiles ?? [];
+  const activeAsrId = config?.active_asr_id ?? null;
+  const activeTtsId = config?.active_tts_id ?? null;
+
+  const lastAsrIdRef = useRef<string | null>(null);
+  const lastTtsIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (activeAsrId) lastAsrIdRef.current = activeAsrId;
+  }, [activeAsrId]);
+  useEffect(() => {
+    if (activeTtsId) lastTtsIdRef.current = activeTtsId;
+  }, [activeTtsId]);
+
+  const [asrEditor, setAsrEditor] = useState<AsrEditorState>(null);
+  const [ttsEditor, setTtsEditor] = useState<TtsEditorState>(null);
+  const [testingAsrId, setTestingAsrId] = useState<string | null>(null);
+  const [testingTtsId, setTestingTtsId] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
+
+  const busy = gateway.pending_action !== null || gateway.speech_loading;
+  const loopbackTts = ttsProfiles.find((item) => item.id === activeTtsId) ?? ttsProfiles[0] ?? null;
+
+  async function toggleAsrMaster(checked: boolean) {
+    if (!checked) {
+      await gateway.setActiveSpeechProfile("asr", null);
       return;
     }
-    const synthesized = await runTtsPreview();
-    if (synthesized) {
-      await runAsrTestWithWav(synthesized, "TTS 合成音频闭环");
+    const target = asrProfiles.find((item) => item.id === lastAsrIdRef.current)?.id
+      ?? asrProfiles[0]?.id;
+    if (target) {
+      await gateway.setActiveSpeechProfile("asr", target);
     }
   }
 
-  const asrCredentialHint = config?.asr.credential_configured
-    ? `已配置凭据 ${config.asr.credential_masked}`
-    : "尚未配置凭据";
-  const ttsCredentialHint = config?.tts.credential_configured
-    ? `已配置凭据 ${config.tts.credential_masked}`
-    : "尚未配置凭据";
+  async function toggleTtsMaster(checked: boolean) {
+    if (!checked) {
+      await gateway.setActiveSpeechProfile("tts", null);
+      return;
+    }
+    const target = ttsProfiles.find((item) => item.id === lastTtsIdRef.current)?.id
+      ?? ttsProfiles[0]?.id;
+    if (target) {
+      await gateway.setActiveSpeechProfile("tts", target);
+    }
+  }
 
-  let asrMicLabel = "录音测试识别";
-  if (asrTest.kind === "recording") asrMicLabel = "停止并识别";
-  if (asrTest.kind === "testing") asrMicLabel = "识别测试中…";
+  async function confirmDelete() {
+    if (!pendingDelete) return;
+    const { capability, id } = pendingDelete;
+    const ok = await gateway.deleteSpeechProfile(capability, id);
+    if (ok) {
+      if (capability === "asr") {
+        if (testingAsrId === id) setTestingAsrId(null);
+        if (asrEditor?.mode === "edit" && asrEditor.profile.id === id) setAsrEditor(null);
+      } else {
+        if (testingTtsId === id) setTestingTtsId(null);
+        if (ttsEditor?.mode === "edit" && ttsEditor.profile.id === id) setTtsEditor(null);
+      }
+      setPendingDelete(null);
+    }
+  }
 
   return (
     <section className={shellStyles.device_section}>
@@ -478,443 +406,309 @@ export const DeviceSpeechSection = observer(function DeviceSpeechSection() {
       </header>
 
       <div className={styles.speech_cards}>
+        {/* 语音识别 (ASR) 配置列表 */}
         <article className={styles.speech_card}>
           <div className={styles.speech_card_header}>
-            <div>
-              <strong>语音识别</strong>
+            <div className={styles.speech_card_title}>
+              <strong>语音识别 (ASR)</strong>
               <span className={styles.status_badge} data-status={liveStatus?.asr}>
                 {speechStatusLabel(liveStatus?.asr)}
               </span>
             </div>
-            <label className={styles.switch}>
-              <input
-                aria-label="启用语音识别"
-                checked={asr.enabled}
+            <div className={styles.speech_card_controls}>
+              <label
+                className={styles.switch}
+                data-disabled={busy || asrProfiles.length === 0}
+              >
+                <input
+                  aria-label="启用语音识别"
+                  checked={Boolean(activeAsrId)}
+                  disabled={busy || asrProfiles.length === 0}
+                  onChange={(event) => void toggleAsrMaster(event.currentTarget.checked)}
+                  type="checkbox"
+                />
+                <span />
+                <b>{activeAsrId ? "已启用" : "已停用"}</b>
+              </label>
+              <button
+                aria-label="新增语音识别配置"
+                className={styles.add_btn}
                 disabled={busy}
-                onChange={(event) => setAsr({ ...asr, enabled: event.currentTarget.checked })}
-                type="checkbox"
-              />
-              <span />
-              <b>{asr.enabled ? "已启用" : "已停用"}</b>
-            </label>
-          </div>
-
-          <div className={styles.field_grid}>
-            <div className={`${styles.field} ${styles.full_width}`}>
-              <span>服务提供商</span>
-              <SelectionPopover<AsrPresetId>
-                aria_label="ASR 服务提供商"
-                content_width="trigger"
-                disabled={busy || asrTestBusy}
-                on_open_change={setAsrProviderOpen}
-                on_select={handleAsrPresetChange}
-                open={asrProviderOpen}
-                options={asrProviderOptions}
-                selected={asr.preset}
-                trigger_content={
-                  <span className={styles.provider_trigger}>
-                    <ProviderIcon name={asrMeta.icon} size={16} />
-                    <span>{asrMeta.label}</span>
-                  </span>
-                }
-                trigger_variant="field"
-              />
-              <p className={styles.preset_hint}>{asrMeta.hint}</p>
-            </div>
-
-            <div className={`${styles.field} ${styles.full_width}`}>
-              <div className={styles.credential_row}>
-                <label htmlFor={asrSecretId}>API Key 凭据</label>
-                <span className={styles.credential_hint}>{asrCredentialHint}</span>
-              </div>
-              <span className={styles.secret_field}>
-                <input
-                  id={asrSecretId}
-                  aria-label="ASR API Key"
-                  autoComplete="off"
-                  disabled={busy || asr.clear_credential}
-                  onChange={(event) => setAsr({ ...asr, credential: event.currentTarget.value })}
-                  placeholder={config?.asr.credential_configured ? "已保存，留空保留现有" : "请输入 API Key"}
-                  type={showAsrSecret ? "text" : "password"}
-                  value={asr.credential}
-                />
-                <InlineIconButton
-                  aria-controls={asrSecretId}
-                  aria-pressed={showAsrSecret}
-                  className={styles.secret_toggle}
-                  disabled={busy || asr.clear_credential}
-                  icon={showAsrSecret ? "eye-off" : "eye"}
-                  label={showAsrSecret ? "隐藏 ASR 凭据" : "显示 ASR 凭据"}
-                  onClick={() => setShowAsrSecret(!showAsrSecret)}
-                  title={showAsrSecret ? "隐藏" : "显示"}
-                />
-              </span>
-              {config?.asr.credential_configured ? (
-                <label className={styles.clear_toggle}>
-                  <input
-                    checked={asr.clear_credential}
-                    disabled={busy}
-                    onChange={(event) => {
-                      const clear_credential = event.currentTarget.checked;
-                      setAsr({ ...asr, clear_credential, credential: clear_credential ? "" : asr.credential });
-                    }}
-                    type="checkbox"
-                  />
-                  清除已保存的 ASR 凭据
-                </label>
-              ) : null}
+                onClick={() => {
+                  setTestingAsrId(null);
+                  setAsrEditor({ mode: "create" });
+                }}
+                type="button"
+              >
+                <Icon name="plus" size={13} />
+                新增配置
+              </button>
             </div>
           </div>
 
-          <div className={styles.test_panel}>
-            <div className={styles.test_header}>
-              <span>识别测试（可直接验证当前填写的配置）</span>
-              <div className={styles.test_actions}>
-                <button
-                  className={styles.test_primary_button}
-                  disabled={busy || asrTestBusy}
-                  onClick={() => void toggleMicTest()}
-                  type="button"
-                >
-                  {asrMicLabel}
-                </button>
-                <button
-                  disabled={busy || asrTestBusy || asrTest.kind === "recording"}
-                  onClick={() => fileInputRef.current?.click()}
-                  type="button"
-                >
-                  上传 WAV 测试
-                </button>
-                <button
-                  disabled={busy || asrTestBusy || ttsTestBusy || asrTest.kind === "recording"}
-                  onClick={() => void runLoopbackAsrTest()}
-                  type="button"
-                >
-                  用 TTS 音频闭环测试
-                </button>
-                <input
-                  accept=".wav,audio/wav"
-                  aria-label="上传 ASR 测试 WAV 文件"
-                  className={styles.hidden_file_input}
-                  onChange={(event) => void handleWavFileSelected(event)}
-                  ref={fileInputRef}
-                  type="file"
-                />
-              </div>
+          {asrProfiles.length > 0 ? (
+            <div className={styles.profile_list}>
+              {asrProfiles.map((profile) => {
+                const isActive = profile.id === activeAsrId;
+                const presetId = detectAsrPreset(profile.provider, profile.endpoint);
+                const meta = ASR_PRESETS[presetId];
+                const isTesting = testingAsrId === profile.id;
+                const subtitleParts = [
+                  shortLabel(meta.label),
+                  profile.model,
+                  profile.credential_masked,
+                ].filter(Boolean);
+                return (
+                  <div
+                    className={styles.profile_item}
+                    data-active={isActive}
+                    key={profile.id}
+                  >
+                    <div className={styles.profile_row}>
+                      <div className={styles.profile_main}>
+                        <span className={styles.profile_dot} data-active={isActive} />
+                        <ProviderIcon name={meta.icon} size={18} />
+                        <div className={styles.profile_meta}>
+                          <div className={styles.profile_title_line}>
+                            <strong>{profile.name}</strong>
+                            {isActive ? <span className={styles.active_tag}>当前使用</span> : null}
+                          </div>
+                          <div className={styles.profile_sub}>{subtitleParts.join(" · ")}</div>
+                        </div>
+                      </div>
+                      <div className={styles.profile_actions}>
+                        {!isActive ? (
+                          <button
+                            aria-label={`启用 ASR ${profile.name}`}
+                            className={styles.row_btn_primary}
+                            disabled={busy}
+                            onClick={() => void gateway.setActiveSpeechProfile("asr", profile.id)}
+                            type="button"
+                          >
+                            启用
+                          </button>
+                        ) : null}
+                        <button
+                          aria-expanded={isTesting}
+                          aria-label={`测试 ASR ${profile.name}`}
+                          className={styles.row_btn}
+                          disabled={busy}
+                          onClick={() => setTestingAsrId(isTesting ? null : profile.id)}
+                          type="button"
+                        >
+                          {isTesting ? "收起" : "测试"}
+                        </button>
+                        <button
+                          aria-label={`编辑 ASR ${profile.name}`}
+                          className={styles.row_btn}
+                          disabled={busy}
+                          onClick={() => {
+                            setTestingAsrId(null);
+                            setAsrEditor({ mode: "edit", profile });
+                          }}
+                          type="button"
+                        >
+                          编辑
+                        </button>
+                        <button
+                          aria-label={`删除 ASR ${profile.name}`}
+                          className={styles.row_btn_danger}
+                          disabled={busy}
+                          onClick={() =>
+                            setPendingDelete({ capability: "asr", id: profile.id, name: profile.name })
+                          }
+                          type="button"
+                        >
+                          删除
+                        </button>
+                      </div>
+                    </div>
+                    {isTesting ? (
+                      <AsrQuickTestBar
+                        key={profile.id}
+                        loopback_tts={loopbackTts}
+                        profile={profile}
+                      />
+                    ) : null}
+                  </div>
+                );
+              })}
             </div>
-            {asrTest.kind === "recording" ? (
-              <p className={styles.preset_hint}>正在录音，请说一句话，然后点击“停止并识别”。</p>
-            ) : null}
-            {asrTest.kind === "ok" ? (
-              <div className={styles.test_result} role="status">
-                <strong>识别结果：「{asrTest.transcript}」</strong>
-                <span>来源：{asrTest.source} · 耗时 {asrTest.elapsed_ms} ms</span>
-              </div>
-            ) : null}
-            {asrTest.kind === "error" ? (
-              <p className={styles.test_error} role="alert">{asrTest.message}</p>
-            ) : null}
-          </div>
+          ) : !asrEditor ? (
+            <p className={styles.empty_list}>暂无已保存的语音识别配置</p>
+          ) : null}
 
-          <CollapsibleSection
-            defaultOpen={Boolean(asrMeta.requires_custom_endpoint)}
-            key={asrMeta.requires_custom_endpoint ? "asr-custom" : "asr-preset"}
-            title="高级设置"
-          >
-            <div className={styles.field_grid}>
-              <label className={`${styles.field} ${styles.full_width}`}>
-                <span>接口地址（Endpoint）</span>
-                <input
-                  aria-label="ASR 接口地址"
-                  disabled={busy}
-                  onChange={(event) => setAsr({ ...asr, endpoint: event.currentTarget.value })}
-                  placeholder={asrMeta.endpoint || "https://.../v1"}
-                  value={asr.endpoint}
-                />
-              </label>
-
-              <div className={styles.field}>
-                <span>模型预设</span>
-                <SelectionPopover<string>
-                  aria_label="ASR 模型预设"
-                  content_width="trigger"
-                  disabled={busy}
-                  on_open_change={setAsrModelOpen}
-                  on_select={(nextModel) => {
-                    setAsrModelOpen(false);
-                    if (nextModel !== CUSTOM_MODEL_SENTINEL) {
-                      setAsr({ ...asr, model: nextModel });
-                    }
-                  }}
-                  open={asrModelOpen}
-                  options={asrModelOptions}
-                  selected={asrModelSelected}
-                  trigger_variant="field"
-                />
-              </div>
-
-              <label className={styles.field}>
-                <span>超时（毫秒）</span>
-                <input
-                  aria-label="ASR 超时"
-                  disabled={busy}
-                  inputMode="numeric"
-                  onChange={(event) => setAsr({ ...asr, timeout_ms: event.currentTarget.value.replace(/\D/g, "") })}
-                  value={asr.timeout_ms}
-                />
-              </label>
-
-              <label className={`${styles.field} ${styles.full_width}`}>
-                <span>模型名称</span>
-                <input
-                  aria-label="ASR 模型名称"
-                  disabled={busy}
-                  onChange={(event) => setAsr({ ...asr, model: event.currentTarget.value })}
-                  placeholder={asrMeta.default_model}
-                  value={asr.model}
-                />
-              </label>
-            </div>
-          </CollapsibleSection>
+          {asrEditor ? (
+            <AsrProfileEditor
+              default_activate={asrProfiles.length === 0 || !activeAsrId}
+              is_active={asrEditor.mode === "edit" && asrEditor.profile.id === activeAsrId}
+              key={asrEditor.mode === "edit" ? asrEditor.profile.id : "new-asr"}
+              loopback_tts={loopbackTts}
+              on_close={() => setAsrEditor(null)}
+              profile={asrEditor.mode === "edit" ? asrEditor.profile : null}
+            />
+          ) : null}
         </article>
 
+        {/* 语音合成 (TTS) 配置列表 */}
         <article className={styles.speech_card}>
           <div className={styles.speech_card_header}>
-            <div>
-              <strong>语音播放</strong>
+            <div className={styles.speech_card_title}>
+              <strong>语音合成 (TTS)</strong>
               <span className={styles.status_badge} data-status={liveStatus?.tts}>
                 {speechStatusLabel(liveStatus?.tts)}
               </span>
             </div>
-            <label className={styles.switch}>
-              <input
-                aria-label="启用语音合成"
-                checked={tts.enabled}
+            <div className={styles.speech_card_controls}>
+              <label
+                className={styles.switch}
+                data-disabled={busy || ttsProfiles.length === 0}
+              >
+                <input
+                  aria-label="启用语音合成"
+                  checked={Boolean(activeTtsId)}
+                  disabled={busy || ttsProfiles.length === 0}
+                  onChange={(event) => void toggleTtsMaster(event.currentTarget.checked)}
+                  type="checkbox"
+                />
+                <span />
+                <b>{activeTtsId ? "已启用" : "已停用"}</b>
+              </label>
+              <button
+                aria-label="新增语音合成配置"
+                className={styles.add_btn}
                 disabled={busy}
-                onChange={(event) => setTts({ ...tts, enabled: event.currentTarget.checked })}
-                type="checkbox"
-              />
-              <span />
-              <b>{tts.enabled ? "已启用" : "已停用"}</b>
-            </label>
+                onClick={() => {
+                  setTestingTtsId(null);
+                  setTtsEditor({ mode: "create" });
+                }}
+                type="button"
+              >
+                <Icon name="plus" size={13} />
+                新增配置
+              </button>
+            </div>
           </div>
 
-          <div className={styles.field_grid}>
-            <div className={styles.field}>
-              <span>服务提供商</span>
-              <SelectionPopover<TtsPresetId>
-                aria_label="TTS 服务提供商"
-                content_width="trigger"
-                disabled={busy || ttsTestBusy}
-                on_open_change={setTtsProviderOpen}
-                on_select={handleTtsPresetChange}
-                open={ttsProviderOpen}
-                options={ttsProviderOptions}
-                selected={tts.preset}
-                trigger_content={
-                  <span className={styles.provider_trigger}>
-                    <ProviderIcon name={ttsMeta.icon} size={16} />
-                    <span>{ttsMeta.label}</span>
-                  </span>
-                }
-                trigger_variant="field"
-              />
+          {ttsProfiles.length > 0 ? (
+            <div className={styles.profile_list}>
+              {ttsProfiles.map((profile) => {
+                const isActive = profile.id === activeTtsId;
+                const presetId = detectTtsPreset(profile.provider, profile.endpoint);
+                const meta = TTS_PRESETS[presetId];
+                const isTesting = testingTtsId === profile.id;
+                const subtitleParts = [
+                  shortLabel(meta.label),
+                  profile.voice,
+                  profile.model,
+                  profile.credential_masked,
+                ].filter(Boolean);
+                return (
+                  <div
+                    className={styles.profile_item}
+                    data-active={isActive}
+                    key={profile.id}
+                  >
+                    <div className={styles.profile_row}>
+                      <div className={styles.profile_main}>
+                        <span className={styles.profile_dot} data-active={isActive} />
+                        <ProviderIcon name={meta.icon} size={18} />
+                        <div className={styles.profile_meta}>
+                          <div className={styles.profile_title_line}>
+                            <strong>{profile.name}</strong>
+                            {isActive ? <span className={styles.active_tag}>当前使用</span> : null}
+                          </div>
+                          <div className={styles.profile_sub}>{subtitleParts.join(" · ")}</div>
+                        </div>
+                      </div>
+                      <div className={styles.profile_actions}>
+                        {!isActive ? (
+                          <button
+                            aria-label={`启用 TTS ${profile.name}`}
+                            className={styles.row_btn_primary}
+                            disabled={busy}
+                            onClick={() => void gateway.setActiveSpeechProfile("tts", profile.id)}
+                            type="button"
+                          >
+                            启用
+                          </button>
+                        ) : null}
+                        <button
+                          aria-expanded={isTesting}
+                          aria-label={`试听 TTS ${profile.name}`}
+                          className={styles.row_btn}
+                          disabled={busy}
+                          onClick={() => setTestingTtsId(isTesting ? null : profile.id)}
+                          type="button"
+                        >
+                          {isTesting ? "收起" : "试听"}
+                        </button>
+                        <button
+                          aria-label={`编辑 TTS ${profile.name}`}
+                          className={styles.row_btn}
+                          disabled={busy}
+                          onClick={() => {
+                            setTestingTtsId(null);
+                            setTtsEditor({ mode: "edit", profile });
+                          }}
+                          type="button"
+                        >
+                          编辑
+                        </button>
+                        <button
+                          aria-label={`删除 TTS ${profile.name}`}
+                          className={styles.row_btn_danger}
+                          disabled={busy}
+                          onClick={() =>
+                            setPendingDelete({ capability: "tts", id: profile.id, name: profile.name })
+                          }
+                          type="button"
+                        >
+                          删除
+                        </button>
+                      </div>
+                    </div>
+                    {isTesting ? (
+                      <TtsQuickPreviewBar key={profile.id} profile={profile} />
+                    ) : null}
+                  </div>
+                );
+              })}
             </div>
+          ) : !ttsEditor ? (
+            <p className={styles.empty_list}>暂无已保存的语音合成配置</p>
+          ) : null}
 
-            <div className={styles.field}>
-              <span>TTS 音色</span>
-              <SelectionPopover<string>
-                aria_label="TTS 预置音色"
-                content_width="trigger"
-                disabled={busy || ttsTestBusy}
-                on_open_change={setTtsVoiceOpen}
-                on_select={handleTtsVoiceChange}
-                open={ttsVoiceOpen}
-                options={ttsVoiceOptions}
-                selected={ttsVoiceSelected}
-                trigger_variant="field"
-              />
-            </div>
-
-            <p className={`${styles.preset_hint} ${styles.full_width}`}>{ttsMeta.hint}</p>
-
-            {ttsVoiceSelected === CUSTOM_VOICE_SENTINEL ? (
-              <label className={`${styles.field} ${styles.full_width}`}>
-                <span>自定义音色 ID</span>
-                <input
-                  aria-label="TTS 音色名称"
-                  disabled={busy}
-                  onChange={(event) => setTts({ ...tts, voice: event.currentTarget.value })}
-                  placeholder={defaultVoiceForModel(tts.preset, tts.model)}
-                  value={tts.voice}
-                />
-              </label>
-            ) : null}
-
-            {sameCloudProvider ? (
-              <div className={`${styles.reuse_box} ${styles.full_width}`}>
-                <label className={styles.clear_toggle}>
-                  <input
-                    aria-label="复用语音识别的 API Key"
-                    checked={tts.reuse_asr_credential}
-                    disabled={busy}
-                    onChange={(event) => setTts({ ...tts, reuse_asr_credential: event.currentTarget.checked })}
-                    type="checkbox"
-                  />
-                  复用上方「语音识别」的 API Key（同厂商只需填一次）
-                </label>
-              </div>
-            ) : null}
-
-            {!effectiveReuseAsr ? (
-              <div className={`${styles.field} ${styles.full_width}`}>
-                <div className={styles.credential_row}>
-                  <label htmlFor={ttsSecretId}>API Key 凭据</label>
-                  <span className={styles.credential_hint}>{ttsCredentialHint}</span>
-                </div>
-                <span className={styles.secret_field}>
-                  <input
-                    id={ttsSecretId}
-                    aria-label="TTS API Key"
-                    autoComplete="off"
-                    disabled={busy || tts.clear_credential}
-                    onChange={(event) => setTts({ ...tts, credential: event.currentTarget.value })}
-                    placeholder={config?.tts.credential_configured ? "已保存，留空保留现有" : "请输入 API Key"}
-                    type={showTtsSecret ? "text" : "password"}
-                    value={tts.credential}
-                  />
-                  <InlineIconButton
-                    aria-controls={ttsSecretId}
-                    aria-pressed={showTtsSecret}
-                    className={styles.secret_toggle}
-                    disabled={busy || tts.clear_credential}
-                    icon={showTtsSecret ? "eye-off" : "eye"}
-                    label={showTtsSecret ? "隐藏 TTS 凭据" : "显示 TTS 凭据"}
-                    onClick={() => setShowTtsSecret(!showTtsSecret)}
-                    title={showTtsSecret ? "隐藏" : "显示"}
-                  />
-                </span>
-                {config?.tts.credential_configured ? (
-                  <label className={styles.clear_toggle}>
-                    <input
-                      checked={tts.clear_credential}
-                      disabled={busy}
-                      onChange={(event) => {
-                        const clear_credential = event.currentTarget.checked;
-                        setTts({ ...tts, clear_credential, credential: clear_credential ? "" : tts.credential });
-                      }}
-                      type="checkbox"
-                    />
-                    清除已保存的 TTS 凭据
-                  </label>
-                ) : null}
-              </div>
-            ) : null}
-          </div>
-
-          <div className={styles.test_panel}>
-            <div className={styles.test_header}>
-              <span>音色试听（切换音色后点击试听即可直接播放）</span>
-            </div>
-            <div className={styles.tts_test_row}>
-              <input
-                aria-label="TTS 试听文本"
-                disabled={busy || ttsTestBusy}
-                maxLength={120}
-                onChange={(event) => setTtsPreviewText(event.currentTarget.value)}
-                placeholder="输入试听句子..."
-                value={ttsPreviewText}
-              />
-              <div className={styles.test_actions}>
-                <button
-                  className={styles.test_primary_button}
-                  disabled={busy || ttsTestBusy}
-                  onClick={() => void runTtsPreview()}
-                  type="button"
-                >
-                  {ttsTestBusy ? "合成中…" : "试听音色"}
-                </button>
-              </div>
-            </div>
-            {ttsTest.kind === "ok" ? (
-              <div className={styles.test_result} role="status">
-                <span>合成成功 · 耗时 {ttsTest.elapsed_ms} ms · 音频 {(ttsTest.duration_ms / 1000).toFixed(1)} s</span>
-                <audio controls ref={audioRef} src={ttsTest.audio_url} />
-              </div>
-            ) : null}
-            {ttsTest.kind === "error" ? (
-              <p className={styles.test_error} role="alert">{ttsTest.message}</p>
-            ) : null}
-          </div>
-
-          <CollapsibleSection
-            defaultOpen={Boolean(ttsMeta.requires_custom_endpoint)}
-            key={ttsMeta.requires_custom_endpoint ? "tts-custom" : "tts-preset"}
-            title="高级设置"
-          >
-            <div className={styles.field_grid}>
-              <label className={`${styles.field} ${styles.full_width}`}>
-                <span>接口地址（Endpoint）</span>
-                <input
-                  aria-label="TTS 接口地址"
-                  disabled={busy}
-                  onChange={(event) => setTts({ ...tts, endpoint: event.currentTarget.value })}
-                  placeholder={ttsMeta.endpoint || "https://.../v1"}
-                  value={tts.endpoint}
-                />
-              </label>
-
-              <div className={styles.field}>
-                <span>模型预设</span>
-                <SelectionPopover<string>
-                  aria_label="TTS 模型预设"
-                  content_width="trigger"
-                  disabled={busy}
-                  on_open_change={setTtsModelOpen}
-                  on_select={handleTtsModelChange}
-                  open={ttsModelOpen}
-                  options={ttsModelOptions}
-                  selected={ttsModelSelected}
-                  trigger_variant="field"
-                />
-              </div>
-
-              <label className={styles.field}>
-                <span>超时（毫秒）</span>
-                <input
-                  aria-label="TTS 超时"
-                  disabled={busy}
-                  inputMode="numeric"
-                  onChange={(event) => setTts({ ...tts, timeout_ms: event.currentTarget.value.replace(/\D/g, "") })}
-                  value={tts.timeout_ms}
-                />
-              </label>
-
-              <label className={`${styles.field} ${styles.full_width}`}>
-                <span>模型名称</span>
-                <input
-                  aria-label="TTS 模型名称"
-                  disabled={busy}
-                  onChange={(event) => setTts({ ...tts, model: event.currentTarget.value })}
-                  placeholder={ttsMeta.default_model}
-                  value={tts.model}
-                />
-              </label>
-            </div>
-          </CollapsibleSection>
+          {ttsEditor ? (
+            <TtsProfileEditor
+              active_asr_id={activeAsrId}
+              asr_profiles={asrProfiles}
+              default_activate={ttsProfiles.length === 0 || !activeTtsId}
+              is_active={ttsEditor.mode === "edit" && ttsEditor.profile.id === activeTtsId}
+              key={ttsEditor.mode === "edit" ? ttsEditor.profile.id : "new-tts"}
+              on_close={() => setTtsEditor(null)}
+              profile={ttsEditor.mode === "edit" ? ttsEditor.profile : null}
+            />
+          ) : null}
         </article>
       </div>
 
-      <footer className={styles.footer_actions}>
-        <span>选好服务商与音色并填写 API Key 后即可测试，保存后自动生效。</span>
-        <button
-          disabled={busy}
-          onClick={() => void saveConfiguration()}
-          type="button"
-        >
-          {gateway.pending_action === "speech" ? "保存中…" : "保存并应用"}
-        </button>
-      </footer>
+      <PresenceBoundary present={pendingDelete !== null}>
+        {pendingDelete ? (
+          <SessionActionDialog
+            confirm_label="删除"
+            is_danger
+            is_pending={busy}
+            on_cancel={() => setPendingDelete(null)}
+            on_confirm={() => void confirmDelete()}
+            title={pendingDelete.capability === "asr" ? "删除语音识别配置？" : "删除语音合成配置？"}
+          >
+            <p>
+              确定删除 <strong>{pendingDelete.name}</strong>？已保存的 API Key 将一并移除。
+            </p>
+          </SessionActionDialog>
+        ) : null}
+      </PresenceBoundary>
     </section>
   );
 });

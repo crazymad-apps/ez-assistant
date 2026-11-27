@@ -160,6 +160,11 @@ export type ArchiveSessionResult = { session: SessionSummary, };
 export type AsrConfigurationSnapshot = { enabled: boolean, provider: SpeechProviderKind, endpoint: string, model: string, timeout_ms: number, credential_configured: boolean, credential_masked?: string, };
 
 /**
+ * 已保存的 Host ASR 配置条目（凭据仅返回是否已配置与脱敏掩码）。
+ */
+export type AsrProfileSnapshot = { id: string, name: string, provider: SpeechProviderKind, endpoint: string, model: string, timeout_ms: number, credential_configured: boolean, credential_masked?: string, };
+
+/**
  * 可靠提交的助手消息。
  */
 export type AssistantMessageSnapshot = {
@@ -688,6 +693,11 @@ export type DeleteSessionRequest = { session_id: SessionId, confirmation_token: 
 
 export type DeleteSessionResult = { session_id: SessionId, };
 
+/**
+ * 删除指定已保存的 ASR/TTS 配置条目（若正在使用则同时停用）。
+ */
+export type DeleteSpeechProfileRequest = { expected_revision?: string, capability: SpeechCapabilityKind, profile_id: string, };
+
 export type DeletedPersonalAgentResult = { name: string, };
 
 /**
@@ -750,12 +760,12 @@ export type DeviceConsoleSnapshot = { api_prefix: string, mode: DeviceConsoleMod
  *
  * 这些是 Host 级交互意图，不属于 Runtime Session 命令。
  */
-export type DeviceGatewayCommand = { "type": "get_snapshot", "payload": GetDeviceGatewaySnapshotRequest } | { "type": "set_access_enabled", "payload": SetDeviceAccessEnabledRequest } | { "type": "open_pairing_window", "payload": OpenDevicePairingWindowRequest } | { "type": "close_pairing_window", "payload": CloseDevicePairingWindowRequest } | { "type": "confirm_pairing", "payload": ConfirmDevicePairingRequest } | { "type": "reject_pairing", "payload": RejectDevicePairingRequest } | { "type": "connect_discovered_device", "payload": ConnectDiscoveredDeviceRequest } | { "type": "rename_device", "payload": RenameDeviceRequest } | { "type": "revoke_device", "payload": RevokeDeviceRequest } | { "type": "get_speech_configuration", "payload": GetSpeechConfigurationRequest } | { "type": "update_speech_configuration", "payload": UpdateSpeechConfigurationRequest } | { "type": "test_asr_configuration", "payload": TestAsrConfigurationRequest } | { "type": "test_tts_configuration", "payload": TestTtsConfigurationRequest };
+export type DeviceGatewayCommand = { "type": "get_snapshot", "payload": GetDeviceGatewaySnapshotRequest } | { "type": "set_access_enabled", "payload": SetDeviceAccessEnabledRequest } | { "type": "open_pairing_window", "payload": OpenDevicePairingWindowRequest } | { "type": "close_pairing_window", "payload": CloseDevicePairingWindowRequest } | { "type": "confirm_pairing", "payload": ConfirmDevicePairingRequest } | { "type": "reject_pairing", "payload": RejectDevicePairingRequest } | { "type": "connect_discovered_device", "payload": ConnectDiscoveredDeviceRequest } | { "type": "rename_device", "payload": RenameDeviceRequest } | { "type": "revoke_device", "payload": RevokeDeviceRequest } | { "type": "get_speech_configuration", "payload": GetSpeechConfigurationRequest } | { "type": "update_speech_configuration", "payload": UpdateSpeechConfigurationRequest } | { "type": "save_asr_profile", "payload": SaveAsrProfileRequest } | { "type": "save_tts_profile", "payload": SaveTtsProfileRequest } | { "type": "set_active_speech_profile", "payload": SetActiveSpeechProfileRequest } | { "type": "delete_speech_profile", "payload": DeleteSpeechProfileRequest } | { "type": "test_asr_configuration", "payload": TestAsrConfigurationRequest } | { "type": "test_tts_configuration", "payload": TestTtsConfigurationRequest };
 
 /**
  * 与 [`DeviceGatewayCommand`] 一一对应的 Host 命令结果。
  */
-export type DeviceGatewayCommandResult = { "type": "get_snapshot", "payload": DeviceGatewaySnapshot } | { "type": "set_access_enabled", "payload": DeviceGatewayMutationResult } | { "type": "open_pairing_window", "payload": DeviceGatewayMutationResult } | { "type": "close_pairing_window", "payload": DeviceGatewayMutationResult } | { "type": "confirm_pairing", "payload": DeviceGatewayMutationResult } | { "type": "reject_pairing", "payload": DeviceGatewayMutationResult } | { "type": "connect_discovered_device", "payload": DeviceGatewayMutationResult } | { "type": "rename_device", "payload": DeviceGatewayMutationResult } | { "type": "revoke_device", "payload": DeviceGatewayMutationResult } | { "type": "get_speech_configuration", "payload": SpeechConfigurationSnapshot } | { "type": "update_speech_configuration", "payload": UpdateSpeechConfigurationResult } | { "type": "test_asr_configuration", "payload": TestAsrConfigurationResult } | { "type": "test_tts_configuration", "payload": TestTtsConfigurationResult };
+export type DeviceGatewayCommandResult = { "type": "get_snapshot", "payload": DeviceGatewaySnapshot } | { "type": "set_access_enabled", "payload": DeviceGatewayMutationResult } | { "type": "open_pairing_window", "payload": DeviceGatewayMutationResult } | { "type": "close_pairing_window", "payload": DeviceGatewayMutationResult } | { "type": "confirm_pairing", "payload": DeviceGatewayMutationResult } | { "type": "reject_pairing", "payload": DeviceGatewayMutationResult } | { "type": "connect_discovered_device", "payload": DeviceGatewayMutationResult } | { "type": "rename_device", "payload": DeviceGatewayMutationResult } | { "type": "revoke_device", "payload": DeviceGatewayMutationResult } | { "type": "get_speech_configuration", "payload": SpeechConfigurationSnapshot } | { "type": "update_speech_configuration", "payload": UpdateSpeechConfigurationResult } | { "type": "save_asr_profile", "payload": UpdateSpeechConfigurationResult } | { "type": "save_tts_profile", "payload": UpdateSpeechConfigurationResult } | { "type": "set_active_speech_profile", "payload": UpdateSpeechConfigurationResult } | { "type": "delete_speech_profile", "payload": UpdateSpeechConfigurationResult } | { "type": "test_asr_configuration", "payload": TestAsrConfigurationResult } | { "type": "test_tts_configuration", "payload": TestTtsConfigurationResult };
 
 /**
  * Host Device Gateway 的可丢弃失效通知；完整状态始终重新读取 Gateway 快照。
@@ -2649,6 +2659,11 @@ export type RuntimeHostStartupStage = "database_check" | "database_backup" | "hi
  */
 export type RuntimeLifecycle = "running" | "shutting_down" | "stopped";
 
+/**
+ * 新增或编辑已保存的 Host ASR 配置条目，并按需设为当前启用项。
+ */
+export type SaveAsrProfileRequest = { expected_revision?: string, id?: string, name: string, provider: SpeechProviderKind, endpoint: string, model: string, timeout_ms: number, credential?: string | null, clear_credential: boolean, activate: boolean, };
+
 export type SaveMessageCardSnapshotRequest = { owner: ConversationOwner, card_id: string, instance_id: string, expected_revision: number, snapshot: MessageCardSnapshot, };
 
 export type SaveMessageCardSnapshotResult = {
@@ -2664,6 +2679,11 @@ export type SavePersonalAgentRequest = {
  * 创建时为 None；编辑时必须为上次读取的完整内容摘要。
  */
 expected_revision: string | null, config: CustomAgentConfig, };
+
+/**
+ * 新增或编辑已保存的 Host TTS 配置条目，并按需设为当前启用项。
+ */
+export type SaveTtsProfileRequest = { expected_revision?: string, id?: string, name: string, provider: SpeechProviderKind, endpoint: string, model: string, voice: string, timeout_ms: number, credential?: string | null, clear_credential: boolean, reuse_asr_profile_id?: string, activate: boolean, };
 
 /**
  * 两种配置整体替换。脚本型只接收命令文本，Agent 型可沿用 Runtime 的默认智能体或模型。
@@ -3047,6 +3067,11 @@ additional_directories: Array<string>,
 directories_match_current: boolean, };
 
 /**
+ * 切换当前启用的 ASR/TTS 配置条目；`profile_id = None` 表示停用但保留已保存列表。
+ */
+export type SetActiveSpeechProfileRequest = { expected_revision?: string, capability: SpeechCapabilityKind, profile_id?: string, };
+
+/**
  * 设置文本主模型调用识图工具时使用的辅助视觉模型。
  */
 export type SetAuxiliaryVisionModelRequest = {
@@ -3221,9 +3246,14 @@ export type SkillSourceSnapshot = "workspace_ez_assistant" | "workspace_agents" 
 export type SkillSummarySnapshot = { name: string, plugin_name?: string, description: string, source: SkillSourceSnapshot, model_invocable: boolean, user_invocable: boolean, enabled: boolean, health: SkillHealthSnapshot, };
 
 /**
+ * 语音能力分类（ASR 或 TTS）。
+ */
+export type SpeechCapabilityKind = "asr" | "tts";
+
+/**
  * Host 语音配置与当前服务健康快照。
  */
-export type SpeechConfigurationSnapshot = { revision?: string, asr: AsrConfigurationSnapshot, tts: TtsConfigurationSnapshot, status: DeviceSpeechServicesSnapshot, };
+export type SpeechConfigurationSnapshot = { revision?: string, asr: AsrConfigurationSnapshot, tts: TtsConfigurationSnapshot, asr_profiles: Array<AsrProfileSnapshot>, active_asr_id?: string, tts_profiles: Array<TtsProfileSnapshot>, active_tts_id?: string, status: DeviceSpeechServicesSnapshot, };
 
 /**
  * Host 语音服务支持的 Provider 类型。
@@ -3336,7 +3366,7 @@ export type SystemContextSnapshot = { session_id: SessionId, session_created_at_
 /**
  * 使用草稿或已保存凭据直接验证 ASR 转写效果的请求（音频为 Base64 WAV）。
  */
-export type TestAsrConfigurationRequest = { asr: UpdateAsrConfigurationInput, audio_wav_base64: string, };
+export type TestAsrConfigurationRequest = { profile_id?: string, asr: UpdateAsrConfigurationInput, audio_wav_base64: string, };
 
 /**
  * ASR 测试结果。
@@ -3368,7 +3398,7 @@ export type TestProviderConnectionResult = { model_count: number, sample_model_i
 /**
  * 使用草稿或已保存凭据直接验证 TTS 合成与试听效果的请求。
  */
-export type TestTtsConfigurationRequest = { tts: UpdateTtsConfigurationInput, fallback_asr_credential?: string | null, text: string, };
+export type TestTtsConfigurationRequest = { profile_id?: string, reuse_asr_profile_id?: string, tts: UpdateTtsConfigurationInput, fallback_asr_credential?: string | null, text: string, };
 
 /**
  * TTS 测试结果（返回可直接在桌面端播放的 16 kHz Mono Base64 WAV）。
@@ -3517,6 +3547,11 @@ export type ToolOutputChannel = "stdout" | "stderr";
  * Host TTS 配置的安全读取投影（凭据仅返回是否已配置与脱敏掩码）。
  */
 export type TtsConfigurationSnapshot = { enabled: boolean, provider: SpeechProviderKind, endpoint: string, model: string, voice: string, timeout_ms: number, credential_configured: boolean, credential_masked?: string, };
+
+/**
+ * 已保存的 Host TTS 配置条目（凭据仅返回是否已配置与脱敏掩码）。
+ */
+export type TtsProfileSnapshot = { id: string, name: string, provider: SpeechProviderKind, endpoint: string, model: string, voice: string, timeout_ms: number, credential_configured: boolean, credential_masked?: string, };
 
 export type UiAppScope = { "type": "draft" } | { "type": "session", session_id: SessionId, };
 

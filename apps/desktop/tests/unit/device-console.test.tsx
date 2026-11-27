@@ -69,6 +69,7 @@ function createConsoleMockClient() {
     speech_services: { asr: "ready", tts: "ready" },
   };
 
+  let revCounter = 1;
   let speechConfig: SpeechConfigurationSnapshot = {
     revision: "rev-1",
     asr: {
@@ -90,6 +91,33 @@ function createConsoleMockClient() {
       credential_configured: true,
       credential_masked: "sk-***abcd",
     },
+    asr_profiles: [
+      {
+        id: "asr-default",
+        name: "阿里云百炼识别",
+        provider: "dashscope",
+        endpoint: "https://dashscope.aliyuncs.com",
+        model: "fun-asr-realtime",
+        timeout_ms: 30000,
+        credential_configured: true,
+        credential_masked: "sk-***abcd",
+      },
+    ],
+    active_asr_id: "asr-default",
+    tts_profiles: [
+      {
+        id: "tts-default",
+        name: "阿里云百炼女声",
+        provider: "dashscope",
+        endpoint: "https://dashscope.aliyuncs.com",
+        model: "cosyvoice-v3-flash",
+        voice: "longxiaochun",
+        timeout_ms: 30000,
+        credential_configured: true,
+        credential_masked: "sk-***abcd",
+      },
+    ],
+    active_tts_id: "tts-default",
     status: { asr: "ready", tts: "ready" },
   };
 
@@ -100,13 +128,128 @@ function createConsoleMockClient() {
     if (command.type === "get_speech_configuration") {
       return { type: "get_speech_configuration", payload: speechConfig };
     }
+    if (command.type === "save_asr_profile") {
+      const req = command.payload as {
+        id?: string;
+        name: string;
+        provider: SpeechConfigurationSnapshot["asr"]["provider"];
+        endpoint: string;
+        model: string;
+        timeout_ms: number;
+        activate: boolean;
+      };
+      revCounter += 1;
+      const id = req.id ?? `asr-${revCounter}`;
+      const nextProfile = {
+        id,
+        name: req.name || req.model,
+        provider: req.provider,
+        endpoint: req.endpoint,
+        model: req.model,
+        timeout_ms: req.timeout_ms,
+        credential_configured: true,
+        credential_masked: "sk-***next",
+      };
+      const nextProfiles = req.id
+        ? speechConfig.asr_profiles.map((item) => (item.id === id ? nextProfile : item))
+        : [...speechConfig.asr_profiles, nextProfile];
+      const activeId = req.activate ? id : speechConfig.active_asr_id;
+      speechConfig = {
+        ...speechConfig,
+        revision: `rev-${revCounter}`,
+        asr_profiles: nextProfiles,
+        active_asr_id: activeId,
+      };
+      return {
+        type: "save_asr_profile",
+        payload: { configuration: speechConfig, snapshot },
+      };
+    }
+    if (command.type === "save_tts_profile") {
+      const req = command.payload as {
+        id?: string;
+        name: string;
+        provider: SpeechConfigurationSnapshot["tts"]["provider"];
+        endpoint: string;
+        model: string;
+        voice: string;
+        timeout_ms: number;
+        activate: boolean;
+      };
+      revCounter += 1;
+      const id = req.id ?? `tts-${revCounter}`;
+      const nextProfile = {
+        id,
+        name: req.name || req.voice,
+        provider: req.provider,
+        endpoint: req.endpoint,
+        model: req.model,
+        voice: req.voice,
+        timeout_ms: req.timeout_ms,
+        credential_configured: true,
+        credential_masked: "sk-***next",
+      };
+      const nextProfiles = req.id
+        ? speechConfig.tts_profiles.map((item) => (item.id === id ? nextProfile : item))
+        : [...speechConfig.tts_profiles, nextProfile];
+      const activeId = req.activate ? id : speechConfig.active_tts_id;
+      speechConfig = {
+        ...speechConfig,
+        revision: `rev-${revCounter}`,
+        tts_profiles: nextProfiles,
+        active_tts_id: activeId,
+      };
+      return {
+        type: "save_tts_profile",
+        payload: { configuration: speechConfig, snapshot },
+      };
+    }
+    if (command.type === "set_active_speech_profile") {
+      const req = command.payload as { capability: "asr" | "tts"; profile_id?: string };
+      revCounter += 1;
+      speechConfig = {
+        ...speechConfig,
+        revision: `rev-${revCounter}`,
+        active_asr_id: req.capability === "asr" ? req.profile_id : speechConfig.active_asr_id,
+        active_tts_id: req.capability === "tts" ? req.profile_id : speechConfig.active_tts_id,
+      };
+      return {
+        type: "set_active_speech_profile",
+        payload: { configuration: speechConfig, snapshot },
+      };
+    }
+    if (command.type === "delete_speech_profile") {
+      const req = command.payload as { capability: "asr" | "tts"; profile_id: string };
+      revCounter += 1;
+      if (req.capability === "asr") {
+        speechConfig = {
+          ...speechConfig,
+          revision: `rev-${revCounter}`,
+          asr_profiles: speechConfig.asr_profiles.filter((item) => item.id !== req.profile_id),
+          active_asr_id: speechConfig.active_asr_id === req.profile_id ? undefined : speechConfig.active_asr_id,
+        };
+      } else {
+        speechConfig = {
+          ...speechConfig,
+          revision: `rev-${revCounter}`,
+          tts_profiles: speechConfig.tts_profiles.filter((item) => item.id !== req.profile_id),
+          active_tts_id: speechConfig.active_tts_id === req.profile_id ? undefined : speechConfig.active_tts_id,
+        };
+      }
+      return {
+        type: "delete_speech_profile",
+        payload: { configuration: speechConfig, snapshot },
+      };
+    }
     if (command.type === "update_speech_configuration") {
       const req = command.payload as {
         asr: { provider: SpeechConfigurationSnapshot["asr"]["provider"]; endpoint: string; model: string; enabled: boolean; timeout_ms: number };
         tts: { provider: SpeechConfigurationSnapshot["tts"]["provider"]; endpoint: string; model: string; voice: string; enabled: boolean; timeout_ms: number };
       };
+      revCounter += 1;
       speechConfig = {
-        revision: "rev-2",
+        ...speechConfig,
+        revision: `rev-${revCounter}`,
         asr: {
           ...req.asr,
           credential_configured: true,
@@ -210,7 +353,7 @@ function createStoreWithClient(client: RuntimeClient): RootStore {
 }
 
 describe("DeviceSpeechSection and DeviceConsole UI", () => {
-  it("edits ASR and TTS speech settings with presets including DeepSeek, voice picker, and live tests without select", async () => {
+  it("manages saved ASR and TTS configuration lists with add, edit, switch, live tests, and delete without select", async () => {
     const mock = createConsoleMockClient();
     const store = createStoreWithClient(mock.client);
     vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:tts-preview");
@@ -223,78 +366,141 @@ describe("DeviceSpeechSection and DeviceConsole UI", () => {
       </RootStoreProvider>,
     );
 
-    await screen.findByText(/仅需填写阿里云百炼 API Key/);
+    // 初始已保存列表展示，且无原生 <select>
+    await screen.findByText("阿里云百炼识别");
+    await screen.findByText("阿里云百炼女声");
     expect(container.querySelector("select")).toBeNull();
     expect(container.querySelectorAll('[data-provider-icon="bailian"]')).toHaveLength(2);
+    expect(screen.getAllByText("当前使用")).toHaveLength(2);
 
-    // 切换 ASR 与 TTS 为 DeepSeek 验证官方语音预置、图标、双端复用提示与 Tide 音色选择
-    fireEvent.click(screen.getByRole("button", { name: "ASR 服务提供商" }));
-    fireEvent.click(await screen.findByRole("option", { name: /^DeepSeek/ }));
-    fireEvent.click(screen.getByRole("button", { name: "TTS 服务提供商" }));
-    fireEvent.click(await screen.findByRole("option", { name: /^DeepSeek/ }));
-    expect(container.querySelectorAll('[data-provider-icon="deepseek"]')).toHaveLength(2);
-    await screen.findByText(/仅需填写 DeepSeek API Key（sk-...）/);
-    fireEvent.click(screen.getByRole("button", { name: "TTS 预置音色" }));
-    fireEvent.click(await screen.findByRole("option", { name: /Tide · 沉稳男声/ }));
+    // 直接从列表试听已保存 TTS，并验证传入 profile_id
+    fireEvent.click(screen.getByRole("button", { name: "试听 TTS 阿里云百炼女声" }));
+    await screen.findByText(/合成成功 · 42 ms/);
+    expect(mock.deviceGatewayCommand).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "test_tts_configuration",
+        payload: expect.objectContaining({ profile_id: "tts-default" }),
+      }),
+    );
 
-    // 切换 TTS 为阶跃星辰验证新预置与音色直选、再切回硅基流动试听闭环测试
-    fireEvent.click(screen.getByRole("button", { name: "TTS 服务提供商" }));
-    fireEvent.click(await screen.findByRole("option", { name: /阶跃星辰/ }));
-    expect(container.querySelector('[data-provider-icon="stepfun"]')).not.toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "TTS 预置音色" }));
-    fireEvent.click(await screen.findByRole("option", { name: /温柔女声/ }));
-
-    // 切换 TTS 为硅基流动并挑选预置音色、试听合成音频，再用该音频闭环测试 ASR
-    fireEvent.click(screen.getByRole("button", { name: "TTS 服务提供商" }));
-    fireEvent.click(await screen.findByRole("option", { name: /硅基流动/ }));
-    fireEvent.click(screen.getByRole("button", { name: "TTS 预置音色" }));
-    fireEvent.click(await screen.findByRole("option", { name: /Anna/ }));
-
-    fireEvent.click(screen.getByRole("button", { name: "试听音色" }));
-    await screen.findByText(/合成成功 · 耗时 42 ms/);
-
-    fireEvent.click(screen.getByRole("button", { name: "用 TTS 音频闭环测试" }));
+    // 直接从列表展开已保存 ASR 快速闭环测试
+    fireEvent.click(screen.getByRole("button", { name: "测试 ASR 阿里云百炼识别" }));
+    fireEvent.click(screen.getByRole("button", { name: "TTS 闭环测试" }));
     await screen.findByText(/闭环识别测试通过/);
+    expect(mock.deviceGatewayCommand).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "test_asr_configuration",
+        payload: expect.objectContaining({ profile_id: "asr-default" }),
+      }),
+    );
 
-    // 切换 ASR 为 Fireworks 验证多 ASR 预置，再切换 OpenAI 展开高级设置
+    // 新增一个 OpenAI ASR 配置（验证 Fireworks 预置图标、OpenAI 高级设置与保存）
+    fireEvent.click(screen.getByRole("button", { name: "新增语音识别配置" }));
     fireEvent.click(screen.getByRole("button", { name: "ASR 服务提供商" }));
     fireEvent.click(await screen.findByRole("option", { name: /Fireworks AI/ }));
     expect(container.querySelector('[data-provider-icon="fireworks"]')).not.toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "ASR 服务提供商" }));
     fireEvent.click(await screen.findByRole("option", { name: /^OpenAI/ }));
+    fireEvent.change(screen.getByLabelText("ASR 配置名称"), { target: { value: "OpenAI 主力识别" } });
+    fireEvent.change(screen.getByLabelText("ASR API Key"), { target: { value: "sk-openai-asr" } });
 
-    const advancedButtons = screen.getAllByRole("button", { name: "高级设置" });
-    fireEvent.click(advancedButtons[0]);
-
+    fireEvent.click(screen.getByRole("button", { name: "高级设置" }));
     await waitFor(() => {
       expect(screen.getByLabelText("ASR 接口地址")).toHaveValue("https://api.openai.com/v1");
       expect(screen.getByLabelText("ASR 模型名称")).toHaveValue("gpt-4o-mini-transcribe");
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "保存并应用" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+    await screen.findByText("OpenAI 主力识别");
+    expect(mock.deviceGatewayCommand).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "save_asr_profile",
+        payload: expect.objectContaining({
+          name: "OpenAI 主力识别",
+          provider: "openai",
+          endpoint: "https://api.openai.com/v1",
+          model: "gpt-4o-mini-transcribe",
+        }),
+      }),
+    );
 
+    // 切换启用刚新增的 ASR 配置
+    fireEvent.click(screen.getByRole("button", { name: "启用 ASR OpenAI 主力识别" }));
     await waitFor(() => {
       expect(mock.deviceGatewayCommand).toHaveBeenCalledWith(
         expect.objectContaining({
-          type: "update_speech_configuration",
+          type: "set_active_speech_profile",
           payload: expect.objectContaining({
-            expected_revision: "rev-1",
-            asr: expect.objectContaining({
-              provider: "openai",
-              endpoint: "https://api.openai.com/v1",
-              model: "gpt-4o-mini-transcribe",
-            }),
-            tts: expect.objectContaining({
-              provider: "siliconflow",
-              endpoint: "https://api.siliconflow.cn/v1",
-              model: "FunAudioLLM/CosyVoice2-0.5B",
-              voice: "anna",
-              reuse_asr_credential: false,
-            }),
+            capability: "asr",
+            profile_id: "asr-2",
           }),
         }),
       );
+    });
+
+    // 新增硅基流动 TTS 配置（验证 DeepSeek / 阶跃星辰 / 硅基流动预置及音色选择）
+    fireEvent.click(screen.getByRole("button", { name: "新增语音合成配置" }));
+    fireEvent.click(screen.getByRole("button", { name: "TTS 服务提供商" }));
+    fireEvent.click(await screen.findByRole("option", { name: /^DeepSeek/ }));
+    fireEvent.click(screen.getByRole("button", { name: "TTS 预置音色" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Tide · 沉稳男声/ }));
+
+    fireEvent.click(screen.getByRole("button", { name: "TTS 服务提供商" }));
+    fireEvent.click(await screen.findByRole("option", { name: /阶跃星辰/ }));
+    expect(container.querySelector('[data-provider-icon="stepfun"]')).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "TTS 服务提供商" }));
+    fireEvent.click(await screen.findByRole("option", { name: /硅基流动/ }));
+    fireEvent.click(screen.getByRole("button", { name: "TTS 预置音色" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Anna/ }));
+    fireEvent.change(screen.getByLabelText("TTS API Key"), { target: { value: "sk-sf-tts" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+    await screen.findByText("硅基流动 · anna");
+    expect(mock.deviceGatewayCommand).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "save_tts_profile",
+        payload: expect.objectContaining({
+          provider: "siliconflow",
+          endpoint: "https://api.siliconflow.cn/v1",
+          model: "FunAudioLLM/CosyVoice2-0.5B",
+          voice: "anna",
+        }),
+      }),
+    );
+
+    // 停用 ASR 总开关时不删除列表配置
+    fireEvent.click(screen.getByLabelText("启用语音识别"));
+    await waitFor(() => {
+      expect(mock.deviceGatewayCommand).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "set_active_speech_profile",
+          payload: expect.objectContaining({
+            capability: "asr",
+            profile_id: undefined,
+          }),
+        }),
+      );
+    });
+    expect(screen.getByText("OpenAI 主力识别")).toBeVisible();
+
+    // 删除指定已保存配置（经过确认弹窗）
+    fireEvent.click(screen.getByRole("button", { name: "删除 ASR OpenAI 主力识别" }));
+    await screen.findByText("删除语音识别配置？");
+    const dialogButtons = screen.getAllByRole("button", { name: "删除" });
+    fireEvent.click(dialogButtons[dialogButtons.length - 1]);
+    await waitFor(() => {
+      expect(mock.deviceGatewayCommand).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "delete_speech_profile",
+          payload: expect.objectContaining({
+            capability: "asr",
+            profile_id: "asr-2",
+          }),
+        }),
+      );
+      expect(screen.queryByRole("button", { name: "删除 ASR OpenAI 主力识别" })).toBeNull();
     });
     store.dispose();
   });
