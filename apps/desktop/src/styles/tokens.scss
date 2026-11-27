@@ -2,6 +2,11 @@
   --ez-font-small: 12px;
   --ez-font-base: 14px;
   --ez-font-large: 16px;
+  --ez-font-ui: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --ez-font-prose: var(--ez-font-ui);
+  --ez-font-mono: "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+  --ez-prose-line-height: 1.72;
+  --ez-code-ligatures: contextual;
   // 单行控件的 border-box 总高度；padding 与 border 不得额外撑高。
   --ez-control-height-small: 24px;
   --ez-control-height-default: 32px;

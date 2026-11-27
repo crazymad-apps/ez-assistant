@@ -1,12 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import {
+  loadDesktopAppearance,
   loadDesktopPreferences,
   loadDesktopTheme,
+  saveDesktopAppearance,
   saveDesktopPreferences,
   saveDesktopTheme,
 } from '../../src/native-bridge/desktopPreferences';
 import { AppearanceStore } from '../../src/stores/AppearanceStore';
+import { DEFAULT_APPEARANCE_PREFERENCES } from '../../src/styles/appearanceOptions';
 import { isThemeId, THEME_PRESETS, type ThemeId } from '../../src/styles/themePresets';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(), isTauri: vi.fn(() => false) }));
@@ -91,12 +94,34 @@ describe('theme storage through existing desktop preferences bridge', () => {
   });
 
   it('exposes only immutable built-in metadata and rejects prototype keys', () => {
-    expect(Object.keys(THEME_PRESETS)).toHaveLength(4);
+    expect(Object.keys(THEME_PRESETS)).toHaveLength(15);
     expect(Object.isFrozen(THEME_PRESETS)).toBe(true);
     for (const preset of Object.values(THEME_PRESETS)) {
       expect(Object.isFrozen(preset)).toBe(true);
       expect(preset.startup_background).toMatch(/^#[0-9a-f]{6}$/);
     }
     expect(isThemeId('toString')).toBe(false);
+  });
+
+  it('persists rich appearance preferences separately in Web localStorage and Tauri commands', async () => {
+    const next = {
+      ...DEFAULT_APPEARANCE_PREFERENCES,
+      mode: 'dark' as const,
+      accent_preset: 'orange' as const,
+      font_size: 'lg' as const,
+      line_height: 'loose' as const,
+    };
+    saveDesktopAppearance(next);
+    expect(loadDesktopAppearance()).toEqual(next);
+    expect(localStorage.getItem('ez-assistant:view')).toBeNull();
+
+    vi.mocked(isTauri).mockReturnValue(true);
+    vi.mocked(invoke).mockResolvedValueOnce(next);
+    expect(await loadDesktopAppearance()).toEqual(next);
+    expect(invoke).toHaveBeenCalledWith('load_desktop_appearance');
+
+    vi.mocked(invoke).mockResolvedValueOnce(undefined);
+    await saveDesktopAppearance(next);
+    expect(invoke).toHaveBeenCalledWith('save_desktop_appearance', { appearance: next });
   });
 });

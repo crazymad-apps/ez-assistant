@@ -4,6 +4,8 @@ import { configure } from "mobx";
 import { App } from "./app/App";
 import { AppearanceStore } from "./stores/AppearanceStore";
 import { RootStore } from "./stores/RootStore";
+import "cn-fontsource-alimama-dong-fang-da-kai-regular/font.css";
+import "./styles/fonts.css";
 import "./styles/index.scss";
 
 configure({ enforceActions: "always" });

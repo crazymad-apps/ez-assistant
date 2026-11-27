@@ -189,8 +189,9 @@
   border-radius: 12px 12px 3px 12px;
   color: var(--ez-text);
   background: var(--ez-primary-soft);
+  font-family: var(--ez-font-prose, inherit);
   font-size: var(--ez-font-base);
-  line-height: 1.65;
+  line-height: var(--ez-prose-line-height, 1.65);
   overflow-wrap: anywhere;
   white-space: pre-wrap;
   -webkit-user-select: text;
@@ -400,6 +401,10 @@
   button:disabled, button[aria-disabled="true"] { opacity: 0.45; }
   button:focus-visible { outline: 2px solid var(--ez-primary-border); }
   time { margin-left: 5px; font-size: var(--ez-font-small); }
+}
+
+:global(html[data-show-timestamps="false"]) .message_actions time {
+  display: none;
 }
 
 .message_action_notice {

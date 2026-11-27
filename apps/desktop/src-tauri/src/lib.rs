@@ -144,6 +144,8 @@ pub fn run() {
                 desktop_preferences::save_desktop_preferences,
                 desktop_preferences::load_desktop_theme,
                 desktop_preferences::save_desktop_theme,
+                desktop_preferences::load_desktop_appearance,
+                desktop_preferences::save_desktop_appearance,
                 desktop_preferences::appearance::apply_desktop_theme,
                 external_link::open_external_http_url,
                 external_link::open_session_workspace_directory,

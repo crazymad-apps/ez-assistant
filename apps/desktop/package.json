@@ -35,6 +35,10 @@
   "dependencies": {
     "@daypicker/react": "10.0.2",
     "@ez-assistant/protocol": "file:../../packages/assistant-protocol",
+    "@fontpkg/alimama-agile-vf": "1.0.5",
+    "@fontpkg/alimama-dao-li-ti": "1.0.5",
+    "@fontpkg/alimama-fang-yuan-ti-vf": "1.0.5",
+    "@fontpkg/alimama-shu-hei-ti": "1.0.5",
     "@modelcontextprotocol/client": "2.0.0",
     "@modelcontextprotocol/core": "2.0.0",
     "@modelcontextprotocol/ext-apps": "2.0.4",
@@ -45,6 +49,7 @@
     "@tauri-apps/api": "2.11.1",
     "@xterm/addon-fit": "0.11.0",
     "@xterm/xterm": "6.0.0",
+    "cn-fontsource-alimama-dong-fang-da-kai-regular": "1.0.3",
     "material-icon-theme": "5.38.1",
     "mobx": "7.0.0",
     "mobx-react-lite": "5.0.0",

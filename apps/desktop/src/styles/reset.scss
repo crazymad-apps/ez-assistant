@@ -20,7 +20,7 @@ body {
   margin: 0;
   color: var(--ez-text);
   background: var(--ez-surface);
-  font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-family: var(--ez-font-ui);
   font-size: var(--ez-font-base);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -31,11 +31,24 @@ html:not([data-theme]) body { background: transparent; }
 
 // 仅原生 macOS 工作区透出窗口材质；登录页、启动页和普通浏览器仍保留实色背景。
 // AppShell 的平台值来自原生桥接，不能用浏览器的 navigator.platform 代替。
-html:not([data-native-theme-failed="true"]):has(main[data-left-sidebar][data-platform="macos"]) body {
+html:not([data-native-theme-failed="true"]):not([data-macos-vibrancy="false"]):has(main[data-left-sidebar][data-platform="macos"]) body {
   background: transparent;
 }
 
-html[data-native-theme-failed="true"] body { background: var(--ez-surface); }
+html[data-native-theme-failed="true"] body,
+html[data-macos-vibrancy="false"] body { background: var(--ez-surface); }
+
+html[data-density="compact"] {
+  --ez-conversation-edge-spacing: 12px;
+  --ez-conversation-top-spacing: 16px;
+  --ez-conversation-bottom-spacing: 18px;
+}
+
+html[data-density="spacious"] {
+  --ez-conversation-edge-spacing: 22px;
+  --ez-conversation-top-spacing: 32px;
+  --ez-conversation-bottom-spacing: 36px;
+}
 
 button,
 input,

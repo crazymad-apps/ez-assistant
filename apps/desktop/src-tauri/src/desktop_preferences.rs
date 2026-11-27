@@ -18,6 +18,7 @@ const THEME_PRESETS: &str = include_str!("../../theme-presets.json");
 const DEFAULT_THEME_ID: &str = "default_light";
 const MAX_EXPANDED_WORKSPACES: usize = 256;
 const MAX_PREFERENCES_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_APPEARANCE_BYTES: usize = 16 * 1024;
 const LEFT_SIDEBAR_DEFAULT_WIDTH: i32 = 286;
 const LEFT_SIDEBAR_MIN_WIDTH: i32 = 220;
 const LEFT_SIDEBAR_MAX_WIDTH: i32 = 420;
@@ -65,6 +66,9 @@ struct PreferencesDocument {
         skip_serializing_if = "Option::is_none"
     )]
     theme_id: Option<serde_json::Value>,
+    // 外观详细偏好（模式、强调色、字体栈、排版宽度与显示开关）；仅由外观命令写入。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    appearance: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Eq, PartialEq, Serialize)]
@@ -188,6 +192,57 @@ pub(crate) fn save_desktop_theme(
         .app_config_dir()
         .map_err(|_| DesktopPreferencesError::PathUnavailable)?;
     save_theme_to_directory(&directory, &theme_id)
+}
+
+#[tauri::command]
+pub(crate) fn load_desktop_appearance(
+    app: AppHandle,
+) -> Result<Option<serde_json::Value>, DesktopPreferencesError> {
+    let directory = app
+        .path()
+        .app_config_dir()
+        .map_err(|_| DesktopPreferencesError::PathUnavailable)?;
+    load_appearance_from_directory(&directory)
+}
+
+#[tauri::command]
+pub(crate) fn save_desktop_appearance(
+    app: AppHandle,
+    appearance: serde_json::Value,
+) -> Result<(), DesktopPreferencesError> {
+    let directory = app
+        .path()
+        .app_config_dir()
+        .map_err(|_| DesktopPreferencesError::PathUnavailable)?;
+    save_appearance_to_directory(&directory, appearance)
+}
+
+pub(crate) fn load_appearance_from_directory(
+    directory: &Path,
+) -> Result<Option<serde_json::Value>, DesktopPreferencesError> {
+    let document = load_document(directory)?;
+    Ok(document.appearance.filter(serde_json::Value::is_object))
+}
+
+pub(crate) fn save_appearance_to_directory(
+    directory: &Path,
+    appearance: serde_json::Value,
+) -> Result<(), DesktopPreferencesError> {
+    if !appearance.is_object() {
+        return Err(DesktopPreferencesError::Invalid);
+    }
+    let encoded_len = serde_json::to_vec(&appearance)
+        .map_err(|_| DesktopPreferencesError::Invalid)?
+        .len();
+    if encoded_len > MAX_APPEARANCE_BYTES {
+        return Err(DesktopPreferencesError::Invalid);
+    }
+    let _guard = PREFERENCES_WRITE
+        .lock()
+        .map_err(|_| DesktopPreferencesError::SaveFailed)?;
+    let mut document = load_document(directory)?;
+    document.appearance = Some(appearance);
+    write_document(directory, &document)
 }
 
 fn is_theme_id(value: &str) -> Result<bool, DesktopPreferencesError> {

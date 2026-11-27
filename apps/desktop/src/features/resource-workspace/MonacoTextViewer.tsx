@@ -1,4 +1,5 @@
 import { useAppearance } from "../../stores/AppearanceContext";
+import { FONT_SIZE_OPTIONS, resolveCodeFontStack } from "../../styles/appearanceOptions";
 import { applyMonacoTheme, registerMonacoThemes } from "./monacoThemes";
 import { forwardRef, useId, useEffect, useImperativeHandle, useRef, useState } from "react";
 import type { ResourceViewState } from "./resourceViewState";
@@ -53,7 +54,10 @@ export const MonacoTextViewer = forwardRef<MonacoTextViewerHandle, Readonly<{
           automaticLayout: true,
           contextmenu: true,
           folding: true,
-          fontSize: 13,
+          fontFamily: resolveCodeFontStack(appearance.preferences),
+          fontLigatures: appearance.preferences.code_ligatures,
+          fontSize:
+            (FONT_SIZE_OPTIONS.find((item) => item.value === appearance.preferences.font_size)?.base_px ?? 14) - 1,
           lineHeight: 20,
           minimap: { enabled: false },
           model,
@@ -100,6 +104,20 @@ export const MonacoTextViewer = forwardRef<MonacoTextViewerHandle, Readonly<{
   useEffect(() => {
     editor_ref.current?.updateOptions({ wordWrap: props.word_wrap ? "on" : "off" });
   }, [props.word_wrap]);
+
+  useEffect(() => {
+    const scale = FONT_SIZE_OPTIONS.find((item) => item.value === appearance.preferences.font_size)?.base_px ?? 14;
+    editor_ref.current?.updateOptions({
+      fontFamily: resolveCodeFontStack(appearance.preferences),
+      fontLigatures: appearance.preferences.code_ligatures,
+      fontSize: scale - 1,
+    });
+  }, [
+    appearance.preferences.code_font,
+    appearance.preferences.custom_code_font,
+    appearance.preferences.code_ligatures,
+    appearance.preferences.font_size,
+  ]);
 
   return (
     <div className={styles.text_viewer}>
