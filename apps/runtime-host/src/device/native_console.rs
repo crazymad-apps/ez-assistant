@@ -14,24 +14,30 @@ use std::{
         Arc,
         atomic::{AtomicU32, Ordering},
     },
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use assistant_protocol::{DeviceConsoleModeSnapshot, DeviceConsoleSnapshot, DeviceId};
+use assistant_runtime::DeviceLifecycle;
 use axum::{
     Json,
     body::Bytes,
     extract::{Path as AxumPath, State},
-    http::{HeaderMap, Method, StatusCode, header::AUTHORIZATION},
+    http::{
+        HeaderMap, Method, StatusCode,
+        header::{AUTHORIZATION, CONTENT_TYPE},
+    },
     response::{IntoResponse, Response},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use super::{
+    crypto::{decode_base64, media_upload_transcript, verify_ed25519},
     gateway::GatewayShared,
     multinet_pinyin,
     protocol::{
@@ -57,6 +63,9 @@ const FBANK_F_MIN_HZ: f32 = 60.0;
 const FBANK_F_MAX_HZ: f32 = 7600.0;
 const FBANK_PRE_EMPHASIS: f32 = 0.97;
 const MAX_AUDIO_DECODED_BYTES: usize = 4 * 1024 * 1024;
+pub(super) const MAX_MEDIA_UPLOAD_BYTES: usize = 2 * 1024 * 1024;
+const MAX_STORED_MEDIA_FILES_PER_DEVICE: usize = 50;
+const ED25519_SIGNATURE_BYTES: usize = 64;
 
 /// 直连终端的持久化 Agent → Device ACL 规则。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -156,6 +165,83 @@ impl NativeConsoleStore {
 
     pub(super) async fn vp_version(&self) -> u64 {
         self.doc.lock().await.vp_version
+    }
+
+    pub(super) fn media_dir(&self) -> PathBuf {
+        self.path
+            .parent()
+            .map(|p| p.join("media"))
+            .unwrap_or_else(|| PathBuf::from("media"))
+    }
+
+    /// 将直连终端通过独立 HTTPS 媒体面上传的 JPEG 原子落盘，并按单设备上限裁剪旧图。
+    pub(super) fn save_media_jpeg(
+        &self,
+        device_id: &DeviceId,
+        jpeg_bytes: &[u8],
+    ) -> Result<(String, PathBuf), String> {
+        if jpeg_bytes.len() < 4
+            || jpeg_bytes.len() > MAX_MEDIA_UPLOAD_BYTES
+            || jpeg_bytes[0] != 0xFF
+            || jpeg_bytes[1] != 0xD8
+        {
+            return Err("invalid JPEG payload".to_owned());
+        }
+        let dev_seg = safe_media_device_segment(device_id.as_str());
+        let dir = self.media_dir().join(&dev_seg);
+        fs::create_dir_all(&dir).map_err(|e| format!("create media dir failed: {e}"))?;
+        let ts_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let filename = format!("{ts_ms}-{}.jpg", random_hex_short());
+        let dest = dir.join(&filename);
+        let tmp = dir.join(format!(".{filename}.tmp"));
+        {
+            let mut opts = OpenOptions::new();
+            opts.write(true).create_new(true);
+            platform::apply_private_open_options(&mut opts);
+            let mut file = opts
+                .open(&tmp)
+                .map_err(|e| format!("open temp media file failed: {e}"))?;
+            file.write_all(jpeg_bytes)
+                .map_err(|e| format!("write media file failed: {e}"))?;
+            file.sync_all()
+                .map_err(|e| format!("sync media file failed: {e}"))?;
+        }
+        if let Err(err) = fs::rename(&tmp, &dest) {
+            let _ = fs::remove_file(&tmp);
+            return Err(format!("commit media file failed: {err}"));
+        }
+        prune_old_media_files(&dir, MAX_STORED_MEDIA_FILES_PER_DEVICE);
+        let media_url = format!("/device/media/{dev_seg}/{filename}");
+        Ok((media_url, dest))
+    }
+
+    /// 将 `/device/media/<dev>/<file>.jpg` 安全解析为本地磁盘路径（严防路径穿越与跨设备越权）。
+    pub(super) fn resolve_media_path(
+        &self,
+        device_id: &DeviceId,
+        media_url: &str,
+    ) -> Option<PathBuf> {
+        let trimmed = media_url.trim().trim_start_matches('/');
+        let rest = trimmed
+            .strip_prefix("device/media/")
+            .or_else(|| trimmed.strip_prefix("media/"))?;
+        let mut parts = rest.split('/');
+        let dev_seg = parts.next()?;
+        let filename = parts.next()?;
+        if parts.next().is_some() {
+            return None;
+        }
+        if dev_seg != safe_media_device_segment(device_id.as_str()) {
+            return None;
+        }
+        if !is_safe_jpeg_filename(filename) {
+            return None;
+        }
+        let path = self.media_dir().join(dev_seg).join(filename);
+        path.is_file().then_some(path)
     }
 
     pub(super) async fn list_acls(&self) -> Vec<NativeAclRule> {
@@ -594,6 +680,32 @@ pub(crate) async fn handle_native_console_request(
         .or_else(|| trimmed.strip_prefix("api/v1"))
         .unwrap_or(trimmed)
         .trim_start_matches('/');
+
+    if let Some(media_rel) = trimmed
+        .strip_prefix("media/")
+        .or_else(|| trimmed.strip_prefix("device/media/"))
+        && method == Method::GET
+    {
+        let normalized = format!("/device/media/{media_rel}");
+        let resolved = shared
+            .native_console
+            .resolve_media_path(device_id, &normalized)
+            .or_else(|| {
+                let candidate = format!(
+                    "/device/media/{}/{media_rel}",
+                    safe_media_device_segment(device_id.as_str())
+                );
+                shared
+                    .native_console
+                    .resolve_media_path(device_id, &candidate)
+            });
+        if let Some(path) = resolved
+            && let Ok(bytes) = fs::read(&path)
+        {
+            return (StatusCode::OK, [(CONTENT_TYPE, "image/jpeg")], bytes).into_response();
+        }
+        return json_error(StatusCode::NOT_FOUND, "媒体文件不存在。");
+    }
 
     let Some(hardware) = shared.native_hardware(device_id).await else {
         return json_error(StatusCode::NOT_FOUND, "直连终端当前离线或不支持原生控制台。");
@@ -1528,26 +1640,26 @@ pub(super) async fn handle_mcp_http_request(
                 .map(str::to_owned)
                 .unwrap_or_else(|| default_action_for_capability(tool_name).to_owned());
             let params_json = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_owned());
+            let canonical = canonical_capability(tool_name);
+            let timeout_ms: u32 = if canonical == "device.camera_capture" {
+                15_000
+            } else {
+                5_000
+            };
             let cmd = DeviceCommandRequest {
                 command_id: format!("mcp-{}", random_hex_short()),
-                capability: canonical_capability(tool_name).to_owned(),
+                capability: canonical.to_owned(),
                 action,
                 params_json,
-                timeout_ms: 5000,
+                timeout_ms,
             };
             match shared
-                .execute_device_command(&device_id, cmd, Duration::from_secs(5))
+                .execute_device_command(&device_id, cmd, Duration::from_millis(u64::from(timeout_ms)))
                 .await
             {
                 Ok(res) => {
-                    let text = if res.ok {
-                        if res.result_json.is_empty() {
-                            "{\"ok\":true}".to_owned()
-                        } else {
-                            res.result_json
-                        }
-                    } else {
-                        format!(
+                    if !res.ok {
+                        let text = format!(
                             "{}: {}",
                             if res.error_code.is_empty() {
                                 "DEVICE_ERROR"
@@ -1555,13 +1667,57 @@ pub(super) async fn handle_mcp_http_request(
                                 &res.error_code
                             },
                             res.error_message
-                        )
+                        );
+                        return rpc_result(
+                            id,
+                            json!({
+                                "isError": true,
+                                "content": [{ "type": "text", "text": text }],
+                            }),
+                        );
+                    }
+
+                    let mut content = Vec::new();
+                    let mut text = if res.result_json.is_empty() {
+                        "{\"ok\":true}".to_owned()
+                    } else {
+                        res.result_json.clone()
                     };
+                    if !res.media_url.is_empty()
+                        && let Some(local_path) = shared
+                            .native_console
+                            .resolve_media_path(&device_id, &res.media_url)
+                        && let Ok(jpeg_bytes) = fs::read(&local_path)
+                        && jpeg_bytes.len() >= 4
+                        && jpeg_bytes.len() <= MAX_MEDIA_UPLOAD_BYTES
+                    {
+                        if let Ok(mut meta) = serde_json::from_str::<Value>(&text)
+                            && let Some(obj) = meta.as_object_mut()
+                        {
+                            obj.insert("ok".to_owned(), json!(true));
+                            obj.insert("media_url".to_owned(), json!(res.media_url));
+                            obj.insert(
+                                "local_path".to_owned(),
+                                json!(local_path.to_string_lossy().to_string()),
+                            );
+                            if let Ok(enriched) = serde_json::to_string(&meta) {
+                                text = enriched;
+                            }
+                        }
+                        content.push(json!({ "type": "text", "text": text }));
+                        content.push(json!({
+                            "type": "image",
+                            "data": BASE64.encode(&jpeg_bytes),
+                            "mimeType": "image/jpeg",
+                        }));
+                    } else {
+                        content.push(json!({ "type": "text", "text": text }));
+                    }
                     rpc_result(
                         id,
                         json!({
-                            "isError": !res.ok,
-                            "content": [{ "type": "text", "text": text }],
+                            "isError": false,
+                            "content": content,
                         }),
                     )
                 }
@@ -1668,16 +1824,167 @@ fn build_mcp_tools(hardware: &DeviceHardwareDeclaration) -> Vec<Value> {
     {
         tools.push(json!({
             "name": "device.camera_capture",
-            "description": "调用终端摄像头拍照",
+            "description": "调用 Mosaico 模块化摄像头拍照并直接返回画面（image/jpeg）供识别分析",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "resolution": { "type": "string", "description": "分辨率，如 qvga / vga" }
+                    "resolution": {
+                        "type": "string",
+                        "description": "分辨率档位：vga（默认 480x480）、qvga（320x320）或 hd（528x720）"
+                    }
                 }
             }
         }));
     }
     tools
+}
+
+/// 独立 HTTPS 媒体上传面 `POST /device/media`（与 WSS 控制/音频面严格隔离）。
+///
+/// 强制校验：已配对未吊销设备 + 当前活跃 WSS `connection_id` + `X-Device-MAC` 一致性
+/// + 防重放 `X-Device-Nonce` + 设备 Ed25519 长期公钥对请求体 SHA-256 的签名。
+pub(super) async fn handle_device_media_upload(
+    State(shared): State<Arc<GatewayShared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let header_str = |name: &str| -> Option<String> {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned)
+    };
+
+    let Some(raw_device_id) = header_str("x-device-id") else {
+        return json_error(StatusCode::UNAUTHORIZED, "missing X-Device-ID");
+    };
+    let Some(connection_id) = header_str("x-device-connection-id") else {
+        return json_error(StatusCode::UNAUTHORIZED, "missing X-Device-Connection-ID");
+    };
+    let Some(nonce) = header_str("x-device-nonce") else {
+        return json_error(StatusCode::UNAUTHORIZED, "missing X-Device-Nonce");
+    };
+    if nonce.len() < 8 || nonce.len() > 128 {
+        return json_error(StatusCode::BAD_REQUEST, "invalid X-Device-Nonce length");
+    }
+    let Some(signature_b64) = header_str("x-device-signature") else {
+        return json_error(StatusCode::UNAUTHORIZED, "missing X-Device-Signature");
+    };
+    let content_type = header_str(CONTENT_TYPE.as_str()).unwrap_or_default();
+    if !content_type.to_ascii_lowercase().starts_with("image/jpeg") {
+        return json_error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "expected image/jpeg");
+    }
+    if body.len() < 4 || body.len() > MAX_MEDIA_UPLOAD_BYTES {
+        return json_error(StatusCode::PAYLOAD_TOO_LARGE, "invalid JPEG body size");
+    }
+    if body[0] != 0xFF || body[1] != 0xD8 {
+        return json_error(StatusCode::BAD_REQUEST, "body is not a valid JPEG image");
+    }
+
+    let Ok(device_id) = DeviceId::new(raw_device_id) else {
+        return json_error(StatusCode::UNAUTHORIZED, "invalid X-Device-ID");
+    };
+    let device = match shared.runtime.registered_device(&device_id) {
+        Ok(Some(device)) => device,
+        Ok(None) | Err(_) => return json_error(StatusCode::UNAUTHORIZED, "unknown device"),
+    };
+    if device.lifecycle == DeviceLifecycle::Revoked {
+        return json_error(StatusCode::FORBIDDEN, "device revoked");
+    }
+
+    let Ok(signature) = decode_base64(&signature_b64, ED25519_SIGNATURE_BYTES) else {
+        return json_error(StatusCode::UNAUTHORIZED, "invalid signature encoding");
+    };
+    let body_sha256: [u8; 32] = Sha256::digest(&body).into();
+    let transcript = media_upload_transcript(
+        device_id.as_str(),
+        &connection_id,
+        &nonce,
+        &body_sha256,
+    );
+    if verify_ed25519(device.public_key.as_bytes(), &transcript, &signature).is_err() {
+        return json_error(StatusCode::UNAUTHORIZED, "invalid media upload signature");
+    }
+
+    let mac_header = header_str("x-device-mac");
+    if let Err((status, msg)) = shared
+        .verify_active_media_session(&device_id, &connection_id, mac_header.as_deref(), &nonce)
+        .await
+    {
+        return json_error(status, msg);
+    }
+
+    match shared.native_console.save_media_jpeg(&device_id, &body) {
+        Ok((media_url, _path)) => (
+            StatusCode::CREATED,
+            Json(json!({
+                "ok": true,
+                "media_url": media_url,
+                "bytes": body.len(),
+            })),
+        )
+            .into_response(),
+        Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &err),
+    }
+}
+
+fn safe_media_device_segment(device_id: &str) -> String {
+    let mut out = String::with_capacity(device_id.len());
+    for ch in device_id.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "device".to_owned()
+    } else {
+        out
+    }
+}
+
+fn is_safe_jpeg_filename(name: &str) -> bool {
+    if name.is_empty()
+        || name.len() > 128
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+    {
+        return false;
+    }
+    let lower = name.to_ascii_lowercase();
+    (lower.ends_with(".jpg") || lower.ends_with(".jpeg"))
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+}
+
+fn prune_old_media_files(dir: &Path, max_keep: usize) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(String, PathBuf)> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if is_safe_jpeg_filename(&name) {
+                Some((name, entry.path()))
+            } else {
+                None
+            }
+        })
+        .collect();
+    if files.len() <= max_keep {
+        return;
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    let remove_count = files.len().saturating_sub(max_keep);
+    for (_, path) in files.into_iter().take(remove_count) {
+        let _ = fs::remove_file(path);
+    }
 }
 
 fn default_action_for_capability(cap: &str) -> &'static str {
@@ -2310,5 +2617,38 @@ mod tests {
         let (after_cfg, after_cnt) = store.wake_config().await;
         assert_eq!(after_cnt, 0);
         assert_eq!(after_cfg.mode, WakeMode::WakeWord);
+    }
+
+    #[test]
+    fn media_store_validates_jpeg_blocks_traversal_and_enforces_device_isolation() {
+        let dir = tempdir().expect("tempdir");
+        let store = NativeConsoleStore::load_or_default(dir.path());
+        let dev_a = DeviceId::new("dev-mosaico-a").expect("dev a");
+        let dev_b = DeviceId::new("dev-mosaico-b").expect("dev b");
+
+        // Rejects non-JPEG payload
+        assert!(store.save_media_jpeg(&dev_a, b"not-a-jpeg").is_err());
+
+        let valid_jpeg = [0xFF_u8, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0xFF, 0xD9];
+        let (media_url, saved_path) = store
+            .save_media_jpeg(&dev_a, &valid_jpeg)
+            .expect("save valid jpeg");
+        assert!(media_url.starts_with("/device/media/dev-mosaico-a/"));
+        assert!(saved_path.is_file());
+        assert_eq!(fs::read(&saved_path).expect("read back"), valid_jpeg);
+
+        // Same device resolves cleanly; other device & traversal attempts are rejected
+        assert_eq!(store.resolve_media_path(&dev_a, &media_url), Some(saved_path));
+        assert!(store.resolve_media_path(&dev_b, &media_url).is_none());
+        assert!(
+            store
+                .resolve_media_path(&dev_a, "/device/media/dev-mosaico-a/../secret.jpg")
+                .is_none()
+        );
+        assert!(
+            store
+                .resolve_media_path(&dev_a, "/device/media/dev-mosaico-a/not_jpg.txt")
+                .is_none()
+        );
     }
 }

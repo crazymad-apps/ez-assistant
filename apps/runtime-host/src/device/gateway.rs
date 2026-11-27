@@ -28,7 +28,12 @@ use assistant_runtime::{
     AssistantRuntime, ChannelOutput, ChannelOutputDispatchError, ChannelSpeechSegment,
     DeviceDeliveryPreference, DeviceLifecycle, OutputPreference, ResolvedChannelDelivery,
 };
-use axum::{Router, routing::{get, post}};
+use axum::{
+    Router,
+    extract::DefaultBodyLimit,
+    http::StatusCode,
+    routing::{get, post},
+};
 use axum_server::{Handle as ServerHandle, tls_rustls::RustlsConfig};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use thiserror::Error;
@@ -202,6 +207,7 @@ struct ActiveConnection {
     hardware: Option<DeviceHardwareDeclaration>,
     active_speaker_role: i32,
     speech_relay: bool,
+    media_replay: super::protocol::MessageReplayWindow,
     command: mpsc::Sender<ConnectionCommand>,
 }
 
@@ -504,6 +510,12 @@ impl DeviceGatewayService {
         .map_err(DeviceGatewayError::Tls)?;
         let router = Router::new()
             .route("/device", get(super::connection::upgrade))
+            .route(
+                "/device/media",
+                post(super::native_console::handle_device_media_upload).layer(
+                    DefaultBodyLimit::max(super::native_console::MAX_MEDIA_UPLOAD_BYTES + 1024),
+                ),
+            )
             .with_state(self.shared.clone());
         let server_handle = ServerHandle::new();
         let server = axum_server::from_tcp_rustls(listener, tls)
@@ -1446,6 +1458,7 @@ impl GatewayShared {
                 hardware,
                 active_speaker_role: 1,
                 speech_relay,
+                media_replay: super::protocol::MessageReplayWindow::default(),
                 command: command_tx,
             },
         );
@@ -1454,6 +1467,37 @@ impl GatewayShared {
         }
         self.notify_changed();
         command_rx
+    }
+
+    /// 校验独立 HTTPS 媒体上传请求的活跃会话、MAC 一致性与防重放 Nonce。
+    pub(super) async fn verify_active_media_session(
+        &self,
+        device_id: &assistant_protocol::DeviceId,
+        connection_id: &str,
+        mac_header: Option<&str>,
+        nonce: &str,
+    ) -> Result<(), (StatusCode, &'static str)> {
+        let mut state = self.state.lock().await;
+        let Some(conn) = state.connections.get_mut(device_id) else {
+            return Err((StatusCode::UNAUTHORIZED, "device is not online"));
+        };
+        if conn.connection_id != connection_id {
+            return Err((StatusCode::UNAUTHORIZED, "connection_id mismatch"));
+        }
+        if let Some(hw) = conn.hardware.as_ref()
+            && !hw.mac.trim().is_empty()
+        {
+            let Some(mac) = mac_header.map(str::trim).filter(|m| !m.is_empty()) else {
+                return Err((StatusCode::FORBIDDEN, "missing X-Device-MAC"));
+            };
+            if !mac.eq_ignore_ascii_case(hw.mac.trim()) {
+                return Err((StatusCode::FORBIDDEN, "X-Device-MAC mismatch"));
+            }
+        }
+        if conn.media_replay.accept(nonce).is_err() {
+            return Err((StatusCode::CONFLICT, "duplicate media upload nonce"));
+        }
+        Ok(())
     }
 
     pub(super) async fn broadcast_speech_status(&self, status: DeviceSpeechServicesSnapshot) {
