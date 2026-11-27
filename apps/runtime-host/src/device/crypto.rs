@@ -173,6 +173,22 @@ pub(super) fn auth_transcript(
     ])
 }
 
+/// 为独立 HTTPS 媒体上传面（`POST /device/media`）构造 Ed25519 签名 transcript。
+pub(super) fn media_upload_transcript(
+    device_id: &str,
+    connection_id: &str,
+    nonce: &str,
+    body_sha256: &[u8; 32],
+) -> Vec<u8> {
+    transcript(&[
+        b"ez-assistant-media-v1",
+        device_id.as_bytes(),
+        connection_id.as_bytes(),
+        nonce.as_bytes(),
+        body_sha256,
+    ])
+}
+
 pub(super) fn validate_ed25519_public_key(public_key: &[u8]) -> Result<(), CryptoError> {
     let public_key: [u8; 32] = public_key
         .try_into()

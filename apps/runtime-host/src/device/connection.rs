@@ -3525,6 +3525,10 @@ mod tests {
                 .expect("rustls config");
                 let router = Router::new()
                     .route("/device", get(upgrade))
+                    .route(
+                        "/device/media",
+                        post(crate::device::native_console::handle_device_media_upload),
+                    )
                     .with_state(handle.test_shared());
                 let server_handle = axum_server::Handle::new();
                 let server_handle_clone = server_handle.clone();
@@ -5329,6 +5333,309 @@ mod tests {
             assert!(saw_cmd);
             assert!(saw_vp);
             assert!(saw_wake_sync);
+            mcp_server.abort();
+            let _ = mcp_server.await;
+            harness.shutdown().await;
+        }
+
+        #[tokio::test]
+        async fn direct_camera_media_upload_and_mcp_image_round_trip() {
+            use base64::Engine as _;
+            use sha2::{Digest, Sha256};
+
+            let harness = TestGatewayHarness::start().await;
+            let mcp_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind native mcp");
+            let mcp_port = mcp_listener.local_addr().expect("mcp addr").port();
+            let mcp_token = "test-camera-mcp-token-0123456789".to_owned();
+            let mcp_router = Router::new()
+                .route(
+                    "/mcp/{device_id}",
+                    post(crate::device::native_console::handle_mcp_http_request),
+                )
+                .with_state(harness.shared.clone());
+            let mcp_server = tokio::spawn(async move {
+                let _ = axum::serve(mcp_listener, mcp_router).await;
+            });
+            harness
+                .handle
+                .seed_test_mcp_endpoint(mcp_port, mcp_token.clone())
+                .await;
+
+            let signing_key = SigningKey::from_bytes(&[91_u8; 32]);
+            let public_key = signing_key.verifying_key().to_bytes();
+            let device_id = DeviceId::new("dev-mosaico-cam").expect("device id");
+            let device_mac = "30:ed:a0:f4:5b:f0";
+            harness
+                .runtime
+                .register_paired_device(NewPairedDevice {
+                    device_id: device_id.clone(),
+                    display_name: "Mosaico-CAM".to_owned(),
+                    public_key: DevicePublicKey::new(public_key),
+                    paired_at_ms: 1000,
+                })
+                .await
+                .expect("register paired device");
+
+            let (mut ws, challenge) = harness.connect_ws().await;
+            let connection_id = challenge.connection_id.clone();
+            let device_nonce = "dev-nonce-cam-1";
+            let caps = text_capabilities();
+            let transcript = auth_transcript(
+                &connection_id,
+                &challenge.nonce,
+                device_id.as_str(),
+                device_nonce,
+                caps,
+                OutputPreferenceSnapshot::Text,
+            );
+            let sig = signing_key.sign(&transcript).to_bytes();
+            send_json(
+                &mut ws,
+                "m-hello-cam",
+                "hello",
+                &DeviceHello {
+                    device_id: device_id.to_string(),
+                    device_nonce: device_nonce.to_owned(),
+                    capabilities: caps,
+                    output_preference: OutputPreferenceSnapshot::Text,
+                    client_version: "0.5.0-direct".to_owned(),
+                    signature: encode_base64(&sig),
+                    mcp_servers: Vec::new(),
+                    console: None,
+                    speech_relay: false,
+                    hardware: Some(crate::device::protocol::DeviceHardwareDeclaration {
+                        mac: device_mac.to_owned(),
+                        chip: "esp32s31".to_owned(),
+                        model: "esp32s31-mosaico".to_owned(),
+                        zone: "desk".to_owned(),
+                        group_id: "home-default".to_owned(),
+                        vp_version: 0,
+                        multinet_ready: true,
+                        wake_config: None,
+                        capabilities: vec![
+                            "device.status_read".to_owned(),
+                            "device.camera_capture".to_owned(),
+                        ],
+                    }),
+                },
+            )
+            .await;
+
+            let ack_env = recv_envelope(&mut ws).await.expect("hello_ack");
+            assert_eq!(ack_env.message_type, "hello_ack");
+
+            let tls_cert = reqwest::Certificate::from_pem(&harness.identity.certificate_pem)
+                .expect("reqwest cert");
+            let https_client = reqwest::Client::builder()
+                .no_proxy()
+                .tls_certs_only([tls_cert])
+                .danger_accept_invalid_hostnames(true)
+                .build()
+                .expect("https client");
+            let media_endpoint = format!("https://127.0.0.1:{}/device/media", harness.addr.port());
+            let jpeg_bytes: Vec<u8> = vec![
+                0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0x00, 0x01, 0x01,
+                0xFF, 0xD9,
+            ];
+            let body_sha: [u8; 32] = Sha256::digest(&jpeg_bytes).into();
+
+            // 1. Rejects tampered Ed25519 signature
+            let bad_sig_res = https_client
+                .post(&media_endpoint)
+                .header("Content-Type", "image/jpeg")
+                .header("X-Device-ID", device_id.as_str())
+                .header("X-Device-Connection-ID", &connection_id)
+                .header("X-Device-MAC", device_mac)
+                .header("X-Device-Nonce", "nonce-bad-sig-1")
+                .header("X-Device-Signature", encode_base64(&[0_u8; 64]))
+                .body(jpeg_bytes.clone())
+                .send()
+                .await
+                .expect("bad sig req");
+            assert_eq!(bad_sig_res.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+            // 2. Rejects mismatched MAC header even with valid Ed25519 signature
+            let mac_nonce = "nonce-wrong-mac-1";
+            let mac_sig = signing_key
+                .sign(&crate::device::crypto::media_upload_transcript(
+                    device_id.as_str(),
+                    &connection_id,
+                    mac_nonce,
+                    &body_sha,
+                ))
+                .to_bytes();
+            let wrong_mac_res = https_client
+                .post(&media_endpoint)
+                .header("Content-Type", "image/jpeg")
+                .header("X-Device-ID", device_id.as_str())
+                .header("X-Device-Connection-ID", &connection_id)
+                .header("X-Device-MAC", "aa:bb:cc:dd:ee:ff")
+                .header("X-Device-Nonce", mac_nonce)
+                .header("X-Device-Signature", encode_base64(&mac_sig))
+                .body(jpeg_bytes.clone())
+                .send()
+                .await
+                .expect("wrong mac req");
+            assert_eq!(wrong_mac_res.status(), reqwest::StatusCode::FORBIDDEN);
+
+            // 3. Simulated Mosaico handles device.camera_capture: uploads over HTTPS /device/media
+            //    and returns lightweight metadata + media_url over WSS (strict three-plane separation)
+            let media_endpoint_bg = media_endpoint.clone();
+            let https_client_bg = https_client.clone();
+            let device_id_bg = device_id.clone();
+            let connection_id_bg = connection_id.clone();
+            let jpeg_bg = jpeg_bytes.clone();
+            let ws_task = tokio::spawn(async move {
+                while let Some(env) = recv_envelope(&mut ws).await {
+                    if env.message_type == "device_command" {
+                        let req: crate::device::protocol::DeviceCommandRequest =
+                            decode_payload(env);
+                        assert_eq!(req.capability, "device.camera_capture");
+                        let nonce = "nonce-valid-capture-1";
+                        let sha: [u8; 32] = Sha256::digest(&jpeg_bg).into();
+                        let sig = signing_key
+                            .sign(&crate::device::crypto::media_upload_transcript(
+                                device_id_bg.as_str(),
+                                &connection_id_bg,
+                                nonce,
+                                &sha,
+                            ))
+                            .to_bytes();
+                        let up_resp = https_client_bg
+                            .post(&media_endpoint_bg)
+                            .header("Content-Type", "image/jpeg")
+                            .header("X-Device-ID", device_id_bg.as_str())
+                            .header("X-Device-Connection-ID", &connection_id_bg)
+                            .header("X-Device-MAC", device_mac)
+                            .header("X-Device-Nonce", nonce)
+                            .header("X-Device-Signature", encode_base64(&sig))
+                            .body(jpeg_bg.clone())
+                            .send()
+                            .await
+                            .expect("media upload");
+                        assert_eq!(up_resp.status(), reqwest::StatusCode::CREATED);
+                        let up_json: Value = up_resp.json().await.expect("upload json");
+                        let media_url = up_json["media_url"]
+                            .as_str()
+                            .expect("media_url")
+                            .to_owned();
+
+                        // Replay with the exact same nonce must be rejected with 409 Conflict
+                        let replay_resp = https_client_bg
+                            .post(&media_endpoint_bg)
+                            .header("Content-Type", "image/jpeg")
+                            .header("X-Device-ID", device_id_bg.as_str())
+                            .header("X-Device-Connection-ID", &connection_id_bg)
+                            .header("X-Device-MAC", device_mac)
+                            .header("X-Device-Nonce", nonce)
+                            .header("X-Device-Signature", encode_base64(&sig))
+                            .body(jpeg_bg.clone())
+                            .send()
+                            .await
+                            .expect("replay upload");
+                        assert_eq!(replay_resp.status(), reqwest::StatusCode::CONFLICT);
+
+                        send_json(
+                            &mut ws,
+                            &format!("res-{}", req.command_id),
+                            "device_command_result",
+                            &DeviceCommandResult {
+                                command_id: req.command_id,
+                                ok: true,
+                                result_json: r#"{"width":480,"height":480,"bytes":15,"sensor":"SC101IOT"}"#
+                                    .to_owned(),
+                                media_url,
+                                error_code: String::new(),
+                                error_message: String::new(),
+                            },
+                        )
+                        .await;
+                        break;
+                    }
+                }
+                let _ = ws.close(None).await;
+            });
+
+            // 4. Loopback MCP lists device.camera_capture and returns text + image/jpeg block
+            let http_client = reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("reqwest");
+            let mcp_url = format!("http://127.0.0.1:{mcp_port}/mcp/{}", device_id.as_str());
+            let list_resp: Value = http_client
+                .post(&mcp_url)
+                .bearer_auth(&mcp_token)
+                .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}))
+                .send()
+                .await
+                .expect("tools/list")
+                .json()
+                .await
+                .expect("tools/list json");
+            let tools = list_resp["result"]["tools"].as_array().expect("tools array");
+            assert!(tools.iter().any(|t| t["name"] == "device.camera_capture"));
+
+            let call_resp: Value = http_client
+                .post(&mcp_url)
+                .bearer_auth(&mcp_token)
+                .json(&json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "device.camera_capture",
+                        "arguments": { "resolution": "vga" }
+                    }
+                }))
+                .send()
+                .await
+                .expect("camera_capture call")
+                .json()
+                .await
+                .expect("camera_capture json");
+            assert_eq!(call_resp["result"]["isError"], false);
+            let content = call_resp["result"]["content"]
+                .as_array()
+                .expect("content blocks");
+            assert_eq!(content.len(), 2);
+            assert_eq!(content[0]["type"], "text");
+            let meta: Value =
+                serde_json::from_str(content[0]["text"].as_str().expect("meta text"))
+                    .expect("meta json");
+            assert_eq!(meta["sensor"], "SC101IOT");
+            let media_url = meta["media_url"].as_str().expect("media_url");
+            assert!(media_url.starts_with("/device/media/dev-mosaico-cam/"));
+            let local_path = meta["local_path"].as_str().expect("local_path");
+            assert!(std::path::Path::new(local_path).is_file());
+
+            assert_eq!(content[1]["type"], "image");
+            assert_eq!(content[1]["mimeType"], "image/jpeg");
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(content[1]["data"].as_str().expect("base64 data"))
+                .expect("decode base64");
+            assert_eq!(decoded, jpeg_bytes);
+
+            // 5. Console GET media/<file> serves the exact captured JPEG
+            let rel_path = media_url.trim_start_matches('/');
+            let preview_res = harness
+                .handle
+                .handle_native_console(
+                    &device_id,
+                    rel_path,
+                    axum::http::Method::GET,
+                    axum::body::Bytes::new(),
+                    &harness.speech,
+                )
+                .await;
+            assert_eq!(preview_res.status(), axum::http::StatusCode::OK);
+            let preview_bytes = axum::body::to_bytes(preview_res.into_body(), 1024 * 1024)
+                .await
+                .expect("preview body");
+            assert_eq!(preview_bytes.as_ref(), jpeg_bytes.as_slice());
+
+            ws_task.await.expect("ws task");
             mcp_server.abort();
             let _ = mcp_server.await;
             harness.shutdown().await;
