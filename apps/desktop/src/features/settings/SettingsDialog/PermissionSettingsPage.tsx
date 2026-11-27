@@ -1,5 +1,5 @@
 import { observer } from "mobx-react-lite";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentVariant,
   PermissionCommandMatch,
@@ -14,6 +14,7 @@ import type {
 } from "@ez-assistant/protocol";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { Icon } from "../../../components/Icon";
+import { useFlipIndicator } from "../../../components/Motion";
 import { PresenceBoundary } from "../../../components/Presence";
 import {
   SelectionPopover,
@@ -111,12 +112,22 @@ export const PermissionSettingsPage = observer(function PermissionSettingsPage(p
   const [grant_editing, setGrantEditing] = useState<GrantForm | null>(null);
   const [pending_scope_key, setPendingScopeKey] = useState<string | null>(null);
   const [deleting_rule, setDeletingRule] = useState<PermissionRuleDefinition | null>(null);
+  const scope_tabs_ref = useRef<HTMLDivElement>(null);
+  const scope_indicator_ref = useRef<HTMLSpanElement>(null);
   const documents = settings.permission_documents;
   const selected = useMemo(
     () => documents.find((document) => scopeKey(document) === selected_key) ?? documents[0] ?? null,
     [documents, selected_key],
   );
   const scope_note = selected ? scopeNote(selected) : null;
+  const active_scope_key = selected ? scopeKey(selected) : "";
+
+  useFlipIndicator({
+    active_key: active_scope_key,
+    active_selector: 'button[aria-selected="true"]',
+    container_ref: scope_tabs_ref,
+    indicator_ref: scope_indicator_ref,
+  });
 
   useEffect(() => {
     if (selected && !documents.some((document) => scopeKey(document) === selected_key)) {
@@ -207,7 +218,8 @@ export const PermissionSettingsPage = observer(function PermissionSettingsPage(p
     <SettingsPageContainer
       actions={(
         <>
-          <div className={styles.permission_scope_tabs} role="tablist">
+          <div className={styles.permission_scope_tabs} ref={scope_tabs_ref} role="tablist">
+            <span aria-hidden="true" className={styles.permission_scope_indicator} ref={scope_indicator_ref} />
             {documents.map((document) => (
               <button
                 aria-selected={scopeKey(document) === selected_key}

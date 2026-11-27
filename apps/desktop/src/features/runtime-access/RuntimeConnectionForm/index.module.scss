@@ -1,9 +1,11 @@
 @use "../../../styles/fields";
 
 .form { display: grid; gap: 18px; width: 100%; text-align: left; }
-.selector { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; border: 1px solid var(--ez-border); border-radius: 12px; background: var(--ez-surface-subtle); }
-.selector button { display: flex; justify-content: center; align-items: center; gap: 8px; min-height: var(--ez-control-height); border: 0; border-radius: 8px; background: transparent; color: var(--ez-text-secondary); font: inherit; font-size: var(--ez-font-base); cursor: pointer; transition: background 180ms, color 180ms; }
+.selector { position: relative; isolation: isolate; display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; border: 1px solid var(--ez-border); border-radius: 12px; background: var(--ez-surface-subtle); }
+.selector_indicator { position: absolute; z-index: 0; border-radius: 8px; background: var(--ez-primary-soft); pointer-events: none; opacity: 0; }
+.selector button { position: relative; z-index: 1; display: flex; justify-content: center; align-items: center; gap: 8px; min-height: var(--ez-control-height); border: 0; border-radius: 8px; background: transparent; color: var(--ez-text-secondary); font: inherit; font-size: var(--ez-font-base); cursor: pointer; transition: background 180ms, color 180ms; }
 .selector button[aria-pressed="true"] { background: var(--ez-primary-soft); color: var(--ez-primary); }
+.selector[data-indicator-ready="true"] button[aria-pressed="true"] { background: transparent; }
 .target { display: grid; gap: 18px; min-width: 0; }
 .local { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 14px; border: 1px solid var(--ez-border); border-radius: 14px; background: var(--ez-surface); }
 .device { flex-shrink: 0; display: grid; place-items: center; width: 42px; height: 42px; border-radius: 12px; color: var(--ez-primary); background: var(--ez-primary-soft); }

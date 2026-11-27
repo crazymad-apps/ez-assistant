@@ -1,0 +1,360 @@
+.root {
+  display: grid;
+  gap: 20px;
+}
+
+.hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 24px 20px 20px;
+  border: 1px solid var(--ez-primary-border);
+  border-radius: var(--ez-radius-medium);
+  background: linear-gradient(135deg, var(--ez-primary-soft), var(--ez-surface-subtle) 80%);
+  text-align: center;
+}
+
+.logo {
+  display: block;
+  width: 56px;
+  height: 56px;
+  flex: 0 0 auto;
+}
+
+.brand_copy {
+  display: grid;
+  gap: 4px;
+}
+
+.product_name {
+  margin: 0;
+  color: var(--ez-text);
+  font-size: var(--ez-font-large);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.copyright {
+  margin: 0;
+  color: var(--ez-text-muted);
+  font-size: var(--ez-font-small);
+}
+
+.version_bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.version_pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 11px;
+  border: 1px solid var(--ez-border);
+  border-radius: 999px;
+  color: var(--ez-text-secondary);
+  background: var(--ez-surface);
+  font-family: var(--ez-font-mono);
+  font-size: var(--ez-font-small);
+  line-height: 1.3;
+}
+
+.status_dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--ez-text-muted);
+}
+
+.version_pill[data-connected="true"] .status_dot {
+  background: var(--ez-success);
+}
+
+.section {
+  display: grid;
+  gap: 8px;
+}
+
+.section_header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+
+  h4 {
+    margin: 0;
+    color: var(--ez-text-muted);
+    font-size: var(--ez-font-small);
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+
+  span {
+    color: var(--ez-text-muted);
+    font-family: var(--ez-font-mono);
+    font-size: var(--ez-font-small);
+  }
+}
+
+.feature_list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--ez-border);
+  border-radius: var(--ez-radius-medium);
+  background: var(--ez-surface-subtle);
+  list-style: none;
+}
+
+.feature_item {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 30px minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+  padding: 12px 14px;
+  border-top: 1px solid var(--ez-border);
+
+  &:first-child {
+    border-top: 0;
+  }
+}
+
+.feature_icon {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: var(--ez-radius-small);
+  color: var(--ez-primary-text);
+  background: var(--ez-primary-soft);
+}
+
+.feature_copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+
+  strong {
+    color: var(--ez-text);
+    font-size: var(--ez-font-base);
+    font-weight: 550;
+    line-height: 1.4;
+  }
+
+  p {
+    margin: 0;
+    color: var(--ez-text-secondary);
+    font-size: var(--ez-font-small);
+    line-height: 1.55;
+  }
+}
+
+.links_container {
+  display: grid;
+}
+
+.link_group {
+  display: grid;
+}
+
+.link_group_secondary {
+  display: grid;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--ez-border);
+}
+
+// 多行入口行按内容自适应高度，显式覆盖全局单行按钮基线。
+.link_row {
+  display: flex;
+  width: 100%;
+  height: auto;
+  min-height: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 13px 6px;
+  border: 0;
+  border-bottom: 1px solid var(--ez-border);
+  border-radius: 0;
+  color: var(--ez-text);
+  background: transparent;
+  text-align: left;
+  transition: background var(--ez-motion-fast) var(--ez-ease-standard);
+
+  &:hover:not(:disabled) {
+    background: var(--ez-surface-subtle);
+  }
+
+  &:last-child {
+    border-bottom: 0;
+  }
+
+  > svg {
+    flex: 0 0 auto;
+    color: var(--ez-text-muted);
+  }
+}
+
+.link_copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+
+  strong {
+    color: var(--ez-text);
+    font-size: var(--ez-font-base);
+    font-weight: 550;
+    line-height: 1.4;
+  }
+
+  span {
+    color: var(--ez-text-muted);
+    font-size: var(--ez-font-small);
+    line-height: 1.45;
+  }
+}
+
+.release_stack {
+  display: grid;
+  gap: 12px;
+}
+
+.release_card {
+  display: grid;
+  gap: 8px;
+  padding: 14px 16px;
+  border: 1px solid var(--ez-border);
+  border-radius: var(--ez-radius-medium);
+  background: var(--ez-surface-subtle);
+}
+
+.release_card_header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.release_title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+
+  h4 {
+    margin: 0;
+    color: var(--ez-text);
+    font-family: var(--ez-font-mono);
+    font-size: var(--ez-font-base);
+    font-weight: 650;
+  }
+}
+
+.current_tag {
+  padding: 2px 8px;
+  border-radius: 999px;
+  color: var(--ez-primary-text);
+  background: var(--ez-primary-soft);
+  font-size: var(--ez-font-small);
+  font-weight: 550;
+}
+
+.release_date {
+  color: var(--ez-text-muted);
+  font-family: var(--ez-font-mono);
+  font-size: var(--ez-font-small);
+}
+
+.release_summary {
+  margin: 0;
+  color: var(--ez-text);
+  font-size: var(--ez-font-small);
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+.release_points {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+  color: var(--ez-text-secondary);
+  font-size: var(--ez-font-small);
+  line-height: 1.55;
+}
+
+.license_list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--ez-border);
+  border-radius: var(--ez-radius-medium);
+  background: var(--ez-surface-subtle);
+  list-style: none;
+}
+
+.license_item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 11px 14px;
+  border-top: 1px solid var(--ez-border);
+
+  &:first-child {
+    border-top: 0;
+  }
+}
+
+.license_copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+
+  strong {
+    color: var(--ez-text);
+    font-size: var(--ez-font-base);
+    font-weight: 550;
+  }
+
+  span {
+    color: var(--ez-text-secondary);
+    font-size: var(--ez-font-small);
+    line-height: 1.45;
+  }
+}
+
+.license_badge {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border: 1px solid var(--ez-border);
+  border-radius: 999px;
+  color: var(--ez-text-muted);
+  background: var(--ez-surface);
+  font-family: var(--ez-font-mono);
+  font-size: var(--ez-font-small);
+  white-space: nowrap;
+}
+
+@media (max-width: 560px) {
+  .hero {
+    padding: 20px 14px 16px;
+  }
+
+  .license_item {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 6px;
+  }
+}

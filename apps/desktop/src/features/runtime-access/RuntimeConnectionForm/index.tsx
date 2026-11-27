@@ -2,6 +2,13 @@ import { useRef, useState, useEffect } from "react";
 import { observer } from "mobx-react-lite";
 import { Button } from "../../../components/Button";
 import { Icon } from "../../../components/Icon";
+import {
+  gsap,
+  MOTION_EASE,
+  runMotion,
+  useFlipIndicator,
+  useGSAP,
+} from "../../../components/Motion";
 import { getDesktopPlatform } from "../../../native-bridge/desktopLifecycle";
 import { rememberedRuntimePassword } from "../../../native-bridge/runtimeConnection";
 import type { ApplicationConnectionStore } from "../ApplicationConnectionStore";
@@ -17,6 +24,10 @@ export const RuntimeConnectionForm = observer(function RuntimeConnectionForm({ c
   const [notice, setNotice] = useState<string | null>(null);
   const read_owner = useRef(0);
   const form_ref = useRef<HTMLFormElement>(null);
+  const selector_ref = useRef<HTMLDivElement>(null);
+  const selector_indicator_ref = useRef<HTMLSpanElement>(null);
+  const target_ref = useRef<HTMLDivElement>(null);
+  const previous_target_ref = useRef(connection.target);
   const focus_restored = useRef(false);
   const current = connection.current?.connection;
   const local_failed = connection.target === "local" && connection.local_state === "failed";
@@ -68,6 +79,36 @@ export const RuntimeConnectionForm = observer(function RuntimeConnectionForm({ c
       if (value) { setPassword(value); setRemember(true); }
     } catch { if (owner === read_owner.current) setNotice("未能读取记住的密码，请手动输入。"); }
   }
+  useFlipIndicator({
+    active_key: connection.organization_selection ? "" : connection.target,
+    active_selector: 'button[aria-pressed="true"]',
+    container_ref: selector_ref,
+    indicator_ref: selector_indicator_ref,
+  });
+
+  useGSAP(
+    () => {
+      if (previous_target_ref.current === connection.target) return;
+      previous_target_ref.current = connection.target;
+      return runMotion((reduced) => {
+        if (reduced || !target_ref.current) return;
+        gsap.fromTo(
+          target_ref.current,
+          { opacity: 0, y: 6 },
+          {
+            clearProps: "transform,opacity",
+            duration: 0.18,
+            ease: MOTION_EASE.enter,
+            opacity: 1,
+            overwrite: "auto",
+            y: 0,
+          },
+        );
+      }, target_ref);
+    },
+    { dependencies: [connection.target], scope: target_ref },
+  );
+
   if (connection.organization_selection) {
     return <OrganizationLoginForm connection={connection} className={styles.form} />;
   }
@@ -79,11 +120,12 @@ export const RuntimeConnectionForm = observer(function RuntimeConnectionForm({ c
     if (connection.mode === "enterprise") setPassword("");
     void connection.connectDesktop(connection.target === "local" ? null : origin.trim(), password, remember, username);
   }}>
-    <div className={styles.selector} role="group" aria-label="Runtime 目标">
+    <div className={styles.selector} ref={selector_ref} role="group" aria-label="Runtime 目标">
+      <span aria-hidden="true" className={styles.selector_indicator} ref={selector_indicator_ref} />
       <button type="button" disabled={connection.updates.installing || connection.login_options_busy} aria-pressed={connection.target === "local"} onClick={() => connection.chooseTarget("local")}><Icon name="terminal" size={17} />本机 Runtime</button>
       <button type="button" disabled={connection.updates.installing || connection.login_options_busy} aria-pressed={connection.target === "remote"} onClick={() => connection.chooseTarget("remote")}><Icon name="globe" size={17} />其他 Runtime</button>
     </div>
-    <div className={styles.target}>
+    <div className={styles.target} ref={target_ref}>
       {connection.target === "local" ? <div className={styles.local}>
         <span className={styles.device}><Icon name="terminal" size={21} /></span>
         <div className={styles.local_copy}><strong>这台电脑</strong><p><span className={styles.status} data-ready={connection.local_state === "ready"} />{local_label}</p></div>

@@ -55,8 +55,10 @@
 
 .navigation {
   display: flex;
+  min-height: 0;
   flex-direction: column;
   gap: 3px;
+  overflow-y: auto;
   padding: 18px 10px;
   border-right: 1px solid var(--ez-border);
   background: var(--ez-sidebar);
@@ -64,6 +66,7 @@
   button {
     --ez-control-default-height: var(--ez-control-height-large);
     display: flex;
+    flex: 0 0 auto;
     min-height: var(--ez-control-height);
     align-items: center;
     gap: 10px;
@@ -556,6 +559,8 @@
 .placeholder p { max-width: 520px; margin: 0; color: var(--ez-text-secondary); line-height: 1.7; }
 
 .permission_scope_tabs {
+  position: relative;
+  isolation: isolate;
   display: inline-flex;
   width: max-content;
   height: var(--ez-control-height-default);
@@ -567,6 +572,8 @@
   background: var(--ez-surface-muted);
 
   button {
+    position: relative;
+    z-index: 1;
     display: flex;
     // 复合控件的内层按钮填满内容区，外框的 padding 只计算一次。
     height: 100%;
@@ -583,6 +590,17 @@
   }
   button:hover { color: var(--ez-text); }
   button[aria-selected="true"] { color: var(--ez-text); background: var(--ez-surface); box-shadow: var(--ez-shadow-small); }
+  &[data-indicator-ready="true"] button[aria-selected="true"] { background: transparent; box-shadow: none; }
+}
+
+.permission_scope_indicator {
+  position: absolute;
+  z-index: 0;
+  border-radius: 5px;
+  background: var(--ez-surface);
+  box-shadow: var(--ez-shadow-small);
+  pointer-events: none;
+  opacity: 0;
 }
 
 .permission_summary {

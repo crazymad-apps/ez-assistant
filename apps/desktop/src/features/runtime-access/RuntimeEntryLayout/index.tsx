@@ -1,6 +1,13 @@
 import { isTauri } from "@tauri-apps/api/core";
-import type { ReactNode } from "react";
+import { useRef, type ReactNode } from "react";
 import appLogo from "../../../../app-icon.svg";
+import {
+  gsap,
+  MOTION_DURATION,
+  MOTION_EASE,
+  runMotion,
+  useGSAP,
+} from "../../../components/Motion";
 import { DotsBackground } from "./DotsBackground";
 import styles from "./index.module.scss";
 import { DesktopWindowControls } from "../../desktop-lifecycle/DesktopWindowControls";
@@ -13,8 +20,36 @@ type RuntimeEntryLayoutProps = {
 export function RuntimeEntryLayout({
   children,
 }: RuntimeEntryLayoutProps) {
+  const page_ref = useRef<HTMLElement>(null);
+
+  useGSAP(
+    () => runMotion((reduced) => {
+      if (reduced) return;
+      const timeline = gsap.timeline({ defaults: { ease: MOTION_EASE.emphasis } });
+      timeline
+        .from("[data-entry-brand]", {
+          clearProps: "transform,opacity",
+          duration: MOTION_DURATION.entrance,
+          opacity: 0,
+          scale: 0.95,
+          y: 10,
+        })
+        .from(
+          "[data-entry-body]",
+          {
+            clearProps: "transform,opacity",
+            duration: MOTION_DURATION.entrance,
+            opacity: 0,
+            y: 12,
+          },
+          "<0.08",
+        );
+    }, page_ref),
+    { scope: page_ref },
+  );
+
   return (
-    <main className={styles.page} data-runtime-entry>
+    <main className={styles.page} data-runtime-entry ref={page_ref}>
       <header
         className={styles.title_bar}
         data-native-window={isTauri()}
@@ -26,8 +61,8 @@ export function RuntimeEntryLayout({
       </header>
       <DotsBackground />
       <section className={styles.content} data-runtime-entry-content>
-        <div className={styles.brand}><img className={styles.mark} src={appLogo} alt="" /><span>ez-assistant</span></div>
-        {children}
+        <div className={styles.brand} data-entry-brand><img className={styles.mark} src={appLogo} alt="" /><span>ez-assistant</span></div>
+        <div data-entry-body>{children}</div>
       </section>
     </main>
   );

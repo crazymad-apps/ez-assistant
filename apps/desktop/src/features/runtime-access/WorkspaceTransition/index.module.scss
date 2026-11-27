@@ -1,9 +1,12 @@
 .scene {
+  position: relative;
   height: 100dvh;
   overflow: clip;
 }
 
 .workspace {
+  position: relative;
+  z-index: 1;
   height: 100%;
   outline: none;
 }
@@ -11,4 +14,12 @@
 .entry {
   height: 100%;
   overflow-y: auto;
+}
+
+.entry_exiting {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
 }

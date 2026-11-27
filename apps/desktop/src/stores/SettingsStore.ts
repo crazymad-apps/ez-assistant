@@ -37,7 +37,7 @@ import type { RuntimeClient } from '../runtime-client/RuntimeClient';
 
 export type RuntimeSettingsPageId =
   'runtime' | 'runtime_connection' | 'host_access' | 'runtime_diagnostics' | 'runtime_local' | 'host_registration';
-export type SettingsPage = RuntimeSettingsPageId | 'appearance' | 'models' | 'permissions' | 'memory' | 'skills' | 'devices' | 'mcp' | 'plugins' | 'agents' | 'notifications';
+export type SettingsPage = RuntimeSettingsPageId | 'appearance' | 'models' | 'permissions' | 'memory' | 'skills' | 'devices' | 'mcp' | 'plugins' | 'agents' | 'notifications' | 'about';
 
 type SettingsDependencies = Readonly<{
   get_client: () => RuntimeClient | null;
@@ -58,7 +58,7 @@ export class SettingsStore {
   #permission_grants_loaded = false;
   readonly mcp: McpSettingsStore;
   is_open = false;
-  page: SettingsPage = 'runtime';
+  page: SettingsPage = 'about';
   loading = false;
   pending_action: string | null = null;
   status: ConfigurationStatus | null = null;
@@ -130,7 +130,7 @@ export class SettingsStore {
     });
   }
 
-  open(page: SettingsPage = 'runtime'): void {
+  open(page: SettingsPage = 'about'): void {
     this.is_open = true;
     this.page = page;
     this.#skill_scope_initialized_for_open = false;

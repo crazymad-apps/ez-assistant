@@ -29,17 +29,7 @@
   font-size: var(--ez-font-base);
   line-height: 1.45;
   overflow-wrap: anywhere;
-  animation: appear var(--ez-motion-menu-enter) var(--ez-ease-standard) both;
 }
 
 .bubble svg { color: var(--ez-success); }
 .bubble[data-kind="error"] svg { color: var(--ez-danger); }
-
-@keyframes appear {
-  from { opacity: 0; transform: translateY(-6px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .bubble { animation: none; }
-}
