@@ -1,4 +1,4 @@
-//! Provider-neutral ASR 端口与首个 DashScope 整句识别 Adapter。
+//! Provider-neutral ASR/TTS 端口及 DashScope、DeepSeek、OpenAI 兼容、MiniMax Adapter。
 
 use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
@@ -10,6 +10,8 @@ use tokio_util::sync::CancellationToken;
 
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_TTS_PCM_BYTES: usize = 60 * 16_000 * 2;
+const MAX_TTS_WAV_DOWNLOAD_BYTES: usize = MAX_TTS_PCM_BYTES * 6;
+const TARGET_SAMPLE_RATE_HZ: u32 = 16_000;
 
 /// Provider-neutral 的整句 ASR 输入；音频固定为 16 kHz 单声道 PCM16 little-endian。
 pub(super) struct AsrRequest {
@@ -92,14 +94,25 @@ impl AsrProvider for DashScopeSpeechRecognizer {
         Box::pin(async move {
             let wav = pcm16_mono_wav(&request.pcm_s16le)?;
             let audio = format!("data:audio/wav;base64,{}", BASE64.encode(wav));
-            let payload = json!({
-                "model": self.model.as_ref(),
-                "input": {"messages": [{
-                    "role": "user",
-                    "content": [{"type": "input_audio", "input_audio": {"data": audio}}]
-                }]},
-                "parameters": {"format": "wav", "sample_rate": "16000"}
-            });
+            let payload = if self.model.starts_with("qwen") {
+                json!({
+                    "model": self.model.as_ref(),
+                    "input": {"messages": [{
+                        "role": "user",
+                        "content": [{"audio": audio}]
+                    }]},
+                    "parameters": {"asr_options": {"enable_itn": true}}
+                })
+            } else {
+                json!({
+                    "model": self.model.as_ref(),
+                    "input": {"messages": [{
+                        "role": "user",
+                        "content": [{"type": "input_audio", "input_audio": {"data": audio}}]
+                    }]},
+                    "parameters": {"format": "wav", "sample_rate": "16000"}
+                })
+            };
             let send = self
                 .client
                 .post(self.endpoint.clone())
@@ -116,13 +129,17 @@ impl AsrProvider for DashScopeSpeechRecognizer {
                 return Err(map_status(status));
             }
             let body = bounded_json(response, &request.cancellation).await?;
-            let transcript = ["/output/text", "/output/output/text"]
-                .iter()
-                .find_map(|pointer| body.pointer(pointer).and_then(Value::as_str))
-                .map(str::trim)
-                .filter(|text| !text.is_empty())
-                .map(ToOwned::to_owned)
-                .ok_or(SpeechProviderError::InvalidTranscript)?;
+            let transcript = [
+                "/output/choices/0/message/content/0/text",
+                "/output/text",
+                "/output/output/text",
+            ]
+            .iter()
+            .find_map(|pointer| body.pointer(pointer).and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(ToOwned::to_owned)
+            .ok_or(SpeechProviderError::InvalidTranscript)?;
             Ok(AsrResult { transcript })
         })
     }
@@ -151,7 +168,12 @@ impl DashScopeSpeechSynthesizer {
         if !is_secure_or_loopback(&endpoint) {
             return Err(SpeechProviderError::Unavailable);
         }
-        endpoint.set_path("/api/v1/services/audio/tts/SpeechSynthesizer");
+        let path = if model.starts_with("qwen") {
+            "/api/v1/services/aigc/multimodal-generation/generation"
+        } else {
+            "/api/v1/services/audio/tts/SpeechSynthesizer"
+        };
+        endpoint.set_path(path);
         endpoint.set_query(None);
         endpoint.set_fragment(None);
         let client = Client::builder()
@@ -171,16 +193,29 @@ impl DashScopeSpeechSynthesizer {
 impl TtsProvider for DashScopeSpeechSynthesizer {
     fn synthesize<'a>(&'a self, text: &'a str, cancellation: CancellationToken) -> TtsFuture<'a> {
         Box::pin(async move {
-            let payload = json!({
-                "model": self.model.as_ref(),
-                "input": {
-                    "text": text,
-                    "voice": self.voice.as_ref(),
-                    "format": "pcm",
-                    "sample_rate": 16000,
-                    "language_hints": ["zh"]
-                }
-            });
+            let payload = if self.model.starts_with("qwen") {
+                json!({
+                    "model": self.model.as_ref(),
+                    "input": {
+                        "text": text,
+                        "voice": self.voice.as_ref(),
+                    },
+                    "parameters": {
+                        "format": "wav"
+                    }
+                })
+            } else {
+                json!({
+                    "model": self.model.as_ref(),
+                    "input": {
+                        "text": text,
+                        "voice": self.voice.as_ref(),
+                        "format": "pcm",
+                        "sample_rate": 16000,
+                        "language_hints": ["zh"]
+                    }
+                })
+            };
             let send = self
                 .client
                 .post(self.endpoint.clone())
@@ -196,26 +231,39 @@ impl TtsProvider for DashScopeSpeechSynthesizer {
                 return Err(map_status(status));
             }
             let body = bounded_json(response, &cancellation).await?;
-            let audio_url = body
-                .pointer("/output/audio/url")
+            let raw = if let Some(encoded) = body
+                .pointer("/output/audio/data")
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
-                .ok_or(SpeechProviderError::InvalidAudio)?;
-            let audio_url = secure_audio_url(audio_url)?;
-            let download = self.client.get(audio_url).send();
-            let response = tokio::select! {
-                () = cancellation.cancelled() => return Err(SpeechProviderError::Cancelled),
-                response = download => response.map_err(map_transport)?,
+            {
+                let decoded = BASE64
+                    .decode(encoded)
+                    .map_err(|_| SpeechProviderError::InvalidAudio)?;
+                if decoded.len() > MAX_TTS_WAV_DOWNLOAD_BYTES {
+                    return Err(SpeechProviderError::OutputTooLarge);
+                }
+                decoded
+            } else {
+                let audio_url = body
+                    .pointer("/output/audio/url")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .ok_or(SpeechProviderError::InvalidAudio)?;
+                let audio_url = secure_audio_url(audio_url)?;
+                let download = self.client.get(audio_url).send();
+                let response = tokio::select! {
+                    () = cancellation.cancelled() => return Err(SpeechProviderError::Cancelled),
+                    response = download => response.map_err(map_transport)?,
+                };
+                let status = response.status();
+                if !status.is_success() {
+                    return Err(map_status(status));
+                }
+                bounded_bytes(response, &cancellation, MAX_TTS_WAV_DOWNLOAD_BYTES).await?
             };
-            let status = response.status();
-            if !status.is_success() {
-                return Err(map_status(status));
-            }
-            let pcm = bounded_bytes(response, &cancellation, MAX_TTS_PCM_BYTES).await?;
-            if pcm.is_empty() || !pcm.len().is_multiple_of(2) {
-                return Err(SpeechProviderError::InvalidAudio);
-            }
+            let pcm = normalize_downloaded_audio(raw)?;
             Ok(TtsResult {
                 pcm_s16le: Arc::from(pcm),
             })
@@ -246,6 +294,620 @@ pub(super) enum SpeechProviderError {
     InvalidAudio,
     #[error("speech provider audio exceeded the output limit")]
     OutputTooLarge,
+}
+
+/// OpenAI 兼容语音识别 Adapter（`/v1/audio/transcriptions`）；发送 16 kHz WAV 并读取 `text`。
+#[derive(Clone)]
+pub(super) struct OpenAiSpeechRecognizer {
+    client: Client,
+    endpoint: Url,
+    model: Arc<str>,
+    credential: Arc<str>,
+}
+
+impl OpenAiSpeechRecognizer {
+    pub(super) fn new(
+        endpoint: String,
+        model: String,
+        credential: String,
+        timeout: Duration,
+    ) -> Result<Self, SpeechProviderError> {
+        let endpoint = resolve_openai_endpoint(&endpoint, "audio/transcriptions")?;
+        let client = Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(|_| SpeechProviderError::Unavailable)?;
+        Ok(Self {
+            client,
+            endpoint,
+            model: Arc::from(model),
+            credential: Arc::from(credential),
+        })
+    }
+}
+
+impl AsrProvider for OpenAiSpeechRecognizer {
+    fn recognize<'a>(&'a self, request: &'a AsrRequest) -> AsrFuture<'a> {
+        Box::pin(async move {
+            let wav = pcm16_mono_wav(&request.pcm_s16le)?;
+            let boundary = format!("ezspeech{}", crate::media_diagnostics::timestamp_ms());
+            let body = build_asr_multipart_body(&boundary, &self.model, &wav);
+            let send = self
+                .client
+                .post(self.endpoint.clone())
+                .bearer_auth(self.credential.as_ref())
+                .header(
+                    reqwest::header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(body)
+                .send();
+            let response = tokio::select! {
+                () = request.cancellation.cancelled() => return Err(SpeechProviderError::Cancelled),
+                response = send => response.map_err(map_transport)?,
+            };
+            let status = response.status();
+            if !status.is_success() {
+                return Err(map_status(status));
+            }
+            let body = bounded_json(response, &request.cancellation).await?;
+            let transcript = body
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(ToOwned::to_owned)
+                .ok_or(SpeechProviderError::InvalidTranscript)?;
+            Ok(AsrResult { transcript })
+        })
+    }
+}
+
+/// OpenAI 兼容语音合成 Adapter（`/v1/audio/speech`）；请求 WAV 并统一重采样为 16 kHz 单声道 PCM16。
+#[derive(Clone)]
+pub(super) struct OpenAiSpeechSynthesizer {
+    client: Client,
+    endpoint: Url,
+    model: Arc<str>,
+    voice: Arc<str>,
+    credential: Arc<str>,
+}
+
+impl OpenAiSpeechSynthesizer {
+    pub(super) fn new(
+        endpoint: String,
+        model: String,
+        voice: String,
+        credential: String,
+        timeout: Duration,
+    ) -> Result<Self, SpeechProviderError> {
+        let endpoint = resolve_openai_endpoint(&endpoint, "audio/speech")?;
+        let client = Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(|_| SpeechProviderError::Unavailable)?;
+        Ok(Self {
+            client,
+            endpoint,
+            model: Arc::from(model),
+            voice: Arc::from(voice),
+            credential: Arc::from(credential),
+        })
+    }
+}
+
+impl TtsProvider for OpenAiSpeechSynthesizer {
+    fn synthesize<'a>(&'a self, text: &'a str, cancellation: CancellationToken) -> TtsFuture<'a> {
+        Box::pin(async move {
+            let payload = json!({
+                "model": self.model.as_ref(),
+                "input": text,
+                "voice": self.voice.as_ref(),
+                "response_format": "wav",
+            });
+            let send = self
+                .client
+                .post(self.endpoint.clone())
+                .bearer_auth(self.credential.as_ref())
+                .json(&payload)
+                .send();
+            let response = tokio::select! {
+                () = cancellation.cancelled() => return Err(SpeechProviderError::Cancelled),
+                response = send => response.map_err(map_transport)?,
+            };
+            let status = response.status();
+            if !status.is_success() {
+                return Err(map_status(status));
+            }
+            let raw = bounded_bytes(response, &cancellation, MAX_TTS_WAV_DOWNLOAD_BYTES).await?;
+            let pcm = wav_bytes_to_pcm16_16k_mono(&raw)?;
+            if pcm.len() > MAX_TTS_PCM_BYTES {
+                return Err(SpeechProviderError::OutputTooLarge);
+            }
+            Ok(TtsResult {
+                pcm_s16le: Arc::from(pcm),
+            })
+        })
+    }
+}
+
+/// DeepSeek 官方语音识别 Adapter（`/v1/tools/asr`）；发送 16 kHz WAV 并读取 `text`。
+#[derive(Clone)]
+pub(super) struct DeepSeekSpeechRecognizer {
+    client: Client,
+    endpoint: Url,
+    credential: Arc<str>,
+}
+
+impl DeepSeekSpeechRecognizer {
+    pub(super) fn new(
+        endpoint: String,
+        credential: String,
+        timeout: Duration,
+    ) -> Result<Self, SpeechProviderError> {
+        let endpoint = resolve_deepseek_endpoint(&endpoint, "tools/asr")?;
+        let client = Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(|_| SpeechProviderError::Unavailable)?;
+        Ok(Self {
+            client,
+            endpoint,
+            credential: Arc::from(credential),
+        })
+    }
+}
+
+impl AsrProvider for DeepSeekSpeechRecognizer {
+    fn recognize<'a>(&'a self, request: &'a AsrRequest) -> AsrFuture<'a> {
+        Box::pin(async move {
+            let wav = pcm16_mono_wav(&request.pcm_s16le)?;
+            let boundary = format!("ezspeech{}", crate::media_diagnostics::timestamp_ms());
+            let body = build_deepseek_asr_multipart_body(&boundary, &wav);
+            let send = self
+                .client
+                .post(self.endpoint.clone())
+                .bearer_auth(self.credential.as_ref())
+                .header(
+                    reqwest::header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(body)
+                .send();
+            let response = tokio::select! {
+                () = request.cancellation.cancelled() => return Err(SpeechProviderError::Cancelled),
+                response = send => response.map_err(map_transport)?,
+            };
+            let status = response.status();
+            if !status.is_success() {
+                return Err(map_status(status));
+            }
+            let body = bounded_json(response, &request.cancellation).await?;
+            let transcript = body
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(ToOwned::to_owned)
+                .ok_or(SpeechProviderError::InvalidTranscript)?;
+            Ok(AsrResult { transcript })
+        })
+    }
+}
+
+/// DeepSeek 官方语音合成 Adapter（`/v1/tools/tts`）；请求 WAV 并统一重采样为 16 kHz 单声道 PCM16。
+#[derive(Clone)]
+pub(super) struct DeepSeekSpeechSynthesizer {
+    client: Client,
+    endpoint: Url,
+    voice: Arc<str>,
+    credential: Arc<str>,
+}
+
+impl DeepSeekSpeechSynthesizer {
+    pub(super) fn new(
+        endpoint: String,
+        voice: String,
+        credential: String,
+        timeout: Duration,
+    ) -> Result<Self, SpeechProviderError> {
+        let endpoint = resolve_deepseek_endpoint(&endpoint, "tools/tts")?;
+        let client = Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(|_| SpeechProviderError::Unavailable)?;
+        let normalized_voice = voice.trim();
+        let voice = if normalized_voice.is_empty() {
+            "stella"
+        } else {
+            normalized_voice
+        };
+        Ok(Self {
+            client,
+            endpoint,
+            voice: Arc::from(voice),
+            credential: Arc::from(credential),
+        })
+    }
+}
+
+impl TtsProvider for DeepSeekSpeechSynthesizer {
+    fn synthesize<'a>(&'a self, text: &'a str, cancellation: CancellationToken) -> TtsFuture<'a> {
+        Box::pin(async move {
+            let payload = json!({
+                "text": text,
+                "voice_id": self.voice.as_ref(),
+                "format": "wav",
+                "filter_markdown": true,
+            });
+            let send = self
+                .client
+                .post(self.endpoint.clone())
+                .bearer_auth(self.credential.as_ref())
+                .json(&payload)
+                .send();
+            let response = tokio::select! {
+                () = cancellation.cancelled() => return Err(SpeechProviderError::Cancelled),
+                response = send => response.map_err(map_transport)?,
+            };
+            let status = response.status();
+            if !status.is_success() {
+                return Err(map_status(status));
+            }
+            let raw = bounded_bytes(response, &cancellation, MAX_TTS_WAV_DOWNLOAD_BYTES).await?;
+            let pcm = wav_bytes_to_pcm16_16k_mono(&raw)?;
+            if pcm.len() > MAX_TTS_PCM_BYTES {
+                return Err(SpeechProviderError::OutputTooLarge);
+            }
+            Ok(TtsResult {
+                pcm_s16le: Arc::from(pcm),
+            })
+        })
+    }
+}
+
+/// MiniMax T2A v2 语音合成 Adapter（单 API Key Bearer 鉴权，直出 16 kHz Mono PCM16）。
+#[derive(Clone)]
+pub(super) struct MiniMaxSpeechSynthesizer {
+    client: Client,
+    endpoint: Url,
+    model: Arc<str>,
+    voice: Arc<str>,
+    credential: Arc<str>,
+}
+
+impl MiniMaxSpeechSynthesizer {
+    pub(super) fn new(
+        endpoint: String,
+        model: String,
+        voice: String,
+        credential: String,
+        timeout: Duration,
+    ) -> Result<Self, SpeechProviderError> {
+        let endpoint = resolve_minimax_endpoint(&endpoint)?;
+        let client = Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(|_| SpeechProviderError::Unavailable)?;
+        Ok(Self {
+            client,
+            endpoint,
+            model: Arc::from(model),
+            voice: Arc::from(voice),
+            credential: Arc::from(credential),
+        })
+    }
+}
+
+impl TtsProvider for MiniMaxSpeechSynthesizer {
+    fn synthesize<'a>(&'a self, text: &'a str, cancellation: CancellationToken) -> TtsFuture<'a> {
+        Box::pin(async move {
+            let payload = json!({
+                "model": self.model.as_ref(),
+                "text": text,
+                "stream": false,
+                "output_format": "hex",
+                "voice_setting": {
+                    "voice_id": self.voice.as_ref(),
+                    "speed": 1.0,
+                    "vol": 1.0,
+                    "pitch": 0
+                },
+                "audio_setting": {
+                    "sample_rate": TARGET_SAMPLE_RATE_HZ,
+                    "format": "pcm",
+                    "channel": 1
+                }
+            });
+            let send = self
+                .client
+                .post(self.endpoint.clone())
+                .bearer_auth(self.credential.as_ref())
+                .json(&payload)
+                .send();
+            let response = tokio::select! {
+                () = cancellation.cancelled() => return Err(SpeechProviderError::Cancelled),
+                response = send => response.map_err(map_transport)?,
+            };
+            let status = response.status();
+            if !status.is_success() {
+                return Err(map_status(status));
+            }
+            let body = bounded_json(response, &cancellation).await?;
+            if let Some(status_code) = body
+                .pointer("/base_resp/status_code")
+                .and_then(Value::as_i64)
+                .filter(|code| *code != 0)
+            {
+                let msg = body
+                    .pointer("/base_resp/status_msg")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                if matches!(status_code, 1004 | 2049)
+                    || msg.contains("auth")
+                    || msg.contains("key")
+                    || msg.contains("token")
+                    || msg.contains("unauthorized")
+                {
+                    return Err(SpeechProviderError::Authentication);
+                }
+                return Err(SpeechProviderError::ProviderFailed);
+            }
+            let hex_audio = body
+                .pointer("/data/audio")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or(SpeechProviderError::InvalidAudio)?;
+            let pcm = decode_hex_pcm(hex_audio)?;
+            Ok(TtsResult {
+                pcm_s16le: Arc::from(pcm),
+            })
+        })
+    }
+}
+
+fn is_version_segment(segment: &str) -> bool {
+    let Some(rest) = segment.strip_prefix('v') else {
+        return false;
+    };
+    !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn resolve_openai_endpoint(raw: &str, suffix: &str) -> Result<Url, SpeechProviderError> {
+    let mut url = Url::parse(raw.trim().trim_end_matches('/'))
+        .map_err(|_| SpeechProviderError::Unavailable)?;
+    if !is_secure_or_loopback(&url) {
+        return Err(SpeechProviderError::Unavailable);
+    }
+    let path = url.path().trim_end_matches('/');
+    let last_segment = path.rsplit('/').find(|seg| !seg.is_empty());
+    let next_path = if path.ends_with(&format!("/{suffix}")) {
+        path.to_owned()
+    } else if path.is_empty() || path == "/" {
+        format!("/v1/{suffix}")
+    } else if last_segment.is_some_and(is_version_segment) {
+        format!("{path}/{suffix}")
+    } else {
+        format!("{path}/v1/{suffix}")
+    };
+    url.set_path(&next_path);
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url)
+}
+
+fn resolve_deepseek_endpoint(raw: &str, suffix: &str) -> Result<Url, SpeechProviderError> {
+    resolve_openai_endpoint(raw, suffix)
+}
+
+fn resolve_minimax_endpoint(raw: &str) -> Result<Url, SpeechProviderError> {
+    let mut url = Url::parse(raw.trim().trim_end_matches('/'))
+        .map_err(|_| SpeechProviderError::Unavailable)?;
+    if !is_secure_or_loopback(&url) {
+        return Err(SpeechProviderError::Unavailable);
+    }
+    let path = url.path().trim_end_matches('/');
+    let next_path = if path.ends_with("/t2a_v2") {
+        path.to_owned()
+    } else if path.ends_with("/v1") {
+        format!("{path}/t2a_v2")
+    } else if path.is_empty() || path == "/" {
+        "/v1/t2a_v2".to_owned()
+    } else {
+        format!("{path}/v1/t2a_v2")
+    };
+    url.set_path(&next_path);
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url)
+}
+
+fn decode_hex_pcm(hex: &str) -> Result<Vec<u8>, SpeechProviderError> {
+    if hex.is_empty() || !hex.len().is_multiple_of(2) {
+        return Err(SpeechProviderError::InvalidAudio);
+    }
+    let byte_len = hex.len() / 2;
+    if byte_len > MAX_TTS_PCM_BYTES {
+        return Err(SpeechProviderError::OutputTooLarge);
+    }
+    if !byte_len.is_multiple_of(2) {
+        return Err(SpeechProviderError::InvalidAudio);
+    }
+    let mut out = Vec::with_capacity(byte_len);
+    for &[hi_byte, lo_byte] in hex.as_bytes().as_chunks::<2>().0 {
+        let hi = hex_nibble(hi_byte)?;
+        let lo = hex_nibble(lo_byte)?;
+        out.push((hi << 4) | lo);
+    }
+    Ok(out)
+}
+
+fn hex_nibble(byte: u8) -> Result<u8, SpeechProviderError> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(SpeechProviderError::InvalidAudio),
+    }
+}
+
+fn normalize_downloaded_audio(raw: Vec<u8>) -> Result<Vec<u8>, SpeechProviderError> {
+    if raw.len() >= 12 && &raw[0..4] == b"RIFF" && &raw[8..12] == b"WAVE" {
+        let pcm = wav_bytes_to_pcm16_16k_mono(&raw)?;
+        if pcm.len() > MAX_TTS_PCM_BYTES {
+            return Err(SpeechProviderError::OutputTooLarge);
+        }
+        return Ok(pcm);
+    }
+    if raw.len() > MAX_TTS_PCM_BYTES {
+        return Err(SpeechProviderError::OutputTooLarge);
+    }
+    if raw.is_empty() || !raw.len().is_multiple_of(2) {
+        return Err(SpeechProviderError::InvalidAudio);
+    }
+    Ok(raw)
+}
+
+fn build_asr_multipart_body(boundary: &str, model: &str, wav: &[u8]) -> Vec<u8> {
+    let clean_model = model.replace(['\r', '\n', '"'], "");
+    let mut body = Vec::with_capacity(wav.len() + 256);
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"model\"\r\n\r\n");
+    body.extend_from_slice(clean_model.as_bytes());
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n",
+    );
+    body.extend_from_slice(b"Content-Type: audio/wav\r\n\r\n");
+    body.extend_from_slice(wav);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    body
+}
+
+fn build_deepseek_asr_multipart_body(boundary: &str, wav: &[u8]) -> Vec<u8> {
+    let mut body = Vec::with_capacity(wav.len() + 192);
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n",
+    );
+    body.extend_from_slice(b"Content-Type: audio/wav\r\n\r\n");
+    body.extend_from_slice(wav);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    body
+}
+
+pub(super) fn wav_bytes_to_pcm16_16k_mono(wav: &[u8]) -> Result<Vec<u8>, SpeechProviderError> {
+    if wav.len() < 12 || &wav[0..4] != b"RIFF" || &wav[8..12] != b"WAVE" {
+        return Err(SpeechProviderError::InvalidAudio);
+    }
+    let mut pos = 12_usize;
+    let mut channels = 0_u16;
+    let mut sample_rate = 0_u32;
+    let mut bits_per_sample = 0_u16;
+    let mut audio_format = 0_u16;
+    let mut found_fmt = false;
+    let mut data_slice: Option<&[u8]> = None;
+
+    while pos.saturating_add(8) <= wav.len() {
+        let id = &wav[pos..pos + 4];
+        let chunk_len_u32 =
+            u32::from_le_bytes([wav[pos + 4], wav[pos + 5], wav[pos + 6], wav[pos + 7]]);
+        pos += 8;
+        if id == b"data"
+            && (chunk_len_u32 == u32::MAX
+                || chunk_len_u32 == 0x7FFF_FFFF
+                || (chunk_len_u32 == 0 && pos < wav.len()))
+        {
+            // 流式 HTTP WAV 响应的 `data` chunk 长度常为未知占位值，直接取到末尾。
+            data_slice = Some(&wav[pos..]);
+            break;
+        }
+        let chunk_len = chunk_len_u32 as usize;
+        let Some(end) = pos.checked_add(chunk_len) else {
+            return Err(SpeechProviderError::InvalidAudio);
+        };
+        if end > wav.len() {
+            return Err(SpeechProviderError::InvalidAudio);
+        }
+        let chunk = &wav[pos..end];
+        if id == b"fmt " {
+            if chunk.len() < 16 {
+                return Err(SpeechProviderError::InvalidAudio);
+            }
+            audio_format = u16::from_le_bytes([chunk[0], chunk[1]]);
+            channels = u16::from_le_bytes([chunk[2], chunk[3]]);
+            sample_rate = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
+            bits_per_sample = u16::from_le_bytes([chunk[14], chunk[15]]);
+            found_fmt = true;
+        } else if id == b"data" {
+            data_slice = Some(chunk);
+            break;
+        }
+        // RIFF chunk 按偶数字节对齐。
+        pos = end.saturating_add(chunk_len % 2);
+    }
+
+    let Some(data) = data_slice else {
+        return Err(SpeechProviderError::InvalidAudio);
+    };
+    if !found_fmt
+        || audio_format != 1
+        || !matches!(channels, 1 | 2)
+        || sample_rate == 0
+        || bits_per_sample != 16
+        || data.is_empty()
+    {
+        return Err(SpeechProviderError::InvalidAudio);
+    }
+    let frame_bytes = usize::from(channels) * 2;
+    let frame_count = data.len() / frame_bytes;
+    if frame_count == 0 {
+        return Err(SpeechProviderError::InvalidAudio);
+    }
+
+    let mut mono = Vec::with_capacity(frame_count);
+    for frame in 0..frame_count {
+        let offset = frame * frame_bytes;
+        let left = i32::from(i16::from_le_bytes([data[offset], data[offset + 1]]));
+        let sample = if channels == 2 {
+            let right = i32::from(i16::from_le_bytes([data[offset + 2], data[offset + 3]]));
+            ((left + right) / 2) as i16
+        } else {
+            left as i16
+        };
+        mono.push(sample);
+    }
+
+    if sample_rate == TARGET_SAMPLE_RATE_HZ {
+        let mut out = Vec::with_capacity(mono.len() * 2);
+        for s in mono {
+            out.extend_from_slice(&s.to_le_bytes());
+        }
+        return Ok(out);
+    }
+
+    let out_len_u64 = (mono.len() as u64).saturating_mul(u64::from(TARGET_SAMPLE_RATE_HZ))
+        / u64::from(sample_rate);
+    let out_len =
+        usize::try_from(out_len_u64.max(1)).map_err(|_| SpeechProviderError::OutputTooLarge)?;
+    if out_len.saturating_mul(2) > MAX_TTS_PCM_BYTES {
+        return Err(SpeechProviderError::OutputTooLarge);
+    }
+    let mut out = Vec::with_capacity(out_len * 2);
+    let step = sample_rate as f64 / f64::from(TARGET_SAMPLE_RATE_HZ);
+    for i in 0..out_len {
+        let pos = i as f64 * step;
+        let idx = (pos.floor() as usize).min(mono.len() - 1);
+        let frac = pos - idx as f64;
+        let s0 = f64::from(mono[idx]);
+        let s1 = f64::from(mono[(idx + 1).min(mono.len() - 1)]);
+        let interpolated = (s0 + frac * (s1 - s0)).round().clamp(-32768.0, 32767.0) as i16;
+        out.extend_from_slice(&interpolated.to_le_bytes());
+    }
+    Ok(out)
 }
 
 fn map_transport(error: reqwest::Error) -> SpeechProviderError {
@@ -327,7 +989,7 @@ fn secure_audio_url(value: &str) -> Result<Url, SpeechProviderError> {
             .then_some(url)
             .ok_or(SpeechProviderError::InvalidAudio);
     }
-    if !host.ends_with(".oss-cn-beijing.aliyuncs.com") {
+    if !host.contains(".oss-") || !host.ends_with(".aliyuncs.com") {
         return Err(SpeechProviderError::InvalidAudio);
     }
     match url.scheme() {
@@ -349,7 +1011,7 @@ fn is_secure_or_loopback(url: &Url) -> bool {
                 .is_some_and(|host| host == "127.0.0.1" || host == "localhost"))
 }
 
-fn pcm16_mono_wav(pcm: &[u8]) -> Result<Vec<u8>, SpeechProviderError> {
+pub(super) fn pcm16_mono_wav(pcm: &[u8]) -> Result<Vec<u8>, SpeechProviderError> {
     if pcm.is_empty() || !pcm.len().is_multiple_of(2) {
         return Err(SpeechProviderError::InvalidPcm);
     }
@@ -484,5 +1146,413 @@ mod tests {
             secure_audio_url("https://example.com/audio.pcm"),
             Err(SpeechProviderError::InvalidAudio)
         ));
+    }
+
+    #[tokio::test]
+    async fn openai_asr_and_tts_adapters_round_trip_wav_audio() {
+        let received_header = Arc::new(std::sync::Mutex::new(String::new()));
+        let captured_header = received_header.clone();
+        let tts_wav = wav_with_rate_and_samples(24_000, &[1000_i16; 2400]);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let app = Router::new()
+            .route(
+                "/v1/audio/transcriptions",
+                post(move |headers: axum::http::HeaderMap, body: Bytes| {
+                    let captured = captured_header.clone();
+                    async move {
+                        *captured.lock().unwrap() = headers
+                            .get("content-type")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or_default()
+                            .to_owned();
+                        assert!(body.windows(4).any(|w| w == b"RIFF"));
+                        Json(json!({"text": "  你好小元  "}))
+                    }
+                }),
+            )
+            .route(
+                "/v1/audio/speech",
+                post(move || {
+                    let tts_wav = tts_wav.clone();
+                    async move { Bytes::from(tts_wav) }
+                }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let asr = OpenAiSpeechRecognizer::new(
+            format!("http://{address}/v1"),
+            "whisper-1".to_owned(),
+            "sk-test".to_owned(),
+            Duration::from_secs(2),
+        )
+        .expect("openai asr");
+        let result = asr
+            .recognize(&AsrRequest {
+                pcm_s16le: Arc::from(vec![0_u8; 640]),
+                cancellation: CancellationToken::new(),
+            })
+            .await
+            .expect("asr ok");
+        assert_eq!(result.transcript, "你好小元");
+        assert!(
+            received_header
+                .lock()
+                .unwrap()
+                .starts_with("multipart/form-data; boundary=")
+        );
+
+        let tts = OpenAiSpeechSynthesizer::new(
+            format!("http://{address}"),
+            "tts-1".to_owned(),
+            "alloy".to_owned(),
+            "sk-test".to_owned(),
+            Duration::from_secs(2),
+        )
+        .expect("openai tts");
+        let synthesized = tts
+            .synthesize("测试播报", CancellationToken::new())
+            .await
+            .expect("tts ok");
+        // 2400 samples @ 24kHz -> 1600 samples @ 16kHz -> 3200 bytes.
+        assert_eq!(synthesized.pcm_s16le.len(), 3200);
+
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[test]
+    fn resolve_openai_endpoint_handles_versioned_prefixes_without_appending_v1() {
+        assert_eq!(
+            resolve_openai_endpoint("https://open.bigmodel.cn/api/paas/v4", "audio/speech")
+                .expect("zhipu")
+                .as_str(),
+            "https://open.bigmodel.cn/api/paas/v4/audio/speech"
+        );
+        assert_eq!(
+            resolve_openai_endpoint("https://api.groq.com/openai/v1", "audio/transcriptions")
+                .expect("groq")
+                .as_str(),
+            "https://api.groq.com/openai/v1/audio/transcriptions"
+        );
+        assert_eq!(
+            resolve_openai_endpoint("https://api.siliconflow.cn/v1", "audio/speech")
+                .expect("siliconflow")
+                .as_str(),
+            "https://api.siliconflow.cn/v1/audio/speech"
+        );
+        assert_eq!(
+            resolve_openai_endpoint("https://api.openai.com/v1", "audio/speech")
+                .expect("openai")
+                .as_str(),
+            "https://api.openai.com/v1/audio/speech"
+        );
+        assert_eq!(
+            resolve_openai_endpoint("https://example.com", "audio/speech")
+                .expect("bare")
+                .as_str(),
+            "https://example.com/v1/audio/speech"
+        );
+    }
+
+    #[tokio::test]
+    async fn dashscope_qwen3_asr_and_tts_use_multimodal_endpoint_and_unpack_wav() {
+        let captured_asr_body = Arc::new(std::sync::Mutex::new(Value::Null));
+        let asr_sink = captured_asr_body.clone();
+        let wav = wav_with_rate_and_samples(24_000, &[420_i16; 2400]);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let audio_url = format!("http://{address}/qwen-tts.wav");
+        let app = Router::new()
+            .route(
+                "/api/v1/services/aigc/multimodal-generation/generation",
+                post(move |Json(payload): Json<Value>| {
+                    let asr_sink = asr_sink.clone();
+                    let audio_url = audio_url.clone();
+                    async move {
+                        if payload["model"] == "qwen3-asr-flash" {
+                            *asr_sink.lock().unwrap() = payload;
+                            Json(json!({
+                                "output": {
+                                    "choices": [{
+                                        "message": {
+                                            "content": [{"text": "  千问语音转写  "}]
+                                        }
+                                    }]
+                                }
+                            }))
+                        } else {
+                            assert_eq!(payload["model"], "qwen3-tts-flash");
+                            assert_eq!(payload["input"]["voice"], "Cherry");
+                            assert_eq!(payload["parameters"]["format"], "wav");
+                            Json(json!({"output": {"audio": {"url": audio_url}}}))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/qwen-tts.wav",
+                get(move || {
+                    let wav = wav.clone();
+                    async move { Bytes::from(wav) }
+                }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let asr = DashScopeSpeechRecognizer::new(
+            format!("http://{address}"),
+            "qwen3-asr-flash".to_owned(),
+            "sk-dash".to_owned(),
+            Duration::from_secs(2),
+        )
+        .expect("qwen asr");
+        let transcript = asr
+            .recognize(&AsrRequest {
+                pcm_s16le: Arc::from(vec![0_u8; 640]),
+                cancellation: CancellationToken::new(),
+            })
+            .await
+            .expect("qwen asr ok")
+            .transcript;
+        assert_eq!(transcript, "千问语音转写");
+        assert!(
+            captured_asr_body.lock().unwrap()["input"]["messages"][0]["content"][0]["audio"]
+                .as_str()
+                .is_some_and(|v| v.starts_with("data:audio/wav;base64,"))
+        );
+
+        let tts = DashScopeSpeechSynthesizer::new(
+            format!("http://{address}"),
+            "qwen3-tts-flash".to_owned(),
+            "Cherry".to_owned(),
+            "sk-dash".to_owned(),
+            Duration::from_secs(2),
+        )
+        .expect("qwen tts");
+        let synthesized = tts
+            .synthesize("你好", CancellationToken::new())
+            .await
+            .expect("qwen tts ok");
+        assert_eq!(synthesized.pcm_s16le.len(), 3200);
+
+        assert!(
+            secure_audio_url("https://dashscope-result-hz.oss-cn-hangzhou.aliyuncs.com/a.wav")
+                .is_ok()
+        );
+        assert!(matches!(
+            secure_audio_url("https://evil.example.com/a.wav"),
+            Err(SpeechProviderError::InvalidAudio)
+        ));
+
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn minimax_tts_decodes_hex_pcm_and_maps_api_errors() {
+        let mode = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let route_mode = mode.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let app = Router::new().route(
+            "/v1/t2a_v2",
+            post(move |Json(payload): Json<Value>| {
+                let route_mode = route_mode.clone();
+                async move {
+                    assert_eq!(payload["voice_setting"]["voice_id"], "female-shaonv");
+                    assert_eq!(payload["audio_setting"]["sample_rate"], 16_000);
+                    match route_mode.load(std::sync::atomic::Ordering::SeqCst) {
+                        0 => Json(json!({
+                            "data": {"audio": "0100ff7f", "status": 2},
+                            "base_resp": {"status_code": 0, "status_msg": "success"}
+                        })),
+                        1 => Json(json!({
+                            "base_resp": {"status_code": 1004, "status_msg": "login fail"}
+                        })),
+                        _ => Json(json!({
+                            "base_resp": {"status_code": 2013, "status_msg": "invalid voice_id"}
+                        })),
+                    }
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let tts = MiniMaxSpeechSynthesizer::new(
+            format!("http://{address}/v1/t2a_v2"),
+            "speech-2.8-turbo".to_owned(),
+            "female-shaonv".to_owned(),
+            "sk-minimax".to_owned(),
+            Duration::from_secs(2),
+        )
+        .expect("minimax tts");
+        let ok = tts
+            .synthesize("测试 MiniMax", CancellationToken::new())
+            .await
+            .expect("hex pcm ok");
+        assert_eq!(ok.pcm_s16le.as_ref(), &[0x01, 0x00, 0xff, 0x7f]);
+
+        mode.store(1, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(
+            tts.synthesize("auth", CancellationToken::new()).await,
+            Err(SpeechProviderError::Authentication)
+        ));
+
+        mode.store(2, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(
+            tts.synthesize("bad", CancellationToken::new()).await,
+            Err(SpeechProviderError::ProviderFailed)
+        ));
+
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn deepseek_asr_transcribes_wav_multipart_and_maps_auth_error() {
+        let status_mode = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let route_mode = status_mode.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let app = Router::new().route(
+            "/v1/tools/asr",
+            post(move |headers: axum::http::HeaderMap, body: Bytes| {
+                let route_mode = route_mode.clone();
+                async move {
+                    let auth = headers
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default();
+                    assert_eq!(auth, "Bearer sk-deepseek-asr");
+                    if route_mode.load(std::sync::atomic::Ordering::SeqCst) == 1 {
+                        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized"})));
+                    }
+                    let body_text = String::from_utf8_lossy(&body);
+                    assert!(body_text.contains("name=\"file\""));
+                    assert!(body.windows(4).any(|w| w == b"RIFF"));
+                    (
+                        StatusCode::OK,
+                        Json(json!({"request_id": "req_1", "text": "  你好深度求索  ", "duration_ms": 1200})),
+                    )
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let provider = DeepSeekSpeechRecognizer::new(
+            format!("http://{address}/v1"),
+            "sk-deepseek-asr".to_owned(),
+            Duration::from_secs(2),
+        )
+        .expect("deepseek asr");
+        let request = AsrRequest {
+            pcm_s16le: Arc::from(vec![0_u8; 640]),
+            cancellation: CancellationToken::new(),
+        };
+        let ok = provider.recognize(&request).await.expect("ASR result");
+        assert_eq!(ok.transcript, "你好深度求索");
+
+        status_mode.store(1, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(
+            provider.recognize(&request).await,
+            Err(SpeechProviderError::Authentication)
+        ));
+
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn deepseek_tts_synthesizes_24khz_and_streaming_wav_to_16khz_pcm() {
+        let status_mode = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let route_mode = status_mode.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let app = Router::new().route(
+            "/v1/tools/tts",
+            post(
+                move |headers: axum::http::HeaderMap, Json(payload): Json<Value>| {
+                    let route_mode = route_mode.clone();
+                    async move {
+                        let auth = headers
+                            .get("authorization")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or_default();
+                        assert_eq!(auth, "Bearer sk-deepseek-tts");
+                        assert_eq!(payload["voice_id"], "tide");
+                        assert_eq!(payload["format"], "wav");
+                        assert_eq!(payload["filter_markdown"], true);
+                        if route_mode.load(std::sync::atomic::Ordering::SeqCst) == 1 {
+                            return (
+                                StatusCode::UNAUTHORIZED,
+                                Bytes::from_static(b"unauthorized"),
+                            );
+                        }
+                        let samples = vec![420_i16; 240];
+                        let mut wav = wav_with_rate_and_samples(24_000, &samples);
+                        // 模拟流式 HTTP WAV 响应的 unknown data chunk 长度哨兵。
+                        wav[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+                        wav[40..44].copy_from_slice(&u32::MAX.to_le_bytes());
+                        (StatusCode::OK, Bytes::from(wav))
+                    }
+                },
+            ),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let tts = DeepSeekSpeechSynthesizer::new(
+            format!("http://{address}/v1"),
+            "tide".to_owned(),
+            "sk-deepseek-tts".to_owned(),
+            Duration::from_secs(2),
+        )
+        .expect("deepseek tts");
+        let ok = tts
+            .synthesize("**你好** DeepSeek", CancellationToken::new())
+            .await
+            .expect("tts result");
+        assert_eq!(ok.pcm_s16le.len(), 320);
+
+        status_mode.store(1, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(
+            tts.synthesize("auth fail", CancellationToken::new()).await,
+            Err(SpeechProviderError::Authentication)
+        ));
+
+        server.abort();
+        let _ = server.await;
+    }
+
+    fn wav_with_rate_and_samples(sample_rate: u32, samples: &[i16]) -> Vec<u8> {
+        let data_bytes = (samples.len() * 2) as u32;
+        let mut wav = Vec::with_capacity(44 + data_bytes as usize);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16_u32.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&sample_rate.to_le_bytes());
+        wav.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+        wav.extend_from_slice(&2_u16.to_le_bytes());
+        wav.extend_from_slice(&16_u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_bytes.to_le_bytes());
+        for sample in samples {
+            wav.extend_from_slice(&sample.to_le_bytes());
+        }
+        wav
     }
 }

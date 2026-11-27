@@ -14,8 +14,8 @@ use axum::{
 
 use super::{
     HttpState, MAX_COMMAND_BYTES, attachments, auth, capabilities, commands, compatibility,
-    desktop, desktop_update_context, ensure_ready, events, health, login, materializations,
-    plugin_config, plugin_upload, resources, terminals, web,
+    desktop, desktop_update_context, device_console, ensure_ready, events, health, login,
+    materializations, plugin_config, plugin_upload, resources, terminals, web,
 };
 
 pub(crate) fn router(state: HttpState) -> Router {
@@ -72,6 +72,16 @@ pub(crate) fn router(state: HttpState) -> Router {
         .route(
             "/plugins/{name}/config-files/{*relative}",
             put(plugin_config::upload_file).layer(DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/devices/{device_id}/console/{*path}",
+            get(device_console::proxy)
+                .post(device_console::proxy)
+                .put(device_console::proxy)
+                .delete(device_console::proxy)
+                .layer(DefaultBodyLimit::max(
+                    device_console::MAX_DEVICE_CONSOLE_BODY_BYTES,
+                )),
         )
         .route_layer((version.clone(), resource_body));
     let resources = files

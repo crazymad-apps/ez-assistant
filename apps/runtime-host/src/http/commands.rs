@@ -3,6 +3,7 @@
 use assistant_protocol::{
     DeviceGatewayCommand, DeviceGatewayCommandResult, DeviceGatewayMutationResult,
     HostAccessCommand, HostAccessStatus, RuntimeCommand, RuntimeCommandResult, RuntimeErrorInfo,
+    UpdateSpeechConfigurationResult,
 };
 use assistant_runtime::RuntimeError;
 use axum::{
@@ -315,6 +316,39 @@ async fn dispatch_device_gateway(
                     .await
                     .map_err(|error| error.to_protocol_info())?,
             })
+        }
+        DeviceGatewayCommand::GetSpeechConfiguration(_) => {
+            let configuration = services
+                .speech
+                .get_configuration()
+                .await
+                .map_err(|error| error.to_protocol_info())?;
+            DeviceGatewayCommandResult::GetSpeechConfiguration(configuration)
+        }
+        DeviceGatewayCommand::UpdateSpeechConfiguration(request) => {
+            let configuration = services
+                .speech
+                .update_configuration(request)
+                .await
+                .map_err(|error| error.to_protocol_info())?;
+            services.device_gateway.notify_changed();
+            let snapshot = services
+                .device_gateway
+                .snapshot()
+                .await
+                .map_err(|error| error.to_protocol_info())?;
+            DeviceGatewayCommandResult::UpdateSpeechConfiguration(UpdateSpeechConfigurationResult {
+                configuration,
+                snapshot,
+            })
+        }
+        DeviceGatewayCommand::TestAsrConfiguration(request) => {
+            let result = services.speech.test_asr(request).await?;
+            DeviceGatewayCommandResult::TestAsrConfiguration(result)
+        }
+        DeviceGatewayCommand::TestTtsConfiguration(request) => {
+            let result = services.speech.test_tts(request).await?;
+            DeviceGatewayCommandResult::TestTtsConfiguration(result)
         }
     };
     Ok((HostCommandResult::DeviceGateway(result), false))

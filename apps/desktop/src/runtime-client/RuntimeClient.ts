@@ -208,6 +208,42 @@ export class RuntimeClient {
     return this.resource("/user-terminals/shells", { method: "GET", cache: "no-store", signal }, (response) => response.json());
   }
 
+  deviceConsoleJson<T>(
+    device_id: string,
+    relative_path: string,
+    init?: Readonly<{ method?: "GET" | "POST" | "PUT" | "DELETE"; body?: unknown; signal?: AbortSignal }>,
+  ): Promise<T> {
+    this.#requireLocal();
+    const cleaned = relative_path.replace(/^\/+/, "");
+    if (!cleaned) throw new Error("控制台请求路径无效。");
+    const headers: Record<string, string> = {};
+    let body: string | undefined;
+    if (init?.body !== undefined) {
+      headers["Content-Type"] = "application/json";
+      body = JSON.stringify(init.body);
+    }
+    return this.resource(
+      `/devices/${encodeURIComponent(device_id)}/console/${cleaned}`,
+      { method: init?.method ?? "GET", headers, body, cache: "no-store", signal: init?.signal },
+      (response) => response.json() as Promise<T>,
+    );
+  }
+
+  deviceConsoleBlob(
+    device_id: string,
+    relative_path: string,
+    signal?: AbortSignal,
+  ): Promise<Blob> {
+    this.#requireLocal();
+    const cleaned = relative_path.replace(/^\/+/, "");
+    if (!cleaned) throw new Error("控制台媒体路径无效。");
+    return this.resource(
+      `/devices/${encodeURIComponent(device_id)}/console/${cleaned}`,
+      { method: "GET", cache: "no-store", signal },
+      (response) => response.blob(),
+    );
+  }
+
   openDesktop(device: string, receive: (event: DesktopEvent) => void, display: string | null = null): DesktopSocket {
     return new DesktopSocket(this.#base_url, this.#access_token, device, this.login_context, receive, this.#abort.signal, display);
   }

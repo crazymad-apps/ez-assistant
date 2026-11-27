@@ -1,0 +1,186 @@
+export type RawRecord = Record<string, unknown>;
+
+export type FleetDeviceItem = Readonly<{
+  device_id: string;
+  zone: string;
+  group_id: string;
+  chip: string;
+  vp_version: number;
+  vad_state: string;
+  online: boolean;
+  rssi: string;
+  volume: string;
+  capabilities: ReadonlyArray<string>;
+}>;
+
+export type MacWhitelistEntry = Readonly<{
+  mac: string;
+  group_id: string;
+  zone: string;
+  label: string;
+  enabled: boolean;
+}>;
+
+export type AclRuleEntry = Readonly<{
+  rule_id: string;
+  agent_id: string;
+  group_id: string;
+  zone_pattern: string;
+  device_id: string;
+  capability_pattern: string;
+  min_speaker_role: number;
+  allow: boolean;
+}>;
+
+export type SpeakerGroupEntry = Readonly<{
+  speaker_id: string;
+  display_name: string;
+  uid: string;
+  agent_id: string;
+  group_id: string;
+  role: number;
+  tts_voice: string;
+  prompt: string;
+  version: number;
+}>;
+
+export function pickString(obj: unknown, ...keys: ReadonlyArray<string>): string {
+  if (!obj || typeof obj !== "object") return "";
+  const record = obj as RawRecord;
+  for (const key of keys) {
+    const val = record[key];
+    if (typeof val === "string") return val;
+    if (typeof val === "number") return String(val);
+  }
+  return "";
+}
+
+export function pickNumber(obj: unknown, fallback: number, ...keys: ReadonlyArray<string>): number {
+  if (!obj || typeof obj !== "object") return fallback;
+  const record = obj as RawRecord;
+  for (const key of keys) {
+    const val = record[key];
+    if (typeof val === "number" && Number.isFinite(val)) return val;
+    if (typeof val === "string" && val.trim() !== "") {
+      const parsed = Number(val);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+  }
+  return fallback;
+}
+
+export function pickBool(obj: unknown, fallback: boolean, ...keys: ReadonlyArray<string>): boolean {
+  if (!obj || typeof obj !== "object") return fallback;
+  const record = obj as RawRecord;
+  for (const key of keys) {
+    const val = record[key];
+    if (typeof val === "boolean") return val;
+  }
+  return fallback;
+}
+
+export function parseFleetDevices(payload: unknown): FleetDeviceItem[] {
+  const list = Array.isArray((payload as RawRecord | null)?.devices)
+    ? ((payload as RawRecord).devices as unknown[])
+    : [];
+  return list.map((raw) => {
+    const item = (raw && typeof raw === "object" ? raw : {}) as RawRecord;
+    const hello = (item.hello && typeof item.hello === "object" ? item.hello : {}) as RawRecord;
+    const shadow = (item.shadow && typeof item.shadow === "object" ? item.shadow : {}) as RawRecord;
+    const rawCaps = Array.isArray(hello.capabilities) ? hello.capabilities : [];
+    const capabilities = rawCaps
+      .map((cap) => pickString(cap, "name"))
+      .filter((name) => name.length > 0);
+    return {
+      device_id:
+        pickString(hello, "deviceId", "device_id") ||
+        pickString(shadow, "deviceId", "device_id") ||
+        "-",
+      zone: pickString(hello, "zone") || pickString(shadow, "zone") || "-",
+      group_id:
+        pickString(hello, "groupId", "group_id") ||
+        pickString(shadow, "groupId", "group_id") ||
+        "-",
+      chip: pickString(hello, "chip") || "-",
+      vp_version: pickNumber(hello, 0, "vpVersion", "vp_version"),
+      vad_state: pickString(shadow, "vadState", "vad_state") || "idle",
+      online: pickBool(shadow, false, "online"),
+      rssi: shadow.rssi !== undefined && shadow.rssi !== null ? String(shadow.rssi) : "-",
+      volume: shadow.volume !== undefined && shadow.volume !== null ? String(shadow.volume) : "-",
+      capabilities,
+    };
+  });
+}
+
+export function parseMacEntries(payload: unknown): MacWhitelistEntry[] {
+  const items = Array.isArray((payload as RawRecord | null)?.items)
+    ? ((payload as RawRecord).items as unknown[])
+    : [];
+  return items.map((raw) => ({
+    mac: pickString(raw, "mac"),
+    group_id: pickString(raw, "groupId", "group_id"),
+    zone: pickString(raw, "zone"),
+    label: pickString(raw, "label"),
+    enabled: pickBool(raw, false, "enabled"),
+  }));
+}
+
+export function parseAclRules(payload: unknown): AclRuleEntry[] {
+  const rules = Array.isArray((payload as RawRecord | null)?.rules)
+    ? ((payload as RawRecord).rules as unknown[])
+    : [];
+  return rules.map((raw) => ({
+    rule_id: pickString(raw, "ruleId", "rule_id"),
+    agent_id: pickString(raw, "agentId", "agent_id"),
+    group_id: pickString(raw, "groupId", "group_id") || "*",
+    zone_pattern: pickString(raw, "zonePattern", "zone_pattern") || "*",
+    device_id: pickString(raw, "deviceId", "device_id"),
+    capability_pattern: pickString(raw, "capabilityPattern", "capability_pattern") || "*",
+    min_speaker_role: pickNumber(raw, 1, "minSpeakerRole", "min_speaker_role"),
+    allow: pickBool(raw, false, "allow"),
+  }));
+}
+
+export function parseSpeakers(payload: unknown): SpeakerGroupEntry[] {
+  const speakers = Array.isArray((payload as RawRecord | null)?.speakers)
+    ? ((payload as RawRecord).speakers as unknown[])
+    : [];
+  return speakers.map((raw) => ({
+    speaker_id: pickString(raw, "speakerId", "speaker_id"),
+    display_name: pickString(raw, "displayName", "display_name"),
+    uid: pickString(raw, "uid"),
+    agent_id: pickString(raw, "agentId", "agent_id"),
+    group_id: pickString(raw, "groupId", "group_id"),
+    role: pickNumber(raw, 1, "role"),
+    tts_voice: pickString(raw, "ttsVoice", "tts_voice"),
+    prompt: pickString(raw, "prompt"),
+    version: pickNumber(raw, 0, "version"),
+  }));
+}
+
+export function normalizeConsolePath(apiPrefix: string, suffix: string): string {
+  const cleanPrefix = apiPrefix.replace(/^\/+/, "").replace(/\/+$/, "");
+  const cleanSuffix = suffix.replace(/^\/+/, "");
+  return cleanPrefix ? `${cleanPrefix}/${cleanSuffix}` : cleanSuffix;
+}
+
+export function extractMediaRelativePath(mediaUrl: string): string | null {
+  const trimmed = mediaUrl.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith("/")) {
+    return trimmed.replace(/^\/+/, "");
+  }
+  try {
+    const parsed = new URL(trimmed);
+    const relative = `${parsed.pathname.replace(/^\/+/, "")}${parsed.search}`;
+    return relative || null;
+  } catch {
+    return null;
+  }
+}
+
+export function roleLabel(role: number): string {
+  if (role === 1) return "Owner (1)";
+  if (role === 2) return "Family (2)";
+  return `Guest (${role})`;
+}
