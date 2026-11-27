@@ -11,7 +11,7 @@ use std::{
 };
 
 // 当前发布链及具名迁移；新库、升级与重启保持同一完整账本。
-const CURRENT_MIGRATION_COUNT: i64 = 25;
+const CURRENT_MIGRATION_COUNT: i64 = 26;
 
 struct Host(Child);
 impl Drop for Host {

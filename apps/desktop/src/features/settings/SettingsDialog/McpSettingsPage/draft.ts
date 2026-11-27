@@ -44,6 +44,7 @@ export function validateMcpDraft(draft: McpServerDraft): string | null {
 
 export function sourceLabel(server: Pick<McpServerSnapshot, "source">): string {
   if (server.source.type === "plugin") return `插件 · ${server.source.name}`;
+  if (server.source.type === "device") return `智能终端 · ${server.source.name}`;
   if (server.source.type === "builtin") return "内置";
   return "用户添加";
 }

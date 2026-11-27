@@ -49,6 +49,7 @@ struct QueueDriverContext {
     config_registry: Arc<ConfigRegistry>,
     model_binding_gate: Arc<tokio::sync::RwLock<()>>,
     permission_coordinator: Arc<crate::permission::PermissionCoordinator>,
+    permission_grants: Arc<crate::permission::PermissionGrantCoordinator>,
     approval_registry: Arc<crate::permission::ApprovalRegistry>,
     model_factory: Arc<dyn crate::ModelServiceFactory>,
     run_tool_factory: Arc<dyn crate::RunToolFactory>,
@@ -165,6 +166,7 @@ impl AssistantRuntime {
             config_registry: self.config_registry.clone(),
             model_binding_gate: self.model_binding_gate.clone(),
             permission_coordinator: self.permission_coordinator.clone(),
+            permission_grants: self.permission_grants.clone(),
             approval_registry: self.approval_registry.clone(),
             model_factory: self.model_factory.clone(),
             run_tool_factory: self.run_tool_factory.clone(),
@@ -509,6 +511,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                 RunAuthorizationInput {
                     input_id: next.0.clone(),
                     permission_coordinator: context.permission_coordinator.clone(),
+                    permission_grants: context.permission_grants.clone(),
                     approval_registry: context.approval_registry.clone(),
                     variant: next.1.stored.agent_variant,
                     run_id: next.2.clone(),
@@ -526,6 +529,7 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                     resume_paused_goal: goal_resume.is_some(),
                     rewrite_input: None,
                     input_origin: next.1.stored.origin,
+                    channel_source: next.1.stored.channel_source.clone(),
                     cross_session: next.1.stored.cross_session.clone(),
                 },
                 Some(model_diagnostics.clone()),
@@ -692,18 +696,32 @@ async fn run_queue(context: QueueDriverContext, session: Arc<SessionController>)
                         message.parts.extend(shell_context.parts.iter().cloned());
                     }
                 }
-                if let (Some(message), Some(disclosure)) = (&mut message, &disclosure_context) {
-                    let needs_disclosure = match session.lock_state() {
-                        Ok(state) => state.journal.as_ref().is_some_and(|journal| {
-                            crate::mcp::needs_initial_disclosure(&journal.snapshot(), disclosure)
-                        }),
+                if let Some(message) = &mut message {
+                    let resolved_disclosure = match session.lock_state() {
+                        Ok(state) => state
+                            .journal
+                            .as_ref()
+                            .map(|journal| {
+                                crate::mcp::resolve_directory_disclosure(
+                                    &journal.snapshot(),
+                                    disclosure_context.as_ref(),
+                                )
+                            })
+                            .transpose(),
                         Err(_) => {
                             fault_driver(&session);
                             return;
                         }
                     };
-                    if needs_disclosure {
-                        message.parts.extend(disclosure.parts.iter().cloned());
+                    match resolved_disclosure {
+                        Ok(Some(Some(disclosure))) => {
+                            message.parts.extend(disclosure.parts.iter().cloned());
+                        }
+                        Ok(Some(None)) | Ok(None) => {}
+                        Err(_) => {
+                            fault_driver(&session);
+                            return;
+                        }
                     }
                 }
                 if next.1.stored.agent_shell_target.is_some()

@@ -6,11 +6,11 @@ import type {
   DeviceCapabilitiesSnapshot,
   DeviceSummarySnapshot,
   PendingDevicePairingSnapshot,
-  SpeechServiceStatusSnapshot,
 } from "@ez-assistant/protocol";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { SessionActionDialog } from "../../sessions/SessionActionDialog";
 import { DeviceDetailPage } from "./DeviceDetailPage";
+import { DeviceSpeechSection } from "./DeviceSpeechSection";
 import { SettingsPageContainer } from "./SettingsPageContainer";
 import styles from "./index.module.scss";
 
@@ -25,6 +25,7 @@ export const DeviceSettingsPage = observer(function DeviceSettingsPage() {
 
   useEffect(() => {
     void gateway.load();
+    void gateway.loadSpeechConfiguration();
   }, [gateway]);
 
   const paired_devices = snapshot?.devices.filter((device) => device.lifecycle === "paired") ?? [];
@@ -49,7 +50,14 @@ export const DeviceSettingsPage = observer(function DeviceSettingsPage() {
   return (
     <SettingsPageContainer
       actions={(
-        <button disabled={gateway.loading || gateway.pending_action !== null} onClick={() => void gateway.load()} type="button">
+        <button
+          disabled={gateway.loading || gateway.pending_action !== null}
+          onClick={() => {
+            void gateway.load();
+            void gateway.loadSpeechConfiguration();
+          }}
+          type="button"
+        >
           <Icon name="refresh" size={14} />
           刷新
         </button>
@@ -178,15 +186,7 @@ export const DeviceSettingsPage = observer(function DeviceSettingsPage() {
         ) : <p className={styles.device_empty}>尚未配对智能终端。</p>}
       </section>
 
-      <section className={styles.device_section}>
-        <header>
-          <h4>语音服务</h4>
-        </header>
-        <dl className={styles.speech_status_list}>
-          <div><dt>语音识别</dt><dd data-status={snapshot?.speech_services.asr}>{speechStatusLabel(snapshot?.speech_services.asr)}</dd></div>
-          <div><dt>语音播放</dt><dd data-status={snapshot?.speech_services.tts}>{speechStatusLabel(snapshot?.speech_services.tts)}</dd></div>
-        </dl>
-      </section>
+      <DeviceSpeechSection />
 
       {gateway.error_message && <p className={styles.error_message} role="alert">{gateway.error_message}</p>}
       {gateway.notice_message && <p className={styles.notice_message} role="status">{gateway.notice_message}</p>}
@@ -216,39 +216,69 @@ const PendingPairing = observer(function PendingPairing(props: Readonly<{
 }>) {
   const [code, setCode] = useState("");
   const pending_action = props.gateway.pending_action === `pairing:${props.pending.pairing_request_id}`;
+  const is_direct = props.pending.mode === "direct_confirm";
+  const subtitle = is_direct
+    ? [
+        capabilityLabel(props.pending.capabilities),
+        props.pending.peer_address,
+        props.pending.key_fingerprint ? `指纹 ${props.pending.key_fingerprint}` : null,
+      ]
+        .filter(Boolean)
+        .join(" · ")
+    : `${capabilityLabel(props.pending.capabilities)} · 还可尝试 ${props.pending.remaining_attempts} 次`;
+
   return (
-    <article>
+    <article data-mode={props.pending.mode}>
       <span className={styles.device_icon}><Icon name="device" size={18} /></span>
       <div>
         <strong>{props.pending.display_name}</strong>
-        <small>{capabilityLabel(props.pending.capabilities)} · 还可尝试 {props.pending.remaining_attempts} 次</small>
+        <small>{subtitle}</small>
       </div>
-      <label>
-        <input
-          aria-label={`${props.pending.display_name} 配对码`}
-          autoComplete="one-time-code"
-          disabled={pending_action}
-          inputMode="numeric"
-          maxLength={6}
-          onChange={(event) => setCode(event.currentTarget.value.replace(/\D/g, "").slice(0, 6))}
-          placeholder="配对码"
-          value={code}
-        />
-      </label>
-      <button
-        disabled={pending_action || code.length !== 6}
-        onClick={() => void props.gateway.confirmPairing(props.pending.pairing_request_id, code, null)}
-        type="button"
-      >
-        {pending_action ? "配对中…" : "确认配对"}
-      </button>
+      {is_direct ? (
+        <div className={styles.pending_device_actions}>
+          <button
+            className={styles.pending_device_confirm}
+            disabled={pending_action}
+            onClick={() => void props.gateway.confirmPairing(props.pending.pairing_request_id, null, null)}
+            type="button"
+          >
+            {pending_action ? "配对中…" : "确认配对"}
+          </button>
+          <button
+            className={styles.pending_device_reject}
+            disabled={pending_action}
+            onClick={() => void props.gateway.rejectPairing(props.pending.pairing_request_id)}
+            type="button"
+          >
+            拒绝
+          </button>
+        </div>
+      ) : (
+        <>
+          <label>
+            <input
+              aria-label={`${props.pending.display_name} 配对码`}
+              autoComplete="one-time-code"
+              disabled={pending_action}
+              inputMode="numeric"
+              maxLength={6}
+              onChange={(event) => setCode(event.currentTarget.value.replace(/\D/g, "").slice(0, 6))}
+              placeholder="配对码"
+              value={code}
+            />
+          </label>
+          <button
+            disabled={pending_action || code.length !== 6}
+            onClick={() => void props.gateway.confirmPairing(props.pending.pairing_request_id, code, null)}
+            type="button"
+          >
+            {pending_action ? "配对中…" : "确认配对"}
+          </button>
+        </>
+      )}
     </article>
   );
 });
-
-function speechStatusLabel(status?: SpeechServiceStatusSnapshot): string {
-  return ({ ready: "可用", degraded: "部分可用", unavailable: "不可用" } as Record<string, string>)[status ?? ""] ?? "待同步";
-}
 
 function capabilityLabel(capabilities?: DeviceCapabilitiesSnapshot): string {
   if (!capabilities) return "能力将在设备在线后同步";

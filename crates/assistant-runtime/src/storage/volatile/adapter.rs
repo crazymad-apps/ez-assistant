@@ -259,6 +259,10 @@ impl RuntimeStore for VolatileRuntimeStore {
         VolatileRuntimeStore::invalidate_server_history_bindings(self, key)
     }
 
+    fn invalidate_controller_server_history_bindings(&self, key: String) -> StoreFuture<'_, ()> {
+        VolatileRuntimeStore::invalidate_controller_server_history_bindings(self, key)
+    }
+
     fn get_model_fixed_config(
         &self,
         selection: assistant_protocol::ModelSelection,
@@ -447,6 +451,43 @@ impl RuntimeStore for VolatileRuntimeStore {
 
     fn set_persona(&self, mutation: PersonaMutation) -> StoreFuture<'_, PersonaSnapshot> {
         VolatileRuntimeStore::set_persona(self, mutation)
+    }
+
+    fn get_controller_prompt(&self) -> StoreFuture<'_, crate::ControllerPromptSnapshot> {
+        VolatileRuntimeStore::get_controller_prompt(self)
+    }
+
+    fn set_controller_prompt(
+        &self,
+        mutation: crate::ControllerPromptMutation,
+    ) -> StoreFuture<'_, crate::ControllerPromptSnapshot> {
+        VolatileRuntimeStore::set_controller_prompt(self, mutation)
+    }
+
+    fn list_permission_grants(
+        &self,
+        include_exhausted: bool,
+    ) -> StoreFuture<'_, Vec<crate::StoredPermissionGrant>> {
+        VolatileRuntimeStore::list_permission_grants(self, include_exhausted)
+    }
+
+    fn create_permission_grant(
+        &self,
+        grant: crate::StoredPermissionGrant,
+    ) -> StoreFuture<'_, crate::StoredPermissionGrant> {
+        VolatileRuntimeStore::create_permission_grant(self, grant)
+    }
+
+    fn consume_permission_grant(
+        &self,
+        grant_id: &str,
+        consumed_at_ms: i64,
+    ) -> StoreFuture<'_, Option<crate::StoredPermissionGrant>> {
+        VolatileRuntimeStore::consume_permission_grant(self, grant_id, consumed_at_ms)
+    }
+
+    fn revoke_permission_grant(&self, grant_id: &str) -> StoreFuture<'_, bool> {
+        VolatileRuntimeStore::revoke_permission_grant(self, grant_id)
     }
 
     fn list_pinned_memories(&self) -> StoreFuture<'_, Vec<StoredPinnedMemory>> {

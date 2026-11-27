@@ -458,12 +458,13 @@ async fn connect_http(
         })?;
         headers.insert(name, value);
     }
-    let client = Client::builder()
-        .redirect(Policy::none())
-        .build()
-        .map_err(|_| {
-            connection_error(McpConnectionFailureKind::Connect, "无法创建 MCP HTTP 连接")
-        })?;
+    let mut builder = Client::builder().redirect(Policy::none());
+    if should_bypass_proxy(server.source(), url) {
+        builder = builder.no_proxy();
+    }
+    let client = builder.build().map_err(|_| {
+        connection_error(McpConnectionFailureKind::Connect, "无法创建 MCP HTTP 连接")
+    })?;
     let mut config = StreamableHttpClientTransportConfig::with_uri(url.to_owned())
         .max_concurrent_requests(options.max_concurrent_requests)
         .control_request_timeout(options.control_timeout)
@@ -477,6 +478,30 @@ async fn connect_http(
         config,
     );
     serve(transport, cancellation).await
+}
+
+fn should_bypass_proxy(source: &assistant_protocol::McpServerSource, url: &str) -> bool {
+    if matches!(source, assistant_protocol::McpServerSource::Device(_)) {
+        return true;
+    }
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let host = parsed
+        .host_str()
+        .unwrap_or_default()
+        .trim_matches(['[', ']']);
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        Ok(std::net::IpAddr::V6(v6)) => {
+            let first = v6.segments()[0];
+            v6.is_loopback() || (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
+        }
+        Err(_) => false,
+    }
 }
 
 async fn serve<T, E, A>(

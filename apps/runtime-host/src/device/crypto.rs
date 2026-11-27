@@ -173,6 +173,22 @@ pub(super) fn auth_transcript(
     ])
 }
 
+pub(super) fn validate_ed25519_public_key(public_key: &[u8]) -> Result<(), CryptoError> {
+    let public_key: [u8; 32] = public_key
+        .try_into()
+        .map_err(|_| CryptoError::InvalidPublicKey)?;
+    VerifyingKey::from_bytes(&public_key).map_err(|_| CryptoError::InvalidPublicKey)?;
+    Ok(())
+}
+
+pub(super) fn public_key_fingerprint(public_key: &[u8]) -> String {
+    let digest = Sha256::digest(public_key);
+    format!(
+        "{:02X}{:02X}-{:02X}{:02X}",
+        digest[0], digest[1], digest[2], digest[3]
+    )
+}
+
 pub(super) fn verify_ed25519(
     public_key: &[u8],
     transcript: &[u8],

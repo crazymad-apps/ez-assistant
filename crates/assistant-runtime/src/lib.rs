@@ -100,9 +100,10 @@ pub use mcp::{
     McpConnectionFactory, McpConnectionFailureKind, McpConnectionFuture, McpConnectionOptions,
     McpImageMaterializationFailure, McpImageMaterializationFuture, McpImageMaterializer,
     McpRawCallResult, McpRawContent, McpSecret, McpServerConfig, McpServerTransportConfig,
-    McpToolDefinition, McpToolPage, McpUiResourcePage,
+    McpToolDefinition, McpToolPage, McpUiResourcePage, device_mcp_server_key,
 };
 pub use memory::{
+    ControllerPromptMutation, ControllerPromptSnapshot, MAX_CONTROLLER_PROMPT_BYTES,
     MemoryContextSnapshot, PersonaMutation, PersonaSnapshot, PinnedMemoryCreatedBy,
     PinnedMemoryMutation, PinnedMemoryMutationResult, RuntimePinnedMemoryStore, StoredPinnedMemory,
     pinned_memory_limits,
@@ -113,7 +114,8 @@ pub use permission::{
     PermissionDocumentError, PermissionEffect, PermissionFileLoad, PermissionFileOperation,
     PermissionFileRevision, PermissionFileScope, PermissionFileStore, PermissionMatcher,
     PermissionProcessMode, PermissionRule, PermissionRuleSource, PermissionSourceDiagnostic,
-    PermissionStoreFuture, ShellPermissionMatcher, file_matcher_matches, resolve_permission_path,
+    PermissionStoreFuture, ShellPermissionMatcher, StoredPermissionGrant, file_matcher_matches,
+    resolve_permission_path,
 };
 pub use runtime::{
     AssistantRuntime, BackgroundRunExit, BackgroundRunOrigin, BackgroundShellStart,

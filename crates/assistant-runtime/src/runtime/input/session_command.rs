@@ -164,6 +164,7 @@ pub(super) async fn execute_session_command(
                 context.mcp_config_store.as_ref(),
                 context.plugin.as_ref(),
                 context.mcp_management.builtin_definitions(),
+                context.mcp_management.device_definitions(),
                 context.mcp_registry.as_ref(),
                 context.config_registry.as_ref(),
                 context.approval_registry.as_ref(),

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type {
+  ControllerPromptSnapshot,
   MemoryCapabilities,
   PinnedMemoryCollectionSnapshot,
   PersonaSnapshot,
@@ -9,7 +10,7 @@ import type { RuntimeClient } from "../../src/runtime-client/RuntimeClient";
 import { MemorySettingsStore } from "../../src/stores/MemorySettingsStore";
 
 describe("MemorySettingsStore", () => {
-  it("loads Persona and Pinned Memory as separate global resources", async () => {
+  it("loads Persona, Controller prompt, and Pinned Memory as separate resources", async () => {
     const commands: RuntimeCommand[] = [];
     const client = clientWithCommand(async (command) => {
       commands.push(command);
@@ -17,6 +18,12 @@ describe("MemorySettingsStore", () => {
         return {
           type: command.type,
           payload: { persona: persona(), capabilities },
+        };
+      }
+      if (command.type === "get_controller_prompt") {
+        return {
+          type: command.type,
+          payload: { prompt: controllerPrompt(), max_bytes: 16_384 },
         };
       }
       if (command.type === "list_pinned_memories") {
@@ -33,11 +40,45 @@ describe("MemorySettingsStore", () => {
 
     expect(commands.map((command) => command.type)).toEqual([
       "get_persona",
+      "get_controller_prompt",
       "list_pinned_memories",
     ]);
     expect(store.persona?.content).toBe("结论优先");
+    expect(store.controller_prompt?.content).toBe("简短口语回复");
+    expect(store.controller_prompt_max_bytes).toBe(16_384);
     expect(store.collection?.items[0]?.content).toBe("测试后再提交");
     expect(store.capabilities).toEqual(capabilities);
+  });
+
+  it("saves Controller prompt with revision CAS and surfaces conflicts", async () => {
+    const command = vi
+      .fn()
+      .mockResolvedValueOnce({
+        type: "set_controller_prompt",
+        payload: {
+          applied: true,
+          prompt: controllerPrompt({ revision: 3, enabled: true, content: "一句讲完" }),
+        },
+      })
+      .mockResolvedValueOnce({
+        type: "set_controller_prompt",
+        payload: {
+          applied: false,
+          prompt: controllerPrompt({ revision: 4, enabled: false, content: "远端提示词" }),
+        },
+      });
+    const store = memoryStore(clientWithCommand(command));
+    store.controller_prompt = controllerPrompt();
+
+    const saved = await store.saveControllerPrompt(true, "一句讲完");
+    expect(saved).toBe(true);
+    expect(store.controller_prompt?.revision).toBe(3);
+    expect(store.notice_message).toContain("下一轮对话立即生效");
+
+    const conflicted = await store.saveControllerPrompt(true, "冲突草稿");
+    expect(conflicted).toBe(false);
+    expect(store.controller_prompt?.content).toBe("远端提示词");
+    expect(store.conflict_message).toContain("草稿仍保留");
   });
 
   it("uses Persona revision CAS and keeps conflicts visible", async () => {
@@ -147,6 +188,18 @@ function persona(overrides: Partial<PersonaSnapshot> = {}): PersonaSnapshot {
     enabled: true,
     content: "结论优先",
     revision: 3,
+    updated_at_ms: 1,
+    ...overrides,
+  };
+}
+
+function controllerPrompt(
+  overrides: Partial<ControllerPromptSnapshot> = {},
+): ControllerPromptSnapshot {
+  return {
+    enabled: true,
+    content: "简短口语回复",
+    revision: 2,
     updated_at_ms: 1,
     ...overrides,
   };

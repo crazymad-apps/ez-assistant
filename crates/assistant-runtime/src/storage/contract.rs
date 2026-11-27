@@ -231,6 +231,8 @@ pub trait RuntimeStore: Send + Sync {
     ) -> StoreFuture<'_, ()>;
     /// 全局生成参数换代时，原子更新全部 Session 的远端续接周期，不改写本地正文。
     fn invalidate_server_history_bindings(&self, key: String) -> StoreFuture<'_, ()>;
+    /// 助理会话（Controller）提示词更新时，仅使 Controller Session 的远端续接周期失效。
+    fn invalidate_controller_server_history_bindings(&self, key: String) -> StoreFuture<'_, ()>;
     fn get_model_fixed_config(
         &self,
         selection: assistant_protocol::ModelSelection,
@@ -363,6 +365,37 @@ pub trait RuntimeStore: Send + Sync {
 
     /// 使用修订号 CAS 更新单例 Persona。
     fn set_persona(&self, mutation: PersonaMutation) -> StoreFuture<'_, PersonaSnapshot>;
+
+    /// 读取单例助理会话（Controller）系统提示词的当前权威投影。
+    fn get_controller_prompt(&self) -> StoreFuture<'_, crate::ControllerPromptSnapshot>;
+
+    /// 使用修订号 CAS 更新单例助理会话（Controller）系统提示词。
+    fn set_controller_prompt(
+        &self,
+        mutation: crate::ControllerPromptMutation,
+    ) -> StoreFuture<'_, crate::ControllerPromptSnapshot>;
+
+    /// 查询后台预授权条目。
+    fn list_permission_grants(
+        &self,
+        include_exhausted: bool,
+    ) -> StoreFuture<'_, Vec<crate::StoredPermissionGrant>>;
+
+    /// 持久化一条新的后台预授权条目。
+    fn create_permission_grant(
+        &self,
+        grant: crate::StoredPermissionGrant,
+    ) -> StoreFuture<'_, crate::StoredPermissionGrant>;
+
+    /// 原子检查并扣减一条预授权的剩余次数；未命中或已失效返回 `Ok(None)`。
+    fn consume_permission_grant(
+        &self,
+        grant_id: &str,
+        consumed_at_ms: i64,
+    ) -> StoreFuture<'_, Option<crate::StoredPermissionGrant>>;
+
+    /// 撤销并删除一条预授权条目。
+    fn revoke_permission_grant(&self, grant_id: &str) -> StoreFuture<'_, bool>;
 
     /// 读取当前全部 Pinned Memory；正式分页产品投影在后续里程碑提供。
     fn list_pinned_memories(&self) -> StoreFuture<'_, Vec<StoredPinnedMemory>>;

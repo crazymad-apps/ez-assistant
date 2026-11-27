@@ -312,6 +312,7 @@ impl AssistantRuntime {
             RunAuthorizationInput {
                 input_id: input_id.clone(),
                 permission_coordinator: self.permission_coordinator.clone(),
+                permission_grants: self.permission_grants.clone(),
                 approval_registry: self.approval_registry.clone(),
                 variant: request.variant,
                 run_id: run_id.clone(),
@@ -328,6 +329,7 @@ impl AssistantRuntime {
                     mcp_selection: input.mcp_selection.clone(),
                 }),
                 input_origin: InputOrigin::User,
+                channel_source: None,
                 cross_session: None,
             },
             None,

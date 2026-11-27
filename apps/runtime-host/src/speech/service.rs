@@ -3,8 +3,13 @@
 use std::{future::Future, panic::AssertUnwindSafe, path::PathBuf, sync::Arc, time::Duration};
 
 use crate::media_diagnostics::{correlation_id, timestamp_ms};
-use assistant_protocol::{DeviceSpeechServicesSnapshot, SpeechServiceStatusSnapshot};
+use assistant_protocol::{
+    DeviceSpeechServicesSnapshot, RuntimeErrorCode, RuntimeErrorInfo, SpeechConfigurationSnapshot,
+    SpeechServiceStatusSnapshot, TestAsrConfigurationRequest, TestAsrConfigurationResult,
+    TestTtsConfigurationRequest, TestTtsConfigurationResult, UpdateSpeechConfigurationRequest,
+};
 use assistant_runtime::RuntimeConfigSource;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use futures_util::FutureExt;
 use thiserror::Error;
 use tokio::{
@@ -14,8 +19,11 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    config,
-    provider::{AsrProvider, AsrRequest, SpeechProviderError, TtsProvider},
+    config::{self, SpeechConfigError},
+    provider::{
+        AsrProvider, AsrRequest, SpeechProviderError, TtsProvider, pcm16_mono_wav,
+        wav_bytes_to_pcm16_16k_mono,
+    },
 };
 
 const COMMAND_CAPACITY: usize = 32;
@@ -23,7 +31,9 @@ const COMMAND_CAPACITY: usize = 32;
 const MAX_ASR_REQUESTS: usize = 4;
 const MAX_TTS_REQUESTS: usize = 2;
 const MAX_ASR_PCM_BYTES: usize = 60 * 16_000 * 2;
+const MAX_ASR_TEST_WAV_BYTES: usize = 512 * 1024;
 const MAX_TTS_TEXT_CHARS: usize = 120;
+const DEFAULT_TTS_TEST_TEXT: &str = "你好，这是语音合成测试。";
 
 /// 既有 Host 语音额度；各用户 Provider 独立，准入仍共用原来的总量。
 #[derive(Clone)]
@@ -80,6 +90,21 @@ struct SynthesizeRequest {
 enum SpeechCommand {
     Reload {
         response: oneshot::Sender<()>,
+    },
+    GetConfiguration {
+        response: oneshot::Sender<Result<SpeechConfigurationSnapshot, SpeechConfigError>>,
+    },
+    UpdateConfiguration {
+        request: UpdateSpeechConfigurationRequest,
+        response: oneshot::Sender<Result<SpeechConfigurationSnapshot, SpeechConfigError>>,
+    },
+    TestAsr {
+        request: TestAsrConfigurationRequest,
+        response: oneshot::Sender<Result<TestAsrConfigurationResult, RuntimeErrorInfo>>,
+    },
+    TestTts {
+        request: TestTtsConfigurationRequest,
+        response: oneshot::Sender<Result<TestTtsConfigurationResult, RuntimeErrorInfo>>,
     },
     Recognize {
         request: RecognizeRequest,
@@ -203,6 +228,7 @@ impl SpeechService {
         self.status.send_replace(compiled.status);
         let mut recognition = JoinSet::<RequestCompletion<String, dyn AsrProvider>>::new();
         let mut synthesis = JoinSet::<RequestCompletion<Arc<[u8]>, dyn TtsProvider>>::new();
+        let mut config_tests = JoinSet::<()>::new();
         loop {
             tokio::select! {
                 biased;
@@ -221,6 +247,7 @@ impl SpeechService {
                         None => {},
                     }
                 }
+                _ = config_tests.join_next(), if !config_tests.is_empty() => {}
                 command = self.commands.recv() => {
                     let Some(command) = command else { break };
                     match command {
@@ -232,6 +259,48 @@ impl SpeechService {
                             };
                             self.status.send_replace(compiled.status);
                             let _ = response.send(());
+                        }
+                        SpeechCommand::GetConfiguration { response } => {
+                            let current_status = *self.status.borrow();
+                            let result = tokio::select! {
+                                biased;
+                                () = shutdown.cancelled() => break,
+                                result = config::read_configuration(self.source.as_ref(), current_status) => result,
+                            };
+                            let _ = response.send(result);
+                        }
+                        SpeechCommand::UpdateConfiguration { request, response } => {
+                            let result = tokio::select! {
+                                biased;
+                                () = shutdown.cancelled() => break,
+                                result = config::update_configuration(self.source.as_ref(), request) => result,
+                            };
+                            match result {
+                                Ok(outcome) => {
+                                    compiled = outcome.compiled;
+                                    self.status.send_replace(compiled.status);
+                                    let _ = response.send(Ok(outcome.configuration));
+                                }
+                                Err(err) => {
+                                    let _ = response.send(Err(err));
+                                }
+                            }
+                        }
+                        SpeechCommand::TestAsr { request, response } => {
+                            let source = self.source.clone();
+                            let test_shutdown = shutdown.child_token();
+                            config_tests.spawn(async move {
+                                let result = run_test_asr(source.as_ref(), request, test_shutdown).await;
+                                let _ = response.send(result);
+                            });
+                        }
+                        SpeechCommand::TestTts { request, response } => {
+                            let source = self.source.clone();
+                            let test_shutdown = shutdown.child_token();
+                            config_tests.spawn(async move {
+                                let result = run_test_tts(source.as_ref(), request, test_shutdown).await;
+                                let _ = response.send(result);
+                            });
                         }
                         SpeechCommand::Recognize { request, mut response, permit } => {
                             let request_id = correlation_id(&request.debug_name);
@@ -276,6 +345,16 @@ impl SpeechService {
                 SpeechCommand::Reload { response } => {
                     let _ = response.send(());
                 }
+                SpeechCommand::GetConfiguration { response }
+                | SpeechCommand::UpdateConfiguration { response, .. } => {
+                    let _ = response.send(Err(SpeechConfigError::Unavailable));
+                }
+                SpeechCommand::TestAsr { response, .. } => {
+                    let _ = response.send(Err(SpeechConfigError::Unavailable.to_protocol_info()));
+                }
+                SpeechCommand::TestTts { response, .. } => {
+                    let _ = response.send(Err(SpeechConfigError::Unavailable.to_protocol_info()));
+                }
                 SpeechCommand::Recognize { response, .. } => {
                     let _ = response.send(Err(SpeechServiceError::Cancelled));
                 }
@@ -295,6 +374,7 @@ impl SpeechService {
                 completed.finish(&None, &self.status, |status| &mut status.tts);
             }
         }
+        while config_tests.join_next().await.is_some() {}
         Ok(())
     }
 }
@@ -333,6 +413,72 @@ impl SpeechServiceHandle {
         {
             let _ = response_rx.await;
         }
+    }
+
+    pub(crate) async fn get_configuration(
+        &self,
+    ) -> Result<SpeechConfigurationSnapshot, SpeechConfigError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.commands
+            .send(SpeechCommand::GetConfiguration {
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| SpeechConfigError::Unavailable)?;
+        response_rx
+            .await
+            .unwrap_or(Err(SpeechConfigError::Unavailable))
+    }
+
+    pub(crate) async fn update_configuration(
+        &self,
+        request: UpdateSpeechConfigurationRequest,
+    ) -> Result<SpeechConfigurationSnapshot, SpeechConfigError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.commands
+            .send(SpeechCommand::UpdateConfiguration {
+                request,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| SpeechConfigError::Unavailable)?;
+        response_rx
+            .await
+            .unwrap_or(Err(SpeechConfigError::Unavailable))
+    }
+
+    pub(crate) async fn test_asr(
+        &self,
+        request: TestAsrConfigurationRequest,
+    ) -> Result<TestAsrConfigurationResult, RuntimeErrorInfo> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.commands
+            .send(SpeechCommand::TestAsr {
+                request,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| SpeechConfigError::Unavailable.to_protocol_info())?;
+        response_rx
+            .await
+            .unwrap_or_else(|_| Err(SpeechConfigError::Unavailable.to_protocol_info()))
+    }
+
+    pub(crate) async fn test_tts(
+        &self,
+        request: TestTtsConfigurationRequest,
+    ) -> Result<TestTtsConfigurationResult, RuntimeErrorInfo> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.commands
+            .send(SpeechCommand::TestTts {
+                request,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| SpeechConfigError::Unavailable.to_protocol_info())?;
+        response_rx
+            .await
+            .unwrap_or_else(|_| Err(SpeechConfigError::Unavailable.to_protocol_info()))
     }
 
     pub(crate) async fn recognize(
@@ -478,6 +624,157 @@ async fn synthesize(
         save_debug_audio(&directory, &request.debug_name, &result.pcm_s16le, "tts").await;
     }
     Ok(result.pcm_s16le)
+}
+
+async fn run_test_asr(
+    source: &dyn RuntimeConfigSource,
+    request: TestAsrConfigurationRequest,
+    shutdown: CancellationToken,
+) -> Result<TestAsrConfigurationResult, RuntimeErrorInfo> {
+    let encoded = request.audio_wav_base64.trim();
+    if encoded.is_empty() || encoded.len() > MAX_ASR_TEST_WAV_BYTES * 2 {
+        return Err(RuntimeErrorInfo::new(
+            RuntimeErrorCode::InvalidRequest,
+            "请先录制或上传待识别的 WAV 测试音频（上限 512 KB）。",
+        ));
+    }
+    let wav_bytes = BASE64.decode(encoded).map_err(|_| {
+        RuntimeErrorInfo::new(
+            RuntimeErrorCode::InvalidRequest,
+            "测试音频 Base64 编码无效。",
+        )
+    })?;
+    if wav_bytes.len() > MAX_ASR_TEST_WAV_BYTES {
+        return Err(RuntimeErrorInfo::new(
+            RuntimeErrorCode::ResourceTooLarge,
+            "测试音频超过 512 KB 上限，请缩短录音或换用较短的 WAV 文件。",
+        ));
+    }
+    let pcm = wav_bytes_to_pcm16_16k_mono(&wav_bytes).map_err(|_| {
+        RuntimeErrorInfo::new(
+            RuntimeErrorCode::InvalidRequest,
+            "仅支持标准 16-bit PCM WAV 音频文件。",
+        )
+    })?;
+    if pcm.len() > MAX_ASR_PCM_BYTES {
+        return Err(RuntimeErrorInfo::new(
+            RuntimeErrorCode::ResourceTooLarge,
+            "测试音频时长超过 60 秒上限。",
+        ));
+    }
+
+    let (provider, timeout) = config::compile_asr_draft(source, &request.asr)
+        .await
+        .map_err(|err| err.to_protocol_info())?;
+    let started_at = std::time::Instant::now();
+    let provider_request = AsrRequest {
+        pcm_s16le: Arc::from(pcm),
+        cancellation: shutdown.clone(),
+    };
+    let result = tokio::select! {
+        biased;
+        () = shutdown.cancelled() => Err(SpeechProviderError::Cancelled),
+        () = tokio::time::sleep(timeout) => Err(SpeechProviderError::Timeout),
+        res = AssertUnwindSafe(provider.recognize(&provider_request)).catch_unwind() => {
+            res.unwrap_or(Err(SpeechProviderError::ProviderFailed))
+        }
+    };
+    let ok = result.map_err(|err| test_provider_error_to_info(err, false))?;
+    Ok(TestAsrConfigurationResult {
+        transcript: ok.transcript,
+        elapsed_ms: u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+    })
+}
+
+async fn run_test_tts(
+    source: &dyn RuntimeConfigSource,
+    request: TestTtsConfigurationRequest,
+    shutdown: CancellationToken,
+) -> Result<TestTtsConfigurationResult, RuntimeErrorInfo> {
+    let text = request.text.trim();
+    let text = if text.is_empty() {
+        DEFAULT_TTS_TEST_TEXT
+    } else {
+        text
+    };
+    if text.chars().count() > MAX_TTS_TEXT_CHARS {
+        return Err(RuntimeErrorInfo::new(
+            RuntimeErrorCode::InvalidRequest,
+            "试听文本不能超过 120 个字符。",
+        ));
+    }
+    let (provider, timeout) = config::compile_tts_draft(
+        source,
+        &request.tts,
+        request
+            .fallback_asr_credential
+            .as_ref()
+            .map(|secret| secret.expose()),
+    )
+    .await
+    .map_err(|err| err.to_protocol_info())?;
+    let started_at = std::time::Instant::now();
+    let result = tokio::select! {
+        biased;
+        () = shutdown.cancelled() => Err(SpeechProviderError::Cancelled),
+        () = tokio::time::sleep(timeout) => Err(SpeechProviderError::Timeout),
+        res = AssertUnwindSafe(provider.synthesize(text, shutdown.clone())).catch_unwind() => {
+            res.unwrap_or(Err(SpeechProviderError::ProviderFailed))
+        }
+    };
+    let ok = result.map_err(|err| test_provider_error_to_info(err, true))?;
+    let wav =
+        pcm16_mono_wav(&ok.pcm_s16le).map_err(|err| test_provider_error_to_info(err, true))?;
+    let duration_ms = ((ok.pcm_s16le.len() as u64) * 1000) / 32_000;
+    Ok(TestTtsConfigurationResult {
+        audio_wav_base64: BASE64.encode(wav),
+        elapsed_ms: u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+        duration_ms,
+    })
+}
+
+fn test_provider_error_to_info(error: SpeechProviderError, is_tts: bool) -> RuntimeErrorInfo {
+    match error {
+        SpeechProviderError::Unavailable => RuntimeErrorInfo::new(
+            RuntimeErrorCode::ConfigurationUnavailable,
+            "语音测试配置不可用，请检查服务商与接口地址。",
+        ),
+        SpeechProviderError::Authentication => RuntimeErrorInfo::new(
+            RuntimeErrorCode::InvalidRequest,
+            "API Key 鉴权失败（401/403），请检查密钥是否正确或是否已开通该语音模型权限。",
+        ),
+        SpeechProviderError::Timeout => RuntimeErrorInfo::new(
+            RuntimeErrorCode::Timeout,
+            "语音服务请求超时，请检查网络连通性或适当增大超时时间。",
+        ),
+        SpeechProviderError::InvalidTranscript => RuntimeErrorInfo::new(
+            RuntimeErrorCode::InvalidRequest,
+            "未识别到有效语音内容，请尝试靠近麦克风多说几个字。",
+        ),
+        SpeechProviderError::InvalidPcm => RuntimeErrorInfo::new(
+            RuntimeErrorCode::InvalidRequest,
+            if is_tts {
+                "服务商返回的音频数据不完整，无法封装为 WAV。"
+            } else {
+                "测试音频 PCM 格式无效。"
+            },
+        ),
+        SpeechProviderError::InvalidAudio => RuntimeErrorInfo::new(
+            RuntimeErrorCode::InvalidRequest,
+            "服务商返回的音频格式无效，请确认模型与音色是否匹配。",
+        ),
+        SpeechProviderError::OutputTooLarge => RuntimeErrorInfo::new(
+            RuntimeErrorCode::ResourceTooLarge,
+            "测试音频输出超出大小限制，请缩短测试文本。",
+        ),
+        SpeechProviderError::Cancelled => {
+            RuntimeErrorInfo::new(RuntimeErrorCode::Cancelled, "语音测试已取消。")
+        }
+        SpeechProviderError::ProviderFailed => RuntimeErrorInfo::new(
+            RuntimeErrorCode::InvalidRequest,
+            "语音服务商返回错误，请确认接口地址、模型名称和音色 ID 是否匹配。",
+        ),
+    }
 }
 
 async fn save_debug_audio(directory: &std::path::Path, name: &str, pcm: &[u8], suffix: &str) {

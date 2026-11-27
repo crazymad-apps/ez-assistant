@@ -15,19 +15,19 @@ use agent_tools::{
 use assistant_protocol::{AgentVariant, ApprovalDecision, ApprovalId, ApprovalMode};
 
 use super::{
-    PermissionCoordinator, PermissionFileScope,
+    PermissionCoordinator, PermissionFileScope, PermissionGrantCoordinator, PermissionPaths,
     matcher::{
         InvocationFactKind, fact_kind, file_matcher_matches_with_paths, matches_rule_with_paths,
     },
 };
 use crate::{
-    RuntimeError, RuntimeResult, SessionExecutionEnvironment,
+    InputChannelSource, RuntimeError, RuntimeResult, SessionExecutionEnvironment, SessionRole,
     goal::{GoalRunSignalLatch, GoalSignalAuthorizationFacts, UPDATE_GOAL_TOOL_NAME},
     mcp::{
         McpAuthorizationFacts, McpDiscoveryAuthorizationFacts, McpRegistry,
         failure_code as mcp_failure_code,
     },
-    runtime::{SpeakAuthorizationFacts, controller::ControllerAuthorizationFacts},
+    runtime::{SpeakAuthorizationFacts, controller::ControllerAuthorizationFacts, now_ms},
     session::SessionController,
     skill::LoadSkillAuthorizationFacts,
     work_plan::WorkPlanAuthorizationFacts,
@@ -90,9 +90,12 @@ pub(crate) trait PermissionApprovalResolver: Send + Sync {
 
 pub(crate) struct RuntimeToolAuthorizer {
     variant: AgentVariant,
+    session_role: SessionRole,
+    channel_source: Option<InputChannelSource>,
     session: Arc<SessionController>,
     permission_scopes: Vec<PermissionFileScope>,
     permission_coordinator: Arc<PermissionCoordinator>,
+    permission_grants: Option<Arc<PermissionGrantCoordinator>>,
     infrastructure_policies: Vec<Arc<dyn ToolPolicy>>,
     default_rules: Option<Arc<dyn super::PermissionRuleSource>>,
     workspace_roots: Vec<AbsolutePath>,
@@ -105,6 +108,8 @@ pub(crate) struct RuntimeToolAuthorizer {
 #[derive(Clone)]
 pub(crate) struct RunAuthorizationScope {
     pub(crate) variant: AgentVariant,
+    pub(crate) session_role: SessionRole,
+    pub(crate) channel_source: Option<InputChannelSource>,
 }
 
 impl RuntimeToolAuthorizer {
@@ -131,9 +136,12 @@ impl RuntimeToolAuthorizer {
         };
         Ok(Self {
             variant: scope.variant,
+            session_role: scope.session_role,
+            channel_source: scope.channel_source,
             session,
             permission_scopes,
             permission_coordinator,
+            permission_grants: None,
             infrastructure_policies,
             default_rules: None,
             workspace_roots,
@@ -142,6 +150,14 @@ impl RuntimeToolAuthorizer {
             goal_signal_latch: None,
             mcp_registry: None,
         })
+    }
+
+    pub(crate) fn with_permission_grants(
+        mut self,
+        grants: Option<Arc<PermissionGrantCoordinator>>,
+    ) -> Self {
+        self.permission_grants = grants;
+        self
     }
 
     pub(crate) fn with_default_rules(
@@ -417,7 +433,12 @@ impl RuntimeToolAuthorizer {
                 return deny("tool call is denied by a permission rule");
             }
             if path_effects.iter().any(|(_, asked, _)| *asked) {
-                return self.resolve_with_current_mode(invocation, batch).await;
+                let Some(approval_mode) = self.current_approval_mode() else {
+                    return deny("session approval mode is unavailable");
+                };
+                return self
+                    .resolve_or_consume_grant(invocation, batch, &paths, approval_mode)
+                    .await;
             }
             if path_effects.iter().all(|(_, _, allowed)| *allowed) {
                 return ToolAuthorization::Allow;
@@ -425,7 +446,7 @@ impl RuntimeToolAuthorizer {
             return match self.current_approval_mode() {
                 None => deny("session approval mode is unavailable"),
                 Some(ApprovalMode::Ask) => {
-                    self.resolve_and_recheck(invocation, batch, ApprovalMode::Ask)
+                    self.resolve_or_consume_grant(invocation, batch, &paths, ApprovalMode::Ask)
                         .await
                 }
                 Some(ApprovalMode::Auto) => ToolAuthorization::Allow,
@@ -452,7 +473,12 @@ impl RuntimeToolAuthorizer {
             return deny("tool call is denied by a permission rule");
         }
         if ask_rule {
-            return self.resolve_with_current_mode(invocation, batch).await;
+            let Some(approval_mode) = self.current_approval_mode() else {
+                return deny("session approval mode is unavailable");
+            };
+            return self
+                .resolve_or_consume_grant(invocation, batch, &paths, approval_mode)
+                .await;
         }
         if allow_rule {
             return ToolAuthorization::Allow;
@@ -460,7 +486,7 @@ impl RuntimeToolAuthorizer {
         match self.current_approval_mode() {
             None => deny("session approval mode is unavailable"),
             Some(ApprovalMode::Ask) => {
-                self.resolve_and_recheck(invocation, batch, ApprovalMode::Ask)
+                self.resolve_or_consume_grant(invocation, batch, &paths, ApprovalMode::Ask)
                     .await
             }
             Some(ApprovalMode::Auto) => ToolAuthorization::Allow,
@@ -471,15 +497,34 @@ impl RuntimeToolAuthorizer {
         self.session.current_approval_mode().ok()
     }
 
-    async fn resolve_with_current_mode(
+    async fn resolve_or_consume_grant(
         &self,
         invocation: &ResolvedToolInvocation,
         batch: &ResolvedToolBatch,
+        paths: &PermissionPaths,
+        effective_approval_mode: ApprovalMode,
     ) -> ToolAuthorization {
-        let Some(approval_mode) = self.current_approval_mode() else {
-            return deny("session approval mode is unavailable");
-        };
-        self.resolve_and_recheck(invocation, batch, approval_mode)
+        if self.session_role == SessionRole::Controller
+            && let Some(grants) = &self.permission_grants
+        {
+            let Ok(timestamp_ms) = now_ms() else {
+                return deny("system clock is unavailable");
+            };
+            match grants
+                .try_consume_controller_grant(self.variant, invocation, paths, timestamp_ms)
+                .await
+            {
+                Ok(Some(_)) => return ToolAuthorization::Allow,
+                Ok(None) => {}
+                Err(_) => return deny("controller permission grant store is unavailable"),
+            }
+        }
+        if matches!(self.channel_source, Some(InputChannelSource::Device(_))) {
+            return deny(
+                "tool call is not authorized for voice/device controller session; ask the user to add a controller permission rule or one-time pre-authorization in Settings -> Permissions -> Controller",
+            );
+        }
+        self.resolve_and_recheck(invocation, batch, effective_approval_mode)
             .await
     }
 
@@ -883,7 +928,11 @@ mod tests {
         approval_resolver: Arc<dyn PermissionApprovalResolver>,
     ) -> RuntimeResult<RuntimeToolAuthorizer> {
         RuntimeToolAuthorizer::new(
-            RunAuthorizationScope { variant },
+            RunAuthorizationScope {
+                variant,
+                session_role: crate::SessionRole::Standard,
+                channel_source: None,
+            },
             Arc::new(SessionController::new(crate::StoredSession {
                 context_management_mode: None,
                 server_history_key: None,

@@ -6,13 +6,17 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::{AgentVariant, PermissionDiagnostic, PermissionFileStatus, SessionId, WorkspaceId};
+use crate::{
+    AgentVariant, PermissionDiagnostic, PermissionFileStatus, PermissionScope, SessionId,
+    WorkspaceId,
+};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum PermissionDocumentScope {
     Global,
+    Controller,
     Workspace { workspace_id: WorkspaceId },
     Session { session_id: SessionId },
 }
@@ -131,4 +135,69 @@ pub enum PermissionProcessModeDefinition {
     Managed,
     Detached,
     Background,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct PermissionGrantSnapshot {
+    pub grant_id: String,
+    pub scope: PermissionScope,
+    pub variants: Vec<AgentVariant>,
+    pub matcher: PermissionRuleMatcher,
+    pub max_uses: u32,
+    pub remaining_uses: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub expires_at_ms: Option<i64>,
+    pub note: String,
+    pub created_at_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub consumed_at_ms: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ListPermissionGrantsRequest {
+    #[serde(default)]
+    pub include_exhausted: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ListPermissionGrantsResult {
+    pub grants: Vec<PermissionGrantSnapshot>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct CreatePermissionGrantRequest {
+    pub scope: PermissionScope,
+    pub variants: Vec<AgentVariant>,
+    pub matcher: PermissionRuleMatcher,
+    pub max_uses: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub ttl_seconds: Option<u64>,
+    #[serde(default)]
+    pub note: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct CreatePermissionGrantResult {
+    pub grant: PermissionGrantSnapshot,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct RevokePermissionGrantRequest {
+    pub grant_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct RevokePermissionGrantResult {
+    pub revoked: bool,
+    pub grant_id: String,
 }

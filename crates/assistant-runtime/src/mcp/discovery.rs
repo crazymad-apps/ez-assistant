@@ -120,21 +120,52 @@ impl McpRunDisclosure {
     }
 }
 
-/// 首次默认目录只随新输入落账；手选披露属于每个显式输入，不从上一轮借用。
-pub(crate) fn needs_initial_disclosure(
+/// 按当前会话中最新目录摘要对比变化：新增、变更或清空都会在下一次输入增量刷新，
+/// 目录未变化时不重复写入以保留上游 Prompt 缓存；手选披露仍随每次显式输入写入。
+pub(crate) fn resolve_directory_disclosure(
     conversation: &agent_types::ConversationSnapshot,
-    context: &UserMessage,
-) -> bool {
-    let selected = context.parts.iter().any(|part| {
-        matches!(part,
-        agent_types::UserPart::InternalContext(part) if part.kind == "mcp_server_selection")
-    });
-    selected
-        || !conversation.messages.iter().any(|message| {
-            matches!(message,
-        agent_types::ConversationMessage::User(user) if user.parts.iter().any(|part| matches!(part,
-            agent_types::UserPart::InternalContext(part) if part.kind == "mcp_server_directory")))
-        })
+    context: Option<&UserMessage>,
+) -> RuntimeResult<Option<UserMessage>> {
+    match context {
+        Some(disclosure) => {
+            let selected = disclosure.parts.iter().any(|part| {
+                matches!(
+                    part,
+                    agent_types::UserPart::InternalContext(part)
+                        if part.kind == "mcp_server_selection"
+                )
+            });
+            if selected
+                || !InternalBoundaryCoordinator::context_is_current(conversation, disclosure)
+            {
+                Ok(Some(disclosure.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+        None => {
+            let had_directory = conversation.messages.iter().any(|message| {
+                matches!(
+                    message,
+                    agent_types::ConversationMessage::User(user)
+                        if user.parts.iter().any(|part| matches!(
+                            part,
+                            agent_types::UserPart::InternalContext(part)
+                                if part.kind == "mcp_server_directory"
+                        ))
+                )
+            });
+            if !had_directory {
+                return Ok(None);
+            }
+            let empty = empty_directory()?;
+            if InternalBoundaryCoordinator::context_is_current(conversation, &empty) {
+                Ok(None)
+            } else {
+                Ok(Some(empty))
+            }
+        }
+    }
 }
 
 /// 显式刷新即使没有可披露 Server，也记录空目录，不能让旧目录继续冒充当前事实。

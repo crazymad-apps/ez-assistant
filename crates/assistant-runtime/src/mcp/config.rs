@@ -514,6 +514,15 @@ pub(super) fn normalize_server(
     key: &McpServerKey,
     raw: Map<String, Value>,
 ) -> Result<NormalizedServer, McpDiagnosticSnapshot> {
+    normalize_server_for_source(key, raw, &assistant_protocol::McpServerSource::User)
+}
+
+pub(super) fn normalize_server_for_source(
+    key: &McpServerKey,
+    raw: Map<String, Value>,
+    source: &assistant_protocol::McpServerSource,
+) -> Result<NormalizedServer, McpDiagnosticSnapshot> {
+    let allow_private_http = matches!(source, assistant_protocol::McpServerSource::Device(_));
     let fingerprint = Sha256::digest(serde_json::to_vec(&raw).map_err(|_| {
         diagnostic(
             Some(key.clone()),
@@ -572,7 +581,7 @@ pub(super) fn normalize_server(
             }
         }
         (None, Some(Value::String(url))) => {
-            validate_http_url(url, key)?;
+            validate_http_url_for_source(url, key, allow_private_http)?;
             let headers = secret_map(&raw, "headers", false, key)?;
             McpServerTransportConfig::StreamableHttp {
                 url: url.clone(),
@@ -987,7 +996,11 @@ pub(super) fn secret_map(
     Ok(result)
 }
 
-fn validate_http_url(value: &str, key: &McpServerKey) -> Result<(), McpDiagnosticSnapshot> {
+fn validate_http_url_for_source(
+    value: &str,
+    key: &McpServerKey,
+    allow_private_http: bool,
+) -> Result<(), McpDiagnosticSnapshot> {
     let url = Url::parse(value).map_err(|_| field_diagnostic(key, "url", "MCP URL is invalid"))?;
     if url.username() != "" || url.password().is_some() || url.fragment().is_some() {
         return Err(field_diagnostic(
@@ -996,12 +1009,12 @@ fn validate_http_url(value: &str, key: &McpServerKey) -> Result<(), McpDiagnosti
             "MCP URL cannot contain userinfo or fragment",
         ));
     }
-    let host = url.host_str().unwrap_or_default();
-    let loopback = host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|address| address.is_loopback());
-    if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
+    let host = url.host_str().unwrap_or_default().trim_matches(['[', ']']);
+    let parsed_ip = host.parse::<std::net::IpAddr>().ok();
+    let loopback =
+        host.eq_ignore_ascii_case("localhost") || parsed_ip.is_some_and(|addr| addr.is_loopback());
+    let private_lan = allow_private_http && parsed_ip.is_some_and(is_private_or_link_local_ip);
+    if url.scheme() != "https" && !(url.scheme() == "http" && (loopback || private_lan)) {
         return Err(field_diagnostic(
             key,
             "url",
@@ -1009,6 +1022,16 @@ fn validate_http_url(value: &str, key: &McpServerKey) -> Result<(), McpDiagnosti
         ));
     }
     Ok(())
+}
+
+fn is_private_or_link_local_ip(addr: std::net::IpAddr) -> bool {
+    match addr {
+        std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => {
+            let first = v6.segments()[0];
+            v6.is_loopback() || (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
+        }
+    }
 }
 
 fn safe_url_summary(value: &str) -> String {
@@ -1540,5 +1563,53 @@ mod tests {
             None,
         );
         assert!(loopback.diagnostics.is_empty());
+
+        let ipv6_loopback = parse_document(
+            r#"{"mcpServers":{"local6":{"url":"http://[::1]:3000/mcp"}}}"#,
+            None,
+        );
+        assert!(ipv6_loopback.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn device_source_allows_private_http_only_and_rejects_public_http() {
+        let key = McpServerKey::new("device-esp").expect("key");
+        let device_source = assistant_protocol::McpServerSource::Device("device-abc".to_owned());
+        for url in [
+            "http://192.168.1.50:8080/mcp",
+            "http://10.0.0.5:8080/mcp",
+            "http://172.16.4.2:8080/mcp",
+            "http://169.254.1.9:8080/mcp",
+            "http://[fd00::1]:8080/mcp",
+            "http://[fe80::1]:8080/mcp",
+            "https://gateway.example.com/mcp",
+        ] {
+            let mut raw = Map::new();
+            raw.insert("url".to_owned(), Value::String(url.to_owned()));
+            assert!(
+                normalize_server_for_source(&key, raw.clone(), &device_source).is_ok(),
+                "device source should accept {url}"
+            );
+            if url.starts_with("http://") {
+                for other in [
+                    assistant_protocol::McpServerSource::User,
+                    assistant_protocol::McpServerSource::Plugin("p".to_owned()),
+                    assistant_protocol::McpServerSource::Builtin,
+                ] {
+                    assert!(
+                        normalize_server_for_source(&key, raw.clone(), &other).is_err(),
+                        "{other:?} must reject private http {url}"
+                    );
+                }
+            }
+        }
+        for rejected in ["http://1.1.1.1:8080/mcp", "http://example.com/mcp"] {
+            let mut raw = Map::new();
+            raw.insert("url".to_owned(), Value::String(rejected.to_owned()));
+            assert!(
+                normalize_server_for_source(&key, raw, &device_source).is_err(),
+                "device source must reject non-private http {rejected}"
+            );
+        }
     }
 }

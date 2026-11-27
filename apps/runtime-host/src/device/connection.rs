@@ -1,15 +1,16 @@
 //! 单条 WSS 连接的配对或已登记设备认证状态机。
 
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     future::Future,
+    net::IpAddr,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use assistant_protocol::{
-    CancelRunRequest, DeviceCapabilitiesSnapshot, DeviceId, OutputPreferenceSnapshot,
-    SubmitInputMode, SubmitInputRequest,
+    CancelRunRequest, DeviceCapabilitiesSnapshot, DeviceId, DevicePairingModeSnapshot,
+    OutputPreferenceSnapshot, SubmitInputMode, SubmitInputRequest,
 };
 use assistant_runtime::{
     DeviceInputSource, DeviceLifecycle, DevicePublicKey, InputChannelSource, InputModality,
@@ -17,7 +18,7 @@ use assistant_runtime::{
 };
 use axum::{
     extract::{
-        State, WebSocketUpgrade,
+        ConnectInfo, State, WebSocketUpgrade,
         ws::{CloseFrame, Message, WebSocket},
     },
     response::Response,
@@ -26,27 +27,31 @@ use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use tokio::{
     sync::mpsc,
-    time::{Instant as TokioInstant, MissedTickBehavior, interval, timeout, timeout_at},
+    time::{Instant as TokioInstant, MissedTickBehavior, interval, timeout},
 };
+use tokio_util::sync::CancellationToken;
 
 use super::{
     crypto::{
         HostPakeState, auth_transcript, decode_base64, encode_base64, pairing_associated_data,
-        pairing_bind_transcript, pairing_commit_transcript, random_stream_id, random_token,
-        verify_ed25519,
+        pairing_bind_transcript, pairing_commit_transcript, public_key_fingerprint,
+        random_stream_id, random_token, validate_ed25519_public_key, verify_ed25519,
     },
     gateway::{
-        ConnectionCommand, DeviceGatewayError, GatewayShared, PairingDecision,
-        PlaybackPreparationResult,
+        ConnectionCommand, DeviceGatewayError, GatewayShared, MAX_PAIRING_ATTEMPTS,
+        PairingDecision, PendingPairingRegistration, PlaybackPreparationResult,
     },
     protocol::{
         ApplicationPing, AuthChallenge, DeviceHello, DownlinkPcmFrame, Envelope, HelloAck,
         InputAccepted, InputSegmentAccepted, InteractionStateChanged, ListenCancel, ListenStart,
-        ListenStop, MessageReplayWindow, OutputPreferenceChanged, PairingBind, PairingBindAck,
-        PairingCommit, PairingComplete, PairingConfirmation, PairingHello, PairingPake,
-        PairingPending, PcmFormat, PlaybackCancel, PlaybackEnd, PlaybackStart, ProtocolError,
-        SetOutputPreference, TextInput, Transcript, UplinkPcmFrame, WireError,
-        preference_is_supported,
+        ListenStop, MessageReplayWindow, OutputPreferenceChanged, PCM_FRAME_KIND_RELAY_UPLINK,
+        PCM_FRAME_KIND_VOICE_UPLINK, PairingBind, PairingBindAck, PairingCommit, PairingComplete,
+        PairingConfirmation, PairingDirectChallenge, PairingDirectCommit, PairingHello,
+        PairingPake, PairingPending, PcmFormat, PlaybackCancel, PlaybackEnd, PlaybackStart,
+        ProtocolError, RELAY_DOWNLINK_CHUNK_BYTES, RelayDownlinkPcmFrame, RelayUplinkPcmFrame,
+        SetOutputPreference, SpeechAsrCancel, SpeechAsrResult, SpeechAsrStart, SpeechAsrStop,
+        SpeechStatusChanged, SpeechTtsEnd, SpeechTtsRequest, SpeechTtsStart, TextInput, Transcript,
+        UplinkPcmFrame, WireError, WirePairingMode, preference_is_supported,
     },
 };
 use crate::media_diagnostics::{correlation_id, timestamp_ms};
@@ -59,6 +64,10 @@ const PLAYBACK_FRAME_INTERVAL: Duration = Duration::from_millis(20);
 const VOICE_TURN_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const PLAYBACK_SEND_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_QUEUED_PLAYBACKS: usize = 20;
+const MAX_RELAY_REQUEST_ID_BYTES: usize = 128;
+const MAX_RELAY_IN_FLIGHT_ASR: usize = 4;
+const MAX_RELAY_IN_FLIGHT_TTS: usize = 4;
+const MAX_RELAY_TTS_TEXT_CHARS: usize = 120;
 const PAIRING_DECISION_QUEUE_CAPACITY: usize = 1;
 const MAX_DEVICE_NAME_BYTES: usize = 128;
 const MAX_CLIENT_VERSION_BYTES: usize = 128;
@@ -76,13 +85,15 @@ const HMAC_SHA256_BYTES: usize = 32;
 
 pub(super) async fn upgrade(
     State(shared): State<std::sync::Arc<GatewayShared>>,
+    ConnectInfo(peer_addr): ConnectInfo<std::net::SocketAddr>,
     upgrade: WebSocketUpgrade,
 ) -> Response {
+    let peer_ip = peer_addr.ip().to_canonical();
     upgrade
         .max_message_size(super::protocol::MAX_CONTROL_MESSAGE_BYTES)
         .max_frame_size(super::protocol::MAX_CONTROL_MESSAGE_BYTES)
         .on_upgrade(move |socket| async move {
-            if let Err(error) = serve(socket, shared).await {
+            if let Err(error) = serve(socket, shared, peer_ip).await {
                 match error {
                     ConnectionError::Closed => {}
                     other => eprintln!("runtime-host: device connection ended: {other}"),
@@ -94,6 +105,7 @@ pub(super) async fn upgrade(
 async fn serve(
     mut socket: WebSocket,
     shared: std::sync::Arc<GatewayShared>,
+    peer_ip: IpAddr,
 ) -> Result<(), ConnectionError> {
     let connection_id = random_token(16)?;
     let host_nonce = random_token(32)?;
@@ -112,11 +124,20 @@ async fn serve(
     match first.message_type.as_str() {
         "pairing_hello" => {
             let hello = first.payload::<PairingHello>()?;
-            pair_device(socket, shared, hello).await
+            pair_device(socket, shared, peer_ip, hello).await
         }
         "hello" => {
             let hello = first.payload::<DeviceHello>()?;
-            authenticate_device(socket, shared, replay, connection_id, host_nonce, hello).await
+            authenticate_device(
+                socket,
+                shared,
+                peer_ip,
+                replay,
+                connection_id,
+                host_nonce,
+                hello,
+            )
+            .await
         }
         _ => {
             send_wire_error(
@@ -131,9 +152,15 @@ async fn serve(
     }
 }
 
+enum ParsedPairingCredential {
+    Spake2 { device_share: Vec<u8> },
+    DirectConfirm { public_key: Vec<u8> },
+}
+
 async fn pair_device(
     mut socket: WebSocket,
     shared: std::sync::Arc<GatewayShared>,
+    peer_ip: IpAddr,
     hello: PairingHello,
 ) -> Result<(), ConnectionError> {
     validate_pairing_hello(&hello)?;
@@ -141,18 +168,90 @@ async fn pair_device(
         send_wire_error(&mut socket, "pairing_not_open", None, true).await?;
         return close(&mut socket, 1008, "pairing not open").await;
     }
-    let device_share = decode_base64(&hello.pake_share, SPAKE2_P256_SHARE_BYTES)?;
+
+    let (credential, mode, remaining_attempts, key_fingerprint) = match hello.pairing_mode {
+        WirePairingMode::Spake2 => {
+            if hello.public_key.is_some() {
+                return Err(ConnectionError::InvalidMessage);
+            }
+            let Some(share) = hello.pake_share.as_deref() else {
+                return Err(ConnectionError::InvalidMessage);
+            };
+            let device_share = decode_base64(share, SPAKE2_P256_SHARE_BYTES)?;
+            (
+                ParsedPairingCredential::Spake2 { device_share },
+                DevicePairingModeSnapshot::Spake2,
+                MAX_PAIRING_ATTEMPTS,
+                None,
+            )
+        }
+        WirePairingMode::DirectConfirm => {
+            if hello.pake_share.is_some() {
+                return Err(ConnectionError::InvalidMessage);
+            }
+            let Some(key_b64) = hello.public_key.as_deref() else {
+                return Err(ConnectionError::InvalidMessage);
+            };
+            let public_key = decode_base64(key_b64, ED25519_PUBLIC_KEY_BYTES)?;
+            validate_ed25519_public_key(&public_key)?;
+            let fingerprint = public_key_fingerprint(&public_key);
+            (
+                ParsedPairingCredential::DirectConfirm { public_key },
+                DevicePairingModeSnapshot::DirectConfirm,
+                1,
+                Some(fingerprint),
+            )
+        }
+    };
+
     let (decision_tx, mut decision_rx) = mpsc::channel(PAIRING_DECISION_QUEUE_CAPACITY);
-    let expires_at_ms = shared
-        .register_pending(
-            hello.pairing_request_id.clone(),
-            hello.display_name.clone(),
-            hello.capabilities,
-            decision_tx,
-        )
+    let (expires_at_ms, token) = shared
+        .register_pending(PendingPairingRegistration {
+            request_id: hello.pairing_request_id.clone(),
+            display_name: hello.display_name.clone(),
+            capabilities: hello.capabilities,
+            mode,
+            remaining_attempts,
+            peer_address: Some(peer_ip.to_string()),
+            key_fingerprint,
+            client_version: hello.client_version.clone(),
+            decision: decision_tx,
+        })
         .await?;
-    send_payload(
+
+    let mut replay = MessageReplayWindow::default();
+    let result = run_pairing_wait_and_complete(
         &mut socket,
+        &shared,
+        &hello,
+        credential,
+        &mut replay,
+        &mut decision_rx,
+        expires_at_ms,
+    )
+    .await;
+
+    // 保留 SPAKE2 输错配对码后的重试计数，其余退出路径（成功、拒绝、断连、免码结束、超时）均立刻清理候选。
+    let keep_spake2_retry = matches!(result, Err(ConnectionError::Spake2CodeMismatch));
+    if !keep_spake2_retry {
+        shared
+            .remove_pending_if_token(&hello.pairing_request_id, token)
+            .await;
+    }
+    if keep_spake2_retry { Ok(()) } else { result }
+}
+
+async fn run_pairing_wait_and_complete(
+    socket: &mut WebSocket,
+    shared: &GatewayShared,
+    hello: &PairingHello,
+    credential: ParsedPairingCredential,
+    replay: &mut MessageReplayWindow,
+    decision_rx: &mut mpsc::Receiver<PairingDecision>,
+    expires_at_ms: i64,
+) -> Result<(), ConnectionError> {
+    send_payload(
+        socket,
         "pairing_pending",
         &PairingPending {
             pairing_request_id: hello.pairing_request_id.clone(),
@@ -161,23 +260,99 @@ async fn pair_device(
     )
     .await?;
 
-    let deadline = tokio::time::Instant::now()
+    let deadline = TokioInstant::now()
         + Duration::from_millis(
             u64::try_from(expires_at_ms.saturating_sub(now_ms()?)).unwrap_or_default(),
         );
-    let decision = timeout_at(deadline, decision_rx.recv())
-        .await
-        .map_err(|_| ConnectionError::PairingExpired)?
-        .ok_or(ConnectionError::PairingCancelled)?;
-    complete_pairing(&mut socket, &shared, &hello, device_share, decision).await
+    let decision = wait_for_pairing_decision(socket, decision_rx, replay, deadline).await?;
+    match (credential, decision) {
+        (_, PairingDecision::Reject) => {
+            send_wire_error(socket, "pairing_rejected", None, false).await?;
+            close(socket, 1008, "pairing rejected").await
+        }
+        (
+            ParsedPairingCredential::Spake2 { device_share },
+            PairingDecision::ApproveSpake2 {
+                pairing_code,
+                display_name,
+            },
+        ) => {
+            complete_spake2_pairing(
+                socket,
+                shared,
+                hello,
+                device_share,
+                pairing_code,
+                display_name,
+            )
+            .await
+        }
+        (
+            ParsedPairingCredential::DirectConfirm { public_key },
+            PairingDecision::ApproveDirect { display_name },
+        ) => {
+            complete_direct_pairing(socket, shared, hello, &public_key, display_name, replay).await
+        }
+        _ => Err(ConnectionError::InvalidMessage),
+    }
 }
 
-async fn complete_pairing(
+async fn wait_for_pairing_decision(
+    socket: &mut WebSocket,
+    decision_rx: &mut mpsc::Receiver<PairingDecision>,
+    replay: &mut MessageReplayWindow,
+    deadline: TokioInstant,
+) -> Result<PairingDecision, ConnectionError> {
+    let sleep = tokio::time::sleep_until(deadline);
+    tokio::pin!(sleep);
+    loop {
+        tokio::select! {
+            decision = decision_rx.recv() => {
+                return decision.ok_or(ConnectionError::PairingCancelled);
+            }
+            message = socket.next() => {
+                let Some(message) = message else {
+                    return Err(ConnectionError::Closed);
+                };
+                match message? {
+                    Message::Close(_) => return Err(ConnectionError::Closed),
+                    Message::Ping(payload) => {
+                        socket.send(Message::Pong(payload)).await?;
+                    }
+                    Message::Pong(_) => {}
+                    Message::Text(text) => {
+                        let envelope = Envelope::decode(&text)?;
+                        replay.accept(&envelope.message_id)?;
+                        match envelope.message_type.as_str() {
+                            "ping" => {
+                                let ping = envelope.payload::<ApplicationPing>()?;
+                                send_payload(socket, "pong", &ping).await?;
+                            }
+                            "pong" => {
+                                let _ = envelope.payload::<ApplicationPing>()?;
+                            }
+                            _ => return Err(ConnectionError::InvalidMessage),
+                        }
+                    }
+                    Message::Binary(_) => return Err(ConnectionError::InvalidMessage),
+                }
+            }
+            () = &mut sleep => {
+                let _ = send_wire_error(socket, "pairing_expired", None, true).await;
+                let _ = close(socket, 1008, "pairing expired").await;
+                return Err(ConnectionError::PairingExpired);
+            }
+        }
+    }
+}
+
+async fn complete_spake2_pairing(
     socket: &mut WebSocket,
     shared: &GatewayShared,
     hello: &PairingHello,
     device_share: Vec<u8>,
-    decision: PairingDecision,
+    pairing_code: String,
+    decision_display_name: Option<String>,
 ) -> Result<(), ConnectionError> {
     let identity = shared.installation_identity().await?;
     let host_nonce = random_token(32)?;
@@ -190,7 +365,7 @@ async fn complete_pairing(
         hello.capabilities,
     );
     let (pake, host_share) = HostPakeState::start(
-        &decision.pairing_code,
+        &pairing_code,
         &hello.pairing_request_id,
         &identity.installation_id,
         &associated_data,
@@ -220,7 +395,8 @@ async fn complete_pairing(
     let confirmation_mac = decode_base64(&confirmation.confirmation_mac, HMAC_SHA256_BYTES)?;
     if keys.verify_device_confirmation(&confirmation_mac).is_err() {
         send_wire_error(socket, "pairing_failed", None, true).await?;
-        return close(socket, 1008, "pairing failed").await;
+        let _ = close(socket, 1008, "pairing failed").await;
+        return Err(ConnectionError::Spake2CodeMismatch);
     }
 
     let bind = receive_typed::<PairingBind>(socket, &mut replay, HANDSHAKE_TIMEOUT, "pairing_bind")
@@ -259,21 +435,99 @@ async fn complete_pairing(
     let binding_mac = decode_base64(&commit.binding_mac, HMAC_SHA256_BYTES)?;
     keys.verify_binding_mac(b"device-commit", &commit_transcript, &binding_mac)?;
     verify_ed25519(&public_key, &commit_transcript, &signature)?;
+    finalize_paired_device(
+        socket,
+        shared,
+        hello,
+        device_id,
+        &public_key,
+        decision_display_name,
+    )
+    .await
+}
+
+async fn complete_direct_pairing(
+    socket: &mut WebSocket,
+    shared: &GatewayShared,
+    hello: &PairingHello,
+    public_key: &[u8],
+    decision_display_name: Option<String>,
+    replay: &mut MessageReplayWindow,
+) -> Result<(), ConnectionError> {
+    let identity = shared.installation_identity().await?;
+    let host_nonce = random_token(32)?;
+    let device_id = DeviceId::new(format!("device-{}", random_token(18)?))
+        .map_err(|_| ConnectionError::InvalidMessage)?;
+    let associated_data = pairing_associated_data(
+        &hello.pairing_request_id,
+        &identity.installation_id,
+        &identity.certificate_fingerprint,
+        &hello.device_nonce,
+        &host_nonce,
+        hello.capabilities,
+    );
+    let bind_transcript = pairing_bind_transcript(&associated_data, public_key);
+    let commit_transcript = pairing_commit_transcript(&bind_transcript, device_id.as_str());
+
+    send_payload(
+        socket,
+        "pairing_direct_challenge",
+        &PairingDirectChallenge {
+            pairing_request_id: hello.pairing_request_id.clone(),
+            host_nonce,
+            device_id: device_id.to_string(),
+        },
+    )
+    .await?;
+
+    let commit = receive_typed::<PairingDirectCommit>(
+        socket,
+        replay,
+        HANDSHAKE_TIMEOUT,
+        "pairing_direct_commit",
+    )
+    .await?;
+    ensure_pairing_request(&commit.pairing_request_id, &hello.pairing_request_id)?;
+    if commit.device_id != device_id.as_str() {
+        return Err(ConnectionError::InvalidMessage);
+    }
+    let signature = decode_base64(&commit.signature, ED25519_SIGNATURE_BYTES)?;
+    if verify_ed25519(public_key, &commit_transcript, &signature).is_err() {
+        send_wire_error(socket, "pairing_failed", None, false).await?;
+        return close(socket, 1008, "pairing failed").await;
+    }
+
+    finalize_paired_device(
+        socket,
+        shared,
+        hello,
+        device_id,
+        public_key,
+        decision_display_name,
+    )
+    .await
+}
+
+async fn finalize_paired_device(
+    socket: &mut WebSocket,
+    shared: &GatewayShared,
+    hello: &PairingHello,
+    device_id: DeviceId,
+    public_key: &[u8],
+    decision_display_name: Option<String>,
+) -> Result<(), ConnectionError> {
     let public_key =
-        DevicePublicKey::from_slice(&public_key).ok_or(ConnectionError::InvalidMessage)?;
-    let display_name = decision
-        .display_name
-        .unwrap_or_else(|| hello.display_name.clone());
+        DevicePublicKey::from_slice(public_key).ok_or(ConnectionError::InvalidMessage)?;
+    let display_name = decision_display_name.unwrap_or_else(|| hello.display_name.clone());
     let stored = shared
         .runtime
         .register_paired_device(NewPairedDevice {
-            device_id: device_id.clone(),
+            device_id,
             display_name,
             public_key,
             paired_at_ms: now_ms()?,
         })
         .await?;
-    shared.remove_pending(&hello.pairing_request_id).await;
     send_payload(
         socket,
         "pairing_complete",
@@ -290,6 +544,7 @@ async fn complete_pairing(
 async fn authenticate_device(
     mut socket: WebSocket,
     shared: std::sync::Arc<GatewayShared>,
+    peer_ip: IpAddr,
     mut replay: MessageReplayWindow,
     connection_id: String,
     host_nonce: String,
@@ -331,6 +586,9 @@ async fn authenticate_device(
         send_wire_error(&mut socket, "unsupported_output_preference", None, true).await?;
         return close(&mut socket, 1008, "unsupported output preference").await;
     }
+    let console_target =
+        super::console::build_device_console_target(Some(peer_ip), hello.console.as_ref());
+    let speech_relay = hello.speech_relay;
     send_payload(
         &mut socket,
         "hello_ack",
@@ -339,42 +597,99 @@ async fn authenticate_device(
             connection_id: connection_id.clone(),
             capabilities,
             output_preference: hello.output_preference,
+            speech_services: speech_relay.then(|| shared.speech.status()),
         },
     )
     .await?;
+
+    let mcp_definitions = super::mcp::build_device_mcp_definitions(
+        &device_id,
+        &device.display_name,
+        peer_ip,
+        &hello.mcp_servers,
+    );
+    let mcp_server_keys = mcp_definitions
+        .iter()
+        .map(|definition| definition.server_key.clone())
+        .collect::<Vec<_>>();
     let mut signals = shared
         .register_connection(
             device_id.clone(),
             connection_id.clone(),
             capabilities,
             hello.output_preference,
+            Some(peer_ip.to_string()),
+            Some(hello.client_version.clone()),
+            mcp_server_keys,
+            console_target,
+            speech_relay,
         )
         .await;
+    shared.mcp_tasks.spawn({
+        let shared = shared.clone();
+        let device_id = device_id.clone();
+        let connection_id = connection_id.clone();
+        async move {
+            let lock = shared.mcp_lock(&device_id).await;
+            let _guard = lock.lock().await;
+            if shared
+                .is_current_connection(&device_id, &connection_id)
+                .await
+            {
+                let _ = shared
+                    .runtime
+                    .sync_device_mcp_servers(&device_id, mcp_definitions)
+                    .await;
+            }
+        }
+    });
+
     let result = authenticated_loop(
         &mut socket,
         &shared,
-        &device_id,
-        &connection_id,
-        capabilities,
+        AuthenticatedLoopConfig {
+            device_id: &device_id,
+            connection_id: &connection_id,
+            capabilities,
+            speech_relay,
+        },
         &mut replay,
         &mut signals,
     )
     .await;
-    shared
+    if shared
         .unregister_connection(&device_id, &connection_id)
-        .await;
+        .await
+    {
+        let lock = shared.mcp_lock(&device_id).await;
+        let _guard = lock.lock().await;
+        if !shared.is_device_connected(&device_id).await {
+            let _ = shared.runtime.mark_device_mcp_offline(&device_id).await;
+        }
+    }
     result
+}
+
+struct AuthenticatedLoopConfig<'a> {
+    device_id: &'a DeviceId,
+    connection_id: &'a str,
+    capabilities: DeviceCapabilitiesSnapshot,
+    speech_relay: bool,
 }
 
 async fn authenticated_loop(
     socket: &mut WebSocket,
-    shared: &GatewayShared,
-    device_id: &DeviceId,
-    connection_id: &str,
-    capabilities: DeviceCapabilitiesSnapshot,
+    shared: &Arc<GatewayShared>,
+    config: AuthenticatedLoopConfig<'_>,
     replay: &mut MessageReplayWindow,
     commands: &mut mpsc::Receiver<ConnectionCommand>,
 ) -> Result<(), ConnectionError> {
+    let AuthenticatedLoopConfig {
+        device_id,
+        connection_id,
+        capabilities,
+        speech_relay,
+    } = config;
     let mut heartbeat = interval(HEARTBEAT_INTERVAL);
     heartbeat.tick().await;
     let mut playback_clock = interval(PLAYBACK_FRAME_INTERVAL);
@@ -401,6 +716,7 @@ async fn authenticated_loop(
     }
     let mut playback = VecDeque::<ActivePlayback>::new();
     let mut client_inputs = ClientInputWindow::default();
+    let mut relay = RelayState::new();
     loop {
         tokio::select! {
             _ = voice_turn_clock.tick() => {
@@ -453,6 +769,29 @@ async fn authenticated_loop(
                     ConnectionCommand::StartPlayback { output, response } => {
                         acknowledge_playback_output(&mut playback, output, response);
                     }
+                    ConnectionCommand::SpeechStatusChanged(speech_services) => {
+                        if speech_relay {
+                            send_payload(
+                                socket,
+                                "speech_status_changed",
+                                &SpeechStatusChanged { speech_services },
+                            )
+                            .await?;
+                        }
+                    }
+                    ConnectionCommand::SpeechAsrResult(result) => {
+                        if relay.in_flight_asr.remove(&result.request_id).is_some() {
+                            send_payload(socket, "speech_asr_result", &result).await?;
+                        }
+                    }
+                    ConnectionCommand::SpeechTtsResult {
+                        request_id,
+                        stream_id,
+                        result,
+                    } => {
+                        deliver_relay_tts_result(socket, &mut relay, request_id, stream_id, result)
+                            .await?;
+                    }
                 }
                 synchronize_playback(socket, &mut playback).await?;
             }
@@ -478,6 +817,10 @@ async fn authenticated_loop(
                         let envelope = Envelope::decode(&text)?;
                         replay.accept(&envelope.message_id)?;
                         match envelope.message_type.as_str() {
+                            "ping" => {
+                                let ping = envelope.payload::<ApplicationPing>()?;
+                                send_payload(socket, "pong", &ping).await?;
+                            }
                             "pong" => {
                                 let _ = envelope.payload::<ApplicationPing>()?;
                             }
@@ -730,6 +1073,47 @@ async fn authenticated_loop(
                                     send_wire_error(socket, "playback_not_active", Some(envelope.message_id), true).await?;
                                 }
                             }
+                            "speech_asr_start" if speech_relay => {
+                                let request = envelope.payload::<SpeechAsrStart>()?;
+                                handle_relay_asr_start(
+                                    socket,
+                                    shared,
+                                    &mut relay,
+                                    envelope.message_id,
+                                    request,
+                                ).await?;
+                            }
+                            "speech_asr_stop" if speech_relay => {
+                                let request = envelope.payload::<SpeechAsrStop>()?;
+                                handle_relay_asr_stop(
+                                    socket,
+                                    shared,
+                                    device_id,
+                                    connection_id,
+                                    &mut relay,
+                                    request,
+                                ).await?;
+                            }
+                            "speech_asr_cancel" if speech_relay => {
+                                let request = envelope.payload::<SpeechAsrCancel>()?;
+                                handle_relay_asr_cancel(
+                                    socket,
+                                    &mut relay,
+                                    envelope.message_id,
+                                    request,
+                                ).await?;
+                            }
+                            "speech_tts_request" if speech_relay => {
+                                let request = envelope.payload::<SpeechTtsRequest>()?;
+                                handle_relay_tts_request(
+                                    socket,
+                                    shared,
+                                    device_id,
+                                    connection_id,
+                                    &mut relay,
+                                    request,
+                                ).await?;
+                            }
                             _ => {
                                 send_wire_error(
                                     socket,
@@ -748,30 +1132,395 @@ async fn authenticated_loop(
                     Message::Close(_) => return Err(ConnectionError::Closed),
                     Message::Binary(bytes) => {
                         last_received = Instant::now();
-                        let frame = match UplinkPcmFrame::decode(&bytes) {
-                            Ok(frame) => frame,
-                            Err(_) => {
+                        match bytes.get(1).copied() {
+                            Some(PCM_FRAME_KIND_VOICE_UPLINK) => {
+                                let frame = match UplinkPcmFrame::decode(&bytes) {
+                                    Ok(frame) => frame,
+                                    Err(_) => {
+                                        send_wire_error(socket, "invalid_pcm_frame", None, false).await?;
+                                        return close(socket, 1008, "invalid PCM frame").await;
+                                    }
+                                };
+                                let Some(utterance) = receiving.as_mut() else {
+                                    send_wire_error(socket, "pcm_without_active_stream", None, true).await?;
+                                    continue;
+                                };
+                                if let Err(error) = utterance.push(frame) {
+                                    let code = match error {
+                                        UplinkError::WrongStream => "pcm_stream_mismatch",
+                                        UplinkError::Sequence => "invalid_pcm_sequence",
+                                        UplinkError::TooLarge => "audio_input_too_large",
+                                    };
+                                    send_wire_error(socket, code, None, false).await?;
+                                    return close(socket, 1008, "invalid PCM stream").await;
+                                }
+                            }
+                            Some(PCM_FRAME_KIND_RELAY_UPLINK) if speech_relay => {
+                                let frame = match RelayUplinkPcmFrame::decode(&bytes) {
+                                    Ok(frame) => frame,
+                                    Err(_) => {
+                                        send_wire_error(socket, "invalid_pcm_frame", None, false).await?;
+                                        return close(socket, 1008, "invalid relay PCM frame").await;
+                                    }
+                                };
+                                push_relay_asr_frame(socket, &mut relay, frame).await?;
+                            }
+                            _ => {
                                 send_wire_error(socket, "invalid_pcm_frame", None, false).await?;
                                 return close(socket, 1008, "invalid PCM frame").await;
                             }
-                        };
-                        let Some(utterance) = receiving.as_mut() else {
-                            send_wire_error(socket, "pcm_without_active_stream", None, true).await?;
-                            continue;
-                        };
-                        if let Err(error) = utterance.push(frame) {
-                            let code = match error {
-                                UplinkError::WrongStream => "pcm_stream_mismatch",
-                                UplinkError::Sequence => "invalid_pcm_sequence",
-                                UplinkError::TooLarge => "audio_input_too_large",
-                            };
-                            send_wire_error(socket, code, None, false).await?;
-                            return close(socket, 1008, "invalid PCM stream").await;
                         }
                     }
                 }
             }
         }
+    }
+}
+
+struct RelayConnectionGuard(CancellationToken);
+
+impl Drop for RelayConnectionGuard {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+struct RelayAsrUpload {
+    request_id: String,
+    stream_id: u32,
+    next_sequence: u32,
+    pcm: Vec<u8>,
+}
+
+struct RelayState {
+    active_asr: Option<RelayAsrUpload>,
+    in_flight_asr: HashMap<String, CancellationToken>,
+    in_flight_tts: HashSet<String>,
+    connection_cancel: CancellationToken,
+    _guard: RelayConnectionGuard,
+}
+
+impl RelayState {
+    fn new() -> Self {
+        let connection_cancel = CancellationToken::new();
+        Self {
+            active_asr: None,
+            in_flight_asr: HashMap::new(),
+            in_flight_tts: HashSet::new(),
+            connection_cancel: connection_cancel.clone(),
+            _guard: RelayConnectionGuard(connection_cancel),
+        }
+    }
+}
+
+async fn send_speech_asr_error(
+    socket: &mut WebSocket,
+    request_id: String,
+    code: &str,
+) -> Result<(), ConnectionError> {
+    send_payload(
+        socket,
+        "speech_asr_result",
+        &SpeechAsrResult {
+            request_id,
+            ok: false,
+            text: None,
+            error: Some(code.to_owned()),
+        },
+    )
+    .await
+}
+
+async fn send_speech_tts_error(
+    socket: &mut WebSocket,
+    request_id: String,
+    stream_id: u32,
+    code: &str,
+) -> Result<(), ConnectionError> {
+    send_payload(
+        socket,
+        "speech_tts_start",
+        &SpeechTtsStart {
+            request_id,
+            stream_id,
+            ok: false,
+            format: None,
+            total_bytes: None,
+            error: Some(code.to_owned()),
+        },
+    )
+    .await
+}
+
+async fn handle_relay_asr_start(
+    socket: &mut WebSocket,
+    shared: &GatewayShared,
+    relay: &mut RelayState,
+    message_id: String,
+    request: SpeechAsrStart,
+) -> Result<(), ConnectionError> {
+    if request.request_id.trim().is_empty()
+        || request.request_id.len() > MAX_RELAY_REQUEST_ID_BYTES
+        || request.stream_id == 0
+        || !request.format.is_relay_pcm()
+    {
+        return send_wire_error(socket, "invalid_speech_asr_request", Some(message_id), true).await;
+    }
+    if !shared.speech.asr_available() {
+        return send_speech_asr_error(socket, request.request_id, "asr_unavailable").await;
+    }
+    if relay.active_asr.is_some() || relay.in_flight_asr.contains_key(&request.request_id) {
+        return send_speech_asr_error(socket, request.request_id, "audio_input_busy").await;
+    }
+    if relay.in_flight_asr.len() >= MAX_RELAY_IN_FLIGHT_ASR {
+        return send_speech_asr_error(socket, request.request_id, "busy").await;
+    }
+    relay.active_asr = Some(RelayAsrUpload {
+        request_id: request.request_id,
+        stream_id: request.stream_id,
+        next_sequence: 0,
+        pcm: Vec::new(),
+    });
+    Ok(())
+}
+
+async fn push_relay_asr_frame(
+    socket: &mut WebSocket,
+    relay: &mut RelayState,
+    frame: RelayUplinkPcmFrame<'_>,
+) -> Result<(), ConnectionError> {
+    let Some(upload) = relay.active_asr.as_mut() else {
+        return send_wire_error(socket, "pcm_without_active_stream", None, true).await;
+    };
+    if upload.stream_id != frame.stream_id {
+        let request_id = upload.request_id.clone();
+        relay.active_asr = None;
+        return send_speech_asr_error(socket, request_id, "pcm_stream_mismatch").await;
+    }
+    if upload.next_sequence != frame.sequence {
+        let request_id = upload.request_id.clone();
+        relay.active_asr = None;
+        return send_speech_asr_error(socket, request_id, "invalid_pcm_sequence").await;
+    }
+    if upload.pcm.len().saturating_add(frame.payload.len()) > MAX_UPLINK_PCM_BYTES {
+        let request_id = upload.request_id.clone();
+        relay.active_asr = None;
+        return send_speech_asr_error(socket, request_id, "audio_input_too_large").await;
+    }
+    upload.next_sequence = upload.next_sequence.saturating_add(1);
+    upload.pcm.extend_from_slice(frame.payload);
+    Ok(())
+}
+
+async fn handle_relay_asr_stop(
+    socket: &mut WebSocket,
+    shared: &Arc<GatewayShared>,
+    device_id: &DeviceId,
+    connection_id: &str,
+    relay: &mut RelayState,
+    request: SpeechAsrStop,
+) -> Result<(), ConnectionError> {
+    let Some(active) = relay.active_asr.as_ref() else {
+        return send_speech_asr_error(socket, request.request_id, "audio_stream_not_active").await;
+    };
+    if active.request_id != request.request_id || active.stream_id != request.stream_id {
+        return send_speech_asr_error(socket, request.request_id, "audio_stream_not_active").await;
+    }
+    let Some(upload) = relay.active_asr.take() else {
+        return Ok(());
+    };
+    if upload.pcm.is_empty() || upload.next_sequence != request.last_sequence.saturating_add(1) {
+        return send_speech_asr_error(socket, upload.request_id, "invalid_speech_asr_stop").await;
+    }
+    if relay.in_flight_asr.len() >= MAX_RELAY_IN_FLIGHT_ASR {
+        return send_speech_asr_error(socket, upload.request_id, "busy").await;
+    }
+    let cancel = relay.connection_cancel.child_token();
+    relay
+        .in_flight_asr
+        .insert(upload.request_id.clone(), cancel.clone());
+    shared.recognition_tasks.spawn({
+        let shared = shared.clone();
+        let device_id = device_id.clone();
+        let connection_id = connection_id.to_owned();
+        let request_id = upload.request_id;
+        let pcm = upload.pcm;
+        async move {
+            let debug_name = format!("relay-{device_id}-{request_id}");
+            let result = tokio::spawn({
+                let speech = shared.speech.clone();
+                async move { speech.recognize(pcm, debug_name, cancel).await }
+            })
+            .await;
+            let payload = match result {
+                Ok(Ok(text)) => SpeechAsrResult {
+                    request_id,
+                    ok: true,
+                    text: Some(text),
+                    error: None,
+                },
+                Ok(Err(error)) => SpeechAsrResult {
+                    request_id,
+                    ok: false,
+                    text: None,
+                    error: Some(error.code().to_owned()),
+                },
+                Err(_) => SpeechAsrResult {
+                    request_id,
+                    ok: false,
+                    text: None,
+                    error: Some("provider_failed".to_owned()),
+                },
+            };
+            shared
+                .send_connection_command(
+                    &device_id,
+                    &connection_id,
+                    ConnectionCommand::SpeechAsrResult(payload),
+                )
+                .await;
+        }
+    });
+    Ok(())
+}
+
+async fn handle_relay_asr_cancel(
+    socket: &mut WebSocket,
+    relay: &mut RelayState,
+    message_id: String,
+    request: SpeechAsrCancel,
+) -> Result<(), ConnectionError> {
+    if relay
+        .active_asr
+        .as_ref()
+        .is_some_and(|active| active.request_id == request.request_id)
+    {
+        relay.active_asr = None;
+        return send_speech_asr_error(socket, request.request_id, "cancelled").await;
+    }
+    if let Some(cancel) = relay.in_flight_asr.remove(&request.request_id) {
+        cancel.cancel();
+        return send_speech_asr_error(socket, request.request_id, "cancelled").await;
+    }
+    send_wire_error(socket, "audio_stream_not_active", Some(message_id), true).await
+}
+
+async fn handle_relay_tts_request(
+    socket: &mut WebSocket,
+    shared: &Arc<GatewayShared>,
+    device_id: &DeviceId,
+    connection_id: &str,
+    relay: &mut RelayState,
+    request: SpeechTtsRequest,
+) -> Result<(), ConnectionError> {
+    if request.request_id.trim().is_empty()
+        || request.request_id.len() > MAX_RELAY_REQUEST_ID_BYTES
+        || request.stream_id == 0
+        || request.text.trim().is_empty()
+        || request.text.chars().count() > MAX_RELAY_TTS_TEXT_CHARS
+    {
+        return send_speech_tts_error(
+            socket,
+            request.request_id,
+            request.stream_id,
+            "invalid_input",
+        )
+        .await;
+    }
+    if !shared.speech.tts_available() {
+        return send_speech_tts_error(
+            socket,
+            request.request_id,
+            request.stream_id,
+            "tts_unavailable",
+        )
+        .await;
+    }
+    if relay.in_flight_tts.len() >= MAX_RELAY_IN_FLIGHT_TTS
+        || !relay.in_flight_tts.insert(request.request_id.clone())
+    {
+        return send_speech_tts_error(socket, request.request_id, request.stream_id, "busy").await;
+    }
+    let cancel = relay.connection_cancel.child_token();
+    shared.recognition_tasks.spawn({
+        let shared = shared.clone();
+        let device_id = device_id.clone();
+        let connection_id = connection_id.to_owned();
+        let request_id = request.request_id;
+        let stream_id = request.stream_id;
+        let text = request.text;
+        async move {
+            let debug_name = format!("relay-tts-{device_id}-{request_id}");
+            let result = tokio::spawn({
+                let speech = shared.speech.clone();
+                async move { speech.synthesize(text, debug_name, cancel).await }
+            })
+            .await
+            .unwrap_or(Err(SpeechServiceError::ProviderFailed));
+            shared
+                .send_connection_command(
+                    &device_id,
+                    &connection_id,
+                    ConnectionCommand::SpeechTtsResult {
+                        request_id,
+                        stream_id,
+                        result,
+                    },
+                )
+                .await;
+        }
+    });
+    Ok(())
+}
+
+async fn deliver_relay_tts_result(
+    socket: &mut WebSocket,
+    relay: &mut RelayState,
+    request_id: String,
+    stream_id: u32,
+    result: Result<Arc<[u8]>, SpeechServiceError>,
+) -> Result<(), ConnectionError> {
+    if !relay.in_flight_tts.remove(&request_id) {
+        return Ok(());
+    }
+    match result {
+        Ok(pcm) if !pcm.is_empty() => {
+            send_payload(
+                socket,
+                "speech_tts_start",
+                &SpeechTtsStart {
+                    request_id: request_id.clone(),
+                    stream_id,
+                    ok: true,
+                    format: Some(PcmFormat {
+                        encoding: "pcm_s16le".to_owned(),
+                        sample_rate_hz: 16_000,
+                        channels: 1,
+                        frame_duration_ms: 0,
+                    }),
+                    total_bytes: Some(pcm.len() as u64),
+                    error: None,
+                },
+            )
+            .await?;
+            for (sequence, chunk) in pcm.chunks(RELAY_DOWNLINK_CHUNK_BYTES).enumerate() {
+                let frame = RelayDownlinkPcmFrame::encode(stream_id, sequence as u32, chunk)?;
+                socket.send(Message::Binary(frame.into())).await?;
+            }
+            send_payload(
+                socket,
+                "speech_tts_end",
+                &SpeechTtsEnd {
+                    request_id,
+                    stream_id,
+                    ok: true,
+                    error: None,
+                },
+            )
+            .await
+        }
+        Ok(_) => send_speech_tts_error(socket, request_id, stream_id, "invalid_audio").await,
+        Err(error) => send_speech_tts_error(socket, request_id, stream_id, error.code()).await,
     }
 }
 
@@ -1855,6 +2604,9 @@ fn validate_pairing_hello(hello: &PairingHello) -> Result<(), ConnectionError> {
         || hello.display_name.len() > MAX_DEVICE_NAME_BYTES
         || hello.device_nonce.trim().is_empty()
         || hello.device_nonce.len() > MAX_NONCE_BYTES
+        || hello.client_version.as_deref().is_some_and(|version| {
+            version.trim().is_empty() || version.len() > MAX_CLIENT_VERSION_BYTES
+        })
     {
         return Err(ConnectionError::InvalidMessage);
     }
@@ -1918,6 +2670,8 @@ enum ConnectionError {
     PairingExpired,
     #[error("device pairing was cancelled")]
     PairingCancelled,
+    #[error("device pairing code did not match")]
+    Spake2CodeMismatch,
     #[error("device control message is invalid")]
     InvalidMessage,
     #[error("system clock is unavailable")]
@@ -2314,5 +3068,1245 @@ mod tests {
         acknowledge_playback_output(&mut playback, output(), tx);
         assert_eq!(rx.try_recv(), Ok(false));
         assert!(playback.is_empty());
+    }
+
+    mod wss_integration {
+        use std::net::SocketAddr;
+
+        use assistant_protocol::{
+            ConfirmDevicePairingRequest, DeviceId, DeviceLifecycleSnapshot,
+            DevicePairingModeSnapshot, DeviceSpeechServicesSnapshot, GetMcpConfigurationRequest,
+            McpServerRuntimeState, McpServerSource, McpTransportKind, RejectDevicePairingRequest,
+            SecretValue, ShutdownRuntimeRequest, SpeechProviderKind, SpeechServiceStatusSnapshot,
+            UpdateAsrConfigurationInput, UpdateSpeechConfigurationRequest,
+            UpdateTtsConfigurationInput,
+        };
+        use assistant_runtime::{AssistantRuntime, RuntimeStore as _};
+        use axum::{
+            Router,
+            body::Body,
+            extract::Json as AxumJson,
+            http::Response as HttpResponse,
+            routing::{get, post},
+        };
+        use axum_server::tls_rustls::RustlsConfig;
+        use ed25519_dalek::{Signer as _, SigningKey};
+        use futures_util::SinkExt as _;
+        use hmac::{Hmac, Mac};
+        use pakery_core::crypto::CpaceGroup as _;
+        use pakery_crypto::{P256Group, Spake2P256};
+        use pakery_spake2::PartyA;
+        use rustls_pki_types::{CertificateDer, pem::PemObject as _};
+        use serde::de::DeserializeOwned;
+        use serde_json::{Value, json};
+        use sha2::{Sha256, Sha512};
+        use tokio_tungstenite::{
+            Connector, MaybeTlsStream, WebSocketStream, client_async_tls_with_config,
+            tungstenite::Message as WsMessage,
+        };
+
+        use super::*;
+        use crate::{
+            config_source::{LocalConfigSource, prepare_private_directory},
+            device::{
+                dispatcher::DeviceChannelOutputDispatcher,
+                gateway::{DeviceGatewayHandle, DeviceGatewayService},
+                identity::InstallationIdentity,
+                protocol::{
+                    AuthChallenge, DeviceConsoleDeclaration, DeviceHello, DeviceMcpScheme,
+                    DeviceMcpServerDeclaration, Envelope, HelloAck, PCM_FRAME_KIND_RELAY_DOWNLINK,
+                    PCM_FRAME_KIND_RELAY_UPLINK, PCM_HEADER_BYTES, PROTOCOL_MAJOR, PROTOCOL_MINOR,
+                    PairingBind, PairingBindAck, PairingCommit, PairingComplete,
+                    PairingConfirmation, PairingDirectChallenge, PairingDirectCommit, PairingHello,
+                    PairingPake, PairingPending, PcmFormat, SpeechAsrResult, SpeechAsrStart,
+                    SpeechAsrStop, SpeechStatusChanged, SpeechTtsEnd, SpeechTtsRequest,
+                    SpeechTtsStart, WireError, WirePairingMode,
+                },
+            },
+            mcp::{HostMcpConnectionFactory, HostMcpImageMaterializer, LocalMcpConfigSource},
+            resources::HostResources,
+            speech::{SpeechService, SpeechServiceHandle},
+            storage::LocalRuntimeStore,
+        };
+
+        type TestWs = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+
+        struct TestGatewayHarness {
+            runtime: Arc<AssistantRuntime>,
+            handle: DeviceGatewayHandle,
+            speech: SpeechServiceHandle,
+            identity: Arc<InstallationIdentity>,
+            addr: SocketAddr,
+            server_handle: axum_server::Handle<SocketAddr>,
+            server_task: tokio::task::JoinHandle<std::io::Result<()>>,
+            speech_cancel: tokio_util::sync::CancellationToken,
+            speech_task: tokio::task::JoinHandle<Result<(), SpeechServiceError>>,
+            mcp_factory: Arc<HostMcpConnectionFactory>,
+            store: Arc<LocalRuntimeStore>,
+            shared: Arc<GatewayShared>,
+            _gateway_service: DeviceGatewayService,
+            _directory: tempfile::TempDir,
+        }
+
+        impl TestGatewayHarness {
+            async fn start() -> Self {
+                let directory = tempfile::tempdir().expect("tempdir");
+                prepare_private_directory(directory.path()).expect("prepare home dir");
+                crate::server::initialize_tls_provider();
+                let store = Arc::new(
+                    LocalRuntimeStore::open(directory.path(), 32)
+                        .await
+                        .expect("open store"),
+                );
+                let resources = HostResources::new(directory.path()).expect("host resources");
+                let mcp_source = Arc::new(LocalMcpConfigSource::new(directory.path().to_owned()));
+                let mcp_factory =
+                    Arc::new(HostMcpConnectionFactory::new(directory.path().to_owned()));
+                let dispatcher = Arc::new(DeviceChannelOutputDispatcher::new());
+                let runtime = Arc::new(
+                    AssistantRuntime::open_with_recall_key(
+                        assistant_runtime::RuntimeConfig::new(
+                            std::num::NonZeroUsize::new(32).expect("nonzero"),
+                        ),
+                        Arc::new(LocalConfigSource::new(directory.path().join("config.toml"))),
+                        resources.model_factory,
+                        resources.session_environment_factory,
+                        resources.skill_package_source,
+                        resources.run_tool_factory,
+                        resources.child_task_workspace_factory,
+                        store.clone(),
+                        store.clone(),
+                        [42_u8; 32],
+                    )
+                    .await
+                    .expect("open runtime")
+                    .with_mcp_services(
+                        mcp_source,
+                        mcp_factory.clone(),
+                        Arc::new(HostMcpImageMaterializer),
+                    )
+                    .with_channel_output_dispatcher(dispatcher.clone()),
+                );
+                let config_source =
+                    Arc::new(LocalConfigSource::new(directory.path().join("config.toml")));
+                let (speech_service, speech) = SpeechService::new(config_source);
+                let speech_cancel = tokio_util::sync::CancellationToken::new();
+                let speech_task = tokio::spawn(speech_service.run_until(speech_cancel.clone()));
+                let (gateway_service, handle) = DeviceGatewayService::new(
+                    directory.path().to_path_buf(),
+                    runtime.clone(),
+                    dispatcher.as_ref(),
+                    speech.clone(),
+                );
+                let identity = Arc::new(
+                    InstallationIdentity::load_or_create(directory.path()).expect("identity"),
+                );
+                handle.seed_test_identity(identity.clone()).await;
+
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind WSS");
+                listener.set_nonblocking(true).expect("nonblocking WSS");
+                let addr = listener.local_addr().expect("WSS addr");
+                let tls = RustlsConfig::from_pem(
+                    identity.certificate_pem.clone(),
+                    identity.private_key_pem.clone(),
+                )
+                .await
+                .expect("rustls config");
+                let router = Router::new()
+                    .route("/device", get(upgrade))
+                    .with_state(handle.test_shared());
+                let server_handle = axum_server::Handle::new();
+                let server_handle_clone = server_handle.clone();
+                let server_task = tokio::spawn(async move {
+                    axum_server::from_tcp_rustls(listener, tls)
+                        .expect("rustls server")
+                        .handle(server_handle_clone)
+                        .serve(router.into_make_service_with_connect_info::<SocketAddr>())
+                        .await
+                });
+
+                let shared = handle.test_shared();
+                Self {
+                    runtime,
+                    handle,
+                    speech,
+                    identity,
+                    addr,
+                    server_handle,
+                    server_task,
+                    speech_cancel,
+                    speech_task,
+                    mcp_factory,
+                    store,
+                    shared,
+                    _gateway_service: gateway_service,
+                    _directory: directory,
+                }
+            }
+
+            async fn connect_ws(&self) -> (TestWs, AuthChallenge) {
+                let mut roots = rustls::RootCertStore::empty();
+                for cert in CertificateDer::pem_slice_iter(&self.identity.certificate_pem) {
+                    roots.add(cert.expect("cert")).expect("add root");
+                }
+                let tls_config = rustls::ClientConfig::builder()
+                    .with_root_certificates(roots)
+                    .with_no_client_auth();
+                let stream = tokio::net::TcpStream::connect(self.addr)
+                    .await
+                    .expect("tcp connect");
+                let url = format!("wss://localhost:{}/device", self.addr.port());
+                let (mut ws, _) = client_async_tls_with_config(
+                    url,
+                    stream,
+                    None,
+                    Some(Connector::Rustls(Arc::new(tls_config))),
+                )
+                .await
+                .expect("WSS handshake");
+                let env = recv_envelope(&mut ws).await.expect("auth_challenge");
+                assert_eq!(env.message_type, "auth_challenge");
+                let challenge: AuthChallenge = decode_payload(env);
+                (ws, challenge)
+            }
+
+            async fn shutdown(self) {
+                self.server_handle.shutdown();
+                let _ = self.server_task.await;
+                self.speech_cancel.cancel();
+                let _ = self.speech_task.await;
+                let _ = self.runtime.shutdown(ShutdownRuntimeRequest {}).await;
+                let _ = self.mcp_factory.shutdown().await;
+                let _ = self.store.shutdown().await;
+            }
+        }
+
+        fn text_capabilities() -> DeviceCapabilitiesSnapshot {
+            DeviceCapabilitiesSnapshot {
+                input_text: true,
+                output_text: true,
+                display_status: true,
+                display_transcript: true,
+                ..DeviceCapabilitiesSnapshot::default()
+            }
+        }
+
+        async fn send_json<T: serde::Serialize>(
+            ws: &mut TestWs,
+            message_id: &str,
+            message_type: &str,
+            payload: &T,
+        ) {
+            let envelope = Envelope {
+                protocol_major: PROTOCOL_MAJOR,
+                protocol_minor: PROTOCOL_MINOR,
+                message_id: message_id.to_owned(),
+                message_type: message_type.to_owned(),
+                payload: serde_json::to_value(payload).expect("serialize payload"),
+            };
+            ws.send(WsMessage::Text(
+                serde_json::to_string(&envelope)
+                    .expect("encode envelope")
+                    .into(),
+            ))
+            .await
+            .expect("send ws text");
+        }
+
+        async fn recv_envelope(ws: &mut TestWs) -> Option<Envelope> {
+            loop {
+                let message = tokio::time::timeout(Duration::from_secs(5), ws.next())
+                    .await
+                    .expect("recv timeout")?;
+                match message.expect("ws frame") {
+                    WsMessage::Text(text) => {
+                        return Some(Envelope::decode(&text).expect("decode envelope"));
+                    }
+                    WsMessage::Ping(payload) => {
+                        ws.send(WsMessage::Pong(payload)).await.expect("send pong");
+                    }
+                    WsMessage::Pong(_) => {}
+                    WsMessage::Close(_) => return None,
+                    other => panic!("unexpected ws message: {other:?}"),
+                }
+            }
+        }
+
+        fn decode_payload<T: DeserializeOwned>(envelope: Envelope) -> T {
+            serde_json::from_value(envelope.payload).expect("decode payload")
+        }
+
+        fn spake2_password_scalar(
+            pairing_code: &str,
+            pairing_request_id: &str,
+            installation_id: &str,
+        ) -> <P256Group as pakery_core::crypto::CpaceGroup>::Scalar {
+            let mut input = Vec::new();
+            for part in [
+                b"ez-assistant-spake2-password-v1".as_slice(),
+                pairing_code.as_bytes(),
+                pairing_request_id.as_bytes(),
+                installation_id.as_bytes(),
+            ] {
+                input.extend_from_slice(&(part.len() as u64).to_be_bytes());
+                input.extend_from_slice(part);
+            }
+            let wide = Sha512::digest(input);
+            P256Group::scalar_from_wide_bytes(&wide).expect("scalar")
+        }
+
+        fn hmac_sha256_tagged(session_key: &[u8], label: &[u8], transcript: &[u8]) -> Vec<u8> {
+            let mut mac = <Hmac<Sha256>>::new_from_slice(session_key).expect("hmac");
+            mac.update(label);
+            mac.update(transcript);
+            mac.finalize().into_bytes().to_vec()
+        }
+
+        async fn pair_direct_confirm(
+            harness: &TestGatewayHarness,
+            request_id: &str,
+            signing_key: &SigningKey,
+            tamper_signature: bool,
+        ) -> (TestWs, Option<DeviceId>) {
+            harness
+                .handle
+                .open_pairing_window()
+                .await
+                .expect("open pairing window");
+            let (mut ws, _) = harness.connect_ws().await;
+            let public_key = signing_key.verifying_key().to_bytes();
+            let device_nonce = "dev-direct-nonce-1".to_owned();
+            send_json(
+                &mut ws,
+                "m-pair-hello",
+                "pairing_hello",
+                &PairingHello {
+                    pairing_request_id: request_id.to_owned(),
+                    display_name: "Direct Gateway".to_owned(),
+                    device_nonce: device_nonce.clone(),
+                    capabilities: text_capabilities(),
+                    pairing_mode: WirePairingMode::DirectConfirm,
+                    pake_share: None,
+                    public_key: Some(encode_base64(&public_key)),
+                    client_version: Some("esp-pika-gateway/0.3.0".to_owned()),
+                },
+            )
+            .await;
+
+            let pending_env = recv_envelope(&mut ws).await.expect("pairing_pending");
+            assert_eq!(pending_env.message_type, "pairing_pending");
+            let _pending: PairingPending = decode_payload(pending_env);
+
+            let snapshot = harness.handle.snapshot().await.expect("snapshot");
+            assert_eq!(snapshot.pending_pairings.len(), 1);
+            let candidate = &snapshot.pending_pairings[0];
+            assert_eq!(candidate.mode, DevicePairingModeSnapshot::DirectConfirm);
+            assert_eq!(candidate.peer_address.as_deref(), Some("127.0.0.1"));
+            assert_eq!(
+                candidate.key_fingerprint.as_deref(),
+                Some(public_key_fingerprint(&public_key).as_str())
+            );
+            assert_eq!(
+                candidate.client_version.as_deref(),
+                Some("esp-pika-gateway/0.3.0")
+            );
+
+            harness
+                .handle
+                .confirm_pairing(ConfirmDevicePairingRequest {
+                    pairing_request_id: request_id.to_owned(),
+                    pairing_code: None,
+                    display_name: None,
+                })
+                .await
+                .expect("confirm direct pairing");
+
+            let challenge_env = recv_envelope(&mut ws)
+                .await
+                .expect("pairing_direct_challenge");
+            assert_eq!(challenge_env.message_type, "pairing_direct_challenge");
+            let challenge: PairingDirectChallenge = decode_payload(challenge_env);
+            assert_eq!(challenge.pairing_request_id, request_id);
+
+            let ad = pairing_associated_data(
+                request_id,
+                &harness.identity.installation_id,
+                &harness.identity.certificate_fingerprint,
+                &device_nonce,
+                &challenge.host_nonce,
+                text_capabilities(),
+            );
+            let bind_transcript = pairing_bind_transcript(&ad, &public_key);
+            let commit_transcript =
+                pairing_commit_transcript(&bind_transcript, &challenge.device_id);
+            let mut sig_bytes = signing_key.sign(&commit_transcript).to_bytes();
+            if tamper_signature {
+                sig_bytes[0] ^= 0xff;
+            }
+            send_json(
+                &mut ws,
+                "m-direct-commit",
+                "pairing_direct_commit",
+                &PairingDirectCommit {
+                    pairing_request_id: request_id.to_owned(),
+                    device_id: challenge.device_id.clone(),
+                    signature: encode_base64(&sig_bytes),
+                },
+            )
+            .await;
+
+            let outcome = recv_envelope(&mut ws).await.expect("pairing outcome");
+            if tamper_signature {
+                assert_eq!(outcome.message_type, "error");
+                let err: WireError = decode_payload(outcome);
+                assert_eq!(err.code, "pairing_failed");
+                assert!(!err.recoverable);
+                (ws, None)
+            } else {
+                assert_eq!(outcome.message_type, "pairing_complete");
+                let complete: PairingComplete = decode_payload(outcome);
+                let device_id = DeviceId::new(complete.device_id).expect("device id");
+                (ws, Some(device_id))
+            }
+        }
+
+        #[tokio::test]
+        async fn wss_direct_confirm_pairing_authenticates_and_persists_device() {
+            let harness = TestGatewayHarness::start().await;
+            let signing_key = SigningKey::from_bytes(&[11_u8; 32]);
+            let (mut ws, device_id) =
+                pair_direct_confirm(&harness, "req-direct-ok", &signing_key, false).await;
+            let device_id = device_id.expect("paired device id");
+            let _ = ws.close(None).await;
+
+            let snapshot = harness.handle.snapshot().await.expect("snapshot");
+            assert!(snapshot.pending_pairings.is_empty());
+            assert_eq!(snapshot.devices.len(), 1);
+            assert_eq!(snapshot.devices[0].device_id, device_id);
+            assert_eq!(
+                snapshot.devices[0].lifecycle,
+                DeviceLifecycleSnapshot::Paired
+            );
+
+            harness.shutdown().await;
+        }
+
+        #[tokio::test]
+        async fn wss_direct_confirm_rejects_bad_signature_and_clears_pending() {
+            let harness = TestGatewayHarness::start().await;
+            let signing_key = SigningKey::from_bytes(&[12_u8; 32]);
+            let (mut ws, device_id) =
+                pair_direct_confirm(&harness, "req-direct-bad", &signing_key, true).await;
+            assert!(device_id.is_none());
+            let _ = ws.close(None).await;
+
+            let snapshot = harness.handle.snapshot().await.expect("snapshot");
+            assert!(snapshot.pending_pairings.is_empty());
+            assert!(snapshot.devices.is_empty());
+
+            harness.shutdown().await;
+        }
+
+        #[tokio::test]
+        async fn wss_reject_pairing_notifies_client_and_clears_pending() {
+            let harness = TestGatewayHarness::start().await;
+            harness
+                .handle
+                .open_pairing_window()
+                .await
+                .expect("open pairing window");
+            let (mut ws, _) = harness.connect_ws().await;
+            let signing_key = SigningKey::from_bytes(&[13_u8; 32]);
+            send_json(
+                &mut ws,
+                "m-pair-reject",
+                "pairing_hello",
+                &PairingHello {
+                    pairing_request_id: "req-reject".to_owned(),
+                    display_name: "Rejected Device".to_owned(),
+                    device_nonce: "nonce-reject".to_owned(),
+                    capabilities: text_capabilities(),
+                    pairing_mode: WirePairingMode::DirectConfirm,
+                    pake_share: None,
+                    public_key: Some(encode_base64(signing_key.verifying_key().as_bytes())),
+                    client_version: None,
+                },
+            )
+            .await;
+
+            assert_eq!(
+                recv_envelope(&mut ws).await.expect("pending").message_type,
+                "pairing_pending"
+            );
+            harness
+                .handle
+                .reject_pairing(RejectDevicePairingRequest {
+                    pairing_request_id: "req-reject".to_owned(),
+                })
+                .await
+                .expect("reject pairing");
+
+            let env = recv_envelope(&mut ws).await.expect("error frame");
+            assert_eq!(env.message_type, "error");
+            let wire_err: WireError = decode_payload(env);
+            assert_eq!(wire_err.code, "pairing_rejected");
+            assert!(!wire_err.recoverable);
+            let _ = ws.close(None).await;
+
+            let snapshot = harness.handle.snapshot().await.expect("snapshot");
+            assert!(snapshot.pending_pairings.is_empty());
+            assert!(snapshot.devices.is_empty());
+
+            harness.shutdown().await;
+        }
+
+        #[tokio::test]
+        async fn wss_pairing_client_disconnect_cleans_up_pending_candidate() {
+            let harness = TestGatewayHarness::start().await;
+            harness
+                .handle
+                .open_pairing_window()
+                .await
+                .expect("open pairing window");
+            let (mut ws, _) = harness.connect_ws().await;
+            let signing_key = SigningKey::from_bytes(&[14_u8; 32]);
+            send_json(
+                &mut ws,
+                "m-pair-drop",
+                "pairing_hello",
+                &PairingHello {
+                    pairing_request_id: "req-disconnect".to_owned(),
+                    display_name: "Dropping Device".to_owned(),
+                    device_nonce: "nonce-drop".to_owned(),
+                    capabilities: text_capabilities(),
+                    pairing_mode: WirePairingMode::DirectConfirm,
+                    pake_share: None,
+                    public_key: Some(encode_base64(signing_key.verifying_key().as_bytes())),
+                    client_version: None,
+                },
+            )
+            .await;
+            assert_eq!(
+                recv_envelope(&mut ws).await.expect("pending").message_type,
+                "pairing_pending"
+            );
+            assert_eq!(
+                harness
+                    .handle
+                    .snapshot()
+                    .await
+                    .expect("snapshot")
+                    .pending_pairings
+                    .len(),
+                1
+            );
+
+            drop(ws);
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if harness
+                        .handle
+                        .snapshot()
+                        .await
+                        .expect("snapshot")
+                        .pending_pairings
+                        .is_empty()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("pending candidate should clean up after client drop");
+
+            harness.shutdown().await;
+        }
+
+        #[tokio::test]
+        async fn wss_legacy_spake2_pairing_still_succeeds() {
+            let harness = TestGatewayHarness::start().await;
+            harness
+                .handle
+                .open_pairing_window()
+                .await
+                .expect("open pairing window");
+            let (mut ws, _) = harness.connect_ws().await;
+            let pairing_code = "482913";
+            let req_id = "req-legacy-spake2";
+            let device_nonce = "dev-spake-nonce";
+            let mut wide = [0_u8; 64];
+            wide[32..].copy_from_slice(&[7_u8; 32]);
+            let client_scalar = P256Group::scalar_from_wide_bytes(&wide).expect("scalar");
+            let pw =
+                spake2_password_scalar(pairing_code, req_id, &harness.identity.installation_id);
+            let (dev_share, _) = PartyA::<Spake2P256>::start_with_scalar(
+                &pw,
+                &client_scalar,
+                req_id.as_bytes(),
+                harness.identity.installation_id.as_bytes(),
+                b"",
+            )
+            .expect("spake2 party A");
+
+            let hello_json = json!({
+                "protocol_major": PROTOCOL_MAJOR,
+                "protocol_minor": PROTOCOL_MINOR,
+                "message_id": "m-legacy-hello",
+                "type": "pairing_hello",
+                "payload": {
+                    "pairing_request_id": req_id,
+                    "display_name": "Legacy Device",
+                    "device_nonce": device_nonce,
+                    "capabilities": text_capabilities(),
+                    "pake_share": encode_base64(&dev_share),
+                }
+            });
+            ws.send(WsMessage::Text(hello_json.to_string().into()))
+                .await
+                .expect("send legacy pairing_hello");
+
+            assert_eq!(
+                recv_envelope(&mut ws).await.expect("pending").message_type,
+                "pairing_pending"
+            );
+            let snapshot = harness.handle.snapshot().await.expect("snapshot");
+            assert_eq!(snapshot.pending_pairings.len(), 1);
+            assert_eq!(
+                snapshot.pending_pairings[0].mode,
+                DevicePairingModeSnapshot::Spake2
+            );
+
+            harness
+                .handle
+                .confirm_pairing(ConfirmDevicePairingRequest {
+                    pairing_request_id: req_id.to_owned(),
+                    pairing_code: Some(SecretValue::new(pairing_code.to_owned())),
+                    display_name: Some("Legacy Renamed".to_owned()),
+                })
+                .await
+                .expect("confirm spake2");
+
+            let pake_env = recv_envelope(&mut ws).await.expect("pairing_pake");
+            assert_eq!(pake_env.message_type, "pairing_pake");
+            let pake: PairingPake = decode_payload(pake_env);
+            let host_share =
+                decode_base64(&pake.pake_share, SPAKE2_P256_SHARE_BYTES).expect("host share");
+            let host_conf =
+                decode_base64(&pake.confirmation_mac, HMAC_SHA256_BYTES).expect("host conf");
+
+            let ad = pairing_associated_data(
+                req_id,
+                &harness.identity.installation_id,
+                &harness.identity.certificate_fingerprint,
+                device_nonce,
+                &pake.host_nonce,
+                text_capabilities(),
+            );
+            let (_, state_a) = PartyA::<Spake2P256>::start_with_scalar(
+                &pw,
+                &client_scalar,
+                req_id.as_bytes(),
+                harness.identity.installation_id.as_bytes(),
+                &ad,
+            )
+            .expect("spake2 party A with ad");
+            let output = state_a.finish(&host_share).expect("spake2 finish");
+            output
+                .verify_peer_confirmation(&host_conf)
+                .expect("host confirmation matches");
+
+            send_json(
+                &mut ws,
+                "m-confirm",
+                "pairing_confirm",
+                &PairingConfirmation {
+                    pairing_request_id: req_id.to_owned(),
+                    confirmation_mac: encode_base64(&output.confirmation_mac),
+                },
+            )
+            .await;
+
+            let signing_key = SigningKey::from_bytes(&[15_u8; 32]);
+            let pub_bytes = signing_key.verifying_key().to_bytes();
+            let bt = pairing_bind_transcript(&ad, &pub_bytes);
+            let bind_sig = signing_key.sign(&bt).to_bytes();
+            let bind_mac = hmac_sha256_tagged(output.session_key.as_bytes(), b"device-bind", &bt);
+            send_json(
+                &mut ws,
+                "m-bind",
+                "pairing_bind",
+                &PairingBind {
+                    pairing_request_id: req_id.to_owned(),
+                    public_key: encode_base64(&pub_bytes),
+                    signature: encode_base64(&bind_sig),
+                    binding_mac: encode_base64(&bind_mac),
+                },
+            )
+            .await;
+
+            let bind_ack_env = recv_envelope(&mut ws).await.expect("pairing_bind_ack");
+            assert_eq!(bind_ack_env.message_type, "pairing_bind_ack");
+            let bind_ack: PairingBindAck = decode_payload(bind_ack_env);
+            let ct = pairing_commit_transcript(&bt, &bind_ack.device_id);
+            let commit_sig = signing_key.sign(&ct).to_bytes();
+            let commit_mac =
+                hmac_sha256_tagged(output.session_key.as_bytes(), b"device-commit", &ct);
+            send_json(
+                &mut ws,
+                "m-commit",
+                "pairing_commit",
+                &PairingCommit {
+                    pairing_request_id: req_id.to_owned(),
+                    device_id: bind_ack.device_id.clone(),
+                    signature: encode_base64(&commit_sig),
+                    binding_mac: encode_base64(&commit_mac),
+                },
+            )
+            .await;
+
+            let complete_env = recv_envelope(&mut ws).await.expect("pairing_complete");
+            assert_eq!(complete_env.message_type, "pairing_complete");
+            let complete: PairingComplete = decode_payload(complete_env);
+            assert_eq!(complete.display_name, "Legacy Renamed");
+            let _ = ws.close(None).await;
+
+            harness.shutdown().await;
+        }
+
+        #[tokio::test]
+        async fn wss_authenticated_device_hello_syncs_marks_offline_and_removes_device_mcp() {
+            let observed_headers =
+                Arc::new(tokio::sync::Mutex::new(Vec::<(String, String)>::new()));
+            let observed_headers_handler = observed_headers.clone();
+            let mcp_router = Router::new().route(
+                "/mcp",
+                post(
+                    move |headers: axum::http::HeaderMap, AxumJson(request): AxumJson<Value>| {
+                        let observed_headers = observed_headers_handler.clone();
+                        async move {
+                            let agent_id = headers
+                                .get("x-agent-id")
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or_default()
+                                .to_owned();
+                            let speaker_role = headers
+                                .get("x-speaker-role")
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or_default()
+                                .to_owned();
+                            if !agent_id.is_empty() || !speaker_role.is_empty() {
+                                observed_headers.lock().await.push((agent_id, speaker_role));
+                            }
+                            let method = request["method"].as_str().unwrap_or_default();
+                            let body = match method {
+                                "server/discover" => json!({
+                                    "jsonrpc": "2.0",
+                                    "id": request["id"],
+                                    "error": {"code": -32601, "message": "not supported"}
+                                }),
+                                "initialize" => json!({
+                                    "jsonrpc": "2.0",
+                                    "id": request["id"],
+                                    "result": {
+                                        "protocolVersion": "2025-06-18",
+                                        "capabilities": {"tools": {}},
+                                        "serverInfo": {"name": "mock-gateway-mcp", "version": "0.1.0"}
+                                    }
+                                }),
+                                "notifications/initialized" => {
+                                    return HttpResponse::builder()
+                                        .status(202)
+                                        .body(Body::empty())
+                                        .expect("202");
+                                }
+                                "tools/list" => json!({
+                                    "jsonrpc": "2.0",
+                                    "id": request["id"],
+                                    "result": {
+                                        "tools": [{
+                                            "name": "device.fleet_list",
+                                            "description": "List online devices",
+                                            "inputSchema": {"type": "object"}
+                                        }]
+                                    }
+                                }),
+                                other => json!({
+                                    "jsonrpc": "2.0",
+                                    "id": request["id"],
+                                    "error": {"code": -32601, "message": format!("unknown method {other}")}
+                                }),
+                            };
+                            HttpResponse::builder()
+                                .header("content-type", "application/json")
+                                .body(Body::from(body.to_string()))
+                                .expect("json response")
+                        }
+                    },
+                ),
+            );
+            let mcp_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind mock mcp");
+            let mcp_port = mcp_listener.local_addr().expect("mcp addr").port();
+            let mcp_server =
+                tokio::spawn(async move { axum::serve(mcp_listener, mcp_router).await });
+
+            let harness = TestGatewayHarness::start().await;
+            let signing_key = SigningKey::from_bytes(&[16_u8; 32]);
+            let (mut pair_ws, paired_id) =
+                pair_direct_confirm(&harness, "req-mcp-sync", &signing_key, false).await;
+            let device_id = paired_id.expect("paired id");
+            let _ = pair_ws.close(None).await;
+
+            let (mut ws, challenge) = harness.connect_ws().await;
+            let device_nonce = "dev-auth-nonce-mcp";
+            let transcript = auth_transcript(
+                &challenge.connection_id,
+                &challenge.nonce,
+                device_id.as_str(),
+                device_nonce,
+                text_capabilities(),
+                OutputPreferenceSnapshot::Text,
+            );
+            let sig = signing_key.sign(&transcript).to_bytes();
+            send_json(
+                &mut ws,
+                "m-hello-mcp",
+                "hello",
+                &DeviceHello {
+                    device_id: device_id.to_string(),
+                    device_nonce: device_nonce.to_owned(),
+                    capabilities: text_capabilities(),
+                    output_preference: OutputPreferenceSnapshot::Text,
+                    client_version: "esp-pika-gateway/0.3.0".to_owned(),
+                    signature: encode_base64(&sig),
+                    mcp_servers: vec![DeviceMcpServerDeclaration {
+                        id: Some("esp-pika-gateway".to_owned()),
+                        display_name: "ESP-Pika 设备网关".to_owned(),
+                        description: "控制局域网终端".to_owned(),
+                        scheme: DeviceMcpScheme::Http,
+                        port: mcp_port,
+                        path: "/mcp".to_owned(),
+                        headers: std::collections::BTreeMap::from([
+                            ("X-Agent-ID".to_owned(), "ez-assistant".to_owned()),
+                            ("X-Speaker-Role".to_owned(), "owner".to_owned()),
+                        ]),
+                    }],
+                    console: None,
+                    speech_relay: false,
+                },
+            )
+            .await;
+
+            let ack_env = recv_envelope(&mut ws).await.expect("hello_ack");
+            assert_eq!(ack_env.message_type, "hello_ack");
+            let _ack: HelloAck = decode_payload(ack_env);
+
+            let snapshot = harness.handle.snapshot().await.expect("snapshot");
+            let conn = snapshot.devices[0]
+                .connection
+                .as_ref()
+                .expect("online connection");
+            assert_eq!(conn.peer_address.as_deref(), Some("127.0.0.1"));
+            assert_eq!(
+                conn.client_version.as_deref(),
+                Some("esp-pika-gateway/0.3.0")
+            );
+            assert_eq!(conn.mcp_server_keys.len(), 1);
+            let expected_key = conn.mcp_server_keys[0].clone();
+
+            let online_cfg = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let cfg = harness
+                        .runtime
+                        .get_mcp_configuration(GetMcpConfigurationRequest {})
+                        .await
+                        .expect("get mcp config");
+                    if let Some(server) = cfg
+                        .snapshot
+                        .servers
+                        .iter()
+                        .find(|server| server.server_key == expected_key)
+                        && server.tool_count == 1
+                    {
+                        break cfg.snapshot;
+                    }
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                }
+            })
+            .await
+            .expect("device MCP server synced");
+            let synced_server = online_cfg
+                .servers
+                .iter()
+                .find(|server| server.server_key == expected_key)
+                .expect("device mcp entry");
+            assert_eq!(
+                synced_server.source,
+                McpServerSource::Device(device_id.to_string())
+            );
+            assert!(
+                synced_server
+                    .managed
+                    .as_ref()
+                    .expect("managed")
+                    .source_enabled
+            );
+            assert_eq!(synced_server.transport, McpTransportKind::StreamableHttp);
+            assert_eq!(
+                synced_server.runtime_state,
+                McpServerRuntimeState::Connected
+            );
+            assert_eq!(synced_server.target_summary, "Managed HTTP");
+            assert!(
+                observed_headers
+                    .lock()
+                    .await
+                    .contains(&("ez-assistant".to_owned(), "owner".to_owned()))
+            );
+
+            drop(ws);
+            let offline_cfg = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let cfg = harness
+                        .runtime
+                        .get_mcp_configuration(GetMcpConfigurationRequest {})
+                        .await
+                        .expect("get mcp config");
+                    if let Some(server) = cfg
+                        .snapshot
+                        .servers
+                        .iter()
+                        .find(|server| server.server_key == expected_key)
+                        && server
+                            .managed
+                            .as_ref()
+                            .is_some_and(|managed| !managed.source_enabled)
+                    {
+                        break cfg.snapshot;
+                    }
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                }
+            })
+            .await
+            .expect("device MCP marked offline after disconnect");
+            assert!(
+                !offline_cfg
+                    .servers
+                    .iter()
+                    .find(|server| server.server_key == expected_key)
+                    .expect("server still present while offline")
+                    .managed
+                    .as_ref()
+                    .expect("managed")
+                    .source_enabled
+            );
+
+            harness
+                .runtime
+                .revoke_paired_device(device_id.clone())
+                .await
+                .expect("revoke paired device");
+            harness.handle.revoke_connection(&device_id).await;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let cfg = harness
+                        .runtime
+                        .get_mcp_configuration(GetMcpConfigurationRequest {})
+                        .await
+                        .expect("get mcp config");
+                    if !cfg
+                        .snapshot
+                        .servers
+                        .iter()
+                        .any(|server| server.server_key == expected_key)
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                }
+            })
+            .await
+            .expect("device MCP removed on revoke");
+
+            mcp_server.abort();
+            let _ = mcp_server.await;
+            harness.shutdown().await;
+        }
+
+        fn build_test_wav_pcm16_16k_mono(samples: &[i16]) -> Vec<u8> {
+            let data_bytes = (samples.len() * 2) as u32;
+            let mut wav = Vec::with_capacity(44 + data_bytes as usize);
+            wav.extend_from_slice(b"RIFF");
+            wav.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+            wav.extend_from_slice(b"WAVE");
+            wav.extend_from_slice(b"fmt ");
+            wav.extend_from_slice(&16_u32.to_le_bytes());
+            wav.extend_from_slice(&1_u16.to_le_bytes());
+            wav.extend_from_slice(&1_u16.to_le_bytes());
+            wav.extend_from_slice(&16_000_u32.to_le_bytes());
+            wav.extend_from_slice(&32_000_u32.to_le_bytes());
+            wav.extend_from_slice(&2_u16.to_le_bytes());
+            wav.extend_from_slice(&16_u16.to_le_bytes());
+            wav.extend_from_slice(b"data");
+            wav.extend_from_slice(&data_bytes.to_le_bytes());
+            for &sample in samples {
+                wav.extend_from_slice(&sample.to_le_bytes());
+            }
+            wav
+        }
+
+        fn encode_relay_uplink_frame(stream_id: u32, sequence: u32, payload: &[u8]) -> Vec<u8> {
+            let mut frame = vec![0_u8; PCM_HEADER_BYTES + payload.len()];
+            frame[0] = 1;
+            frame[1] = PCM_FRAME_KIND_RELAY_UPLINK;
+            frame[4..8].copy_from_slice(&stream_id.to_be_bytes());
+            frame[8..12].copy_from_slice(&sequence.to_be_bytes());
+            frame[12..14].copy_from_slice(&(payload.len() as u16).to_be_bytes());
+            frame[PCM_HEADER_BYTES..].copy_from_slice(payload);
+            frame
+        }
+
+        #[tokio::test]
+        async fn wss_authenticated_console_and_speech_relay_round_trip() {
+            let tts_samples = [321_i16, -654, 987, -111];
+            let tts_wav = build_test_wav_pcm16_16k_mono(&tts_samples);
+            let speech_router = Router::new()
+                .route(
+                    "/v1/audio/transcriptions",
+                    post(|| async { AxumJson(json!({ "text": "打开客厅灯" })) }),
+                )
+                .route(
+                    "/v1/audio/speech",
+                    post({
+                        let tts_wav = tts_wav.clone();
+                        move || {
+                            let body = tts_wav.clone();
+                            async move {
+                                HttpResponse::builder()
+                                    .header("content-type", "audio/wav")
+                                    .body(Body::from(body))
+                                    .expect("wav response")
+                            }
+                        }
+                    }),
+                );
+            let speech_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind speech mock");
+            let speech_port = speech_listener.local_addr().expect("speech addr").port();
+            let speech_server = tokio::spawn(async move {
+                axum::serve(speech_listener, speech_router)
+                    .await
+                    .expect("serve speech mock");
+            });
+
+            let harness = TestGatewayHarness::start().await;
+            let initial_cfg = harness
+                .speech
+                .get_configuration()
+                .await
+                .expect("read initial config");
+            let updated_cfg = harness
+                .speech
+                .update_configuration(UpdateSpeechConfigurationRequest {
+                    expected_revision: initial_cfg.revision,
+                    asr: UpdateAsrConfigurationInput {
+                        enabled: true,
+                        provider: SpeechProviderKind::Openai,
+                        endpoint: format!("http://127.0.0.1:{speech_port}/v1"),
+                        model: "gpt-4o-mini-transcribe".to_owned(),
+                        timeout_ms: 10_000,
+                        credential: Some(SecretValue::new("sk-asr-test".to_owned())),
+                        clear_credential: false,
+                    },
+                    tts: UpdateTtsConfigurationInput {
+                        enabled: true,
+                        provider: SpeechProviderKind::Openai,
+                        endpoint: format!("http://127.0.0.1:{speech_port}/v1"),
+                        model: "gpt-4o-mini-tts".to_owned(),
+                        voice: "alloy".to_owned(),
+                        timeout_ms: 10_000,
+                        credential: Some(SecretValue::new("sk-tts-test".to_owned())),
+                        clear_credential: false,
+                        reuse_asr_credential: false,
+                    },
+                })
+                .await
+                .expect("update speech config");
+            assert_eq!(updated_cfg.status.asr, SpeechServiceStatusSnapshot::Ready);
+            assert_eq!(updated_cfg.status.tts, SpeechServiceStatusSnapshot::Ready);
+
+            let signing_key = SigningKey::from_bytes(&[9_u8; 32]);
+            let (mut ws, paired_id) =
+                pair_direct_confirm(&harness, "pair-relay-1", &signing_key, false).await;
+            let device_id = paired_id.expect("paired device id");
+            let _ = ws.close(None).await;
+
+            let (mut ws, challenge) = harness.connect_ws().await;
+            let device_nonce = "dev-auth-relay-1";
+            let caps = text_capabilities();
+            let transcript = auth_transcript(
+                &challenge.connection_id,
+                &challenge.nonce,
+                device_id.as_str(),
+                device_nonce,
+                caps,
+                OutputPreferenceSnapshot::Text,
+            );
+            let sig = signing_key.sign(&transcript).to_bytes();
+            send_json(
+                &mut ws,
+                "m-hello-relay",
+                "hello",
+                &DeviceHello {
+                    device_id: device_id.to_string(),
+                    device_nonce: device_nonce.to_owned(),
+                    capabilities: caps,
+                    output_preference: OutputPreferenceSnapshot::Text,
+                    client_version: "esp-pika-gateway/0.4.0".to_owned(),
+                    signature: encode_base64(&sig),
+                    mcp_servers: Vec::new(),
+                    console: Some(DeviceConsoleDeclaration {
+                        scheme: DeviceMcpScheme::Http,
+                        port: 8000,
+                        api_prefix: "/api/v1".to_owned(),
+                        ui_path: Some("/ui/".to_owned()),
+                    }),
+                    speech_relay: true,
+                },
+            )
+            .await;
+
+            let ack_env = recv_envelope(&mut ws).await.expect("hello_ack");
+            assert_eq!(ack_env.message_type, "hello_ack");
+            let ack: HelloAck = decode_payload(ack_env);
+            let ack_speech = ack.speech_services.expect("speech services in hello_ack");
+            assert_eq!(ack_speech.asr, SpeechServiceStatusSnapshot::Ready);
+            assert_eq!(ack_speech.tts, SpeechServiceStatusSnapshot::Ready);
+
+            let snapshot = harness.handle.snapshot().await.expect("snapshot");
+            let conn = snapshot.devices[0]
+                .connection
+                .as_ref()
+                .expect("online connection");
+            assert!(conn.speech_relay);
+            let console_snap = conn.console.as_ref().expect("console snapshot");
+            assert_eq!(console_snap.api_prefix, "/api/v1");
+            assert_eq!(console_snap.ui_path.as_deref(), Some("/ui/"));
+            assert_eq!(
+                console_snap.direct_url.as_deref(),
+                Some("http://127.0.0.1:8000/ui/")
+            );
+            assert!(harness.handle.console_target(&device_id).await.is_some());
+
+            harness
+                .shared
+                .broadcast_speech_status(DeviceSpeechServicesSnapshot {
+                    asr: SpeechServiceStatusSnapshot::Degraded,
+                    tts: SpeechServiceStatusSnapshot::Ready,
+                })
+                .await;
+            let status_env = recv_envelope(&mut ws).await.expect("speech_status_changed");
+            assert_eq!(status_env.message_type, "speech_status_changed");
+            let status_payload: SpeechStatusChanged = decode_payload(status_env);
+            assert_eq!(
+                status_payload.speech_services.asr,
+                SpeechServiceStatusSnapshot::Degraded
+            );
+
+            send_json(
+                &mut ws,
+                "m-asr-start",
+                "speech_asr_start",
+                &SpeechAsrStart {
+                    request_id: "asr-req-1".to_owned(),
+                    stream_id: 101,
+                    format: PcmFormat {
+                        encoding: "pcm_s16le".to_owned(),
+                        sample_rate_hz: 16_000,
+                        channels: 1,
+                        frame_duration_ms: 0,
+                    },
+                },
+            )
+            .await;
+            let uplink_pcm = vec![12_u8; 640];
+            ws.send(WsMessage::Binary(
+                encode_relay_uplink_frame(101, 0, &uplink_pcm).into(),
+            ))
+            .await
+            .expect("send binary kind=3");
+            send_json(
+                &mut ws,
+                "m-asr-stop",
+                "speech_asr_stop",
+                &SpeechAsrStop {
+                    request_id: "asr-req-1".to_owned(),
+                    stream_id: 101,
+                    last_sequence: 0,
+                },
+            )
+            .await;
+            let asr_env = recv_envelope(&mut ws).await.expect("speech_asr_result");
+            assert_eq!(asr_env.message_type, "speech_asr_result");
+            let asr_res: SpeechAsrResult = decode_payload(asr_env);
+            assert!(asr_res.ok);
+            assert_eq!(asr_res.text.as_deref(), Some("打开客厅灯"));
+
+            send_json(
+                &mut ws,
+                "m-tts-req",
+                "speech_tts_request",
+                &SpeechTtsRequest {
+                    request_id: "tts-req-1".to_owned(),
+                    stream_id: 202,
+                    text: "客厅灯已打开".to_owned(),
+                },
+            )
+            .await;
+            let tts_start_env = recv_envelope(&mut ws).await.expect("speech_tts_start");
+            assert_eq!(tts_start_env.message_type, "speech_tts_start");
+            let tts_start: SpeechTtsStart = decode_payload(tts_start_env);
+            assert!(tts_start.ok);
+            assert_eq!(tts_start.total_bytes, Some((tts_samples.len() * 2) as u64));
+
+            let mut received_pcm = Vec::new();
+            let tts_end_env = loop {
+                let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+                    .await
+                    .expect("tts recv")
+                    .expect("tts frame")
+                    .expect("ws ok");
+                match msg {
+                    WsMessage::Binary(frame) => {
+                        assert_eq!(frame[0], 1);
+                        assert_eq!(frame[1], PCM_FRAME_KIND_RELAY_DOWNLINK);
+                        assert_eq!(
+                            u32::from_be_bytes([frame[4], frame[5], frame[6], frame[7]]),
+                            202
+                        );
+                        received_pcm.extend_from_slice(&frame[PCM_HEADER_BYTES..]);
+                    }
+                    WsMessage::Text(text) => {
+                        break Envelope::decode(&text).expect("decode tts end");
+                    }
+                    other => panic!("unexpected TTS ws frame: {other:?}"),
+                }
+            };
+            assert_eq!(tts_end_env.message_type, "speech_tts_end");
+            let tts_end: SpeechTtsEnd = decode_payload(tts_end_env);
+            assert!(tts_end.ok);
+            let mut expected_pcm = Vec::new();
+            for s in tts_samples {
+                expected_pcm.extend_from_slice(&s.to_le_bytes());
+            }
+            assert_eq!(received_pcm, expected_pcm);
+
+            speech_server.abort();
+            let _ = speech_server.await;
+            harness.shutdown().await;
+        }
     }
 }

@@ -42,6 +42,7 @@ const MAX_SHELL_OUTPUT_BYTES: u64 = 1024 * 1024;
 pub(super) struct HostRunToolFactory {
     resources: LocalToolResources,
     sessions_root: AbsolutePath,
+    user_roots: Vec<AbsolutePath>,
 }
 
 struct LocalToolResources {
@@ -76,9 +77,18 @@ impl HostRunToolFactory {
     ) -> Result<Self, ToolResourceError> {
         let sessions_root = AbsolutePath::new(runtime_home.join("data/sessions"))
             .map_err(ToolResourceError::path)?;
+        let logical_root = AbsolutePath::new(runtime_home).map_err(ToolResourceError::path)?;
+        let mut user_roots = vec![logical_root];
+        if let Ok(resolved) = assistant_runtime::resolve_permission_path(runtime_home)
+            && let Ok(abs_resolved) = AbsolutePath::new(resolved)
+            && !user_roots.contains(&abs_resolved)
+        {
+            user_roots.push(abs_resolved);
+        }
         Ok(Self {
             resources: LocalToolResources::new(paths)?,
             sessions_root,
+            user_roots,
         })
     }
 }
@@ -125,8 +135,12 @@ impl RunToolFactory for HostRunToolFactory {
             ));
         }
         let resolver = checked_resolver(request.environment)?;
-        self.resources
-            .compile(request, resolver, self.sessions_root.clone())
+        self.resources.compile(
+            request,
+            resolver,
+            self.sessions_root.clone(),
+            self.user_roots.clone(),
+        )
     }
 }
 
@@ -197,6 +211,7 @@ impl LocalToolResources {
         request: RunToolFactoryRequest<'_>,
         resolver: SessionPathResolver,
         sessions_root: AbsolutePath,
+        user_roots: Vec<AbsolutePath>,
     ) -> Result<RunToolBundle, RunToolFactoryError> {
         // 注册顺序也是 Provider 可见请求的一部分，保持固定顺序可让相同工具集稳定序列化。
         let mut registry = ToolRegistry::new();
@@ -319,7 +334,10 @@ impl LocalToolResources {
                 Arc::new(ToolImageMutationPolicy {
                     sessions_root: sessions_root.clone(),
                 }),
-                Arc::new(SessionPermissionFileMutationPolicy { sessions_root }),
+                Arc::new(SessionPermissionFileMutationPolicy {
+                    sessions_root,
+                    user_roots,
+                }),
             ],
         )
         .with_default_rules(Arc::new(super::feedback::HostDefaultRules {
@@ -456,10 +474,11 @@ impl ToolImageMutationPolicy {
     }
 }
 
-/// Session 权限文件位于 Agent 可写的私有目录中，但它是 Host 控制面文件，不是普通业务文件。
-/// 防止结构化文件工具借助默认私有目录写权限修改自己的授权边界。
+/// Session 与 Controller 权限文件是 Host 控制面文件，不是普通业务文件。
+/// 防止结构化文件工具借助默认目录写权限修改自己的授权边界。
 struct SessionPermissionFileMutationPolicy {
     sessions_root: AbsolutePath,
+    user_roots: Vec<AbsolutePath>,
 }
 
 impl ToolPolicy for SessionPermissionFileMutationPolicy {
@@ -468,17 +487,67 @@ impl ToolPolicy for SessionPermissionFileMutationPolicy {
         invocation: &ResolvedToolInvocation,
         _batch: &ResolvedToolBatch,
     ) -> PolicyEvaluation {
-        if file_targets(invocation).any(|(operation, path)| {
-            is_mutation(operation) && self.is_session_permission_file(path)
-        }) {
-            PolicyEvaluation::Decide(ToolAuthorization::Deny { reason: "session permissions are managed by the Runtime and cannot be modified by structured file tools".to_owned() })
-        } else {
-            PolicyEvaluation::Continue
+        for (operation, path) in file_targets(invocation) {
+            if !is_mutation(operation) {
+                continue;
+            }
+            if self.is_controller_permission_file(path) {
+                return PolicyEvaluation::Decide(ToolAuthorization::Deny {
+                    reason: "controller permissions are managed by the Runtime and cannot be modified by structured file tools".to_owned(),
+                });
+            }
+            if self.is_session_permission_file(path) {
+                return PolicyEvaluation::Decide(ToolAuthorization::Deny {
+                    reason: "session permissions are managed by the Runtime and cannot be modified by structured file tools".to_owned(),
+                });
+            }
         }
+        PolicyEvaluation::Continue
     }
 }
 
 impl SessionPermissionFileMutationPolicy {
+    fn matches_controller_root(&self, candidate: &std::path::Path) -> bool {
+        self.user_roots.iter().any(|root| {
+            candidate.strip_prefix(root.as_path()).ok()
+                == Some(std::path::Path::new("controller-permissions.json"))
+        })
+    }
+
+    fn is_controller_permission_file(&self, path: &AbsolutePath) -> bool {
+        if self.matches_controller_root(path.as_path()) {
+            return true;
+        }
+        if assistant_runtime::resolve_permission_path(path.as_path())
+            .is_ok_and(|resolved| self.matches_controller_root(&resolved))
+        {
+            return true;
+        }
+        if std::fs::symlink_metadata(path.as_path()).is_ok_and(|meta| meta.file_type().is_symlink())
+            && let Ok(target) = std::fs::read_link(path.as_path())
+        {
+            let logical_target = join_link_target(path.as_path(), &target);
+            if self.matches_controller_root(&logical_target)
+                || assistant_runtime::resolve_permission_path(&logical_target)
+                    .is_ok_and(|resolved| self.matches_controller_root(&resolved))
+            {
+                return true;
+            }
+            if let Some(parent) = path.as_path().parent()
+                && let Ok(resolved_parent) = assistant_runtime::resolve_permission_path(parent)
+            {
+                let canonical_target = normalize_path(&resolved_parent, &target);
+                if self.matches_controller_root(&canonical_target)
+                    || assistant_runtime::resolve_permission_path(&canonical_target)
+                        .is_ok_and(|resolved| self.matches_controller_root(&resolved))
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn is_session_permission_file(&self, path: &AbsolutePath) -> bool {
         let Ok(relative) = path.as_path().strip_prefix(self.sessions_root.as_path()) else {
             return false;
@@ -507,6 +576,34 @@ fn is_mutation(operation: FileOperation) -> bool {
         operation,
         FileOperation::Write | FileOperation::Edit | FileOperation::Delete
     )
+}
+
+fn normalize_path(base: &std::path::Path, target: &std::path::Path) -> std::path::PathBuf {
+    let raw = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        base.join(target)
+    };
+    let mut normalized = std::path::PathBuf::new();
+    for component in raw.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn join_link_target(link: &std::path::Path, target: &std::path::Path) -> std::path::PathBuf {
+    match link.parent() {
+        Some(parent) => normalize_path(parent, target),
+        None => normalize_path(std::path::Path::new(""), target),
+    }
 }
 
 fn nonzero32(value: u32) -> NonZeroU32 {
@@ -920,6 +1017,117 @@ mod tests {
             authorizer.authorize(invocation, &protected_batch).await,
             ToolAuthorization::Deny { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn controller_permission_file_cannot_be_modified_by_structured_file_tools() {
+        let root = TempDir::new().expect("tempdir");
+        let work = root.path().join("work");
+        std::fs::create_dir(&work).expect("workdir");
+        std::fs::write(work.join("output.txt"), "allowed").expect("work file");
+        let controller_permissions = root.path().join("controller-permissions.json");
+        std::fs::write(
+            &controller_permissions,
+            r#"{"schema_version":1,"rules":[]}"#,
+        )
+        .expect("controller permission file");
+
+        let factory = HostRunToolFactory::with_paths(
+            root.path(),
+            Arc::new(crate::user_paths::UserPaths::new(root.path(), Vec::new())),
+        )
+        .expect("factory");
+        let environment = environment(&root, "work");
+        let (tools, policies) = compile_bundle(&factory, &environment).into_parts();
+        let authorizer = test_authorizer(policies);
+
+        let write_batch = Dispatcher::resolve_batch(
+            &tools,
+            &[call(
+                "write_file",
+                json!({
+                    "path": controller_permissions.to_string_lossy(),
+                    "content": r#"{"schema_version":1,"rules":[{"id":"self-grant"}]}"#
+                }),
+            )],
+        );
+        let ResolvedBatchItemRef::Valid(write_item) = write_batch.get(0).unwrap() else {
+            panic!("write resolves");
+        };
+        assert!(matches!(
+            authorizer.authorize(write_item, &write_batch).await,
+            ToolAuthorization::Deny { .. }
+        ));
+
+        let edit_batch = Dispatcher::resolve_batch(
+            &tools,
+            &[call(
+                "edit_file",
+                json!({"files":[
+                    {"path":work.join("output.txt"),"edits":[{"old_string":"allowed","new_string":"changed"}]},
+                    {"path":controller_permissions,"edits":[{"old_string":"rules","new_string":"changed"}]}
+                ]}),
+            )],
+        );
+        let ResolvedBatchItemRef::Valid(edit_item) = edit_batch.get(0).unwrap() else {
+            panic!("edit resolves");
+        };
+        assert!(matches!(
+            authorizer.authorize(edit_item, &edit_batch).await,
+            ToolAuthorization::Deny { .. }
+        ));
+
+        #[cfg(unix)]
+        {
+            let link_in_work = work.join("ctrl-link.json");
+            std::os::unix::fs::symlink(
+                std::path::Path::new("../controller-permissions.json"),
+                &link_in_work,
+            )
+            .expect("create symlink to controller-permissions.json");
+            let symlink_batch = Dispatcher::resolve_batch(
+                &tools,
+                &[call(
+                    "write_file",
+                    json!({
+                        "path": link_in_work.to_string_lossy(),
+                        "content": r#"{"schema_version":1,"rules":[{"id":"via-symlink"}]}"#
+                    }),
+                )],
+            );
+            let ResolvedBatchItemRef::Valid(symlink_item) = symlink_batch.get(0).unwrap() else {
+                panic!("symlink write resolves");
+            };
+            assert!(matches!(
+                authorizer.authorize(symlink_item, &symlink_batch).await,
+                ToolAuthorization::Deny { .. }
+            ));
+
+            let dangling_link = work.join("dangling-ctrl-link.json");
+            std::fs::remove_file(&controller_permissions).expect("remove target to test dangling");
+            std::os::unix::fs::symlink(
+                std::path::Path::new("../controller-permissions.json"),
+                &dangling_link,
+            )
+            .expect("create dangling symlink to controller-permissions.json");
+            let dangling_batch = Dispatcher::resolve_batch(
+                &tools,
+                &[call(
+                    "write_file",
+                    json!({
+                        "path": dangling_link.to_string_lossy(),
+                        "content": r#"{"schema_version":1,"rules":[{"id":"via-dangling"}]}"#
+                    }),
+                )],
+            );
+            let ResolvedBatchItemRef::Valid(dangling_item) = dangling_batch.get(0).unwrap() else {
+                panic!("dangling symlink write resolves");
+            };
+            assert!(matches!(
+                authorizer.authorize(dangling_item, &dangling_batch).await,
+                ToolAuthorization::Deny { .. }
+            ));
+        }
     }
 
     #[test]

@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{RuntimeStore, StoreError, StoreErrorKind};
 
 pub const MAX_PERSONA_BYTES: usize = 32 * 1024;
+pub const MAX_CONTROLLER_PROMPT_BYTES: usize = MAX_PERSONA_BYTES;
 
 pub fn pinned_memory_limits() -> PinnedMemoryLimits {
     PinnedMemoryLimits {
@@ -71,6 +72,24 @@ pub struct MemoryContextSnapshot {
 /// 使用期望修订号替换单例 Persona。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PersonaMutation {
+    pub expected_revision: u64,
+    pub enabled: bool,
+    pub content: String,
+    pub updated_at_ms: i64,
+}
+
+/// 单例助理会话（Controller）系统提示词投影。
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ControllerPromptSnapshot {
+    pub enabled: bool,
+    pub content: String,
+    pub revision: u64,
+    pub updated_at_ms: i64,
+}
+
+/// 使用期望修订号替换单例助理会话（Controller）系统提示词。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ControllerPromptMutation {
     pub expected_revision: u64,
     pub enabled: bool,
     pub content: String,

@@ -747,6 +747,7 @@ describe('SettingsDialog model management', () => {
         {
           pairing_request_id: 'pairing-1',
           display_name: '客厅新终端',
+          mode: 'spake2',
           expires_at_ms: 10_000,
           remaining_attempts: 5,
           capabilities: {
@@ -808,6 +809,9 @@ describe('SettingsDialog model management', () => {
           connection: {
             connected_at_ms: 1_725_000_200_000,
             output_preference: 'text',
+            peer_address: '192.168.101.8',
+            client_version: 'esp-pika-gateway/0.3.0',
+            mcp_server_keys: ['dev_device-1_esp-pika-gateway'],
             capabilities: {
               input_text: true,
               input_pcm16_16k_mono: false,
@@ -837,9 +841,107 @@ describe('SettingsDialog model management', () => {
     expect(screen.getByText('设备 ID').nextElementSibling).toHaveTextContent('device-1');
     expect(screen.getByText('输入能力').nextElementSibling).toHaveTextContent('文字');
     expect(screen.getByText('交互能力').nextElementSibling).toHaveTextContent('状态显示、转写显示');
+    expect(screen.getByText('连接地址').nextElementSibling).toHaveTextContent('192.168.101.8');
+    expect(screen.getByText('客户端版本').nextElementSibling).toHaveTextContent('esp-pika-gateway/0.3.0');
+    expect(screen.getByText('自动配置 MCP').nextElementSibling).toHaveTextContent('dev_device-1_esp-pika-gateway');
 
     fireEvent.click(screen.getByRole('button', { name: '返回设备列表' }));
     expect(screen.getByRole('heading', { name: '智能终端' })).toBeVisible();
+  });
+
+  it('supports one-click confirm and reject for direct_confirm pairing candidates and labels offline device MCP', () => {
+    const store = settingsStore();
+    store.settings.page = 'devices';
+    store.device_gateway.stale = false;
+    store.device_gateway.snapshot = {
+      enabled: true,
+      available: true,
+      installation_id: 'installation-1',
+      certificate_fingerprint: 'fingerprint',
+      pairing_window: { expires_at_ms: 10_000 },
+      pending_pairings: [
+        {
+          pairing_request_id: 'pairing-direct',
+          display_name: 'ESP-Pika Gateway',
+          mode: 'direct_confirm',
+          peer_address: '192.168.101.25',
+          key_fingerprint: '1A2B-3C4D',
+          client_version: 'esp-pika-gateway/0.3.0',
+          expires_at_ms: 10_000,
+          remaining_attempts: 1,
+          capabilities: {
+            input_text: true,
+            input_pcm16_16k_mono: false,
+            output_text: true,
+            output_pcm16_16k_mono: false,
+            playback_cancel: false,
+            display_status: true,
+            display_transcript: true,
+          },
+        },
+      ],
+      devices: [],
+      speech_services: { asr: 'unavailable', tts: 'unavailable' },
+    };
+    vi.spyOn(store.device_gateway, 'load').mockResolvedValue();
+    const confirm = vi.spyOn(store.device_gateway, 'confirmPairing').mockResolvedValue(true);
+    const reject = vi.spyOn(store.device_gateway, 'rejectPairing').mockResolvedValue(true);
+    renderDialog(store);
+
+    expect(screen.getByText('ESP-Pika Gateway')).toBeVisible();
+    expect(screen.getByText(/192\.168\.101\.25/)).toBeVisible();
+    expect(screen.getByText(/指纹 1A2B-3C4D/)).toBeVisible();
+    expect(screen.queryByPlaceholderText('配对码')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '确认配对' }));
+    expect(confirm).toHaveBeenCalledWith('pairing-direct', null, null);
+    fireEvent.click(screen.getByRole('button', { name: '拒绝' }));
+    expect(reject).toHaveBeenCalledWith('pairing-direct');
+  });
+
+  it('labels device-sourced MCP servers as 智能终端 and 终端已离线 when offline', () => {
+    const store = mcpSettingsStore();
+    vi.spyOn(store.settings.mcp, 'load').mockResolvedValue();
+    store.settings.mcp.stale = false;
+    store.settings.mcp.configuration = {
+      revision: 'mcp-device-r1',
+      needs_refresh: false,
+      diagnostics: [],
+      servers: [
+        {
+          source: { type: 'device', name: 'device-1' },
+          server_key: 'dev_device-1_esp-pika-gateway',
+          display_name: 'ESP-Pika 设备网关',
+          description: '',
+          transport: 'streamable_http',
+          enabled: false,
+          runtime_state: 'disabled',
+          tool_count: 0,
+          needs_refresh: false,
+          target_summary: 'Managed HTTP',
+          startup_timeout_ms: null,
+          tool_timeout_ms: null,
+          environment_keys: [],
+          header_keys: [],
+          managed: {
+            revision: 'dev-r1',
+            definition_digest: 'd1',
+            configured_enabled: true,
+            source_enabled: false,
+            source_available: false,
+            configuration_ready: true,
+            environment: {},
+            headers: {},
+            parameters: [],
+            parameter_bindings: {},
+          },
+        },
+      ],
+    };
+    renderDialog(store);
+    expect(screen.getByText('ESP-Pika 设备网关')).toBeVisible();
+    expect(screen.getByText(/智能终端 · device-1/)).toBeVisible();
+    expect(screen.getByText(/终端已离线/)).toBeVisible();
   });
 
   it('shows the Chinese skill management projection and delegates the name toggle', () => {
@@ -1056,6 +1158,62 @@ describe('SettingsDialog permission management', () => {
     fireEvent.click(within(listbox).getByRole('option', { name: '拒绝' }));
     expect(effect).toHaveTextContent('拒绝');
   });
+
+  it('manages controller one-time grants on the 助理会话 tab without native selects', async () => {
+    const store = settingsStore();
+    store.settings.page = 'permissions';
+    store.settings.permission_documents = [
+      permissionDocument({ type: 'global' }, true),
+      permissionDocument({ type: 'controller' }, true),
+    ];
+    store.settings.permission_grants = [
+      {
+        grant_id: 'grant-1',
+        scope: 'controller',
+        variants: ['build'],
+        matcher: { type: 'general', payload: { tool_name: 'speak' } },
+        max_uses: 1,
+        remaining_uses: 1,
+        note: 'voice confirmation',
+        created_at_ms: 100,
+      },
+    ];
+    const create_grant = vi.spyOn(store.settings, 'createPermissionGrant').mockResolvedValue(true);
+    const reload_permissions = vi.spyOn(store.settings, 'reloadPermissions').mockResolvedValue(true);
+    renderDialog(store);
+
+    fireEvent.click(screen.getByRole('tab', { name: '助理会话' }));
+    expect(screen.getByText('后台一次性预授权')).toBeVisible();
+    expect(screen.getByText('剩余 1 / 1 次')).toBeVisible();
+
+    fireEvent.click(screen.getByRole('button', { name: '重新加载' }));
+    expect(reload_permissions).toHaveBeenCalledWith('controller');
+
+    fireEvent.click(screen.getByRole('button', { name: '新增预授权' }));
+    expect(screen.getByRole('button', { name: '添加规则' })).toBeDisabled();
+    expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
+    expect(document.querySelector('select')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: '选择匹配类型' }));
+    fireEvent.click(within(screen.getByRole('listbox')).getByRole('option', { name: '通用工具' }));
+    fireEvent.change(screen.getByPlaceholderText('例如 delegate_task'), {
+      target: { value: 'speak' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '保存预授权' }));
+
+    await waitFor(() =>
+      expect(create_grant).toHaveBeenCalledWith({
+        variants: ['build'],
+        matcher: { type: 'general', payload: { tool_name: 'speak' } },
+        max_uses: 1,
+        ttl_seconds: 3600,
+        note: '',
+      }),
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '添加规则' }));
+    expect(screen.getByRole('button', { name: '新增预授权' })).toBeDisabled();
+  });
 });
 
 describe('SettingsDialog memory management', () => {
@@ -1063,10 +1221,19 @@ describe('SettingsDialog memory management', () => {
     const store = settingsStore();
     store.settings.page = 'memory';
     store.memory_settings.persona = personaSnapshot();
+    store.memory_settings.controller_prompt = {
+      enabled: true,
+      content: '回答简短',
+      revision: 1,
+      updated_at_ms: 1,
+    };
+    store.memory_settings.controller_prompt_max_bytes = 16_384;
     store.memory_settings.capabilities = memoryCapabilities;
     store.memory_settings.collection = pinnedCollection();
     renderDialog(store);
 
+    expect(screen.getByText('助理会话提示词')).toBeVisible();
+    expect(screen.getByLabelText('助理会话提示词内容')).toHaveValue('回答简短');
     expect(screen.getByText('尚未添加 Pinned Memory。')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '添加' }));
     expect(screen.getByText('添加 Pinned Memory')).toBeInTheDocument();

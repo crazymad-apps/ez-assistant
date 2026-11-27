@@ -90,6 +90,7 @@ pub(super) fn file(
 pub(super) fn is_configuration(relative: &Path) -> bool {
     let components = relative.iter().collect::<Vec<_>>();
     let permission = relative == Path::new("permissions.json")
+        || relative == Path::new("controller-permissions.json")
         || (components.len() == 5
             && components[0] == "data"
             && components[1] == "sessions"

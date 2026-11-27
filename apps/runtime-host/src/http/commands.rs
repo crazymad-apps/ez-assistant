@@ -3,6 +3,7 @@
 use assistant_protocol::{
     DeviceGatewayCommand, DeviceGatewayCommandResult, DeviceGatewayMutationResult,
     HostAccessCommand, HostAccessStatus, RuntimeCommand, RuntimeCommandResult, RuntimeErrorInfo,
+    UpdateSpeechConfigurationResult,
 };
 use assistant_runtime::RuntimeError;
 use axum::{
@@ -268,6 +269,20 @@ async fn dispatch_device_gateway(
                     .map_err(|error| error.to_protocol_info())?,
             })
         }
+        DeviceGatewayCommand::RejectPairing(request) => {
+            services
+                .device_gateway
+                .reject_pairing(request)
+                .await
+                .map_err(|error| error.to_protocol_info())?;
+            DeviceGatewayCommandResult::RejectPairing(DeviceGatewayMutationResult {
+                snapshot: services
+                    .device_gateway
+                    .snapshot()
+                    .await
+                    .map_err(|error| error.to_protocol_info())?,
+            })
+        }
         DeviceGatewayCommand::RenameDevice(request) => {
             services
                 .runtime
@@ -301,6 +316,39 @@ async fn dispatch_device_gateway(
                     .await
                     .map_err(|error| error.to_protocol_info())?,
             })
+        }
+        DeviceGatewayCommand::GetSpeechConfiguration(_) => {
+            let configuration = services
+                .speech
+                .get_configuration()
+                .await
+                .map_err(|error| error.to_protocol_info())?;
+            DeviceGatewayCommandResult::GetSpeechConfiguration(configuration)
+        }
+        DeviceGatewayCommand::UpdateSpeechConfiguration(request) => {
+            let configuration = services
+                .speech
+                .update_configuration(request)
+                .await
+                .map_err(|error| error.to_protocol_info())?;
+            services.device_gateway.notify_changed();
+            let snapshot = services
+                .device_gateway
+                .snapshot()
+                .await
+                .map_err(|error| error.to_protocol_info())?;
+            DeviceGatewayCommandResult::UpdateSpeechConfiguration(UpdateSpeechConfigurationResult {
+                configuration,
+                snapshot,
+            })
+        }
+        DeviceGatewayCommand::TestAsrConfiguration(request) => {
+            let result = services.speech.test_asr(request).await?;
+            DeviceGatewayCommandResult::TestAsrConfiguration(result)
+        }
+        DeviceGatewayCommand::TestTtsConfiguration(request) => {
+            let result = services.speech.test_tts(request).await?;
+            DeviceGatewayCommandResult::TestTtsConfiguration(result)
         }
     };
     Ok((HostCommandResult::DeviceGateway(result), false))
@@ -775,6 +823,18 @@ async fn dispatch_runtime(
             RuntimeCommandResult::SetPersona(runtime.set_persona(request).await?),
             false,
         ),
+        RuntimeCommand::GetControllerPrompt(request) => (
+            RuntimeCommandResult::GetControllerPrompt(
+                runtime.get_controller_prompt(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::SetControllerPrompt(request) => (
+            RuntimeCommandResult::SetControllerPrompt(
+                runtime.set_controller_prompt(request).await?,
+            ),
+            false,
+        ),
         RuntimeCommand::ListPinnedMemories(request) => (
             RuntimeCommandResult::ListPinnedMemories(runtime.list_pinned_memories(request).await?),
             false,
@@ -799,6 +859,12 @@ async fn dispatch_runtime(
             RuntimeCommandResult::ReloadPermissions(runtime.reload_permissions(request).await?),
             false,
         ),
+        RuntimeCommand::ReloadControllerPermissions(request) => (
+            RuntimeCommandResult::ReloadControllerPermissions(
+                runtime.reload_controller_permissions(request).await?,
+            ),
+            false,
+        ),
         RuntimeCommand::GetPermissionDocument(request) => (
             RuntimeCommandResult::GetPermissionDocument(
                 runtime.get_permission_document(request).await?,
@@ -808,6 +874,24 @@ async fn dispatch_runtime(
         RuntimeCommand::ReplacePermissionDocument(request) => (
             RuntimeCommandResult::ReplacePermissionDocument(
                 runtime.replace_permission_document(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::ListPermissionGrants(request) => (
+            RuntimeCommandResult::ListPermissionGrants(
+                runtime.list_permission_grants(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::CreatePermissionGrant(request) => (
+            RuntimeCommandResult::CreatePermissionGrant(
+                runtime.create_permission_grant(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::RevokePermissionGrant(request) => (
+            RuntimeCommandResult::RevokePermissionGrant(
+                runtime.revoke_permission_grant(request).await?,
             ),
             false,
         ),

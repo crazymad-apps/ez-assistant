@@ -732,3 +732,814 @@ async fn saving_a_recursive_file_rule_does_not_release_an_existing_approval() {
         RunStatus::Completed
     );
 }
+
+#[tokio::test]
+async fn global_and_controller_permission_scopes_are_isolated_in_both_directions() {
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(true),
+        8_192,
+        [
+            file_calls_step("ctrl-global-only", &["global-only.txt"]),
+            ModelScript::Events(message_events(&assistant_text(
+                "ctrl-global-done",
+                "denied",
+            ))),
+            file_calls_step("std-global-only", &["global-only.txt"]),
+            ModelScript::Events(message_events(&assistant_text(
+                "std-global-done",
+                "allowed",
+            ))),
+            file_calls_step("ctrl-own-rule", &["controller-only.txt"]),
+            ModelScript::Events(message_events(&assistant_text("ctrl-own-done", "allowed"))),
+            file_calls_step("std-ctrl-only", &["controller-only.txt"]),
+            ModelScript::Events(message_events(&assistant_text("std-ctrl-done", "denied"))),
+        ],
+    ));
+    let permission_store = Arc::new(MutablePermissionStore::writable());
+    let global_doc = PermissionDocument {
+        schema_version: 1,
+        rules: vec![crate::PermissionRule {
+            id: "allow-global-only".to_owned(),
+            effect: crate::PermissionEffect::Allow,
+            variants: vec![AgentVariant::Build],
+            matcher: crate::PermissionMatcher::File(crate::FilePermissionMatcher {
+                operation: crate::PermissionFileOperation::Read,
+                path: test_absolute_path("/workspace/global-only.txt"),
+                path_match: crate::PathMatch::Exact,
+                excluded_paths: Vec::new(),
+            }),
+        }],
+    }
+    .render()
+    .expect("render global doc");
+    permission_store.put(PermissionFileScope::Global, global_doc);
+    let runtime = runtime_with_permission_components(permission_store, model, file_tools()).await;
+    runtime
+        .replace_permission_document(ReplacePermissionDocumentRequest {
+            scope: PermissionDocumentScope::Controller,
+            expected_revision: PermissionDocumentRevision::Missing,
+            document: PermissionDocumentDraft {
+                schema_version: 1,
+                rules: vec![PermissionRuleDefinition {
+                    id: "allow-controller-only".to_owned(),
+                    effect: PermissionRuleEffect::Allow,
+                    variants: vec![AgentVariant::Build],
+                    matcher: PermissionRuleMatcher::File(PermissionFileMatcher {
+                        operation: PermissionFileOperationDefinition::Read,
+                        path: test_absolute_path("/workspace/controller-only.txt"),
+                        path_match: PermissionPathMatch::Exact,
+                    }),
+                }],
+            },
+        })
+        .await
+        .expect("save controller rule");
+
+    let controller = runtime
+        .create_session_inner(
+            CreateSessionRequest::default(),
+            crate::SessionRole::Controller,
+            "助理",
+        )
+        .await
+        .expect("controller")
+        .session
+        .session_id;
+    let standard = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("standard")
+        .session
+        .session_id;
+
+    let ctrl_global_run = runtime
+        .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            session_id: controller.clone(),
+            message: "read global file from controller".to_owned(),
+            variant: AgentVariant::Build,
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+        })
+        .await
+        .expect("ctrl global input")
+        .run;
+    let pending = wait_for_pending_count(&runtime, &controller, 1)
+        .await
+        .pop()
+        .expect("global allow must not skip approval on controller");
+    runtime
+        .decide_approval(DecideApprovalRequest {
+            session_id: controller.clone(),
+            approval_id: pending.approval_id,
+            decision: ApprovalDecision::Deny,
+        })
+        .await
+        .expect("deny");
+    let term = wait_for_terminal(&runtime, &controller, &ctrl_global_run.run_id).await;
+    assert_eq!(term.status, RunStatus::Completed);
+    assert_eq!(
+        term.tools[0].status,
+        assistant_protocol::ToolActivityStatus::Failed
+    );
+
+    let std_global_run = runtime
+        .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            session_id: standard.clone(),
+            message: "read global file from standard".to_owned(),
+            variant: AgentVariant::Build,
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+        })
+        .await
+        .expect("std global input")
+        .run;
+    let term = wait_for_terminal(&runtime, &standard, &std_global_run.run_id).await;
+    assert_eq!(term.status, RunStatus::Completed);
+    assert_eq!(
+        term.tools[0].status,
+        assistant_protocol::ToolActivityStatus::Completed
+    );
+
+    let ctrl_own_run = runtime
+        .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            session_id: controller.clone(),
+            message: "read controller file from controller".to_owned(),
+            variant: AgentVariant::Build,
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+        })
+        .await
+        .expect("ctrl own input")
+        .run;
+    let term = wait_for_terminal(&runtime, &controller, &ctrl_own_run.run_id).await;
+    assert_eq!(term.status, RunStatus::Completed);
+    assert_eq!(
+        term.tools[0].status,
+        assistant_protocol::ToolActivityStatus::Completed
+    );
+
+    let std_ctrl_run = runtime
+        .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            session_id: standard.clone(),
+            message: "read controller file from standard".to_owned(),
+            variant: AgentVariant::Build,
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+        })
+        .await
+        .expect("std ctrl input")
+        .run;
+    let pending = wait_for_pending_count(&runtime, &standard, 1)
+        .await
+        .pop()
+        .expect("controller allow must not skip approval on standard");
+    runtime
+        .decide_approval(DecideApprovalRequest {
+            session_id: standard.clone(),
+            approval_id: pending.approval_id,
+            decision: ApprovalDecision::Deny,
+        })
+        .await
+        .expect("deny");
+    let term = wait_for_terminal(&runtime, &standard, &std_ctrl_run.run_id).await;
+    assert_eq!(term.status, RunStatus::Completed);
+    assert_eq!(
+        term.tools[0].status,
+        assistant_protocol::ToolActivityStatus::Failed
+    );
+}
+
+#[tokio::test]
+async fn controller_grants_consume_fifo_respect_expiry_revocation_deny_and_isolate_standard() {
+    use assistant_protocol::{
+        CreatePermissionGrantRequest, ListPermissionGrantsRequest, RevokePermissionGrantRequest,
+    };
+
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(true),
+        8_192,
+        [
+            file_calls_step("std-blocked", &["a.txt"]),
+            ModelScript::Events(message_events(&assistant_text(
+                "std-blocked-done",
+                "denied",
+            ))),
+            file_calls_step("ctrl-use-1", &["a.txt"]),
+            ModelScript::Events(message_events(&assistant_text("ctrl-use-1-done", "ok1"))),
+            file_calls_step("ctrl-use-2", &["a.txt"]),
+            ModelScript::Events(message_events(&assistant_text("ctrl-use-2-done", "ok2"))),
+            file_calls_step("ctrl-use-3", &["a.txt"]),
+            ModelScript::Events(message_events(&assistant_text("ctrl-use-3-done", "ok3"))),
+            file_calls_step("ctrl-exhausted", &["a.txt"]),
+            ModelScript::Events(message_events(&assistant_text(
+                "ctrl-exhausted-done",
+                "denied",
+            ))),
+            file_calls_step("ctrl-deny-override", &["a.txt"]),
+            ModelScript::Events(message_events(&assistant_text("ctrl-deny-done", "denied"))),
+        ],
+    ));
+    let store = Arc::new(VolatileRuntimeStore::default());
+    let runtime = AssistantRuntime::open(
+        RuntimeConfig::new(NonZeroUsize::new(32).expect("non-zero")),
+        Arc::new(MissingConfigSource),
+        Arc::new(StaticModelFactory::new(model)),
+        Arc::new(StaticSystemPromptFactory),
+        static_run_tool_factory(file_tools()),
+        Arc::new(TestChildWorkspaceFactory::default()),
+        store.clone(),
+        Arc::new(MutablePermissionStore::writable()),
+    )
+    .await
+    .expect("open runtime");
+    runtime
+        .config_registry
+        .replace_document_for_test(TEST_CONFIG);
+    model_fixture::seed(&runtime, "unique-test-secret-9f1ca2").await;
+
+    let read_matcher = PermissionRuleMatcher::File(PermissionFileMatcher {
+        operation: PermissionFileOperationDefinition::Read,
+        path: test_absolute_path("/workspace"),
+        path_match: PermissionPathMatch::Recursive,
+    });
+    // Pre-seed an expired grant to verify expiry is ignored without sleeping.
+    crate::RuntimeStore::create_permission_grant(
+        store.as_ref(),
+        crate::StoredPermissionGrant {
+            grant_id: "expired-grant".to_owned(),
+            scope: PermissionScope::Controller,
+            variants: vec![AgentVariant::Build],
+            matcher: crate::permission::matcher_from_protocol(read_matcher.clone()),
+            max_uses: 1,
+            remaining_uses: 1,
+            expires_at_ms: Some(1),
+            note: "expired".to_owned(),
+            created_at_ms: 1,
+            consumed_at_ms: None,
+        },
+    )
+    .await
+    .expect("seed expired grant");
+
+    let grant_1 = runtime
+        .create_permission_grant(CreatePermissionGrantRequest {
+            scope: PermissionScope::Controller,
+            variants: vec![AgentVariant::Build],
+            matcher: read_matcher.clone(),
+            max_uses: 2,
+            ttl_seconds: Some(3_600),
+            note: "first grant".to_owned(),
+        })
+        .await
+        .expect("create grant 1")
+        .grant;
+    // Ensure a strictly later millisecond so FIFO ordering does not tie-break on random grant_id.
+    while i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time after unix epoch")
+            .as_millis(),
+    )
+    .expect("timestamp fits i64")
+        <= grant_1.created_at_ms
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    let grant_2 = runtime
+        .create_permission_grant(CreatePermissionGrantRequest {
+            scope: PermissionScope::Controller,
+            variants: vec![AgentVariant::Build],
+            matcher: read_matcher.clone(),
+            max_uses: 1,
+            ttl_seconds: None,
+            note: "second grant".to_owned(),
+        })
+        .await
+        .expect("create grant 2")
+        .grant;
+    let revoked_grant = runtime
+        .create_permission_grant(CreatePermissionGrantRequest {
+            scope: PermissionScope::Controller,
+            variants: vec![AgentVariant::Build],
+            matcher: read_matcher.clone(),
+            max_uses: 1,
+            ttl_seconds: None,
+            note: "revoked grant".to_owned(),
+        })
+        .await
+        .expect("create revoked grant")
+        .grant;
+    assert!(
+        runtime
+            .revoke_permission_grant(RevokePermissionGrantRequest {
+                grant_id: revoked_grant.grant_id.clone(),
+            })
+            .await
+            .expect("revoke grant")
+            .revoked
+    );
+
+    let expired_only_excluded = runtime
+        .list_permission_grants(ListPermissionGrantsRequest {
+            include_exhausted: false,
+        })
+        .await
+        .expect("list active grants only")
+        .grants;
+    assert_eq!(
+        expired_only_excluded
+            .iter()
+            .map(|grant| grant.grant_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![grant_1.grant_id.as_str(), grant_2.grant_id.as_str()]
+    );
+    assert!(
+        !expired_only_excluded
+            .iter()
+            .any(|grant| grant.grant_id == "expired-grant")
+    );
+    assert!(
+        runtime
+            .list_permission_grants(ListPermissionGrantsRequest {
+                include_exhausted: true,
+            })
+            .await
+            .expect("include_exhausted keeps expired grant")
+            .grants
+            .iter()
+            .any(|grant| grant.grant_id == "expired-grant")
+    );
+
+    let controller = runtime
+        .create_session_inner(
+            CreateSessionRequest::default(),
+            crate::SessionRole::Controller,
+            "助理",
+        )
+        .await
+        .expect("controller")
+        .session
+        .session_id;
+    let standard = runtime
+        .create_session(CreateSessionRequest::default())
+        .await
+        .expect("standard")
+        .session
+        .session_id;
+
+    let std_run = runtime
+        .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            session_id: standard.clone(),
+            message: "standard must not use controller grant".to_owned(),
+            variant: AgentVariant::Build,
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+        })
+        .await
+        .expect("std input")
+        .run;
+    let pending = wait_for_pending_count(&runtime, &standard, 1)
+        .await
+        .pop()
+        .expect("standard needs approval despite controller grants");
+    runtime
+        .decide_approval(DecideApprovalRequest {
+            session_id: standard.clone(),
+            approval_id: pending.approval_id,
+            decision: ApprovalDecision::Deny,
+        })
+        .await
+        .expect("deny");
+    assert_eq!(
+        wait_for_terminal(&runtime, &standard, &std_run.run_id)
+            .await
+            .status,
+        RunStatus::Completed
+    );
+
+    // Uses 1 & 2 come from grant_1 in FIFO order; use 3 comes from grant_2; use 4 exhausts grants.
+    for (step_index, msg) in ["use 1", "use 2", "use 3"].iter().enumerate() {
+        let run = runtime
+            .submit_started_input(SubmitInputRequest {
+                delivery: Default::default(),
+                mode: assistant_protocol::SubmitInputMode::Normal,
+                session_id: controller.clone(),
+                message: (*msg).to_owned(),
+                variant: AgentVariant::Build,
+                attachment_ids: Vec::new(),
+                quotes: Vec::new(),
+                skill_name: None,
+                mcp_server_key: None,
+                idempotency_key: None,
+            })
+            .await
+            .expect("controller run")
+            .run;
+        let term = wait_for_terminal(&runtime, &controller, &run.run_id).await;
+        assert_eq!(
+            term.tools[0].status,
+            assistant_protocol::ToolActivityStatus::Completed,
+            "{msg} should be authorized by grant"
+        );
+        if step_index == 0 {
+            let after_first = runtime
+                .list_permission_grants(ListPermissionGrantsRequest {
+                    include_exhausted: false,
+                })
+                .await
+                .expect("after first use")
+                .grants;
+            let partial = after_first
+                .iter()
+                .find(|grant| grant.grant_id == grant_1.grant_id)
+                .expect("grant_1 remains active after first use");
+            assert_eq!(partial.remaining_uses, 1);
+            assert_eq!(partial.consumed_at_ms, None);
+        }
+    }
+
+    let exhausted_run = runtime
+        .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            session_id: controller.clone(),
+            message: "after exhaustion".to_owned(),
+            variant: AgentVariant::Build,
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+        })
+        .await
+        .expect("exhausted input")
+        .run;
+    let pending = wait_for_pending_count(&runtime, &controller, 1)
+        .await
+        .pop()
+        .expect("exhausted and expired grants must require approval");
+    runtime
+        .decide_approval(DecideApprovalRequest {
+            session_id: controller.clone(),
+            approval_id: pending.approval_id,
+            decision: ApprovalDecision::Deny,
+        })
+        .await
+        .expect("deny exhausted");
+    wait_for_terminal(&runtime, &controller, &exhausted_run.run_id).await;
+
+    let remaining = runtime
+        .list_permission_grants(ListPermissionGrantsRequest {
+            include_exhausted: true,
+        })
+        .await
+        .expect("list all grants")
+        .grants;
+    let grant_1_after = remaining
+        .iter()
+        .find(|g| g.grant_id == grant_1.grant_id)
+        .expect("grant 1 present");
+    assert_eq!(grant_1_after.remaining_uses, 0);
+    assert!(grant_1_after.consumed_at_ms.is_some());
+    assert_eq!(
+        remaining
+            .iter()
+            .find(|g| g.grant_id == grant_2.grant_id)
+            .expect("grant 2 present")
+            .remaining_uses,
+        0
+    );
+
+    // Explicit Deny rule on Controller takes precedence over a newly created matching grant without consuming it.
+    let grant_3 = runtime
+        .create_permission_grant(CreatePermissionGrantRequest {
+            scope: PermissionScope::Controller,
+            variants: vec![AgentVariant::Build],
+            matcher: read_matcher,
+            max_uses: 1,
+            ttl_seconds: None,
+            note: "must not override deny".to_owned(),
+        })
+        .await
+        .expect("create grant 3")
+        .grant;
+    runtime
+        .replace_permission_document(ReplacePermissionDocumentRequest {
+            scope: PermissionDocumentScope::Controller,
+            expected_revision: PermissionDocumentRevision::Missing,
+            document: PermissionDocumentDraft {
+                schema_version: 1,
+                rules: vec![PermissionRuleDefinition {
+                    id: "explicit-deny-read".to_owned(),
+                    effect: PermissionRuleEffect::Deny,
+                    variants: vec![AgentVariant::Build],
+                    matcher: PermissionRuleMatcher::File(PermissionFileMatcher {
+                        operation: PermissionFileOperationDefinition::Read,
+                        path: test_absolute_path("/workspace"),
+                        path_match: PermissionPathMatch::Recursive,
+                    }),
+                }],
+            },
+        })
+        .await
+        .expect("save controller deny");
+
+    let denied_run = runtime
+        .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            session_id: controller.clone(),
+            message: "deny takes precedence".to_owned(),
+            variant: AgentVariant::Build,
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+        })
+        .await
+        .expect("deny input")
+        .run;
+    let term = wait_for_terminal(&runtime, &controller, &denied_run.run_id).await;
+    assert_eq!(
+        term.tools[0].status,
+        assistant_protocol::ToolActivityStatus::Failed
+    );
+    assert_eq!(
+        runtime
+            .list_permission_grants(ListPermissionGrantsRequest {
+                include_exhausted: false,
+            })
+            .await
+            .expect("active grants")
+            .grants
+            .into_iter()
+            .find(|g| g.grant_id == grant_3.grant_id)
+            .expect("grant 3 must remain unconsumed")
+            .remaining_uses,
+        1
+    );
+}
+
+#[tokio::test]
+async fn device_originated_controller_turn_fails_fast_without_grant_and_consumes_when_granted() {
+    use assistant_protocol::{CreatePermissionGrantRequest, ListPermissionGrantsRequest};
+
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(true),
+        8_192,
+        [
+            file_calls_step("device-no-grant", &["secret.txt"]),
+            ModelScript::Events(message_events(&assistant_text(
+                "device-denied",
+                "no permission",
+            ))),
+            file_calls_step("device-with-grant", &["secret.txt"]),
+            ModelScript::Events(message_events(&assistant_text("device-allowed", "read ok"))),
+        ],
+    ));
+    let runtime = runtime_with_permission_components(
+        Arc::new(MutablePermissionStore::writable()),
+        model,
+        file_tools(),
+    )
+    .await;
+
+    let controller = runtime
+        .create_session_inner(
+            CreateSessionRequest::default(),
+            crate::SessionRole::Controller,
+            "助理",
+        )
+        .await
+        .expect("controller")
+        .session
+        .session_id;
+    let device = runtime
+        .register_paired_device(crate::NewPairedDevice {
+            device_id: assistant_protocol::DeviceId::new("device-perm").expect("device id"),
+            display_name: "智能终端".to_owned(),
+            public_key: crate::DevicePublicKey::new([9; 32]),
+            paired_at_ms: 1_000,
+        })
+        .await
+        .expect("register device");
+
+    let make_device_input = |client_input_id: &str, msg: &str| crate::SubmitSessionInputRequest {
+        input: SubmitInputRequest {
+            delivery: Default::default(),
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            session_id: controller.clone(),
+            message: msg.to_owned(),
+            variant: AgentVariant::Build,
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+        },
+        source: crate::InputChannelSource::Device(crate::DeviceInputSource {
+            device_id: device.device_id.clone(),
+            client_input_id: client_input_id.to_owned(),
+            modality: crate::InputModality::Text,
+            requested_output: crate::OutputPreference::Text,
+        }),
+    };
+
+    let fast_fail_run = runtime
+        .submit_started_session_input(make_device_input("c-1", "read without grant"))
+        .await
+        .expect("device input 1")
+        .run;
+    let term = wait_for_terminal(&runtime, &controller, &fast_fail_run.run_id).await;
+    assert_eq!(term.status, RunStatus::Completed);
+    assert_eq!(
+        term.tools[0].status,
+        assistant_protocol::ToolActivityStatus::Failed
+    );
+    assert!(
+        runtime
+            .list_pending_approvals(ListPendingApprovalsRequest {
+                session_id: controller.clone(),
+            })
+            .await
+            .expect("approvals")
+            .approvals
+            .is_empty()
+    );
+
+    let grant = runtime
+        .create_permission_grant(CreatePermissionGrantRequest {
+            scope: PermissionScope::Controller,
+            variants: vec![AgentVariant::Build],
+            matcher: PermissionRuleMatcher::File(PermissionFileMatcher {
+                operation: PermissionFileOperationDefinition::Read,
+                path: test_absolute_path("/workspace"),
+                path_match: PermissionPathMatch::Recursive,
+            }),
+            max_uses: 1,
+            ttl_seconds: Some(3_600),
+            note: "device voice one-shot".to_owned(),
+        })
+        .await
+        .expect("create grant")
+        .grant;
+
+    let authorized_run = runtime
+        .submit_started_session_input(make_device_input("c-2", "read with grant"))
+        .await
+        .expect("device input 2")
+        .run;
+    let term = wait_for_terminal(&runtime, &controller, &authorized_run.run_id).await;
+    assert_eq!(term.status, RunStatus::Completed);
+    assert_eq!(
+        term.tools[0].status,
+        assistant_protocol::ToolActivityStatus::Completed
+    );
+    assert!(
+        !runtime
+            .list_permission_grants(ListPermissionGrantsRequest {
+                include_exhausted: false,
+            })
+            .await
+            .expect("list grants")
+            .grants
+            .iter()
+            .any(|g| g.grant_id == grant.grant_id)
+    );
+}
+
+#[tokio::test]
+async fn reload_controller_permissions_refreshes_controller_scope_without_a_session() {
+    use crate::{
+        FilePermissionMatcher, PathMatch, PermissionEffect, PermissionFileOperation,
+        PermissionMatcher, PermissionRule,
+    };
+    use assistant_protocol::{ReloadControllerPermissionsRequest, RuntimeEvent};
+
+    let source = Arc::new(MutablePermissionStore::writable());
+    let model = Arc::new(ScriptedModelService::new(
+        model_capabilities(true),
+        8_192,
+        [
+            file_calls_step("ctrl-allow-after-reload", &["reloaded.txt"]),
+            ModelScript::Events(message_events(&assistant_text("ctrl-done", "ok"))),
+        ],
+    ));
+    let runtime = runtime_with_permission_components(source.clone(), model, file_tools()).await;
+    let controller = runtime
+        .create_session_inner(
+            CreateSessionRequest::default(),
+            crate::SessionRole::Controller,
+            "助理",
+        )
+        .await
+        .expect("controller")
+        .session
+        .session_id;
+
+    let external_allow = PermissionDocument {
+        schema_version: 2,
+        rules: vec![PermissionRule {
+            id: "external-ctrl-allow".to_owned(),
+            effect: PermissionEffect::Allow,
+            variants: vec![AgentVariant::Build],
+            matcher: PermissionMatcher::File(FilePermissionMatcher {
+                excluded_paths: Vec::new(),
+                operation: PermissionFileOperation::Read,
+                path: test_absolute_path("/workspace"),
+                path_match: PathMatch::Recursive,
+            }),
+        }],
+    }
+    .render()
+    .expect("render valid controller document");
+    source.put(PermissionFileScope::Controller, external_allow);
+
+    let mut events = runtime.subscribe_events();
+    let result = runtime
+        .reload_controller_permissions(ReloadControllerPermissionsRequest::default())
+        .await
+        .expect("reload controller permissions");
+    assert!(result.applied);
+    assert_eq!(result.file.scope, PermissionScope::Controller);
+    assert_eq!(result.file.status, PermissionFileStatus::Ready);
+    assert!(result.diagnostics.is_empty());
+    assert!(matches!(
+        events.recv().await.expect("permission changed event"),
+        RuntimeEvent::PermissionChanged
+    ));
+
+    let run = runtime
+        .submit_started_input(SubmitInputRequest {
+            delivery: Default::default(),
+            mode: assistant_protocol::SubmitInputMode::Normal,
+            session_id: controller.clone(),
+            message: "read reloaded controller permission".to_owned(),
+            variant: AgentVariant::Build,
+            attachment_ids: Vec::new(),
+            quotes: Vec::new(),
+            skill_name: None,
+            mcp_server_key: None,
+            idempotency_key: None,
+        })
+        .await
+        .expect("submit controller input")
+        .run;
+    let term = wait_for_terminal(&runtime, &controller, &run.run_id).await;
+    assert_eq!(term.status, RunStatus::Completed);
+    assert_eq!(
+        term.tools[0].status,
+        assistant_protocol::ToolActivityStatus::Completed
+    );
+
+    // Invalid external JSON keeps previously active controller snapshot intact.
+    source.put(
+        PermissionFileScope::Controller,
+        br#"{"schema_version":2,"rules":["invalid"]}"#.to_vec(),
+    );
+    let invalid_reload = runtime
+        .reload_controller_permissions(ReloadControllerPermissionsRequest::default())
+        .await
+        .expect("invalid reload returns diagnostics");
+    assert!(!invalid_reload.applied);
+    assert_eq!(invalid_reload.file.scope, PermissionScope::Controller);
+    assert_eq!(invalid_reload.file.status, PermissionFileStatus::Invalid);
+    assert!(!invalid_reload.diagnostics.is_empty());
+
+    let snapshot = runtime
+        .permission_coordinator
+        .registry()
+        .snapshot(&PermissionFileScope::Controller)
+        .expect("registry")
+        .expect("controller snapshot intact");
+    assert_eq!(
+        snapshot.document.as_ref().expect("valid prior doc").rules[0].id,
+        "external-ctrl-allow"
+    );
+}

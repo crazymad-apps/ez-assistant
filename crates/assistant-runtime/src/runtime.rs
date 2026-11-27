@@ -135,6 +135,7 @@ pub struct AssistantRuntime {
     device_mutation_gate: AsyncMutex<()>,
     config_registry: Arc<ConfigRegistry>,
     permission_coordinator: Arc<PermissionCoordinator>,
+    permission_grants: Arc<crate::permission::PermissionGrantCoordinator>,
     approval_registry: Arc<crate::permission::ApprovalRegistry>,
     model_factory: Arc<dyn ModelServiceFactory>,
     session_environment_factory: Arc<dyn SessionEnvironmentFactory>,
@@ -191,6 +192,9 @@ impl AssistantRuntime {
         permission_coordinator
             .register_empty_scope(PermissionFileScope::Global)
             .expect("empty global permission scope is valid");
+        permission_coordinator
+            .register_empty_scope(PermissionFileScope::Controller)
+            .expect("empty controller permission scope is valid");
         Self::from_recovered(
             config,
             config_source,
@@ -307,6 +311,10 @@ impl AssistantRuntime {
             root_cancellation.clone(),
             event_sender.clone(),
         ));
+        let permission_grants = Arc::new(crate::permission::PermissionGrantCoordinator::new(
+            store.clone(),
+            event_sender.clone(),
+        ));
         Ok(Self {
             config,
             lifecycle: RwLock::new(RuntimeLifecycle::Running),
@@ -330,6 +338,7 @@ impl AssistantRuntime {
                 model_factory.configuration_source(),
             )),
             permission_coordinator,
+            permission_grants,
             approval_registry: Arc::new(crate::permission::ApprovalRegistry::new()),
             model_factory,
             session_environment_factory,
@@ -1135,7 +1144,7 @@ fn random_recall_key() -> [u8; 32] {
 }
 
 fn permission_scopes(recovered: &RecoveredRuntime) -> Vec<PermissionFileScope> {
-    let mut scopes = vec![PermissionFileScope::Global];
+    let mut scopes = vec![PermissionFileScope::Global, PermissionFileScope::Controller];
     scopes.extend(
         recovered
             .workspaces

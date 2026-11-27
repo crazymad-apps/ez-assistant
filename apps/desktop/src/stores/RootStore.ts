@@ -188,6 +188,9 @@ export class RootStore {
         this.notifications.ingest(event, this.notificationScopeFor(this.#local_runtime.client));
         this.history_edit.observe(event, this.#local_runtime.client);
         this.#publishRuntimeEvent(this.#local_runtime.client, event.event);
+        if (event.event.type === "permission_grants_changed") {
+          void this.settings.refreshPermissionGrants();
+        }
         if (this.navigation.target_device) return;
         this.conversation_navigation.observe(event.event, this.#local_runtime.client);
         this.feedback.setScope(this.notificationScope());

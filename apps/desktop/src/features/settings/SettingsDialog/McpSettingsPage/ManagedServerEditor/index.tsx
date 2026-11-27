@@ -123,7 +123,11 @@ export const ManagedServerEditor = observer(function ManagedServerEditor(
           </p>
           {priorityLabel(server) && <p role="status">{priorityLabel(server)}；当前配置保留，可继续编辑。</p>}
           {!managed.source_enabled && (
-            <p className={styles.warning}>所属插件已停用，服务不会启动；这里保留服务自身的启停设置。</p>
+            <p className={styles.warning}>
+              {server.source.type === 'device'
+                ? '所属智能终端当前离线，服务会在终端重新上线后自动恢复；这里保留服务自身的启停设置。'
+                : '所属插件已停用，服务不会启动；这里保留服务自身的启停设置。'}
+            </p>
           )}
           {!managed.configuration_ready && <p className={styles.warning}>配置尚不完整，请检查必要参数或来源诊断。</p>}
           <label className={styles.checkbox}>

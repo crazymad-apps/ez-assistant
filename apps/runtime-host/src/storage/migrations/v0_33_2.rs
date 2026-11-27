@@ -4,6 +4,8 @@ use rusqlite::Connection;
 
 use super::{Migration, MigrationError, Result, v0_33_1};
 
+pub(super) mod controller_settings;
+
 pub(super) fn entry() -> Migration {
     Migration {
         key: "release",
@@ -163,7 +165,7 @@ fn install_schedule_delivery(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn validate_schedule_delivery(connection: &Connection) -> Result<()> {
+pub(super) fn validate_schedule_delivery(connection: &Connection) -> Result<()> {
     validate_scheduled_sessions(connection)?;
     connection.prepare("SELECT deleting FROM schedules LIMIT 0")?;
     connection.prepare("SELECT files_json,result_finalized,tracks_script_process,cleanup_confirmed FROM schedule_executions LIMIT 0")?;

@@ -8,6 +8,7 @@ mod auth;
 mod commands;
 mod compatibility;
 mod desktop;
+mod device_console;
 mod diagnostics;
 mod error;
 mod events;
