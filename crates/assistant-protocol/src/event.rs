@@ -213,6 +213,8 @@ pub enum RuntimeEvent {
     },
     /// 权限 Registry 已经完成原子替换。
     PermissionChanged,
+    /// 后台预授权记录发生变化。
+    PermissionGrantsChanged,
     /// 一个 Session 已完整创建。
     SessionCreated {
         /// 新 Session 的稳定摘要。
@@ -739,6 +741,10 @@ mod tests {
                     }],
                 },
                 "permission_reloaded",
+            ),
+            (
+                RuntimeEvent::PermissionGrantsChanged,
+                "permission_grants_changed",
             ),
             (
                 RuntimeEvent::ApprovalRequested {

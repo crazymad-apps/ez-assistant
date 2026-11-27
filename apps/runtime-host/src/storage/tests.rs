@@ -2814,6 +2814,234 @@ fn persona_and_pinned_memory_use_cas_and_survive_reopen() {
     );
 }
 
+#[test]
+fn controller_prompt_permission_file_and_grants_survive_reopen_with_expiry_and_cas() {
+    use assistant_protocol::{AgentVariant, PermissionScope};
+    use assistant_runtime::{
+        ControllerPromptMutation, GeneralPermissionMatcher, PermissionFileRevision,
+        PermissionFileScope, PermissionMatcher, StoredPermissionGrant,
+    };
+
+    let root = TempDir::new().expect("controller storage home");
+    let mut engine = open_engine(&root);
+
+    let initial_prompt = engine
+        .get_controller_prompt()
+        .expect("initial controller prompt");
+    assert!(!initial_prompt.enabled);
+    assert!(initial_prompt.content.is_empty());
+    assert_eq!(initial_prompt.revision, 0);
+
+    let updated_prompt = engine
+        .set_controller_prompt(ControllerPromptMutation {
+            expected_revision: 0,
+            enabled: true,
+            content: "用简短口语回答。".to_owned(),
+            updated_at_ms: 100,
+        })
+        .expect("update controller prompt");
+    assert_eq!(updated_prompt.revision, 1);
+    assert_eq!(
+        engine
+            .set_controller_prompt(ControllerPromptMutation {
+                expected_revision: 0,
+                enabled: false,
+                content: String::new(),
+                updated_at_ms: 101,
+            })
+            .expect_err("stale controller prompt revision must conflict")
+            .kind(),
+        StoreErrorKind::Conflict
+    );
+
+    let initial_file = engine
+        .load_permission_file(&PermissionFileScope::Controller)
+        .expect("initial controller permission file");
+    assert_eq!(initial_file.revision, PermissionFileRevision::Missing);
+    let bytes = assistant_runtime::PermissionDocument::empty()
+        .render()
+        .expect("render document");
+    let next_rev = engine
+        .replace_permission_file(
+            &PermissionFileScope::Controller,
+            &PermissionFileRevision::Missing,
+            &bytes,
+        )
+        .expect("save controller permission file");
+    assert_eq!(
+        fs::read(root.path().join("controller-permissions.json"))
+            .expect("controller-permissions.json written"),
+        bytes
+    );
+    assert_eq!(
+        engine
+            .replace_permission_file(
+                &PermissionFileScope::Controller,
+                &PermissionFileRevision::Missing,
+                &bytes,
+            )
+            .expect_err("stale missing revision must conflict")
+            .kind(),
+        StoreErrorKind::Conflict
+    );
+
+    let matcher = PermissionMatcher::General(GeneralPermissionMatcher {
+        tool_name: "speak".to_owned(),
+    });
+    engine
+        .create_permission_grant(StoredPermissionGrant {
+            grant_id: "grant-b".to_owned(),
+            scope: PermissionScope::Controller,
+            variants: vec![AgentVariant::Build],
+            matcher: matcher.clone(),
+            max_uses: 2,
+            remaining_uses: 2,
+            expires_at_ms: Some(1_000),
+            note: "two uses".to_owned(),
+            created_at_ms: 20,
+            consumed_at_ms: None,
+        })
+        .expect("create grant b");
+    engine
+        .create_permission_grant(StoredPermissionGrant {
+            grant_id: "grant-a".to_owned(),
+            scope: PermissionScope::Controller,
+            variants: vec![AgentVariant::Build],
+            matcher: matcher.clone(),
+            max_uses: 1,
+            remaining_uses: 1,
+            expires_at_ms: Some(50),
+            note: "earlier short lived".to_owned(),
+            created_at_ms: 10,
+            consumed_at_ms: None,
+        })
+        .expect("create grant a");
+
+    let active = engine
+        .list_permission_grants(false)
+        .expect("list active grants");
+    assert_eq!(
+        active
+            .iter()
+            .map(|g| g.grant_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["grant-a", "grant-b"]
+    );
+    assert!(
+        engine
+            .consume_permission_grant("grant-a", 50)
+            .expect("expired consume returns ok none")
+            .is_none()
+    );
+    let first_consume = engine
+        .consume_permission_grant("grant-b", 60)
+        .expect("first consume")
+        .expect("grant-b first use");
+    assert_eq!(first_consume.remaining_uses, 1);
+    assert_eq!(first_consume.consumed_at_ms, None);
+    let second_consume = engine
+        .consume_permission_grant("grant-b", 70)
+        .expect("second consume")
+        .expect("grant-b second use");
+    assert_eq!(second_consume.remaining_uses, 0);
+    assert_eq!(second_consume.consumed_at_ms, Some(70));
+    assert!(
+        engine
+            .consume_permission_grant("grant-b", 80)
+            .expect("exhausted consume")
+            .is_none()
+    );
+
+    let still_active = engine
+        .list_permission_grants(false)
+        .expect("active after exhaustion");
+    assert_eq!(still_active.len(), 1);
+    assert_eq!(still_active[0].grant_id, "grant-a");
+    assert_eq!(
+        engine
+            .list_permission_grants(true)
+            .expect("include exhausted")
+            .len(),
+        2
+    );
+
+    drop(engine);
+    let mut reopened = open_engine(&root);
+    let restored_prompt = reopened
+        .get_controller_prompt()
+        .expect("reopened controller prompt");
+    assert_eq!(restored_prompt, updated_prompt);
+    assert_eq!(
+        reopened
+            .load_permission_file(&PermissionFileScope::Controller)
+            .expect("reopened controller file")
+            .revision,
+        next_rev
+    );
+    assert!(
+        reopened
+            .revoke_permission_grant("grant-a")
+            .expect("revoke a")
+    );
+    assert!(
+        !reopened
+            .revoke_permission_grant("grant-a")
+            .expect("revoke twice")
+    );
+    assert!(
+        reopened
+            .list_permission_grants(false)
+            .expect("no active left")
+            .is_empty()
+    );
+
+    let std_session = new_session("std-history", &reopened.sessions_directory);
+    reopened
+        .create_session(std_session)
+        .expect("create standard session");
+    let mut ctrl_session = new_session("ctrl-history", &reopened.sessions_directory);
+    ctrl_session.role = assistant_runtime::SessionRole::Controller;
+    ctrl_session.title = "助理".to_owned();
+    reopened
+        .create_session(ctrl_session)
+        .expect("create controller session");
+    reopened
+        .connection
+        .execute(
+            "UPDATE sessions SET server_history_key = ?1 WHERE session_id = ?2",
+            rusqlite::params!["std-epoch", "std-history"],
+        )
+        .expect("seed std server_history_key");
+    reopened
+        .connection
+        .execute(
+            "UPDATE sessions SET server_history_key = ?1 WHERE session_id = ?2",
+            rusqlite::params!["ctrl-old-epoch", "ctrl-history"],
+        )
+        .expect("seed ctrl server_history_key");
+    reopened
+        .invalidate_controller_server_history_bindings("ctrl-new-epoch".to_owned())
+        .expect("invalidate controller history bindings");
+    assert_eq!(
+        reopened
+            .load_sessions_scoped(Some(&SessionId::new("std-history").unwrap()))
+            .expect("load standard")
+            .remove(0)
+            .server_history_key
+            .as_deref(),
+        Some("std-epoch")
+    );
+    assert_eq!(
+        reopened
+            .load_sessions_scoped(Some(&SessionId::new("ctrl-history").unwrap()))
+            .expect("load controller")
+            .remove(0)
+            .server_history_key
+            .as_deref(),
+        Some("ctrl-new-epoch")
+    );
+}
+
 fn raw_user_message(value: &str, text: &str) -> UserMessage {
     let ConversationMessage::User(message) = user_message(value, text) else {
         unreachable!("fixture is a user message")
@@ -4931,7 +5159,10 @@ fn known_unversioned_storage_migrates_without_losing_existing_business_data() {
              DROP TABLE providers;
              DROP TABLE conversation_usage_snapshots;
              DROP TABLE message_cards;
-             DROP TABLE schedule_deliveries;             DROP TABLE schedule_executions;
+             DROP TABLE controller_permission_grants;
+             DROP TABLE controller_prompt;
+             DROP TABLE schedule_deliveries;
+             DROP TABLE schedule_executions;
              DROP TABLE schedules;
 DROP INDEX workspaces_sort_order;
          DROP INDEX session_resources_workspace_order;

@@ -587,6 +587,102 @@ impl VolatileRuntimeStore {
         })
     }
 
+    pub(super) fn get_controller_prompt(&self) -> StoreFuture<'_, crate::ControllerPromptSnapshot> {
+        Box::pin(async move { Ok(self.lock()?.controller_prompt.clone()) })
+    }
+
+    pub(super) fn set_controller_prompt(
+        &self,
+        mutation: crate::ControllerPromptMutation,
+    ) -> StoreFuture<'_, crate::ControllerPromptSnapshot> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            if state.controller_prompt.revision != mutation.expected_revision {
+                return Err(conflict("controller prompt revision changed"));
+            }
+            let next_revision = mutation
+                .expected_revision
+                .checked_add(1)
+                .ok_or_else(|| conflict("controller prompt revision exhausted"))?;
+            state.controller_prompt = crate::ControllerPromptSnapshot {
+                enabled: mutation.enabled,
+                content: mutation.content,
+                revision: next_revision,
+                updated_at_ms: mutation.updated_at_ms,
+            };
+            Ok(state.controller_prompt.clone())
+        })
+    }
+
+    pub(super) fn list_permission_grants(
+        &self,
+        include_exhausted: bool,
+    ) -> StoreFuture<'_, Vec<crate::StoredPermissionGrant>> {
+        Box::pin(async move {
+            let state = self.lock()?;
+            let mut grants = state
+                .permission_grants
+                .values()
+                .filter(|grant| include_exhausted || grant.remaining_uses > 0)
+                .cloned()
+                .collect::<Vec<_>>();
+            grants.sort_by(|left, right| {
+                left.created_at_ms
+                    .cmp(&right.created_at_ms)
+                    .then_with(|| left.grant_id.cmp(&right.grant_id))
+            });
+            Ok(grants)
+        })
+    }
+
+    pub(super) fn create_permission_grant(
+        &self,
+        grant: crate::StoredPermissionGrant,
+    ) -> StoreFuture<'_, crate::StoredPermissionGrant> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            if state.permission_grants.contains_key(&grant.grant_id) {
+                return Err(conflict("permission grant already exists"));
+            }
+            state
+                .permission_grants
+                .insert(grant.grant_id.clone(), grant.clone());
+            Ok(grant)
+        })
+    }
+
+    pub(super) fn consume_permission_grant(
+        &self,
+        grant_id: &str,
+        consumed_at_ms: i64,
+    ) -> StoreFuture<'_, Option<crate::StoredPermissionGrant>> {
+        let grant_id = grant_id.to_owned();
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            let Some(grant) = state.permission_grants.get_mut(&grant_id) else {
+                return Ok(None);
+            };
+            if grant.remaining_uses == 0
+                || grant.expires_at_ms.is_some_and(|exp| exp <= consumed_at_ms)
+            {
+                return Ok(None);
+            }
+            grant.remaining_uses -= 1;
+            if grant.remaining_uses == 0 {
+                grant.consumed_at_ms = Some(consumed_at_ms);
+            }
+            Ok(Some(grant.clone()))
+        })
+    }
+
+    pub(super) fn revoke_permission_grant(&self, grant_id: &str) -> StoreFuture<'_, bool> {
+        let grant_id = grant_id.to_owned();
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            Ok(state.permission_grants.remove(&grant_id).is_some())
+        })
+    }
+
     pub(super) fn list_pinned_memories(&self) -> StoreFuture<'_, Vec<StoredPinnedMemory>> {
         Box::pin(async move { Ok(self.lock()?.pinned_memories.values().cloned().collect()) })
     }

@@ -33,6 +33,7 @@ use crate::{
 pub(crate) struct SessionController {
     id: SessionId,
     pub(crate) scheduled: Option<Arc<crate::runtime::schedule::ScheduledSession>>,
+    role: SessionRole,
     pub(crate) feedback_changed: tokio::sync::Notify,
     custom_agent: Option<assistant_protocol::CustomAgentSnapshot>,
     created_at_ms: i64,
@@ -218,6 +219,7 @@ impl SessionController {
         Self {
             id: stored.session_id,
             scheduled: None,
+            role: stored.role,
             feedback_changed: tokio::sync::Notify::new(),
             custom_agent: stored.custom_agent,
             created_at_ms: stored.created_at_ms,
@@ -390,6 +392,7 @@ impl SessionController {
         Self {
             id: stored.session_id,
             scheduled: None,
+            role: stored.role,
             feedback_changed: tokio::sync::Notify::new(),
             custom_agent: stored.custom_agent,
             created_at_ms: stored.created_at_ms,
@@ -539,6 +542,12 @@ impl SessionController {
     }
 
     pub(crate) fn permission_scopes(&self) -> Vec<crate::PermissionFileScope> {
+        if self.role == SessionRole::Controller {
+            return vec![
+                crate::PermissionFileScope::Controller,
+                crate::PermissionFileScope::Session(self.id.clone()),
+            ];
+        }
         let mut scopes = vec![crate::PermissionFileScope::Global];
         if let Some(workspace_id) = self.environment.workspace_id.clone() {
             scopes.push(crate::PermissionFileScope::Workspace(workspace_id));

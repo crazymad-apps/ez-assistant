@@ -27,6 +27,7 @@ const ROOTS: &[&str] = &[
     "mcp.json",
     "mcp",
     "permissions.json",
+    "controller-permissions.json",
     "recall-reference.key",
     "device",
     "backups/database",

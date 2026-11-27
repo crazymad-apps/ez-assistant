@@ -142,6 +142,8 @@ struct State {
         BTreeMap<assistant_protocol::ModelSelection, assistant_protocol::ModelFixedConfig>,
     devices: BTreeMap<assistant_protocol::DeviceId, PairedDevice>,
     persona: PersonaSnapshot,
+    controller_prompt: crate::ControllerPromptSnapshot,
+    permission_grants: BTreeMap<String, crate::StoredPermissionGrant>,
     pinned_collection_revision: u64,
     pinned_memories: BTreeMap<String, StoredPinnedMemory>,
     skill_name_states: BTreeMap<SkillName, SkillNameState>,

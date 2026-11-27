@@ -402,6 +402,7 @@ impl ObservationState {
             | ToolCompleted { session_id, .. }
             | GuardrailTriggered { session_id, .. } => (Some(session_id), false),
             PermissionChanged
+            | PermissionGrantsChanged
             | SkillSettingsChanged { .. }
             | PluginOperationChanged { .. }
             | PluginCatalogChanged

@@ -505,6 +505,19 @@ impl RuntimeStore for FaultInjectingStore {
         self.inner.invalidate_server_history_bindings(key)
     }
 
+    fn invalidate_controller_server_history_bindings(&self, key: String) -> StoreFuture<'_, ()> {
+        if self.fail_next_history_binding.swap(false, Ordering::SeqCst) {
+            return Box::pin(async {
+                Err(StoreError::new(
+                    StoreErrorKind::Unavailable,
+                    "fixture history binding write failed",
+                ))
+            });
+        }
+        self.inner
+            .invalidate_controller_server_history_bindings(key)
+    }
+
     fn get_model_fixed_config(
         &self,
         selection: assistant_protocol::ModelSelection,
@@ -772,6 +785,44 @@ impl RuntimeStore for FaultInjectingStore {
 
     fn set_persona(&self, mutation: PersonaMutation) -> StoreFuture<'_, PersonaSnapshot> {
         self.inner.set_persona(mutation)
+    }
+
+    fn get_controller_prompt(&self) -> StoreFuture<'_, crate::ControllerPromptSnapshot> {
+        self.inner.get_controller_prompt()
+    }
+
+    fn set_controller_prompt(
+        &self,
+        mutation: crate::ControllerPromptMutation,
+    ) -> StoreFuture<'_, crate::ControllerPromptSnapshot> {
+        self.inner.set_controller_prompt(mutation)
+    }
+
+    fn list_permission_grants(
+        &self,
+        include_exhausted: bool,
+    ) -> StoreFuture<'_, Vec<crate::StoredPermissionGrant>> {
+        self.inner.list_permission_grants(include_exhausted)
+    }
+
+    fn create_permission_grant(
+        &self,
+        grant: crate::StoredPermissionGrant,
+    ) -> StoreFuture<'_, crate::StoredPermissionGrant> {
+        self.inner.create_permission_grant(grant)
+    }
+
+    fn consume_permission_grant(
+        &self,
+        grant_id: &str,
+        consumed_at_ms: i64,
+    ) -> StoreFuture<'_, Option<crate::StoredPermissionGrant>> {
+        self.inner
+            .consume_permission_grant(grant_id, consumed_at_ms)
+    }
+
+    fn revoke_permission_grant(&self, grant_id: &str) -> StoreFuture<'_, bool> {
+        self.inner.revoke_permission_grant(grant_id)
     }
 
     fn list_pinned_memories(&self) -> StoreFuture<'_, Vec<StoredPinnedMemory>> {

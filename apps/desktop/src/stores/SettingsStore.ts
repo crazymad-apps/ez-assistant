@@ -2,6 +2,7 @@ import { McpSettingsStore } from '../features/settings';
 import { action, makeObservable, observable, observableRef, runInAction } from 'mobx';
 import type {
   AgentShellSettings,
+  AgentVariant,
   ShellKind,
   ConfigurationStatus,
   ConnectionValidationFailure,
@@ -22,6 +23,8 @@ import type {
   PermissionDocumentRevision,
   PermissionDocumentScope,
   PermissionDocumentSnapshot,
+  PermissionGrantSnapshot,
+  PermissionRuleMatcher,
   SessionId,
   SkillDetailSnapshot,
   SkillManagementSnapshot,
@@ -50,6 +53,7 @@ export class SettingsStore {
   // 仅标识前端读取；新读取或已提交 mutation 使先前响应失效，不属于持久化版本。
   #model_read = 0;
   #shell_read = 0;
+  #permission_grants_loaded = false;
   readonly mcp: McpSettingsStore;
   is_open = false;
   page: SettingsPage = 'runtime';
@@ -64,6 +68,7 @@ export class SettingsStore {
   notice_message: string | null = null;
   configuration_conflict = false;
   permission_documents: readonly PermissionDocumentSnapshot[] = [];
+  permission_grants: readonly PermissionGrantSnapshot[] = [];
   permission_conflict = false;
   skill_workspace_id: WorkspaceId | null = null;
   skill_management: SkillManagementSnapshot | null = null;
@@ -90,6 +95,7 @@ export class SettingsStore {
       notice_message: observable,
       configuration_conflict: observable,
       permission_documents: observableRef,
+      permission_grants: observableRef,
       permission_conflict: observable,
       skill_workspace_id: observable,
       skill_management: observableRef,
@@ -103,6 +109,9 @@ export class SettingsStore {
       load: action,
       reloadConfiguration: action,
       loadPermissions: action,
+      refreshPermissionGrants: action,
+      createPermissionGrant: action,
+      revokePermissionGrant: action,
       reloadPermissions: action,
       loadSkills: action,
       loadSkillDetail: action,
@@ -336,7 +345,7 @@ export class SettingsStore {
     const client = this.requireClient();
     if (!client) return;
     const context = this.dependencies.get_permission_context();
-    const scopes: PermissionDocumentScope[] = [{ type: 'global' }];
+    const scopes: PermissionDocumentScope[] = [{ type: 'global' }, { type: 'controller' }];
     if (context.workspace_id) {
       scopes.unshift({ type: 'workspace', payload: { workspace_id: context.workspace_id } });
     }
@@ -346,16 +355,25 @@ export class SettingsStore {
     this.loading = true;
     this.clearMessages();
     try {
-      const results = await Promise.all(
-        scopes.map((scope) =>
-          client.command({
-            type: 'get_permission_document',
-            payload: { scope },
-          }),
+      const [results, grants_result] = await Promise.all([
+        Promise.all(
+          scopes.map((scope) =>
+            client.command({
+              type: 'get_permission_document',
+              payload: { scope },
+            }),
+          ),
         ),
-      );
+        client.command({
+          type: 'list_permission_grants',
+          payload: { include_exhausted: false },
+        }),
+      ]);
+      if (client !== this.dependencies.get_client()) return;
       runInAction(() => {
         this.permission_documents = results.map((result) => result.payload.document);
+        this.permission_grants = grants_result.payload.grants;
+        this.#permission_grants_loaded = true;
       });
     } catch (error: unknown) {
       runInAction(() => {
@@ -368,10 +386,93 @@ export class SettingsStore {
     }
   }
 
-  async reloadPermissions(): Promise<boolean> {
+  async refreshPermissionGrants(): Promise<void> {
+    if (!this.#permission_grants_loaded) return;
+    const client = this.dependencies.get_client();
+    if (!client) return;
+    try {
+      const result = await client.command({
+        type: 'list_permission_grants',
+        payload: { include_exhausted: false },
+      });
+      if (client !== this.dependencies.get_client()) return;
+      runInAction(() => {
+        this.permission_grants = result.payload.grants;
+      });
+    } catch {
+      // 后台推送触发的静默刷新失败时保留现有列表，避免打断当前交互。
+    }
+  }
+
+  async createPermissionGrant(
+    input: Readonly<{
+      variants: AgentVariant[];
+      matcher: PermissionRuleMatcher;
+      max_uses: number;
+      ttl_seconds?: number;
+      note: string;
+    }>,
+  ): Promise<boolean> {
     const client = this.requireClient();
+    if (!client) return false;
+    return this.runAction('permission_grant:create', async () => {
+      await client.command({
+        type: 'create_permission_grant',
+        payload: {
+          scope: 'controller',
+          variants: input.variants,
+          matcher: input.matcher,
+          max_uses: input.max_uses,
+          ...(input.ttl_seconds !== undefined ? { ttl_seconds: input.ttl_seconds } : {}),
+          note: input.note,
+        },
+      });
+      if (client !== this.dependencies.get_client()) return;
+      const list_result = await client.command({
+        type: 'list_permission_grants',
+        payload: { include_exhausted: false },
+      });
+      if (client !== this.dependencies.get_client()) return;
+      this.permission_grants = list_result.payload.grants;
+      this.#permission_grants_loaded = true;
+      this.notice_message = '一次性预授权已添加。';
+    });
+  }
+
+  async revokePermissionGrant(grant_id: string): Promise<boolean> {
+    const client = this.requireClient();
+    if (!client) return false;
+    return this.runAction('permission_grant:revoke', async () => {
+      await client.command({
+        type: 'revoke_permission_grant',
+        payload: { grant_id },
+      });
+      if (client !== this.dependencies.get_client()) return;
+      this.permission_grants = this.permission_grants.filter(
+        (grant) => grant.grant_id !== grant_id,
+      );
+      this.notice_message = '预授权已撤销。';
+    });
+  }
+
+  async reloadPermissions(scope_type?: PermissionDocumentScope['type']): Promise<boolean> {
+    const client = this.requireClient();
+    if (!client) return false;
+    if (scope_type === 'controller') {
+      return this.runAction('permission:reload', async () => {
+        const result = await client.command({
+          type: 'reload_controller_permissions',
+          payload: {},
+        });
+        if (!result.payload.applied) {
+          throw new Error(result.payload.diagnostics[0]?.message ?? '权限文件校验失败。');
+        }
+        await this.loadPermissions();
+        this.notice_message = '权限规则已重新加载。';
+      });
+    }
     const { session_id } = this.dependencies.get_permission_context();
-    if (!client || !session_id) {
+    if (!session_id) {
       this.error_message = '请先选择一个会话，再重新加载权限。';
       return false;
     }
@@ -774,6 +875,7 @@ export class SettingsStore {
 function samePermissionScope(left: PermissionDocumentScope, right: PermissionDocumentScope): boolean {
   if (left.type !== right.type) return false;
   if (left.type === 'global' || right.type === 'global') return true;
+  if (left.type === 'controller' || right.type === 'controller') return true;
   if (left.type === 'workspace' && right.type === 'workspace') {
     return left.payload.workspace_id === right.payload.workspace_id;
   }

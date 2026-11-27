@@ -1,20 +1,24 @@
 //! Persona、Pinned Memory 与冻结 System Context 的产品命令。
 
 use agent_memory::{PinnedMemoryCategory, PinnedMemoryEntry, PinnedMemoryId};
+use agent_model::SystemPromptSnapshot;
 use assistant_protocol::{
-    CreatePinnedMemoryRequest, DeletePinnedMemoryRequest, GetMemoryCapabilitiesRequest,
-    GetMemoryCapabilitiesResult, GetPersonaRequest, GetPersonaResult, GetSystemContextRequest,
-    GetSystemContextResult, ListPinnedMemoriesRequest, ListPinnedMemoriesResult,
-    MemoryCapabilities, PersonaSnapshot as PersonaProjection, PinnedMemoryCollectionSnapshot,
-    PinnedMemoryCreatedBy as CreatedByProjection, PinnedMemoryMutationResult as MutationProjection,
-    PinnedMemorySnapshot, SetPersonaRequest, SetPersonaResult, SystemContextSnapshot,
-    UpdatePinnedMemoryRequest,
+    ControllerPromptSnapshot as ControllerPromptProjection, CreatePinnedMemoryRequest,
+    DeletePinnedMemoryRequest, GetControllerPromptRequest, GetControllerPromptResult,
+    GetMemoryCapabilitiesRequest, GetMemoryCapabilitiesResult, GetPersonaRequest, GetPersonaResult,
+    GetSystemContextRequest, GetSystemContextResult, ListPinnedMemoriesRequest,
+    ListPinnedMemoriesResult, MemoryCapabilities, PersonaSnapshot as PersonaProjection,
+    PinnedMemoryCollectionSnapshot, PinnedMemoryCreatedBy as CreatedByProjection,
+    PinnedMemoryMutationResult as MutationProjection, PinnedMemorySnapshot,
+    SetControllerPromptRequest, SetControllerPromptResult, SetPersonaRequest, SetPersonaResult,
+    SystemContextSnapshot, UpdatePinnedMemoryRequest,
 };
 
 use super::{AssistantRuntime, now_ms};
 use crate::{
+    ControllerPromptMutation, ControllerPromptSnapshot, MAX_CONTROLLER_PROMPT_BYTES,
     PersonaMutation, PinnedMemoryCreatedBy, PinnedMemoryMutation, RuntimeError, RuntimeResult,
-    StoreErrorKind, StoredPinnedMemory,
+    SessionRole, StoreErrorKind, StoredPinnedMemory,
     memory::{MAX_PERSONA_BYTES, domain_attributes, protocol_attributes},
     pinned_memory_limits,
 };
@@ -75,6 +79,79 @@ impl AssistantRuntime {
                 })
             }
             Err(source) => Err(RuntimeError::from_store("update persona", source)),
+        }
+    }
+
+    pub async fn get_controller_prompt(
+        &self,
+        _request: GetControllerPromptRequest,
+    ) -> RuntimeResult<GetControllerPromptResult> {
+        let _operation = self.operation_gate.read().await;
+        self.ensure_running()?;
+        let prompt = self
+            .store
+            .get_controller_prompt()
+            .await
+            .map_err(|source| RuntimeError::from_store("load controller prompt", source))?;
+        Ok(GetControllerPromptResult {
+            prompt: project_controller_prompt(prompt),
+            max_bytes: MAX_CONTROLLER_PROMPT_BYTES as u32,
+        })
+    }
+
+    pub async fn set_controller_prompt(
+        &self,
+        request: SetControllerPromptRequest,
+    ) -> RuntimeResult<SetControllerPromptResult> {
+        let _operation = self.operation_gate.read().await;
+        self.ensure_running()?;
+        validate_controller_prompt(request.enabled, &request.content)?;
+        let mutation = ControllerPromptMutation {
+            expected_revision: request.expected_revision,
+            enabled: request.enabled,
+            content: request.content,
+            updated_at_ms: now_ms()?,
+        };
+        match self.store.set_controller_prompt(mutation).await {
+            Ok(prompt) => {
+                let key = crate::id::generate("history").map_err(|_| {
+                    RuntimeError::InternalStateUnavailable {
+                        component: "history binding",
+                    }
+                })?;
+                self.store
+                    .invalidate_controller_server_history_bindings(key.clone())
+                    .await
+                    .map_err(|source| {
+                        RuntimeError::from_store("invalidate controller history bindings", source)
+                    })?;
+                for session in self
+                    .sessions
+                    .read()
+                    .map_err(|_| RuntimeError::InternalStateUnavailable {
+                        component: "sessions",
+                    })?
+                    .values()
+                {
+                    if session.role()? == SessionRole::Controller {
+                        session.lock_state()?.server_history_key = Some(key.clone());
+                    }
+                }
+                Ok(SetControllerPromptResult {
+                    applied: true,
+                    prompt: project_controller_prompt(prompt),
+                })
+            }
+            Err(source) if source.kind() == StoreErrorKind::Conflict => {
+                let prompt = self.store.get_controller_prompt().await.map_err(|source| {
+                    RuntimeError::from_store("reload controller prompt", source)
+                })?;
+                Ok(SetControllerPromptResult {
+                    applied: false,
+                    prompt: project_controller_prompt(prompt),
+                })
+            }
+            Err(source) => Err(RuntimeError::from_store("update controller prompt", source)),
         }
     }
 
@@ -173,12 +250,23 @@ impl AssistantRuntime {
         self.ensure_running()?;
         let session = self.session(&request.session_id).await?;
         let summary = session.summary()?;
+        let base = session.current_system_prompt()?;
+        let prompt = if session.role()? == SessionRole::Controller {
+            let controller_prompt = self
+                .store
+                .get_controller_prompt()
+                .await
+                .map_err(|source| RuntimeError::from_store("load controller prompt", source))?;
+            merge_controller_prompt(&base, Some(&controller_prompt))
+        } else {
+            base
+        };
         Ok(GetSystemContextResult {
             snapshot: SystemContextSnapshot {
                 session_id: request.session_id,
                 session_created_at_ms: summary.created_at_ms,
                 workspace: self.session_workspace_snapshot(&session)?,
-                parts: session.current_system_prompt()?.parts().to_vec(),
+                parts: prompt.parts().to_vec(),
             },
         })
     }
@@ -224,16 +312,67 @@ impl AssistantRuntime {
     }
 }
 
+pub(crate) fn merge_controller_prompt(
+    base: &SystemPromptSnapshot,
+    controller_prompt: Option<&ControllerPromptSnapshot>,
+) -> SystemPromptSnapshot {
+    let Some(controller_prompt) = controller_prompt else {
+        return base.clone();
+    };
+    let trimmed = controller_prompt.content.trim();
+    if !controller_prompt.enabled || trimmed.is_empty() {
+        return base.clone();
+    }
+    let instruction = format!("<controller_instructions>\n{trimmed}\n</controller_instructions>");
+    let mut parts = base.parts().to_vec();
+    if let Some(directory_index) = parts
+        .iter()
+        .rposition(|part| part.starts_with("<runtime_directories>"))
+    {
+        parts.insert(directory_index, instruction);
+    } else {
+        parts.push(instruction);
+    }
+    SystemPromptSnapshot::new(parts)
+}
+
 fn validate_persona(_enabled: bool, content: &str) -> RuntimeResult<()> {
+    validate_prompt_bytes(
+        content,
+        MAX_PERSONA_BYTES,
+        "persona content is invalid or exceeds its capacity",
+    )
+}
+
+fn validate_controller_prompt(_enabled: bool, content: &str) -> RuntimeResult<()> {
+    validate_prompt_bytes(
+        content,
+        MAX_CONTROLLER_PROMPT_BYTES,
+        "controller prompt content is invalid or exceeds its capacity",
+    )
+}
+
+fn validate_prompt_bytes(
+    content: &str,
+    max_bytes: usize,
+    reason: &'static str,
+) -> RuntimeResult<()> {
     let contains_unsupported_control = content
         .chars()
         .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'));
-    if content.len() > MAX_PERSONA_BYTES || contains_unsupported_control {
-        return Err(RuntimeError::InvalidRequest {
-            reason: "persona content is invalid or exceeds its capacity",
-        });
+    if content.len() > max_bytes || contains_unsupported_control {
+        return Err(RuntimeError::InvalidRequest { reason });
     }
     Ok(())
+}
+
+fn project_controller_prompt(prompt: ControllerPromptSnapshot) -> ControllerPromptProjection {
+    ControllerPromptProjection {
+        enabled: prompt.enabled,
+        content: prompt.content,
+        revision: prompt.revision,
+        updated_at_ms: prompt.updated_at_ms,
+    }
 }
 
 fn invalid_memory() -> RuntimeError {

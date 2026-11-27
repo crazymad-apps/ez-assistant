@@ -1056,6 +1056,62 @@ describe('SettingsDialog permission management', () => {
     fireEvent.click(within(listbox).getByRole('option', { name: '拒绝' }));
     expect(effect).toHaveTextContent('拒绝');
   });
+
+  it('manages controller one-time grants on the 助理会话 tab without native selects', async () => {
+    const store = settingsStore();
+    store.settings.page = 'permissions';
+    store.settings.permission_documents = [
+      permissionDocument({ type: 'global' }, true),
+      permissionDocument({ type: 'controller' }, true),
+    ];
+    store.settings.permission_grants = [
+      {
+        grant_id: 'grant-1',
+        scope: 'controller',
+        variants: ['build'],
+        matcher: { type: 'general', payload: { tool_name: 'speak' } },
+        max_uses: 1,
+        remaining_uses: 1,
+        note: 'voice confirmation',
+        created_at_ms: 100,
+      },
+    ];
+    const create_grant = vi.spyOn(store.settings, 'createPermissionGrant').mockResolvedValue(true);
+    const reload_permissions = vi.spyOn(store.settings, 'reloadPermissions').mockResolvedValue(true);
+    renderDialog(store);
+
+    fireEvent.click(screen.getByRole('tab', { name: '助理会话' }));
+    expect(screen.getByText('后台一次性预授权')).toBeVisible();
+    expect(screen.getByText('剩余 1 / 1 次')).toBeVisible();
+
+    fireEvent.click(screen.getByRole('button', { name: '重新加载' }));
+    expect(reload_permissions).toHaveBeenCalledWith('controller');
+
+    fireEvent.click(screen.getByRole('button', { name: '新增预授权' }));
+    expect(screen.getByRole('button', { name: '添加规则' })).toBeDisabled();
+    expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
+    expect(document.querySelector('select')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: '选择匹配类型' }));
+    fireEvent.click(within(screen.getByRole('listbox')).getByRole('option', { name: '通用工具' }));
+    fireEvent.change(screen.getByPlaceholderText('例如 delegate_task'), {
+      target: { value: 'speak' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '保存预授权' }));
+
+    await waitFor(() =>
+      expect(create_grant).toHaveBeenCalledWith({
+        variants: ['build'],
+        matcher: { type: 'general', payload: { tool_name: 'speak' } },
+        max_uses: 1,
+        ttl_seconds: 3600,
+        note: '',
+      }),
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '添加规则' }));
+    expect(screen.getByRole('button', { name: '新增预授权' })).toBeDisabled();
+  });
 });
 
 describe('SettingsDialog memory management', () => {
@@ -1063,10 +1119,19 @@ describe('SettingsDialog memory management', () => {
     const store = settingsStore();
     store.settings.page = 'memory';
     store.memory_settings.persona = personaSnapshot();
+    store.memory_settings.controller_prompt = {
+      enabled: true,
+      content: '回答简短',
+      revision: 1,
+      updated_at_ms: 1,
+    };
+    store.memory_settings.controller_prompt_max_bytes = 16_384;
     store.memory_settings.capabilities = memoryCapabilities;
     store.memory_settings.collection = pinnedCollection();
     renderDialog(store);
 
+    expect(screen.getByText('助理会话提示词')).toBeVisible();
+    expect(screen.getByLabelText('助理会话提示词内容')).toHaveValue('回答简短');
     expect(screen.getByText('尚未添加 Pinned Memory。')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '添加' }));
     expect(screen.getByText('添加 Pinned Memory')).toBeInTheDocument();

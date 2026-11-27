@@ -189,6 +189,20 @@ impl StorageEngine {
         Ok(())
     }
 
+    pub(super) fn invalidate_controller_server_history_bindings(
+        &self,
+        key: String,
+    ) -> StorageResult<()> {
+        if key.is_empty() {
+            return Err(invalid_data("history binding must not be empty"));
+        }
+        sql(self.connection.execute(
+            "UPDATE sessions SET server_history_key=?1 WHERE role='controller'",
+            [key],
+        ))?;
+        Ok(())
+    }
+
     pub(super) fn get_model_fixed_config(
         &self,
         selection: ModelSelection,

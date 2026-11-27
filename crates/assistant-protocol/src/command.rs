@@ -6,6 +6,7 @@ use ts_rs::TS;
 use crate::{
     AgentVariant, ApprovalDecision, ApprovalId, ApprovalMode, ApprovalSnapshot, AttachmentId,
     AttachmentSummary, ChildTaskId, ChildTaskSnapshot, ConfigurationStatus,
+    ControllerPromptSnapshot, CreatePermissionGrantRequest, CreatePermissionGrantResult,
     DeleteConfirmationToken, GetApplicationSnapshotRequest, GetApplicationSnapshotResult,
     GetChildTaskViewRequest, GetChildTaskViewResult, GetConversationMessagePreviewRequest,
     GetConversationMessagePreviewResult, GetConversationPageAroundMessageRequest,
@@ -15,12 +16,13 @@ use crate::{
     GetToolDetailRequest, GetToolDetailResult, GoalId, GoalSnapshot, IdempotencyKey, InputId,
     InterruptRunRequest, InterruptRunResult, ListConversationNavigationRequest,
     ListConversationNavigationResult, ListConversationPageRequest, ListConversationPageResult,
-    MemoryAttributeValue, MemoryCapabilities, MessageFeedback, MessageId, PermissionDiagnostic,
-    PermissionDocumentDraft, PermissionDocumentRevision, PermissionDocumentScope,
-    PermissionDocumentSnapshot, PermissionFileSummary, PersonaSnapshot,
-    PinnedMemoryCollectionSnapshot, PinnedMemorySnapshot, PrioritizeQueuedInputRequest,
-    PrioritizeQueuedInputResult, ReasoningEffortKey, RejectApprovalAndStopRunRequest,
-    RejectApprovalAndStopRunResult, ResumeQueuedInputRequest, ResumeQueuedInputResult, RunId,
+    ListPermissionGrantsRequest, ListPermissionGrantsResult, MemoryAttributeValue,
+    MemoryCapabilities, MessageFeedback, MessageId, PermissionDiagnostic, PermissionDocumentDraft,
+    PermissionDocumentRevision, PermissionDocumentScope, PermissionDocumentSnapshot,
+    PermissionFileSummary, PersonaSnapshot, PinnedMemoryCollectionSnapshot, PinnedMemorySnapshot,
+    PrioritizeQueuedInputRequest, PrioritizeQueuedInputResult, ReasoningEffortKey,
+    RejectApprovalAndStopRunRequest, RejectApprovalAndStopRunResult, ResumeQueuedInputRequest,
+    ResumeQueuedInputResult, RevokePermissionGrantRequest, RevokePermissionGrantResult, RunId,
     RunSnapshot, RuntimeLifecycle, SearchConversationHistoryRequest,
     SearchConversationHistoryResult, SessionId, SessionListFilter, SessionSummary,
     SkillDetailSnapshot, SkillManagementSnapshot, SystemContextSnapshot, WorkPlanSnapshot,
@@ -122,6 +124,20 @@ pub struct ReloadPermissionsResult {
     pub session_id: SessionId,
     pub applied: bool,
     pub files: Vec<PermissionFileSummary>,
+    pub diagnostics: Vec<PermissionDiagnostic>,
+}
+
+/// 显式重新加载助理会话（Controller）全局隔离权限文件 `controller-permissions.json`。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ReloadControllerPermissionsRequest {}
+
+/// Controller 权限重载结果；只有 `applied` 为 true 时才替换内存快照。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct ReloadControllerPermissionsResult {
+    pub applied: bool,
+    pub file: PermissionFileSummary,
     pub diagnostics: Vec<PermissionDiagnostic>,
 }
 
@@ -1320,6 +1336,32 @@ pub struct SetPersonaResult {
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
+pub struct GetControllerPromptRequest {}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct GetControllerPromptResult {
+    pub prompt: ControllerPromptSnapshot,
+    pub max_bytes: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SetControllerPromptRequest {
+    pub expected_revision: u64,
+    pub enabled: bool,
+    pub content: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct SetControllerPromptResult {
+    pub applied: bool,
+    pub prompt: ControllerPromptSnapshot,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
 pub struct ListPinnedMemoriesRequest {}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -1486,6 +1528,8 @@ pub enum RuntimeCommand {
     GetMemoryCapabilities(GetMemoryCapabilitiesRequest),
     GetPersona(GetPersonaRequest),
     SetPersona(SetPersonaRequest),
+    GetControllerPrompt(GetControllerPromptRequest),
+    SetControllerPrompt(SetControllerPromptRequest),
     ListPinnedMemories(ListPinnedMemoriesRequest),
     CreatePinnedMemory(CreatePinnedMemoryRequest),
     UpdatePinnedMemory(UpdatePinnedMemoryRequest),
@@ -1493,10 +1537,15 @@ pub enum RuntimeCommand {
     GetSystemContext(GetSystemContextRequest),
     /// 显式重新加载目标 Session 的权限 cohort。
     ReloadPermissions(ReloadPermissionsRequest),
+    /// 显式重新加载助理会话（Controller）隔离权限文件。
+    ReloadControllerPermissions(ReloadControllerPermissionsRequest),
     /// 查询一份权限文档的安全产品投影。
     GetPermissionDocument(GetPermissionDocumentRequest),
-    /// 以 revision CAS 替换 Session 或 Workspace 权限文档。
+    /// 以 revision CAS 替换 Session、Workspace 或 Controller 权限文档。
     ReplacePermissionDocument(ReplacePermissionDocumentRequest),
+    ListPermissionGrants(ListPermissionGrantsRequest),
+    CreatePermissionGrant(CreatePermissionGrantRequest),
+    RevokePermissionGrant(RevokePermissionGrantRequest),
     ListPendingApprovals(ListPendingApprovalsRequest),
     DecideApproval(DecideApprovalRequest),
     /// 显式验证指定模型连接。
@@ -1704,6 +1753,8 @@ pub enum RuntimeCommandResult {
     GetMemoryCapabilities(GetMemoryCapabilitiesResult),
     GetPersona(GetPersonaResult),
     SetPersona(SetPersonaResult),
+    GetControllerPrompt(GetControllerPromptResult),
+    SetControllerPrompt(SetControllerPromptResult),
     ListPinnedMemories(ListPinnedMemoriesResult),
     CreatePinnedMemory(PinnedMemoryMutationResult),
     UpdatePinnedMemory(PinnedMemoryMutationResult),
@@ -1711,8 +1762,13 @@ pub enum RuntimeCommandResult {
     GetSystemContext(GetSystemContextResult),
     /// 权限 cohort 重载已完成。
     ReloadPermissions(ReloadPermissionsResult),
+    /// Controller 权限重载已完成。
+    ReloadControllerPermissions(ReloadControllerPermissionsResult),
     GetPermissionDocument(GetPermissionDocumentResult),
     ReplacePermissionDocument(ReplacePermissionDocumentResult),
+    ListPermissionGrants(ListPermissionGrantsResult),
+    CreatePermissionGrant(CreatePermissionGrantResult),
+    RevokePermissionGrant(RevokePermissionGrantResult),
     ListPendingApprovals(ListPendingApprovalsResult),
     DecideApproval(DecideApprovalResult),
     /// 模型连接验证已完成。
@@ -1830,6 +1886,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::{PermissionGeneralMatcher, PermissionRuleMatcher};
 
     fn session_summary() -> SessionSummary {
         SessionSummary {
@@ -2156,6 +2213,41 @@ mod tests {
                 "get_config_status",
             ),
             (
+                RuntimeCommand::GetControllerPrompt(GetControllerPromptRequest::default()),
+                "get_controller_prompt",
+            ),
+            (
+                RuntimeCommand::SetControllerPrompt(SetControllerPromptRequest {
+                    expected_revision: 1,
+                    enabled: true,
+                    content: "Keep replies concise.".to_owned(),
+                }),
+                "set_controller_prompt",
+            ),
+            (
+                RuntimeCommand::ListPermissionGrants(ListPermissionGrantsRequest::default()),
+                "list_permission_grants",
+            ),
+            (
+                RuntimeCommand::CreatePermissionGrant(CreatePermissionGrantRequest {
+                    scope: crate::PermissionScope::Controller,
+                    variants: vec![AgentVariant::Build],
+                    matcher: PermissionRuleMatcher::General(PermissionGeneralMatcher {
+                        tool_name: "delegate_task".to_owned(),
+                    }),
+                    max_uses: 1,
+                    ttl_seconds: Some(600),
+                    note: "once".to_owned(),
+                }),
+                "create_permission_grant",
+            ),
+            (
+                RuntimeCommand::RevokePermissionGrant(RevokePermissionGrantRequest {
+                    grant_id: "pg-1".to_owned(),
+                }),
+                "revoke_permission_grant",
+            ),
+            (
                 RuntimeCommand::ReloadConfig(ReloadConfigRequest::default()),
                 "reload_config",
             ),
@@ -2175,6 +2267,12 @@ mod tests {
                     session_id: session_id.clone(),
                 }),
                 "reload_permissions",
+            ),
+            (
+                RuntimeCommand::ReloadControllerPermissions(
+                    ReloadControllerPermissionsRequest::default(),
+                ),
+                "reload_controller_permissions",
             ),
             (
                 RuntimeCommand::ListPendingApprovals(ListPendingApprovalsRequest {
@@ -2512,6 +2610,62 @@ mod tests {
                 "get_config_status",
             ),
             (
+                RuntimeCommandResult::GetControllerPrompt(GetControllerPromptResult {
+                    prompt: ControllerPromptSnapshot {
+                        enabled: true,
+                        content: "Keep replies concise.".to_owned(),
+                        revision: 2,
+                        updated_at_ms: 100,
+                    },
+                    max_bytes: 32_768,
+                }),
+                "get_controller_prompt",
+            ),
+            (
+                RuntimeCommandResult::SetControllerPrompt(SetControllerPromptResult {
+                    applied: true,
+                    prompt: ControllerPromptSnapshot {
+                        enabled: true,
+                        content: "Keep replies concise.".to_owned(),
+                        revision: 2,
+                        updated_at_ms: 100,
+                    },
+                }),
+                "set_controller_prompt",
+            ),
+            (
+                RuntimeCommandResult::ListPermissionGrants(ListPermissionGrantsResult {
+                    grants: Vec::new(),
+                }),
+                "list_permission_grants",
+            ),
+            (
+                RuntimeCommandResult::CreatePermissionGrant(CreatePermissionGrantResult {
+                    grant: crate::PermissionGrantSnapshot {
+                        grant_id: "pg-1".to_owned(),
+                        scope: crate::PermissionScope::Controller,
+                        variants: vec![AgentVariant::Build],
+                        matcher: PermissionRuleMatcher::General(PermissionGeneralMatcher {
+                            tool_name: "delegate_task".to_owned(),
+                        }),
+                        max_uses: 1,
+                        remaining_uses: 1,
+                        expires_at_ms: Some(1000),
+                        note: "once".to_owned(),
+                        created_at_ms: 10,
+                        consumed_at_ms: None,
+                    },
+                }),
+                "create_permission_grant",
+            ),
+            (
+                RuntimeCommandResult::RevokePermissionGrant(RevokePermissionGrantResult {
+                    revoked: true,
+                    grant_id: "pg-1".to_owned(),
+                }),
+                "revoke_permission_grant",
+            ),
+            (
                 RuntimeCommandResult::ReloadConfig(ReloadConfigResult {
                     status: configuration_status(),
                 }),
@@ -2532,6 +2686,19 @@ mod tests {
                     diagnostics: Vec::new(),
                 }),
                 "reload_permissions",
+            ),
+            (
+                RuntimeCommandResult::ReloadControllerPermissions(
+                    ReloadControllerPermissionsResult {
+                        applied: true,
+                        file: crate::PermissionFileSummary {
+                            scope: crate::PermissionScope::Controller,
+                            status: crate::PermissionFileStatus::Ready,
+                        },
+                        diagnostics: Vec::new(),
+                    },
+                ),
+                "reload_controller_permissions",
             ),
             (
                 RuntimeCommandResult::ListPendingApprovals(ListPendingApprovalsResult {

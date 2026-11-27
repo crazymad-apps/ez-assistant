@@ -769,6 +769,18 @@ async fn dispatch_runtime(
             RuntimeCommandResult::SetPersona(runtime.set_persona(request).await?),
             false,
         ),
+        RuntimeCommand::GetControllerPrompt(request) => (
+            RuntimeCommandResult::GetControllerPrompt(
+                runtime.get_controller_prompt(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::SetControllerPrompt(request) => (
+            RuntimeCommandResult::SetControllerPrompt(
+                runtime.set_controller_prompt(request).await?,
+            ),
+            false,
+        ),
         RuntimeCommand::ListPinnedMemories(request) => (
             RuntimeCommandResult::ListPinnedMemories(runtime.list_pinned_memories(request).await?),
             false,
@@ -793,6 +805,12 @@ async fn dispatch_runtime(
             RuntimeCommandResult::ReloadPermissions(runtime.reload_permissions(request).await?),
             false,
         ),
+        RuntimeCommand::ReloadControllerPermissions(request) => (
+            RuntimeCommandResult::ReloadControllerPermissions(
+                runtime.reload_controller_permissions(request).await?,
+            ),
+            false,
+        ),
         RuntimeCommand::GetPermissionDocument(request) => (
             RuntimeCommandResult::GetPermissionDocument(
                 runtime.get_permission_document(request).await?,
@@ -802,6 +820,24 @@ async fn dispatch_runtime(
         RuntimeCommand::ReplacePermissionDocument(request) => (
             RuntimeCommandResult::ReplacePermissionDocument(
                 runtime.replace_permission_document(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::ListPermissionGrants(request) => (
+            RuntimeCommandResult::ListPermissionGrants(
+                runtime.list_permission_grants(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::CreatePermissionGrant(request) => (
+            RuntimeCommandResult::CreatePermissionGrant(
+                runtime.create_permission_grant(request).await?,
+            ),
+            false,
+        ),
+        RuntimeCommand::RevokePermissionGrant(request) => (
+            RuntimeCommandResult::RevokePermissionGrant(
+                runtime.revoke_permission_grant(request).await?,
             ),
             false,
         ),

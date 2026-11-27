@@ -49,7 +49,10 @@ fn schedule_schema_upgrade_preserves_previous_tables_and_blocks_rollback() {
     drop(source);
 
     let report = migrate(home.path(), DATABASE_SCHEMA_VERSION, &entries).unwrap();
-    assert_eq!(report.applied, ["0.33.2", "0.33.2", "0.33.2", "0.33.2"]);
+    assert_eq!(
+        report.applied,
+        ["0.33.2", "0.33.2", "0.33.2", "0.33.2", "0.33.2"]
+    );
     let backup = report.backup.unwrap().join(DATABASE_FILE);
     let saved = Connection::open_with_flags(&backup, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
     assert_eq!(backup::evidence(&saved).unwrap(), before);
@@ -1459,6 +1462,7 @@ fn product_upgrade_removes_only_its_backup_after_verified_success() {
         "schedules",
         "schedule_executions",
         "schedule_deliveries",
+        "controller_permission_grants",
     ] {
         actual.tables.remove(table).unwrap();
         assert_eq!(
@@ -1470,6 +1474,14 @@ fn product_upgrade_removes_only_its_backup_after_verified_success() {
             "{table} must be empty immediately after upgrade"
         );
     }
+    actual.tables.remove("controller_prompt").unwrap();
+    assert_eq!(
+        source
+            .query_row("SELECT COUNT(*) FROM controller_prompt", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1,
+    );
     actual.tables.remove("schema_migrations");
     original.tables.remove("schema_migrations");
     actual.tables.remove("database_compatibility");
@@ -1687,7 +1699,8 @@ fn schedule_delivery_migration_preserves_prior_execution_and_restorable_backup()
     let before = backup::evidence(&source).unwrap();
     drop(source);
 
-    let upgraded = migrate(home.path(), "0.33.2", &entries).unwrap();
+    let m3 = &entries[..m2.len() + 1];
+    let upgraded = migrate(home.path(), "0.33.2", m3).unwrap();
     assert_eq!(upgraded.applied, ["0.33.2"]);
     let backup_path = upgraded.backup.unwrap().join(DATABASE_FILE);
     let snapshot =

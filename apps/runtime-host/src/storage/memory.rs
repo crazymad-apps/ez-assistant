@@ -5,8 +5,9 @@ use std::collections::BTreeMap;
 use agent_memory::{MemoryPropertyValue, PinnedMemoryCategory, PinnedMemoryEntry, PinnedMemoryId};
 use assistant_protocol::SessionId;
 use assistant_runtime::{
-    MemoryContextSnapshot, PersonaMutation, PersonaSnapshot, PinnedMemoryCreatedBy,
-    PinnedMemoryMutation, PinnedMemoryMutationResult, StoredPinnedMemory,
+    ControllerPromptMutation, ControllerPromptSnapshot, MemoryContextSnapshot, PersonaMutation,
+    PersonaSnapshot, PinnedMemoryCreatedBy, PinnedMemoryMutation, PinnedMemoryMutationResult,
+    StoredPinnedMemory,
 };
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
@@ -82,6 +83,75 @@ impl StorageEngine {
             database_write_error("persona update could not be committed", source)
         })?;
         Ok(PersonaSnapshot {
+            enabled: mutation.enabled,
+            content: mutation.content,
+            revision: next_revision,
+            updated_at_ms: mutation.updated_at_ms,
+        })
+    }
+
+    pub(super) fn get_controller_prompt(&self) -> StorageResult<ControllerPromptSnapshot> {
+        self.connection
+            .query_row(
+                "SELECT enabled, content, revision, updated_at_ms
+                 FROM controller_prompt WHERE singleton_key = 1",
+                [],
+                |row| {
+                    Ok(ControllerPromptSnapshot {
+                        enabled: row.get::<_, i64>(0)? != 0,
+                        content: row.get(1)?,
+                        revision: decode_revision(row.get(2)?)?,
+                        updated_at_ms: row.get(3)?,
+                    })
+                },
+            )
+            .map_err(|source| {
+                invalid_data_with_source("controller prompt state is unavailable", source)
+            })
+    }
+
+    pub(super) fn set_controller_prompt(
+        &mut self,
+        mutation: ControllerPromptMutation,
+    ) -> StorageResult<ControllerPromptSnapshot> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|source| {
+                database_write_error("controller prompt transaction could not be started", source)
+            })?;
+        let next_revision = mutation
+            .expected_revision
+            .checked_add(1)
+            .ok_or_else(|| conflict("controller prompt revision exhausted"))?;
+        let next_revision_sql = to_i64(next_revision, "controller prompt revision is too large")?;
+        let expected_revision_sql = to_i64(
+            mutation.expected_revision,
+            "expected controller prompt revision is too large",
+        )?;
+        let changed = transaction
+            .execute(
+                "UPDATE controller_prompt
+                 SET enabled = ?1, content = ?2, revision = ?3, updated_at_ms = ?4
+                 WHERE singleton_key = 1 AND revision = ?5",
+                params![
+                    if mutation.enabled { 1_i64 } else { 0_i64 },
+                    mutation.content,
+                    next_revision_sql,
+                    mutation.updated_at_ms,
+                    expected_revision_sql,
+                ],
+            )
+            .map_err(|source| {
+                database_write_error("controller prompt could not be updated", source)
+            })?;
+        if changed != 1 {
+            return Err(conflict("controller prompt revision changed"));
+        }
+        transaction.commit().map_err(|source| {
+            database_write_error("controller prompt update could not be committed", source)
+        })?;
+        Ok(ControllerPromptSnapshot {
             enabled: mutation.enabled,
             content: mutation.content,
             revision: next_revision,
