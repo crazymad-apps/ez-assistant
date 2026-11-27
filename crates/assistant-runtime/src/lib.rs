@@ -100,7 +100,7 @@ pub use mcp::{
     McpConnectionFactory, McpConnectionFailureKind, McpConnectionFuture, McpConnectionOptions,
     McpImageMaterializationFailure, McpImageMaterializationFuture, McpImageMaterializer,
     McpRawCallResult, McpRawContent, McpSecret, McpServerConfig, McpServerTransportConfig,
-    McpToolDefinition, McpToolPage, McpUiResourcePage,
+    McpToolDefinition, McpToolPage, McpUiResourcePage, device_mcp_server_key,
 };
 pub use memory::{
     ControllerPromptMutation, ControllerPromptSnapshot, MAX_CONTROLLER_PROMPT_BYTES,

@@ -56,24 +56,36 @@ impl OverridesDocument {
         self.revision.as_deref().unwrap_or("absent")
     }
 
+    fn managed_group(source: &McpServerSource) -> RuntimeResult<&'static str> {
+        match source {
+            McpServerSource::Builtin => Ok("builtin"),
+            McpServerSource::Device(_) => Ok("device"),
+            McpServerSource::Plugin(_) | McpServerSource::User => {
+                Err(RuntimeError::McpConfigInvalid)
+            }
+        }
+    }
+
     fn record(&self, definition: &ManagedMcpServerDefinition) -> RuntimeResult<Map<String, Value>> {
         if !self.valid {
             return Err(RuntimeError::McpConfigInvalid);
         }
         let section = match definition.source {
-            McpServerSource::Builtin => self
-                .root
-                .get("managedServers")
-                .map(|value| {
-                    value
-                        .as_object()
-                        .ok_or(RuntimeError::McpConfigInvalid)?
-                        .get("builtin")
-                        .map(|value| value.as_object().ok_or(RuntimeError::McpConfigInvalid))
-                        .transpose()
-                })
-                .transpose()?
-                .flatten(),
+            McpServerSource::Builtin | McpServerSource::Device(_) => {
+                let group = Self::managed_group(&definition.source)?;
+                self.root
+                    .get("managedServers")
+                    .map(|value| {
+                        value
+                            .as_object()
+                            .ok_or(RuntimeError::McpConfigInvalid)?
+                            .get(group)
+                            .map(|value| value.as_object().ok_or(RuntimeError::McpConfigInvalid))
+                            .transpose()
+                    })
+                    .transpose()?
+                    .flatten()
+            }
             McpServerSource::Plugin(_) => self
                 .root
                 .get("servers")
@@ -98,14 +110,16 @@ impl OverridesDocument {
         record: Map<String, Value>,
     ) -> RuntimeResult<()> {
         let section = match definition.source {
-            McpServerSource::Builtin => self
-                .root
-                .entry("managedServers")
-                .or_insert_with(|| Value::Object(Map::new()))
-                .as_object_mut()
-                .ok_or(RuntimeError::McpConfigInvalid)?
-                .entry("builtin")
-                .or_insert_with(|| Value::Object(Map::new())),
+            McpServerSource::Builtin | McpServerSource::Device(_) => {
+                let group = Self::managed_group(&definition.source)?;
+                self.root
+                    .entry("managedServers")
+                    .or_insert_with(|| Value::Object(Map::new()))
+                    .as_object_mut()
+                    .ok_or(RuntimeError::McpConfigInvalid)?
+                    .entry(group)
+                    .or_insert_with(|| Value::Object(Map::new()))
+            }
             McpServerSource::Plugin(_) => self
                 .root
                 .entry("servers")
@@ -165,7 +179,7 @@ impl McpConfigStore {
         definition: &'a ManagedMcpServerDefinition,
     ) -> RuntimeResult<&'a dyn McpConfigSource> {
         match definition.source {
-            McpServerSource::Builtin => Ok(self.source.as_ref()),
+            McpServerSource::Builtin | McpServerSource::Device(_) => Ok(self.source.as_ref()),
             McpServerSource::Plugin(_) => definition
                 .configuration
                 .as_deref()
@@ -231,14 +245,18 @@ impl McpConfigStore {
             .collect();
         let mut defined = candidate.configured_keys.clone();
         for definition in definitions {
-            if !documents.contains_key(&definition.source) {
+            let document_key = match &definition.source {
+                McpServerSource::Builtin | McpServerSource::Device(_) => McpServerSource::Builtin,
+                other => other.clone(),
+            };
+            if !documents.contains_key(&document_key) {
                 let document = match self.managed_source(definition) {
                     Ok(source) => load(source, false).await.ok(),
                     Err(_) => None,
                 };
-                documents.insert(definition.source.clone(), document);
+                documents.insert(document_key.clone(), document);
             }
-            let document = documents.get(&definition.source).and_then(Option::as_ref);
+            let document = documents.get(&document_key).and_then(Option::as_ref);
             let revision = document
                 .map_or("unavailable", OverridesDocument::public_revision)
                 .to_owned();
@@ -317,7 +335,7 @@ impl McpConfigStore {
                     .get("managedServers")
                     .and_then(|value| value.get("builtin")),
                 McpServerSource::Plugin(_) => document.root.get("servers"),
-                McpServerSource::User => None,
+                McpServerSource::Device(_) | McpServerSource::User => None,
             };
             if let Some(records) = section.and_then(Value::as_object) {
                 for key in records.keys() {
@@ -369,7 +387,10 @@ impl McpConfigStore {
         let source = self.managed_source(definition)?;
         let mut document = load(
             source,
-            matches!(definition.source, McpServerSource::Builtin),
+            matches!(
+                definition.source,
+                McpServerSource::Builtin | McpServerSource::Device(_)
+            ),
         )
         .await?;
         if document.public_revision() != expected_revision {
@@ -437,7 +458,10 @@ impl McpConfigStore {
         let _gate = self.gate.lock().await;
         let document = load(
             self.managed_source(definition)?,
-            matches!(definition.source, McpServerSource::Builtin),
+            matches!(
+                definition.source,
+                McpServerSource::Builtin | McpServerSource::Device(_)
+            ),
         )
         .await?;
         if document.public_revision() != draft.expected_revision {
@@ -448,6 +472,55 @@ impl McpConfigStore {
         patch_map(&mut record, "env", &draft.environment)?;
         patch_map(&mut record, "headers", &draft.headers)?;
         apply(definition, &record)
+    }
+
+    /// 解除终端配对时清理 `mcp.json` 中 `managedServers.device` 下该设备关联的受管覆盖记录。
+    pub(crate) async fn remove_managed_device_overrides(
+        &self,
+        device_id: &assistant_protocol::DeviceId,
+        extra_keys: &[McpServerKey],
+    ) -> RuntimeResult<()> {
+        let _gate = self.gate.lock().await;
+        let mut document = load(self.source.as_ref(), true).await?;
+        if document.revision.is_none() || !document.valid {
+            return Ok(());
+        }
+        let before = document.root.clone();
+        if let Some(managed) = document
+            .root
+            .get_mut("managedServers")
+            .and_then(Value::as_object_mut)
+            && let Some(device_section) = managed.get_mut("device").and_then(Value::as_object_mut)
+        {
+            for key in extra_keys {
+                device_section.remove(key.as_str());
+            }
+            device_section.retain(|key, _| !super::device_key_belongs_to_device(key, device_id));
+            if device_section.is_empty() {
+                managed.remove("device");
+            }
+        }
+        if document
+            .root
+            .get("managedServers")
+            .and_then(Value::as_object)
+            .is_some_and(Map::is_empty)
+        {
+            document.root.remove("managedServers");
+        }
+        if before == document.root {
+            return Ok(());
+        }
+        let contents = serde_json::to_string_pretty(&document.root)
+            .map_err(|_| RuntimeError::McpConfigInvalid)?
+            + "\n";
+        match self.source.replace(document.revision, contents).await {
+            ConfigSourceReplace::Applied(_) => Ok(()),
+            ConfigSourceReplace::Conflict(_) => Err(RuntimeError::McpConfigConflict),
+            ConfigSourceReplace::Unavailable(_) => {
+                Err(RuntimeError::ConfigurationPersistenceFailed)
+            }
+        }
     }
 }
 
@@ -600,9 +673,10 @@ fn apply(
             }
         }
     }
-    let mut config = super::config::normalize_server(&definition.server_key, raw)
-        .map_err(|_| RuntimeError::McpConfigInvalid)?
-        .config;
+    let mut config =
+        super::config::normalize_server_for_source(&definition.server_key, raw, &definition.source)
+            .map_err(|_| RuntimeError::McpConfigInvalid)?
+            .config;
     if let McpServerSource::Plugin(name) = &definition.source {
         config.plugin_name = Some(name.clone());
     }
@@ -761,6 +835,7 @@ fn invalid(definition: &ManagedMcpServerDefinition) -> McpDiagnosticSnapshot {
     let source = match &definition.source {
         McpServerSource::User => "用户添加".to_owned(),
         McpServerSource::Plugin(name) => format!("插件 · {name}"),
+        McpServerSource::Device(id) => format!("智能终端 · {id}"),
         McpServerSource::Builtin => "内置资源".to_owned(),
     };
     let missing = definition
@@ -770,7 +845,10 @@ fn invalid(definition: &ManagedMcpServerDefinition) -> McpDiagnosticSnapshot {
         .map(|field| field.name.as_str())
         .collect::<Vec<_>>();
     let reason = if !definition.source_available {
-        "服务来源不可用，请检查插件是否已安装且包文件完整".to_owned()
+        match &definition.source {
+            McpServerSource::Device(_) => "智能终端当前离线或尚未上报可用服务".to_owned(),
+            _ => "服务来源不可用，请检查插件是否已安装且包文件完整".to_owned(),
+        }
     } else if !missing.is_empty() {
         format!(
             "缺少必填插件配置项：{}。请在插件配置中填写后刷新此服务",

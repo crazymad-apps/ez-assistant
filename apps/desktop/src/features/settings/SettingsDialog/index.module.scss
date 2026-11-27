@@ -330,6 +330,43 @@
   > button:disabled { opacity: 0.45; }
 }
 
+.pending_device_list article[data-mode="direct_confirm"] {
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+}
+
+.pending_device_actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pending_device_confirm {
+  min-height: var(--ez-control-height);
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--ez-radius-small);
+  color: var(--ez-on-primary);
+  background: var(--ez-primary);
+}
+
+.pending_device_confirm:disabled { opacity: 0.45; }
+
+.pending_device_reject {
+  min-height: var(--ez-control-height);
+  padding: 0 10px;
+  border: 1px solid var(--ez-border-strong);
+  border-radius: var(--ez-radius-small);
+  color: var(--ez-text-secondary);
+  background: var(--ez-surface);
+}
+
+.pending_device_reject:hover:not(:disabled) {
+  color: var(--ez-danger);
+  background: var(--ez-surface-subtle);
+}
+
+.pending_device_reject:disabled { opacity: 0.45; }
+
 .paired_device_list > article {
   display: grid;
   min-width: 0;

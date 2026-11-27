@@ -77,7 +77,9 @@ export const McpSettingsPage = observer(function McpSettingsPage(props: Readonly
 function stateLabel(server: McpServerSnapshot): string {
   const priority = priorityLabel(server);
   if (priority) return `${priority}${server.needs_refresh ? " · 待刷新" : ""}`;
-  if (server.managed && !server.managed.source_enabled) return "插件已停用";
+  if (server.managed && !server.managed.source_enabled) {
+    return server.source.type === "device" ? "终端已离线" : "插件已停用";
+  }
   if (server.needs_refresh) return `配置待刷新 · ${server.tool_count} 个工具`;
   if (server.runtime_state === "connected") return `已连接 · ${server.tool_count} 个工具`;
   if (server.runtime_state === "connected_without_tools") return "已连接 · 无工具";

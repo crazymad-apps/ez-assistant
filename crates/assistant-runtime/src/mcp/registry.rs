@@ -375,6 +375,39 @@ impl McpRegistry {
         Ok((keys, close_failed))
     }
 
+    /// 当受管服务定义发生变化（例如终端重连换用新 IP）时提前退役旧来源连接，
+    /// 避免后续新连接偶发失败时 `RetainedAfterFailure` 继续保留指向旧地址的连接。
+    pub(crate) async fn retire_server_if_source(
+        &self,
+        key: &McpServerKey,
+        source: &assistant_protocol::McpServerSource,
+    ) -> RuntimeResult<bool> {
+        let _refresh = self.refresh_gate.lock().await;
+        let retired = self.events.publish_transition(|| {
+            let matches_source = {
+                let servers = self.servers.read().map_err(|_| registry_unavailable())?;
+                servers
+                    .get(key)
+                    .is_some_and(|state| &state.source == source)
+            };
+            let retired = if matches_source {
+                self.remove_current(key)?
+            } else {
+                None
+            };
+            let event = retired
+                .is_some()
+                .then_some(assistant_protocol::RuntimeEvent::McpRegistryChanged);
+            Ok((retired, event))
+        })?;
+        let Some(state) = retired else {
+            return Ok(false);
+        };
+        state.call_cancellation.cancel();
+        let _ = state.retire().await;
+        Ok(true)
+    }
+
     pub(crate) fn projections(
         &self,
     ) -> RuntimeResult<BTreeMap<McpServerKey, McpRegistryServerProjection>> {

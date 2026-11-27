@@ -432,9 +432,9 @@ schema_version: number | null,
 issues: Array<ConfigurationIssue>, };
 
 /**
- * 用户用候选设备展示的配对码确认一次配对请求。
+ * 用户在桌面端确认一次配对请求（SPAKE2 携带 6 位配对码；免码直连不传配对码）。
  */
-export type ConfirmDevicePairingRequest = { pairing_request_id: string, pairing_code: string, display_name: string | null, };
+export type ConfirmDevicePairingRequest = { pairing_request_id: string, pairing_code?: string | null, display_name: string | null, };
 
 /**
  * 一次连接验证的脱敏失败。
@@ -721,19 +721,19 @@ export type DeviceCapabilitiesSnapshot = { input_text: boolean, input_pcm16_16k_
  *
  * 设备离线时整个字段从设备摘要中消失，不把离线写回持久设备记录。
  */
-export type DeviceConnectionSnapshot = { connected_at_ms: number, capabilities: DeviceCapabilitiesSnapshot, output_preference: OutputPreferenceSnapshot, };
+export type DeviceConnectionSnapshot = { connected_at_ms: number, capabilities: DeviceCapabilitiesSnapshot, output_preference: OutputPreferenceSnapshot, peer_address?: string, client_version?: string, mcp_server_keys?: Array<McpServerKey>, };
 
 /**
  * Desktop 发往 Host 的 Device Gateway 管理命令集合。
  *
  * 这些是 Host 级交互意图，不属于 Runtime Session 命令。
  */
-export type DeviceGatewayCommand = { "type": "get_snapshot", "payload": GetDeviceGatewaySnapshotRequest } | { "type": "set_access_enabled", "payload": SetDeviceAccessEnabledRequest } | { "type": "open_pairing_window", "payload": OpenDevicePairingWindowRequest } | { "type": "close_pairing_window", "payload": CloseDevicePairingWindowRequest } | { "type": "confirm_pairing", "payload": ConfirmDevicePairingRequest } | { "type": "rename_device", "payload": RenameDeviceRequest } | { "type": "revoke_device", "payload": RevokeDeviceRequest };
+export type DeviceGatewayCommand = { "type": "get_snapshot", "payload": GetDeviceGatewaySnapshotRequest } | { "type": "set_access_enabled", "payload": SetDeviceAccessEnabledRequest } | { "type": "open_pairing_window", "payload": OpenDevicePairingWindowRequest } | { "type": "close_pairing_window", "payload": CloseDevicePairingWindowRequest } | { "type": "confirm_pairing", "payload": ConfirmDevicePairingRequest } | { "type": "reject_pairing", "payload": RejectDevicePairingRequest } | { "type": "rename_device", "payload": RenameDeviceRequest } | { "type": "revoke_device", "payload": RevokeDeviceRequest };
 
 /**
  * 与 [`DeviceGatewayCommand`] 一一对应的 Host 命令结果。
  */
-export type DeviceGatewayCommandResult = { "type": "get_snapshot", "payload": DeviceGatewaySnapshot } | { "type": "set_access_enabled", "payload": DeviceGatewayMutationResult } | { "type": "open_pairing_window", "payload": DeviceGatewayMutationResult } | { "type": "close_pairing_window", "payload": DeviceGatewayMutationResult } | { "type": "confirm_pairing", "payload": DeviceGatewayMutationResult } | { "type": "rename_device", "payload": DeviceGatewayMutationResult } | { "type": "revoke_device", "payload": DeviceGatewayMutationResult };
+export type DeviceGatewayCommandResult = { "type": "get_snapshot", "payload": DeviceGatewaySnapshot } | { "type": "set_access_enabled", "payload": DeviceGatewayMutationResult } | { "type": "open_pairing_window", "payload": DeviceGatewayMutationResult } | { "type": "close_pairing_window", "payload": DeviceGatewayMutationResult } | { "type": "confirm_pairing", "payload": DeviceGatewayMutationResult } | { "type": "reject_pairing", "payload": DeviceGatewayMutationResult } | { "type": "rename_device", "payload": DeviceGatewayMutationResult } | { "type": "revoke_device", "payload": DeviceGatewayMutationResult };
 
 /**
  * Host Device Gateway 的可丢弃失效通知；完整状态始终重新读取 Gateway 快照。
@@ -761,6 +761,11 @@ export type DeviceId = string;
  * Desktop 可见的稳定设备登记生命周期，不表达在线状态。
  */
 export type DeviceLifecycleSnapshot = "paired" | "revoked";
+
+/**
+ * 配对确认方式；默认保持 6 位数字 SPAKE2 口令，同时支持桌面端一键确认免码配对。
+ */
+export type DevicePairingModeSnapshot = "spake2" | "direct_confirm";
 
 /**
  * 当前允许附近设备发起配对的限时窗口。
@@ -1480,10 +1485,10 @@ export type McpServerSnapshot = { server_key: McpServerKey, source: McpServerSou
 shadowed_by?: McpServerSource, display_name: string, description: string, transport: McpTransportKind, enabled: boolean, runtime_state: McpServerRuntimeState, tool_count: number, needs_refresh: boolean, target_summary: string, startup_timeout_ms: number | null, tool_timeout_ms: number | null, environment_keys: Array<string>, header_keys: Array<string>, };
 
 /**
- * 配置所有权来源；排序同时定义同名启用项的优先级：用户、插件标识升序、内置。
+ * 配置所有权来源；排序同时定义同名启用项的优先级：用户、插件标识升序、智能终端标识升序、内置。
  * 运行与权限仍沿用 server_key，来源仅决定采用哪份配置。
  */
-export type McpServerSource = { "type": "user" } | { "type": "plugin", "name": string } | { "type": "builtin" };
+export type McpServerSource = { "type": "user" } | { "type": "plugin", "name": string } | { "type": "device", "name": string } | { "type": "builtin" };
 
 /**
  * 管理目标的完整身份，避免修改另一个同名来源。
@@ -1716,7 +1721,7 @@ export type PcOutputHostingSnapshot = { device_id: DeviceId, device_name: string
  *
  * 候选及尝试次数只存在于当前 Host 进程，不是持久设备身份。
  */
-export type PendingDevicePairingSnapshot = { pairing_request_id: string, display_name: string, capabilities: DeviceCapabilitiesSnapshot, expires_at_ms: number, remaining_attempts: number, };
+export type PendingDevicePairingSnapshot = { pairing_request_id: string, display_name: string, capabilities: DeviceCapabilitiesSnapshot, expires_at_ms: number, remaining_attempts: number, mode: DevicePairingModeSnapshot, peer_address?: string, key_fingerprint?: string, client_version?: string, };
 
 export type PermissionCommandMatch = "exact" | "prefix";
 
@@ -2070,6 +2075,11 @@ restored: boolean, };
 export type RejectApprovalAndStopRunRequest = { session_id: SessionId, approval_id: ApprovalId, expected_queue_revision: number, };
 
 export type RejectApprovalAndStopRunResult = { run: RunSnapshot, approvals: ApprovalQueueSnapshot, };
+
+/**
+ * 用户在桌面端拒绝一次待确认的配对请求。
+ */
+export type RejectDevicePairingRequest = { pairing_request_id: string, };
 
 export type ReleaseMessageCardRequest = { owner: ConversationOwner, card_id: string, instance_id: string, };
 

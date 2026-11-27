@@ -153,10 +153,10 @@ pub use device_gateway::{
     CloseDevicePairingWindowRequest, ConfirmDevicePairingRequest, DeviceCapabilitiesSnapshot,
     DeviceConnectionSnapshot, DeviceGatewayCommand, DeviceGatewayCommandResult, DeviceGatewayEvent,
     DeviceGatewayMutationResult, DeviceGatewaySnapshot, DeviceLifecycleSnapshot,
-    DevicePairingWindowSnapshot, DeviceSpeechServicesSnapshot, DeviceSummarySnapshot,
-    GetDeviceGatewaySnapshotRequest, OpenDevicePairingWindowRequest, PendingDevicePairingSnapshot,
-    RenameDeviceRequest, RevokeDeviceRequest, SetDeviceAccessEnabledRequest,
-    SpeechServiceStatusSnapshot,
+    DevicePairingModeSnapshot, DevicePairingWindowSnapshot, DeviceSpeechServicesSnapshot,
+    DeviceSummarySnapshot, GetDeviceGatewaySnapshotRequest, OpenDevicePairingWindowRequest,
+    PendingDevicePairingSnapshot, RejectDevicePairingRequest, RenameDeviceRequest,
+    RevokeDeviceRequest, SetDeviceAccessEnabledRequest, SpeechServiceStatusSnapshot,
 };
 pub use error::{ModelFailureKind, RuntimeErrorCode, RuntimeErrorInfo};
 pub use event::{

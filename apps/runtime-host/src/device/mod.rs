@@ -5,6 +5,7 @@ mod crypto;
 mod dispatcher;
 mod gateway;
 mod identity;
+mod mcp;
 mod protocol;
 
 pub(crate) use dispatcher::DeviceChannelOutputDispatcher;

@@ -36,6 +36,7 @@ export class DeviceGatewayStore {
       openPairingWindow: action,
       closePairingWindow: action,
       confirmPairing: action,
+      rejectPairing: action,
       renameDevice: action,
       revokeDevice: action,
       setOutputHosting: action,
@@ -115,10 +116,10 @@ export class DeviceGatewayStore {
 
   async confirmPairing(
     pairing_request_id: string,
-    pairing_code: string,
+    pairing_code: string | null,
     display_name: string | null,
   ): Promise<boolean> {
-    if (!/^\d{6}$/.test(pairing_code)) {
+    if (pairing_code !== null && !/^\d{6}$/.test(pairing_code)) {
       this.error_message = "请输入终端显示或播报的 6 位配对码。";
       this.notice_message = null;
       return false;
@@ -129,11 +130,24 @@ export class DeviceGatewayStore {
         type: "confirm_pairing",
         payload: {
           pairing_request_id,
-          pairing_code,
+          pairing_code: pairing_code ?? null,
           display_name: display_name?.trim() || null,
         },
       },
-      "配对码已提交，正在等待终端完成确认。",
+      pairing_code === null
+        ? "已发送配对确认，正在等待终端完成绑定。"
+        : "配对码已提交，正在等待终端完成确认。",
+    );
+  }
+
+  async rejectPairing(pairing_request_id: string): Promise<boolean> {
+    return this.#runGatewayAction(
+      `pairing:${pairing_request_id}`,
+      {
+        type: "reject_pairing",
+        payload: { pairing_request_id },
+      },
+      "已拒绝该终端的配对请求。",
     );
   }
 

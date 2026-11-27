@@ -15,15 +15,16 @@ use std::{
 };
 
 use agent_types::ToolImageReference;
-use assistant_protocol::{McpServerKey, McpTransportKind};
+use assistant_protocol::{DeviceId, McpServerKey, McpTransportKind};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) use config::{McpConfigStore, McpRegistryCandidate};
 pub(crate) use discovery::{
-    DiscoverMcpTools, McpDiscoveryAuthorizationFacts, McpRunDisclosure, needs_initial_disclosure,
-    refresh_directory,
+    DiscoverMcpTools, McpDiscoveryAuthorizationFacts, McpRunDisclosure, refresh_directory,
+    resolve_directory_disclosure,
 };
 pub use managed::ManagedMcpServerDefinition;
 #[cfg(test)]
@@ -449,6 +450,9 @@ pub(crate) struct McpService {
     pub(crate) management_available: bool,
     /// Host 在启动时注入的只读定义；不保存用户配置或活动连接。
     pub(crate) builtin_definitions: Arc<[ManagedMcpServerDefinition]>,
+    /// 已配对智能终端在当前进程内动态声明的 MCP 定义；随终端上线/下线/吊销更新。
+    pub(crate) device_definitions:
+        Arc<std::sync::RwLock<BTreeMap<DeviceId, Vec<ManagedMcpServerDefinition>>>>,
     pub(crate) test_gate: Mutex<()>,
     pub(crate) tests: std::sync::Mutex<
         std::collections::BTreeMap<
@@ -469,6 +473,7 @@ impl McpService {
             image_materializer: Arc::new(UnavailableMcpImageMaterializer),
             management_available: false,
             builtin_definitions: Arc::from([]),
+            device_definitions: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
             test_gate: Mutex::new(()),
             tests: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         }
@@ -490,6 +495,7 @@ impl McpService {
             image_materializer,
             management_available: true,
             builtin_definitions: Arc::from([]),
+            device_definitions: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
             test_gate: Mutex::new(()),
             tests: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         }
@@ -508,6 +514,63 @@ impl McpService {
     pub(crate) fn management_available(&self) -> bool {
         self.management_available
     }
+}
+
+pub(crate) fn device_definitions_snapshot(
+    definitions: &std::sync::RwLock<BTreeMap<DeviceId, Vec<ManagedMcpServerDefinition>>>,
+) -> RuntimeResult<Vec<ManagedMcpServerDefinition>> {
+    let guard = definitions
+        .read()
+        .map_err(|_| RuntimeError::InternalStateUnavailable {
+            component: "device MCP definitions",
+        })?;
+    Ok(guard.values().flatten().cloned().collect())
+}
+
+fn device_mcp_short_hash(device_id: &DeviceId) -> String {
+    let digest = Sha256::digest(device_id.as_str().as_bytes());
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}",
+        digest[0], digest[1], digest[2], digest[3]
+    )
+}
+
+/// 为已配对智能终端生成稳定且满足 `McpServerKey` 字符集约束的服务标识。
+/// 无论终端 IP 或显示名如何变化，同一设备 + 声明 ID 始终映射到同一个 `server_key`，
+/// 以保证助理会话里的 MCP 权限规则在重连或 IP 变化后依然有效。
+pub fn device_mcp_server_key(
+    device_id: &DeviceId,
+    qualifier: Option<&str>,
+) -> Option<McpServerKey> {
+    let short_hash = device_mcp_short_hash(device_id);
+    let slug = qualifier.map(|raw| {
+        let mut out = String::new();
+        let mut last_dash = false;
+        for ch in raw.trim().bytes() {
+            let lower = ch.to_ascii_lowercase();
+            if lower.is_ascii_lowercase() || lower.is_ascii_digit() {
+                out.push(lower as char);
+                last_dash = false;
+            } else if !out.is_empty() && !last_dash {
+                out.push('-');
+                last_dash = true;
+            }
+            if out.len() >= 24 {
+                break;
+            }
+        }
+        out.trim_matches('-').to_owned()
+    });
+    let key = match slug.as_deref() {
+        Some(slug) if !slug.is_empty() => format!("device-{slug}-{short_hash}"),
+        _ => format!("device-{short_hash}"),
+    };
+    McpServerKey::new(key).ok()
+}
+
+pub(crate) fn device_key_belongs_to_device(key: &str, device_id: &DeviceId) -> bool {
+    let suffix = format!("-{}", device_mcp_short_hash(device_id));
+    key == format!("device{suffix}") || (key.starts_with("device-") && key.ends_with(&suffix))
 }
 
 pub(crate) fn effective_connect_timeout(

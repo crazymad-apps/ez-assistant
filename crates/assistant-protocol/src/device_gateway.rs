@@ -29,6 +29,16 @@ pub enum DeviceLifecycleSnapshot {
     Revoked,
 }
 
+/// 配对确认方式；默认保持 6 位数字 SPAKE2 口令，同时支持桌面端一键确认免码配对。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum DevicePairingModeSnapshot {
+    #[default]
+    Spake2,
+    DirectConfirm,
+}
+
 /// 一台已配对设备当前在线连接的易失投影。
 ///
 /// 设备离线时整个字段从设备摘要中消失，不把离线写回持久设备记录。
@@ -38,6 +48,14 @@ pub struct DeviceConnectionSnapshot {
     pub connected_at_ms: i64,
     pub capabilities: DeviceCapabilitiesSnapshot,
     pub output_preference: OutputPreferenceSnapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub peer_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub client_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_server_keys: Vec<crate::McpServerKey>,
 }
 
 /// Desktop 管理页使用的设备摘要，由 Runtime 登记事实和 Host 在线状态组合而成。
@@ -66,6 +84,17 @@ pub struct PendingDevicePairingSnapshot {
     pub capabilities: DeviceCapabilitiesSnapshot,
     pub expires_at_ms: i64,
     pub remaining_attempts: u8,
+    #[serde(default)]
+    pub mode: DevicePairingModeSnapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub peer_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub key_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub client_version: Option<String>,
 }
 
 /// 当前允许附近设备发起配对的限时窗口。
@@ -146,14 +175,22 @@ pub struct OpenDevicePairingWindowRequest {}
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct CloseDevicePairingWindowRequest {}
 
-/// 用户用候选设备展示的配对码确认一次配对请求。
+/// 用户在桌面端确认一次配对请求（SPAKE2 携带 6 位配对码；免码直连不传配对码）。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export_to = "assistant-protocol.ts")]
 pub struct ConfirmDevicePairingRequest {
     pub pairing_request_id: String,
-    #[ts(type = "string")]
-    pub pairing_code: SecretValue,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "string | null")]
+    pub pairing_code: Option<SecretValue>,
     pub display_name: Option<String>,
+}
+
+/// 用户在桌面端拒绝一次待确认的配对请求。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[ts(export_to = "assistant-protocol.ts")]
+pub struct RejectDevicePairingRequest {
+    pub pairing_request_id: String,
 }
 
 /// 修改已配对设备显示名称的请求。
@@ -183,6 +220,7 @@ pub enum DeviceGatewayCommand {
     OpenPairingWindow(OpenDevicePairingWindowRequest),
     ClosePairingWindow(CloseDevicePairingWindowRequest),
     ConfirmPairing(ConfirmDevicePairingRequest),
+    RejectPairing(RejectDevicePairingRequest),
     RenameDevice(RenameDeviceRequest),
     RevokeDevice(RevokeDeviceRequest),
 }
@@ -204,6 +242,7 @@ pub enum DeviceGatewayCommandResult {
     OpenPairingWindow(DeviceGatewayMutationResult),
     ClosePairingWindow(DeviceGatewayMutationResult),
     ConfirmPairing(DeviceGatewayMutationResult),
+    RejectPairing(DeviceGatewayMutationResult),
     RenameDevice(DeviceGatewayMutationResult),
     RevokeDevice(DeviceGatewayMutationResult),
 }
@@ -216,7 +255,7 @@ mod tests {
     fn device_gateway_command_round_trips_with_stable_tagging() {
         let command = DeviceGatewayCommand::ConfirmPairing(ConfirmDevicePairingRequest {
             pairing_request_id: "pairing-1".to_owned(),
-            pairing_code: SecretValue::new("123456".to_owned()),
+            pairing_code: Some(SecretValue::new("123456".to_owned())),
             display_name: Some("客厅终端".to_owned()),
         });
         let value = serde_json::to_value(&command).expect("serialize command");
@@ -224,13 +263,36 @@ mod tests {
         let decoded: DeviceGatewayCommand =
             serde_json::from_value(value).expect("deserialize command");
         assert_eq!(decoded, command);
+
+        let direct = DeviceGatewayCommand::ConfirmPairing(ConfirmDevicePairingRequest {
+            pairing_request_id: "pairing-2".to_owned(),
+            pairing_code: None,
+            display_name: None,
+        });
+        let direct_value = serde_json::to_value(&direct).expect("serialize direct confirm");
+        assert_eq!(
+            serde_json::from_value::<DeviceGatewayCommand>(direct_value)
+                .expect("deserialize direct confirm"),
+            direct
+        );
+
+        let reject = DeviceGatewayCommand::RejectPairing(RejectDevicePairingRequest {
+            pairing_request_id: "pairing-3".to_owned(),
+        });
+        let reject_value = serde_json::to_value(&reject).expect("serialize reject");
+        assert_eq!(reject_value["type"], "reject_pairing");
+        assert_eq!(
+            serde_json::from_value::<DeviceGatewayCommand>(reject_value)
+                .expect("deserialize reject"),
+            reject
+        );
     }
 
     #[test]
     fn pairing_code_is_redacted_from_debug_output() {
         let command = DeviceGatewayCommand::ConfirmPairing(ConfirmDevicePairingRequest {
             pairing_request_id: "pairing-1".to_owned(),
-            pairing_code: SecretValue::new("123456".to_owned()),
+            pairing_code: Some(SecretValue::new("123456".to_owned())),
             display_name: None,
         });
         let debug = format!("{command:?}");
