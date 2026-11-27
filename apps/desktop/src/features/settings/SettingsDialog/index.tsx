@@ -2,6 +2,13 @@ import { observer } from "mobx-react-lite";
 import { useEffect, useRef, useState } from "react";
 import { Dialog } from "../../../components/Dialog";
 import { Icon, type IconName } from "../../../components/Icon";
+import {
+  gsap,
+  MOTION_DURATION,
+  MOTION_EASE,
+  runMotion,
+  useGSAP,
+} from "../../../components/Motion";
 import { PresenceBoundary } from "../../../components/Presence";
 import { SessionActionDialog } from "../../sessions/SessionActionDialog";
 import { useRootStore } from "../../../stores/RootStoreContext";
@@ -17,6 +24,7 @@ import { AgentSettingsPage } from "./AgentSettingsPage";
 import { PluginSettingsPage } from "./PluginSettingsPage";
 import { NotificationSettingsPage } from "./NotificationSettingsPage";
 import { AppearanceSettingsPage } from "./AppearanceSettingsPage";
+import { AboutSettingsPage } from "./AboutSettingsPage";
 import styles from "./index.module.scss";
 
 const pages: ReadonlyArray<{ id: SettingsPage; label: string; icon: IconName }> = [
@@ -31,6 +39,7 @@ const pages: ReadonlyArray<{ id: SettingsPage; label: string; icon: IconName }> 
   { id: "mcp", label: "MCP", icon: "puzzle" },
   { id: "plugins", label: "插件", icon: "plugin" },
   { id: "agents", label: "智能体", icon: "bot" },
+  { id: "about", label: "关于", icon: "info" },
 ];
 
 const runtime_pages: readonly SettingsPage[] = ["runtime", "runtime_connection", "host_access", "runtime_diagnostics", "runtime_local", "host_registration"];
@@ -39,6 +48,8 @@ export const SettingsDialog = observer(function SettingsDialog() {
   const store = useRootStore();
   const settings = store.settings;
   const close_button_ref = useRef<HTMLButtonElement>(null);
+  const content_ref = useRef<HTMLDivElement>(null);
+  const previous_page_ref = useRef<SettingsPage | null>(null);
   const [form_pending, setFormPending] = useState(false);
   const [form_dirty, setFormDirty] = useState(false);
   const [pending_navigation, setPendingNavigation] = useState<Readonly<
@@ -50,6 +61,35 @@ export const SettingsDialog = observer(function SettingsDialog() {
       void store.memory_settings.load();
     }
   }, [settings.is_open, settings.page, store.memory_settings]);
+
+  useGSAP(
+    () => {
+      if (!settings.is_open) {
+        previous_page_ref.current = null;
+        return;
+      }
+      const previous = previous_page_ref.current;
+      previous_page_ref.current = settings.page;
+      // 首次打开弹窗由 Dialog 自身呈现入场，仅在弹窗保持打开并切换页面时补间右侧内容。
+      if (previous === null || previous === settings.page) return;
+      return runMotion((reduced) => {
+        if (reduced || !content_ref.current) return;
+        gsap.fromTo(
+          content_ref.current,
+          { opacity: 0, y: 4 },
+          {
+            clearProps: "transform,opacity",
+            duration: MOTION_DURATION.fast,
+            ease: MOTION_EASE.enter,
+            opacity: 1,
+            overwrite: "auto",
+            y: 0,
+          },
+        );
+      }, content_ref);
+    },
+    { dependencies: [settings.is_open, settings.page], scope: content_ref },
+  );
 
   function requestClose() {
     if (form_pending) return;
@@ -112,7 +152,7 @@ export const SettingsDialog = observer(function SettingsDialog() {
               </button>
             ))}
           </nav>
-          <div className={styles.content}>
+          <div className={styles.content} ref={content_ref}>
             {settings.page === "appearance" && <AppearanceSettingsPage />}
             {runtime_pages.includes(settings.page) && <RuntimeSettingsPage onNavigate={selectPage} onDirtyChange={setFormDirty} onPendingChange={setFormPending} />}
             {settings.page === "notifications" && <NotificationSettingsPage />}
@@ -130,6 +170,7 @@ export const SettingsDialog = observer(function SettingsDialog() {
             {settings.page === "mcp" && <McpSettingsPage onDirtyChange={setFormDirty} />}
             {settings.page === "plugins" && <PluginSettingsPage onDirtyChange={setFormDirty} />}
             {settings.page === "agents" && <AgentSettingsPage onDirtyChange={setFormDirty} />}
+            {settings.page === "about" && <AboutSettingsPage onNavigate={selectPage} />}
           </div>
         </div>
     </Dialog>

@@ -33,6 +33,7 @@ export type IconName =
   | "fork"
   | "globe"
   | "image"
+  | "info"
   | "logout"
   | "menu"
   | "message"
@@ -54,6 +55,7 @@ export type IconName =
   | "sidebar-left"
   | "sidebar-right"
   | "shield"
+  | "sparkles"
   | "stop"
   | "sun"
   | "terminal"
@@ -113,6 +115,7 @@ const paths: Record<IconName, ReactNode> = {
   fork: <><circle cx="6" cy="5" r="2" /><circle cx="18" cy="5" r="2" /><circle cx="12" cy="19" r="2" /><path d="M6 7v2c0 3 2 4 6 4s6-1 6-4V7M12 13v4" /></>,
   globe: <><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" /></>,
   image: <><rect x="3" y="4" width="18" height="16" rx="2" /><circle cx="8.5" cy="9" r="1.5" /><path d="m4 17 5-5 3 3 2-2 6 6" /></>,
+  info: <><circle cx="12" cy="12" r="9" /><path d="M12 16v-4.5" /><circle cx="12" cy="8.25" r="0.6" fill="currentColor" stroke="none" /></>,
   logout: <><path d="M10 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h4M14 7l5 5-5 5M19 12H9" /></>,
   menu: <><path d="M4 7h16M4 12h16M4 17h16" /></>,
   message: <><path d="M21 15a3 3 0 0 1-3 3H8l-5 4V6a3 3 0 0 1 3-3h12a3 3 0 0 1 3 3Z" /><path d="M7 8h10M7 12h7" /></>,
@@ -155,6 +158,7 @@ const paths: Record<IconName, ReactNode> = {
   "sidebar-left": <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16" /></>,
   "sidebar-right": <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M15 4v16" /></>,
   shield: <path d="M12 3 5 6v5c0 4.6 2.8 8 7 10 4.2-2 7-5.4 7-10V6z" />,
+  sparkles: <><path d="M12 3l1.7 4.8L18.5 9.5l-4.8 1.7L12 16l-1.7-4.8L5.5 9.5l4.8-1.7L12 3Z" /><path d="M19 15l.7 1.8L21.5 17.5l-1.8.7L19 20l-.7-1.8-1.8-.7 1.8-.7L19 15Z" /><path d="M5.5 16l.5 1.3 1.3.5-1.3.5-.5 1.3-.5-1.3-1.3-.5 1.3-.5.5-1.3Z" /></>,
   stop: <rect x="7" y="7" width="10" height="10" rx="1.5" fill="currentColor" stroke="none" />,
   sun: <><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" /></>,
   terminal: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="m7 9 3 3-3 3M13 15h4" /></>,

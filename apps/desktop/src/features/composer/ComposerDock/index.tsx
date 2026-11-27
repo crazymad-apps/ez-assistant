@@ -14,6 +14,14 @@ import type {
 } from '@ez-assistant/protocol';
 import { Button } from '../../../components/Button';
 import { Icon } from '../../../components/Icon';
+import {
+  gsap,
+  MOTION_DURATION,
+  MOTION_EASE,
+  prefersReducedMotion,
+  runMotion,
+  useGSAP,
+} from '../../../components/Motion';
 import { PresenceBoundary } from '../../../components/Presence';
 import { useInputMethodGuard } from '../../../components/InputMethodGuard';
 import { Tooltip } from '../../../components/Tooltip';
@@ -1055,7 +1063,41 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
   const [slash_active_index, setSlashActiveIndex] = useState(0);
   const textarea_ref = useRef<HTMLTextAreaElement>(null);
   const slash_ref = useRef<HTMLDivElement>(null);
+  const intro_ref = useRef<HTMLDivElement>(null);
   const input_method = useInputMethodGuard();
+
+  useGSAP(
+    () => runMotion((reduced) => {
+      const intro = intro_ref.current;
+      if (reduced || !intro) return;
+      const timeline = gsap.timeline({ defaults: { ease: MOTION_EASE.enter } });
+      const headings = intro.querySelectorAll('h1, p');
+      const quick_buttons = intro.querySelectorAll('button');
+      if (headings.length > 0) {
+        timeline.from(headings, {
+          clearProps: 'transform,opacity',
+          duration: 0.22,
+          opacity: 0,
+          stagger: 0.04,
+          y: 8,
+        });
+      }
+      if (quick_buttons.length > 0) {
+        timeline.from(
+          quick_buttons,
+          {
+            clearProps: 'transform,opacity',
+            duration: 0.18,
+            opacity: 0,
+            stagger: 0.035,
+            y: 6,
+          },
+          headings.length > 0 ? '<0.06' : 0,
+        );
+      }
+    }, intro_ref),
+    { scope: intro_ref },
+  );
   const attachment_flow = useComposerAttachments({
     attachments: draft?.attachments ?? [],
     disabled: store.composer_pending || draft?.materialization_attempt !== null,
@@ -1424,7 +1466,7 @@ const NewSessionDraftComposer = observer(function NewSessionDraftComposer({
             }} variant="primary">确认应用</Button>
           </footer>
         </Dialog>
-        <div className={styles.draft_intro}>
+        <div className={styles.draft_intro} ref={intro_ref}>
           <h1>今天想完成什么？</h1>
           <p>选择项目，或直接描述你想完成的任务。</p>
           <div className={styles.draft_quick_actions} aria-label="新会话快捷入口">
@@ -1747,6 +1789,8 @@ function ContextUsageRing({
 }: Readonly<{
   context: SessionViewSnapshot['usage']['context'];
 }>) {
+  const ring_ref = useRef<HTMLSpanElement>(null);
+  const initialized_ref = useRef(false);
   let degrees = 0;
   let label = '上下文占用未知';
   if (context && context.used_tokens !== null && context.usage_basis_points !== null) {
@@ -1755,13 +1799,34 @@ function ContextUsageRing({
     label = `${prefix}${formatCompact(context.used_tokens)} / ${formatCompact(context.window_tokens)} · ${(context.usage_basis_points / 100).toFixed(1)}%`;
   }
   if (context?.calibration_pending) label += " · 待校准";
+
+  useGSAP(
+    () => {
+      const ring = ring_ref.current;
+      if (!ring) return;
+      const target_degrees = `${degrees}deg`;
+      if (!initialized_ref.current || prefersReducedMotion()) {
+        initialized_ref.current = true;
+        gsap.set(ring, { '--context-degrees': target_degrees });
+        return;
+      }
+      gsap.to(ring, {
+        '--context-degrees': target_degrees,
+        duration: MOTION_DURATION.ring,
+        ease: MOTION_EASE.enter,
+        overwrite: 'auto',
+      });
+    },
+    { dependencies: [degrees], scope: ring_ref },
+  );
+
   return (
     <Tooltip content={label}>
       <span
         aria-label={`上下文用量：${label}`}
         className={styles.context_ring}
+        ref={ring_ref}
         role="img"
-        style={{ '--context-degrees': `${degrees}deg` } as React.CSSProperties}
         tabIndex={0}
       />
     </Tooltip>

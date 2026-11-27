@@ -14,6 +14,13 @@ import type {
   UserMessageSnapshot,
 } from "@ez-assistant/protocol";
 import { Icon } from "../../../components/Icon";
+import {
+  gsap,
+  MOTION_DURATION,
+  MOTION_EASE,
+  prefersReducedMotion,
+  useGSAP,
+} from "../../../components/Motion";
 import { Tooltip } from "../../../components/Tooltip";
 import { Collapse } from "../../../components/Collapse";
 import { PresenceBoundary, usePresence } from "../../../components/Presence";
@@ -697,18 +704,7 @@ export const ConversationView = observer(function ConversationView({ navigation_
           </button>
         </div>
       )}
-      {show_scroll_bottom && (
-        <Tooltip content="返回最新">
-        <button
-          aria-label="返回最新"
-          className={styles.scroll_bottom}
-          onClick={scrollToBottom}
-          type="button"
-        >
-          <Icon name="arrow-down" size={16} />
-        </button>
-        </Tooltip>
-      )}
+      <ScrollToBottomButton on_click={scrollToBottom} visible={show_scroll_bottom} />
       {attachment_menu && (
         <ResourceContextMenu
           items={[
@@ -854,5 +850,78 @@ function centeredRangeScrollTop(container: HTMLElement, range: Range): number | 
   return Math.min(
     Math.max(0, container.scrollHeight - container.clientHeight),
     Math.max(0, unclamped),
+  );
+}
+
+/** 仅控制「返回最新」悬浮按钮的轻量进退场，不拦截业务滚动锚点逻辑。 */
+function ScrollToBottomButton(props: Readonly<{
+  on_click: () => void;
+  visible: boolean;
+}>) {
+  const button_ref = useRef<HTMLButtonElement>(null);
+  const [mounted, setMounted] = useState(props.visible);
+
+  useLayoutEffect(() => {
+    if (props.visible) {
+      setMounted(true);
+    } else if (prefersReducedMotion()) {
+      setMounted(false);
+    }
+  }, [props.visible]);
+
+  useGSAP(
+    () => {
+      const button = button_ref.current;
+      if (!mounted || !button) return;
+      if (prefersReducedMotion()) {
+        if (!props.visible) setMounted(false);
+        return;
+      }
+      if (props.visible) {
+        gsap.fromTo(
+          button,
+          { opacity: 0, scale: 0.92, y: 8 },
+          {
+            clearProps: "transform,opacity",
+            duration: 0.16,
+            ease: MOTION_EASE.enter,
+            opacity: 1,
+            overwrite: "auto",
+            scale: 1,
+            y: 0,
+          },
+        );
+      } else {
+        gsap.to(button, {
+          autoAlpha: 0,
+          duration: MOTION_DURATION.fast,
+          ease: MOTION_EASE.exit,
+          onComplete: () => setMounted(false),
+          overwrite: "auto",
+          scale: 0.94,
+          y: 6,
+        });
+      }
+    },
+    { dependencies: [mounted, props.visible], scope: button_ref },
+  );
+
+  if (!mounted) return null;
+  const exiting = !props.visible;
+  return (
+    <Tooltip content="返回最新">
+      <button
+        aria-hidden={exiting || undefined}
+        aria-label="返回最新"
+        className={styles.scroll_bottom}
+        disabled={exiting}
+        onClick={props.on_click}
+        ref={button_ref}
+        tabIndex={exiting ? -1 : undefined}
+        type="button"
+      >
+        <Icon name="arrow-down" size={16} />
+      </button>
+    </Tooltip>
   );
 }

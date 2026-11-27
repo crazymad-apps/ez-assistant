@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import { observer } from "mobx-react-lite";
 import type {
   ApprovalDecision,
@@ -7,6 +8,7 @@ import type {
   ToolInputSnapshot,
 } from "@ez-assistant/protocol";
 import { Icon } from "../../../components/Icon";
+import { gsap, MOTION_EASE, runMotion, useGSAP } from "../../../components/Motion";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import styles from "./index.module.scss";
 
@@ -20,11 +22,32 @@ export const ApprovalWorkspace = observer(function ApprovalWorkspace(props: Read
   remaining: number;
 }>) {
   const store = useRootStore();
+  const workspace_ref = useRef<HTMLElement>(null);
   const allow_options = props.approval.available_decisions.filter(isAllowDecision);
   const pending = store.pending_approval_id === props.approval.approval_id;
   const subject = props.approval.subject;
+
+  useGSAP(
+    () => runMotion((reduced) => {
+      if (reduced || !workspace_ref.current) return;
+      gsap.fromTo(
+        workspace_ref.current,
+        { opacity: 0, y: 6 },
+        {
+          clearProps: "transform,opacity",
+          duration: 0.18,
+          ease: MOTION_EASE.enter,
+          opacity: 1,
+          overwrite: "auto",
+          y: 0,
+        },
+      );
+    }, workspace_ref),
+    { dependencies: [props.approval.approval_id], scope: workspace_ref },
+  );
+
   return (
-    <section className={styles.approval_workspace}>
+    <section className={styles.approval_workspace} ref={workspace_ref}>
       <header>
         <span><Icon name="shield" size={17} /></span>
         <div>
