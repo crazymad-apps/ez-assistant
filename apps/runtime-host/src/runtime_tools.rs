@@ -27,9 +27,16 @@ fn directory_for(executable: &Path) -> Option<PathBuf> {
     // Tauri Linux 的 deb/rpm/AppImage 都使用 usr/bin + usr/lib/<package> 布局。
     #[cfg(target_os = "linux")]
     if parent.file_name() == Some(OsStr::new("bin")) {
-        let resources = parent.parent()?.join("lib/ez-assistant-desktop").join(BIN);
-        if resources.is_dir() {
-            return Some(resources);
+        let prefix = parent.parent()?;
+        for package_dir in [
+            "lib/EZ Assistant",
+            "lib/ez-assistant-desktop",
+            "lib/ez-assistant",
+        ] {
+            let resources = prefix.join(package_dir).join(BIN);
+            if resources.is_dir() {
+                return Some(resources);
+            }
         }
     }
     None

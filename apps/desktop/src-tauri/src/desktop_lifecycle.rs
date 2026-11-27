@@ -198,7 +198,7 @@ impl DesktopLifecycleCoordinator {
         )?;
         let application_menu = Menu::default(app_handle)?;
         application_menu.append(&runtime_menu)?;
-        if !cfg!(windows) {
+        if cfg!(target_os = "macos") {
             app_handle.set_menu(application_menu)?;
         }
 

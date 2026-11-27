@@ -55,8 +55,8 @@ pub fn run() {
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags({
                     let flags = tauri_plugin_window_state::StateFlags::all();
-                    // Windows 的自绘标题栏由配置决定，旧窗口状态不得恢复原生边框。
-                    if cfg!(windows) {
+                    // Windows 与 Linux 的自绘标题栏由配置决定，旧窗口状态不得恢复原生边框。
+                    if cfg!(any(windows, target_os = "linux")) {
                         flags.difference(tauri_plugin_window_state::StateFlags::DECORATIONS)
                     } else {
                         flags
