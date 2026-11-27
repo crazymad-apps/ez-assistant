@@ -8,8 +8,10 @@ import {
   pickNumber,
   pickString,
   roleLabel,
+  type CapturedVoiceprintSample,
   type SpeakerGroupEntry,
 } from "./api";
+import { WakeSettingsCard } from "./WakeSettingsCard";
 import {
   BrowserWavRecorder,
   synthesizeTestToneSample,
@@ -19,8 +21,16 @@ import styles from "./index.module.scss";
 
 type VoiceprintTabProps = Readonly<{
   device_id: string;
+  device_name?: string;
   api_prefix: string;
+  mode?: "proxy" | "native";
 }>;
+
+const GUIDED_SENTENCES: ReadonlyArray<string> = [
+  "你好小元，今天天气怎么样？",
+  "帮我看一下现在的温度和电量。",
+  "明天早上八点提醒我开会。",
+];
 
 const ROLE_OPTIONS: ReadonlyArray<SelectionOption<string>> = [
   { value: "1", label: "Owner (1)" },
@@ -58,10 +68,15 @@ export const VoiceprintTab = observer(function VoiceprintTab(props: VoiceprintTa
   const recorderRef = useRef<BrowserWavRecorder | null>(null);
   const [recording, setRecording] = useState(false);
   const [sample, setSample] = useState<RecordedAudioSample | null>(null);
+  const [deviceSamples, setDeviceSamples] = useState<CapturedVoiceprintSample[]>([]);
+  const [capturingDevice, setCapturingDevice] = useState(false);
+  const [wakeRefreshToken, setWakeRefreshToken] = useState(0);
+  const [notice, setNotice] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState(false);
   const [voiceResult, setVoiceResult] = useState<string | null>(null);
   const [confidence, setConfidence] = useState<number | null>(null);
   const [matchedSpeaker, setMatchedSpeaker] = useState("");
+  const isNative = props.mode === "native";
 
   useEffect(() => {
     return () => {
@@ -125,15 +140,64 @@ export const VoiceprintTab = observer(function VoiceprintTab(props: VoiceprintTa
 
   async function deleteSpeaker(id: string) {
     setError(null);
+    setNotice(null);
     try {
-      await gateway.consoleJson(
+      const res = await gateway.consoleJson<Record<string, unknown>>(
         props.device_id,
         normalizeConsolePath(props.api_prefix, `speakers/${encodeURIComponent(id)}`),
         { method: "DELETE" },
       );
+      if (res.auto_fallback_wake_word === true) {
+        setNotice("已删除最后一位声纹成员，终端已自动切回「唤醒词模式」以防无法唤醒。");
+      }
+      setWakeRefreshToken((n) => n + 1);
       await refreshSpeakers();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "删除说话人失败。");
+    }
+  }
+
+  async function captureFromDevice() {
+    if (deviceSamples.length >= 3) {
+      setError("已采集满 3 句样本，可直接点击「声纹注册 (Enroll)」或先清空重录。");
+      return;
+    }
+    const step = deviceSamples.length + 1;
+    setCapturingDevice(true);
+    setError(null);
+    setNotice(`请靠近 ${props.device_name ?? "Mosaico"} 清晰说出第 ${step}/3 句：「${GUIDED_SENTENCES[step - 1]}」…`);
+    try {
+      const res = await gateway.consoleJson<Record<string, unknown>>(
+        props.device_id,
+        normalizeConsolePath(props.api_prefix, "voice/capture_embedding"),
+        {
+          method: "POST",
+          body: { duration_ms: 3000, step, total: 3 },
+        },
+      );
+      const embedding = Array.isArray(res.embedding)
+        ? res.embedding.filter((v): v is number => typeof v === "number" && Number.isFinite(v))
+        : [];
+      if (embedding.length !== 192) {
+        throw new Error("终端返回的声纹特征不完整，请重试。");
+      }
+      const next: CapturedVoiceprintSample = {
+        embedding,
+        voiced_ms: pickNumber(res, 0, "voiced_ms"),
+        snr_db: pickNumber(res, 0, "snr_db"),
+        rms: pickNumber(res, 0, "rms"),
+        duration_ms: pickNumber(res, 3000, "duration_ms"),
+        label: `第 ${step} 句`,
+      };
+      setDeviceSamples((prev) => [...prev, next]);
+      setNotice(
+        `第 ${step}/3 句采集完成（有效人声 ${(next.voiced_ms / 1000).toFixed(1)}s · SNR ${next.snr_db.toFixed(1)} dB）`,
+      );
+    } catch (err: unknown) {
+      setNotice(null);
+      setError(err instanceof Error ? err.message : "Mosaico 本机采集声纹失败。");
+    } finally {
+      setCapturingDevice(false);
     }
   }
 
@@ -161,8 +225,8 @@ export const VoiceprintTab = observer(function VoiceprintTab(props: VoiceprintTa
   }
 
   async function enrollVoiceprint() {
-    if (!sample) {
-      setError("请先录制人声或点击生成合成测试样本。");
+    if (deviceSamples.length === 0 && !sample) {
+      setError("请先用 Mosaico 录制声纹、电脑麦克风录音或生成合成测试样本。");
       return;
     }
     const cleanedId = speakerId.trim();
@@ -172,25 +236,35 @@ export const VoiceprintTab = observer(function VoiceprintTab(props: VoiceprintTa
     }
     setBusyAction(true);
     setError(null);
+    setNotice(null);
     try {
+      const body: Record<string, unknown> = {
+        speaker_id: cleanedId,
+        display_name: displayName.trim() || cleanedId,
+        uid: uid.trim(),
+        agent_id: agentId.trim(),
+        group_id: groupId.trim(),
+        role: Number(role),
+        tts_voice: ttsVoice.trim(),
+        prompt: prompt.trim(),
+      };
+      if (deviceSamples.length > 0) {
+        body.embeddings = deviceSamples.map((s) => s.embedding);
+      } else if (sample) {
+        body.audio_base64 = sample.base64;
+      }
       const res = await gateway.consoleJson<Record<string, unknown>>(
         props.device_id,
         normalizeConsolePath(props.api_prefix, "voice/enroll"),
         {
           method: "POST",
-          body: {
-            speaker_id: cleanedId,
-            display_name: displayName.trim() || cleanedId,
-            uid: uid.trim(),
-            agent_id: agentId.trim(),
-            group_id: groupId.trim(),
-            role: Number(role),
-            tts_voice: ttsVoice.trim(),
-            audio_base64: sample.base64,
-          },
+          body,
         },
       );
       setVoiceResult(JSON.stringify(res, null, 2));
+      setDeviceSamples([]);
+      setNotice("声纹已注册并同步至终端加密 NVS，现在可开启「声纹免唤醒」模式。");
+      setWakeRefreshToken((n) => n + 1);
       await refreshSpeakers();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "声纹注册失败。");
@@ -200,23 +274,28 @@ export const VoiceprintTab = observer(function VoiceprintTab(props: VoiceprintTa
   }
 
   async function identifyVoiceprint() {
-    if (!sample) {
-      setError("请先录制人声或点击生成合成测试样本。");
+    if (deviceSamples.length === 0 && !sample) {
+      setError("请先录制人声、用 Mosaico 采集或生成合成测试样本。");
       return;
     }
     setBusyAction(true);
     setError(null);
     try {
+      const body: Record<string, unknown> = {
+        uid: uid.trim(),
+        agent_id: agentId.trim(),
+      };
+      if (deviceSamples.length > 0) {
+        body.embedding = deviceSamples[deviceSamples.length - 1].embedding;
+      } else if (sample) {
+        body.audio_base64 = sample.base64;
+      }
       const res = await gateway.consoleJson<Record<string, unknown>>(
         props.device_id,
         normalizeConsolePath(props.api_prefix, "voice/identify"),
         {
           method: "POST",
-          body: {
-            uid: uid.trim(),
-            agent_id: agentId.trim(),
-            audio_base64: sample.base64,
-          },
+          body,
         },
       );
       setConfidence(pickNumber(res, 0, "confidence"));
@@ -258,15 +337,26 @@ export const VoiceprintTab = observer(function VoiceprintTab(props: VoiceprintTa
 
   const tier = confidence !== null ? classifyConfidence(confidence, matchedSpeaker) : null;
   const pct = confidence !== null ? Math.max(0, Math.min(100, Math.round(confidence * 100))) : 0;
+  const hasVoiceSample = deviceSamples.length > 0 || sample !== null;
 
   return (
     <div className={styles.section_grid}>
+      {isNative ? (
+        <WakeSettingsCard
+          api_prefix={props.api_prefix}
+          device_id={props.device_id}
+          device_name={props.device_name ?? "Mosaico"}
+          refresh_token={wakeRefreshToken}
+        />
+      ) : null}
+
       <section className={styles.panel}>
         <header className={styles.panel_header}>
           <h4>说话人配置与声纹采样</h4>
         </header>
         <form className={styles.panel_body} onSubmit={(event) => void saveSpeakerGroup(event)}>
           {error ? <p className={styles.error_banner} role="alert">{error}</p> : null}
+          {notice ? <p className={styles.success_banner} role="status">{notice}</p> : null}
           <div className={styles.form_grid}>
             <label className={styles.field}>
               <span>说话人 ID (Speaker ID)</span>
@@ -352,21 +442,70 @@ export const VoiceprintTab = observer(function VoiceprintTab(props: VoiceprintTa
             </label>
           </div>
 
+          {isNative ? (
+            <div className={styles.capture_box}>
+              <div className={styles.action_row}>
+                <strong>{props.device_name ?? "Mosaico"} 本机录制</strong>
+                <span className={styles.badge} data-tone={deviceSamples.length >= 3 ? "online" : "warn"}>
+                  {deviceSamples.length}/3 句
+                </span>
+              </div>
+              {deviceSamples.length < 3 ? (
+                <p className={styles.meta_line}>
+                  建议朗读：「{GUIDED_SENTENCES[deviceSamples.length]}」
+                </p>
+              ) : null}
+              <div className={styles.action_row}>
+                <button
+                  className={styles.primary_btn}
+                  disabled={capturingDevice || busyAction || recording || deviceSamples.length >= 3}
+                  onClick={() => void captureFromDevice()}
+                  type="button"
+                >
+                  {capturingDevice
+                    ? "Mosaico 正在收音…"
+                    : deviceSamples.length >= 3
+                      ? "已完成 3 句采集"
+                      : `用 Mosaico 录第 ${deviceSamples.length + 1} 句`}
+                </button>
+                {deviceSamples.length > 0 ? (
+                  <button
+                    className={styles.secondary_btn}
+                    disabled={capturingDevice || busyAction}
+                    onClick={() => setDeviceSamples([])}
+                    type="button"
+                  >
+                    清空终端采样
+                  </button>
+                ) : null}
+              </div>
+              {deviceSamples.length > 0 ? (
+                <div className={styles.capture_list}>
+                  {deviceSamples.map((item, idx) => (
+                    <span className={styles.cap_tag} key={`${item.label}-${idx}`}>
+                      {item.label} · 有效 {(item.voiced_ms / 1000).toFixed(1)}s · SNR {item.snr_db.toFixed(1)} dB
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
           <div className={styles.action_row}>
             <button className={styles.primary_btn} disabled={savingSpeaker} type="submit">
               {savingSpeaker ? "保存中…" : "保存说话人信息"}
             </button>
             <button
               className={styles.secondary_btn}
-              disabled={busyAction}
+              disabled={busyAction || capturingDevice}
               onClick={() => void toggleRecording()}
               type="button"
             >
-              {recording ? "停止录音 (16kHz WAV)" : "录制人声"}
+              {recording ? "停止录音 (16kHz WAV)" : "用电脑麦克风录制"}
             </button>
             <button
               className={styles.secondary_btn}
-              disabled={busyAction || recording}
+              disabled={busyAction || recording || capturingDevice}
               onClick={() => setSample(synthesizeTestToneSample(150))}
               type="button"
             >
@@ -374,7 +513,7 @@ export const VoiceprintTab = observer(function VoiceprintTab(props: VoiceprintTa
             </button>
             <button
               className={styles.secondary_btn}
-              disabled={busyAction || recording}
+              disabled={busyAction || recording || capturingDevice}
               onClick={() => setSample(synthesizeTestToneSample(420))}
               type="button"
             >
@@ -384,14 +523,14 @@ export const VoiceprintTab = observer(function VoiceprintTab(props: VoiceprintTa
 
           {sample ? (
             <div className={styles.meta_line}>
-              当前音频样本：{sample.label} · {sample.wav_bytes.byteLength} 字节
+              当前电脑音频样本：{sample.label} · {sample.wav_bytes.byteLength} 字节
             </div>
           ) : null}
 
           <div className={styles.action_row}>
             <button
               className={styles.primary_btn}
-              disabled={busyAction || !sample}
+              disabled={busyAction || capturingDevice || !hasVoiceSample}
               onClick={() => void enrollVoiceprint()}
               type="button"
             >
@@ -399,7 +538,7 @@ export const VoiceprintTab = observer(function VoiceprintTab(props: VoiceprintTa
             </button>
             <button
               className={styles.secondary_btn}
-              disabled={busyAction || !sample}
+              disabled={busyAction || capturingDevice || !hasVoiceSample}
               onClick={() => void identifyVoiceprint()}
               type="button"
             >
@@ -407,7 +546,7 @@ export const VoiceprintTab = observer(function VoiceprintTab(props: VoiceprintTa
             </button>
             <button
               className={styles.secondary_btn}
-              disabled={busyAction || !sample}
+              disabled={busyAction || capturingDevice || !sample}
               onClick={() => void transcribeSample()}
               type="button"
             >

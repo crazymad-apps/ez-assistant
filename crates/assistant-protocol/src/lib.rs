@@ -151,11 +151,12 @@ pub use custom_agent::{
 };
 pub use device_gateway::{
     AsrConfigurationSnapshot, CloseDevicePairingWindowRequest, ConfirmDevicePairingRequest,
-    DeviceCapabilitiesSnapshot, DeviceConnectionSnapshot, DeviceConsoleSnapshot,
-    DeviceGatewayCommand, DeviceGatewayCommandResult, DeviceGatewayEvent,
-    DeviceGatewayMutationResult, DeviceGatewaySnapshot, DeviceLifecycleSnapshot,
-    DevicePairingModeSnapshot, DevicePairingWindowSnapshot, DeviceSpeechServicesSnapshot,
-    DeviceSummarySnapshot, GetDeviceGatewaySnapshotRequest, GetSpeechConfigurationRequest,
+    ConnectDiscoveredDeviceRequest, DeviceCapabilitiesSnapshot, DeviceConnectionSnapshot,
+    DeviceConsoleModeSnapshot, DeviceConsoleSnapshot, DeviceGatewayCommand,
+    DeviceGatewayCommandResult, DeviceGatewayEvent, DeviceGatewayMutationResult,
+    DeviceGatewaySnapshot, DeviceLifecycleSnapshot, DevicePairingModeSnapshot,
+    DevicePairingWindowSnapshot, DeviceSpeechServicesSnapshot, DeviceSummarySnapshot,
+    DiscoveredDeviceSnapshot, GetDeviceGatewaySnapshotRequest, GetSpeechConfigurationRequest,
     OpenDevicePairingWindowRequest, PendingDevicePairingSnapshot, RejectDevicePairingRequest,
     RenameDeviceRequest, RevokeDeviceRequest, SetDeviceAccessEnabledRequest,
     SpeechConfigurationSnapshot, SpeechProviderKind, SpeechServiceStatusSnapshot,

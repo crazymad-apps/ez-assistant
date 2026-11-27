@@ -10,7 +10,7 @@ use std::{
 
 use assistant_protocol::{
     CancelRunRequest, DeviceCapabilitiesSnapshot, DeviceId, DevicePairingModeSnapshot,
-    OutputPreferenceSnapshot, SubmitInputMode, SubmitInputRequest,
+    OutputPreferenceSnapshot, SpeechServiceStatusSnapshot, SubmitInputMode, SubmitInputRequest,
 };
 use assistant_runtime::{
     DeviceInputSource, DeviceLifecycle, DevicePublicKey, InputChannelSource, InputModality,
@@ -26,7 +26,7 @@ use axum::{
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use tokio::{
-    sync::mpsc,
+    sync::{mpsc, oneshot},
     time::{Instant as TokioInstant, MissedTickBehavior, interval, timeout},
 };
 use tokio_util::sync::CancellationToken;
@@ -42,16 +42,17 @@ use super::{
         PairingDecision, PendingPairingRegistration, PlaybackPreparationResult,
     },
     protocol::{
-        ApplicationPing, AuthChallenge, DeviceHello, DownlinkPcmFrame, Envelope, HelloAck,
-        InputAccepted, InputSegmentAccepted, InteractionStateChanged, ListenCancel, ListenStart,
-        ListenStop, MessageReplayWindow, OutputPreferenceChanged, PCM_FRAME_KIND_RELAY_UPLINK,
-        PCM_FRAME_KIND_VOICE_UPLINK, PairingBind, PairingBindAck, PairingCommit, PairingComplete,
-        PairingConfirmation, PairingDirectChallenge, PairingDirectCommit, PairingHello,
-        PairingPake, PairingPending, PcmFormat, PlaybackCancel, PlaybackEnd, PlaybackStart,
-        ProtocolError, RELAY_DOWNLINK_CHUNK_BYTES, RelayDownlinkPcmFrame, RelayUplinkPcmFrame,
-        SetOutputPreference, SpeechAsrCancel, SpeechAsrResult, SpeechAsrStart, SpeechAsrStop,
-        SpeechStatusChanged, SpeechTtsEnd, SpeechTtsRequest, SpeechTtsStart, TextInput, Transcript,
-        UplinkPcmFrame, WireError, WirePairingMode, preference_is_supported,
+        ApplicationPing, AuthChallenge, DeviceCommandResult, DeviceHello, DownlinkPcmFrame,
+        Envelope, HelloAck, InputAccepted, InputSegmentAccepted, InteractionStateChanged,
+        ListenCancel, ListenStart, ListenStop, MessageReplayWindow, OutputPreferenceChanged,
+        PCM_FRAME_KIND_RELAY_UPLINK, PCM_FRAME_KIND_VOICE_UPLINK, PairingBind, PairingBindAck,
+        PairingCommit, PairingComplete, PairingConfirmation, PairingDirectChallenge,
+        PairingDirectCommit, PairingHello, PairingPake, PairingPending, PcmFormat, PlaybackCancel,
+        PlaybackEnd, PlaybackStart, ProtocolError, RELAY_DOWNLINK_CHUNK_BYTES,
+        RelayDownlinkPcmFrame, RelayUplinkPcmFrame, SetOutputPreference, SpeechAsrCancel,
+        SpeechAsrResult, SpeechAsrStart, SpeechAsrStop, SpeechStatusChanged, SpeechTtsEnd,
+        SpeechTtsRequest, SpeechTtsStart, TextInput, Transcript, UplinkPcmFrame, VoiceprintSyncAck,
+        WakeConfigAck, WireError, WirePairingMode, preference_is_supported,
     },
 };
 use crate::media_diagnostics::{correlation_id, timestamp_ms};
@@ -516,6 +517,7 @@ async fn finalize_paired_device(
     public_key: &[u8],
     decision_display_name: Option<String>,
 ) -> Result<(), ConnectionError> {
+    let fingerprint = public_key_fingerprint(public_key);
     let public_key =
         DevicePublicKey::from_slice(public_key).ok_or(ConnectionError::InvalidMessage)?;
     let display_name = decision_display_name.unwrap_or_else(|| hello.display_name.clone());
@@ -528,6 +530,8 @@ async fn finalize_paired_device(
             paired_at_ms: now_ms()?,
         })
         .await?;
+    shared.remove_discovered_by_fingerprint(&fingerprint).await;
+    shared.notify_changed();
     send_payload(
         socket,
         "pairing_complete",
@@ -588,6 +592,9 @@ async fn authenticate_device(
     }
     let console_target =
         super::console::build_device_console_target(Some(peer_ip), hello.console.as_ref());
+    let hardware = hello.hardware.clone();
+    let initial_device_vp = hardware.as_ref().map_or(0, |hw| hw.vp_version);
+    let hardware_enabled = hardware.is_some();
     let speech_relay = hello.speech_relay;
     send_payload(
         &mut socket,
@@ -597,17 +604,30 @@ async fn authenticate_device(
             connection_id: connection_id.clone(),
             capabilities,
             output_preference: hello.output_preference,
-            speech_services: speech_relay.then(|| shared.speech.status()),
+            speech_services: (speech_relay || hardware_enabled)
+                .then(|| shared.speech.status()),
         },
     )
     .await?;
 
-    let mcp_definitions = super::mcp::build_device_mcp_definitions(
+    let mut mcp_definitions = super::mcp::build_device_mcp_definitions(
         &device_id,
         &device.display_name,
         peer_ip,
         &hello.mcp_servers,
     );
+    if hardware_enabled
+        && console_target.is_none()
+        && let Some((mcp_port, mcp_token)) = shared.active_mcp_endpoint().await
+        && let Some(native_mcp) = super::mcp::build_native_device_mcp_definition(
+            &device_id,
+            &device.display_name,
+            mcp_port,
+            &mcp_token,
+        )
+    {
+        mcp_definitions.push(native_mcp);
+    }
     let mcp_server_keys = mcp_definitions
         .iter()
         .map(|definition| definition.server_key.clone())
@@ -622,9 +642,21 @@ async fn authenticate_device(
             Some(hello.client_version.clone()),
             mcp_server_keys,
             console_target,
+            hardware,
             speech_relay,
         )
         .await;
+    if hardware_enabled {
+        if let Some(initial_sync) = shared
+            .native_console
+            .prepare_initial_sync(initial_device_vp)
+            .await
+        {
+            let _ = send_payload(&mut socket, "voiceprint_sync", &initial_sync).await;
+        }
+        let initial_wake = shared.native_console.build_wake_sync().await;
+        let _ = send_payload(&mut socket, "wake_config_sync", &initial_wake).await;
+    }
     shared.mcp_tasks.spawn({
         let shared = shared.clone();
         let device_id = device_id.clone();
@@ -650,8 +682,10 @@ async fn authenticate_device(
         AuthenticatedLoopConfig {
             device_id: &device_id,
             connection_id: &connection_id,
+            declared_capabilities: hello.capabilities,
             capabilities,
             speech_relay,
+            hardware_enabled,
         },
         &mut replay,
         &mut signals,
@@ -673,8 +707,10 @@ async fn authenticate_device(
 struct AuthenticatedLoopConfig<'a> {
     device_id: &'a DeviceId,
     connection_id: &'a str,
+    declared_capabilities: DeviceCapabilitiesSnapshot,
     capabilities: DeviceCapabilitiesSnapshot,
     speech_relay: bool,
+    hardware_enabled: bool,
 }
 
 async fn authenticated_loop(
@@ -687,8 +723,10 @@ async fn authenticated_loop(
     let AuthenticatedLoopConfig {
         device_id,
         connection_id,
-        capabilities,
+        declared_capabilities,
+        mut capabilities,
         speech_relay,
+        hardware_enabled,
     } = config;
     let mut heartbeat = interval(HEARTBEAT_INTERVAL);
     heartbeat.tick().await;
@@ -717,6 +755,9 @@ async fn authenticated_loop(
     let mut playback = VecDeque::<ActivePlayback>::new();
     let mut client_inputs = ClientInputWindow::default();
     let mut relay = RelayState::new();
+    let mut pending_commands: HashMap<String, oneshot::Sender<DeviceCommandResult>> =
+        HashMap::new();
+    let mut pending_wake_syncs: HashMap<String, oneshot::Sender<WakeConfigAck>> = HashMap::new();
     loop {
         tokio::select! {
             _ = voice_turn_clock.tick() => {
@@ -770,7 +811,19 @@ async fn authenticated_loop(
                         acknowledge_playback_output(&mut playback, output, response);
                     }
                     ConnectionCommand::SpeechStatusChanged(speech_services) => {
-                        if speech_relay {
+                        let asr_ready =
+                            speech_services.asr != SpeechServiceStatusSnapshot::Unavailable;
+                        let tts_ready =
+                            speech_services.tts != SpeechServiceStatusSnapshot::Unavailable;
+                        let next_caps =
+                            effective_capabilities(declared_capabilities, asr_ready, tts_ready);
+                        if next_caps != capabilities {
+                            capabilities = next_caps;
+                            shared
+                                .update_capabilities(device_id, connection_id, capabilities)
+                                .await;
+                        }
+                        if speech_relay || hardware_enabled {
                             send_payload(
                                 socket,
                                 "speech_status_changed",
@@ -791,6 +844,50 @@ async fn authenticated_loop(
                     } => {
                         deliver_relay_tts_result(socket, &mut relay, request_id, stream_id, result)
                             .await?;
+                    }
+                    ConnectionCommand::ExecuteDeviceCommand { request, response } => {
+                        if pending_commands.len() >= 32 {
+                            let _ = response.send(DeviceCommandResult {
+                                command_id: request.command_id,
+                                ok: false,
+                                result_json: String::new(),
+                                media_url: String::new(),
+                                error_code: "DEVICE_BUSY".to_owned(),
+                                error_message: "终端并发指令队列已满".to_owned(),
+                            });
+                        } else {
+                            pending_commands.insert(request.command_id.clone(), response);
+                            send_payload(socket, "device_command", &request).await?;
+                        }
+                    }
+                    ConnectionCommand::SyncVoiceprints(sync) => {
+                        if hardware_enabled {
+                            send_payload(socket, "voiceprint_sync", &sync).await?;
+                        }
+                    }
+                    ConnectionCommand::SyncWakeConfig { request, response } => {
+                        if hardware_enabled {
+                            if let Some(tx) = response {
+                                if pending_wake_syncs.len() >= 16 {
+                                    let _ = tx.send(WakeConfigAck {
+                                        sync_id: request.sync_id,
+                                        ok: false,
+                                        active_config: None,
+                                        error: Some("终端并发唤醒配置更新队列已满".to_owned()),
+                                    });
+                                    continue;
+                                }
+                                pending_wake_syncs.insert(request.sync_id.clone(), tx);
+                            }
+                            send_payload(socket, "wake_config_sync", &request).await?;
+                        } else if let Some(tx) = response {
+                            let _ = tx.send(WakeConfigAck {
+                                sync_id: request.sync_id,
+                                ok: false,
+                                active_config: None,
+                                error: Some("终端不支持直连唤醒配置".to_owned()),
+                            });
+                        }
                     }
                 }
                 synchronize_playback(socket, &mut playback).await?;
@@ -930,7 +1027,20 @@ async fn authenticated_loop(
                                     aggregation.pause_commit();
                                 }
                                 let client_input_id = request.client_input_id.clone();
-                                eprintln!("event=voice_capture_started ts_ms={} device={} input={} stream_id={}", timestamp_ms(), correlation_id(device_id.as_str()), correlation_id(&client_input_id), request.stream_id);
+                                if let Some(role) = request.speaker_role {
+                                    shared
+                                        .set_active_speaker_role(device_id, connection_id, role)
+                                        .await;
+                                }
+                                eprintln!(
+                                    "event=voice_capture_started ts_ms={} device={} input={} stream_id={} wake_source={} speaker={}",
+                                    timestamp_ms(),
+                                    correlation_id(device_id.as_str()),
+                                    correlation_id(&client_input_id),
+                                    request.stream_id,
+                                    request.wake_source.as_deref().unwrap_or("unspecified"),
+                                    request.speaker_id.as_deref().unwrap_or("anonymous"),
+                                );
                                 receiving = Some(UplinkUtterance::new(request));
                                 send_payload(socket, "state_changed", &InteractionStateChanged {
                                     run_id: None,
@@ -1113,6 +1223,37 @@ async fn authenticated_loop(
                                     &mut relay,
                                     request,
                                 ).await?;
+                            }
+                            "device_command_result" if hardware_enabled => {
+                                let result = envelope.payload::<DeviceCommandResult>()?;
+                                if let Some(tx) = pending_commands.remove(&result.command_id) {
+                                    let _ = tx.send(result);
+                                }
+                            }
+                            "voiceprint_sync_ack" if hardware_enabled => {
+                                let ack = envelope.payload::<VoiceprintSyncAck>()?;
+                                if ack.ok {
+                                    shared
+                                        .update_hardware_vp_version(
+                                            device_id,
+                                            connection_id,
+                                            ack.vp_version,
+                                        )
+                                        .await;
+                                }
+                            }
+                            "wake_config_ack" if hardware_enabled => {
+                                let ack = envelope.payload::<WakeConfigAck>()?;
+                                if ack.ok
+                                    && let Some(cfg) = ack.active_config.clone()
+                                {
+                                    shared
+                                        .update_hardware_wake_config(device_id, connection_id, cfg)
+                                        .await;
+                                }
+                                if let Some(tx) = pending_wake_syncs.remove(&ack.sync_id) {
+                                    let _ = tx.send(ack);
+                                }
                             }
                             _ => {
                                 send_wire_error(
@@ -2729,6 +2870,10 @@ mod tests {
                 frame_duration_ms: 20,
             },
             output_preference: OutputPreferenceSnapshot::Text,
+            speaker_id: None,
+            speaker_role: None,
+            speaker_score: None,
+            wake_source: None,
         });
         let payload = [0_u8; super::super::protocol::PCM_PAYLOAD_BYTES];
         utterance
@@ -3074,12 +3219,12 @@ mod tests {
         use std::net::SocketAddr;
 
         use assistant_protocol::{
-            ConfirmDevicePairingRequest, DeviceId, DeviceLifecycleSnapshot,
-            DevicePairingModeSnapshot, DeviceSpeechServicesSnapshot, GetMcpConfigurationRequest,
-            McpServerRuntimeState, McpServerSource, McpTransportKind, RejectDevicePairingRequest,
-            SecretValue, ShutdownRuntimeRequest, SpeechProviderKind, SpeechServiceStatusSnapshot,
-            UpdateAsrConfigurationInput, UpdateSpeechConfigurationRequest,
-            UpdateTtsConfigurationInput,
+            ConfirmDevicePairingRequest, ConnectDiscoveredDeviceRequest, DeviceId,
+            DeviceLifecycleSnapshot, DevicePairingModeSnapshot, DeviceSpeechServicesSnapshot,
+            GetMcpConfigurationRequest, McpServerRuntimeState, McpServerSource, McpTransportKind,
+            RejectDevicePairingRequest, SecretValue, ShutdownRuntimeRequest, SpeechProviderKind,
+            SpeechServiceStatusSnapshot, UpdateAsrConfigurationInput,
+            UpdateSpeechConfigurationRequest, UpdateTtsConfigurationInput,
         };
         use assistant_runtime::{AssistantRuntime, RuntimeStore as _};
         use axum::{
@@ -3201,11 +3346,10 @@ mod tests {
                 let identity = Arc::new(
                     InstallationIdentity::load_or_create(directory.path()).expect("identity"),
                 );
-                handle.seed_test_identity(identity.clone()).await;
-
                 let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind WSS");
                 listener.set_nonblocking(true).expect("nonblocking WSS");
                 let addr = listener.local_addr().expect("WSS addr");
+                handle.seed_test_identity(identity.clone(), addr.port()).await;
                 let tls = RustlsConfig::from_pem(
                     identity.certificate_pem.clone(),
                     identity.private_key_pem.clone(),
@@ -3895,6 +4039,7 @@ mod tests {
                     }],
                     console: None,
                     speech_relay: false,
+                    hardware: None,
                 },
             )
             .await;
@@ -4175,6 +4320,7 @@ mod tests {
                         ui_path: Some("/ui/".to_owned()),
                     }),
                     speech_relay: true,
+                    hardware: None,
                 },
             )
             .await;
@@ -4306,6 +4452,549 @@ mod tests {
 
             speech_server.abort();
             let _ = speech_server.await;
+            harness.shutdown().await;
+        }
+
+        #[tokio::test]
+        async fn wss_connect_discovered_device_nudges_http_and_auto_approves_matching_key_only() {
+            let harness = TestGatewayHarness::start().await;
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<Value>(4);
+            let mock_device_app = Router::new().route(
+                "/ez/connect",
+                post({
+                    let tx = tx.clone();
+                    move |AxumJson(body): AxumJson<Value>| {
+                        let tx = tx.clone();
+                        async move {
+                            let _ = tx.send(body).await;
+                            axum::Json(json!({ "ok": true }))
+                        }
+                    }
+                }),
+            );
+            let dev_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind mock device http");
+            let dev_addr = dev_listener.local_addr().expect("mock device addr");
+            let dev_server = tokio::spawn(async move {
+                let _ = axum::serve(dev_listener, mock_device_app).await;
+            });
+
+            let target_key = SigningKey::from_bytes(&[71_u8; 32]);
+            let target_pub = target_key.verifying_key().to_bytes();
+            let target_fp = public_key_fingerprint(&target_pub);
+            let discovery_id = "Mosaico-5BF0._ez-device._tcp.local.";
+            harness
+                .handle
+                .seed_test_discovered_device(
+                    discovery_id,
+                    "Mosaico-5BF0",
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                    dev_addr.port(),
+                    &target_fp,
+                )
+                .await;
+
+            let initial = harness.handle.snapshot().await.expect("initial snapshot");
+            assert_eq!(initial.discovered_devices.len(), 1);
+            assert_eq!(initial.discovered_devices[0].key_fingerprint, target_fp);
+
+            harness
+                .handle
+                .connect_discovered_device(ConnectDiscoveredDeviceRequest {
+                    discovery_id: discovery_id.to_owned(),
+                    display_name: Some("书房 Mosaico".to_owned()),
+                })
+                .await
+                .expect("connect discovered device");
+
+            let nudge = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+                .await
+                .expect("nudge timeout")
+                .expect("nudge body");
+            assert_eq!(nudge["port"].as_u64(), Some(u64::from(harness.addr.port())));
+            assert_eq!(nudge["path"].as_str(), Some("/device"));
+            assert_eq!(
+                nudge["installation_id"].as_str(),
+                Some(harness.identity.installation_id.as_str())
+            );
+            assert_eq!(
+                nudge["certificate_fingerprint"].as_str(),
+                Some(harness.identity.certificate_fingerprint.as_str())
+            );
+
+            // A different key connecting while targeted slot is active must NOT auto-approve.
+            let rogue_key = SigningKey::from_bytes(&[72_u8; 32]);
+            let (mut rogue_ws, _) = harness.connect_ws().await;
+            send_json(
+                &mut rogue_ws,
+                "m-rogue-pair",
+                "pairing_hello",
+                &PairingHello {
+                    pairing_request_id: "req-rogue".to_owned(),
+                    display_name: "Rogue".to_owned(),
+                    device_nonce: "rogue-nonce".to_owned(),
+                    capabilities: text_capabilities(),
+                    pairing_mode: WirePairingMode::DirectConfirm,
+                    pake_share: None,
+                    public_key: Some(encode_base64(rogue_key.verifying_key().as_bytes())),
+                    client_version: None,
+                },
+            )
+            .await;
+            assert_eq!(
+                recv_envelope(&mut rogue_ws).await.expect("pending").message_type,
+                "pairing_pending"
+            );
+            let rogue_snapshot = harness.handle.snapshot().await.expect("rogue snapshot");
+            assert_eq!(rogue_snapshot.pending_pairings.len(), 1);
+            let _ = rogue_ws.close(None).await;
+
+            // Now the targeted Mosaico connects and auto-approves without manual confirm_pairing!
+            let (mut ws, _) = harness.connect_ws().await;
+            let req_id = "req-mosaico-auto";
+            let dev_nonce = "dev-nonce-auto";
+            send_json(
+                &mut ws,
+                "m-auto-pair",
+                "pairing_hello",
+                &PairingHello {
+                    pairing_request_id: req_id.to_owned(),
+                    display_name: "Mosaico-5BF0".to_owned(),
+                    device_nonce: dev_nonce.to_owned(),
+                    capabilities: text_capabilities(),
+                    pairing_mode: WirePairingMode::DirectConfirm,
+                    pake_share: None,
+                    public_key: Some(encode_base64(&target_pub)),
+                    client_version: Some("esp-pika-mosaico/0.3.0".to_owned()),
+                },
+            )
+            .await;
+            assert_eq!(
+                recv_envelope(&mut ws).await.expect("pending").message_type,
+                "pairing_pending"
+            );
+            let challenge_env = recv_envelope(&mut ws)
+                .await
+                .expect("auto pairing_direct_challenge");
+            assert_eq!(challenge_env.message_type, "pairing_direct_challenge");
+            let challenge: PairingDirectChallenge = decode_payload(challenge_env);
+            let ad = pairing_associated_data(
+                req_id,
+                &harness.identity.installation_id,
+                &harness.identity.certificate_fingerprint,
+                dev_nonce,
+                &challenge.host_nonce,
+                text_capabilities(),
+            );
+            let bind_transcript = pairing_bind_transcript(&ad, &target_pub);
+            let commit_transcript =
+                pairing_commit_transcript(&bind_transcript, &challenge.device_id);
+            let sig = target_key.sign(&commit_transcript).to_bytes();
+            send_json(
+                &mut ws,
+                "m-auto-commit",
+                "pairing_direct_commit",
+                &PairingDirectCommit {
+                    pairing_request_id: req_id.to_owned(),
+                    device_id: challenge.device_id.clone(),
+                    signature: encode_base64(&sig),
+                },
+            )
+            .await;
+            let complete_env = recv_envelope(&mut ws).await.expect("pairing_complete");
+            assert_eq!(complete_env.message_type, "pairing_complete");
+            let complete: PairingComplete = decode_payload(complete_env);
+            assert_eq!(complete.display_name, "书房 Mosaico");
+            let _ = ws.close(None).await;
+
+            let after = harness.handle.snapshot().await.expect("after snapshot");
+            assert!(after.discovered_devices.is_empty());
+            assert_eq!(after.devices.len(), 1);
+            assert_eq!(after.devices[0].display_name, "书房 Mosaico");
+
+            dev_server.abort();
+            let _ = dev_server.await;
+            harness.shutdown().await;
+        }
+
+        #[tokio::test]
+        async fn wss_native_console_commands_acl_and_voiceprint_sync_round_trip() {
+            let harness = TestGatewayHarness::start().await;
+            let mcp_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind native mcp");
+            let mcp_port = mcp_listener.local_addr().expect("mcp addr").port();
+            let mcp_token = "test-loopback-mcp-token-0123456789".to_owned();
+            let mcp_router = Router::new()
+                .route(
+                    "/mcp/{device_id}",
+                    post(crate::device::native_console::handle_mcp_http_request),
+                )
+                .with_state(harness.shared.clone());
+            let mcp_server = tokio::spawn(async move {
+                let _ = axum::serve(mcp_listener, mcp_router).await;
+            });
+            harness
+                .handle
+                .seed_test_mcp_endpoint(mcp_port, mcp_token.clone())
+                .await;
+
+            let signing_key = SigningKey::from_bytes(&[73_u8; 32]);
+            let public_key = signing_key.verifying_key().to_bytes();
+            let device_id = DeviceId::new("dev-mosaico-direct").expect("device id");
+            harness
+                .runtime
+                .register_paired_device(NewPairedDevice {
+                    device_id: device_id.clone(),
+                    display_name: "Mosaico-5BF0".to_owned(),
+                    public_key: DevicePublicKey::new(public_key),
+                    paired_at_ms: 1000,
+                })
+                .await
+                .expect("register paired device");
+
+            let (mut ws, challenge) = harness.connect_ws().await;
+            let device_nonce = "dev-nonce-native-1";
+            let caps = text_capabilities();
+            let transcript = auth_transcript(
+                &challenge.connection_id,
+                &challenge.nonce,
+                device_id.as_str(),
+                device_nonce,
+                caps,
+                OutputPreferenceSnapshot::Text,
+            );
+            let sig = signing_key.sign(&transcript).to_bytes();
+            send_json(
+                &mut ws,
+                "m-hello-native",
+                "hello",
+                &DeviceHello {
+                    device_id: device_id.to_string(),
+                    device_nonce: device_nonce.to_owned(),
+                    capabilities: caps,
+                    output_preference: OutputPreferenceSnapshot::Text,
+                    client_version: "0.4.0-direct".to_owned(),
+                    signature: encode_base64(&sig),
+                    mcp_servers: Vec::new(),
+                    console: None,
+                    speech_relay: false,
+                    hardware: Some(crate::device::protocol::DeviceHardwareDeclaration {
+                        mac: "30:ed:a0:f4:5b:f0".to_owned(),
+                        chip: "esp32s31".to_owned(),
+                        model: "esp32s31-mosaico".to_owned(),
+                        zone: "desk".to_owned(),
+                        group_id: "home-default".to_owned(),
+                        vp_version: 0,
+                        multinet_ready: true,
+                        wake_config: None,
+                        capabilities: vec![
+                            "device.display_show".to_owned(),
+                            "device.audio_set_volume".to_owned(),
+                            "device.sensor_read".to_owned(),
+                            "device.status_read".to_owned(),
+                        ],
+                    }),
+                },
+            )
+            .await;
+
+            let ack_env = recv_envelope(&mut ws).await.expect("hello_ack");
+            assert_eq!(ack_env.message_type, "hello_ack");
+
+            let snap = harness.handle.snapshot().await.expect("snapshot");
+            let conn = snap.devices[0].connection.as_ref().expect("online");
+            let console = conn.console.as_ref().expect("native console snapshot");
+            assert_eq!(console.api_prefix, "/api/v1");
+            assert_eq!(console.mode, assistant_protocol::DeviceConsoleModeSnapshot::Native);
+            assert!(console.direct_url.is_none());
+            assert!(harness.handle.has_native_console(&device_id).await);
+            assert_eq!(conn.mcp_server_keys.len(), 1);
+            let expected_mcp_key = conn.mcp_server_keys[0].clone();
+
+            // Verify real HostMcpConnectionFactory + rmcp connects to loopback MCP and discovers all 4 tools
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let cfg = harness
+                        .runtime
+                        .get_mcp_configuration(GetMcpConfigurationRequest {})
+                        .await
+                        .expect("get mcp config");
+                    if cfg
+                        .snapshot
+                        .servers
+                        .iter()
+                        .any(|s| s.server_key == expected_mcp_key && s.tool_count == 4)
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+            .await
+            .expect("native loopback MCP should connect and list 4 tools");
+
+            // Spawn simulated Mosaico loop answering WSS device_command, wake_config_sync & voiceprint_sync
+            let ws_task = tokio::spawn(async move {
+                let mut saw_cmd = false;
+                let mut saw_vp = false;
+                let mut saw_wake_sync = false;
+                while let Some(env) = recv_envelope(&mut ws).await {
+                    match env.message_type.as_str() {
+                        "device_command" => {
+                            let req: crate::device::protocol::DeviceCommandRequest =
+                                decode_payload(env);
+                            saw_cmd = true;
+                            let result_json = if req.capability == "device.status_read" {
+                                r#"{"rssi":-52,"volume":68,"battery_pct":91,"temperature_c":31.5,"free_int":70120,"vp_version":0}"#.to_owned()
+                            } else {
+                                r#"{"ok":true,"emotion":"happy"}"#.to_owned()
+                            };
+                            send_json(
+                                &mut ws,
+                                &format!("res-{}", req.command_id),
+                                "device_command_result",
+                                &DeviceCommandResult {
+                                    command_id: req.command_id,
+                                    ok: true,
+                                    result_json,
+                                    media_url: String::new(),
+                                    error_code: String::new(),
+                                    error_message: String::new(),
+                                },
+                            )
+                            .await;
+                        }
+                        "wake_config_sync" => {
+                            let sync: crate::device::protocol::WakeConfigSyncRequest =
+                                decode_payload(env);
+                            if sync.config.mode == crate::device::protocol::WakeMode::VoiceprintDirect {
+                                saw_wake_sync = true;
+                            }
+                            send_json(
+                                &mut ws,
+                                &format!("wake-ack-{}", sync.sync_id),
+                                "wake_config_ack",
+                                &WakeConfigAck {
+                                    sync_id: sync.sync_id,
+                                    ok: true,
+                                    active_config: Some(sync.config),
+                                    error: None,
+                                },
+                            )
+                            .await;
+                            if saw_vp && saw_wake_sync {
+                                break;
+                            }
+                        }
+                        "voiceprint_sync" => {
+                            let sync: crate::device::protocol::VoiceprintSyncRequest =
+                                decode_payload(env);
+                            saw_vp = true;
+                            send_json(
+                                &mut ws,
+                                "vp-ack-1",
+                                "voiceprint_sync_ack",
+                                &VoiceprintSyncAck {
+                                    vp_version: sync.vp_version,
+                                    count: sync.upserts.len() as u32,
+                                    ok: true,
+                                    error: None,
+                                },
+                            )
+                            .await;
+                        }
+                        _ => {}
+                    }
+                }
+                let _ = ws.close(None).await;
+                (saw_cmd, saw_vp, saw_wake_sync)
+            });
+
+            // 1. GET /api/v1/devices triggers live status_read over WSS
+            let dev_res = harness
+                .handle
+                .handle_native_console(
+                    &device_id,
+                    "api/v1/devices",
+                    axum::http::Method::GET,
+                    axum::body::Bytes::new(),
+                    &harness.speech,
+                )
+                .await;
+            assert_eq!(dev_res.status(), axum::http::StatusCode::OK);
+            let dev_bytes = axum::body::to_bytes(dev_res.into_body(), 1024 * 1024)
+                .await
+                .expect("devices body");
+            let dev_json: serde_json::Value =
+                serde_json::from_slice(&dev_bytes).expect("devices json");
+            assert_eq!(dev_json["devices"][0]["shadow"]["battery_pct"], 91);
+            assert_eq!(dev_json["devices"][0]["shadow"]["volume"], 68);
+
+            // 2. POST /api/v1/devices/{id}/commands executes display_show over WSS
+            let cmd_body = serde_json::to_vec(&serde_json::json!({
+                "agent_id": "ez-assistant",
+                "capability": "device.display_show",
+                "action": "show",
+                "params_json": r#"{"emotion":"happy","text":"Hello"}"#,
+                "timeout_ms": 3000
+            }))
+            .expect("cmd body");
+            let cmd_res = harness
+                .handle
+                .handle_native_console(
+                    &device_id,
+                    "api/v1/devices/30:ed:a0:f4:5b:f0/commands",
+                    axum::http::Method::POST,
+                    axum::body::Bytes::from(cmd_body),
+                    &harness.speech,
+                )
+                .await;
+            assert_eq!(cmd_res.status(), axum::http::StatusCode::OK);
+            let cmd_bytes = axum::body::to_bytes(cmd_res.into_body(), 1024 * 1024)
+                .await
+                .expect("cmd bytes");
+            let cmd_json: serde_json::Value =
+                serde_json::from_slice(&cmd_bytes).expect("cmd json");
+            assert_eq!(cmd_json["ok"], true);
+
+            // 2b. Loopback MCP endpoint enforces Bearer auth, dispatches tools/call over WSS, and enforces ACL
+            let http_client = reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("reqwest");
+            let mcp_url = format!("http://127.0.0.1:{mcp_port}/mcp/{}", device_id.as_str());
+            let unauth = http_client
+                .post(&mcp_url)
+                .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}))
+                .send()
+                .await
+                .expect("unauth mcp");
+            assert_eq!(unauth.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+            let mcp_call: Value = http_client
+                .post(&mcp_url)
+                .bearer_auth(&mcp_token)
+                .json(&json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "device.display_show",
+                        "arguments": { "emotion": "excited", "text": "MCP OK" }
+                    }
+                }))
+                .send()
+                .await
+                .expect("mcp call")
+                .json()
+                .await
+                .expect("mcp call json");
+            assert_eq!(mcp_call["result"]["isError"], false);
+
+            // Add deny ACL rule -> both console command & MCP tools/call are rejected
+            let deny_body = serde_json::to_vec(&json!({
+                "agent_id": "ez-assistant",
+                "group_id": "*",
+                "zone_pattern": "*",
+                "device_id": "*",
+                "capability_pattern": "device.display_show",
+                "min_speaker_role": 1,
+                "allow": false
+            }))
+            .expect("deny body");
+            let deny_res = harness
+                .handle
+                .handle_native_console(
+                    &device_id,
+                    "api/v1/acls/deny-display",
+                    axum::http::Method::PUT,
+                    axum::body::Bytes::from(deny_body),
+                    &harness.speech,
+                )
+                .await;
+            assert_eq!(deny_res.status(), axum::http::StatusCode::OK);
+
+            let denied_call: Value = http_client
+                .post(&mcp_url)
+                .bearer_auth(&mcp_token)
+                .json(&json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "device.display_show",
+                        "arguments": { "emotion": "happy", "text": "Blocked" }
+                    }
+                }))
+                .send()
+                .await
+                .expect("denied mcp call")
+                .json()
+                .await
+                .expect("denied mcp call json");
+            assert_eq!(denied_call["result"]["isError"], true);
+
+            // 3. Enroll speaker -> pushes voiceprint_sync over WSS
+            let pcm: Vec<u8> = (0..16_000_usize)
+                .flat_map(|i| {
+                    let s = ((2.0 * std::f32::consts::PI * 220.0 * (i as f32) / 16_000.0).sin()
+                        * 20_000.0) as i16;
+                    s.to_le_bytes()
+                })
+                .collect();
+            let enroll_body = serde_json::to_vec(&serde_json::json!({
+                "speaker_id": "spk_luke",
+                "display_name": "Luke",
+                "role": 1,
+                "audio_base64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &pcm),
+            }))
+            .expect("enroll body");
+            let enroll_res = harness
+                .handle
+                .handle_native_console(
+                    &device_id,
+                    "api/v1/voice/enroll",
+                    axum::http::Method::POST,
+                    axum::body::Bytes::from(enroll_body),
+                    &harness.speech,
+                )
+                .await;
+            assert_eq!(enroll_res.status(), axum::http::StatusCode::OK);
+
+            // 4. PUT /api/v1/wake switches to voiceprint_direct + custom wake word over WSS
+            let wake_body = serde_json::to_vec(&json!({
+                "mode": "voiceprint_direct",
+                "wake_word": "小元同学",
+                "wake_pinyin": "xiao yuan tong xue",
+                "vp_threshold": 0.78
+            }))
+            .expect("wake body");
+            let wake_res = harness
+                .handle
+                .handle_native_console(
+                    &device_id,
+                    "api/v1/wake",
+                    axum::http::Method::PUT,
+                    axum::body::Bytes::from(wake_body),
+                    &harness.speech,
+                )
+                .await;
+            assert_eq!(wake_res.status(), axum::http::StatusCode::OK);
+            let wake_bytes = axum::body::to_bytes(wake_res.into_body(), 1024 * 1024)
+                .await
+                .expect("wake bytes");
+            let wake_json: Value = serde_json::from_slice(&wake_bytes).expect("wake json");
+            assert_eq!(wake_json["synced"], true);
+            assert_eq!(wake_json["wake"]["mode"], "voiceprint_direct");
+
+            let (saw_cmd, saw_vp, saw_wake_sync) = ws_task.await.expect("ws task");
+            assert!(saw_cmd);
+            assert!(saw_vp);
+            assert!(saw_wake_sync);
+            mcp_server.abort();
+            let _ = mcp_server.await;
             harness.shutdown().await;
         }
     }

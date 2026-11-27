@@ -10,6 +10,9 @@ export type FleetDeviceItem = Readonly<{
   online: boolean;
   rssi: string;
   volume: string;
+  battery_pct: string;
+  temperature_c: string;
+  free_int: string;
   capabilities: ReadonlyArray<string>;
 }>;
 
@@ -32,6 +35,33 @@ export type AclRuleEntry = Readonly<{
   allow: boolean;
 }>;
 
+export type WakeMode = "wake_word" | "wake_word_plus_vp" | "voiceprint_direct";
+
+export type DeviceWakeConfig = Readonly<{
+  mode: WakeMode;
+  wake_word: string;
+  wake_pinyin: string;
+  vp_threshold: number;
+  min_speech_ms: number;
+  cooldown_ms: number;
+  vp_wake_chime: boolean;
+}>;
+
+export type DeviceWakeSnapshot = Readonly<{
+  wake: DeviceWakeConfig;
+  enrolled_speaker_count: number;
+  multinet_ready: boolean;
+}>;
+
+export type CapturedVoiceprintSample = Readonly<{
+  embedding: number[];
+  voiced_ms: number;
+  snr_db: number;
+  rms: number;
+  duration_ms: number;
+  label: string;
+}>;
+
 export type SpeakerGroupEntry = Readonly<{
   speaker_id: string;
   display_name: string;
@@ -42,6 +72,7 @@ export type SpeakerGroupEntry = Readonly<{
   tts_voice: string;
   prompt: string;
   version: number;
+  template_count: number;
 }>;
 
 export function pickString(obj: unknown, ...keys: ReadonlyArray<string>): string {
@@ -107,6 +138,18 @@ export function parseFleetDevices(payload: unknown): FleetDeviceItem[] {
       online: pickBool(shadow, false, "online"),
       rssi: shadow.rssi !== undefined && shadow.rssi !== null ? String(shadow.rssi) : "-",
       volume: shadow.volume !== undefined && shadow.volume !== null ? String(shadow.volume) : "-",
+      battery_pct:
+        shadow.battery_pct !== undefined && shadow.battery_pct !== null
+          ? `${String(shadow.battery_pct)}%`
+          : "",
+      temperature_c:
+        shadow.temperature_c !== undefined && shadow.temperature_c !== null
+          ? `${String(shadow.temperature_c)}°C`
+          : "",
+      free_int:
+        shadow.free_int !== undefined && shadow.free_int !== null
+          ? `${Math.round(Number(shadow.free_int) / 1024)}KB`
+          : "",
       capabilities,
     };
   });
@@ -155,7 +198,29 @@ export function parseSpeakers(payload: unknown): SpeakerGroupEntry[] {
     tts_voice: pickString(raw, "ttsVoice", "tts_voice"),
     prompt: pickString(raw, "prompt"),
     version: pickNumber(raw, 0, "version"),
+    template_count: pickNumber(raw, 1, "template_count", "templateCount"),
   }));
+}
+
+export function parseWakeSnapshot(payload: unknown): DeviceWakeSnapshot {
+  const root = (payload && typeof payload === "object" ? payload : {}) as RawRecord;
+  const rawWake = (root.wake && typeof root.wake === "object" ? root.wake : {}) as RawRecord;
+  const rawMode = pickString(rawWake, "mode");
+  const mode: WakeMode =
+    rawMode === "wake_word_plus_vp" || rawMode === "voiceprint_direct" ? rawMode : "wake_word";
+  return {
+    wake: {
+      mode,
+      wake_word: pickString(rawWake, "wake_word", "wakeWord") || "你好小元",
+      wake_pinyin: pickString(rawWake, "wake_pinyin", "wakePinyin") || "ni hao xiao yuan",
+      vp_threshold: pickNumber(rawWake, 0.78, "vp_threshold", "vpThreshold"),
+      min_speech_ms: pickNumber(rawWake, 700, "min_speech_ms", "minSpeechMs"),
+      cooldown_ms: pickNumber(rawWake, 1500, "cooldown_ms", "cooldownMs"),
+      vp_wake_chime: pickBool(rawWake, false, "vp_wake_chime", "vpWakeChime"),
+    },
+    enrolled_speaker_count: pickNumber(root, 0, "enrolled_speaker_count", "enrolledSpeakerCount"),
+    multinet_ready: pickBool(root, true, "multinet_ready", "multinetReady"),
+  };
 }
 
 export function normalizeConsolePath(apiPrefix: string, suffix: string): string {

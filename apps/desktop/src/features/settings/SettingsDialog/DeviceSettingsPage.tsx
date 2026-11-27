@@ -5,11 +5,13 @@ import { PresenceBoundary } from "../../../components/Presence";
 import type {
   DeviceCapabilitiesSnapshot,
   DeviceSummarySnapshot,
+  DiscoveredDeviceSnapshot,
   PendingDevicePairingSnapshot,
 } from "@ez-assistant/protocol";
 import { useRootStore } from "../../../stores/RootStoreContext";
 import { SessionActionDialog } from "../../sessions/SessionActionDialog";
-import { DeviceDetailPage } from "./DeviceDetailPage";
+import { DeviceDetailPage, type ConsoleTabKey } from "./DeviceDetailPage";
+import { WakeSettingsCard } from "./DeviceConsole/WakeSettingsCard";
 import { DeviceSpeechSection } from "./DeviceSpeechSection";
 import { SettingsPageContainer } from "./SettingsPageContainer";
 import styles from "./index.module.scss";
@@ -22,6 +24,7 @@ export const DeviceSettingsPage = observer(function DeviceSettingsPage() {
   const [editing_name, setEditingName] = useState("");
   const [revoking_device, setRevokingDevice] = useState<DeviceSummarySnapshot | null>(null);
   const [detail_device_id, setDetailDeviceId] = useState<string | null>(null);
+  const [detail_tab, setDetailTab] = useState<ConsoleTabKey>("overview");
 
   useEffect(() => {
     void gateway.load();
@@ -29,10 +32,28 @@ export const DeviceSettingsPage = observer(function DeviceSettingsPage() {
   }, [gateway]);
 
   const paired_devices = snapshot?.devices.filter((device) => device.lifecycle === "paired") ?? [];
+  const discovered_devices = snapshot?.discovered_devices ?? [];
   const detail_device = paired_devices.find((device) => device.device_id === detail_device_id) ?? null;
+  const online_native_devices = paired_devices.filter(
+    (device) => device.connection?.console?.mode === "native",
+  );
+
+  function openDeviceDetail(device_id: string, tab: ConsoleTabKey = "overview") {
+    setDetailTab(tab);
+    setDetailDeviceId(device_id);
+  }
 
   if (detail_device) {
-    return <DeviceDetailPage device={detail_device} on_back={() => setDetailDeviceId(null)} />;
+    return (
+      <DeviceDetailPage
+        device={detail_device}
+        initial_tab={detail_tab}
+        on_back={() => {
+          setDetailDeviceId(null);
+          setDetailTab("overview");
+        }}
+      />
+    );
   }
 
   async function saveName(device: DeviceSummarySnapshot) {
@@ -116,6 +137,26 @@ export const DeviceSettingsPage = observer(function DeviceSettingsPage() {
 
       <section className={styles.device_section}>
         <header>
+          <h4>附近可连接的设备</h4>
+          <span className={styles.device_count}>{discovered_devices.length}</span>
+        </header>
+        {discovered_devices.length > 0 ? (
+          <div className={styles.discovered_device_list}>
+            {discovered_devices.map((device) => (
+              <DiscoveredDeviceRow
+                device={device}
+                gateway={gateway}
+                key={device.discovery_id}
+              />
+            ))}
+          </div>
+        ) : (
+          <p className={styles.device_empty}>Mosaico 终端开机连上同一 Wi-Fi 后会自动出现在这里。</p>
+        )}
+      </section>
+
+      <section className={styles.device_section}>
+        <header>
           <h4>已配对设备</h4>
           <span className={styles.device_count}>{paired_devices.length}</span>
         </header>
@@ -146,7 +187,7 @@ export const DeviceSettingsPage = observer(function DeviceSettingsPage() {
                     <button
                       aria-label={`查看 ${device.display_name} 详情`}
                       className={styles.paired_device_name_button}
-                      onClick={() => setDetailDeviceId(device.device_id)}
+                      onClick={() => openDeviceDetail(device.device_id, "overview")}
                       type="button"
                     >
                       {device.display_name}
@@ -154,6 +195,15 @@ export const DeviceSettingsPage = observer(function DeviceSettingsPage() {
                   ) : null}
                 </div>
                 <div className={styles.paired_device_actions}>
+                  {editing_device !== device.device_id ? (
+                    <button
+                      disabled={gateway.pending_action !== null}
+                      onClick={() => openDeviceDetail(device.device_id, "overview")}
+                      type="button"
+                    >
+                      管理
+                    </button>
+                  ) : null}
                   {editing_device === device.device_id ? (
                     <>
                       <button disabled={gateway.pending_action !== null} onClick={() => setEditingDevice(null)} type="button">取消</button>
@@ -185,6 +235,17 @@ export const DeviceSettingsPage = observer(function DeviceSettingsPage() {
           </div>
         ) : <p className={styles.device_empty}>尚未配对智能终端。</p>}
       </section>
+
+      {online_native_devices.map((device) => (
+        <WakeSettingsCard
+          api_prefix={device.connection?.console?.api_prefix ?? "/api/v1"}
+          device_id={device.device_id}
+          device_name={device.display_name}
+          key={`wake-${device.device_id}`}
+          on_open_voiceprint={() => openDeviceDetail(device.device_id, "voice")}
+          standalone_spacing
+        />
+      ))}
 
       <DeviceSpeechSection />
 
@@ -290,3 +351,36 @@ function capabilityLabel(capabilities?: DeviceCapabilitiesSnapshot): string {
   ].filter(Boolean);
   return values.length > 0 ? values.join(" · ") : "未声明交互能力";
 }
+
+const DiscoveredDeviceRow = observer(function DiscoveredDeviceRow(props: Readonly<{
+  gateway: ReturnType<typeof useRootStore>["device_gateway"];
+  device: DiscoveredDeviceSnapshot;
+}>) {
+  const connecting = props.gateway.pending_action === `connect:${props.device.discovery_id}`;
+  const busy = props.gateway.pending_action !== null || props.gateway.stale;
+  const subtitle = [
+    props.device.model,
+    props.device.peer_address,
+    `指纹 ${props.device.key_fingerprint}`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  return (
+    <article>
+      <span className={styles.device_icon}><Icon name="device" size={18} /></span>
+      <div>
+        <strong>{props.device.display_name}</strong>
+        <small>{subtitle}</small>
+      </div>
+      <button
+        className={styles.pending_device_confirm}
+        disabled={busy}
+        onClick={() => void props.gateway.connectDiscoveredDevice(props.device.discovery_id)}
+        type="button"
+      >
+        {connecting ? "连接中…" : "连接"}
+      </button>
+    </article>
+  );
+});

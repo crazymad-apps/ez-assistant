@@ -44,6 +44,10 @@
   overflow: hidden;
 }
 
+.panel_standalone {
+  margin-top: 12px;
+}
+
 .panel_header {
   display: flex;
   min-height: 46px;
@@ -303,12 +307,192 @@
 }
 
 .error_banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   margin: 0;
   padding: 9px 11px;
   border-radius: var(--ez-radius-small);
   color: var(--ez-danger);
   background: var(--ez-danger-soft);
   font-size: var(--ez-font-small);
+}
+
+.success_banner {
+  margin: 0;
+  padding: 8px 11px;
+  border-radius: var(--ez-radius-small);
+  color: var(--ez-success-text);
+  background: var(--ez-success-soft);
+  font-size: var(--ez-font-small);
+}
+
+.setting_row {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px 14px;
+}
+
+.setting_label {
+  padding-top: 7px;
+  color: var(--ez-text-secondary);
+  font-size: var(--ez-font-small);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.setting_control_col {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.segmented_group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  width: fit-content;
+  max-width: 100%;
+  padding: 3px;
+  border-radius: var(--ez-radius-small);
+  background: var(--ez-surface-muted);
+}
+
+.segmented_btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  min-height: 28px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ez-text-secondary);
+  font-size: var(--ez-font-small);
+  white-space: nowrap;
+  cursor: pointer;
+
+  &:hover {
+    color: var(--ez-text);
+  }
+
+  &[data-selected="true"] {
+    color: var(--ez-text);
+    background: var(--ez-surface);
+    box-shadow: var(--ez-shadow-small);
+    font-weight: 600;
+  }
+
+  &[data-locked="true"] {
+    opacity: 0.56;
+  }
+}
+
+.wake_input_row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.wake_input {
+  flex: 1 1 200px;
+  max-width: 280px;
+  min-width: 0;
+  height: var(--ez-control-height);
+  min-height: var(--ez-control-height);
+  padding: 0 10px;
+  border: 1px solid var(--ez-border-strong);
+  border-radius: var(--ez-radius-small);
+  outline: 0;
+  color: var(--ez-text);
+  background: var(--ez-surface);
+  font: inherit;
+
+  &:focus {
+    @include fields.focus-border;
+  }
+}
+
+.preset_chip {
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  min-height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--ez-border-strong);
+  border-radius: 999px;
+  background: var(--ez-surface);
+  color: var(--ez-text-secondary);
+  font-size: var(--ez-font-small);
+  white-space: nowrap;
+
+  &:hover {
+    color: var(--ez-text);
+    background: var(--ez-surface-subtle);
+  }
+
+  &[data-active="true"] {
+    border-color: var(--ez-primary);
+    color: var(--ez-primary);
+    background: var(--ez-surface-subtle);
+    font-weight: 600;
+  }
+}
+
+.inline_link_btn {
+  display: inline-flex;
+  align-items: center;
+  height: auto;
+  min-height: 24px;
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  color: var(--ez-primary);
+  font-size: var(--ez-font-small);
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.warn_text {
+  margin: 0;
+  color: var(--ez-warning-text);
+  font-size: var(--ez-font-small);
+}
+
+.check_row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--ez-font-small);
+  color: var(--ez-text-secondary);
+  white-space: nowrap;
+}
+
+.wake_footer {
+  display: flex;
+  justify-content: flex-start;
+  padding-left: 86px;
+}
+
+.capture_box {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--ez-radius-small);
+  border: 1px dashed var(--ez-border-strong);
+  background: var(--ez-surface-subtle);
+}
+
+.capture_list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .progress_track {
@@ -326,7 +510,16 @@
 }
 
 @media (max-width: 640px) {
-  .form_grid {
+  .form_grid,
+  .setting_row {
     grid-template-columns: 1fr;
+  }
+
+  .setting_label {
+    padding-top: 0;
+  }
+
+  .wake_footer {
+    padding-left: 0;
   }
 }

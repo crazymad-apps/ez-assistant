@@ -1680,6 +1680,7 @@ describe("ComposerDock", () => {
       installation_id: "installation-1",
       certificate_fingerprint: "fingerprint",
       pending_pairings: [],
+      discovered_devices: [],
       devices: [{
         device_id: "device-1",
         display_name: "客厅终端",

@@ -463,7 +463,7 @@ fn preflight_response(headers: &HeaderMap, origin: Option<&str>) -> Response {
         headers
             .get(ACCESS_CONTROL_REQUEST_METHOD)
             .and_then(|value| value.to_str().ok()),
-        Some("GET" | "POST")
+        Some("GET" | "POST" | "PUT" | "DELETE")
     ) {
         return HttpError::forbidden("CORS preflight method is not allowed").into_response();
     }
@@ -511,7 +511,7 @@ fn with_cors(mut response: Response, origin: Option<&str>) -> Response {
         headers.insert(VARY, HeaderValue::from_static("Origin"));
         headers.insert(
             ACCESS_CONTROL_ALLOW_METHODS,
-            HeaderValue::from_static("GET,POST,OPTIONS"),
+            HeaderValue::from_static("GET,POST,PUT,DELETE,OPTIONS"),
         );
         headers.insert(
             ACCESS_CONTROL_ALLOW_HEADERS,
@@ -620,5 +620,36 @@ mod tests {
             "127.0.0.1:1234".parse().unwrap(),
             "runtime.test"
         ));
+    }
+
+    #[test]
+    fn cors_preflight_allows_put_and_delete_for_device_console() {
+        for method in ["GET", "POST", "PUT", "DELETE"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                ACCESS_CONTROL_REQUEST_METHOD,
+                HeaderValue::from_static(method),
+            );
+            headers.insert(
+                ACCESS_CONTROL_REQUEST_HEADERS,
+                HeaderValue::from_static(
+                    "authorization, content-type, x-ez-client-version, x-ez-min-compatible-version",
+                ),
+            );
+            let response = preflight_response(&headers, Some("tauri://localhost"));
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            assert_eq!(
+                response.headers().get(ACCESS_CONTROL_ALLOW_METHODS),
+                Some(&HeaderValue::from_static("GET,POST,PUT,DELETE,OPTIONS"))
+            );
+        }
+
+        let mut disallowed = HeaderMap::new();
+        disallowed.insert(
+            ACCESS_CONTROL_REQUEST_METHOD,
+            HeaderValue::from_static("PATCH"),
+        );
+        let rejected = preflight_response(&disallowed, Some("tauri://localhost"));
+        assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
     }
 }

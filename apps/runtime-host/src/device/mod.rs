@@ -7,6 +7,8 @@ mod dispatcher;
 mod gateway;
 mod identity;
 mod mcp;
+mod multinet_pinyin;
+mod native_console;
 mod protocol;
 
 pub(crate) use console::{ConsoleProxyPathError, DeviceConsoleTarget, resolve_proxy_url};

@@ -5,6 +5,10 @@ import type { DeviceGatewaySnapshot, SpeechConfigurationSnapshot } from "@ez-ass
 import { AppMessageProvider } from "../../src/components/AppMessage";
 import { DeviceDetailPage } from "../../src/features/settings/SettingsDialog/DeviceDetailPage";
 import { DeviceSettingsPage } from "../../src/features/settings/SettingsDialog/DeviceSettingsPage";
+import {
+  chineseWakeWordToPinyin,
+  validateWakePinyin,
+} from "../../src/features/settings/SettingsDialog/DeviceConsole/wakePinyin";
 import type { RuntimeClient } from "../../src/runtime-client/RuntimeClient";
 import { RootStore } from "../../src/stores/RootStore";
 import { RootStoreProvider } from "../../src/stores/RootStoreContext";
@@ -29,6 +33,7 @@ function createConsoleMockClient() {
     installation_id: "inst-1",
     certificate_fingerprint: "fp-1",
     pending_pairings: [],
+    discovered_devices: [],
     devices: [
       {
         device_id: "gw-1",
@@ -53,6 +58,7 @@ function createConsoleMockClient() {
           client_version: "esp-pika-gateway/0.4.0",
           console: {
             api_prefix: "/api/v1",
+            mode: "proxy",
             ui_path: "/ui/",
             direct_url: "http://192.168.1.33:8000/ui/",
           },
@@ -367,6 +373,173 @@ describe("DeviceSpeechSection and DeviceConsole UI", () => {
       </RootStoreProvider>,
     );
     expect(screen.queryByRole("tab", { name: "声纹与语音" })).toBeNull();
+    store.dispose();
+  });
+
+  it("renders native direct-connect console tabs without MAC whitelist or external console URL", async () => {
+    const mock = createConsoleMockClient();
+    const store = createStoreWithClient(mock.client);
+    const nativeDevice = {
+      ...mock.snapshot.devices[0],
+      device_id: "mosaico-1",
+      display_name: "Mosaico-5BF0",
+      connection: {
+        ...mock.snapshot.devices[0].connection!,
+        client_version: "0.4.0-direct",
+        console: {
+          api_prefix: "/api/v1",
+          mode: "native" as const,
+        },
+        speech_relay: false,
+      },
+    };
+    render(
+      <RootStoreProvider store={store}>
+        <AppMessageProvider>
+          <DeviceDetailPage device={nativeDevice} on_back={() => undefined} />
+        </AppMessageProvider>
+      </RootStoreProvider>,
+    );
+
+    expect(screen.getByRole("tab", { name: "概览" })).toBeVisible();
+    expect(screen.getByRole("tab", { name: "设备控制与状态" })).toBeVisible();
+    expect(screen.getByRole("tab", { name: "ACL 权限矩阵" })).toBeVisible();
+    expect(screen.getByRole("tab", { name: "声纹与语音" })).toBeVisible();
+    expect(screen.queryByRole("tab", { name: "MAC 白名单" })).toBeNull();
+    expect(screen.queryByText("原始控制台")).toBeNull();
+
+    fireEvent.click(screen.getByRole("tab", { name: "设备控制与状态" }));
+    await screen.findByText(/直连硬件状态与实时遥测/);
+    store.dispose();
+  });
+
+  it("converts Chinese wake words to MultiNet7 pinyin, enforces voiceprint guardrail, and syncs wake settings on DeviceSettingsPage", async () => {
+    expect(chineseWakeWordToPinyin("你好小元")).toEqual({
+      pinyin: "ni hao xiao yuan",
+      unknown_chars: [],
+    });
+    expect(chineseWakeWordToPinyin("绿茶")).toEqual({
+      pinyin: "lv cha",
+      unknown_chars: [],
+    });
+    expect(validateWakePinyin("ni hao xiao yuan").valid).toBe(true);
+    expect(validateWakePinyin("ni hao xyz").valid).toBe(false);
+
+    const mock = createConsoleMockClient();
+    mock.snapshot.devices[0] = {
+      ...mock.snapshot.devices[0],
+      device_id: "mosaico-1",
+      display_name: "Mosaico-5BF0",
+      connection: {
+        ...mock.snapshot.devices[0].connection!,
+        client_version: "0.5.0-direct",
+        console: {
+          api_prefix: "/api/v1",
+          mode: "native",
+        },
+        speech_relay: false,
+      },
+    };
+    let enrolledCount = 0;
+    const savedWakeCalls: unknown[] = [];
+    const customConsoleJson = vi.fn(
+      async (_deviceId: string, path: string, init?: { method?: string; body?: unknown }): Promise<unknown> => {
+        if (path === "api/v1/wake" && (!init?.method || init.method === "GET")) {
+          return {
+            wake: {
+              mode: "wake_word",
+              wake_word: "你好小元",
+              wake_pinyin: "ni hao xiao yuan",
+              vp_threshold: 0.78,
+              min_speech_ms: 700,
+              cooldown_ms: 1500,
+              vp_wake_chime: false,
+            },
+            enrolled_speaker_count: enrolledCount,
+            multinet_ready: true,
+          };
+        }
+        if (path === "api/v1/wake" && init?.method === "PUT") {
+          savedWakeCalls.push(init.body);
+          return { ok: true, synced: true, wake: init.body, enrolled_speaker_count: enrolledCount };
+        }
+        if (path === "api/v1/speakers") {
+          return { speakers: [] };
+        }
+        if (path === "api/v1/voice/capture_embedding") {
+          return {
+            ok: true,
+            embedding: Array.from({ length: 192 }, (_, idx) => (idx === 0 ? 1 : 0)),
+            voiced_ms: 1400,
+            snr_db: 17.5,
+            rms: 0.12,
+            duration_ms: 2100,
+          };
+        }
+        if (path === "api/v1/voice/enroll") {
+          enrolledCount = 1;
+          return { ok: true, speaker_id: "spk-luke", template_count: 1, synced_devices: 1 };
+        }
+        return { ok: true };
+      },
+    );
+    mock.client.deviceConsoleJson = customConsoleJson as unknown as RuntimeClient["deviceConsoleJson"];
+
+    const store = createStoreWithClient(mock.client);
+    const { container } = render(
+      <RootStoreProvider store={store}>
+        <AppMessageProvider>
+          <DeviceSettingsPage />
+        </AppMessageProvider>
+      </RootStoreProvider>,
+    );
+
+    await screen.findByText(/语音唤醒 · Mosaico-5BF0/);
+    expect(container.querySelector("select")).toBeNull();
+    expect(screen.getByLabelText("唤醒词")).toHaveValue("你好小元");
+
+    // Trying voiceprint_direct with 0 speakers shows guardrail alert
+    fireEvent.click(screen.getByRole("radio", { name: "声纹免唤醒" }));
+    await screen.findByText(/请先录入声纹后再开启声纹唤醒/);
+
+    // Edit wake word to 小元同学 -> auto pinyin xiao yuan tong xue -> save
+    fireEvent.change(screen.getByLabelText("唤醒词"), { target: { value: "小元同学" } });
+    fireEvent.click(screen.getByRole("button", { name: "微调拼音" }));
+    expect(screen.getByLabelText("唤醒词拼音")).toHaveValue("xiao yuan tong xue");
+    fireEvent.click(screen.getByRole("button", { name: "保存唤醒设置" }));
+
+    await waitFor(() => {
+      expect(savedWakeCalls).toHaveLength(1);
+      expect(savedWakeCalls[0]).toEqual(
+        expect.objectContaining({
+          mode: "wake_word",
+          wake_word: "小元同学",
+          wake_pinyin: "xiao yuan tong xue",
+        }),
+      );
+    });
+
+    // Click "录入声纹" jumps straight to VoiceprintTab with Mosaico capture
+    fireEvent.click(screen.getByRole("button", { name: "录入声纹" }));
+    await screen.findByText(/Mosaico-5BF0 本机录制/);
+    fireEvent.click(screen.getByRole("button", { name: "用 Mosaico 录第 1 句" }));
+    await screen.findByText(/第 1\/3 句采集完成/);
+
+    fireEvent.change(screen.getByLabelText("说话人 ID"), { target: { value: "spk-luke" } });
+    fireEvent.click(screen.getByRole("button", { name: "声纹注册 (Enroll)" }));
+    await waitFor(() => {
+      expect(customConsoleJson).toHaveBeenCalledWith(
+        "mosaico-1",
+        "api/v1/voice/enroll",
+        expect.objectContaining({
+          method: "POST",
+          body: expect.objectContaining({
+            speaker_id: "spk-luke",
+            embeddings: [expect.any(Array)],
+          }),
+        }),
+      );
+    });
     store.dispose();
   });
 });

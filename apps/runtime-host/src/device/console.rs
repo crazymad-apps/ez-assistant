@@ -2,7 +2,7 @@
 
 use std::net::IpAddr;
 
-use assistant_protocol::DeviceConsoleSnapshot;
+use assistant_protocol::{DeviceConsoleModeSnapshot, DeviceConsoleSnapshot};
 use thiserror::Error;
 
 use super::{
@@ -81,6 +81,7 @@ pub(super) fn to_snapshot(target: &DeviceConsoleTarget) -> DeviceConsoleSnapshot
     let direct_suffix = target.ui_path.as_deref().unwrap_or("/");
     DeviceConsoleSnapshot {
         api_prefix: target.api_prefix.clone(),
+        mode: DeviceConsoleModeSnapshot::Proxy,
         ui_path: target.ui_path.clone(),
         direct_url: Some(format!("{scheme}://{authority}{direct_suffix}")),
     }

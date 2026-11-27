@@ -8,14 +8,15 @@ import consoleStyles from "./DeviceConsole/index.module.scss";
 import { SettingsPageContainer } from "./SettingsPageContainer";
 import styles from "./index.module.scss";
 
-type ConsoleTabKey = "overview" | "fleet" | "macs" | "acls" | "voice";
+export type ConsoleTabKey = "overview" | "fleet" | "macs" | "acls" | "voice";
 
 type DeviceDetailPageProps = Readonly<{
   device: DeviceSummarySnapshot;
+  initial_tab?: ConsoleTabKey;
   on_back: () => void;
 }>;
 
-const CONSOLE_TABS: ReadonlyArray<Readonly<{ key: ConsoleTabKey; label: string }>> = [
+const PROXY_CONSOLE_TABS: ReadonlyArray<Readonly<{ key: ConsoleTabKey; label: string }>> = [
   { key: "overview", label: "概览" },
   { key: "fleet", label: "设备拓扑与指令" },
   { key: "macs", label: "MAC 白名单" },
@@ -23,14 +24,24 @@ const CONSOLE_TABS: ReadonlyArray<Readonly<{ key: ConsoleTabKey; label: string }
   { key: "voice", label: "声纹与语音" },
 ];
 
-/** 详情页只展开当前 Gateway 快照与受控控制台代理视图，不在前端持久化易失连接态。 */
+const NATIVE_CONSOLE_TABS: ReadonlyArray<Readonly<{ key: ConsoleTabKey; label: string }>> = [
+  { key: "overview", label: "概览" },
+  { key: "fleet", label: "设备控制与状态" },
+  { key: "acls", label: "ACL 权限矩阵" },
+  { key: "voice", label: "声纹与语音" },
+];
+
+/** 详情页只展开当前 Gateway 快照与受控控制台视图，不在前端持久化易失连接态。 */
 export function DeviceDetailPage(props: DeviceDetailPageProps) {
   const connection = props.device.connection;
   const consoleMeta = connection?.console ?? null;
-  const [activeTab, setActiveTab] = useState<ConsoleTabKey>("overview");
+  const isNativeConsole = consoleMeta?.mode === "native";
+  const consoleTabs = isNativeConsole ? NATIVE_CONSOLE_TABS : PROXY_CONSOLE_TABS;
+  const [activeTab, setActiveTab] = useState<ConsoleTabKey>(props.initial_tab ?? "overview");
   const [copiedDirectUrl, setCopiedDirectUrl] = useState(false);
 
-  const currentTab: ConsoleTabKey = consoleMeta ? activeTab : "overview";
+  const currentTab: ConsoleTabKey =
+    !consoleMeta || (isNativeConsole && activeTab === "macs") ? "overview" : activeTab;
 
   async function copyDirectUrl(url: string) {
     try {
@@ -50,7 +61,7 @@ export function DeviceDetailPage(props: DeviceDetailPageProps) {
     >
       {consoleMeta ? (
         <div aria-label="终端管理页签" className={consoleStyles.tabs} role="tablist">
-          {CONSOLE_TABS.map((tab) => (
+          {consoleTabs.map((tab) => (
             <button
               aria-selected={currentTab === tab.key}
               key={tab.key}
@@ -107,10 +118,14 @@ export function DeviceDetailPage(props: DeviceDetailPageProps) {
       ) : null}
 
       {currentTab === "fleet" && consoleMeta ? (
-        <FleetTab api_prefix={consoleMeta.api_prefix} device_id={props.device.device_id} />
+        <FleetTab
+          api_prefix={consoleMeta.api_prefix}
+          device_id={props.device.device_id}
+          mode={consoleMeta.mode}
+        />
       ) : null}
 
-      {currentTab === "macs" && consoleMeta ? (
+      {currentTab === "macs" && consoleMeta && !isNativeConsole ? (
         <MacWhitelistTab api_prefix={consoleMeta.api_prefix} device_id={props.device.device_id} />
       ) : null}
 
@@ -119,7 +134,12 @@ export function DeviceDetailPage(props: DeviceDetailPageProps) {
       ) : null}
 
       {currentTab === "voice" && consoleMeta ? (
-        <VoiceprintTab api_prefix={consoleMeta.api_prefix} device_id={props.device.device_id} />
+        <VoiceprintTab
+          api_prefix={consoleMeta.api_prefix}
+          device_id={props.device.device_id}
+          device_name={props.device.display_name}
+          mode={consoleMeta.mode}
+        />
       ) : null}
     </SettingsPageContainer>
   );

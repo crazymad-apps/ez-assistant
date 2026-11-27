@@ -16,17 +16,17 @@ use std::{
 };
 
 use assistant_protocol::{
-    ConfirmDevicePairingRequest, DeviceCapabilitiesSnapshot, DeviceConnectionSnapshot,
-    DeviceGatewayEvent, DeviceGatewaySnapshot, DeviceLifecycleSnapshot, DevicePairingModeSnapshot,
-    DevicePairingWindowSnapshot, DeviceSpeechServicesSnapshot, DeviceSummarySnapshot, McpServerKey,
-    OutputPreferenceSnapshot, PendingDevicePairingSnapshot, RejectDevicePairingRequest,
-    RuntimeErrorCode, RuntimeErrorInfo,
+    ConfirmDevicePairingRequest, ConnectDiscoveredDeviceRequest, DeviceCapabilitiesSnapshot,
+    DeviceConnectionSnapshot, DeviceGatewayEvent, DeviceGatewaySnapshot, DeviceLifecycleSnapshot,
+    DevicePairingModeSnapshot, DevicePairingWindowSnapshot, DeviceSpeechServicesSnapshot,
+    DeviceSummarySnapshot, DiscoveredDeviceSnapshot, McpServerKey, OutputPreferenceSnapshot,
+    PendingDevicePairingSnapshot, RejectDevicePairingRequest, RuntimeErrorCode, RuntimeErrorInfo,
 };
 use assistant_runtime::{
     AssistantRuntime, ChannelOutput, ChannelOutputDispatchError, ChannelSpeechSegment,
     DeviceDeliveryPreference, DeviceLifecycle, OutputPreference, ResolvedChannelDelivery,
 };
-use axum::{Router, routing::get};
+use axum::{Router, routing::{get, post}};
 use axum_server::{Handle as ServerHandle, tls_rustls::RustlsConfig};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use thiserror::Error;
@@ -41,16 +41,23 @@ use super::identity::{IdentityError, InstallationIdentity};
 use super::{
     console::DeviceConsoleTarget,
     dispatcher::DeviceChannelOutputDispatcher,
-    protocol::{InteractionStateChanged, SpeechAsrResult, TextOutput, preference_is_supported},
+    native_console::NativeConsoleStore,
+    protocol::{
+        DeviceCommandRequest, DeviceCommandResult, DeviceHardwareDeclaration,
+        InteractionStateChanged, SpeechAsrResult, TextOutput, VoiceprintSyncRequest,
+        preference_is_supported,
+    },
 };
 use crate::speech::{SpeechServiceError, SpeechServiceHandle};
 
 const PAIRING_WINDOW_DURATION: Duration = Duration::from_secs(5 * 60);
+const TARGETED_PAIRING_TTL: Duration = Duration::from_secs(60);
 pub(super) const MAX_PAIRING_ATTEMPTS: u8 = 5;
 const LIFECYCLE_QUEUE_CAPACITY: usize = 16;
 const CONNECTION_COMMAND_CAPACITY: usize = 32;
 const GATEWAY_EVENT_CAPACITY: usize = 32;
 const DEVICE_SERVICE_TYPE: &str = "_ez-assistant._tcp.local.";
+const DISCOVERABLE_DEVICE_SERVICE_TYPE: &str = "_ez-device._tcp.local.";
 
 /// 供 HTTP 管理入口和 Runtime 渠道分发器调用的 Gateway 轻量句柄。
 ///
@@ -79,6 +86,7 @@ pub(crate) struct DeviceGatewayService {
 pub(super) struct GatewayShared {
     pub(super) runtime: Arc<AssistantRuntime>,
     pub(super) speech: SpeechServiceHandle,
+    pub(super) native_console: Arc<NativeConsoleStore>,
     state: Mutex<GatewayState>,
     voice_turns: Mutex<
         HashMap<
@@ -97,10 +105,36 @@ pub(super) struct GatewayShared {
 struct GatewayState {
     enabled: bool,
     available: bool,
+    active_port: Option<u16>,
+    active_mcp_port: Option<u16>,
+    active_mcp_token: Option<String>,
     identity: Option<Arc<InstallationIdentity>>,
     pairing_window_expires_at_ms: Option<i64>,
     pending_pairings: HashMap<String, PendingPairing>,
+    discovered_devices: HashMap<String, DiscoveredDeviceRecord>,
+    targeted_auto_approves: HashMap<String, TargetedAutoApprove>,
     connections: HashMap<assistant_protocol::DeviceId, ActiveConnection>,
+}
+
+/// 局域网 mDNS 浏览发现的未配对终端记录。
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DiscoveredDeviceRecord {
+    discovery_id: String,
+    display_name: String,
+    model: String,
+    peer_ip: IpAddr,
+    control_port: u16,
+    key_fingerprint: String,
+    firmware_version: Option<String>,
+    mac_address: Option<String>,
+}
+
+/// 点击「连接」后授予特定密钥指纹 + IP 的一次性 60 秒自动配对许可。
+#[derive(Clone, Debug)]
+struct TargetedAutoApprove {
+    peer_ip: IpAddr,
+    display_name: Option<String>,
+    expires_at_ms: i64,
 }
 
 /// 等待 Desktop 确认（输入配对码或一键确认）的候选设备及其一次性决策通道。
@@ -154,6 +188,8 @@ struct ActiveConnection {
     client_version: Option<String>,
     mcp_server_keys: Vec<McpServerKey>,
     console: Option<DeviceConsoleTarget>,
+    hardware: Option<DeviceHardwareDeclaration>,
+    active_speaker_role: i32,
     speech_relay: bool,
     command: mpsc::Sender<ConnectionCommand>,
 }
@@ -176,6 +212,15 @@ pub(super) enum ConnectionCommand {
         request_id: String,
         stream_id: u32,
         result: Result<Arc<[u8]>, SpeechServiceError>,
+    },
+    ExecuteDeviceCommand {
+        request: DeviceCommandRequest,
+        response: oneshot::Sender<DeviceCommandResult>,
+    },
+    SyncVoiceprints(VoiceprintSyncRequest),
+    SyncWakeConfig {
+        request: super::protocol::WakeConfigSyncRequest,
+        response: Option<oneshot::Sender<super::protocol::WakeConfigAck>>,
     },
 }
 
@@ -219,6 +264,8 @@ enum LifecycleCommand {
 struct ActiveGateway {
     server_handle: ServerHandle<SocketAddr>,
     server_task: JoinHandle<Result<(), std::io::Error>>,
+    mcp_server_handle: ServerHandle<SocketAddr>,
+    mcp_server_task: JoinHandle<Result<(), std::io::Error>>,
     mdns: ServiceDaemon,
     service_fullname: String,
     port: u16,
@@ -233,9 +280,11 @@ impl DeviceGatewayService {
     ) -> (Self, DeviceGatewayHandle) {
         let (lifecycle_tx, lifecycle_rx) = mpsc::channel(LIFECYCLE_QUEUE_CAPACITY);
         let (event_tx, _) = broadcast::channel(GATEWAY_EVENT_CAPACITY);
+        let native_console = Arc::new(NativeConsoleStore::load_or_default(&runtime_home));
         let shared = Arc::new(GatewayShared {
             runtime,
             speech,
+            native_console,
             events: event_tx,
             voice_turns: Mutex::new(HashMap::new()),
             mcp_locks: Mutex::new(HashMap::new()),
@@ -245,9 +294,14 @@ impl DeviceGatewayService {
             state: Mutex::new(GatewayState {
                 enabled: false,
                 available: false,
+                active_port: None,
+                active_mcp_port: None,
+                active_mcp_token: None,
                 identity: None,
                 pairing_window_expires_at_ms: None,
                 pending_pairings: HashMap::new(),
+                discovered_devices: HashMap::new(),
+                targeted_auto_approves: HashMap::new(),
                 connections: HashMap::new(),
             }),
         });
@@ -275,6 +329,18 @@ impl DeviceGatewayService {
         let mut speech_status_open = true;
         let mut pairing_expiry = interval(Duration::from_secs(1));
         pairing_expiry.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let (browser_mdns, mut browser_rx) = match ServiceDaemon::new().and_then(|daemon| {
+            daemon
+                .browse(DISCOVERABLE_DEVICE_SERVICE_TYPE)
+                .map(|rx| (daemon, rx))
+        }) {
+            Ok((daemon, rx)) => (Some(daemon), Some(rx)),
+            Err(error) => {
+                eprintln!("runtime-host: discovered-device mDNS browser unavailable: {error}");
+                (None, None)
+            }
+        };
+        let mut result = Ok(());
         loop {
             tokio::select! {
                 () = shutdown.cancelled() => break,
@@ -284,7 +350,7 @@ impl DeviceGatewayService {
                     };
                     match command {
                         LifecycleCommand::SetEnabled { enabled, response } => {
-                            let result = if enabled {
+                            let res = if enabled {
                                 if active.is_none() {
                                     self.start_gateway().await.map(|started| active = Some(started))
                                 } else {
@@ -297,7 +363,7 @@ impl DeviceGatewayService {
                                 self.mark_disabled().await;
                                 Ok(())
                             };
-                            let _ = response.send(result);
+                            let _ = response.send(res);
                         }
                         LifecycleCommand::RefreshDiscovery => {
                             if let Some(started) = active.as_mut()
@@ -308,6 +374,12 @@ impl DeviceGatewayService {
                                 eprintln!("runtime-host: device discovery degraded: {error}");
                             }
                         }
+                    }
+                }
+                browser_event = recv_browser_event(&mut browser_rx), if browser_rx.is_some() => {
+                    match browser_event {
+                        Some(event) => self.handle_discovery_event(event).await,
+                        None => browser_rx = None,
                     }
                 }
                 _ = pairing_expiry.tick() => {
@@ -335,21 +407,26 @@ impl DeviceGatewayService {
                     }
                     self.shared.notify_changed();
                 }
-                result = wait_server(&mut active), if active.is_some() => {
-                    let error = result.unwrap_or_else(|| "device listener stopped".to_owned());
+                wait_res = wait_server(&mut active), if active.is_some() => {
+                    let error = wait_res.unwrap_or_else(|| "device listener stopped".to_owned());
                     if let Some(started) = active.take() {
                         self.cleanup_stopped_gateway(started).await;
                     }
                     self.shared.state.lock().await.available = false;
-                    return Err(DeviceGatewayError::Listener(error));
+                    self.shared.state.lock().await.active_port = None;
+                    result = Err(DeviceGatewayError::Listener(error));
+                    break;
                 }
             }
+        }
+        if let Some(daemon) = browser_mdns {
+            let _ = daemon.shutdown();
         }
         if let Some(started) = active.take() {
             self.stop_gateway(started).await;
         }
         self.mark_disabled().await;
-        Ok(())
+        result
     }
 
     async fn start_gateway(&self) -> Result<ActiveGateway, DeviceGatewayError> {
@@ -395,10 +472,36 @@ impl DeviceGatewayService {
                 return Err(error);
             }
         };
+        let mcp_listener =
+            std::net::TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+                .map_err(DeviceGatewayError::Bind)?;
+        mcp_listener
+            .set_nonblocking(true)
+            .map_err(DeviceGatewayError::Bind)?;
+        let mcp_port = mcp_listener
+            .local_addr()
+            .map_err(DeviceGatewayError::Bind)?
+            .port();
+        let mcp_token = super::crypto::random_token(32).map_err(|_| {
+            DeviceGatewayError::Listener("failed to generate loopback MCP token".to_owned())
+        })?;
+        let mcp_router = Router::new()
+            .route(
+                "/mcp/{device_id}",
+                post(super::native_console::handle_mcp_http_request),
+            )
+            .with_state(self.shared.clone());
+        let mcp_server_handle = ServerHandle::new();
+        let mcp_server = axum_server::from_tcp(mcp_listener)
+            .map_err(DeviceGatewayError::Bind)?
+            .handle(mcp_server_handle.clone());
         {
             let mut state = self.shared.state.lock().await;
             state.enabled = true;
             state.available = true;
+            state.active_port = Some(port);
+            state.active_mcp_port = Some(mcp_port);
+            state.active_mcp_token = Some(mcp_token);
             state.identity = Some(identity);
         }
         self.shared.notify_changed();
@@ -407,9 +510,16 @@ impl DeviceGatewayService {
                 .serve(router.into_make_service_with_connect_info::<SocketAddr>())
                 .await
         });
+        let mcp_server_task = tokio::spawn(async move {
+            mcp_server
+                .serve(mcp_router.into_make_service())
+                .await
+        });
         Ok(ActiveGateway {
             server_handle,
             server_task,
+            mcp_server_handle,
+            mcp_server_task,
             mdns,
             service_fullname,
             port,
@@ -423,7 +533,11 @@ impl DeviceGatewayService {
         active
             .server_handle
             .graceful_shutdown(Some(Duration::from_secs(5)));
+        active
+            .mcp_server_handle
+            .graceful_shutdown(Some(Duration::from_secs(2)));
         let _ = active.server_task.await;
+        let _ = active.mcp_server_task.await;
         self.stop_recognition_tasks().await;
         self.stop_mcp_tasks(disconnected).await;
     }
@@ -432,6 +546,10 @@ impl DeviceGatewayService {
         let disconnected = self.disconnect_all().await;
         let _ = active.mdns.unregister(&active.service_fullname);
         let _ = active.mdns.shutdown();
+        active
+            .mcp_server_handle
+            .graceful_shutdown(Some(Duration::from_secs(2)));
+        let _ = active.mcp_server_task.await;
         self.stop_recognition_tasks().await;
         self.stop_mcp_tasks(disconnected).await;
     }
@@ -553,10 +671,58 @@ impl DeviceGatewayService {
         let mut state = self.shared.state.lock().await;
         state.enabled = false;
         state.available = false;
+        state.active_port = None;
+        state.active_mcp_port = None;
+        state.active_mcp_token = None;
         state.pairing_window_expires_at_ms = None;
         state.pending_pairings.clear();
+        state.targeted_auto_approves.clear();
         drop(state);
         self.shared.notify_changed();
+    }
+
+    async fn handle_discovery_event(&self, event: mdns_sd::ServiceEvent) {
+        match event {
+            mdns_sd::ServiceEvent::ServiceResolved(info) => {
+                let fullname = info.get_fullname().to_owned();
+                let mut state = self.shared.state.lock().await;
+                let changed = if let Some(record) = parse_discovered_record(&info) {
+                    let same = state
+                        .discovered_devices
+                        .get(&fullname)
+                        .is_some_and(|existing| *existing == record);
+                    if same {
+                        false
+                    } else {
+                        state.discovered_devices.insert(fullname, record);
+                        true
+                    }
+                } else {
+                    state.discovered_devices.remove(&fullname).is_some()
+                };
+                drop(state);
+                if changed {
+                    self.shared.notify_changed();
+                }
+            }
+            mdns_sd::ServiceEvent::ServiceRemoved(_, fullname) => {
+                let removed = self
+                    .shared
+                    .state
+                    .lock()
+                    .await
+                    .discovered_devices
+                    .remove(&fullname)
+                    .is_some();
+                if removed {
+                    self.shared.notify_changed();
+                }
+            }
+            mdns_sd::ServiceEvent::SearchStarted(_)
+            | mdns_sd::ServiceEvent::ServiceFound(_, _)
+            | mdns_sd::ServiceEvent::SearchStopped(_)
+            | _ => {}
+        }
     }
 }
 
@@ -673,6 +839,83 @@ impl DeviceGatewayHandle {
         Ok(())
     }
 
+    pub(crate) async fn connect_discovered_device(
+        &self,
+        request: ConnectDiscoveredDeviceRequest,
+    ) -> Result<(), DeviceGatewayError> {
+        let now = now_ms()?;
+        let discovered = {
+            let state = self.shared.state.lock().await;
+            state
+                .discovered_devices
+                .get(&request.discovery_id)
+                .cloned()
+                .ok_or(DeviceGatewayError::PairingNotFound)?
+        };
+
+        let needs_enable = {
+            let state = self.shared.state.lock().await;
+            !state.enabled || !state.available
+        };
+        if needs_enable {
+            self.set_enabled(true).await?;
+        }
+
+        let target_expires_at = now
+            .checked_add(i64::try_from(TARGETED_PAIRING_TTL.as_millis()).unwrap_or(i64::MAX))
+            .ok_or(DeviceGatewayError::Clock)?;
+        let (identity, port) = {
+            let mut state = self.shared.state.lock().await;
+            if !state.enabled || !state.available {
+                return Err(DeviceGatewayError::Unavailable);
+            }
+            let identity = state
+                .identity
+                .clone()
+                .ok_or(DeviceGatewayError::Unavailable)?;
+            let port = state.active_port.ok_or(DeviceGatewayError::Unavailable)?;
+            let current_window = state.pairing_window_expires_at_ms.unwrap_or(0);
+            state.pairing_window_expires_at_ms = Some(current_window.max(target_expires_at));
+            let preferred_name = request
+                .display_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .or_else(|| Some(discovered.display_name.clone()));
+            state.targeted_auto_approves.insert(
+                discovered.key_fingerprint.clone(),
+                TargetedAutoApprove {
+                    peer_ip: discovered.peer_ip,
+                    display_name: preferred_name,
+                    expires_at_ms: target_expires_at,
+                },
+            );
+            (identity, port)
+        };
+        self.shared.notify_changed();
+        let _ = self.lifecycle.try_send(LifecycleCommand::RefreshDiscovery);
+
+        let local_host = resolve_local_ip_for_peer(discovered.peer_ip).map(|ip| ip.to_string());
+        let nudge_url = match discovered.peer_ip {
+            IpAddr::V4(ipv4) => format!("http://{ipv4}:{}/ez/connect", discovered.control_port),
+            IpAddr::V6(ipv6) => format!("http://[{ipv6}]:{}/ez/connect", discovered.control_port),
+        };
+        let payload = serde_json::json!({
+            "host": local_host.unwrap_or_default(),
+            "port": port,
+            "path": "/device",
+            "installation_id": identity.installation_id,
+            "certificate_fingerprint": identity.certificate_fingerprint,
+        });
+        if let Err(error) = send_connect_nudge(&nudge_url, &payload).await {
+            eprintln!(
+                "runtime-host: device HTTP connect nudge failed (mDNS fallback stays active): url={nudge_url} error={error}"
+            );
+        }
+        Ok(())
+    }
+
     pub(crate) async fn snapshot(&self) -> Result<DeviceGatewaySnapshot, DeviceGatewayError> {
         let now = now_ms()?;
         let devices = self
@@ -680,6 +923,11 @@ impl DeviceGatewayHandle {
             .runtime
             .registered_devices()
             .map_err(DeviceGatewayError::Runtime)?;
+        let paired_fingerprints = devices
+            .iter()
+            .filter(|device| device.lifecycle == DeviceLifecycle::Paired)
+            .map(|device| super::crypto::public_key_fingerprint(device.public_key.as_bytes()))
+            .collect::<std::collections::HashSet<_>>();
         let mut state = self.shared.state.lock().await;
         prune_expired(&mut state, now);
         let mut summaries = devices
@@ -693,7 +941,16 @@ impl DeviceGatewayHandle {
                         peer_address: connection.peer_address.clone(),
                         client_version: connection.client_version.clone(),
                         mcp_server_keys: connection.mcp_server_keys.clone(),
-                        console: connection.console.as_ref().map(super::console::to_snapshot),
+                        console: connection
+                            .console
+                            .as_ref()
+                            .map(super::console::to_snapshot)
+                            .or_else(|| {
+                                connection
+                                    .hardware
+                                    .as_ref()
+                                    .map(|_| super::native_console::native_console_snapshot())
+                            }),
                         speech_relay: connection.speech_relay,
                     }
                 }),
@@ -728,6 +985,26 @@ impl DeviceGatewayHandle {
             .collect::<Vec<_>>();
         pending_pairings
             .sort_by(|left, right| left.pairing_request_id.cmp(&right.pairing_request_id));
+        let mut discovered_devices = state
+            .discovered_devices
+            .values()
+            .filter(|record| !paired_fingerprints.contains(&record.key_fingerprint))
+            .map(|record| DiscoveredDeviceSnapshot {
+                discovery_id: record.discovery_id.clone(),
+                display_name: record.display_name.clone(),
+                model: record.model.clone(),
+                peer_address: record.peer_ip.to_string(),
+                control_port: record.control_port,
+                key_fingerprint: record.key_fingerprint.clone(),
+                firmware_version: record.firmware_version.clone(),
+                mac_address: record.mac_address.clone(),
+            })
+            .collect::<Vec<_>>();
+        discovered_devices.sort_by(|left, right| {
+            left.display_name
+                .cmp(&right.display_name)
+                .then_with(|| left.discovery_id.cmp(&right.discovery_id))
+        });
         Ok(DeviceGatewaySnapshot {
             enabled: state.enabled,
             available: state.available,
@@ -745,6 +1022,7 @@ impl DeviceGatewayHandle {
                 .pairing_window_expires_at_ms
                 .map(|expires_at_ms| DevicePairingWindowSnapshot { expires_at_ms }),
             pending_pairings,
+            discovered_devices,
             devices: summaries,
             speech_services: self.shared.speech.status(),
         })
@@ -791,12 +1069,77 @@ impl DeviceGatewayHandle {
             .and_then(|connection| connection.console.clone())
     }
 
+    pub(crate) async fn has_native_console(
+        &self,
+        device_id: &assistant_protocol::DeviceId,
+    ) -> bool {
+        self.shared
+            .state
+            .lock()
+            .await
+            .connections
+            .get(device_id)
+            .is_some_and(|connection| connection.console.is_none() && connection.hardware.is_some())
+    }
+
+    pub(crate) async fn handle_native_console(
+        &self,
+        device_id: &assistant_protocol::DeviceId,
+        relative_path: &str,
+        method: axum::http::Method,
+        body: axum::body::Bytes,
+        speech: &SpeechServiceHandle,
+    ) -> axum::response::Response {
+        super::native_console::handle_native_console_request(
+            &self.shared,
+            device_id,
+            relative_path,
+            method,
+            body,
+            speech,
+        )
+        .await
+    }
+
     #[cfg(test)]
-    pub(super) async fn seed_test_identity(&self, identity: Arc<InstallationIdentity>) {
+    pub(super) async fn seed_test_identity(&self, identity: Arc<InstallationIdentity>, port: u16) {
         let mut state = self.shared.state.lock().await;
         state.enabled = true;
         state.available = true;
+        state.active_port = Some(port);
         state.identity = Some(identity);
+    }
+
+    #[cfg(test)]
+    pub(super) async fn seed_test_mcp_endpoint(&self, port: u16, token: String) {
+        let mut state = self.shared.state.lock().await;
+        state.active_mcp_port = Some(port);
+        state.active_mcp_token = Some(token);
+    }
+
+    #[cfg(test)]
+    pub(super) async fn seed_test_discovered_device(
+        &self,
+        discovery_id: &str,
+        display_name: &str,
+        peer_ip: IpAddr,
+        control_port: u16,
+        key_fingerprint: &str,
+    ) {
+        let mut state = self.shared.state.lock().await;
+        state.discovered_devices.insert(
+            discovery_id.to_owned(),
+            DiscoveredDeviceRecord {
+                discovery_id: discovery_id.to_owned(),
+                display_name: display_name.to_owned(),
+                model: "esp32s31-mosaico".to_owned(),
+                peer_ip,
+                control_port,
+                key_fingerprint: key_fingerprint.to_owned(),
+                firmware_version: Some("0.3.0".to_owned()),
+                mac_address: Some("30:ed:a0:f4:5b:f0".to_owned()),
+            },
+        );
     }
 
     #[cfg(test)]
@@ -863,6 +1206,29 @@ impl GatewayShared {
             .pairing_window_expires_at_ms
             .filter(|expires_at| *expires_at > now)
             .ok_or(DeviceGatewayError::PairingNotOpen)?;
+        let targeted_approval = if registration.mode == DevicePairingModeSnapshot::DirectConfirm
+            && let Some(fingerprint) = registration.key_fingerprint.as_deref()
+            && let Some(targeted) = state.targeted_auto_approves.get(fingerprint)
+            && targeted.expires_at_ms > now
+            && registration.peer_address.as_deref().is_some_and(|addr| {
+                addr.parse::<IpAddr>()
+                    .ok()
+                    .is_some_and(|ip| ip.to_canonical() == targeted.peer_ip.to_canonical())
+            }) {
+            state.targeted_auto_approves.remove(fingerprint)
+        } else {
+            None
+        };
+        if let Some(targeted) = targeted_approval {
+            let preferred_name = targeted
+                .display_name
+                .or_else(|| Some(registration.display_name.clone()));
+            drop(state);
+            let _ = registration.decision.try_send(PairingDecision::ApproveDirect {
+                display_name: preferred_name,
+            });
+            return Ok((window_expires, token));
+        }
         let request_id = registration.request_id.clone();
         let reuse_existing = state
             .pending_pairings
@@ -909,6 +1275,19 @@ impl GatewayShared {
         Ok((expires_at_ms, token))
     }
 
+    pub(super) async fn remove_discovered_by_fingerprint(&self, fingerprint: &str) {
+        let mut state = self.state.lock().await;
+        let before = state.discovered_devices.len();
+        state
+            .discovered_devices
+            .retain(|_, record| !record.key_fingerprint.eq_ignore_ascii_case(fingerprint));
+        let changed = state.discovered_devices.len() != before;
+        drop(state);
+        if changed {
+            self.notify_changed();
+        }
+    }
+
     pub(super) async fn remove_pending_if_token(&self, request_id: &str, token: u64) {
         let mut state = self.state.lock().await;
         let should_remove = state
@@ -924,7 +1303,7 @@ impl GatewayShared {
 
     #[expect(
         clippy::too_many_arguments,
-        reason = "connection registration records identity, capabilities, metadata, console target, and MCP keys atomically"
+        reason = "connection registration records identity, capabilities, metadata, console target, hardware profile, and MCP keys atomically"
     )]
     pub(super) async fn register_connection(
         &self,
@@ -936,6 +1315,7 @@ impl GatewayShared {
         client_version: Option<String>,
         mcp_server_keys: Vec<McpServerKey>,
         console: Option<DeviceConsoleTarget>,
+        hardware: Option<DeviceHardwareDeclaration>,
         speech_relay: bool,
     ) -> mpsc::Receiver<ConnectionCommand> {
         let (command_tx, command_rx) = mpsc::channel(CONNECTION_COMMAND_CAPACITY);
@@ -950,6 +1330,8 @@ impl GatewayShared {
                 client_version,
                 mcp_server_keys,
                 console,
+                hardware,
+                active_speaker_role: 1,
                 speech_relay,
                 command: command_tx,
             },
@@ -967,13 +1349,229 @@ impl GatewayShared {
             state
                 .connections
                 .values()
-                .filter(|connection| connection.speech_relay)
                 .map(|connection| connection.command.clone())
                 .collect::<Vec<_>>()
         };
         for sender in senders {
             let _ = sender.try_send(ConnectionCommand::SpeechStatusChanged(status));
         }
+    }
+
+    pub(super) async fn update_capabilities(
+        &self,
+        device_id: &assistant_protocol::DeviceId,
+        connection_id: &str,
+        capabilities: DeviceCapabilitiesSnapshot,
+    ) {
+        let changed = {
+            let mut state = self.state.lock().await;
+            if let Some(connection) = state.connections.get_mut(device_id)
+                && connection.connection_id == connection_id
+                && connection.capabilities != capabilities
+            {
+                connection.capabilities = capabilities;
+                true
+            } else {
+                false
+            }
+        };
+        if changed {
+            self.notify_changed();
+        }
+    }
+
+    pub(super) async fn active_mcp_endpoint(&self) -> Option<(u16, String)> {
+        let state = self.state.lock().await;
+        match (state.active_mcp_port, state.active_mcp_token.as_ref()) {
+            (Some(port), Some(token)) => Some((port, token.clone())),
+            _ => None,
+        }
+    }
+
+    pub(super) async fn active_mcp_token(&self) -> Option<String> {
+        self.state.lock().await.active_mcp_token.clone()
+    }
+
+    pub(super) async fn native_hardware(
+        &self,
+        device_id: &assistant_protocol::DeviceId,
+    ) -> Option<DeviceHardwareDeclaration> {
+        self.state
+            .lock()
+            .await
+            .connections
+            .get(device_id)
+            .and_then(|connection| connection.hardware.clone())
+    }
+
+    pub(super) async fn update_hardware_vp_version(
+        &self,
+        device_id: &assistant_protocol::DeviceId,
+        connection_id: &str,
+        vp_version: u64,
+    ) {
+        let mut state = self.state.lock().await;
+        if let Some(connection) = state.connections.get_mut(device_id)
+            && connection.connection_id == connection_id
+            && let Some(hw) = connection.hardware.as_mut()
+        {
+            hw.vp_version = vp_version;
+        }
+    }
+
+    pub(super) async fn update_hardware_wake_config(
+        &self,
+        device_id: &assistant_protocol::DeviceId,
+        connection_id: &str,
+        config: super::protocol::DeviceWakeConfig,
+    ) {
+        let mut state = self.state.lock().await;
+        if let Some(connection) = state.connections.get_mut(device_id)
+            && connection.connection_id == connection_id
+            && let Some(hw) = connection.hardware.as_mut()
+        {
+            hw.wake_config = Some(config);
+        }
+    }
+
+    pub(super) async fn set_active_speaker_role(
+        &self,
+        device_id: &assistant_protocol::DeviceId,
+        connection_id: &str,
+        speaker_role: i32,
+    ) {
+        let mut state = self.state.lock().await;
+        if let Some(connection) = state.connections.get_mut(device_id)
+            && connection.connection_id == connection_id
+        {
+            connection.active_speaker_role = speaker_role.clamp(1, 3);
+        }
+    }
+
+    pub(super) async fn active_speaker_role(
+        &self,
+        device_id: &assistant_protocol::DeviceId,
+    ) -> i32 {
+        self.state
+            .lock()
+            .await
+            .connections
+            .get(device_id)
+            .map_or(1, |connection| connection.active_speaker_role)
+    }
+
+    pub(super) async fn sync_wake_config(
+        &self,
+        device_id: &assistant_protocol::DeviceId,
+        request: super::protocol::WakeConfigSyncRequest,
+        timeout_duration: Duration,
+    ) -> Result<super::protocol::WakeConfigAck, String> {
+        let sender = {
+            let state = self.state.lock().await;
+            state
+                .connections
+                .get(device_id)
+                .filter(|connection| connection.hardware.is_some())
+                .map(|connection| connection.command.clone())
+        }
+        .ok_or_else(|| "目标直连终端当前离线。".to_owned())?;
+
+        let (tx, rx) = oneshot::channel();
+        sender
+            .send(ConnectionCommand::SyncWakeConfig {
+                request,
+                response: Some(tx),
+            })
+            .await
+            .map_err(|_| "向终端发送唤醒配置失败，连接可能已断开。".to_owned())?;
+
+        match tokio::time::timeout(timeout_duration, rx).await {
+            Ok(Ok(ack)) => Ok(ack),
+            Ok(Err(_)) => Err("终端连接已中断，未收到唤醒配置回执。".to_owned()),
+            Err(_) => Err("等待终端应用唤醒配置超时。".to_owned()),
+        }
+    }
+
+    pub(super) async fn broadcast_wake_config_sync(
+        &self,
+        request: super::protocol::WakeConfigSyncRequest,
+    ) -> usize {
+        let senders = {
+            let state = self.state.lock().await;
+            state
+                .connections
+                .values()
+                .filter(|connection| connection.hardware.is_some())
+                .map(|connection| connection.command.clone())
+                .collect::<Vec<_>>()
+        };
+        let mut count = 0;
+        for sender in senders {
+            if sender
+                .try_send(ConnectionCommand::SyncWakeConfig {
+                    request: request.clone(),
+                    response: None,
+                })
+                .is_ok()
+            {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    pub(super) async fn execute_device_command(
+        &self,
+        device_id: &assistant_protocol::DeviceId,
+        request: DeviceCommandRequest,
+        timeout_duration: Duration,
+    ) -> Result<DeviceCommandResult, String> {
+        let sender = {
+            let state = self.state.lock().await;
+            state
+                .connections
+                .get(device_id)
+                .filter(|connection| connection.hardware.is_some())
+                .map(|connection| connection.command.clone())
+        }
+        .ok_or_else(|| "目标直连终端当前离线。".to_owned())?;
+
+        let (tx, rx) = oneshot::channel();
+        sender
+            .send(ConnectionCommand::ExecuteDeviceCommand {
+                request,
+                response: tx,
+            })
+            .await
+            .map_err(|_| "向终端发送指令失败，连接可能已断开。".to_owned())?;
+
+        match tokio::time::timeout(timeout_duration, rx).await {
+            Ok(Ok(result)) => Ok(result),
+            Ok(Err(_)) => Err("终端连接已中断，未收到指令执行回执。".to_owned()),
+            Err(_) => Err("等待终端执行指令超时。".to_owned()),
+        }
+    }
+
+    pub(super) async fn broadcast_voiceprint_sync(&self, request: VoiceprintSyncRequest) -> usize {
+        let senders = {
+            let state = self.state.lock().await;
+            state
+                .connections
+                .values()
+                .filter(|connection| connection.hardware.is_some())
+                .map(|connection| connection.command.clone())
+                .collect::<Vec<_>>()
+        };
+        let mut count = 0;
+        for sender in senders {
+            if sender
+                .try_send(ConnectionCommand::SyncVoiceprints(request.clone()))
+                .is_ok()
+            {
+                count += 1;
+            }
+        }
+        count
     }
 
     pub(super) async fn send_connection_command(
@@ -1058,7 +1656,7 @@ impl GatewayShared {
         }
     }
 
-    fn notify_changed(&self) {
+    pub(super) fn notify_changed(&self) {
         let _ = self.events.send(DeviceGatewayEvent::Changed);
     }
 
@@ -1347,6 +1945,9 @@ fn output_preference_to_snapshot(preference: OutputPreference) -> OutputPreferen
 }
 
 fn prune_expired(state: &mut GatewayState, now: i64) -> bool {
+    state
+        .targeted_auto_approves
+        .retain(|_, targeted| targeted.expires_at_ms > now);
     if state
         .pairing_window_expires_at_ms
         .is_some_and(|expires_at| expires_at <= now)
@@ -1360,6 +1961,151 @@ fn prune_expired(state: &mut GatewayState, now: i64) -> bool {
             .retain(|_, pending| pending.expires_at_ms > now && pending.remaining_attempts > 0);
         false
     }
+}
+
+async fn recv_browser_event(
+    rx: &mut Option<mdns_sd::Receiver<mdns_sd::ServiceEvent>>,
+) -> Option<mdns_sd::ServiceEvent> {
+    let receiver = rx.as_ref()?;
+    receiver.recv_async().await.ok()
+}
+
+fn is_valid_key_fingerprint(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 9
+        && bytes[4] == b'-'
+        && bytes[..4].iter().all(|byte| byte.is_ascii_hexdigit())
+        && bytes[5..].iter().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn select_preferred_discovered_ip(info: &mdns_sd::ResolvedService) -> Option<IpAddr> {
+    let v4_addrs = info.get_addresses_v4();
+    let best_ipv4 = v4_addrs
+        .iter()
+        .copied()
+        .find(|ip| !ip.is_loopback() && !ip.is_link_local() && !ip.is_unspecified())
+        .or_else(|| v4_addrs.iter().copied().next());
+    match best_ipv4 {
+        Some(ip) => Some(IpAddr::V4(ip)),
+        None => info
+            .get_addresses()
+            .iter()
+            .map(|scoped| scoped.to_ip_addr().to_canonical())
+            .find(|ip| !ip.is_loopback() && !ip.is_unspecified()),
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "pure field parser tested directly without mocking non_exhaustive ResolvedService"
+)]
+fn parse_discovered_fields(
+    fullname: &str,
+    control_port: u16,
+    peer_ip: IpAddr,
+    paired: Option<&str>,
+    pk_fp: Option<&str>,
+    name: Option<&str>,
+    model: Option<&str>,
+    fw: Option<&str>,
+    mac: Option<&str>,
+) -> Option<DiscoveredDeviceRecord> {
+    if control_port == 0 {
+        return None;
+    }
+    if paired.map(str::trim) == Some("1") {
+        return None;
+    }
+    let raw_fp = pk_fp?.trim();
+    if !is_valid_key_fingerprint(raw_fp) {
+        return None;
+    }
+    let key_fingerprint = raw_fp.to_ascii_uppercase();
+
+    let fallback_name = fullname
+        .strip_suffix(&format!(".{DISCOVERABLE_DEVICE_SERVICE_TYPE}"))
+        .unwrap_or(fullname)
+        .trim()
+        .to_owned();
+    let display_name = name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            if fallback_name.is_empty() {
+                "ESP-Mosaico".to_owned()
+            } else {
+                fallback_name
+            }
+        });
+    let model = model
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("esp32s31-mosaico")
+        .to_owned();
+    let firmware_version = fw
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let mac_address = mac
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+
+    Some(DiscoveredDeviceRecord {
+        discovery_id: fullname.to_owned(),
+        display_name,
+        model,
+        peer_ip,
+        control_port,
+        key_fingerprint,
+        firmware_version,
+        mac_address,
+    })
+}
+
+fn parse_discovered_record(info: &mdns_sd::ResolvedService) -> Option<DiscoveredDeviceRecord> {
+    let peer_ip = select_preferred_discovered_ip(info)?;
+    let props = info.get_properties();
+    parse_discovered_fields(
+        info.get_fullname(),
+        info.get_port(),
+        peer_ip,
+        props.get_property_val_str("paired"),
+        props.get_property_val_str("pk_fp"),
+        props.get_property_val_str("name"),
+        props.get_property_val_str("model"),
+        props.get_property_val_str("fw"),
+        props.get_property_val_str("mac"),
+    )
+}
+
+fn resolve_local_ip_for_peer(peer: IpAddr) -> Option<IpAddr> {
+    let bind_addr = match peer {
+        IpAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+        IpAddr::V6(_) => SocketAddr::new(IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), 0),
+    };
+    let socket = std::net::UdpSocket::bind(bind_addr).ok()?;
+    socket.connect(SocketAddr::new(peer, 80)).ok()?;
+    socket.local_addr().ok().map(|addr| addr.ip().to_canonical())
+}
+
+async fn send_connect_nudge(url: &str, payload: &serde_json::Value) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let response = client
+        .post(url)
+        .json(payload)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("HTTP {}", response.status()));
+    }
+    Ok(())
 }
 
 async fn wait_server(active: &mut Option<ActiveGateway>) -> Option<String> {
@@ -1476,6 +2222,68 @@ mod tests {
                 DeviceDeliveryPreference::Preset,
             ),
             OutputPreference::Audio
+        );
+    }
+
+    #[test]
+    fn discovered_key_fingerprint_validation_accepts_only_xxxx_xxxx_hex() {
+        assert!(is_valid_key_fingerprint("1A2B-3C4D"));
+        assert!(is_valid_key_fingerprint("1a2b-3c4d"));
+        assert!(!is_valid_key_fingerprint("1A2B3C4D"));
+        assert!(!is_valid_key_fingerprint("1A2B-3C4G"));
+        assert!(!is_valid_key_fingerprint(""));
+    }
+
+    #[test]
+    fn parse_discovered_fields_filters_paired_invalid_and_normalizes_fingerprint() {
+        let record = parse_discovered_fields(
+            "Mosaico-5BF0._ez-device._tcp.local.",
+            8765,
+            IpAddr::V4(Ipv4Addr::new(192, 168, 110, 88)),
+            Some("0"),
+            Some("a1b2-c3d4"),
+            Some("Mosaico-5BF0"),
+            Some("esp32s31-mosaico"),
+            Some("0.3.0"),
+            Some("30:ed:a0:f4:5b:f0"),
+        )
+        .expect("valid unpaired device");
+        assert_eq!(record.discovery_id, "Mosaico-5BF0._ez-device._tcp.local.");
+        assert_eq!(record.display_name, "Mosaico-5BF0");
+        assert_eq!(record.peer_ip, IpAddr::V4(Ipv4Addr::new(192, 168, 110, 88)));
+        assert_eq!(record.control_port, 8765);
+        assert_eq!(record.key_fingerprint, "A1B2-C3D4");
+        assert_eq!(record.model, "esp32s31-mosaico");
+        assert_eq!(record.firmware_version.as_deref(), Some("0.3.0"));
+        assert_eq!(record.mac_address.as_deref(), Some("30:ed:a0:f4:5b:f0"));
+
+        assert!(
+            parse_discovered_fields(
+                "Mosaico-5BF0._ez-device._tcp.local.",
+                8765,
+                IpAddr::V4(Ipv4Addr::new(192, 168, 110, 88)),
+                Some("1"),
+                Some("A1B2-C3D4"),
+                None,
+                None,
+                None,
+                None,
+            )
+            .is_none()
+        );
+        assert!(
+            parse_discovered_fields(
+                "Mosaico-5BF0._ez-device._tcp.local.",
+                8765,
+                IpAddr::V4(Ipv4Addr::new(192, 168, 110, 88)),
+                Some("0"),
+                Some("invalid"),
+                None,
+                None,
+                None,
+                None,
+            )
+            .is_none()
         );
     }
 }
