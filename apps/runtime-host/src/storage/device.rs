@@ -130,6 +130,33 @@ impl StorageEngine {
                     revoked_at_ms,
                 });
             }
+            // 硬件终端使用持久化 Ed25519 密钥对：解除配对后由用户显式重新配对时，原地重新激活原身份。
+            if lifecycle == "revoked" && public_key.as_slice() == device.public_key.as_bytes() {
+                self.connection
+                    .execute(
+                        "UPDATE devices
+                         SET display_name = ?1, lifecycle = 'paired',
+                             paired_at_ms = ?2, updated_at_ms = ?2, revoked_at_ms = NULL
+                         WHERE device_id = ?3 AND lifecycle = 'revoked'",
+                        params![
+                            device.display_name,
+                            device.paired_at_ms,
+                            device.device_id.as_str(),
+                        ],
+                    )
+                    .map_err(|source| {
+                        database_write_error("revoked device could not be reactivated", source)
+                    })?;
+                return Ok(PairedDevice {
+                    device_id: device.device_id,
+                    display_name: device.display_name,
+                    public_key: device.public_key,
+                    lifecycle: DeviceLifecycle::Paired,
+                    paired_at_ms: device.paired_at_ms,
+                    updated_at_ms: device.paired_at_ms,
+                    revoked_at_ms: None,
+                });
+            }
             return Err(conflict("device identity already exists"));
         }
         // 长期设备公钥全局唯一，防止同一物理身份被另一个 Device ID 再次登记。

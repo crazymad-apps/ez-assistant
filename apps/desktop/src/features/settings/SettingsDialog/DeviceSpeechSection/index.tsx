@@ -396,13 +396,15 @@ export const DeviceSpeechSection = observer(function DeviceSpeechSection() {
     <section className={shellStyles.device_section}>
       <header>
         <h4>语音服务</h4>
-        <button
-          disabled={busy}
-          onClick={() => void gateway.loadSpeechConfiguration()}
-          type="button"
-        >
-          {gateway.speech_loading ? "读取中…" : "重新读取"}
-        </button>
+        {!config && gateway.error_message ? (
+          <button
+            disabled={busy}
+            onClick={() => void gateway.loadSpeechConfiguration()}
+            type="button"
+          >
+            {gateway.speech_loading ? "读取中…" : "重试"}
+          </button>
+        ) : null}
       </header>
 
       <div className={styles.speech_cards}>

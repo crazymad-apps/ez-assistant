@@ -797,7 +797,7 @@ describe('SettingsDialog model management', () => {
     expect(restart).toHaveBeenCalledWith('restart_runtime');
   });
 
-  it('manages Gateway access and confirms a visible device candidate without CLI state', async () => {
+  it('manages Gateway access via automatic Mosaico discovery without legacy manual pairing UI', async () => {
     const store = settingsStore();
     store.device_gateway.stale = false;
     store.device_gateway.snapshot = {
@@ -808,8 +808,8 @@ describe('SettingsDialog model management', () => {
       pairing_window: { expires_at_ms: 10_000 },
       pending_pairings: [
         {
-          pairing_request_id: 'pairing-1',
-          display_name: '客厅新终端',
+          pairing_request_id: 'pairing-legacy-spake2',
+          display_name: '旧式配对码终端',
           mode: 'spake2',
           expires_at_ms: 10_000,
           remaining_attempts: 5,
@@ -830,26 +830,20 @@ describe('SettingsDialog model management', () => {
     };
     vi.spyOn(store.device_gateway, 'load').mockResolvedValue();
     const access = vi.spyOn(store.device_gateway, 'setAccessEnabled').mockResolvedValue(true);
-    const confirm = vi.spyOn(store.device_gateway, 'confirmPairing').mockResolvedValue(true);
     renderDialog(store);
     fireEvent.click(within(screen.getByRole('navigation', { name: '设置页面' })).getByRole('button', { name: '智能终端' }));
 
     expect(screen.getByRole('heading', { name: '智能终端' })).toBeVisible();
-    expect(screen.queryByText('管理局域网智能终端接入、配对和设备身份')).not.toBeInTheDocument();
-    expect(screen.queryByText('已启用并可用')).not.toBeInTheDocument();
-    expect(screen.queryByText('终端发现本机后会显示在这里，输入终端展示或播报的配对码。')).not.toBeInTheDocument();
-    expect(
-      screen.queryByText('本阶段只展示 Host 当前能力，不在这里编辑服务商、模型、声音或密钥。'),
-    ).not.toBeInTheDocument();
-    expect(screen.getByText('客厅新终端')).toBeVisible();
-    expect(screen.getByPlaceholderText('配对码')).toHaveAccessibleName('客厅新终端 配对码');
+    expect(screen.queryByRole('button', { name: '添加设备' })).not.toBeInTheDocument();
+    expect(screen.queryByText('点击“添加设备”后，附近未配对终端才能申请接入。')).not.toBeInTheDocument();
+    expect(screen.queryByText('旧式配对码终端')).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText('配对码')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '重新读取' })).not.toBeInTheDocument();
+    expect(screen.getByText('Mosaico 终端开机连上同一 Wi-Fi 后会自动出现在这里。')).toBeVisible();
     expect(screen.getAllByText('不可用')).toHaveLength(2);
+
     fireEvent.click(screen.getByRole('switch', { name: '智能终端接入' }));
     expect(access).toHaveBeenCalledWith(false);
-
-    fireEvent.change(screen.getByLabelText('客厅新终端 配对码'), { target: { value: '123456' } });
-    fireEvent.click(screen.getByRole('button', { name: '确认配对' }));
-    expect(confirm).toHaveBeenCalledWith('pairing-1', '123456', null);
   });
 
   it('keeps the paired device list concise and opens connection details on a secondary page', () => {

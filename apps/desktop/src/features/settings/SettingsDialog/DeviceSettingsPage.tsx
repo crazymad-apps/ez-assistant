@@ -14,6 +14,7 @@ import { DeviceDetailPage, type ConsoleTabKey } from "./DeviceDetailPage";
 import { WakeSettingsCard } from "./DeviceConsole/WakeSettingsCard";
 import { DeviceSpeechSection } from "./DeviceSpeechSection";
 import { SettingsPageContainer } from "./SettingsPageContainer";
+import pageStyles from "./DeviceSettingsPage.module.scss";
 import styles from "./index.module.scss";
 
 export const DeviceSettingsPage = observer(function DeviceSettingsPage() {
@@ -33,6 +34,16 @@ export const DeviceSettingsPage = observer(function DeviceSettingsPage() {
 
   const paired_devices = snapshot?.devices.filter((device) => device.lifecycle === "paired") ?? [];
   const discovered_devices = snapshot?.discovered_devices ?? [];
+  const discovered_fingerprints = new Set(
+    discovered_devices.map((device) => device.key_fingerprint.toUpperCase()),
+  );
+  const direct_pending_pairings = (snapshot?.pending_pairings ?? []).filter(
+    (pending) =>
+      pending.mode === "direct_confirm"
+      && (!pending.key_fingerprint
+        || !discovered_fingerprints.has(pending.key_fingerprint.toUpperCase())),
+  );
+  const nearby_count = discovered_devices.length + direct_pending_pairings.length;
   const detail_device = paired_devices.find((device) => device.device_id === detail_device_id) ?? null;
   const online_native_devices = paired_devices.filter(
     (device) => device.connection?.console?.mode === "native",
@@ -88,7 +99,14 @@ export const DeviceSettingsPage = observer(function DeviceSettingsPage() {
       <article className={styles.device_gateway_card}>
         <div>
           <span className={styles.device_icon}><Icon name="device" size={19} /></span>
-          <strong>设备接入</strong>
+          <div className={pageStyles.gateway_title_group}>
+            <strong>设备接入</strong>
+            <small>
+              {snapshot?.enabled
+                ? "已开启局域网自动发现，Mosaico 开机连上同一 Wi-Fi 即可连接"
+                : "关闭后已配对终端将暂停自动重连"}
+            </small>
+          </div>
         </div>
         <button
           aria-checked={snapshot?.enabled ?? false}
@@ -102,58 +120,6 @@ export const DeviceSettingsPage = observer(function DeviceSettingsPage() {
           <i />
         </button>
       </article>
-
-      <section className={styles.device_section}>
-        <header>
-          <h4>添加设备</h4>
-          {snapshot?.pairing_window ? (
-            <button
-              disabled={gateway.pending_action !== null}
-              onClick={() => void gateway.closePairingWindow()}
-              type="button"
-            >
-              结束添加
-            </button>
-          ) : (
-            <button
-              disabled={!snapshot?.enabled || !snapshot.available || gateway.pending_action !== null}
-              onClick={() => void gateway.openPairingWindow()}
-              type="button"
-            >
-              添加设备
-            </button>
-          )}
-        </header>
-        {snapshot?.pairing_window ? (
-          snapshot.pending_pairings.length > 0 ? (
-            <div className={styles.pending_device_list}>
-              {snapshot.pending_pairings.map((pending) => (
-                <PendingPairing gateway={gateway} key={pending.pairing_request_id} pending={pending} />
-              ))}
-            </div>
-          ) : <p className={styles.device_empty}>正在等待终端发起配对…</p>
-        ) : <p className={styles.device_empty}>点击“添加设备”后，附近未配对终端才能申请接入。</p>}
-      </section>
-
-      <section className={styles.device_section}>
-        <header>
-          <h4>附近可连接的设备</h4>
-          <span className={styles.device_count}>{discovered_devices.length}</span>
-        </header>
-        {discovered_devices.length > 0 ? (
-          <div className={styles.discovered_device_list}>
-            {discovered_devices.map((device) => (
-              <DiscoveredDeviceRow
-                device={device}
-                gateway={gateway}
-                key={device.discovery_id}
-              />
-            ))}
-          </div>
-        ) : (
-          <p className={styles.device_empty}>Mosaico 终端开机连上同一 Wi-Fi 后会自动出现在这里。</p>
-        )}
-      </section>
 
       <section className={styles.device_section}>
         <header>
@@ -233,7 +199,46 @@ export const DeviceSettingsPage = observer(function DeviceSettingsPage() {
               </article>
             ))}
           </div>
-        ) : <p className={styles.device_empty}>尚未配对智能终端。</p>}
+        ) : <p className={styles.device_empty}>尚未配对 Mosaico 终端。</p>}
+      </section>
+
+      <section className={styles.device_section}>
+        <header>
+          <h4>附近可连接的设备</h4>
+          <span className={styles.device_count}>{nearby_count}</span>
+        </header>
+        {nearby_count > 0 ? (
+          <>
+            {discovered_devices.length > 0 ? (
+              <div className={styles.discovered_device_list}>
+                {discovered_devices.map((device) => (
+                  <DiscoveredDeviceRow
+                    device={device}
+                    gateway={gateway}
+                    key={device.discovery_id}
+                  />
+                ))}
+              </div>
+            ) : null}
+            {direct_pending_pairings.length > 0 ? (
+              <div className={styles.pending_device_list}>
+                {direct_pending_pairings.map((pending) => (
+                  <DirectConfirmPairingRow
+                    gateway={gateway}
+                    key={pending.pairing_request_id}
+                    pending={pending}
+                  />
+                ))}
+              </div>
+            ) : null}
+          </>
+        ) : paired_devices.length > 0 ? (
+          <p className={pageStyles.nearby_empty_compact}>
+            未发现新的 Mosaico 终端，新设备开机连上同一 Wi-Fi 后会自动出现。
+          </p>
+        ) : (
+          <p className={styles.device_empty}>Mosaico 终端开机连上同一 Wi-Fi 后会自动出现在这里。</p>
+        )}
       </section>
 
       {online_native_devices.map((device) => (
@@ -271,72 +276,44 @@ export const DeviceSettingsPage = observer(function DeviceSettingsPage() {
   );
 });
 
-const PendingPairing = observer(function PendingPairing(props: Readonly<{
+const DirectConfirmPairingRow = observer(function DirectConfirmPairingRow(props: Readonly<{
   gateway: ReturnType<typeof useRootStore>["device_gateway"];
   pending: PendingDevicePairingSnapshot;
 }>) {
-  const [code, setCode] = useState("");
   const pending_action = props.gateway.pending_action === `pairing:${props.pending.pairing_request_id}`;
-  const is_direct = props.pending.mode === "direct_confirm";
-  const subtitle = is_direct
-    ? [
-        capabilityLabel(props.pending.capabilities),
-        props.pending.peer_address,
-        props.pending.key_fingerprint ? `指纹 ${props.pending.key_fingerprint}` : null,
-      ]
-        .filter(Boolean)
-        .join(" · ")
-    : `${capabilityLabel(props.pending.capabilities)} · 还可尝试 ${props.pending.remaining_attempts} 次`;
+  const subtitle = [
+    capabilityLabel(props.pending.capabilities),
+    props.pending.peer_address,
+    props.pending.key_fingerprint ? `指纹 ${props.pending.key_fingerprint}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
-    <article data-mode={props.pending.mode}>
+    <article data-mode="direct_confirm">
       <span className={styles.device_icon}><Icon name="device" size={18} /></span>
       <div>
         <strong>{props.pending.display_name}</strong>
         <small>{subtitle}</small>
       </div>
-      {is_direct ? (
-        <div className={styles.pending_device_actions}>
-          <button
-            className={styles.pending_device_confirm}
-            disabled={pending_action}
-            onClick={() => void props.gateway.confirmPairing(props.pending.pairing_request_id, null, null)}
-            type="button"
-          >
-            {pending_action ? "配对中…" : "确认配对"}
-          </button>
-          <button
-            className={styles.pending_device_reject}
-            disabled={pending_action}
-            onClick={() => void props.gateway.rejectPairing(props.pending.pairing_request_id)}
-            type="button"
-          >
-            拒绝
-          </button>
-        </div>
-      ) : (
-        <>
-          <label>
-            <input
-              aria-label={`${props.pending.display_name} 配对码`}
-              autoComplete="one-time-code"
-              disabled={pending_action}
-              inputMode="numeric"
-              maxLength={6}
-              onChange={(event) => setCode(event.currentTarget.value.replace(/\D/g, "").slice(0, 6))}
-              placeholder="配对码"
-              value={code}
-            />
-          </label>
-          <button
-            disabled={pending_action || code.length !== 6}
-            onClick={() => void props.gateway.confirmPairing(props.pending.pairing_request_id, code, null)}
-            type="button"
-          >
-            {pending_action ? "配对中…" : "确认配对"}
-          </button>
-        </>
-      )}
+      <div className={styles.pending_device_actions}>
+        <button
+          className={styles.pending_device_confirm}
+          disabled={pending_action}
+          onClick={() => void props.gateway.confirmPairing(props.pending.pairing_request_id, null, null)}
+          type="button"
+        >
+          {pending_action ? "配对中…" : "确认配对"}
+        </button>
+        <button
+          className={styles.pending_device_reject}
+          disabled={pending_action}
+          onClick={() => void props.gateway.rejectPairing(props.pending.pairing_request_id)}
+          type="button"
+        >
+          拒绝
+        </button>
+      </div>
     </article>
   );
 });

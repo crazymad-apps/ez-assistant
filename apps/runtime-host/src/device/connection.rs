@@ -26,7 +26,7 @@ use axum::{
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::{Notify, mpsc, oneshot},
     time::{Instant as TokioInstant, MissedTickBehavior, interval, timeout},
 };
 use tokio_util::sync::CancellationToken;
@@ -62,6 +62,9 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(25);
 const PLAYBACK_FRAME_INTERVAL: Duration = Duration::from_millis(20);
+const PLAYBACK_TICK_INTERVAL: Duration = Duration::from_millis(10);
+const PLAYBACK_INITIAL_BURST_FRAMES: u32 = 10;
+const PLAYBACK_MAX_CATCHUP_PER_TICK: usize = 6;
 const VOICE_TURN_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const PLAYBACK_SEND_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_QUEUED_PLAYBACKS: usize = 20;
@@ -77,7 +80,7 @@ const MAX_CLIENT_INPUT_ID_BYTES: usize = 256;
 const MAX_TEXT_INPUT_BYTES: usize = 48 * 1024;
 const MAX_UPLINK_PCM_BYTES: usize = 60 * 16_000 * 2;
 const MAX_CLIENT_INPUT_FINGERPRINTS: usize = 1_024;
-const VOICE_TURN_COMMIT_DELAY: Duration = Duration::from_secs(2);
+const RECONNECT_VOICE_TURN_COMMIT_DELAY: Duration = Duration::from_secs(2);
 const MAX_VOICE_TURN_SEGMENTS: usize = 16;
 const SPAKE2_P256_SHARE_BYTES: usize = 65;
 const ED25519_PUBLIC_KEY_BYTES: usize = 32;
@@ -410,8 +413,7 @@ async fn complete_spake2_pairing(
     keys.verify_binding_mac(b"device-bind", &bind_transcript, &binding_mac)?;
     verify_ed25519(&public_key, &bind_transcript, &signature)?;
 
-    let device_id = DeviceId::new(format!("device-{}", random_token(18)?))
-        .map_err(|_| ConnectionError::InvalidMessage)?;
+    let device_id = resolve_pairing_device_id(shared, &public_key)?;
     let commit_transcript = pairing_commit_transcript(&bind_transcript, device_id.as_str());
     let host_proof = keys.binding_mac(b"host-bind-ack", &commit_transcript);
     send_payload(
@@ -457,8 +459,7 @@ async fn complete_direct_pairing(
 ) -> Result<(), ConnectionError> {
     let identity = shared.installation_identity().await?;
     let host_nonce = random_token(32)?;
-    let device_id = DeviceId::new(format!("device-{}", random_token(18)?))
-        .map_err(|_| ConnectionError::InvalidMessage)?;
+    let device_id = resolve_pairing_device_id(shared, public_key)?;
     let associated_data = pairing_associated_data(
         &hello.pairing_request_id,
         &identity.installation_id,
@@ -509,6 +510,21 @@ async fn complete_direct_pairing(
     .await
 }
 
+fn resolve_pairing_device_id(
+    shared: &GatewayShared,
+    public_key: &[u8],
+) -> Result<DeviceId, ConnectionError> {
+    if let Ok(existing_devices) = shared.runtime.registered_devices()
+        && let Some(existing) = existing_devices
+            .into_iter()
+            .find(|device| device.public_key.as_bytes() == public_key)
+    {
+        return Ok(existing.device_id);
+    }
+    DeviceId::new(format!("device-{}", random_token(18)?))
+        .map_err(|_| ConnectionError::InvalidMessage)
+}
+
 async fn finalize_paired_device(
     socket: &mut WebSocket,
     shared: &GatewayShared,
@@ -521,7 +537,7 @@ async fn finalize_paired_device(
     let public_key =
         DevicePublicKey::from_slice(public_key).ok_or(ConnectionError::InvalidMessage)?;
     let display_name = decision_display_name.unwrap_or_else(|| hello.display_name.clone());
-    let stored = shared
+    let stored = match shared
         .runtime
         .register_paired_device(NewPairedDevice {
             device_id,
@@ -529,7 +545,15 @@ async fn finalize_paired_device(
             public_key,
             paired_at_ms: now_ms()?,
         })
-        .await?;
+        .await
+    {
+        Ok(stored) => stored,
+        Err(error) => {
+            let _ = send_wire_error(socket, "pairing_failed", None, false).await;
+            let _ = close(socket, 1008, "pairing failed").await;
+            return Err(error.into());
+        }
+    };
     shared.remove_discovered_by_fingerprint(&fingerprint).await;
     shared.notify_changed();
     send_payload(
@@ -730,8 +754,8 @@ async fn authenticated_loop(
     } = config;
     let mut heartbeat = interval(HEARTBEAT_INTERVAL);
     heartbeat.tick().await;
-    let mut playback_clock = interval(PLAYBACK_FRAME_INTERVAL);
-    playback_clock.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut playback_clock = interval(PLAYBACK_TICK_INTERVAL);
+    playback_clock.set_missed_tick_behavior(MissedTickBehavior::Skip);
     playback_clock.tick().await;
     let mut voice_turn_clock = interval(VOICE_TURN_POLL_INTERVAL);
     voice_turn_clock.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -739,6 +763,7 @@ async fn authenticated_loop(
     let mut last_received = Instant::now();
     let mut receiving: Option<UplinkUtterance> = None;
     let voice_turn = shared.voice_turn(device_id).await;
+    let voice_turn_notify = Arc::new(Notify::new());
     {
         let mut aggregation = voice_turn.lock().await;
         if aggregation
@@ -749,7 +774,9 @@ async fn authenticated_loop(
         } else if let Some(aggregation) = aggregation.as_mut() {
             // Give a reconnected terminal time to retransmit a segment whose
             // ownership acknowledgement may have been lost with the old WSS.
-            aggregation.schedule_commit();
+            let reconnect_delay =
+                RECONNECT_VOICE_TURN_COMMIT_DELAY.max(shared.native_console.turn_commit_delay());
+            aggregation.schedule_commit(reconnect_delay);
         }
     }
     let mut playback = VecDeque::<ActivePlayback>::new();
@@ -760,6 +787,9 @@ async fn authenticated_loop(
     let mut pending_wake_syncs: HashMap<String, oneshot::Sender<WakeConfigAck>> = HashMap::new();
     loop {
         tokio::select! {
+            _ = voice_turn_notify.notified() => {
+                process_voice_turn(socket, shared, device_id, capabilities, &voice_turn).await?;
+            }
             _ = voice_turn_clock.tick() => {
                 process_voice_turn(socket, shared, device_id, capabilities, &voice_turn).await?;
             }
@@ -809,6 +839,9 @@ async fn authenticated_loop(
                     }
                     ConnectionCommand::StartPlayback { output, response } => {
                         acknowledge_playback_output(&mut playback, output, response);
+                    }
+                    ConnectionCommand::InterruptPlayback { reason } => {
+                        cancel_playback(socket, &mut playback, &reason).await?;
                     }
                     ConnectionCommand::SpeechStatusChanged(speech_services) => {
                         let asr_ready =
@@ -964,6 +997,9 @@ async fn authenticated_loop(
                                     continue;
                                 }
                                 cancel_playback(socket, &mut playback, "interrupted_by_input").await?;
+                                shared
+                                    .interrupt_playbacks(Some(device_id), "interrupted_by_input")
+                                    .await;
                                 if !client_inputs.remember(
                                     &request.client_input_id,
                                     input_fingerprint(b"text", request.text.as_bytes(), request.output_preference),
@@ -1012,6 +1048,9 @@ async fn authenticated_loop(
                                     continue;
                                 }
                                 cancel_playback(socket, &mut playback, "interrupted_by_input").await?;
+                                shared
+                                    .interrupt_playbacks(Some(device_id), "interrupted_by_input")
+                                    .await;
                                 if voice_turn.lock().await.is_none() {
                                     if let Err(error) = cancel_active_controller_run(shared.runtime.as_ref()).await {
                                         let (code, recoverable) = input_error(&error);
@@ -1064,7 +1103,10 @@ async fn authenticated_loop(
                                         return Err(ConnectionError::InvalidMessage);
                                     };
                                     let mut aggregation = voice_turn.lock().await;
-                                    resume_or_clear_voice_turn(&mut aggregation);
+                                    resume_or_clear_voice_turn(
+                                        &mut aggregation,
+                                        shared.native_console.turn_commit_delay(),
+                                    );
                                     drop(aggregation);
                                     send_payload(socket, "state_changed", &InteractionStateChanged {
                                         run_id: None,
@@ -1110,7 +1152,7 @@ async fn authenticated_loop(
                                     send_wire_error(socket, "voice_turn_limit_reached", Some(envelope.message_id), true).await?;
                                     continue;
                                 };
-                                aggregation.schedule_commit();
+                                aggregation.schedule_commit(shared.native_console.turn_commit_delay());
                                 let logical_client_input_id =
                                     aggregation.logical_client_input_id.clone();
                                 let recognition = match admission {
@@ -1128,6 +1170,7 @@ async fn authenticated_loop(
                                         ordinal,
                                         cancellation,
                                         voice_turn.clone(),
+                                        voice_turn_notify.clone(),
                                         logical_client_input_id,
                                     );
                                 }
@@ -1147,7 +1190,10 @@ async fn authenticated_loop(
                                 if receiving.as_ref().is_some_and(|active| active.stream_id == request.stream_id) {
                                     if let Some(cancelled) = receiving.take() {
                                         let mut aggregation = voice_turn.lock().await;
-                                        resume_or_clear_voice_turn(&mut aggregation);
+                                        resume_or_clear_voice_turn(
+                                            &mut aggregation,
+                                            shared.native_console.turn_commit_delay(),
+                                        );
                                         drop(aggregation);
                                         send_payload(socket, "state_changed", &InteractionStateChanged {
                                             run_id: None,
@@ -1173,12 +1219,16 @@ async fn authenticated_loop(
                                     send_wire_error(socket, "unsupported_playback_cancel", Some(envelope.message_id), true).await?;
                                     continue;
                                 }
+                                let wildcard = request.stream_id == 0 && request.output_id.is_empty();
                                 let matches = playback.front().is_some_and(|active| {
                                     active.output_id == request.output_id
                                         && active.stream_id() == Some(request.stream_id)
                                 });
-                                if matches {
+                                if matches || wildcard {
                                     cancel_playback(socket, &mut playback, "cancelled").await?;
+                                    // Stop the active controller run too so long-text `speak` stops
+                                    // generating and queueing subsequent TTS segments.
+                                    let _ = cancel_active_controller_run(shared.runtime.as_ref()).await;
                                 } else {
                                     send_wire_error(socket, "playback_not_active", Some(envelope.message_id), true).await?;
                                 }
@@ -1822,18 +1872,39 @@ async fn cancel_playback(
     Ok(())
 }
 
+fn playback_due_sequence_target(elapsed: Duration) -> u32 {
+    let elapsed_frames =
+        u32::try_from(elapsed.as_millis() / PLAYBACK_FRAME_INTERVAL.as_millis()).unwrap_or(u32::MAX);
+    PLAYBACK_INITIAL_BURST_FRAMES.saturating_add(elapsed_frames)
+}
+
+async fn pump_due_playback_frames(
+    socket: &mut WebSocket,
+    playback: &mut VecDeque<ActivePlayback>,
+    max_frames: usize,
+) -> Result<(), ConnectionError> {
+    for _ in 0..max_frames {
+        let Some(active) = playback.front() else {
+            break;
+        };
+        let Some(stream) = active.stream.as_ref() else {
+            break;
+        };
+        let target_sequence = playback_due_sequence_target(stream.started_at.elapsed());
+        if stream.sequence >= target_sequence {
+            break;
+        }
+        send_next_playback_frame(socket, playback).await?;
+    }
+    Ok(())
+}
+
 async fn advance_playback(
     socket: &mut WebSocket,
     playback: &mut VecDeque<ActivePlayback>,
 ) -> Result<(), ConnectionError> {
     synchronize_playback(socket, playback).await?;
-    if playback
-        .front()
-        .is_some_and(|active| active.stream.is_some())
-    {
-        send_next_playback_frame(socket, playback).await?;
-    }
-    Ok(())
+    pump_due_playback_frames(socket, playback, PLAYBACK_MAX_CATCHUP_PER_TICK).await
 }
 
 async fn synchronize_playback(
@@ -1882,6 +1953,7 @@ async fn synchronize_playback(
             );
             active.start(stream_id, output.pcm);
         }
+        pump_due_playback_frames(socket, playback, PLAYBACK_INITIAL_BURST_FRAMES as usize).await?;
     }
     Ok(())
 }
@@ -2137,8 +2209,8 @@ impl VoiceTurnAggregation {
         self.commit_deadline = None;
     }
 
-    fn schedule_commit(&mut self) {
-        self.commit_deadline = Some(TokioInstant::now() + VOICE_TURN_COMMIT_DELAY);
+    fn schedule_commit(&mut self, delay: Duration) {
+        self.commit_deadline = Some(TokioInstant::now() + delay);
     }
 
     fn ready_to_commit(&self) -> bool {
@@ -2188,14 +2260,17 @@ impl VoiceTurnAggregation {
 ///
 /// 空聚合没有任何可提交事实，直接清除；已有分段则重新启动 commit deadline。该转换只修改
 /// Gateway 的易失聚合状态，不提交 Runtime Input，也不取消已经运行的 ASR。
-fn resume_or_clear_voice_turn(aggregation: &mut Option<VoiceTurnAggregation>) {
+fn resume_or_clear_voice_turn(
+    aggregation: &mut Option<VoiceTurnAggregation>,
+    delay: Duration,
+) {
     if aggregation
         .as_ref()
         .is_some_and(VoiceTurnAggregation::is_empty)
     {
         *aggregation = None;
     } else if let Some(aggregation) = aggregation.as_mut() {
-        aggregation.schedule_commit();
+        aggregation.schedule_commit(delay);
     }
 }
 
@@ -2399,6 +2474,7 @@ fn spawn_segment_recognition(
     ordinal: usize,
     cancellation: tokio_util::sync::CancellationToken,
     voice_turn: Arc<tokio::sync::Mutex<Option<VoiceTurnAggregation>>>,
+    voice_turn_notify: Arc<Notify>,
     logical_client_input_id: String,
 ) {
     let failed_outcome = RecognitionOutcome {
@@ -2419,6 +2495,7 @@ fn spawn_segment_recognition(
         recognition,
         failed_outcome,
         voice_turn,
+        Some(voice_turn_notify),
         logical_client_input_id,
     );
 }
@@ -2433,6 +2510,7 @@ fn spawn_owned_recognition(
     recognition: impl Future<Output = RecognitionOutcome> + Send + 'static,
     failed_outcome: RecognitionOutcome,
     voice_turn: Arc<tokio::sync::Mutex<Option<VoiceTurnAggregation>>>,
+    voice_turn_notify: Option<Arc<Notify>>,
     logical_client_input_id: String,
 ) {
     tasks.spawn(async move {
@@ -2440,12 +2518,19 @@ fn spawn_owned_recognition(
             Ok(outcome) => outcome,
             Err(_) => failed_outcome,
         };
-        settle_recognition_outcome(&voice_turn, &logical_client_input_id, outcome).await;
+        settle_recognition_outcome(
+            &voice_turn,
+            voice_turn_notify.as_deref(),
+            &logical_client_input_id,
+            outcome,
+        )
+        .await;
     });
 }
 
 async fn settle_recognition_outcome(
     voice_turn: &Arc<tokio::sync::Mutex<Option<VoiceTurnAggregation>>>,
+    voice_turn_notify: Option<&Notify>,
     logical_client_input_id: &str,
     outcome: RecognitionOutcome,
 ) {
@@ -2454,6 +2539,9 @@ async fn settle_recognition_outcome(
         && logical_client_input_id == active.logical_client_input_id
     {
         active.complete_segment(outcome);
+        if let Some(notify) = voice_turn_notify {
+            notify.notify_one();
+        }
     }
 }
 
@@ -2859,6 +2947,29 @@ mod tests {
     }
 
     #[test]
+    fn playback_queue_cancellation_cancels_active_and_queued_long_reply_segments() {
+        let mut queue = VecDeque::new();
+        let token1 = CancellationToken::new();
+        let token2 = CancellationToken::new();
+        let token3 = CancellationToken::new();
+        assert!(reserve_playback(&mut queue, "run-1-s1".to_owned(), token1.clone()));
+        assert!(reserve_playback(&mut queue, "run-1-s2".to_owned(), token2.clone()));
+        assert!(reserve_playback(&mut queue, "run-1-s3".to_owned(), token3.clone()));
+        queue
+            .front_mut()
+            .expect("front")
+            .start(42, Arc::from(vec![0_u8; 640]));
+
+        for active in queue.drain(..) {
+            active.cancellation.cancel();
+        }
+        assert!(queue.is_empty());
+        assert!(token1.is_cancelled());
+        assert!(token2.is_cancelled());
+        assert!(token3.is_cancelled());
+    }
+
+    #[test]
     fn uplink_collector_enforces_stream_sequence_and_limit() {
         let mut utterance = UplinkUtterance::new(ListenStart {
             client_input_id: "client-input".to_owned(),
@@ -2936,7 +3047,7 @@ mod tests {
         else {
             panic!("second segment must be new");
         };
-        aggregation.schedule_commit();
+        aggregation.schedule_commit(Duration::from_secs(2));
         aggregation.commit_deadline = Some(TokioInstant::now());
 
         aggregation.complete_segment(RecognitionOutcome {
@@ -2964,6 +3075,44 @@ mod tests {
     }
 
     #[test]
+    fn voice_turn_zero_commit_delay_is_ready_immediately_and_nonzero_delay_waits() {
+        let mut instant_turn =
+            VoiceTurnAggregation::new("instant".to_owned(), OutputPreferenceSnapshot::Audio);
+        let SegmentAdmission::New { ordinal, .. } = instant_turn
+            .admit_segment("seg-1".to_owned(), [5; 32], 1)
+            .expect("segment")
+        else {
+            panic!("segment must be new");
+        };
+        instant_turn.schedule_commit(Duration::ZERO);
+        assert!(!instant_turn.ready_to_commit());
+        instant_turn.complete_segment(RecognitionOutcome {
+            ordinal,
+            stream_id: 1,
+            client_input_id: "seg-1".to_owned(),
+            result: Ok("立刻提交".to_owned()),
+        });
+        assert!(instant_turn.ready_to_commit());
+
+        let mut buffered_turn =
+            VoiceTurnAggregation::new("buffered".to_owned(), OutputPreferenceSnapshot::Audio);
+        let SegmentAdmission::New { ordinal, .. } = buffered_turn
+            .admit_segment("seg-2".to_owned(), [6; 32], 2)
+            .expect("segment")
+        else {
+            panic!("segment must be new");
+        };
+        buffered_turn.schedule_commit(Duration::from_secs(5));
+        buffered_turn.complete_segment(RecognitionOutcome {
+            ordinal,
+            stream_id: 2,
+            client_input_id: "seg-2".to_owned(),
+            result: Ok("等待合并".to_owned()),
+        });
+        assert!(!buffered_turn.ready_to_commit());
+    }
+
+    #[test]
     fn voice_turn_pause_cancels_the_pending_commit_and_empty_segments_are_omitted() {
         let mut aggregation =
             VoiceTurnAggregation::new("logical-input".to_owned(), OutputPreferenceSnapshot::Text);
@@ -2973,7 +3122,7 @@ mod tests {
         else {
             panic!("empty segment must be new");
         };
-        aggregation.schedule_commit();
+        aggregation.schedule_commit(Duration::from_secs(2));
         aggregation.pause_commit();
         aggregation.complete_segment(RecognitionOutcome {
             ordinal: empty,
@@ -2992,7 +3141,7 @@ mod tests {
             "empty".to_owned(),
             OutputPreferenceSnapshot::Text,
         ));
-        resume_or_clear_voice_turn(&mut empty);
+        resume_or_clear_voice_turn(&mut empty, Duration::from_secs(2));
         assert!(empty.is_none());
 
         let mut existing =
@@ -3003,7 +3152,7 @@ mod tests {
         ));
         existing.pause_commit();
         let mut existing = Some(existing);
-        resume_or_clear_voice_turn(&mut existing);
+        resume_or_clear_voice_turn(&mut existing, Duration::from_secs(2));
         assert!(
             existing
                 .as_ref()
@@ -3049,6 +3198,7 @@ mod tests {
                 result: Err(SpeechServiceError::Unavailable),
             },
             voice_turn.clone(),
+            None,
             "logical-input".to_owned(),
         );
         spawn_owned_recognition(
@@ -3061,6 +3211,7 @@ mod tests {
                 result: Err(SpeechServiceError::Unavailable),
             },
             voice_turn.clone(),
+            None,
             "logical-input".to_owned(),
         );
 
@@ -3213,6 +3364,22 @@ mod tests {
         acknowledge_playback_output(&mut playback, output(), tx);
         assert_eq!(rx.try_recv(), Ok(false));
         assert!(playback.is_empty());
+    }
+
+    #[test]
+    fn playback_schedule_maintains_initial_jitter_cushion_without_cumulative_drift() {
+        assert_eq!(
+            playback_due_sequence_target(Duration::ZERO),
+            PLAYBACK_INITIAL_BURST_FRAMES
+        );
+        assert_eq!(
+            playback_due_sequence_target(Duration::from_millis(20)),
+            PLAYBACK_INITIAL_BURST_FRAMES + 1
+        );
+        assert_eq!(
+            playback_due_sequence_target(Duration::from_millis(1_000)),
+            PLAYBACK_INITIAL_BURST_FRAMES + 50
+        );
     }
 
     mod wss_integration {
@@ -4615,6 +4782,175 @@ mod tests {
 
             dev_server.abort();
             let _ = dev_server.await;
+            harness.shutdown().await;
+        }
+
+        #[tokio::test]
+        async fn wss_connect_discovered_device_approves_existing_pending_and_allows_repair_after_revoke() {
+            let harness = TestGatewayHarness::start().await;
+            let device_key = SigningKey::from_bytes(&[73_u8; 32]);
+            let device_pub = device_key.verifying_key().to_bytes();
+            let device_fp = public_key_fingerprint(&device_pub);
+            let discovery_id = "Mosaico-Repair._ez-device._tcp.local.";
+
+            // 1. 先登记并撤销该硬件密钥对应的旧设备身份（模拟用户曾点击「解除配对」）。
+            let original_id = DeviceId::new("device-mosaico-revoked-01").expect("device id");
+            harness
+                .runtime
+                .register_paired_device(NewPairedDevice {
+                    device_id: original_id.clone(),
+                    display_name: "Mosaico-5BF0".to_owned(),
+                    public_key: DevicePublicKey::new(device_pub),
+                    paired_at_ms: 1_000,
+                })
+                .await
+                .expect("seed initial paired device");
+            harness
+                .runtime
+                .revoke_paired_device(original_id.clone())
+                .await
+                .expect("revoke initial device");
+
+            // 2. 打开配对窗口，终端先连入并停在 pending_pairings（与截图场景一致）。
+            harness
+                .handle
+                .open_pairing_window()
+                .await
+                .expect("open pairing window");
+            harness
+                .handle
+                .seed_test_discovered_device(
+                    discovery_id,
+                    "Mosaico-5BF0",
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                    8765,
+                    &device_fp,
+                )
+                .await;
+
+            let (mut ws, _) = harness.connect_ws().await;
+            let req_id = "req-mosaico-repair";
+            let dev_nonce = "dev-nonce-repair";
+            send_json(
+                &mut ws,
+                "m-repair-pair",
+                "pairing_hello",
+                &PairingHello {
+                    pairing_request_id: req_id.to_owned(),
+                    display_name: "Mosaico-5BF0".to_owned(),
+                    device_nonce: dev_nonce.to_owned(),
+                    capabilities: text_capabilities(),
+                    pairing_mode: WirePairingMode::DirectConfirm,
+                    pake_share: None,
+                    public_key: Some(encode_base64(&device_pub)),
+                    client_version: Some("esp-pika-mosaico/0.5.0-direct".to_owned()),
+                },
+            )
+            .await;
+            assert_eq!(
+                recv_envelope(&mut ws).await.expect("pending").message_type,
+                "pairing_pending"
+            );
+            let pending_snapshot = harness.handle.snapshot().await.expect("pending snapshot");
+            assert_eq!(pending_snapshot.pending_pairings.len(), 1);
+
+            // 3. 点击「连接」应直接批准现有 pending_pairings，并原地重新激活原 device_id！
+            harness
+                .handle
+                .connect_discovered_device(ConnectDiscoveredDeviceRequest {
+                    discovery_id: discovery_id.to_owned(),
+                    display_name: None,
+                })
+                .await
+                .expect("connect discovered approves existing pending");
+
+            let challenge_env = recv_envelope(&mut ws)
+                .await
+                .expect("pairing_direct_challenge");
+            assert_eq!(challenge_env.message_type, "pairing_direct_challenge");
+            let challenge: PairingDirectChallenge = decode_payload(challenge_env);
+            assert_eq!(challenge.device_id, original_id.as_str());
+
+            let ad = pairing_associated_data(
+                req_id,
+                &harness.identity.installation_id,
+                &harness.identity.certificate_fingerprint,
+                dev_nonce,
+                &challenge.host_nonce,
+                text_capabilities(),
+            );
+            let bind_transcript = pairing_bind_transcript(&ad, &device_pub);
+            let commit_transcript =
+                pairing_commit_transcript(&bind_transcript, &challenge.device_id);
+            let sig = device_key.sign(&commit_transcript).to_bytes();
+            send_json(
+                &mut ws,
+                "m-repair-commit",
+                "pairing_direct_commit",
+                &PairingDirectCommit {
+                    pairing_request_id: req_id.to_owned(),
+                    device_id: challenge.device_id.clone(),
+                    signature: encode_base64(&sig),
+                },
+            )
+            .await;
+            let complete_env = recv_envelope(&mut ws).await.expect("pairing_complete");
+            assert_eq!(complete_env.message_type, "pairing_complete");
+            let complete: PairingComplete = decode_payload(complete_env);
+            assert_eq!(complete.device_id, original_id.as_str());
+            let _ = ws.close(None).await;
+
+            // 4. 快照中该设备已恢复 Paired，且能重新认证上线。
+            let after = harness.handle.snapshot().await.expect("after snapshot");
+            assert!(after.discovered_devices.is_empty());
+            assert!(after.pending_pairings.is_empty());
+            let device = after
+                .devices
+                .iter()
+                .find(|item| item.device_id == original_id)
+                .expect("reactivated device present");
+            assert_eq!(
+                device.lifecycle,
+                assistant_protocol::DeviceLifecycleSnapshot::Paired
+            );
+
+            let (mut auth_ws, auth_challenge) = harness.connect_ws().await;
+            let auth_nonce = "dev-auth-nonce-repair";
+            let auth_t = auth_transcript(
+                &auth_challenge.connection_id,
+                &auth_challenge.nonce,
+                original_id.as_str(),
+                auth_nonce,
+                text_capabilities(),
+                OutputPreferenceSnapshot::Text,
+            );
+            let auth_sig = device_key.sign(&auth_t).to_bytes();
+            send_json(
+                &mut auth_ws,
+                "m-repair-auth",
+                "hello",
+                &DeviceHello {
+                    device_id: original_id.to_string(),
+                    device_nonce: auth_nonce.to_owned(),
+                    capabilities: text_capabilities(),
+                    output_preference: OutputPreferenceSnapshot::Text,
+                    client_version: "esp-pika-mosaico/0.5.0-direct".to_owned(),
+                    signature: encode_base64(&auth_sig),
+                    mcp_servers: Vec::new(),
+                    console: None,
+                    hardware: None,
+                    speech_relay: false,
+                },
+            )
+            .await;
+            assert_eq!(
+                recv_envelope(&mut auth_ws)
+                    .await
+                    .expect("hello_ack")
+                    .message_type,
+                "hello_ack"
+            );
+            let _ = auth_ws.close(None).await;
             harness.shutdown().await;
         }
 

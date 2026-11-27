@@ -306,6 +306,14 @@ fn default_cooldown_ms() -> u32 {
     1500
 }
 
+fn default_speech_end_silence_ms() -> u32 {
+    500
+}
+
+fn default_turn_commit_delay_ms() -> u32 {
+    0
+}
+
 /// 直连终端的唤醒词与声纹唤醒模式配置。
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -324,6 +332,10 @@ pub(super) struct DeviceWakeConfig {
     pub(super) cooldown_ms: u32,
     #[serde(default)]
     pub(super) vp_wake_chime: bool,
+    #[serde(default = "default_speech_end_silence_ms")]
+    pub(super) speech_end_silence_ms: u32,
+    #[serde(default = "default_turn_commit_delay_ms")]
+    pub(super) turn_commit_delay_ms: u32,
 }
 
 impl Default for DeviceWakeConfig {
@@ -336,6 +348,8 @@ impl Default for DeviceWakeConfig {
             min_speech_ms: default_min_speech_ms(),
             cooldown_ms: default_cooldown_ms(),
             vp_wake_chime: false,
+            speech_end_silence_ms: default_speech_end_silence_ms(),
+            turn_commit_delay_ms: default_turn_commit_delay_ms(),
         }
     }
 }

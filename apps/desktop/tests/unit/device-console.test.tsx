@@ -660,6 +660,8 @@ describe("DeviceSpeechSection and DeviceConsole UI", () => {
               min_speech_ms: 700,
               cooldown_ms: 1500,
               vp_wake_chime: false,
+              speech_end_silence_ms: 500,
+              turn_commit_delay_ms: 0,
             },
             enrolled_speaker_count: enrolledCount,
             multinet_ready: true,
@@ -708,10 +710,14 @@ describe("DeviceSpeechSection and DeviceConsole UI", () => {
     fireEvent.click(screen.getByRole("radio", { name: "声纹免唤醒" }));
     await screen.findByText(/请先录入声纹后再开启声纹唤醒/);
 
-    // Edit wake word to 小元同学 -> auto pinyin xiao yuan tong xue -> save
+    // Edit wake word to 小元同学 -> auto pinyin xiao yuan tong xue + configure end-silence & commit delay -> save
     fireEvent.change(screen.getByLabelText("唤醒词"), { target: { value: "小元同学" } });
     fireEvent.click(screen.getByRole("button", { name: "微调拼音" }));
     expect(screen.getByLabelText("唤醒词拼音")).toHaveValue("xiao yuan tong xue");
+    expect(screen.getByLabelText("说完判停延迟（毫秒）")).toHaveValue(500);
+    expect(screen.getByLabelText("识别后入会话延迟（毫秒）")).toHaveValue(0);
+    fireEvent.click(screen.getByRole("button", { name: "极速 0.35s" }));
+    fireEvent.change(screen.getByLabelText("识别后入会话延迟（毫秒）"), { target: { value: "300" } });
     fireEvent.click(screen.getByRole("button", { name: "保存唤醒设置" }));
 
     await waitFor(() => {
@@ -721,6 +727,8 @@ describe("DeviceSpeechSection and DeviceConsole UI", () => {
           mode: "wake_word",
           wake_word: "小元同学",
           wake_pinyin: "xiao yuan tong xue",
+          speech_end_silence_ms: 350,
+          turn_commit_delay_ms: 300,
         }),
       );
     });

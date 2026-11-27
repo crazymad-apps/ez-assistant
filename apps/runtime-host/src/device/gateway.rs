@@ -6,8 +6,10 @@ use playback::PreparedPlayback;
 
 use std::{
     collections::HashMap,
+    fs::{self, OpenOptions},
+    io::Write,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -58,6 +60,15 @@ const CONNECTION_COMMAND_CAPACITY: usize = 32;
 const GATEWAY_EVENT_CAPACITY: usize = 32;
 const DEVICE_SERVICE_TYPE: &str = "_ez-assistant._tcp.local.";
 const DISCOVERABLE_DEVICE_SERVICE_TYPE: &str = "_ez-device._tcp.local.";
+const GATEWAY_STATE_DIRECTORY: &str = "device";
+const GATEWAY_STATE_FILE: &str = "gateway.json";
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct GatewayPreferenceDocument {
+    schema_version: u32,
+    enabled: bool,
+}
 
 /// 供 HTTP 管理入口和 Runtime 渠道分发器调用的 Gateway 轻量句柄。
 ///
@@ -206,6 +217,9 @@ pub(super) enum ConnectionCommand {
         output: PlaybackOutput,
         response: oneshot::Sender<bool>,
     },
+    InterruptPlayback {
+        reason: String,
+    },
     SpeechStatusChanged(DeviceSpeechServicesSnapshot),
     SpeechAsrResult(SpeechAsrResult),
     SpeechTtsResult {
@@ -269,6 +283,7 @@ struct ActiveGateway {
     mdns: ServiceDaemon,
     service_fullname: String,
     port: u16,
+    advertised_pairing_available: bool,
 }
 
 impl DeviceGatewayService {
@@ -329,6 +344,22 @@ impl DeviceGatewayService {
         let mut speech_status_open = true;
         let mut pairing_expiry = interval(Duration::from_secs(1));
         pairing_expiry.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let should_auto_enable = match load_gateway_enabled_preference(&self.runtime_home) {
+            Some(enabled) => enabled,
+            None => self.shared.runtime.registered_devices().is_ok_and(|devices| {
+                devices
+                    .iter()
+                    .any(|device| device.lifecycle == DeviceLifecycle::Paired)
+            }),
+        };
+        if should_auto_enable {
+            match self.start_gateway().await {
+                Ok(started) => active = Some(started),
+                Err(error) => {
+                    eprintln!("runtime-host: device gateway auto-start degraded: {error}");
+                }
+            }
+        }
         let (browser_mdns, mut browser_rx) = match ServiceDaemon::new().and_then(|daemon| {
             daemon
                 .browse(DISCOVERABLE_DEVICE_SERVICE_TYPE)
@@ -363,6 +394,14 @@ impl DeviceGatewayService {
                                 self.mark_disabled().await;
                                 Ok(())
                             };
+                            if res.is_ok()
+                                && let Err(error) =
+                                    save_gateway_enabled_preference(&self.runtime_home, enabled)
+                            {
+                                eprintln!(
+                                    "runtime-host: failed to persist device gateway preference: {error}"
+                                );
+                            }
                             let _ = response.send(res);
                         }
                         LifecycleCommand::RefreshDiscovery => {
@@ -383,15 +422,22 @@ impl DeviceGatewayService {
                     }
                 }
                 _ = pairing_expiry.tick() => {
-                    let expired = {
+                    let (expired, currently_open) = {
                         let mut state = self.shared.state.lock().await;
-                        prune_expired(&mut state, now_ms()?)
+                        let now = now_ms()?;
+                        let expired = prune_expired(&mut state, now);
+                        let open = state.enabled
+                            && state.available
+                            && state
+                                .pairing_window_expires_at_ms
+                                .is_some_and(|expires_at| expires_at > now);
+                        (expired, open)
                     };
                     if expired {
                         self.shared.notify_changed();
                     }
-                    if expired
-                        && let Some(started) = active.as_mut()
+                    if let Some(started) = active.as_mut()
+                        && (expired || started.advertised_pairing_available != currently_open)
                         && let Err(error) = self.refresh_discovery(started).await
                     {
                         self.shared.state.lock().await.available = false;
@@ -465,13 +511,14 @@ impl DeviceGatewayService {
             .handle(server_handle.clone());
         let mdns = ServiceDaemon::new()
             .map_err(|error| DeviceGatewayError::Discovery(error.to_string()))?;
-        let service_fullname = match self.register_discovery(&mdns, &identity, port).await {
-            Ok(fullname) => fullname,
-            Err(error) => {
-                let _ = mdns.shutdown();
-                return Err(error);
-            }
-        };
+        let (service_fullname, advertised_pairing_available) =
+            match self.register_discovery(&mdns, &identity, port).await {
+                Ok(registered) => registered,
+                Err(error) => {
+                    let _ = mdns.shutdown();
+                    return Err(error);
+                }
+            };
         let mcp_listener =
             std::net::TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
                 .map_err(DeviceGatewayError::Bind)?;
@@ -523,6 +570,7 @@ impl DeviceGatewayService {
             mdns,
             service_fullname,
             port,
+            advertised_pairing_available,
         })
     }
 
@@ -566,10 +614,11 @@ impl DeviceGatewayService {
             .identity
             .clone()
             .ok_or(DeviceGatewayError::Unavailable)?;
-        let _ = active.mdns.unregister(&active.service_fullname);
-        active.service_fullname = self
+        let (service_fullname, advertised_pairing_available) = self
             .register_discovery(&active.mdns, &identity, active.port)
             .await?;
+        active.service_fullname = service_fullname;
+        active.advertised_pairing_available = advertised_pairing_available;
         Ok(())
     }
 
@@ -578,7 +627,7 @@ impl DeviceGatewayService {
         mdns: &ServiceDaemon,
         identity: &InstallationIdentity,
         port: u16,
-    ) -> Result<String, DeviceGatewayError> {
+    ) -> Result<(String, bool), DeviceGatewayError> {
         let pairing_available = self.shared.pairing_is_open(now_ms()?).await;
         let properties = [
             (
@@ -612,7 +661,7 @@ impl DeviceGatewayService {
         let fullname = service.get_fullname().to_owned();
         mdns.register(service)
             .map_err(|error| DeviceGatewayError::Discovery(error.to_string()))?;
-        Ok(fullname)
+        Ok((fullname, pairing_available))
     }
 
     async fn disconnect_all(&self) -> Vec<assistant_protocol::DeviceId> {
@@ -861,6 +910,53 @@ impl DeviceGatewayHandle {
             self.set_enabled(true).await?;
         }
 
+        let preferred_name = request
+            .display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .or_else(|| Some(discovered.display_name.clone()));
+
+        // 若该设备已连入并在 pending_pairings 等待确认，点击「连接」时直接批准现有会话，
+        // 避免固件停留在 kPairing 阻塞等待而忽略新的 HTTP /ez/connect 触发。
+        let existing_pending = {
+            let mut state = self.shared.state.lock().await;
+            prune_expired(&mut state, now);
+            state
+                .pending_pairings
+                .values_mut()
+                .find(|pending| {
+                    pending.mode == DevicePairingModeSnapshot::DirectConfirm
+                        && pending.remaining_attempts > 0
+                        && pending
+                            .key_fingerprint
+                            .as_deref()
+                            .is_some_and(|fp| fp.eq_ignore_ascii_case(&discovered.key_fingerprint))
+                        && pending.peer_address.as_deref().is_some_and(|addr| {
+                            addr.parse::<IpAddr>().ok().is_some_and(|ip| {
+                                ip.to_canonical() == discovered.peer_ip.to_canonical()
+                            })
+                        })
+                })
+                .map(|pending| {
+                    pending.remaining_attempts = 0;
+                    pending.decision.clone()
+                })
+        };
+        if let Some(decision_tx) = existing_pending {
+            self.shared.notify_changed();
+            if decision_tx
+                .send(PairingDecision::ApproveDirect {
+                    display_name: preferred_name.clone(),
+                })
+                .await
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+
         let target_expires_at = now
             .checked_add(i64::try_from(TARGETED_PAIRING_TTL.as_millis()).unwrap_or(i64::MAX))
             .ok_or(DeviceGatewayError::Clock)?;
@@ -876,15 +972,8 @@ impl DeviceGatewayHandle {
             let port = state.active_port.ok_or(DeviceGatewayError::Unavailable)?;
             let current_window = state.pairing_window_expires_at_ms.unwrap_or(0);
             state.pairing_window_expires_at_ms = Some(current_window.max(target_expires_at));
-            let preferred_name = request
-                .display_name
-                .as_deref()
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .map(str::to_owned)
-                .or_else(|| Some(discovered.display_name.clone()));
             state.targeted_auto_approves.insert(
-                discovered.key_fingerprint.clone(),
+                discovered.key_fingerprint.to_ascii_uppercase(),
                 TargetedAutoApprove {
                     peer_ip: discovered.peer_ip,
                     display_name: preferred_name,
@@ -1056,6 +1145,21 @@ impl DeviceGatewayHandle {
         self.shared.notify_changed();
     }
 
+    /// 当主控会话收到桌面端新输入或取消指令时，立即打断在线终端正在播报的旧长文本 TTS。
+    pub(crate) async fn interrupt_controller_playbacks_if_session(
+        &self,
+        session_id: &assistant_protocol::SessionId,
+        reason: &str,
+    ) -> usize {
+        let Ok(controller) = self.shared.runtime.controller_summary().await else {
+            return 0;
+        };
+        if controller.session_id != *session_id {
+            return 0;
+        }
+        self.shared.interrupt_playbacks(None, reason).await
+    }
+
     pub(crate) async fn console_target(
         &self,
         device_id: &assistant_protocol::DeviceId,
@@ -1208,14 +1312,23 @@ impl GatewayShared {
             .ok_or(DeviceGatewayError::PairingNotOpen)?;
         let targeted_approval = if registration.mode == DevicePairingModeSnapshot::DirectConfirm
             && let Some(fingerprint) = registration.key_fingerprint.as_deref()
-            && let Some(targeted) = state.targeted_auto_approves.get(fingerprint)
-            && targeted.expires_at_ms > now
-            && registration.peer_address.as_deref().is_some_and(|addr| {
-                addr.parse::<IpAddr>()
-                    .ok()
-                    .is_some_and(|ip| ip.to_canonical() == targeted.peer_ip.to_canonical())
-            }) {
-            state.targeted_auto_approves.remove(fingerprint)
+        {
+            let normalized_fp = fingerprint.to_ascii_uppercase();
+            let matches_peer = state.targeted_auto_approves.get(&normalized_fp).is_some_and(
+                |targeted| {
+                    targeted.expires_at_ms > now
+                        && registration.peer_address.as_deref().is_some_and(|addr| {
+                            addr.parse::<IpAddr>().ok().is_some_and(|ip| {
+                                ip.to_canonical() == targeted.peer_ip.to_canonical()
+                            })
+                        })
+                },
+            );
+            if matches_peer {
+                state.targeted_auto_approves.remove(&normalized_fp)
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -1355,6 +1468,35 @@ impl GatewayShared {
         for sender in senders {
             let _ = sender.try_send(ConnectionCommand::SpeechStatusChanged(status));
         }
+    }
+
+    /// 向在线终端连接发送打断播报指令，清空当前及排队的旧 TTS 片段（可选排除发起打断的终端自身）。
+    pub(super) async fn interrupt_playbacks(
+        &self,
+        exclude_device: Option<&assistant_protocol::DeviceId>,
+        reason: &str,
+    ) -> usize {
+        let senders = {
+            let state = self.state.lock().await;
+            state
+                .connections
+                .iter()
+                .filter(|(id, _)| exclude_device.is_none_or(|excluded| excluded != *id))
+                .map(|(_, connection)| connection.command.clone())
+                .collect::<Vec<_>>()
+        };
+        let mut interrupted = 0;
+        for sender in senders {
+            if sender
+                .try_send(ConnectionCommand::InterruptPlayback {
+                    reason: reason.to_owned(),
+                })
+                .is_ok()
+            {
+                interrupted += 1;
+            }
+        }
+        interrupted
     }
 
     pub(super) async fn update_capabilities(
@@ -2121,6 +2263,47 @@ async fn wait_server(active: &mut Option<ActiveGateway>) -> Option<String> {
     }
 }
 
+fn gateway_preference_path(runtime_home: &Path) -> PathBuf {
+    runtime_home
+        .join(GATEWAY_STATE_DIRECTORY)
+        .join(GATEWAY_STATE_FILE)
+}
+
+fn load_gateway_enabled_preference(runtime_home: &Path) -> Option<bool> {
+    let bytes = fs::read(gateway_preference_path(runtime_home)).ok()?;
+    let document: GatewayPreferenceDocument = serde_json::from_slice(&bytes).ok()?;
+    (document.schema_version == 1).then_some(document.enabled)
+}
+
+fn save_gateway_enabled_preference(runtime_home: &Path, enabled: bool) -> Result<(), String> {
+    let path = gateway_preference_path(runtime_home);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let bytes = serde_json::to_vec_pretty(&GatewayPreferenceDocument {
+        schema_version: 1,
+        enabled,
+    })
+    .map_err(|error| error.to_string())?;
+    let mut suffix = [0_u8; 6];
+    let _ = getrandom::fill(&mut suffix);
+    let mut suffix_hex = String::with_capacity(suffix.len() * 2);
+    for byte in suffix {
+        use std::fmt::Write as _;
+        let _ = write!(&mut suffix_hex, "{byte:02x}");
+    }
+    let tmp_path = path.with_file_name(format!(".{GATEWAY_STATE_FILE}.{suffix_hex}.tmp"));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    crate::platform::apply_private_open_options(&mut options);
+    let mut file = options.open(&tmp_path).map_err(|error| error.to_string())?;
+    file.write_all(&bytes).map_err(|error| error.to_string())?;
+    let _ = file.sync_all();
+    drop(file);
+    fs::rename(&tmp_path, &path).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 fn now_ms() -> Result<i64, DeviceGatewayError> {
     let elapsed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2285,5 +2468,15 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn gateway_enabled_preference_persists_round_trip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(load_gateway_enabled_preference(dir.path()), None);
+        save_gateway_enabled_preference(dir.path(), true).expect("save true");
+        assert_eq!(load_gateway_enabled_preference(dir.path()), Some(true));
+        save_gateway_enabled_preference(dir.path(), false).expect("save false");
+        assert_eq!(load_gateway_enabled_preference(dir.path()), Some(false));
     }
 }

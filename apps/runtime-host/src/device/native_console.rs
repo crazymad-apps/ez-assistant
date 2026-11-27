@@ -10,7 +10,10 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
     time::Duration,
 };
 
@@ -128,6 +131,7 @@ impl Default for NativeConsoleDocument {
 pub(super) struct NativeConsoleStore {
     path: PathBuf,
     doc: Mutex<NativeConsoleDocument>,
+    turn_commit_delay_ms: AtomicU32,
 }
 
 impl NativeConsoleStore {
@@ -138,10 +142,16 @@ impl NativeConsoleStore {
             .and_then(|bytes| serde_json::from_slice::<NativeConsoleDocument>(&bytes).ok())
             .filter(|doc| doc.schema_version == 1)
             .unwrap_or_default();
+        let turn_commit_delay_ms = loaded.wake.turn_commit_delay_ms.clamp(0, 5000);
         Self {
             path,
             doc: Mutex::new(loaded),
+            turn_commit_delay_ms: AtomicU32::new(turn_commit_delay_ms),
         }
+    }
+
+    pub(super) fn turn_commit_delay(&self) -> Duration {
+        Duration::from_millis(u64::from(self.turn_commit_delay_ms.load(Ordering::Relaxed)))
     }
 
     pub(super) async fn vp_version(&self) -> u64 {
@@ -247,17 +257,24 @@ impl NativeConsoleStore {
         next.vp_threshold = next.vp_threshold.clamp(0.55, 0.95);
         next.min_speech_ms = next.min_speech_ms.clamp(400, 1500);
         next.cooldown_ms = next.cooldown_ms.clamp(500, 5000);
+        next.speech_end_silence_ms = next.speech_end_silence_ms.clamp(250, 2500);
+        next.turn_commit_delay_ms = next.turn_commit_delay_ms.clamp(0, 5000);
 
         let previous = doc.wake.clone();
         doc.wake = next.clone();
         save_document(&self.path, &doc)?;
+        self.turn_commit_delay_ms
+            .store(next.turn_commit_delay_ms, Ordering::Relaxed);
         Ok((next, previous, enrolled))
     }
 
     pub(super) async fn restore_wake_config(&self, previous: DeviceWakeConfig) {
         let mut doc = self.doc.lock().await;
+        let restored_delay = previous.turn_commit_delay_ms.clamp(0, 5000);
         doc.wake = previous;
         let _ = save_document(&self.path, &doc);
+        self.turn_commit_delay_ms
+            .store(restored_delay, Ordering::Relaxed);
     }
 
     pub(super) async fn upsert_speaker_metadata(
@@ -994,6 +1011,10 @@ struct UpdateWakePayload {
     cooldown_ms: Option<u32>,
     #[serde(default)]
     vp_wake_chime: Option<bool>,
+    #[serde(default)]
+    speech_end_silence_ms: Option<u32>,
+    #[serde(default)]
+    turn_commit_delay_ms: Option<u32>,
 }
 
 async fn handle_update_wake(
@@ -1026,6 +1047,12 @@ async fn handle_update_wake(
     }
     if let Some(chime) = payload.vp_wake_chime {
         next.vp_wake_chime = chime;
+    }
+    if let Some(ms) = payload.speech_end_silence_ms {
+        next.speech_end_silence_ms = ms;
+    }
+    if let Some(ms) = payload.turn_commit_delay_ms {
+        next.turn_commit_delay_ms = ms;
     }
 
     let (saved, previous, enrolled) = match shared.native_console.update_wake_config(next).await {
@@ -2250,13 +2277,15 @@ mod tests {
         assert_eq!(vp_sync.upserts[1].speaker_id, "spk_owner#2");
         assert_eq!(vp_sync.upserts[2].speaker_id, "spk_owner#3");
 
-        // Now switching to voiceprint_direct + custom wake word succeeds
+        // Now switching to voiceprint_direct + custom wake word + latency tuning succeeds
         let (saved, _, enrolled) = store
             .update_wake_config(DeviceWakeConfig {
                 mode: WakeMode::VoiceprintDirect,
                 wake_word: "小元同学".to_owned(),
                 wake_pinyin: "Xiao Yuan Tong Xue".to_owned(),
                 vp_threshold: 0.80,
+                speech_end_silence_ms: 100, // clamped up to 250
+                turn_commit_delay_ms: 650,
                 ..DeviceWakeConfig::default()
             })
             .await
@@ -2264,6 +2293,13 @@ mod tests {
         assert_eq!(enrolled, 1);
         assert_eq!(saved.mode, WakeMode::VoiceprintDirect);
         assert_eq!(saved.wake_pinyin, "xiao yuan tong xue");
+        assert_eq!(saved.speech_end_silence_ms, 250);
+        assert_eq!(saved.turn_commit_delay_ms, 650);
+        assert_eq!(store.turn_commit_delay(), Duration::from_millis(650));
+
+        // Reloading from disk restores the persisted latency settings
+        let reloaded = NativeConsoleStore::load_or_default(dir.path());
+        assert_eq!(reloaded.turn_commit_delay(), Duration::from_millis(650));
 
         // Deleting the last speaker automatically falls back to wake_word mode
         let (deleted, _, fallback) = store.delete_speaker("spk_owner").await.expect("delete");

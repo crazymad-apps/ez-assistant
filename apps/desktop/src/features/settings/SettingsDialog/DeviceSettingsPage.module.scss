@@ -1,0 +1,21 @@
+.gateway_title_group {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+
+  small {
+    overflow: hidden;
+    color: var(--ez-text-muted);
+    font-size: 12px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+.nearby_empty_compact {
+  margin: 0;
+  padding: 12px 13px;
+  color: var(--ez-text-muted);
+  font-size: 12.5px;
+  text-align: left;
+}
